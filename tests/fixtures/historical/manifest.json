@@ -1,0 +1,60 @@
+{
+  "format_version": 1,
+  "fixtures": [
+    {
+      "name": "schema-v6",
+      "schema_version": 6,
+      "source_commit": "0ce18d42da917124a459dedfa1fb4aa6b097ff17",
+      "archive": "schema-v6.sqlite3.gz",
+      "archive_sha256": "c11457dddbbf5f9fe57571c603041a09380c9d32c04aa82ab2ddb7da4d2cc7cd",
+      "database_sha256": "4ca9407a2edbc459c868b30f9195ee80b5c022566d9f37656f4d5595f8d3a6af",
+      "subject_id": "Noyra-m41-historical-v6",
+      "anchor_event_id": "evt_m41_historical_v6",
+      "expected_migration_error": null
+    },
+    {
+      "name": "schema-v16",
+      "schema_version": 16,
+      "source_commit": "27dbe17e24bfd8a158e485d8f34430a34694c270",
+      "archive": "schema-v16.sqlite3.gz",
+      "archive_sha256": "8ab7a81c4990d7f04c5acf1dc0ebc227e8e90f23f74fd847b1345af20ed342a6",
+      "database_sha256": "6fc1eae63a7b41a15d2fadc58c5dc4f49a67f18ff729d1f9d8cd0b6c8a8d8aca",
+      "subject_id": "Noyra-m41-historical-v16",
+      "anchor_event_id": "evt_m41_historical_v16",
+      "expected_migration_error": null
+    },
+    {
+      "name": "schema-v21",
+      "schema_version": 21,
+      "source_commit": "66e2181f183543422de6c1fdd0cf40ddfa231dae",
+      "archive": "schema-v21.sqlite3.gz",
+      "archive_sha256": "6b75a9b033644a9f9ff6d8af99a2fc272a139a9b0a94990d097f2640a005d214",
+      "database_sha256": "100c06321541146b42d83d671e6993099c4dc902a72a8c0bce92d3cd423d0e07",
+      "subject_id": "Noyra-m41-historical-v21",
+      "anchor_event_id": "evt_m41_historical_v21",
+      "expected_migration_error": null
+    },
+    {
+      "name": "schema-v27",
+      "schema_version": 27,
+      "source_commit": "731265924aba1cd79ef8c850a3574a31a22ba69f",
+      "archive": "schema-v27.sqlite3.gz",
+      "archive_sha256": "8f1e621d1316bf6f7d1431a2a08b06246dc70a6f13dd16e80d65d2c37ee800ff",
+      "database_sha256": "9e0482a6865e235c53a3616dd2ddd54306b7151e82a711b4cca31c7dd9050a16",
+      "subject_id": "Noyra-m41-historical-v27",
+      "anchor_event_id": "evt_m41_historical_v27",
+      "expected_migration_error": null
+    },
+    {
+      "name": "schema-v31",
+      "schema_version": 31,
+      "source_commit": "b67be86f0d247a7e30e8a461de3458972526a5f0",
+      "archive": "schema-v31.sqlite3.gz",
+      "archive_sha256": "0e8c89723aa327171d310db5ffe31851363d65bc7c5fbbf835ecef643c2a1cdf",
+      "database_sha256": "03aea816b3ca0dfc7b9446e3eddda4efa69c548a373cc01c9dbe494233e6b017",
+      "subject_id": "Noyra-m41-historical-v31",
+      "anchor_event_id": "evt_m41_historical_v31",
+      "expected_migration_error": null
+    }
+  ]
+}

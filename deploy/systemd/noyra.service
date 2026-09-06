@@ -1,0 +1,38 @@
+[Unit]
+Description=Noyra artificial subject runtime
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=noyra
+Group=noyra
+WorkingDirectory=/opt/noyra/current
+EnvironmentFile=/etc/noyra/noyra.env
+ExecStart=/opt/noyra/current/.venv/bin/python -m noyra serve
+ExecStartPre=/usr/bin/test -x /opt/noyra/current/.venv/bin/python
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=78
+TimeoutStopSec=30
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=1000
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/noyra
+ReadOnlyPaths=/etc/noyra/backup-keyring.json
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

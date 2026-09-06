@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "seed": 10920260817,
+  "topics": [
+    {"content_term": "cedar", "query_term": "forest"},
+    {"content_term": "turbine", "query_term": "wind"},
+    {"content_term": "lithium", "query_term": "battery"},
+    {"content_term": "clinic", "query_term": "health"},
+    {"content_term": "orbit", "query_term": "space"},
+    {"content_term": "ledger", "query_term": "finance"},
+    {"content_term": "melody", "query_term": "music"},
+    {"content_term": "harvest", "query_term": "agriculture"}
+  ],
+  "memories_per_topic": 32,
+  "candidate_limits": [16, 32, 64, 128],
+  "recall_at": 8,
+  "minimum_recall_curve": [0.15, 0.35, 0.70, 0.95],
+  "approved_candidate_limit": 128,
+  "approved_recall_floor": 0.95,
+  "large_profile_embeddings": 10000,
+  "large_profile_candidate_limit": 768,
+  "large_profile_max_selects": 1,
+  "large_profile_max_json_decodes": 768,
+  "large_profile_max_peak_bytes": 3000000,
+  "large_profile_recall_candidate_limit": 64,
+  "large_profile_recall_selects": 6
+}

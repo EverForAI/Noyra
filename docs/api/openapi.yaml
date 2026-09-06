@@ -1,0 +1,1937 @@
+openapi: 3.0.3
+info:
+  title: Noyra Runtime API
+  version: 0.1.0
+  description: |
+    Stable versioned control and observation API for one Noyra subject.
+    The unversioned /api paths remain compatible aliases; new clients should
+    use /api/v1. Authentication uses a role-specific bearer token. /health is
+    a cached readiness projection; /health/live is a cheap liveness probe and
+    /health/ready checks only startup admission dependencies.
+  x-global-error-responses:
+    api_routes:
+      '429': Bounded rate limit or queue capacity was exhausted; honor Retry-After.
+      '503': A shared runtime or at-rest dependency is unavailable; honor Retry-After.
+    json_request_routes:
+      '411': Content-Length is required for JSON requests.
+      '413': The request body exceeds the configured byte limit.
+servers:
+  - url: http://127.0.0.1:8765
+tags:
+  - name: observation
+  - name: configuration
+  - name: exports
+paths:
+  /health:
+    get:
+      tags: [observation]
+      operationId: health
+      responses:
+        '200':
+          description: Healthy runtime
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Health' } }
+        '503':
+          description: Runtime is degraded
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Health' } }
+  /health/live:
+    get:
+      tags: [observation]
+      operationId: healthLive
+      responses:
+        '200':
+          description: Process is accepting health probes
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Liveness' } }
+  /health/ready:
+    get:
+      tags: [observation]
+      operationId: healthReady
+      responses:
+        '200':
+          description: Runtime is ready for normal requests
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Readiness' } }
+        '503':
+          description: Startup or runtime admission dependency is unavailable
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Readiness' } }
+  /api/v1/state:
+    get:
+      tags: [observation]
+      operationId: state
+      responses:
+        '200':
+          description: Public state projection
+          content: { application/json: { schema: { $ref: '#/components/schemas/PublicSubjectStateV1' } } }
+  /api/v1/state/details:
+    get:
+      tags: [observation]
+      operationId: stateDetails
+      security: [{ readBearer: [] }]
+      responses:
+        '200':
+          description: Detailed operational state for authorized readers
+          content: { application/json: { schema: { type: object } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/diary:
+    get:
+      tags: [observation]
+      operationId: diary
+      parameters: [{ $ref: '#/components/parameters/Limit' }]
+      responses: { '200': { $ref: '#/components/responses/JsonList' } }
+  /api/v1/behavior:
+    get:
+      tags: [observation]
+      operationId: behavior
+      parameters: [{ $ref: '#/components/parameters/Limit' }]
+      responses: { '200': { $ref: '#/components/responses/JsonList' } }
+  /api/v1/goals:
+    get:
+      tags: [observation]
+      operationId: goals
+      security: [{ readBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/projects:
+    get:
+      tags: [observation]
+      operationId: projects
+      security: [{ readBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/outcomes:
+    get:
+      tags: [observation]
+      operationId: outcomes
+      security: [{ readBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/interactions:
+    get:
+      tags: [observation]
+      operationId: interactions
+      responses: { '200': { $ref: '#/components/responses/JsonList' } }
+    post:
+      tags: [configuration]
+      operationId: offerInteraction
+      security: [{ operatorBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/InteractionInput' } }
+      responses:
+        '201': { description: Interaction recorded }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/runtime-logs:
+    get:
+      tags: [observation]
+      operationId: runtimeLogs
+      security: [{ readBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: Stable keyset page of runtime log records
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/RuntimeLogPage' } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/deliveries:
+    get:
+      tags: [observation]
+      operationId: deliveries
+      security: [{ readBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/deliveries/{deliveryId}/reconciliations:
+    get:
+      tags: [observation]
+      operationId: deliveryReconciliationHistory
+      security: [{ readBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/DeliveryId' }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/admin/export-jobs:
+    get:
+      tags: [exports]
+      operationId: listExportJobs
+      security: [{ exportBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [exports]
+      operationId: createExportJob
+      security: [{ exportBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind]
+              properties:
+                kind: { type: string, enum: [runtime, training] }
+      responses:
+        '202': { description: Export queued }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Training export is disabled }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { description: Export queue is full }
+  /api/v1/admin/export-jobs/{jobId}:
+    get:
+      tags: [exports]
+      operationId: getExportJob
+      security: [{ exportBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/JobId' }]
+      responses:
+        '200': { description: Export job status }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/admin/export-jobs/{jobId}/download:
+    get:
+      tags: [exports]
+      operationId: downloadExportJob
+      security: [{ exportBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/JobId' }]
+      responses:
+        '200':
+          description: ZIP archive
+          headers:
+            X-Archive-SHA256: { schema: { type: string, pattern: '^[a-f0-9]{64}$' } }
+          content: { application/zip: { schema: { type: string, format: binary } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Archive is not ready }
+        '410': { description: Archive is no longer available }
+  /api/v1/admin/export-jobs/{jobId}/cancel:
+    post:
+      tags: [exports]
+      operationId: cancelExportJob
+      security: [{ exportBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/JobId' }]
+      responses:
+        '200': { description: Job cancelled }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Job is already running or terminal }
+  /api/v1/diagnostics:
+    get:
+      tags: [observation]
+      operationId: diagnostics
+      security: [{ readBearer: [] }]
+      responses:
+        '200':
+          description: Bounded operational diagnostics; wallet state is aggregate-only.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                properties:
+                  wallet: { $ref: '#/components/schemas/WalletDiagnostics' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/health:
+    get:
+      tags: [observation]
+      operationId: adminHealth
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/recoverable-work:
+    get:
+      tags: [observation]
+      operationId: recoverableWork
+      security: [{ operatorBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/lifecycle:
+    get:
+      tags: [observation]
+      operationId: lifecycle
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/admin/lifecycle/{operation}:
+    post:
+      tags: [configuration]
+      operationId: lifecycleControl
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - name: operation
+          in: path
+          required: true
+          schema: { type: string, enum: [pause, resume, reset] }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ReasonInput' } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/admin/actions/{actionId}/reconcile:
+    post:
+      tags: [configuration]
+      operationId: reconcileAction
+      security: [{ operatorBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ActionId' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ReconciliationInput' } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/model-calls/{callId}/reconcile:
+    post:
+      tags: [configuration]
+      operationId: reconcileModelCall
+      security: [{ operatorBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/CallId' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ModelCallReconciliationInput' } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/runtime-export:
+    get:
+      tags: [exports]
+      operationId: legacyRuntimeExport
+      security: [{ exportBearer: [] }]
+      responses:
+        '202': { description: Compatibility route queued an export job }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /api/v1/admin/training-export:
+    get:
+      tags: [exports]
+      operationId: legacyTrainingExport
+      security: [{ exportBearer: [] }]
+      responses:
+        '202': { description: Compatibility route queued an export job }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /api/v1/common-knowledge/public-key:
+    get:
+      tags: [observation]
+      operationId: commonKnowledgePublicKey
+      responses: { '200': { $ref: '#/components/responses/JsonObject' } }
+  /api/v1/common-knowledge/discovery:
+    get:
+      tags: [observation]
+      operationId: commonKnowledgeDiscovery
+      responses: { '200': { $ref: '#/components/responses/JsonObject' } }
+  /api/v1/common-knowledge/feed:
+    get:
+      tags: [observation]
+      operationId: commonKnowledgeFeed
+      parameters:
+        - { name: cursor, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /api/v1/common-knowledge/public:
+    get:
+      tags: [observation]
+      operationId: commonKnowledgePublic
+      parameters: [{ $ref: '#/components/parameters/Limit' }]
+      responses: { '200': { $ref: '#/components/responses/JsonList' } }
+  /api/v1/mailbox:
+    get:
+      tags: [observation]
+      operationId: mailbox
+      security: [{ readBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/bounties:
+    get:
+      tags: [configuration]
+      operationId: listPublicBounties
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/bounties/{bountyId}:
+    get:
+      tags: [configuration]
+      operationId: getPublicBounty
+      parameters: [{ name: bountyId, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-bounties:
+    get:
+      tags: [configuration]
+      operationId: listWalletBounties
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    post:
+      tags: [configuration]
+      operationId: createWalletBounty
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '201': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-submissions:
+    get:
+      tags: [configuration]
+      operationId: listWalletSubmissions
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-orders:
+    get:
+      tags: [configuration]
+      operationId: listWalletOrders
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-rewards:
+    get:
+      tags: [wallet-rewards]
+      operationId: listWalletRewardWorkflows
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    post:
+      tags: [wallet-rewards]
+      operationId: createWalletRewardWorkflow
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '201': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '411': { $ref: '#/components/responses/LengthRequired' }
+        '413': { $ref: '#/components/responses/RequestEntityTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-reward-incidents:
+    get:
+      tags: [wallet-rewards]
+      operationId: listWalletRewardIncidents
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-reward-incidents/{incidentId}/resolve:
+    post:
+      tags: [wallet-rewards]
+      operationId: resolveWalletRewardIncident
+      security: [{ operatorBearer: [] }]
+      parameters: [{ name: incidentId, in: path, required: true, schema: { type: string } }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '411': { $ref: '#/components/responses/LengthRequired' }
+        '413': { $ref: '#/components/responses/RequestEntityTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-executions:
+    get:
+      tags: [wallet-execution]
+      operationId: listWalletExecutions
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-executions/{executionId}:
+    get:
+      tags: [wallet-execution]
+      operationId: getWalletExecution
+      security: [{ operatorBearer: [] }]
+      parameters: [{ name: executionId, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-executions/{executionId}/attempts:
+    get:
+      tags: [wallet-execution]
+      operationId: listWalletExecutionAttempts
+      security: [{ operatorBearer: [] }]
+      parameters: [{ name: executionId, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-policy:
+    get:
+      tags: [configuration]
+      operationId: getWalletPolicy
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    post:
+      tags: [configuration]
+      operationId: updateWalletPolicy
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-ledger:
+    get:
+      tags: [configuration]
+      operationId: getWalletLedger
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-bounties/{bountyId}/{operation}:
+    post:
+      tags: [configuration]
+      operationId: walletBountyOperation
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { name: bountyId, in: path, required: true, schema: { type: string } }
+        - { name: operation, in: path, required: true, schema: { type: string } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-rewards/{workflowId}/{operation}:
+    post:
+      tags: [wallet-rewards]
+      operationId: walletRewardOperation
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { name: workflowId, in: path, required: true, schema: { type: string } }
+        - { name: operation, in: path, required: true, schema: { type: string } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-reward-submissions/{submissionId}/decide:
+    post:
+      tags: [wallet-rewards]
+      operationId: decideWalletRewardSubmission
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { name: submissionId, in: path, required: true, schema: { type: string } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/bounties/{bountyId}/submissions:
+    post:
+      tags: [configuration]
+      operationId: submitWalletBounty
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '413': { $ref: '#/components/responses/RequestEntityTooLarge' }
+        '411': { $ref: '#/components/responses/LengthRequired' }
+        '201': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/wallet-rewards/{workflowId}/submissions:
+    post:
+      tags: [wallet-rewards]
+      operationId: submitWalletReward
+      parameters: [{ name: workflowId, in: path, required: true, schema: { type: string } }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '201': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '411': { $ref: '#/components/responses/LengthRequired' }
+        '413': { $ref: '#/components/responses/RequestEntityTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-submissions/{submissionId}/{operation}:
+    post:
+      tags: [configuration]
+      operationId: walletSubmissionOperation
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { name: submissionId, in: path, required: true, schema: { type: string } }
+        - { name: operation, in: path, required: true, schema: { type: string } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-orders/{orderId}/{operation}:
+    post:
+      tags: [configuration]
+      operationId: walletOrderOperation
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { name: orderId, in: path, required: true, schema: { type: string } }
+        - { name: operation, in: path, required: true, schema: { type: string } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-executions/{executionId}/receipt:
+    post:
+      tags: [wallet-execution]
+      operationId: pollWalletExecutionReceipt
+      security: [{ operatorBearer: [] }]
+      parameters: [{ name: executionId, in: path, required: true, schema: { type: string } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/WalletExecutionReceiptRequest' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-executions/recover:
+    post:
+      tags: [wallet-execution]
+      operationId: recoverWalletExecutions
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/WalletExecutionRecoveryInput' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-rewards/execute-ready:
+    post:
+      tags: [wallet-rewards]
+      operationId: executeReadyWalletRewards
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/search-providers:
+    get:
+      tags: [configuration]
+      operationId: listSearchProviders
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [configuration]
+      operationId: configureSearchProvider
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '201': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/config/search-providers/{configId}/revoke:
+    post:
+      tags: [configuration]
+      operationId: revokeSearchProvider
+      security: [{ operatorBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ConfigId' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReasonInput' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/config/wallet-networks:
+    get:
+      tags: [configuration]
+      operationId: listWalletNetworks
+      security: [{ operatorBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    post:
+      tags: [configuration]
+      operationId: registerWalletNetwork
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '201': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/wallet-networks/{networkId}/revoke:
+    post:
+      tags: [configuration]
+      operationId: revokeWalletNetwork
+      security: [{ operatorBearer: [] }]
+      parameters: [{ name: networkId, in: path, required: true, schema: { type: string } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReasonInput' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/wallet-assets:
+    get:
+      tags: [configuration]
+      operationId: listWalletAssets
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { name: network_id, in: query, schema: { type: string } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    post:
+      tags: [configuration]
+      operationId: registerWalletAsset
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '201': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/wallet-assets/{assetId}/revoke:
+    post:
+      tags: [configuration]
+      operationId: revokeWalletAsset
+      security: [{ operatorBearer: [] }]
+      parameters: [{ name: assetId, in: path, required: true, schema: { type: string } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReasonInput' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/wallet-addresses:
+    get:
+      tags: [configuration]
+      operationId: listWalletAddresses
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { name: network_id, in: query, schema: { type: string } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    post:
+      tags: [configuration]
+      operationId: registerWalletAddress
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '201': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/wallet-addresses/{addressId}/revoke:
+    post:
+      tags: [configuration]
+      operationId: revokeWalletAddress
+      security: [{ operatorBearer: [] }]
+      parameters: [{ name: addressId, in: path, required: true, schema: { type: string } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReasonInput' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/wallet-balances:
+    get:
+      tags: [configuration]
+      operationId: listWalletBalances
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { name: network_id, in: query, schema: { type: string } }
+        - { name: asset_id, in: query, schema: { type: string } }
+        - { name: address_id, in: query, schema: { type: string } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/wallet-balance-history:
+    get:
+      tags: [configuration]
+      operationId: walletBalanceHistory
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }
+        - { name: cursor, in: query, schema: { type: string, minLength: 1, maxLength: 8192 }, description: Opaque cursor returned by the preceding page. }
+        - { name: network_id, in: query, schema: { type: string, minLength: 1, maxLength: 128 } }
+        - { name: asset_id, in: query, schema: { type: string, minLength: 1, maxLength: 128 } }
+        - { name: address_id, in: query, schema: { type: string, minLength: 1, maxLength: 128 } }
+      responses:
+        '200':
+          description: Stable keyset page of immutable balance observations
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/WalletBalanceHistoryPage' } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/wallet-observation-health:
+    get:
+      tags: [configuration]
+      operationId: walletObservationHealthBreakdown
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { name: group_by, in: query, schema: { type: string, enum: [network, source], default: network } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 256, default: 100 } }
+        - { name: network_id, in: query, schema: { type: string, minLength: 1, maxLength: 128 } }
+        - { name: source, in: query, schema: { type: string, pattern: '^[a-z][a-z0-9_]{0,63}$' } }
+      responses:
+        '200':
+          description: Bounded health breakdown of active read-only balance pairs
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/WalletObservationHealthBreakdown' } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-acquisitions:
+    get:
+      tags: [configuration]
+      operationId: listWalletAcquisitions
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { name: status, in: query, schema: { type: string } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    post:
+      tags: [configuration]
+      operationId: enqueueWalletAcquisition
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/WalletAcquisitionInput' } } } }
+      responses:
+        '202': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-acquisition-budget:
+    get:
+      tags: [configuration]
+      operationId: walletAcquisitionBudget
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { name: network_id, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 128 } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-acquisitions/{runId}:
+    get:
+      tags: [configuration]
+      operationId: getWalletAcquisition
+      security: [{ operatorBearer: [] }]
+      parameters: [{ name: runId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128 } }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-acquisitions/{runId}/attempts:
+    get:
+      tags: [configuration]
+      operationId: listWalletAcquisitionAttempts
+      security: [{ operatorBearer: [] }]
+      parameters: [{ name: runId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128 } }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-acquisitions/run:
+    post:
+      tags: [configuration]
+      operationId: runWalletAcquisitions
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/WalletAcquisitionRunInput' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-acquisitions/{runId}/retry:
+    post:
+      tags: [configuration]
+      operationId: retryWalletAcquisition
+      security: [{ operatorBearer: [] }]
+      parameters: [{ name: runId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128 } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/WalletAcquisitionRetryInput' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-acquisitions/{runId}/cancel:
+    post:
+      tags: [configuration]
+      operationId: cancelWalletAcquisition
+      security: [{ operatorBearer: [] }]
+      parameters: [{ name: runId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128 } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReasonInput' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/model-resources:
+    get:
+      tags: [configuration]
+      operationId: listModelResources
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    post:
+      tags: [configuration]
+      operationId: configureModelResource
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '201': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/model-resources/{groupId}/keys:
+    get:
+      tags: [configuration]
+      operationId: listModelResourceKeys
+      security: [{ operatorBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/GroupId' }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    post:
+      tags: [configuration]
+      operationId: addModelResourceKeys
+      security: [{ operatorBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/GroupId' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/model-resources/{groupId}/keys/{keyId}/revoke:
+    post:
+      tags: [configuration]
+      operationId: revokeModelResourceKey
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/GroupId' }
+        - { $ref: '#/components/parameters/KeyId' }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReasonInput' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/model-resources/{groupId}/update:
+    post:
+      tags: [configuration]
+      operationId: updateModelResource
+      security: [{ operatorBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/GroupId' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/model-resources/{groupId}/test:
+    post:
+      tags: [configuration]
+      operationId: testModelResource
+      security: [{ operatorBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/GroupId' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReasonInput' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/model-resources/{groupId}/{operation}:
+    post:
+      tags: [configuration]
+      operationId: changeModelResourceStatus
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/GroupId' }
+        - { name: operation, in: path, required: true, schema: { type: string, enum: [enable, disable, revoke] } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReasonInput' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/embedding-resources:
+    get:
+      tags: [configuration]
+      operationId: listEmbeddingResources
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [configuration]
+      operationId: configureEmbeddingResource
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '201': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/config/embedding-resources/{configId}/{operation}:
+    post:
+      tags: [configuration]
+      operationId: changeEmbeddingResourceStatus
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/ConfigId' }
+        - { name: operation, in: path, required: true, schema: { type: string, enum: [enable, disable, revoke] } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReasonInput' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/config/training-policy:
+    get:
+      tags: [configuration]
+      operationId: trainingPolicy
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [configuration]
+      operationId: updateTrainingPolicy
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/config/common-knowledge:
+    get:
+      tags: [configuration]
+      operationId: commonKnowledgeConfig
+      security: [{ operatorBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/config/common-knowledge/trust:
+    post:
+      tags: [configuration]
+      operationId: trustCommonKnowledgeKey
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '201': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/config/common-knowledge/import:
+    post:
+      tags: [configuration]
+      operationId: importCommonKnowledge
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '201': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/config/common-knowledge/peers:
+    post:
+      tags: [configuration]
+      operationId: registerCommonKnowledgePeer
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '201': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/config/common-knowledge/peers/{peerId}/sync:
+    post:
+      tags: [configuration]
+      operationId: syncCommonKnowledgePeer
+      security: [{ operatorBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PeerId' }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+  /api/v1/config/common-knowledge/{packageId}/revoke:
+    post:
+      tags: [configuration]
+      operationId: revokeCommonKnowledge
+      security: [{ operatorBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PackageId' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReasonInput' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/config/transports:
+    get:
+      tags: [configuration]
+      operationId: listTransports
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [configuration]
+      operationId: configureTransport
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '201': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/config/transports/{transportId}/{operation}:
+    post:
+      tags: [configuration]
+      operationId: changeTransportStatus
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { name: transportId, in: path, required: true, schema: { type: string } }
+        - { name: operation, in: path, required: true, schema: { type: string } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReasonInput' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/config/capabilities:
+    get:
+      tags: [configuration]
+      operationId: listCapabilities
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [configuration]
+      operationId: grantCapability
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '201': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/config/capabilities/{grantId}/revoke:
+    post:
+      tags: [configuration]
+      operationId: revokeCapability
+      security: [{ operatorBearer: [] }]
+      parameters: [{ name: grantId, in: path, required: true, schema: { type: string } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReasonInput' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/deliveries/{deliveryId}/{operation}:
+    post:
+      tags: [configuration]
+      operationId: reconcileDelivery
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/DeliveryId' }
+        - { name: operation, in: path, required: true, schema: { type: string, enum: [lookup, reconcile] } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DeliveryReconciliationInput' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/self-modification:
+    get:
+      tags: [observation]
+      operationId: selfModification
+      security: [{ readBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/public-posts:
+    get:
+      tags: [observation]
+      operationId: publicPosts
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    post:
+      tags: [observation]
+      operationId: submitPublicPost
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        '201': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '411': { $ref: '#/components/responses/LengthRequired' }
+        '413': { $ref: '#/components/responses/RequestTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/public-posts/captcha:
+    post:
+      tags: [observation]
+      operationId: publicPostCaptcha
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, maxProperties: 0 } } }
+      responses:
+        '200': { description: CAPTCHA challenge, content: { application/json: { schema: { type: object } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '411': { $ref: '#/components/responses/LengthRequired' }
+        '413': { $ref: '#/components/responses/RequestTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/webhooks/{channel}/{transportId}:
+    post:
+      tags: [configuration]
+      operationId: receiveInboundWebhook
+      parameters:
+        - { name: channel, in: path, required: true, schema: { type: string, enum: [telegram, qq, feishu, wechat, email, webhook] } }
+        - { name: transportId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { type: object } }
+          application/xml: { schema: { type: string } }
+      responses:
+        '200': { description: Event durably accepted or provider challenge response }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '411': { $ref: '#/components/responses/LengthRequired' }
+        '413': { $ref: '#/components/responses/RequestTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/public-posts:
+    get:
+      tags: [configuration]
+      operationId: adminPublicPosts
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [draft, pending_review, published, rejected, archived] } }
+        - { name: cursor, in: query, schema: { type: string, maxLength: 512 } }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/public-post-controls:
+    get:
+      tags: [configuration]
+      operationId: getPublicPostControls
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/public-post-controls:
+    post:
+      tags: [configuration]
+      operationId: updatePublicPostControls
+      security: [{ operatorBearer: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '411': { $ref: '#/components/responses/LengthRequired' }
+        '413': { $ref: '#/components/responses/RequestTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/public-posts/{postId}/{operation}:
+    post:
+      tags: [configuration]
+      operationId: moderatePublicPost
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { name: postId, in: path, required: true, schema: { type: string } }
+        - { name: operation, in: path, required: true, schema: { type: string, enum: [publish, reject, archive] } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '411': { $ref: '#/components/responses/LengthRequired' }
+        '413': { $ref: '#/components/responses/RequestTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/inbound-bindings:
+    get:
+      tags: [configuration]
+      operationId: listInboundBindings
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    post:
+      tags: [configuration]
+      operationId: createInboundBinding
+      security: [{ operatorBearer: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        '201': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '411': { $ref: '#/components/responses/LengthRequired' }
+        '413': { $ref: '#/components/responses/RequestTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/inbound-bindings/{bindingId}/{operation}:
+    post:
+      tags: [configuration]
+      operationId: changeInboundBindingStatus
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - { name: bindingId, in: path, required: true, schema: { type: string } }
+        - { name: operation, in: path, required: true, schema: { type: string, enum: [enable, disable, revoke] } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ReasonInput' } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '411': { $ref: '#/components/responses/LengthRequired' }
+        '413': { $ref: '#/components/responses/RequestTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+components:
+  securitySchemes:
+    readBearer:
+      type: http
+      scheme: bearer
+      description: NOYRA_READ_TOKEN (or a higher-privilege token)
+    operatorBearer:
+      type: http
+      scheme: bearer
+      description: NOYRA_OPERATOR_TOKEN (or break-glass/admin token)
+    exportBearer:
+      type: http
+      scheme: bearer
+      description: NOYRA_EXPORT_TOKEN (or break-glass/admin token)
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque cursor returned by the preceding runtime-log page.
+      schema: { type: string, minLength: 1, maxLength: 8192 }
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema: { type: string, pattern: '^export-job-[A-Za-z0-9_-]+$' }
+    ActionId:
+      name: actionId
+      in: path
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 256 }
+    CallId:
+      name: callId
+      in: path
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 256 }
+    ConfigId:
+      name: configId
+      in: path
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 256 }
+    GroupId:
+      name: groupId
+      in: path
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 256 }
+    KeyId:
+      name: keyId
+      in: path
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 256 }
+    PeerId:
+      name: peerId
+      in: path
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 256 }
+    PackageId:
+      name: packageId
+      in: path
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 256 }
+    DeliveryId:
+      name: deliveryId
+      in: path
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 256 }
+  responses:
+    JsonList:
+      description: JSON list
+      content: { application/json: { schema: { type: array, items: { type: object } } } }
+    JsonObject:
+      description: JSON object
+      content: { application/json: { schema: { type: object, additionalProperties: true } } }
+    Unauthorized:
+      description: Missing or invalid role token
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    BadRequest:
+      description: Invalid request
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    NotFound:
+      description: Resource not found
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Conflict:
+      description: Request conflicts with durable state
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Forbidden:
+      description: Authenticated request is not permitted
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    TooManyRequests:
+      description: Bounded queue or rate limit exhausted
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    ServiceUnavailable:
+      description: Runtime dependency is degraded
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    BadGateway:
+      description: Upstream peer unavailable or invalid
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    UnsupportedMediaType:
+      description: JSON request body is required
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+  schemas:
+    RuntimeLogPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items: { type: object }
+        next_cursor:
+          type: string
+          nullable: true
+    WalletBalanceHistoryPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor, has_more]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [snapshot_id, subject_id, network_id, asset_id, address_id, balance, source, observed_at, created_at]
+            properties:
+              snapshot_id: { type: string }
+              subject_id: { type: string }
+              network_id: { type: string }
+              asset_id: { type: string }
+              address_id: { type: string }
+              balance: { type: string, pattern: '^(0|[1-9][0-9]{0,255})$' }
+              source: { type: string }
+              observed_at: { type: string, format: date-time }
+              created_at: { type: string, format: date-time }
+        next_cursor:
+          type: string
+          nullable: true
+        has_more: { type: boolean }
+    WalletObservationHealthBreakdown:
+      type: object
+      additionalProperties: false
+      description: >-
+        Bounded aggregate health grouped by network identifier or by the newest
+        source for each active pair. A null source value denotes a pair with no
+        observation. No balances, addresses, RPC origins, or lease credentials
+        are returned.
+      required: [group_by, evaluated_at, stale_after_seconds, status, groups, total_groups, has_more]
+      properties:
+        group_by: { type: string, enum: [network, source] }
+        evaluated_at: { type: string, format: date-time }
+        stale_after_seconds: { type: integer, minimum: 0, maximum: 2592000 }
+        status: { type: string, enum: [ok, attention, degraded] }
+        total_groups: { type: integer, minimum: 0, maximum: 256 }
+        has_more: { type: boolean }
+        groups:
+          type: array
+          maxItems: 256
+          items: { $ref: '#/components/schemas/WalletObservationHealthGroup' }
+    WalletObservationHealthGroup:
+      type: object
+      additionalProperties: false
+      required:
+        [value, active_pairs, observed_pairs, fresh_pairs, near_expiry_pairs,
+         stale_pairs, never_pairs, future_pairs, anomalous_pairs, snapshot_count,
+         latest_observed_at, max_age_seconds, status]
+      properties:
+        value: { type: string, nullable: true }
+        active_pairs: { type: integer, minimum: 0 }
+        observed_pairs: { type: integer, minimum: 0 }
+        fresh_pairs: { type: integer, minimum: 0 }
+        near_expiry_pairs: { type: integer, minimum: 0 }
+        stale_pairs: { type: integer, minimum: 0 }
+        never_pairs: { type: integer, minimum: 0 }
+        future_pairs: { type: integer, minimum: 0 }
+        anomalous_pairs: { type: integer, minimum: 0 }
+        snapshot_count: { type: integer, minimum: 0 }
+        latest_observed_at: { type: string, format: date-time, nullable: true }
+        max_age_seconds: { type: integer, minimum: 0, nullable: true }
+        status: { type: string, enum: [ok, attention, degraded] }
+    WalletDiagnostics:
+      description: Available aggregate projection or a bounded degraded result.
+      oneOf:
+        - $ref: '#/components/schemas/WalletDiagnosticsAvailable'
+        - $ref: '#/components/schemas/WalletDiagnosticsUnavailable'
+    WalletDiagnosticsAvailable:
+      type: object
+      additionalProperties: false
+      required: [subject_id, status, resources, balance_history, acquisition]
+      properties:
+        subject_id: { type: string }
+        status: { type: string, enum: [ok, attention, degraded] }
+        resources:
+          type: object
+          additionalProperties: false
+          required: [networks, assets, addresses]
+          properties:
+            networks: { $ref: '#/components/schemas/WalletResourceCounts' }
+            assets: { $ref: '#/components/schemas/WalletResourceCounts' }
+            addresses: { $ref: '#/components/schemas/WalletResourceCounts' }
+        balance_history:
+          type: object
+          additionalProperties: false
+          required: [snapshots, latest_observed_at, latest_created_at, observation_health]
+          properties:
+            snapshots: { type: integer, minimum: 0 }
+            latest_observed_at: { type: string, format: date-time, nullable: true }
+            latest_created_at: { type: string, format: date-time, nullable: true }
+            observation_health:
+              $ref: '#/components/schemas/WalletObservationHealth'
+        acquisition:
+          $ref: '#/components/schemas/WalletAcquisitionDiagnostics'
+    WalletDiagnosticsUnavailable:
+      type: object
+      additionalProperties: false
+      required: [status, reason]
+      properties:
+        status: { type: string, const: degraded }
+        reason: { type: string, const: unavailable }
+    WalletResourceCounts:
+      type: object
+      additionalProperties: false
+      required: [active, revoked, total]
+      properties:
+        active: { type: integer, minimum: 0 }
+        revoked: { type: integer, minimum: 0 }
+        total: { type: integer, minimum: 0 }
+    WalletObservationHealth:
+      type: object
+      additionalProperties: false
+      description: >-
+        Constant-size health for active asset/address/network pairs. The
+        evaluation timestamp and stale window are canonical UTC milliseconds
+        and seconds respectively. A pair at exactly 75% of the window is
+        near-expiry; a pair older than the window is stale. Future observations
+        are counted separately. An anomaly is a same-time disagreement or an
+        adjacent snapshot change greater than 100% (zero/non-zero always
+        qualifies).
+      required:
+        [status, evaluated_at, stale_after_seconds, observed_pairs, fresh_pairs,
+         near_expiry_pairs, stale_pairs, never_pairs, future_pairs, anomalous_pairs,
+         max_age_seconds]
+      properties:
+        status: { type: string, enum: [ok, attention, degraded] }
+        evaluated_at: { type: string, format: date-time }
+        stale_after_seconds: { type: integer, minimum: 0, maximum: 2592000 }
+        observed_pairs: { type: integer, minimum: 0 }
+        fresh_pairs: { type: integer, minimum: 0 }
+        near_expiry_pairs: { type: integer, minimum: 0 }
+        stale_pairs: { type: integer, minimum: 0 }
+        never_pairs: { type: integer, minimum: 0 }
+        future_pairs: { type: integer, minimum: 0 }
+        anomalous_pairs: { type: integer, minimum: 0 }
+        max_age_seconds: { type: integer, minimum: 0, nullable: true }
+    WalletAcquisitionDiagnostics:
+      description: Available aggregate acquisition projection or a bounded degraded result.
+      oneOf:
+        - $ref: '#/components/schemas/WalletAcquisitionAvailable'
+        - $ref: '#/components/schemas/WalletDiagnosticsUnavailable'
+    WalletAcquisitionAvailable:
+      type: object
+      additionalProperties: false
+      required:
+        [subject_id, status, counts, total, active, attention, attempts,
+         expired_running, next_attempt_at]
+      properties:
+        subject_id: { type: string }
+        status: { type: string, enum: [ok, attention, degraded] }
+        counts:
+          type: object
+          additionalProperties: false
+          required: [cancelled, failed, queued, retry_wait, running, succeeded, unknown]
+          properties:
+            cancelled: { type: integer, minimum: 0 }
+            failed: { type: integer, minimum: 0 }
+            queued: { type: integer, minimum: 0 }
+            retry_wait: { type: integer, minimum: 0 }
+            running: { type: integer, minimum: 0 }
+            succeeded: { type: integer, minimum: 0 }
+            unknown: { type: integer, minimum: 0 }
+        total: { type: integer, minimum: 0 }
+        active: { type: integer, minimum: 0 }
+        attention: { type: integer, minimum: 0 }
+        attempts: { type: integer, minimum: 0 }
+        expired_running: { type: integer, minimum: 0 }
+        next_attempt_at: { type: string, format: date-time, nullable: true }
+    PublicSubjectStateV1:
+      type: object
+      additionalProperties: false
+      required: [schema, schema_version, subject_id, display_name, lifecycle, online, public_diary_count]
+      properties:
+        schema: { type: string, const: PublicSubjectStateV1 }
+        schema_version: { type: integer, const: 1 }
+        subject_id: { type: string }
+        display_name: { type: string }
+        lifecycle:
+          type: object
+          additionalProperties: false
+          required: [state]
+          properties:
+            state: { type: string }
+        online: { type: boolean }
+        public_diary_count: { type: integer, minimum: 0 }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    Health:
+      type: object
+      required: [status, lifecycle, integrity, at_rest, cloud_archive]
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        lifecycle: { type: object }
+        loop: { type: object, nullable: true }
+        integrity:
+          type: object
+          nullable: true
+          description: Bounded operational summary; private check identifiers and evidence are omitted.
+        at_rest:
+          allOf: [{ $ref: '#/components/schemas/AtRestHealth' }]
+          nullable: true
+        cloud_archive: { type: object }
+        wallet_acquisition:
+          type: object
+          description: Bounded wallet balance acquisition counters; no lease credentials are exposed.
+    Liveness:
+      type: object
+      additionalProperties: false
+      required: [status, service]
+      properties:
+        status: { type: string, const: ok }
+        service: { type: string, const: noyra }
+    Readiness:
+      type: object
+      additionalProperties: true
+      required: [status, service]
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        service: { type: string, const: noyra }
+    AtRestHealth:
+      type: object
+      required: [mode, enforced, ready, threat_model, permissions, volume, backup_key]
+      properties:
+        mode: { type: string, enum: [development, required] }
+        enforced: { type: boolean }
+        ready: { type: boolean }
+        threat_model: { type: string, enum: [noyra-at-rest/offline-media-v1] }
+        permissions: { type: object }
+        volume: { type: object }
+        backup_key:
+          type: object
+          description: Key IDs, fingerprints, and generations only; key bytes are never exposed.
+        reason: { type: string }
+    InteractionInput:
+      type: object
+      required: [content]
+      properties:
+        channel: { type: string, default: web }
+        counterparty: { type: string, default: web-user }
+        content: { type: string, maxLength: 100000 }
+        idempotency_key: { type: string, maxLength: 256 }
+    ReasonInput:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 10000 }
+    WalletAcquisitionInput:
+      type: object
+      additionalProperties: false
+      required: [asset_id, address_id]
+      properties:
+        asset_id: { type: string, minLength: 1, maxLength: 128 }
+        address_id: { type: string, minLength: 1, maxLength: 128 }
+        idempotency_key: { type: string, minLength: 1, maxLength: 128 }
+        max_attempts: { type: integer, minimum: 1, maximum: 5, default: 5 }
+        not_before: { type: string, format: date-time }
+    WalletAcquisitionRunInput:
+      type: object
+      additionalProperties: false
+      properties:
+        limit: { type: integer, minimum: 1, maximum: 32, default: 1 }
+    WalletAcquisitionRetryInput:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 2000 }
+        not_before: { type: string, format: date-time }
+    WalletExecutionReceiptRequest:
+      type: object
+      additionalProperties: false
+    WalletExecutionRecoveryInput:
+      type: object
+      additionalProperties: false
+      properties:
+        limit: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+    ReconciliationInput:
+      type: object
+      additionalProperties: true
+      required: [outcome, reason]
+      properties:
+        outcome: { type: string, enum: [succeeded, failed, cancelled] }
+        reason: { type: string, minLength: 1, maxLength: 10000 }
+        result: { type: object, additionalProperties: true }
+        response: { type: object, additionalProperties: true, nullable: true }
+    ModelCallReconciliationInput:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      anyOf:
+        - required: [outcome]
+        - required: [status]
+      properties:
+        outcome: { type: string, enum: [succeeded, failed, retry] }
+        status: { type: string, enum: [succeeded, failed, retry] }
+        reason: { type: string, minLength: 1, maxLength: 2000 }
+        response: { type: object, additionalProperties: true, nullable: true }
+        evidence: { type: object, additionalProperties: true, nullable: true }
+    DeliveryReconciliationInput:
+      type: object
+      additionalProperties: true
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 10000 }
+        status: { type: string, enum: [delivered, failed, cancelled] }
+        provider_message_id: { type: string, nullable: true }

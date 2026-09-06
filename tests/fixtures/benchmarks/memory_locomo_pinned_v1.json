@@ -1,0 +1,34 @@
+{
+  "format": "noyra-memory-benchmark/v1",
+  "dataset_id": "locomo-reduced-pinned-v1",
+  "source_url": "https://github.com/snap-research/LoCoMo",
+  "source_revision": "pinned-fixture-v1",
+  "derivation": "A committed, license-safe reduced query format fixture. No external benchmark score is implied.",
+  "quality_floor": {
+    "precision_at_k": 0.75,
+    "recall_at_k": 0.75,
+    "mean_reciprocal_rank": 0.75,
+    "hit_rate": 1.0
+  },
+  "cases": [
+    {
+      "case_id": "locomo-pinned-001",
+      "query": "Which color was the lighthouse journal?",
+      "relevant_terms": ["amber lighthouse"],
+      "limit": 1
+    },
+    {
+      "case_id": "locomo-pinned-002",
+      "query": "What protocol did the archive team rehearse?",
+      "relevant_terms": ["winter archive protocol"],
+      "limit": 1
+    },
+    {
+      "case_id": "locomo-pinned-003",
+      "query": "Where was the observatory key stored?",
+      "relevant_terms": ["observatory key"],
+      "limit": 1
+    }
+  ],
+  "sha256": "5339185aecc25fe77101118ac9d2a25a7d84329005f53be5bd6fa4d5cf6870ec"
+}

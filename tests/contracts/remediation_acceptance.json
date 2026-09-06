@@ -1,0 +1,426 @@
+{
+  "format_version": 1,
+  "audit_baseline": "87e059a",
+  "audit_report": "docs/audit/2026-08-15-full-readonly-audit.md",
+  "closure_policy": {
+    "allowed_statuses": ["open", "implemented", "verified"],
+    "close_status": "verified",
+    "required_evidence": [
+      "focused regression",
+      "full suite",
+      "static gates",
+      "readonly review"
+    ],
+    "rule": "Every contract for an issue must be verified before the issue can be closed."
+  },
+  "verification_snapshot": {
+    "captured_at": "2026-08-18",
+    "full_pytest": "746 passed, 3 platform-specific skips, 104 subtests passed",
+    "m41_smoke": "274 passed",
+    "deployment_audit": "194 passed, 1 platform-specific skip",
+    "static_gates": [
+      "ruff check",
+      "ruff format --check",
+      "mypy --strict",
+      "compileall",
+      "pip check",
+      "pip-audit with UTF-8 locale",
+      "git diff --check"
+    ],
+    "implemented_not_verified": ["P2-14", "P3-03", "P3-04"],
+    "open_external_evidence": ["P3-05", "P3-08"],
+    "skip_policy": "Windows local runs do not convert POSIX symlink or encrypted-volume skips into passes."
+  },
+  "issues": [
+    {
+      "id": "P1-01",
+      "origin": "native",
+      "gate": "A",
+      "status": "verified",
+      "contracts": [
+        {"id": "P1-01.A", "claim": "Prepared work is resumed, cancelled, or isolated before sleep with a bounded deadline.", "evidence": ["state machine", "restart", "fault injection"]},
+        {"id": "P1-01.B", "claim": "sleep_requested is emitted only after a sleep run exists and active work remains progressable on conflict.", "evidence": ["transition trace", "fatigue", "prepared action"]}
+      ]
+    },
+    {
+      "id": "P1-02",
+      "origin": "residual",
+      "gate": "C",
+      "status": "verified",
+      "contracts": [
+        {"id": "P1-02.A", "claim": "Versioned integrity checks are wired into startup and bounded periodic execution.", "evidence": ["tests/test_m42_p1_02_integrity_runtime.py startup, scheduler, restart, shutdown, quarantine and timeout matrix", "spawned read-only SQLite audit process with a wall-clock hard deadline and bounded termination/join", "startup integrity gate before durable recovery, periodic watchdog execution, and alert/pause policy persistence", "M41 targeted smoke/large/soak: 274 passed each", "full pytest: 600 passed", "deployment audit: 163 passed twice with 73.00% focused coverage", "Ruff/format/Mypy/compileall/pip check/pip-audit/git diff --check"]},
+        {"id": "P1-02.B", "claim": "Every durable domain is registered and P0/P1 findings follow the alert-to-safe-pause policy.", "evidence": ["37/37 manual registry checks healthy on schema 33", "SQLite authorizer regression proves all 11 previously missing durable tables are read", "core audit/training provenance, model resource revisions/key events, fatigue transitions, observation archive segments, and autonomous project resource/assistance/sleep domains", "reverse cross-subject ownership tests for epistemic reviews and search-provider uses", "strict P0 tamper tests for types, canonical JSON, hashes, lifecycle history, current-state reconciliation and orphan records", "single SQLite snapshot and 100,000-event soak with event payload, event chain, causal order and mind state all ok", "P1 findings alert without unsafe mutation; proven P0 follows durable quarantine and automatic safe-pause policy"]}
+      ]
+    },
+    {
+      "id": "P1-03",
+      "origin": "regression",
+      "gate": "C",
+      "status": "verified",
+      "contracts": [
+        {"id": "P1-03.A", "claim": "Valid current and legacy archived events reconcile payload, manifest, segment, key metadata, tombstones, event counts, timestamps, and event-chain evidence under one bounded SQLite snapshot.", "evidence": ["tests/test_m42_p1_03_archive_integrity.py (35 focused tests)", "test_valid_archived_event_passes_all_integrity_layers", "test_legacy_archive_metadata_remains_readable_and_wrong_key_is_degraded", "test_multiple_segments_restore_payloads_and_preserve_event_chain", "test_concurrent_archive_commit_cannot_mix_integrity_snapshots", "bounded local reads and decompression", "streamed segment inventory and bounded event materialization", "M41 smoke/large: 152 passed each", "full pytest: 425 passed", "deployment audit: 41 passed at 72.64% coverage", "Ruff/format/Mypy/compileall/pip check/pip-audit/git diff --check", "independent read-only review"]},
+        {"id": "P1-03.B", "claim": "Missing or ambiguous keys and verifier resource limits report degraded without false SQLite/P0 findings, while proven ciphertext, manifest, tombstone, segment, or payload corruption reports P0 corrupt.", "evidence": ["test_unavailable_archive_key_is_degraded_not_p0", "test_archive_corruption_is_p0 fault matrix", "test_database_archive_corruption_precedes_missing_key_classification", "test_combined_key_id_and_ciphertext_tamper_is_corrupt", "test_archive_verification_limit_is_degraded_without_sqlite_failure", "test_valid_segment_above_configured_event_budget_is_degraded_not_corrupt", "test_hot_event_verification_limit_is_degraded_without_materializing_payload", "test_archive_provider_unavailable_is_degraded", "test_noncanonical_hot_payload_is_event_corruption_not_sqlite_failure", "conservative fingerprint/ciphertext and oversized unauthenticated ambiguity contracts", "M41 smoke/large: 152 passed each", "full pytest: 425 passed", "deployment/static/dependency gates", "independent read-only review"]}
+      ]
+    },
+    {
+      "id": "P1-04",
+      "origin": "native",
+      "gate": "B",
+      "status": "verified",
+      "contracts": [
+        {"id": "P1-04.A", "claim": "Schema 33 ownership graph v1 explicitly classifies 98 direct subject tables, 28 parent-linked revision/child tables, common-knowledge predicates, schema_meta's schema_version allowlist, and six skipped FTS tables; every exported table reconciles expected and actual rows.", "evidence": ["tests/test_m42_p1_04_runtime_export.py::test_parent_graph_contract_is_explicit_for_every_revision_family", "tests/test_m42_p1_04_runtime_export.py::test_explicit_graph_reconciles_every_table_and_prevents_id_collision_leaks", "tests/test_m42_p1_04_runtime_export.py::test_unregistered_schema_table_fails_closed", "manifest table_inventory", "11 focused; 44 related regression; 72 smoke; 72 large; 345 full pytest", "Ruff/format/Mypy/compileall/pip check/pip-audit", "read-only graph and manifest review"]},
+        {"id": "P1-04.B", "claim": "Revision, child, evidence, and common-knowledge histories remain linked to the exported subject parent set, and cross-subject references fail closed.", "evidence": ["tests/test_m42_p1_04_runtime_export.py::test_audit_named_parent_families_and_common_knowledge_are_subject_isolated", "tests/test_m42_p1_04_runtime_export.py::test_cross_subject_parent_reference_fails_closed", "tests/test_m42_p1_04_runtime_export.py::test_large_parent_history_exports_without_variable_sized_id_lists", "tests/test_m42_p1_04_runtime_export.py::test_historical_fixture_export_keeps_anchor_and_reconciles_inventory", "28 parent-family graph rules", "schema 6/16/21/27/31 historical fixtures", "deployment audit: 40 passed, 72.07% focused coverage"]}
+      ]
+    },
+    {
+      "id": "P1-05",
+      "origin": "residual",
+      "gate": "B",
+      "status": "verified",
+      "contracts": [
+        {"id": "P1-05.A", "claim": "Concurrent training-policy updates use compare-and-swap and preserve ordered consent history.", "evidence": ["tests/test_m42_p1_05_training_consent.py::test_concurrent_policy_updates_merge_and_preserve_ordered_consent_history", "tests/test_m42_p1_05_training_consent.py::test_consent_audit_history_is_append_only", "tests/test_service.py::ServiceTestCase::test_training_policy_and_export_are_authenticated", "BEGIN IMMEDIATE plus version-predicate update", "HTTP required expected_version and 409 conflict", "82 targeted smoke/large", "355 full pytest", "deployment/static/read-only gates"]},
+        {"id": "P1-05.B", "claim": "Revocation before publication prevents the in-flight artifact from becoming available.", "evidence": ["tests/test_m42_p1_05_training_consent.py::test_revocation_before_publication_destroys_staged_artifact", "tests/test_m42_p1_05_training_consent.py::test_revoked_export_job_never_becomes_downloadable", "tests/test_m42_p1_05_training_consent.py::test_staging_metadata_failure_removes_private_pending_file", "same-directory pending artifact", "transactional consent lease recheck", "abort audit and no success rows", "82 targeted smoke/large", "355 full pytest", "independent read-only review"]}
+      ]
+    },
+    {
+      "id": "P1-06",
+      "origin": "regression",
+      "gate": "B",
+      "status": "verified",
+      "contracts": [
+        {"id": "P1-06.A", "claim": "Shutdown joins or isolates every export writer before releasing the subject process lock.", "evidence": ["tests/test_m42_p1_06_export_ownership.py::test_manager_shutdown_waits_for_writer_before_subject_lock_is_released", "tests/test_m42_p1_06_export_ownership.py::test_unowned_second_service_does_not_recover_before_lock_failure", "tests/test_m42_p1_06_export_ownership.py::test_recovery_is_explicit_subject_owned_and_scoped_to_interrupted_files", "shutdown wait=True before kernel.close", "ownership-gated subject-scoped recovery", "92 targeted smoke/large", "365 full pytest", "deployment/static gates"]},
+        {"id": "P1-06.B", "claim": "A cancelled export cannot publish files or append export and audit rows after cancellation.", "evidence": ["tests/test_m42_p1_06_export_ownership.py::test_cancel_before_publication_has_no_domain_success_or_artifact", "tests/test_m42_p1_06_export_ownership.py::test_publication_wins_and_cancel_after_commit_cannot_revoke_success", "tests/test_m42_p1_06_export_ownership.py::test_job_target_symlink_cannot_escape_export_root", "tests/test_m42_p1_06_export_ownership.py::test_snapshot_backup_checkpoint_cleans_partial_image", "shared cancellation/publication decision lock", "atomic job and domain success transaction", "strict control-aware worker contract", "runtime and training race matrix", "41 deployment tests at 72.55% coverage", "independent focused review"]}
+      ]
+    },
+    {
+      "id": "P1-07",
+      "origin": "residual",
+      "gate": "B",
+      "status": "verified",
+      "contracts": [
+        {"id": "P1-07.A", "claim": "Disk-backed exact deduplication, episode assembly, payload decoding, JSONL sharding, and ZIP publication enforce explicit row, memory, work-byte, archive-byte, quota, and free-space bounds during streaming.", "evidence": ["tests/test_m42_p1_07_training_bounds.py (24 focused tests)", "test_data_volume_work_root_disk_dedup_and_success_cleanup", "test_episode_assembly_obeys_event_and_elapsed_time_bounds", "test_episode_assembly_is_split_before_serialized_record_limit", "test_jsonl_files_are_sharded_with_verifiable_row_and_byte_manifests", "test_oversize_stored_event_is_rejected_before_payload_materialization", "test_compressed_model_payload_is_bounded_before_json_decode", "test_cold_archive_segment_decompression_is_bounded", "SQLite disk dedup with fixed cache/page-count and high-water accounting", "SQLite progress handler and 64-page snapshot checkpoints", "M41 smoke/large: 117 passed each", "full pytest: 390 passed", "deployment audit: 41 passed at 72.64% coverage", "Ruff/format/Mypy/compileall/pip check/pip-audit", "independent read-only review"]},
+        {"id": "P1-07.B", "claim": "All owned work, pending, snapshot, deduplication, and partial archive files stay on the managed data volume; normal exits remove them, ownership-gated restart removes work/pending orphans, and the lock-aware P2-16 stale scavenger removes abandoned snapshot images.", "evidence": ["test_data_volume_work_root_disk_dedup_and_success_cleanup", "test_cancellation_during_streaming_removes_work_and_pending_archive", "test_disk_full_during_partial_jsonl_write_removes_all_work", "test_disk_full_while_opening_writers_closes_already_opened_files", "test_restart_scavenges_only_owned_orphan_work_paths", "managed data_root/exports work/target containment", "P2-16 snapshot cleanup and stale-image scavenger", "Windows verification", "Ubuntu entry retained for CI/release host execution", "full pytest: 390 passed", "deployment audit: 41 passed at 72.64% coverage", "git diff --check", "independent read-only review"]}
+      ]
+    },
+    {
+      "id": "P1-08",
+      "origin": "residual",
+      "gate": "A",
+      "status": "verified",
+      "contracts": [
+        {"id": "P1-08.A", "claim": "Every unauthenticated state projection is constrained by an explicit field allowlist.", "evidence": ["schema snapshot", "all public routes", "private fixture"]},
+        {"id": "P1-08.B", "claim": "Equivalent goal, mission, project, and metacognitive fields cannot leak through aliases or nesting.", "evidence": ["recursive field diff", "negative cases", "authenticated comparison"]}
+      ]
+    },
+    {
+      "id": "P1-09",
+      "origin": "residual",
+      "gate": "D",
+      "status": "verified",
+      "contracts": [
+        {"id": "P1-09.A", "claim": "Semantic scoring reads and computes only a bounded candidate set or indexed nearest neighbors.", "evidence": ["large profile", "query count", "memory bound"]},
+        {"id": "P1-09.B", "claim": "Bounded retrieval preserves an approved relevance floor on reproducible datasets.", "evidence": ["quality benchmark", "recall curve", "deterministic seed"]}
+      ]
+    },
+    {
+      "id": "P1-10",
+      "origin": "residual",
+      "gate": "D",
+      "status": "verified",
+      "contracts": [
+        {"id": "P1-10.A", "claim": "Embedding calls have independent call, token, and cost budgets with durable usage entries.", "evidence": ["budget exhaustion", "ledger reconciliation", "concurrency"]},
+        {"id": "P1-10.B", "claim": "Timeouts and provider failures trip a bounded circuit without blocking recall or hiding fatigue cost.", "evidence": ["network injection", "timeout", "circuit recovery"]}
+      ]
+    },
+    {
+      "id": "P1-11",
+      "origin": "residual",
+      "gate": "D",
+      "status": "verified",
+      "contracts": [
+        {"id": "P1-11.A", "claim": "A versioned keyring can read old segments through rotation and detect unrecoverable keys.", "evidence": ["key rotation", "key loss", "restore"]},
+        {"id": "P1-11.B", "claim": "Verified cloud segments support read-through before bounded local garbage collection releases space.", "evidence": ["cloud failure", "local GC", "quota trend"]}
+      ]
+    },
+    {
+      "id": "P1-12",
+      "origin": "residual",
+      "gate": "C",
+      "status": "verified",
+      "contracts": [
+        {"id": "P1-12.A", "claim": "Execution revision, result, artifact bytes, and evidence are joined by verified digests.", "evidence": ["tamper matrix", "artifact digest", "integrity registry"]},
+        {"id": "P1-12.B", "claim": "Each output type has an executable validator and no placeholder or model assertion can mark success.", "evidence": ["validator failure", "restart", "negative outputs"]}
+      ]
+    },
+    {
+      "id": "P1-13",
+      "origin": "native",
+      "gate": "A",
+      "status": "verified",
+      "contracts": [
+        {"id": "P1-13.A", "claim": "Per-use approval is not advertised or accepted as a security boundary; new approval-required grants are rejected.", "evidence": ["API negative case", "UI snapshot", "product contract"]},
+        {"id": "P1-13.B", "claim": "Legacy approval-required grants fail closed even with arbitrary tokens, while ordinary grant use remains atomic and auditable.", "evidence": ["legacy row", "arbitrary-token negative case", "use ledger"]}
+      ]
+    },
+    {
+      "id": "P2-01",
+      "origin": "native",
+      "gate": "B",
+      "status": "verified",
+      "contracts": [
+        {"id": "P2-01.A", "claim": "Workspace export starts at the selected subject storage key, never the shared workspace root.", "evidence": ["two subjects", "manifest storage key", "path inventory"]},
+        {"id": "P2-01.B", "claim": "Symlinks, reparse points, and renamed paths cannot include another subject's bytes.", "evidence": ["directory link", "junction/symlink", "descriptor identity race"]}
+      ]
+    },
+    {
+      "id": "P2-02",
+      "origin": "native",
+      "gate": "D",
+      "status": "verified",
+      "contracts": [
+        {"id": "P2-02.A", "claim": "Unknown reconciliation appends a revision while preserving the original behavior record.", "evidence": ["tests/test_m42_p2_02_behavior_reconciliation.py::test_reconciliation_preserves_original_and_appends_hashed_revision", "tests/test_m42_p2_02_behavior_reconciliation.py::test_schema_32_behavior_log_migration_creates_baseline_and_is_idempotent"]},
+        {"id": "P2-02.B", "claim": "The complete behavior revision sequence has stable hashes and export coverage.", "evidence": ["tests/test_m42_p2_02_behavior_reconciliation.py::test_revision_contract_rejects_extra_or_mutated_rows_and_hash_tampering", "tests/test_m42_p2_02_behavior_reconciliation.py::test_runtime_export_contains_original_and_reconciled_chain"]}
+      ]
+    },
+    {
+      "id": "P2-03",
+      "origin": "native",
+      "gate": "D",
+      "status": "verified",
+      "contracts": [
+        {"id": "P2-03.A", "claim": "Search and browser clients enforce streaming response limits before full buffering.", "evidence": ["tests/test_m42_p2_03_http_bounds.py::test_bounded_reader_enforces_body_header_and_encoding_limits", "tests/test_m42_p2_03_http_bounds.py::test_search_stream_bounds_release_response_and_preserve_unknown_timeout", "tests/test_m42_p2_03_http_bounds.py::test_browser_stream_bounds_and_unknown_timeout"]},
+        {"id": "P2-03.B", "claim": "Every HTTP transport has bounded headers, body, time, redirects, and connection occupancy.", "evidence": ["tests/test_m42_p2_03_http_bounds.py::test_transport_stream_bounds_and_unknown_timeout", "tests/test_m42_p2_03_http_bounds.py::test_oversized_transport_response_is_unknown_and_not_retried", "tests/test_m42_p2_03_http_bounds.py::test_adapter_deadlines_include_waiting_for_response_headers", "tests/test_m42_p2_03_http_bounds.py::test_adapters_disable_redirects_per_request"]}
+      ]
+    },
+    {
+      "id": "P2-04",
+      "origin": "residual",
+      "gate": "D",
+      "status": "verified",
+      "contracts": [
+        {"id": "P2-04.A", "claim": "SMTP resolves and pins a public address and rejects rebinding and private destinations.", "evidence": ["DNS change", "IPv4", "IPv6"]},
+        {"id": "P2-04.B", "claim": "Delivery timeout becomes unknown and idempotent recovery cannot duplicate mail.", "evidence": ["post-send timeout", "provider query", "reconcile"]}
+      ]
+    },
+    {
+      "id": "P2-05",
+      "origin": "native",
+      "gate": "D",
+      "status": "verified",
+      "contracts": [
+        {"id": "P2-05.A", "claim": "Unknown deliveries support provider-status lookup with durable evidence.", "evidence": ["provider matrix", "restart"]},
+        {"id": "P2-05.B", "claim": "Manual reconciliation is authorized, append-only, and prevents unsafe resend decisions.", "evidence": ["operator flow", "replay"]}
+      ]
+    },
+    {
+      "id": "P2-06",
+      "origin": "residual",
+      "gate": "D",
+      "status": "verified",
+      "contracts": [
+        {"id": "P2-06.A", "claim": "Disable and revoke invalidate already-built embedding providers before another call.", "evidence": ["concurrency", "live provider"]},
+        {"id": "P2-06.B", "claim": "Failed embedding-secret deletion enters a bounded repair queue with health reporting.", "evidence": ["filesystem failure", "restart", "repair"]}
+      ]
+    },
+    {
+      "id": "P2-07",
+      "origin": "native",
+      "gate": "D",
+      "status": "verified",
+      "contracts": [
+        {"id": "P2-07.A", "claim": "Model and embedding custom endpoints pin public DNS across redirects and retries.", "evidence": ["DNS rebinding", "redirect"]},
+        {"id": "P2-07.B", "claim": "Embedding responses are streamed under hard body, time, and token bounds.", "evidence": ["oversized response", "slow stream"]}
+      ]
+    },
+    {
+      "id": "P2-08",
+      "origin": "native",
+      "gate": "D",
+      "status": "verified",
+      "contracts": [
+        {"id": "P2-08.A", "claim": "A package-id collision with different content is rejected before creating an import link.", "evidence": ["collision", "two subjects"]},
+        {"id": "P2-08.B", "claim": "Import provenance always binds the exact verified envelope, content hash, and signer.", "evidence": ["tamper", "export"]}
+      ]
+    },
+    {
+      "id": "P2-09",
+      "origin": "native",
+      "gate": "D",
+      "status": "verified",
+      "contracts": [
+        {"id": "P2-09.A", "claim": "Accepted common knowledge reaches cognition only through an advisory, non-private boundary.", "evidence": ["cognition integration", "privacy"]},
+        {"id": "P2-09.B", "claim": "Every read revalidates signature, trust status, revocation, and compatibility.", "evidence": ["key revoke", "metadata tamper"]}
+      ]
+    },
+    {
+      "id": "P2-10",
+      "origin": "native",
+      "gate": "D",
+      "status": "verified",
+      "contracts": [
+        {"id": "P2-10.A", "claim": "A newer schema marker is rejected before any schema or data write.", "evidence": ["byte-preserving future fixture", "no current-schema DDL"]},
+        {"id": "P2-10.B", "claim": "Each historical migration creates a verified backup and recovers from injected failure.", "evidence": ["v6-v31 fixtures", "verified backup marker", "restore anchor and quick_check"]}
+      ]
+    },
+    {
+      "id": "P2-11",
+      "origin": "residual",
+      "gate": "D",
+      "status": "verified",
+      "contracts": [
+        {"id": "P2-11.A", "claim": "Thought-threshold observations map to think outcomes in formation and evaluation paths.", "evidence": ["mapping table", "historical outcomes"]},
+        {"id": "P2-11.B", "claim": "Simulation replays fixed history and compares workflow, budget, stagnation, and sleep effects.", "evidence": ["deterministic replay", "behavior diff"]}
+      ]
+    },
+    {
+      "id": "P2-12",
+      "origin": "regression",
+      "gate": "D",
+      "status": "verified",
+      "contracts": [
+        {"id": "P2-12.A", "claim": "Deadline consumption advances only during active execution, not queue, pause, block, or sleep.", "evidence": ["state clock", "restart"]},
+        {"id": "P2-12.B", "claim": "Minimum duration and abandonment rules preserve the original bounded-project objective.", "evidence": ["boundary values", "timeout"]}
+      ]
+    },
+    {
+      "id": "P2-13",
+      "origin": "residual",
+      "gate": "D",
+      "status": "verified",
+      "contracts": [
+        {"id": "P2-13.A", "claim": "Multi-file outputs stage and validate completely before atomic manifest publication.", "evidence": ["tests/test_m42_p2_13_atomic_prototype.py", "Windows full suite", "Ubuntu full suite"]},
+        {"id": "P2-13.B", "claim": "Platform-specific no-follow operations close symlink and reparse-point races.", "evidence": ["Windows junction/replacement race passed", "Ubuntu POSIX symlink escape passed", "746 passed on each platform"]}
+      ]
+    },
+    {
+      "id": "P2-14",
+      "origin": "native",
+      "gate": "D",
+      "status": "implemented",
+      "contracts": [
+        {"id": "P2-14.A", "claim": "Hot database and secret storage meet the documented at-rest threat model on both platforms.", "evidence": ["tests/test_m42_p2_14_at_rest.py: 22 Windows tests passed, 1 platform symlink skip", "tests/test_m42_p2_14_at_rest.py: 23 WSL2 Ubuntu tests passed", "real Windows BitLocker VHDX probe and required guard", "real WSL2 dm-crypt LUKS loopback probe and required guard", "Windows DACL and Ubuntu 0700/0600 checks", "temporary-volume evidence recorded in docs/audit/2026-08-18-p2-14-at-rest-acceptance.md"]},
+        {"id": "P2-14.B", "claim": "Key lifecycle and restore procedures preserve availability without exposing private state.", "evidence": ["Windows BitLocker VHDX backup, rotation, restore and missing-key run", "WSL2 LUKS backup, rotation, restore and missing-key run", "AES-256-GCM backup contains no test credential plaintext", "historical key loss fails closed without publication", "temporary-volume evidence recorded in docs/audit/2026-08-18-p2-14-at-rest-acceptance.md"]}
+      ]
+    },
+    {
+      "id": "P2-15",
+      "origin": "native",
+      "gate": "D",
+      "status": "verified",
+      "contracts": [
+        {"id": "P2-15.A", "claim": "Base and cloud installation profiles are separately locked and tested.", "evidence": ["Ubuntu base profile install passed", "Ubuntu cloud profile install passed", "Docker base build passed: noyra:p2-15-base sha256:a2dc94f906391da9db9ca86bf03e4c16e40e68072c9ed287fa2ebafee49f9101", "Docker cloud build passed: noyra:p2-15-cloud sha256:06738299a63e1e3f9e70fba6a887cb4827ae9f642f758489d7e15981bcb20a31", "container base import passed", "container cloud boto3==1.43.72 import passed"]},
+        {"id": "P2-15.B", "claim": "Configured cloud archive fails startup when its dependency profile is unavailable.", "evidence": ["missing dependency", "health status", "base/cloud profile lock regression"]}
+      ]
+    },
+    {
+      "id": "P2-16",
+      "origin": "residual",
+      "gate": "B",
+      "status": "verified",
+      "contracts": [
+        {"id": "P2-16.A", "claim": "Large exports release read snapshots between bounded keyset pages or use an isolated backup.", "evidence": ["tests/test_m42_p2_16_export_snapshots.py::test_runtime_export_uses_isolated_backup_and_releases_live_wal", "tests/test_m42_p2_16_export_snapshots.py::test_training_export_uses_isolated_backup_for_stream_and_legacy_collection", "WAL checkpoint", "isolated backup cleanup", "snapshot-only read guard", "77 targeted smoke/large", "350 full pytest", "deployment audit", "static gates", "read-only snapshot review"]},
+        {"id": "P2-16.B", "claim": "Legacy synchronous routes create jobs and never occupy a request worker for the full export.", "evidence": ["tests/test_service.py::ServiceTestCase::test_legacy_export_route_enqueues_without_blocking_request_worker", "runtime/training GET route contract", "202 response plus poll/download", "bounded export queue", "77 targeted smoke/large", "350 full pytest", "deployment audit", "read-only API review"]}
+      ]
+    },
+    {
+      "id": "P2-17",
+      "origin": "native",
+      "gate": "D",
+      "status": "verified",
+      "contracts": [
+        {"id": "P2-17.A", "claim": "Runtime logs use stable keyset cursors across category sources without offset scans.", "evidence": ["query plan", "large profile"]},
+        {"id": "P2-17.B", "claim": "Concurrent inserts produce no duplicates or gaps across page boundaries.", "evidence": ["concurrency", "cursor replay"]}
+      ]
+    },
+    {
+      "id": "P2-18",
+      "origin": "native",
+      "gate": "D",
+      "status": "verified",
+      "contracts": [
+        {"id": "P2-18.A", "claim": "Subject identifiers are validated as stable ASCII slugs at every ingress.", "evidence": ["tests/test_m42_p2_18_subject_storage.py", "Windows full suite", "Ubuntu full suite"]},
+        {"id": "P2-18.B", "claim": "Filesystem storage keys are independent and every resolved path remains under its subject root.", "evidence": ["Windows subject-storage ingress/path checks", "Ubuntu keyed-directory symlink rejection", "746 passed on each platform"]}
+      ]
+    },
+    {
+      "id": "P3-01",
+      "origin": "maturity",
+      "gate": "research",
+      "status": "verified",
+      "contracts": [
+        {"id": "P3-01.A", "claim": "Software prototypes run declared build and test validators under budgets.", "evidence": ["real artifact", "validator"]},
+        {"id": "P3-01.B", "claim": "Prediction and self-experiment outputs use measured outcomes rather than fixed placeholders.", "evidence": ["calibration", "baseline comparison"]}
+      ]
+    },
+    {
+      "id": "P3-02",
+      "origin": "maturity",
+      "gate": "research",
+      "status": "verified",
+      "contracts": [
+        {"id": "P3-02.A", "claim": "Common knowledge supports discovery, versioning, synchronization, and revocation propagation.", "evidence": ["two nodes", "offline recovery"]},
+        {"id": "P3-02.B", "claim": "Subject evaluation remains explicit and cannot mutate private identity or memory.", "evidence": ["workflow", "privacy"]}
+      ]
+    },
+    {
+      "id": "P3-03",
+      "origin": "maturity",
+      "gate": "research",
+      "status": "implemented",
+      "contracts": [
+        {"id": "P3-03.A", "claim": "Affect channels produce reproducible causal behavior differences under ablation.", "evidence": ["ablation", "fixed history"]},
+        {"id": "P3-03.B", "claim": "Long-run calibration stays within documented stability and safety envelopes.", "evidence": ["10,000-snapshot deterministic stability soak: within_envelope=true, violations=[]", "drift metrics", "multi-day calibration soak still required"]}
+      ]
+    },
+    {
+      "id": "P3-04",
+      "origin": "maturity",
+      "gate": "research",
+      "status": "implemented",
+      "contracts": [
+        {"id": "P3-04.A", "claim": "Memory retrieval runs pinned public benchmarks with reproducible scoring.", "evidence": ["LoCoMo locomo10 full evidence-QA retrieval: 1,982 cases", "LongMemEval Oracle: 500 questions", "upstream revisions and SHA-256 values recorded in docs/audit/2026-08-18-p3-04-memory-benchmarks.md"]},
+        {"id": "P3-04.B", "claim": "Long-run precision, recall, latency, memory, and cost curves have regression thresholds.", "evidence": ["LoCoMo elapsed and hit/recall/MRR report", "LongMemEval elapsed and session-recall/hit/MRR report", "corpus-size trend curve and answer-level QA evaluation still required"]}
+      ]
+    },
+    {
+      "id": "P3-05",
+      "origin": "maturity",
+      "gate": "research",
+      "status": "open",
+      "contracts": [
+        {"id": "P3-05.A", "claim": "Windows installation, removal, startup, data location, logging, and upgrade are repeatable.", "evidence": ["clean VM", "upgrade"]},
+        {"id": "P3-05.B", "claim": "Packages are signed and crash recovery preserves the previous usable release.", "evidence": ["signature", "rollback"]}
+      ]
+    },
+    {
+      "id": "P3-06",
+      "origin": "maturity",
+      "gate": "research",
+      "status": "verified",
+      "contracts": [
+        {"id": "P3-06.A", "claim": "Operators can pause, resume, reset, and reconcile prepared and unknown work safely.", "evidence": ["operator workflow", "authorization"]},
+        {"id": "P3-06.B", "claim": "Integrity, archive-key, migration, WAL, storage, and export health is visible without private content.", "evidence": ["projection snapshot", "failure states"]}
+      ]
+    },
+    {
+      "id": "P3-07",
+      "origin": "maturity",
+      "gate": "research",
+      "status": "verified",
+      "contracts": [
+        {"id": "P3-07.A", "claim": "Every supported route and authorization response is represented in the OpenAPI contract.", "evidence": ["route inventory", "schema diff"]},
+        {"id": "P3-07.B", "claim": "Runtime contract tests reject undocumented or incompatible API drift.", "evidence": ["request-response validation", "CI"]}
+      ]
+    },
+    {
+      "id": "P3-08",
+      "origin": "maturity",
+      "gate": "research",
+      "status": "open",
+      "contracts": [
+        {"id": "P3-08.A", "claim": "Dependency locks include hashes and CI actions are pinned to immutable revisions.", "evidence": ["supply-chain audit", "fresh install"]},
+        {"id": "P3-08.B", "claim": "Release artifacts carry signatures, SBOM, and verifiable build provenance.", "evidence": ["release verification", "rebuild"]}
+      ]
+    }
+  ]
+}

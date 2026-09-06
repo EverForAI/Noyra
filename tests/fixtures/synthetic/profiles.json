@@ -1,0 +1,26 @@
+{
+  "format_version": 1,
+  "profiles": [
+    {
+      "name": "smoke",
+      "event_count": 128,
+      "memory_count": 128,
+      "payload_bytes": 512,
+      "batch_size": 32
+    },
+    {
+      "name": "large",
+      "event_count": 10000,
+      "memory_count": 10000,
+      "payload_bytes": 2048,
+      "batch_size": 500
+    },
+    {
+      "name": "soak",
+      "event_count": 100000,
+      "memory_count": 100000,
+      "payload_bytes": 4096,
+      "batch_size": 1000
+    }
+  ]
+}

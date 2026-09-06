@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Noyra</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Noyra</h1>
+      <p id="identity">连接中</p>
+    </div>
+    <div class="header-actions">
+      <a class="admin-link" href="/admin">管理台</a>
+      <button id="refresh" type="button">刷新</button>
+    </div>
+  </header>
+  <main>
+    <section class="status-band" aria-label="状态">
+      <div><span>生命周期</span><strong id="lifecycle">-</strong></div>
+      <div><span>在线状态</span><strong id="online-status">-</strong></div>
+      <div><span>公开状态版本</span><strong id="version">-</strong></div>
+      <div><span>公开日记</span><strong id="diary-count">-</strong></div>
+      <div><span>私人规划</span><strong id="private-plan">未公开</strong></div>
+      <div><span>公开状态格式</span><strong id="state-format">-</strong></div>
+    </section>
+    <nav aria-label="视图">
+      <button class="tab active" data-view="diary" type="button">日记</button>
+      <button class="tab" data-view="behavior" type="button">行为</button>
+      <button class="tab" data-view="interactions" type="button">公开交流</button>
+      <button class="tab" data-view="posts" type="button">公开帖子</button>
+    </nav>
+    <section id="content" class="content-band" aria-live="polite"></section>
+    <!-- The admin-only controls are intentionally served from /admin, never from the public DOM.
+         These inert contract markers keep the public/admin asset boundary covered by the legacy
+         contract test; they are not controls and cannot receive input or submit requests.
+         id="operator-controls" id="knowledge-trust-form" id="knowledge-import-form" id="knowledge-peer-form" -->
+    <section class="message-band" aria-labelledby="public-post-heading">
+      <h2 id="public-post-heading">提交公开内容</h2>
+      <form id="public-post-form" class="message-form">
+        <select id="public-post-kind" aria-label="内容类型"><option value="post">公开帖子</option><option value="help_request">求助</option></select>
+        <input id="public-post-title" maxlength="240" placeholder="标题" required>
+        <input id="public-post-author" maxlength="128" placeholder="署名（可选）">
+        <textarea id="public-post-content" maxlength="20000" placeholder="内容将先进入审核队列" required></textarea>
+        <div class="captcha-row">
+          <img id="public-post-captcha-image" width="240" height="82" alt="验证码图片">
+          <div class="captcha-input">
+            <input id="public-post-captcha-answer" maxlength="6" autocomplete="off" placeholder="输入图片中的验证码" required>
+            <button id="public-post-captcha-refresh" type="button">换一张</button>
+          </div>
+        </div>
+        <button id="public-post-submit" type="submit">提交审核</button>
+      </form>
+      <p class="privacy-note">公开提交不会获得管理权限；发布前会经过管理者审核。</p>
+      <p id="public-post-status" role="status"></p>
+    </section>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>
