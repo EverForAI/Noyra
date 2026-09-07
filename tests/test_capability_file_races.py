@@ -9,7 +9,9 @@ from typing import Any, cast
 
 import pytest
 
-from noyra.capability import CapabilityGrant, CapabilityStore, ToolRunner
+from noyra.capability import CapabilityGrant, CapabilityIntegrity, CapabilityStore, ToolRunner
+from noyra.capability.errors import CapabilityDeniedError
+from noyra.capability.filesystem import normalized_root
 from noyra.capability.types import CapabilityType
 from noyra.core import Database, IdentityStore
 from noyra.core.types import content_hash
@@ -52,6 +54,123 @@ def runner(tmp_path: Path) -> tuple[ToolRunner, str, Path]:
             actor="operator",
         )
     return ToolRunner(db, max_file_bytes=1024), subject, root
+
+
+def windows_short_path(path: Path) -> Path:
+    import ctypes
+    from ctypes import wintypes
+
+    ctypes_api: Any = ctypes
+    function = ctypes_api.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+    function.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    function.restype = wintypes.DWORD
+    buffer = ctypes.create_unicode_buffer(32768)
+    count = function(str(path), buffer, len(buffer))
+    assert 0 < count < len(buffer), ctypes_api.get_last_error()
+    short = Path(buffer.value)
+    if short == path:
+        pytest.skip("test volume does not generate Windows 8.3 aliases")
+    return short
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows 8.3 path compatibility")
+@pytest.mark.parametrize("missing_root", [False, True])
+def test_short_grant_root_preserves_io_and_persisted_integrity(
+    tmp_path: Path, missing_root: bool
+) -> None:
+    tools, subject, root = runner(tmp_path)
+    long = root / "long directory with short alias"
+    long.mkdir()
+    short = windows_short_path(long)
+    if missing_root:
+        short = short / "new root"
+        long = long / "new root"
+    for grant in tools.capabilities.list(subject):
+        tools.capabilities.revoke(
+            grant.grant_id, subject_id=subject, actor="operator", reason="replace"
+        )
+        tools.capabilities.grant(
+            subject,
+            CapabilityGrant(
+                capability_type=cast(CapabilityType, grant.capability_type),
+                scope={"root": str(short)},
+                issuer="test",
+                rate_limit_per_hour=1,
+                side_effect=grant.side_effect,
+            ),
+            actor="operator",
+        )
+    with tools.database.connection() as connection:
+        before = [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT grant_id, scope_json, state_hash FROM capability_grants ORDER BY grant_id"
+            )
+        ]
+    # Reload stored scopes rather than relying on the grant-creation objects.
+    tools = ToolRunner(tools.database, max_file_bytes=1024)
+    assert tools.write_text(subject, short / "file.txt", "expected").status == "succeeded"
+    assert tools.read_text(subject, long / "file.txt").content == "expected"
+    assert (long / "file.txt").read_text(encoding="utf-8") == "expected"
+    with pytest.raises(CapabilityDeniedError):
+        tools.write_text(subject, short / "second.txt", "rate limited")
+    with tools.database.connection() as connection:
+        after = [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT grant_id, scope_json, state_hash FROM capability_grants ORDER BY grant_id"
+            )
+        ]
+    assert after == before
+    assert CapabilityIntegrity(tools.database).verify(subject)["capability_uses"] == 2
+    assert not (long / "second.txt").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows 8.3 reparse boundary")
+@pytest.mark.parametrize("missing_suffix", [False, True])
+def test_short_grant_root_does_not_normalize_away_junction(
+    tmp_path: Path, missing_suffix: bool
+) -> None:
+    tools, subject, root = runner(tmp_path)
+    long = root / "long directory with short alias"
+    long.mkdir()
+    short = windows_short_path(long)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "file.txt"
+    victim.write_text("foreign secret", encoding="utf-8")
+    link = long / "junction"
+    directory_link(link, outside)
+    scope = short / "junction"
+    if missing_suffix:
+        scope /= "missing"
+    try:
+        with pytest.raises(PermissionError):
+            normalized_root(str(scope))
+        for grant in tools.capabilities.list(subject):
+            tools.capabilities.revoke(
+                grant.grant_id, subject_id=subject, actor="operator", reason="replace"
+            )
+            tools.capabilities.grant(
+                subject,
+                CapabilityGrant(
+                    capability_type=cast(CapabilityType, grant.capability_type),
+                    scope={"root": str(scope)},
+                    issuer="test",
+                    rate_limit_per_hour=1,
+                    side_effect=grant.side_effect,
+                ),
+                actor="operator",
+            )
+        with pytest.raises(CapabilityDeniedError):
+            tools.read_text(subject, scope / "file.txt")
+        with pytest.raises(CapabilityDeniedError):
+            tools.write_text(subject, scope / "file.txt", "overwrite")
+        assert victim.read_text(encoding="utf-8") == "foreign secret"
+        assert list(outside.iterdir()) == [victim]
+        assert CapabilityIntegrity(tools.database).verify(subject)["capability_uses"] == 0
+    finally:
+        remove_link(link)
 
 
 @pytest.mark.parametrize("ancestor", [False, True])

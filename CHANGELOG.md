@@ -20,6 +20,8 @@
 - Share native-fee settlement freshness across native/token sends and retries.
 - Bind file I/O to no-follow handles; revalidate the exact charged capability
   before and after reads without charging twice; support equivalent grant roots.
+- Accept Windows 8.3 grant-root aliases without following junctions, rewriting
+  stored authorization scopes, or granting directory creation above the root.
 - Reject untrusted POSIX writable directory configurations. Dedicated-account
   isolation remains required; hostile same-UID actors are outside this boundary.
 - Correct Windows training-export race-test path normalization without weakening

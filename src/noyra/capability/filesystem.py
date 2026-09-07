@@ -16,10 +16,40 @@ _CLOEXEC = int(getattr(os, "O_CLOEXEC", 0))
 _NONBLOCK = int(getattr(os, "O_NONBLOCK", 0))
 
 
+def _windows_long_path(path: Path) -> Path:
+    """Expand lexical 8.3 aliases without resolving junctions or symlinks."""
+    import ctypes
+    from ctypes import wintypes
+
+    ctypes_api: Any = ctypes
+    function = ctypes_api.WinDLL("kernel32", use_last_error=True).GetLongPathNameW
+    function.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    function.restype = wintypes.DWORD
+    buffer = ctypes.create_unicode_buffer(32768)
+    suffix: list[str] = []
+    while True:
+        count = function(str(path), buffer, len(buffer))
+        if count:
+            if count >= len(buffer):
+                raise PermissionError("filesystem grant root exceeds Windows path limits")
+            return Path(buffer.value).joinpath(*reversed(suffix))
+        error = ctypes_api.get_last_error()
+        # A grant may name a not-yet-created directory, but permission and other
+        # failures must not be mistaken for an absent suffix.
+        if error not in {2, 3} or path.parent == path:
+            raise PermissionError("filesystem grant root spelling is unavailable")
+        suffix.append(path.name)
+        path = path.parent
+
+
 def normalized_root(value: str) -> Path:
     original = Path(value).expanduser()
     root = Path(os.path.normpath(original))
-    if not root.is_absolute() or original.resolve() != root:
+    if not root.is_absolute():
+        raise PermissionError("filesystem grant root must be absolute")
+    if os.name == "nt":
+        root = _windows_long_path(root)
+    if original.resolve() != root:
         raise PermissionError("filesystem grant root has an ambiguous or linked spelling")
     return root
 
