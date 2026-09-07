@@ -5,13 +5,14 @@ operator capabilities. Treat a deployment as a personal data system.
 
 ## Reporting
 
-Do not open a public issue for a vulnerability. The intended repository is
-`EverForAI/Noyra`, maintained by Jaxon Grey. Before public release the maintainer
-must enable and verify GitHub Private Vulnerability Reporting under Security >
-Advisories > Report a vulnerability, or publish another verified private contact.
-No private reporting channel has been verified during local release preparation.
-Do not send a report until that channel is available; do not substitute a public
-issue. Include a minimal reproduction, affected commit, deployment mode
+Do not open a public issue for a vulnerability. Report privately to
+`EverForAI/Noyra`, maintained by Jaxon Grey, using
+[GitHub Private Vulnerability Reporting](https://github.com/EverForAI/Noyra/security/advisories/new).
+The feature was enabled and verified on September 7, 2026. Sign in to GitHub,
+then use Security > Advisories > Report a vulnerability. Reports are not
+automatically published. If the private form is unavailable, do not substitute
+a public issue or disclose vulnerability details publicly.
+Include a minimal reproduction, affected commit, deployment mode
 (Windows or Ubuntu), and impact in a private report.
 Do not include real API keys, private messages, wallet material, or personal
 data in a report.

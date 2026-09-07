@@ -119,7 +119,7 @@ Windows x64 下载包经 GitHub release asset digest 核对，SHA-256：
 不运行 `push --all` / `push --mirror` / `push --tags`，不复制 Git 配置、hooks、reflog、对象库。
 不为抢先改变日期或将内部提交日期称作公开日期。首次实际公开时间以 GitHub 公开记录为准。
 
-## 仍阻断正式公开的事项
+## 本轮审查时仍阻断正式公开的事项（2026-09-06）
 
 1. 最终公开提交的验证尚未执行；本次只完成公开内容安全准备。
 2. GitHub 私密漏洞报告入口未启用核验；账号登录、仓库创建、真实 URL 可见性尚未检查。
@@ -128,3 +128,17 @@ Windows x64 下载包经 GitHub release asset digest 核对，SHA-256：
 
 搜索和扫描不能从机制上证明没有任意未知私密内容，原始对象扫描亦不覆盖工作区外的私人仓库、
 主机凭据或其他运行数据。本轮不接触那些来源，也不将它们纳入允许公开范围。
+
+## 2026-09-07 发布准备进展
+
+- 经用户授权，白名单源码已公开于 `https://github.com/EverForAI/Noyra`。
+  首次公开根提交为 `13a3cb7e5907dddb47b8f1d60cd50c917f0163d3`，无父提交，
+  包含 484 个文件；公开 Git tree 与独立白名单快照一致，没有推送旧开发历史。
+- 作者 Jaxon Grey 已关联 GitHub 账号 EverForAI，使用用户确认的 GitHub noreply 邮箱。
+- GitHub Private Vulnerability Reporting 已启用，页面显示设置保存成功，公开 API
+  返回 `enabled: true`。当前报告入口见根目录 `SECURITY.md`；未提交虚构漏洞报告，
+  不将开关和入口核验视为通知投递或响应时限验收。
+- 首次公开提交的 GitHub quality 流水线仍在执行；不得将部分成功任务视为全量通过。
+  本次更新仅修正文档和配套校验值，不改变业务实现或解除现有 P1 风险。
+- 上一节保留为审查时点记录。源码公开不等于正式稳定版发布；生产发布门禁、真实
+  testnet/KMS/恢复/长期运行验收没有因此通过。不推送 `v*` 标签，不绕过既有 release 门禁。
