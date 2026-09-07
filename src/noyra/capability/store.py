@@ -19,6 +19,7 @@ from noyra.core.types import (
 )
 
 from .errors import CapabilityDeniedError
+from .filesystem import normalized_root
 from .types import CapabilityGrant, CapabilityGrantRecord
 
 
@@ -170,6 +171,35 @@ class CapabilityStore:
                 is not None
             )
 
+    def revalidate_use(
+        self,
+        grant_id: str,
+        subject_id: str,
+        capability_type: str,
+        resource: str,
+        *,
+        side_effect: bool,
+    ) -> CapabilityGrantRecord:
+        """Validate the charged grant without consuming or rate-limiting it again."""
+        with self.database.connection() as connection:
+            row = self._get_row(connection, grant_id, subject_id=subject_id)
+            grant = self._from_row(row)
+            if (
+                grant.status != "active"
+                or grant.capability_type != capability_type
+                or grant.requires_approval
+                or (side_effect and not grant.side_effect)
+                or (
+                    grant.expires_at is not None
+                    and self._parse_time(grant.expires_at) <= self._parse_time(utc_now())
+                )
+                or not self._scope_matches(capability_type, row["scope_json"], resource)
+            ):
+                raise CapabilityDeniedError(
+                    "charged capability grant no longer authorizes the operation"
+                )
+            return grant
+
     def list(self, subject_id: str) -> list[CapabilityGrantRecord]:
         with self.database.connection() as connection:
             rows = connection.execute(
@@ -242,7 +272,7 @@ class CapabilityStore:
         if capability_type.startswith("filesystem"):
             root = scope["root"]
             try:
-                root_path = Path(root).expanduser().resolve()
+                root_path = normalized_root(root)
                 target = Path(resource).expanduser().resolve()
             except (OSError, RuntimeError, TypeError, ValueError):
                 return False

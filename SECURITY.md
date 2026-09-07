@@ -23,13 +23,19 @@ regression test and a changelog entry.
 
 ## Research-preview limitations
 
-This source preview is not a production-stable release. AUD-12 (directory
-replacement races in file tools) and AUD-05 (native transaction-fee admission
-for token payments) remain open P1 risks. See the
-[current audit correction](docs/audit/2026-09-05-comprehensive-audit-remediation.md).
+This source preview is not a production-stable release. Revision
+`preview-2026.09.07-r1` addresses the confirmed AUD-12 file-tool and AUD-05
+native-fee admission findings, including retry reservation, cross-asset
+settlement, exact-grant revocation and compatible-root regressions. See the
+[revision boundaries](docs/release/2026-09-07-preview-r1.md) and
+[repair contract](docs/audit/2026-09-07-second-freeze-remediation.md).
+POSIX writes require trusted directory ownership/permissions and a dedicated
+service account; hostile same-UID or privileged actors are not isolated.
+Legacy ambiguous payment histories require reviewed reconciliation, not
+automatic release of funds or rewriting historical journals.
 For the preview, use a new disposable data directory, loopback binding, no wallet
 signer, no automatic payments or publishing, no file read/write grants, and no
-real funds. Disabling exposure is not a fix. Signing, bounded file operations,
+real funds. Local fixes do not establish real-chain safety. Signing, bounded file operations,
 autonomous task bounties, payments and tips remain in the project roadmap;
 enable them only after the relevant fixes and deployment acceptance.
 

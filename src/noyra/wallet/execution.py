@@ -11,7 +11,8 @@ from __future__ import annotations
 import ipaddress
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from types import TracebackType
 from typing import Any, Literal, Protocol, Self, cast
 from urllib.parse import urlparse
@@ -845,14 +846,9 @@ class WalletPaymentExecutionEngine:
             raise ValueError("unknown retry reason is invalid")
         actor = self.economy._operator(actor)
         existing = self._order_execution(order_id, subject_id)
-        if existing is not None and existing.tx_hash is not None:
-            try:
-                receipt = self.signer.get_receipt(existing.tx_hash, chain_id=existing.chain_id)
-            except Exception:
-                receipt = None
-            if receipt is not None and self._valid_receipt(
-                receipt, existing, min_confirmations=self.min_confirmations
-            ):
+        if existing is not None:
+            receipt, _error = self._lookup_receipt(existing)
+            if receipt is not None:
                 if receipt.status == 1:
                     return self._mark_confirmed(
                         existing.execution_id,
@@ -865,6 +861,7 @@ class WalletPaymentExecutionEngine:
                     subject_id,
                     actor=actor,
                     code="chain_receipt_failed",
+                    receipt_tx_hash=receipt.tx_hash,
                     receipt_status=0,
                     receipt_block_number=receipt.block_number,
                     receipt_block_hash=receipt.block_hash,
@@ -894,8 +891,13 @@ class WalletPaymentExecutionEngine:
                 code="broadcast_unknown",
             )
         except WalletSignerError as error:
-            return self._mark_failed(
-                execution.execution_id, subject_id, actor=actor, code=self._signer_error_code(error)
+            # Rejection of this attempt says nothing about an earlier broadcast.
+            return self._mark_unknown(
+                execution.execution_id,
+                subject_id,
+                actor=actor,
+                tx_hash=execution.tx_hash,
+                code=self._signer_error_code(error),
             )
         except Exception:
             return self._mark_unknown(
@@ -931,11 +933,10 @@ class WalletPaymentExecutionEngine:
     ) -> WalletExecutionRecord:
         actor = self.economy._operator(actor)
         execution = self.get_execution(execution_id, subject_id)
-        if execution.status not in {"broadcast", "unknown"} or execution.tx_hash is None:
+        if execution.status not in {"broadcast", "unknown"}:
             return execution
-        try:
-            receipt = self.signer.get_receipt(execution.tx_hash, chain_id=execution.chain_id)
-        except Exception:
+        receipt, error = self._lookup_receipt(execution)
+        if receipt is None and error is not None:
             if execution.status == "unknown":
                 return execution
             return self._mark_unknown(
@@ -943,20 +944,10 @@ class WalletPaymentExecutionEngine:
                 subject_id,
                 actor=actor,
                 tx_hash=execution.tx_hash,
-                code="receipt_lookup_unknown",
+                code=error,
             )
         if receipt is None:
             return execution
-        if not self._valid_receipt(receipt, execution, min_confirmations=self.min_confirmations):
-            if execution.status == "unknown":
-                return execution
-            return self._mark_unknown(
-                execution_id,
-                subject_id,
-                actor=actor,
-                tx_hash=execution.tx_hash,
-                code="receipt_invalid",
-            )
         if receipt.status == 1:
             return self._mark_confirmed(execution_id, subject_id, actor=actor, receipt=receipt)
         return self._mark_failed(
@@ -964,6 +955,7 @@ class WalletPaymentExecutionEngine:
             subject_id,
             actor=actor,
             code="chain_receipt_failed",
+            receipt_tx_hash=receipt.tx_hash,
             receipt_status=0,
             receipt_block_number=receipt.block_number,
             receipt_block_hash=receipt.block_hash,
@@ -1066,7 +1058,7 @@ class WalletPaymentExecutionEngine:
                 state_hash = cls._execution_hash_values_from_row(
                     execution,
                     "unknown",
-                    None,
+                    execution["tx_hash"],
                     "process_restarted",
                     None,
                     None,
@@ -1077,7 +1069,7 @@ class WalletPaymentExecutionEngine:
                     now,
                 )
                 c.execute(
-                    "UPDATE wallet_payment_executions SET status='unknown',tx_hash=NULL,"
+                    "UPDATE wallet_payment_executions SET status='unknown',"
                     "error_code='process_restarted',receipt_status=NULL,receipt_block_number=NULL,"
                     "receipt_block_hash=NULL,receipt_confirmations=NULL,receipt_effect_hash=NULL,"
                     "last_audit_id=?,updated_at=?,state_hash=? "
@@ -1098,16 +1090,16 @@ class WalletPaymentExecutionEngine:
                     int(attempt["attempt_number"]),
                     attempt["request_id"],
                     "unknown",
-                    None,
+                    execution["tx_hash"],
                     "process_restarted",
                     attempt["started_at"],
                     now,
                 )
                 c.execute(
-                    "UPDATE wallet_payment_execution_attempts SET status='unknown',"
+                    "UPDATE wallet_payment_execution_attempts SET status='unknown',tx_hash=?,"
                     "error_code='process_restarted',completed_at=?,state_hash=? "
                     "WHERE attempt_id=?",
-                    (now, attempt_hash, attempt["attempt_id"]),
+                    (execution["tx_hash"], now, attempt_hash, attempt["attempt_id"]),
                 )
                 recovered.append(
                     cls._execution_from_row(
@@ -1391,6 +1383,21 @@ class WalletPaymentExecutionEngine:
                         max_fee_per_gas=fee_value,
                     )
                 )
+                source = self.economy._spending_address(c, subject_id, execution.network_id)
+                if source is None or source["address"] != execution.source_address:
+                    raise WalletExecutionError("wallet retry spending address changed")
+                self._check_observed_fee_budget(
+                    c,
+                    subject_id=subject_id,
+                    network_id=execution.network_id,
+                    asset_type=execution.asset_type,
+                    source_address_id=source["address_id"],
+                    min_balance=policy["min_balance"],
+                    gas_limit=gas_value,
+                    max_fee_per_gas=fee_value,
+                    max_observation_age_seconds=int(policy["max_observation_age_seconds"]),
+                    exclude_execution_id=execution.execution_id,
+                )
                 aid = self.economy._audit(
                     c,
                     subject_id,
@@ -1403,7 +1410,7 @@ class WalletPaymentExecutionEngine:
                 state = self._execution_hash_values_from_row(
                     execution_row,
                     "signing",
-                    None,
+                    execution.tx_hash,
                     None,
                     None,
                     None,
@@ -1414,7 +1421,7 @@ class WalletPaymentExecutionEngine:
                     now,
                 )
                 c.execute(
-                    "UPDATE wallet_payment_executions SET status='signing',tx_hash=NULL,"
+                    "UPDATE wallet_payment_executions SET status='signing',"
                     "error_code=NULL,receipt_status=NULL,receipt_block_number=NULL,"
                     "receipt_block_hash=NULL,receipt_confirmations=NULL,receipt_effect_hash=NULL,"
                     "attempt_count=?,last_audit_id=?,updated_at=?,state_hash=? "
@@ -1571,6 +1578,7 @@ class WalletPaymentExecutionEngine:
                 min_balance=policy["min_balance"],
                 gas_limit=gas_value,
                 max_fee_per_gas=fee,
+                max_observation_age_seconds=int(policy["max_observation_age_seconds"]),
             )
             request_id = f"{order_id}:attempt:1"
             execution_id = new_id("wallet_exec")
@@ -1694,8 +1702,8 @@ class WalletPaymentExecutionEngine:
                 request_id,
             )
 
-    @staticmethod
     def _check_observed_fee_budget(
+        self,
         c: Any,
         *,
         subject_id: str,
@@ -1705,32 +1713,46 @@ class WalletPaymentExecutionEngine:
         min_balance: str,
         gas_limit: int,
         max_fee_per_gas: str,
+        max_observation_age_seconds: int,
+        exclude_execution_id: str | None = None,
     ) -> None:
-        """Reject a transfer when an observed native balance cannot cover fees.
+        """Reserve native fees atomically with the execution, including retries.
 
-        Balance snapshots are optional for legacy/read-only wallets.  When a
-        snapshot exists, however, it is unsafe to ignore fees or other
-        in-flight executions: the signer may otherwise receive an envelope
-        that the chain cannot fund.  The check is intentionally scoped to the
-        spending address and network and never treats another asset's units as
-        native currency.
+        Token reservations promise token principal only; fee admission happens
+        at signing. Legacy native-only wallets retain optional observations.
+        Token execution always requires a bounded-age native observation.
         """
+        self.economy._require_resolved_legacy_payments(c, subject_id, network_id)
         native_asset = c.execute(
             "SELECT asset_id FROM wallet_assets WHERE subject_id=? AND network_id=? "
             "AND asset_type='native' AND status='active' LIMIT 1",
             (subject_id, network_id),
         ).fetchone()
         if native_asset is None:
-            if asset_type == "native":
-                raise WalletExecutionError("wallet native fee asset is not registered")
-            return
+            raise WalletExecutionError("wallet native fee asset is not registered")
         latest = c.execute(
-            "SELECT balance FROM wallet_balance_snapshots WHERE subject_id=? AND network_id=? "
+            "SELECT * FROM wallet_balance_snapshots WHERE subject_id=? AND network_id=? "
             "AND asset_id=? AND address_id=? ORDER BY observed_at DESC,snapshot_id DESC LIMIT 1",
             (subject_id, network_id, native_asset["asset_id"], source_address_id),
         ).fetchone()
         if latest is None:
+            if asset_type == "token":
+                raise WalletExecutionError("wallet native fee balance is unavailable")
             return
+        observation = self.wallets._balance_from_row(latest)
+        if asset_type == "token":
+            from .store import WALLET_BALANCE_OBSERVATION_MAX_AGE_SECONDS
+
+            age_limit = min(
+                max_observation_age_seconds or WALLET_BALANCE_OBSERVATION_MAX_AGE_SECONDS,
+                WALLET_BALANCE_OBSERVATION_MAX_AGE_SECONDS,
+            )
+            age = (
+                datetime.fromisoformat(self.economy.clock())
+                - datetime.fromisoformat(observation.observed_at)
+            ).total_seconds()
+            if not 0 <= age <= age_limit:
+                raise WalletExecutionError("wallet native fee balance is not current")
         fee = int(max_fee_per_gas) * int(gas_limit)
         source_address = c.execute(
             "SELECT address FROM wallet_addresses WHERE address_id=? AND subject_id=?",
@@ -1738,26 +1760,44 @@ class WalletPaymentExecutionEngine:
         ).fetchone()
         if source_address is None:
             raise IntegrityError("wallet spending address is missing")
+        # Every payment spends this native budget, even a reverted token transfer.
+        # Without block anchors, require a newer observation after settlement.
+        settled_after_observation = c.execute(
+            "SELECT 1 FROM wallet_payment_executions "
+            "WHERE subject_id=? AND network_id=? AND source_address=? "
+            "AND status IN ('confirmed','failed') AND tx_hash IS NOT NULL "
+            "AND updated_at>=? LIMIT 1",
+            (subject_id, network_id, source_address["address"], observation.observed_at),
+        ).fetchone()
+        if settled_after_observation is not None:
+            raise WalletExecutionError("wallet native fee balance predates settlement")
         pending_fee = sum(
             int(row["gas_limit"]) * int(row["max_fee_per_gas"])
             for row in c.execute(
                 "SELECT gas_limit,max_fee_per_gas FROM wallet_payment_executions "
                 "WHERE subject_id=? AND network_id=? AND source_address=? "
-                "AND status IN ('signing','broadcast','unknown')",
-                (subject_id, network_id, source_address["address"]),
+                "AND status IN ('signing','broadcast','unknown') "
+                "AND (? IS NULL OR execution_id<>?)",
+                (
+                    subject_id,
+                    network_id,
+                    source_address["address"],
+                    exclude_execution_id,
+                    exclude_execution_id,
+                ),
             )
         )
-        reserved_amount = 0
-        if asset_type == "native":
-            reserved_amount = sum(
-                int(row["amount"])
-                for row in c.execute(
-                    "SELECT amount FROM wallet_payment_orders WHERE subject_id=? AND network_id=? "
-                    "AND asset_id=? AND status IN ('reserved','signing','broadcast','unknown')",
-                    (subject_id, network_id, native_asset["asset_id"]),
-                )
+        reserved_amount = sum(
+            int(row["amount"])
+            for row in c.execute(
+                "SELECT amount FROM wallet_payment_orders WHERE subject_id=? AND network_id=? "
+                "AND asset_id=? AND status IN ('reserved','signing','broadcast','unknown')",
+                (subject_id, network_id, native_asset["asset_id"]),
             )
-        if int(latest["balance"]) - reserved_amount - pending_fee < fee + int(min_balance):
+        )
+        # min_balance is in the payment asset's atoms, not necessarily wei.
+        native_minimum = int(min_balance) if asset_type == "native" else 0
+        if int(observation.balance) - reserved_amount - pending_fee < fee + native_minimum:
             raise WalletExecutionError("observed native balance cannot cover wallet fees")
 
     def _mark_broadcast(
@@ -1845,12 +1885,12 @@ class WalletPaymentExecutionEngine:
             if order["status"] not in {"signing", "broadcast"}:
                 return self._execution_from_row(execution)
             if tx_hash is None:
-                tx = None
+                tx = execution["tx_hash"]
             else:
                 try:
                     tx = _tx_hash(tx_hash)
                 except ValueError:
-                    tx = None
+                    tx = execution["tx_hash"]
                     code = "broadcast_unknown_invalid_hash"
             aid = self.economy._audit(
                 c,
@@ -1886,6 +1926,39 @@ class WalletPaymentExecutionEngine:
                 ).fetchone()
             )
 
+    def _lookup_receipt(
+        self, execution: WalletExecutionRecord
+    ) -> tuple[WalletReceipt | None, str | None]:
+        # Attempts share one nonce/envelope. A newer attempt must not hide an
+        # earlier transaction's receipt. The retry contract permits 32 attempts.
+        hashes = dict.fromkeys([execution.tx_hash] if execution.tx_hash is not None else [])
+        with self.database.read_transaction() as c:
+            for row in c.execute(
+                "SELECT * FROM wallet_payment_execution_attempts WHERE execution_id=? "
+                "AND subject_id=? ORDER BY attempt_number DESC LIMIT 32",
+                (execution.execution_id, execution.subject_id),
+            ):
+                if row["state_hash"] != self._attempt_hash(row):
+                    raise IntegrityError("wallet execution attempt hash mismatch")
+                if row["tx_hash"] is not None:
+                    hashes[_tx_hash(row["tx_hash"])] = None
+        error = None
+        for tx in hashes:
+            try:
+                receipt = self.signer.get_receipt(tx, chain_id=execution.chain_id)
+            except Exception:
+                error = "receipt_lookup_unknown"
+                continue
+            if receipt is not None:
+                if self._valid_receipt(
+                    receipt,
+                    replace(execution, tx_hash=tx),
+                    min_confirmations=self.min_confirmations,
+                ):
+                    return receipt, None
+                error = "receipt_invalid"
+        return None, error
+
     def _mark_failed(
         self,
         execution_id: str,
@@ -1893,6 +1966,7 @@ class WalletPaymentExecutionEngine:
         *,
         actor: str,
         code: str,
+        receipt_tx_hash: str | None = None,
         receipt_status: int | None = None,
         receipt_block_number: int | None = None,
         receipt_block_hash: str | None = None,
@@ -1909,6 +1983,7 @@ class WalletPaymentExecutionEngine:
             order = self.economy._order_row(c, execution["order_id"], subject_id)
             if order["status"] not in {"signing", "broadcast", "unknown"}:
                 return self._execution_from_row(execution)
+            tx = execution["tx_hash"] if receipt_tx_hash is None else _tx_hash(receipt_tx_hash)
             aid = self.economy._audit(
                 c,
                 subject_id,
@@ -1921,7 +1996,7 @@ class WalletPaymentExecutionEngine:
             state = self._execution_hash_values_from_row(
                 execution,
                 "failed",
-                execution["tx_hash"],
+                tx,
                 code,
                 receipt_status,
                 receipt_block_number,
@@ -1932,11 +2007,12 @@ class WalletPaymentExecutionEngine:
                 now,
             )
             c.execute(
-                "UPDATE wallet_payment_executions SET status='failed',error_code=?,"
+                "UPDATE wallet_payment_executions SET status='failed',tx_hash=?,error_code=?,"
                 "receipt_status=?,receipt_block_number=?,receipt_block_hash=?,"
                 "receipt_confirmations=?,receipt_effect_hash=?,last_audit_id=?,updated_at=?,"
                 "state_hash=? WHERE execution_id=?",
                 (
+                    tx,
                     code,
                     receipt_status,
                     receipt_block_number,
@@ -1949,7 +2025,7 @@ class WalletPaymentExecutionEngine:
                     execution_id,
                 ),
             )
-            self._finish_attempt(c, execution, "failed", execution["tx_hash"], code, now)
+            self._finish_attempt(c, execution, "failed", tx, code, now)
             return self._execution_from_row(
                 c.execute(
                     "SELECT * FROM wallet_payment_executions WHERE execution_id=?", (execution_id,)
@@ -1971,6 +2047,7 @@ class WalletPaymentExecutionEngine:
                 return self._execution_from_row(execution)
             if order["status"] not in {"broadcast", "unknown"}:
                 raise InvalidTransitionError("order is not awaiting receipt")
+            tx = _tx_hash(receipt.tx_hash)
             aid = self.economy._audit(
                 c,
                 subject_id,
@@ -1978,7 +2055,7 @@ class WalletPaymentExecutionEngine:
                 actor,
                 {
                     "order_id": execution["order_id"],
-                    "tx_hash": execution["tx_hash"],
+                    "tx_hash": tx,
                     "block_number": receipt.block_number,
                     "block_hash": receipt.block_hash,
                     "confirmations": receipt.confirmations,
@@ -1992,7 +2069,7 @@ class WalletPaymentExecutionEngine:
             state = self._execution_hash_values_from_row(
                 execution,
                 "confirmed",
-                execution["tx_hash"],
+                tx,
                 None,
                 1,
                 receipt.block_number,
@@ -2003,11 +2080,12 @@ class WalletPaymentExecutionEngine:
                 now,
             )
             c.execute(
-                "UPDATE wallet_payment_executions SET status='confirmed',error_code=NULL,"
+                "UPDATE wallet_payment_executions SET status='confirmed',tx_hash=?,error_code=NULL,"
                 "receipt_status=1,receipt_block_number=?,receipt_block_hash=?,"
                 "receipt_confirmations=?,receipt_effect_hash=?,last_audit_id=?,updated_at=?,"
                 "state_hash=? WHERE execution_id=?",
                 (
+                    tx,
                     receipt.block_number,
                     receipt.block_hash,
                     receipt.confirmations,
@@ -2018,7 +2096,7 @@ class WalletPaymentExecutionEngine:
                     execution_id,
                 ),
             )
-            self._finish_attempt(c, execution, "confirmed", execution["tx_hash"], None, now)
+            self._finish_attempt(c, execution, "confirmed", tx, None, now)
             return self._execution_from_row(
                 c.execute(
                     "SELECT * FROM wallet_payment_executions WHERE execution_id=?", (execution_id,)

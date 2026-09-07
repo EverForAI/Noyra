@@ -1291,17 +1291,37 @@ class WalletEconomyStore:
         self._transition_order(c, row, "confirmed", actor, reason)
         self._post_order_journal(c, row, "settlement", ("reserved", "debit"), ("paid", "credit"))
 
+    @staticmethod
+    def _require_resolved_legacy_payments(c: Any, subject_id: str, network_id: str) -> None:
+        """Old rejected retries/refunds are not evidence of chain cancellation."""
+        unresolved = c.execute(
+            "SELECT e.execution_id FROM wallet_payment_executions e "
+            "JOIN wallet_payment_orders o ON o.order_id=e.order_id AND o.subject_id=e.subject_id "
+            "WHERE e.subject_id=? AND e.network_id=? AND ("
+            "(e.status='failed' AND e.receipt_status IS NULL AND EXISTS ("
+            "SELECT 1 FROM wallet_payment_execution_attempts a "
+            "WHERE a.execution_id=e.execution_id AND a.subject_id=e.subject_id "
+            "AND a.attempt_number<e.attempt_count AND a.status IN ('unknown','broadcast'))) "
+            "OR (o.status='refunded' AND e.status IN ('signing','broadcast','unknown'))) LIMIT 1",
+            (subject_id, network_id),
+        ).fetchone()
+        if unresolved is not None:
+            raise IntegrityError(
+                "legacy wallet payment has unresolved broadcasts; recovery required"
+            )
+
     def refund_order(
         self, order_id: str, subject_id: str, *, actor: str, reason: str = "operator refunded"
     ) -> PaymentOrderRecord:
-        """Release a failed/unknown reservation without broadcasting anything."""
+        """Release a failed reservation; unknown broadcasts still own their funds."""
         actor = self._operator(actor)
         reason = reason.strip()
         if not reason or len(reason) > 2000:
             raise ValueError("refund reason is invalid")
         with self.database.transaction() as c:
             row = self._order_row(c, order_id, subject_id)
-            if row["status"] not in {"failed", "unknown"}:
+            self._require_resolved_legacy_payments(c, subject_id, row["network_id"])
+            if row["status"] != "failed":
                 raise InvalidTransitionError("order cannot be refunded")
             self._transition_order(c, row, "refunded", actor, reason)
             self._post_order_journal(

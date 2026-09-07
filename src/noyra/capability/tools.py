@@ -1,18 +1,16 @@
 from __future__ import annotations
 
 import os
-import stat
 from pathlib import Path
 
 from noyra.core.actions import ActionLedger
 from noyra.core.database import Database
-from noyra.core.types import ActionRecord, new_id
+from noyra.core.types import ActionRecord
 from noyra.world import SafeWebReader, SourceRecord
 
+from .filesystem import normalized_root, read_bounded, write_atomic
 from .store import CapabilityStore
 from .types import ToolResult, WebToolResult
-
-_O_NOFOLLOW = int(getattr(os, "O_NOFOLLOW", 0))
 
 
 class ToolRunner:
@@ -53,7 +51,7 @@ class ToolRunner:
         if terminal is not None:
             return terminal
         try:
-            self.capabilities.use(
+            grant = self.capabilities.use(
                 subject_id,
                 "filesystem_read",
                 target,
@@ -67,12 +65,23 @@ class ToolRunner:
             raise
         action = self.actions.start(action.action_id)
         try:
-            # Read max+1 bytes from the opened file.  A pre-read stat is only
-            # advisory and cannot protect against a concurrently growing file.
-            data = self._read_bounded_handle(subject_id, target)
+            root = self._revalidate_file_target(
+                subject_id, "filesystem_read", target, grant.grant_id
+            )
+            # The authorized directory is held by a no-reparse handle for the
+            # complete operation; this closes rename/junction replacement races.
+            data = read_bounded(
+                Path(target),
+                root,
+                self.max_file_bytes,
+                before_read=lambda: self._revalidate_file_target(
+                    subject_id, "filesystem_read", target, grant.grant_id
+                ),
+            )
             if len(data) > self.max_file_bytes:
                 raise ValueError("authorized file exceeds the read limit")
             content = data.decode("utf-8")
+            self._revalidate_file_target(subject_id, "filesystem_read", target, grant.grant_id)
         except Exception as error:
             finished = self.actions.finish(
                 action.action_id,
@@ -223,7 +232,7 @@ class ToolRunner:
         if terminal is not None:
             return terminal
         try:
-            self.capabilities.use(
+            grant = self.capabilities.use(
                 subject_id,
                 "filesystem_write",
                 target,
@@ -237,44 +246,23 @@ class ToolRunner:
             raise
         action = self.actions.start(action.action_id)
         file_path = Path(target)
-        temp_path = file_path.with_name(f".{file_path.name}.{new_id('tmp')}")
-        parent_fd: int | None = None
-        temp_name = temp_path.name
         try:
-            self._revalidate_file_target(subject_id, "filesystem_write", target)
-            self._revalidate_file_target(subject_id, "filesystem_write", str(file_path.parent))
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            # On POSIX, bind the write to an opened directory identity.  A
-            # later rename or symlink replacement of the path cannot redirect
-            # the temporary file or atomic replacement outside that directory.
-            if os.name != "nt" and hasattr(os, "O_DIRECTORY"):
-                parent_flags = os.O_RDONLY | os.O_DIRECTORY
-                parent_flags |= _O_NOFOLLOW
-                parent_fd = os.open(file_path.parent, parent_flags)
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-            fd = (
-                os.open(temp_name, flags, 0o600, dir_fd=parent_fd)
-                if parent_fd is not None
-                else os.open(temp_path, flags, 0o600)
+            root = self._revalidate_file_target(
+                subject_id, "filesystem_write", target, grant.grant_id
             )
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(encoded)
-                handle.flush()
-                os.fsync(handle.fileno())
-            self._revalidate_file_target(subject_id, "filesystem_write", target)
-            if parent_fd is not None:
-                os.replace(temp_name, file_path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-            else:
-                os.replace(temp_path, file_path)
-            self._revalidate_file_target(subject_id, "filesystem_write", target)
+            self._revalidate_file_target(
+                subject_id, "filesystem_write", str(file_path.parent), grant.grant_id
+            )
+            write_atomic(
+                Path(target),
+                root,
+                encoded,
+                before_publish=lambda: self._revalidate_file_target(
+                    subject_id, "filesystem_write", target, grant.grant_id
+                ),
+            )
+            self._revalidate_file_target(subject_id, "filesystem_write", target, grant.grant_id)
         except Exception as error:
-            try:
-                if parent_fd is not None:
-                    os.unlink(temp_name, dir_fd=parent_fd)
-                else:
-                    temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
             finished = self.actions.finish(
                 action.action_id,
                 "unknown",
@@ -284,9 +272,6 @@ class ToolRunner:
                 resource_summary=f"up to {len(encoded)} bytes",
             )
             return ToolResult(finished.action_id, finished.status, None, 0)
-        finally:
-            if parent_fd is not None:
-                os.close(parent_fd)
         finished = self.actions.finish(
             action.action_id,
             "succeeded",
@@ -297,14 +282,10 @@ class ToolRunner:
         )
         return ToolResult(finished.action_id, finished.status, None, len(encoded))
 
-    def _revalidate_file_target(self, subject_id: str, capability_type: str, target: str) -> None:
-        """Recheck directory identity immediately before filesystem I/O.
-
-        CapabilityStore performs the same resolved-root check during grant
-        selection.  Repeating it at the I/O boundary closes the common
-        authorization-then-junction replacement window and rejects symlinked
-        paths.  The bounded handle read above additionally closes growth races.
-        """
+    def _revalidate_file_target(
+        self, subject_id: str, capability_type: str, target: str, grant_id: str
+    ) -> Path:
+        """Recheck grants; only handle-relative I/O provides race protection."""
         path = Path(target)
         try:
             resolved = path.resolve(strict=False)
@@ -312,56 +293,14 @@ class ToolRunner:
             raise PermissionError("authorized filesystem path is unavailable") from error
         if os.path.normcase(str(resolved)) != os.path.normcase(str(path)):
             raise PermissionError("authorized filesystem path changed")
-        # Do not call ``allows`` here: it intentionally enforces the grant's
-        # rolling rate limit, and the authorization use was already recorded
-        # before this I/O recheck.  Recheck only the active grant roots and
-        # their integrity, without consuming a second use.
-        grants = [
-            grant
-            for grant in self.capabilities.list(subject_id)
-            if grant.capability_type == capability_type
-            and grant.status == "active"
-            and (capability_type != "filesystem_write" or grant.side_effect)
-        ]
-        if not any(
-            Path(str(grant.scope["root"])).expanduser().resolve() == resolved
-            or Path(str(grant.scope["root"])).expanduser().resolve() in resolved.parents
-            for grant in grants
-        ):
-            raise PermissionError("authorized filesystem path changed")
-
-    def _read_bounded_handle(self, subject_id: str, target: str) -> bytes:
-        """Open only a no-follow descriptor and bind it to the authorized path."""
-        self._revalidate_file_target(subject_id, "filesystem_read", target)
-        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
-        flags |= _O_NOFOLLOW
-        path = Path(target)
-        parent_fd: int | None = None
-        if os.name != "nt" and hasattr(os, "O_DIRECTORY"):
-            parent_flags = os.O_RDONLY | os.O_DIRECTORY
-            parent_flags |= _O_NOFOLLOW
-            parent_fd = os.open(path.parent, parent_flags)
-        fd = (
-            os.open(path.name, flags, dir_fd=parent_fd)
-            if parent_fd is not None
-            else os.open(target, flags)
+        grant = self.capabilities.revalidate_use(
+            grant_id,
+            subject_id,
+            capability_type,
+            target,
+            side_effect=capability_type == "filesystem_write",
         )
-        try:
-            self._revalidate_file_target(subject_id, "filesystem_read", target)
-            opened = os.fstat(fd)
-            if not stat.S_ISREG(opened.st_mode):
-                raise PermissionError("authorized path is not a regular file")
-            current = os.stat(target, follow_symlinks=False)
-            if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
-                raise PermissionError("authorized filesystem path changed during open")
-            with os.fdopen(fd, "rb") as handle:
-                fd = -1
-                return handle.read(self.max_file_bytes + 1)
-        finally:
-            if fd >= 0:
-                os.close(fd)
-            if parent_fd is not None:
-                os.close(parent_fd)
+        return normalized_root(str(grant.scope["root"]))
 
     @staticmethod
     def _terminal_result(action: ActionRecord) -> ToolResult | None:

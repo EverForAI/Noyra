@@ -1692,14 +1692,14 @@ class _WindowsWorkspaceAPI:
             raise ProjectExecutionError("artifact path has an unexpected file type")
         return attributes
 
-    def open_root(self, path: Path) -> int:
+    def open_root(self, path: Path, *, share_delete: bool = True) -> int:
         handle = self.create_file(
             str(path),
             self.FILE_LIST_DIRECTORY
             | self.FILE_TRAVERSE
             | self.FILE_READ_ATTRIBUTES
             | self.SYNCHRONIZE,
-            self.FILE_SHARE_ALL,
+            self.FILE_SHARE_ALL if share_delete else self.FILE_SHARE_ALL & ~4,
             None,
             3,
             0x02000000 | self.FILE_OPEN_REPARSE_POINT,
@@ -1723,6 +1723,7 @@ class _WindowsWorkspaceAPI:
         create: bool = False,
         write: bool = False,
         delete: bool = False,
+        share_delete: bool = True,
     ) -> int:
         encoded = name.encode("utf-16-le")
         buffer = self.ctypes.create_unicode_buffer(name)
@@ -1766,7 +1767,7 @@ class _WindowsWorkspaceAPI:
                 self.ctypes.byref(status_block),
                 None,
                 file_attributes,
-                self.FILE_SHARE_ALL,
+                self.FILE_SHARE_ALL if share_delete else self.FILE_SHARE_ALL & ~4,
                 disposition,
                 options,
                 None,

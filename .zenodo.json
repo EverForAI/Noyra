@@ -1,0 +1,13 @@
+{
+  "title": "Noyra: A Non-Command Artificial Subject for Real-World Environments",
+  "description": "Experimental research source preview, revision preview-2026.09.07-r1. Persistent identity, internally generated goals, memory and non-command human interaction with bounded real-world interfaces. Real signer, automatic payments, file capabilities and real funds remain disabled in the preview configuration. This is not a production-stable release or proof of subjective consciousness or global priority.",
+  "creators": [{"name": "Grey, Jaxon"}],
+  "upload_type": "software",
+  "license": "Apache-2.0",
+  "access_right": "open",
+  "version": "preview-2026.09.07-r1",
+  "keywords": ["Noyra", "non-command artificial subject", "NCAS", "autonomous agents", "research preview"],
+  "related_identifiers": [
+    {"identifier": "https://github.com/EverForAI/Noyra", "relation": "isSupplementTo", "scheme": "url"}
+  ]
+}

@@ -25,6 +25,9 @@ RESOURCE_LIMITS = {
     "soak": {"rss": 1024**3, "wal": 2 * 1024**3, "database": 8 * 1024**3},
 }
 TARGETED_TESTS = (
+    "tests/test_wallet_fee_admission.py",
+    "tests/test_capability_file_races.py",
+    "tests/test_m42_p2_01_training_workspace.py",
     "tests/test_wallet_release_gates.py",
     "tests/test_wallet_schema60.py",
     "tests/test_wallet_gate_runner.py",

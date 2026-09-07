@@ -113,9 +113,9 @@ class TrainingWorkspaceIsolationTestCase(unittest.TestCase):
         self.assertFalse(list((self.root / "exports" / "work").glob("*.work")))
 
     def test_rename_race_cannot_substitute_foreign_bytes(self) -> None:
-        own = self.subject_root / "own.md"
-        foreign = self.other_subject_root / "foreign.md"
-        displaced = self.subject_root / ".own.md.displaced"
+        own = (self.subject_root / "own.md").resolve()
+        foreign = (self.other_subject_root / "foreign.md").resolve()
+        displaced = (self.subject_root / ".own.md.displaced").resolve()
         own.write_text("subject-a", encoding="utf-8")
         foreign.write_text("subject-b-secret", encoding="utf-8")
         exporter = TrainingDatasetExporter(self.database, workspace_root=self.workspace_root)
@@ -145,6 +145,7 @@ class TrainingWorkspaceIsolationTestCase(unittest.TestCase):
             ):
                 exporter.export_to_path(self.subject_id, actor="test", target=target)
         except RuntimeError:
+            self.assertTrue(raced)
             self.assertFalse(target.exists())
             return
 
@@ -152,6 +153,10 @@ class TrainingWorkspaceIsolationTestCase(unittest.TestCase):
         with zipfile.ZipFile(target) as archive:
             content = b"\n".join(archive.read(name) for name in archive.namelist())
         self.assertNotIn(b"subject-b-secret", content)
+
+    def test_rename_race_with_noncanonical_workspace_spelling(self) -> None:
+        self.subject_root = self.subject_root / ".." / self.subject_storage_key
+        self.test_rename_race_cannot_substitute_foreign_bytes()
 
     def _make_directory_link(self, link: Path, target: Path) -> None:
         if os.name != "nt":
