@@ -20,7 +20,12 @@ bash -n "$unlock_script"
 test_root="$(mktemp -d /tmp/noyra-storage-contract.XXXXXX)"
 stub_dir="$test_root/stubs"
 mkdir "$stub_dir"
+mount_point_created=false
 cleanup() {
+  if [[ "$mount_point_created" == true ]]; then
+    rm -f -- /var/lib/noyra/.unexpected-entry
+    rmdir -- /var/lib/noyra 2>/dev/null || true
+  fi
   rm -rf --one-file-system "$test_root"
 }
 trap cleanup EXIT
@@ -69,11 +74,22 @@ if run_setup /var/lib/noyra/contract.img; then
 fi
 grep -F 'must be outside the data mount' "$test_root/stderr" >/dev/null || fail 'mount containment error was not reported'
 
+# Model an existing, non-empty native mount point. The setup script intentionally
+# permits a missing mount point during dry-run so first-install validation can be
+# inspected without mutating the host.
+if [[ ! -e /var/lib/noyra ]]; then
+  mkdir -p /var/lib/noyra
+  mount_point_created=true
+fi
 stub find 'printf "%s\\n" /var/lib/noyra/.unexpected-entry'
 if run_setup "$test_root/nonempty.img"; then
   fail 'non-empty mount point was accepted'
 fi
 grep -F 'Mount point must be empty' "$test_root/stderr" >/dev/null || fail 'non-empty mount error was not reported'
+if [[ "$mount_point_created" == true ]]; then
+  rmdir /var/lib/noyra
+  mount_point_created=false
+fi
 
 storage_image="$test_root/storage.img"
 printf 'placeholder' > "$storage_image"
