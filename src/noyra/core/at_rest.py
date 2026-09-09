@@ -52,6 +52,8 @@ _DEFAULT_CHUNK_BYTES = 1024 * 1024
 _MIN_CHUNK_BYTES = 64 * 1024
 _MAX_CHUNK_BYTES = 8 * 1024 * 1024
 _MAX_ATTESTATION_LIFETIME = timedelta(hours=24)
+# Recursive ACL work includes PowerShell startup and filesystem latency.
+_WINDOWS_ACL_TIMEOUT_SECONDS = 60
 _POSIX_LOST_FOUND_NAME = "lost+found"
 _KEY_ID_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 _KEY_ID_START_CHARACTERS = frozenset(
@@ -1219,14 +1221,16 @@ class EncryptedBackupManager:
             raise BackupAuthenticationError("restored database failed integrity validation")
 
 
-def _run_command(args: list[str]) -> subprocess.CompletedProcess[str]:
+def _run_command(
+    args: list[str], *, timeout_seconds: float = 15
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         args,
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=15,
+        timeout=timeout_seconds,
         check=False,
     )
 
@@ -1687,7 +1691,17 @@ foreach ($item in $targets) {{
   Set-PrivateAcl $item.FullName $item.PSIsContainer
 }}
 """
-    result = _run_command(_powershell_command(script))
+    try:
+        result = _run_command(
+            _powershell_command(script), timeout_seconds=_WINDOWS_ACL_TIMEOUT_SECONDS
+        )
+    except subprocess.TimeoutExpired as error:
+        raise AtRestError(
+            f"Windows ACL hardening timed out after {error.timeout:g} seconds; "
+            "private-storage permissions could not be established"
+        ) from error
+    except OSError as error:
+        raise AtRestError(f"Windows ACL hardening unavailable: {type(error).__name__}") from error
     if result.returncode != 0:
         raise AtRestError(result.stderr.strip() or "Windows ACL hardening failed")
 
@@ -1699,7 +1713,6 @@ def _windows_permission_audit(
     require_current_owner: bool = True,
     require_privileged_owner: bool = False,
 ) -> tuple[bool, str]:
-    run = runner or _run_command
     encoded_root = base64.b64encode(str(root).encode("utf-8")).decode("ascii")
     owner_check = "$true" if require_current_owner else "$false"
     privileged_owner_check = "$true" if require_privileged_owner else "$false"
@@ -1765,10 +1778,17 @@ foreach ($item in $targets) {{
 [pscustomobject]@{{Ready=$true; Detail='private ACL'}} | ConvertTo-Json -Compress
 """
     try:
-        result = run(_powershell_command(script))
+        command = _powershell_command(script)
+        result = (
+            runner(command)
+            if runner is not None
+            else _run_command(command, timeout_seconds=_WINDOWS_ACL_TIMEOUT_SECONDS)
+        )
         if result.returncode != 0:
             return False, result.stderr.strip() or "ACL command failed"
         payload = json.loads(result.stdout)
+    except subprocess.TimeoutExpired as error:
+        return False, f"Windows ACL audit timed out after {error.timeout:g} seconds"
     except (OSError, json.JSONDecodeError) as error:
         return False, f"ACL probe unavailable: {type(error).__name__}"
     if not isinstance(payload, dict):

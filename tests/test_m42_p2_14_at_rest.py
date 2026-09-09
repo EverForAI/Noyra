@@ -30,6 +30,7 @@ from noyra.core.at_rest import (
     _posix_metadata_error,
     _private_paths,
     _private_permission_error,
+    _windows_harden,
     _windows_permission_audit,
     validate_keyring_path,
     validate_private_file,
@@ -355,6 +356,87 @@ def test_windows_acl_audit_rejects_other_principals(tmp_path: Path) -> None:
 
     assert _windows_permission_audit(root, runner=unsafe_runner) == (False, "other principal")
     assert _windows_permission_audit(root, runner=safe_runner) == (True, "private ACL")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires real Windows ACLs and PowerShell")
+@pytest.mark.parametrize("operation", ["harden", "audit"])
+def test_windows_acl_operations_allow_slow_powershell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    from noyra.core import at_rest
+
+    root = tmp_path / "private"
+    nested = root / "nested"
+    nested.mkdir(parents=True)
+    (nested / "secret.key").write_text("synthetic-secret", encoding="utf-8")
+    if operation == "audit":
+        _windows_harden(root, entire_tree=True)
+
+    powershell_command = at_rest._powershell_command
+
+    def delayed_command(script: str) -> list[str]:
+        return powershell_command("Start-Sleep -Seconds 16\n" + script)
+
+    # Exercise the real ACL script beyond the old 15-second process deadline.
+    with monkeypatch.context() as delayed:
+        delayed.setattr(at_rest, "_powershell_command", delayed_command)
+        if operation == "harden":
+            _windows_harden(root, entire_tree=True)
+        else:
+            assert _windows_permission_audit(root) == (True, "private ACL")
+    assert _windows_permission_audit(root) == (True, "private ACL")
+
+
+@pytest.mark.parametrize("operation", ["harden", "audit"])
+@pytest.mark.parametrize("failure", ["timeout", "unavailable", "denied"])
+def test_windows_acl_command_failures_remain_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, failure: str
+) -> None:
+    calls = 0
+
+    def fail_command(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        timeout = kwargs["timeout"]
+        assert isinstance(timeout, (int, float)) and 15 < timeout <= 120
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(args, timeout)
+        if failure == "unavailable":
+            raise FileNotFoundError("PowerShell is unavailable")
+        return subprocess.CompletedProcess(args, 1, "", "synthetic access denied")
+
+    monkeypatch.setattr("noyra.core.at_rest.subprocess.run", fail_command)
+    if operation == "harden":
+        with pytest.raises(AtRestError, match=r"Windows ACL hardening|synthetic access denied"):
+            _windows_harden(tmp_path, entire_tree=True)
+    else:
+        ready, detail = _windows_permission_audit(tmp_path)
+        assert not ready
+        assert "ACL" in detail or "synthetic access denied" in detail
+    assert calls == 1
+
+
+def test_windows_acl_injected_runner_timeout_is_unavailable(tmp_path: Path) -> None:
+    def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(args, 15)
+
+    ready, detail = _windows_permission_audit(tmp_path, runner=runner)
+    assert not ready
+    assert "timed out" in detail
+
+
+def test_volume_probe_keeps_short_command_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def command(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert kwargs["timeout"] == 15
+        return subprocess.CompletedProcess(args, 1, "", "synthetic unavailable volume")
+
+    monkeypatch.setattr("noyra.core.at_rest.subprocess.run", command)
+    status = VolumeEncryptionProbe(platform_name="nt").probe(
+        tmp_path, backend="auto", attestation_path=None
+    )
+    assert not status.encrypted
 
 
 def test_posix_permission_contract_rejects_group_or_other_access() -> None:
