@@ -4,7 +4,6 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-
 ROOT = Path(__file__).resolve().parents[1] / "site"
 EXPECTED = {
     "index.html": "zh-CN",
@@ -13,7 +12,9 @@ EXPECTED = {
     "en/research/index.html": "en",
 }
 POSITIONING = {
-    "zh-CN": "\u53ef\u96c7\u4f63\u4eba\u7c7b\u52b3\u52a8\u7684\u975e\u547d\u4ee4\u5f0f\u4eba\u5de5\u4e3b\u4f53",
+    "zh-CN": (
+        "\u53ef\u96c7\u4f63\u4eba\u7c7b\u52b3\u52a8\u7684\u975e\u547d\u4ee4\u5f0f\u4eba\u5de5\u4e3b\u4f53"
+    ),
     "en": "a non-command artificial subject capable of hiring human labor",
 }
 RETIRED_COPY = (
@@ -127,7 +128,11 @@ def validate():
                 target /= "index.html"
             if not target.is_file():
                 errors.append(f"broken link: {path.name} -> {href}")
-            if url.fragment and target in parsed and unquote(url.fragment) not in parsed[target].ids:
+            if (
+                url.fragment
+                and target in parsed
+                and unquote(url.fragment) not in parsed[target].ids
+            ):
                 errors.append(f"broken fragment: {href}")
     allowed = {".html", ".css", ".js", ".webp", ".png", ".xml", ".txt"}
     total = 0
@@ -145,7 +150,11 @@ def validate():
         errors.append("publication exceeds 4 MB budget")
     if errors:
         raise SystemExit("\n".join(errors))
-    print(f"PASS: {len(parsed)} bilingual pages; links, assets, fragments, language and safety contracts; {total:,} bytes")
+    print(
+        "PASS: "
+        f"{len(parsed)} bilingual pages; links, assets, fragments, language and safety contracts; "
+        f"{total:,} bytes"
+    )
 
 
 if __name__ == "__main__":
