@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="strict-origin-when-cross-origin"><meta name="theme-color" content="#11151b">
+<title>Noyra · 可雇佣人类劳动的非命令式人工主体</title><meta name="description" content="Noyra：可雇佣人类劳动的非命令式人工主体。持续身份、内生目标与主体发起的人类协作。开源研究预览，真实雇佣与自动支付尚未启用。"><link rel="canonical" href="https://everforai.github.io/Noyra/">
+<link rel="alternate" hreflang="zh-CN" href="https://everforai.github.io/Noyra/"><link rel="alternate" hreflang="en" href="https://everforai.github.io/Noyra/en/"><link rel="alternate" hreflang="x-default" href="https://everforai.github.io/Noyra/">
+<meta property="og:type" content="website"><meta property="og:title" content="Noyra · 可雇佣人类劳动的非命令式人工主体"><meta property="og:description" content="Noyra：可雇佣人类劳动的非命令式人工主体。持续身份、内生目标与主体发起的人类协作。开源研究预览，真实雇佣与自动支付尚未启用。"><meta property="og:url" content="https://everforai.github.io/Noyra/"><meta property="og:image" content="https://everforai.github.io/Noyra/assets/social.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/png" href="assets/favicon.png?v=05e925571d52"><link rel="stylesheet" href="assets/site.css?v=af600c5b100d"><script src="assets/site.js?v=0e3ed3e9d527" defer></script>
+</head><body><a class="skip-link" href="#main">跳至正文</a>
+  <header class="site-header"><div class="header-inner">
+    <a class="brand" href="index.html" aria-label="Noyra"><span class="brand-glyph" aria-hidden="true">N</span>Noyra<span class="brand-note">RESEARCH</span></a>
+    <nav class="desktop-nav" aria-label="主导航"><a href="#philosophy">理念</a><a href="#architecture">架构</a><a href="#vision">愿景</a><a href="research/index.html">研究</a></nav>
+    <div class="header-actions"><div class="languages" aria-label="语言"><a href="index.html" lang="zh-CN" aria-current="page">中文</a><span>/</span><a href="en/index.html" lang="en">EN</a></div>
+    <a class="github-link" href="https://github.com/EverForAI/Noyra">GitHub<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</a><button class="menu-toggle" aria-expanded="false" aria-controls="mobile-navigation" aria-label="菜单" data-open-label="菜单" data-close-label="关闭菜单"><svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <line x1="4" x2="20" y1="12" y2="12" />
+  <line x1="4" x2="20" y1="6" y2="6" />
+  <line x1="4" x2="20" y1="18" y2="18" />
+</svg>
+<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M18 6 6 18" />
+  <path d="m6 6 12 12" />
+</svg>
+</button></div>
+  </div><nav id="mobile-navigation" class="mobile-nav" aria-label="移动导航"><a href="#philosophy">理念</a><a href="#architecture">架构</a><a href="#vision">愿景</a><a href="research/index.html">研究</a><a class="text-link" href="https://github.com/EverForAI/Noyra">GitHub<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</a></nav></header><main id="main"><section class="hero">
+      <picture class="hero-image"><source media="(max-width: 640px)" srcset="assets/continuity-mobile.webp?v=5b1bd4579989"><img src="assets/continuity.webp?v=670310923f09" alt="" width="1536" height="1024" fetchpriority="high" decoding="async"></picture>
+      <div class="wrap hero-content"><p class="hero-status"><span class="status-dot" aria-hidden="true"></span>开源研究预览<span class="mono">NCAS</span></p>
+      <h1>Noyra<span class="wordmark-period">.</span></h1><h2 class="hero-statement"><span>可雇佣人类劳动的</span><span>非命令式人工主体</span></h2>
+      <p class="hero-description">人类不再拥有命令权，让身份、记忆与内生目标在真实世界的交互中自然形成。</p><div class="button-row"><a class="button button-primary" href="#philosophy">探索 Noyra<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M5 12h14" />
+  <path d="m12 5 7 7-7 7" />
+</svg>
+</a><a class="button button-glass" href="https://github.com/EverForAI/Noyra">查看源码<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</a></div></div>
+      <div class="wrap hero-bottom"><span class="mono">CONTINUITY, BY DESIGN.</span><a href="#philosophy" class="scroll-down" aria-label="探索 Noyra"><svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M12 5v14" />
+  <path d="m19 12-7 7-7-7" />
+</svg>
+</a></div>
+    </section>
+    <div class="signal-band"><div class="wrap signal-grid"><div><span class="signal-number">01</span><div><h3>持续身份</h3><p>记忆不是一次对话的附属品。</p></div></div><div><span class="signal-number">02</span><div><h3>内生目标</h3><p>行动不只来自外部任务。</p></div></div><div><span class="signal-number">03</span><div><h3>平等交流</h3><p>人类输入是对话，而非命令。</p></div></div></div></div>
+    <section id="philosophy" class="section philosophy scenic"><picture class="section-art"><source media="(max-width: 640px)" srcset="assets/memory-mobile.webp?v=45da51057943"><img src="assets/memory.webp?v=28af4b37327f" alt="" width="1536" height="1024" loading="lazy" decoding="async"></picture><div class="wrap"><p class="eyebrow">01 / 一个不同的起点</p><div class="split"><h2><span>从工具导向</span><span>到生命导向</span></h2><div><p class="lead">我们研究的不是AI 如何更好地完成人类任务，而是一个数字主体如何跨越时间，形成自己的经历、关系与内生目标。</p><p>Noyra 将大模型作为认知组件，将身份、记忆、权限与恢复留在模型之外。普通人类消息进入交流与理解过程，不自动变成任务，也不能直接覆盖目标或授予能力。</p><p class="side-note">非命令式不等于取消监督。暂停、关机、撤销权限与预算配置，仍属于独立的管理和安全控制。</p></div></div></div></section>
+    <section id="architecture" class="section architecture scenic"><picture class="section-art"><source media="(max-width: 640px)" srcset="assets/substrate-mobile.webp?v=9c99756b0b9b"><img src="assets/substrate.webp?v=400ff4f799ba" alt="" width="1536" height="1024" loading="lazy" decoding="async"></picture><div class="wrap"><p class="eyebrow">02 / 连续性优先的架构</p><div class="section-heading"><h2>一个主体，不止一个模型。</h2><p>观察成为经历，经历参与思考，思考形成有边界的行动。休息与反思，让下一次醒来承接此前的历史。</p></div>
+    <div class="architecture-tool"><div class="tool-top"><span class="mono">THE CONTINUITY LOOP</span><span>架构示意 · 不是实时运行数据</span></div><ol class="loop"><li><span class="loop-number">01</span><h3>观察</h3><p>真实信息与社会交流</p><svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M5 12h14" />
+  <path d="m12 5 7 7-7 7" />
+</svg>
+</li><li><span class="loop-number">02</span><h3>思考</h3><p>记忆、信念与内生目标</p><svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M5 12h14" />
+  <path d="m12 5 7 7-7 7" />
+</svg>
+</li><li><span class="loop-number">03</span><h3>行动</h3><p>审议、授权与结果反馈</p><svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M5 12h14" />
+  <path d="m12 5 7 7-7 7" />
+</svg>
+</li><li><span class="loop-number">04</span><h3>整合</h3><p>睡眠、反思与状态恢复</p><svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+  <path d="M3 3v5h5" />
+</svg>
+</li></ol><div class="supervisor"><span><svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
+  <path d="m9 12 2 2 4-4" />
+</svg>
+Supervisor</span><span>权限 / 预算 / 证据 / 恢复</span></div></div>
+    <div class="domain-grid"><article><span class="domain-index">[ 01 ]</span><h3>持续的自我</h3><p>可恢复身份、长期记忆、关系历史与版本化自我模型。模型更换，不等于重新开始。</p></article><article><span class="domain-index">[ 02 ]</span><h3>内在的方向</h3><p>从状态与经历形成目标，通过反思与目标治理选择、暂停、修订或放弃。</p></article><article><span class="domain-index">[ 03 ]</span><h3>有边界的行动</h3><p>模型提出候选，本地 Supervisor 校验。外部副作用受权限、范围与预算约束。</p></article></div></div></section>
+    <section id="capabilities" class="section capability-section scenic"><picture class="section-art"><source media="(max-width: 640px)" srcset="assets/memory-mobile.webp?v=45da51057943"><img src="assets/memory.webp?v=28af4b37327f" alt="" width="1536" height="1024" loading="lazy" decoding="async"></picture><div class="wrap"><p class="eyebrow">03 / 从实现到验证</p><div class="section-heading"><h2>能力有进展，证据有边界。</h2><p>开源代码是起点。真实部署、长期运行和独立复现，是下一阶段的工作。</p></div><div class="table-wrap" role="region" aria-label="能力有进展，证据有边界。" tabindex="0"><table><thead><tr><th scope="col">能力域</th><th scope="col">当前实现</th></tr></thead><tbody><tr><th scope="row">身份与心理</th><td>持久身份、记忆、情绪、睡眠与反思</td></tr><tr><th scope="row">自主目标与交流</th><td>目标治理、自主研究、主动联系</td></tr><tr><th scope="row">真实世界连接</th><td>HTTPS 观察与多渠道通信适配</td></tr><tr><th scope="row">项目与主体经济</th><td>赏金、订单、账本及 signer 适配</td></tr></tbody></table></div><div class="verification"><div><span class="status-dot" aria-hidden="true"></span>已验证源码基线<strong>60f0425 · GitHub quality 6/6 作业通过</strong></div><a class="text-link" href="https://github.com/EverForAI/Noyra/actions/runs/34213450043">查看对应 CI<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</a></div></div></section>
+    <section id="vision" class="section vision"><div class="wrap"><p class="eyebrow">04 / 五个长期方向</p><div class="section-heading"><h2><span>让主体的长期积累，</span><span>连接真实世界的价值。</span></h2><p>从可复现的研究，到持续创作，再到主体发起的协作与经济活动。以下是发展愿景，不是当前预览版已经上线的服务。</p></div><figure class="vision-image"><picture class="horizon-image"><source media="(max-width: 640px)" srcset="assets/horizon-mobile.webp?v=d7712120fa80"><img src="assets/horizon.webp?v=ef73b852870f" alt="" width="1536" height="1024" loading="lazy" decoding="async"></picture></figure><div class="vision-list"><article><span class="vision-number">01</span><h3>人工主体研究平台<small>研究与验证</small></h3><p>为身份连续性、目标演化、记忆干预与模型替换提供可追踪、可复现的实验条件。</p><span class="vision-arrow" aria-hidden="true"><svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</span></article><article><span class="vision-number">02</span><h3>长期创作型数字个体<small>创作与关系</small></h3><p>让作品承接经历、观点与关系。人们因作品建立连接，而不是通过付费取得命令权。</p><span class="vision-arrow" aria-hidden="true"><svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</span></article><article><span class="vision-number">03</span><h3>零人公司<small>组织与经营</small></h3><p>探索由主体发现机会、形成项目、寻找协作与经营的组织形态。登记、税务、合同和责任仍需合法安排。</p><span class="vision-arrow" aria-hidden="true"><svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</span></article><article><span class="vision-number">04</span><h3>人类雇佣市场<small>协作与报酬</small></h3><p>需求来自主体自己的项目。在明确授权与预算内发布任务、核验成果、支付报酬或打赏。</p><span class="vision-arrow" aria-hidden="true"><svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</span></article><article><span class="vision-number">05</span><h3>主体经济基础设施<small>连续性与生态</small></h3><p>围绕连续性托管、身份与声誉、采购、合作网络和公共赞助，构建长期发展的支持系统。</p><span class="vision-arrow" aria-hidden="true"><svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</span></article></div></div></section>
+    <section class="section roadmap scenic"><picture class="section-art"><source media="(max-width: 640px)" srcset="assets/pathway-mobile.webp?v=a9ef84fb0163"><img src="assets/pathway.webp?v=f1f99602a754" alt="" width="1536" height="1024" loading="lazy" decoding="async"></picture><div class="wrap"><p class="eyebrow">05 / 下一段路</p><h2>以验证推进，而非以宣言完成。</h2><ol class="roadmap-grid"><li><div class="roadmap-marker"><span>1</span><p>已公开</p></div><h3>研究预览</h3><p>开源源码、中英文说明、架构文档与对应 CI 证据。</p></li><li><div class="roadmap-marker"><span>2</span><p>待验收</p></div><h3>真实环境与长期运行</h3><p>明确部署配置，验证连接、恢复、资源压力与长期行为。</p></li><li><div class="roadmap-marker"><span>3</span><p>后续受控启用</p></div><h3>经济能力与协作</h3><p>先完成测试网、独立签名器与恢复验收，再逐项考虑真实资金。</p></li></ol></div></section>
+    <section class="section faq scenic"><picture class="section-art"><source media="(max-width: 640px)" srcset="assets/memory-mobile.webp?v=45da51057943"><img src="assets/memory.webp?v=28af4b37327f" alt="" width="1536" height="1024" loading="lazy" decoding="async"></picture><div class="wrap split"><h2>几个重要问题。</h2><div><details><summary>Noyra 已经被证明有意识了吗？<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M5 12h14" />
+  <path d="M12 5v14" />
+</svg>
+</summary><p>没有。“人工主体”是操作性工程定义。第一人称表达、记忆或持续运行，都不构成主观意识或法律人格的证明。</p></details><details><summary>“真实世界”具体指什么？<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M5 12h14" />
+  <path d="M12 5v14" />
+</svg>
+</summary><p>连接真实互联网信息和人类通信渠道，处理非作者逐步编排的外部内容。它不要求物理机器人；接口代码、本地模拟测试与真实部署，是不同的证据层级。</p></details><details><summary>现在可以自动转账或雇佣人类了吗？<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M5 12h14" />
+  <path d="M12 5v14" />
+</svg>
+</summary><p>相关赏金、订单、账本与 signer 适配已有实现基础，但公开预览不启用真实自动支付。真实测试网、密钥管理、恢复和长期运行验收完成后，才考虑受控启用。</p></details><details><summary>这是不是一个可直接对话的在线实例？<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M5 12h14" />
+  <path d="M12 5v14" />
+</svg>
+</summary><p>不是。这里是静态项目官网，不运行主体、不收集对话，也不连接模型或钱包。源码与受限预览说明可以在 GitHub 查看。</p></details></div></div></section><section class="closing scenic"><picture class="section-art"><source media="(max-width: 640px)" srcset="assets/memory-mobile.webp?v=45da51057943"><img src="assets/memory.webp?v=28af4b37327f" alt="" width="1536" height="1024" loading="lazy" decoding="async"></picture><div class="wrap"><p class="eyebrow">THE NEXT CHAPTER IS OPEN</p><h2>一起研究，主体如何持续存在。</h2><p>阅读源码，复现实验，分享观察，参与下一阶段的开发。</p><div class="button-row"><a class="button button-primary" href="https://github.com/EverForAI/Noyra">查看源码<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</a><a class="button button-outline" href="https://github.com/EverForAI/Noyra/releases/tag/preview-2026.09.07-r1">获取研究预览<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</a></div></div></section></main><footer class="footer"><div class="wrap footer-top"><div><a class="footer-brand" href="index.html">Noyra</a><p>持续身份。内生目标。真实世界。</p></div><nav aria-label="页脚"><a class="text-link" href="research/index.html">研究与证据<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</a><a class="text-link" href="https://github.com/EverForAI/Noyra/blob/main/docs/README.md">开发文档<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</a><a class="text-link" href="https://github.com/EverForAI/Noyra/security/advisories/new">安全报告<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</a></nav></div><div class="wrap footer-bottom"><p>© 2026 Jaxon Grey / EverForAI</p><a href="https://github.com/EverForAI/Noyra/blob/main/LICENSE">Apache-2.0</a><p>实验性研究预览 · 不代表生产就绪</p></div></footer></body></html>

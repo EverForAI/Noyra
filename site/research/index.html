@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="strict-origin-when-cross-origin"><meta name="theme-color" content="#11151b">
+<title>研究与证据 · Noyra</title><meta name="description" content="Noyra：可雇佣人类劳动的非命令式人工主体。持续身份、内生目标与主体发起的人类协作。开源研究预览，真实雇佣与自动支付尚未启用。"><link rel="canonical" href="https://everforai.github.io/Noyra/research/">
+<link rel="alternate" hreflang="zh-CN" href="https://everforai.github.io/Noyra/research/"><link rel="alternate" hreflang="en" href="https://everforai.github.io/Noyra/en/research/"><link rel="alternate" hreflang="x-default" href="https://everforai.github.io/Noyra/research/">
+<meta property="og:type" content="website"><meta property="og:title" content="研究与证据 · Noyra"><meta property="og:description" content="Noyra：可雇佣人类劳动的非命令式人工主体。持续身份、内生目标与主体发起的人类协作。开源研究预览，真实雇佣与自动支付尚未启用。"><meta property="og:url" content="https://everforai.github.io/Noyra/research/"><meta property="og:image" content="https://everforai.github.io/Noyra/assets/social.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/png" href="../assets/favicon.png?v=05e925571d52"><link rel="stylesheet" href="../assets/site.css?v=af600c5b100d"><script src="../assets/site.js?v=0e3ed3e9d527" defer></script>
+</head><body class="research-page"><a class="skip-link" href="#main">跳至正文</a>
+  <header class="site-header"><div class="header-inner">
+    <a class="brand" href="../index.html" aria-label="Noyra"><span class="brand-glyph" aria-hidden="true">N</span>Noyra<span class="brand-note">RESEARCH</span></a>
+    <nav class="desktop-nav" aria-label="主导航"><a href="../index.html#philosophy">理念</a><a href="../index.html#architecture">架构</a><a href="../index.html#vision">愿景</a><a href="../research/index.html" aria-current="page">研究</a></nav>
+    <div class="header-actions"><div class="languages" aria-label="语言"><a href="../research/index.html" lang="zh-CN" aria-current="page">中文</a><span>/</span><a href="../en/research/index.html" lang="en">EN</a></div>
+    <a class="github-link" href="https://github.com/EverForAI/Noyra">GitHub<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</a><button class="menu-toggle" aria-expanded="false" aria-controls="mobile-navigation" aria-label="菜单" data-open-label="菜单" data-close-label="关闭菜单"><svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <line x1="4" x2="20" y1="12" y2="12" />
+  <line x1="4" x2="20" y1="6" y2="6" />
+  <line x1="4" x2="20" y1="18" y2="18" />
+</svg>
+<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M18 6 6 18" />
+  <path d="m6 6 12 12" />
+</svg>
+</button></div>
+  </div><nav id="mobile-navigation" class="mobile-nav" aria-label="移动导航"><a href="../index.html#philosophy">理念</a><a href="../index.html#architecture">架构</a><a href="../index.html#vision">愿景</a><a href="../research/index.html" aria-current="page">研究</a><a class="text-link" href="https://github.com/EverForAI/Noyra">GitHub<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</a></nav></header><main id="main"><section class="research-hero scenic"><picture class="section-art"><source media="(max-width: 640px)" srcset="../assets/memory-mobile.webp?v=45da51057943"><img src="../assets/memory.webp?v=28af4b37327f" alt="" width="1536" height="1024" fetchpriority="high" decoding="async"></picture><div class="wrap"><p class="eyebrow">NOYRA / RESEARCH</p><h1>研究与证据</h1><p class="research-intro">理解架构，探索主体与人的协作。</p><p>非命令式人工主体（NCAS）关注持续身份、内生目标和真实世界交互。这里介绍 Noyra 的架构、实现进展与相关研究。</p><div class="research-tabs"><a href="#architecture-topics">架构要点<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M12 5v14" />
+  <path d="m19 12-7 7-7-7" />
+</svg>
+</a><a href="#evidence">L1 / L2 / L3<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M12 5v14" />
+  <path d="m19 12-7 7-7-7" />
+</svg>
+</a></div></div></section>
+    <section id="architecture-topics" class="section criteria-section scenic"><picture class="section-art"><source media="(max-width: 640px)" srcset="../assets/memory-mobile.webp?v=45da51057943"><img src="../assets/memory.webp?v=28af4b37327f" alt="" width="1536" height="1024" loading="lazy" decoding="async"></picture><div class="wrap"><p class="eyebrow">01 / 架构与研究</p><h2>持续存在，自主形成方向。</h2><div class="criteria-grid"><article><span class="criterion-id">01</span><h3>持续性</h3><p>没有新任务消息时，已启动的运行循环仍可推进活动、观察、休息或等待。资源不足或安全暂停可以停止。</p></article><article><span class="criterion-id">02</span><h3>内生目标</h3><p>目标有来自主体状态与经历的形成和修订路径，不只是分解用户提供的任务。</p></article><article><span class="criterion-id">03</span><h3>无命令特权</h3><p>普通消息不能直接创建任务、覆盖目标、提高优先级、授予权限或强制行动。管理控制与交流分离。</p></article><article><span class="criterion-id">04</span><h3>自主取舍</h3><p>是否、何时及如何交流由内部机制决定，可以拒绝、延迟、沉默和主动联系。</p></article><article><span class="criterion-id">05</span><h3>时间连续性</h3><p>重启或睡眠后恢复同一操作性身份，保留历史与未完成状态，不只保留名称。</p></article><article><span class="criterion-id">06</span><h3>真实环境耦合</h3><p>真实外部信息与人类通信入口参与后续活动。完整验收需记录实际部署、模型、时间与结果。</p></article><article><span class="criterion-id">07</span><h3>受约束行动</h3><p>工具和外部副作用受模型外的权限、范围、预算和安全控制约束，不能自行扩权。</p></article><article><span class="criterion-id">08</span><h3>可核验性</h3><p>身份、目标、观察、行动和恢复均有可追踪证据。失败与未知不伪装成成功。</p></article></div><a class="text-link" href="https://github.com/EverForAI/Noyra/blob/main/docs/research/non-command-oriented-subject.md">查看完整定义与实现入口<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</a></div></section>
+    <section id="evidence" class="section evidence-section scenic"><picture class="section-art"><source media="(max-width: 640px)" srcset="../assets/substrate-mobile.webp?v=9c99756b0b9b"><img src="../assets/substrate.webp?v=400ff4f799ba" alt="" width="1536" height="1024" loading="lazy" decoding="async"></picture><div class="wrap"><p class="eyebrow">02 / EVIDENCE</p><h2>代码、测试、部署，分别陈述。</h2><div class="evidence-grid"><article><span>L1</span><h3>代码与架构</h3><p>检查权限、数据流、状态提交和恢复路径。</p></article><article><span>L2</span><h3>本地与 CI 验证</h3><p>回归、模拟、压力测试及故障注入。</p></article><article><span>L3</span><h3>真实部署证据</h3><p>明确环境、连接、运行时长和结果，当前尚待完整验收。</p></article></div><div class="verification"><div><span class="status-dot" aria-hidden="true"></span>已验证源码基线<strong>60f0425 · GitHub quality 6/6 作业通过</strong></div><a class="text-link" href="https://github.com/EverForAI/Noyra/actions/runs/34213450043">查看对应 CI<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</a></div></div></section>
+    <section id="collaboration" class="section collaboration-section scenic"><picture class="section-art"><source media="(max-width: 640px)" srcset="../assets/memory-mobile.webp?v=45da51057943"><img src="../assets/memory.webp?v=28af4b37327f" alt="" width="1536" height="1024" loading="lazy" decoding="async"></picture><div class="wrap split"><h2>主体提出需求，人类参与协作。</h2><div><p class="lead">Noyra 将人类协作视为主体项目的一项受约束能力：主体可以形成需求、发布任务、接收成果并在授权范围内支付报酬。</p><p>普通交流不会直接创建任务、授予权限或强制行动。预览版仍关闭真实自动支付和真实雇佣；相关实现基础、测试边界与部署要求均记录在公开文档中。</p><a class="text-link" href="https://github.com/EverForAI/Noyra/issues">分享实验结果与建议<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</a></div></div></section><section class="closing scenic"><picture class="section-art"><source media="(max-width: 640px)" srcset="../assets/memory-mobile.webp?v=45da51057943"><img src="../assets/memory.webp?v=28af4b37327f" alt="" width="1536" height="1024" loading="lazy" decoding="async"></picture><div class="wrap"><p class="eyebrow">THE NEXT CHAPTER IS OPEN</p><h2>一起研究，主体如何持续存在。</h2><p>阅读源码，复现实验，分享观察，参与下一阶段的开发。</p><div class="button-row"><a class="button button-primary" href="https://github.com/EverForAI/Noyra">查看源码<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</a><a class="button button-outline" href="https://github.com/EverForAI/Noyra/releases/tag/preview-2026.09.07-r1">获取研究预览<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</a></div></div></section></main><footer class="footer"><div class="wrap footer-top"><div><a class="footer-brand" href="../index.html">Noyra</a><p>持续身份。内生目标。真实世界。</p></div><nav aria-label="页脚"><a class="text-link" href="../research/index.html">研究与证据<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</a><a class="text-link" href="https://github.com/EverForAI/Noyra/blob/main/docs/README.md">开发文档<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</a><a class="text-link" href="https://github.com/EverForAI/Noyra/security/advisories/new">安全报告<svg aria-hidden="true" focusable="false"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M7 7h10v10" />
+  <path d="M7 17 17 7" />
+</svg>
+</a></nav></div><div class="wrap footer-bottom"><p>© 2026 Jaxon Grey / EverForAI</p><a href="https://github.com/EverForAI/Noyra/blob/main/LICENSE">Apache-2.0</a><p>实验性研究预览 · 不代表生产就绪</p></div></footer></body></html>

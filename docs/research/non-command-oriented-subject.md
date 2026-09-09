@@ -4,8 +4,11 @@
 GitHub 用户名：[EverForAI](https://github.com/EverForAI)。
 源码检查基线：`454894312906073e22554fda585efd285323afe7`。
 
-本文件定义研究对象、公开主张及核验入口，不是已完成独立符合性认证的报告。
+本文件保留架构定义、技术检查项及实现入口，不是已完成独立符合性认证的报告。
 NCAS v1.0 是判据版本，不是软件版本；当前 Python 包版本仍为 `0.1.0`。
+
+2026-09-09 定位更新：Noyra 不再提出首创或优先性主张。下文原有检查项保留供工程研究参考，
+不作为宣传定位的认证要求；对外介绍采用“可雇佣人类劳动的非命令式人工主体”。
 
 ## 正式定义
 
@@ -100,19 +103,19 @@ NCAS v1.0 是判据版本，不是软件版本；当前 Python 包版本仍为 `
 
 ## 对外表述
 
-标题：**Noyra：首个真实世界非命令式人工主体**。
+标题：**Noyra：可雇佣人类劳动的非命令式人工主体**。
 
-标题须和 [README](../../README.md) 的首创限定共同出现。它是作者对 NCAS v1.0 判据组合提出的
-可质疑、可修订的研究主张，不是“首次出现自主 AI”“首次自生成目标”或意识证明。
-“尚未确认其他项目全部满足”不能推出“已证明只有 Noyra 满足”，更不能替代 Noyra 自己的符合性验证。
-相关工作与检索边界见[先例记录](2026-09-06-ncas-prior-art.md)。
+这一定位描述主体围绕自身项目组织有偿人类协作的能力方向。赏金、提交、审核、订单、
+账本与独立 signer 适配已有实现基础；当前预览未启用真实雇佣或真实自动支付，
+实际配置及部署验收状态以 [README](../../README.md) 和最新发布说明为准。
+相关工作作为研究参考保留，见[检索记录](2026-09-06-ncas-prior-art.md)。
 
 English summary: Noyra is an experimental reference implementation of a
 Non-Command Artificial Subject (NCAS), authored by Jaxon Grey. Ordinary human
 messages are treated as information or social interaction, not as privileged
-executable commands. The title's priority claim is the author's provisional,
-revisable research claim, not an independently established fact. A bounded
-GitHub search and partial source inspection dated September 6, 2026 did not
-establish another full match; neither absence of a match nor this document
-certifies Noyra's conformance. Real-world interfaces, local tests, and live
-deployment validation are distinct evidence levels.
+executable commands. Its positioning is a non-command artificial subject capable
+of hiring human labor. Bounty, submission, review, order, ledger and isolated
+signer-adapter foundations exist; real employment and automatic payments are not
+enabled in the current preview. The technical checklist remains a research
+reference, not a certification required for this positioning. Real-world interfaces,
+local tests and live-deployment validation are distinct evidence levels.

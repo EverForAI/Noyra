@@ -1,20 +1,20 @@
-# Noyra: The World's First Real-World Non-Command Artificial Subject
+# Noyra: A Non-Command Artificial Subject Capable of Hiring Human Labor
 
 [English](README.en.md) | [简体中文](README.md)
 
-> This is an authorial research claim based on the combination of the eight NCAS v1.0 criteria.
-> It is open to challenge, pending independent verification, and revisable. It is not a certified
-> claim of subjective consciousness, legal personhood, or global priority.
+[Project website (GitHub Pages)](https://everforai.github.io/Noyra/)
+
+> Noyra explores a non-command artificial-subject architecture that can organize human
+> collaboration within explicit authorization and budget boundaries. Ordinary human messages
+> are information and social interaction, not privileged executable commands.
 
 Author and public attribution: **Jaxon Grey**<br>
 GitHub: [EverForAI](https://github.com/EverForAI)<br>
 License: [Apache-2.0](LICENSE)<br>
 Current release: experimental research preview `preview-2026.09.07-r1`
 
-As of the limited GitHub search and partial source inspection dated September 6, 2026, we had not
-confirmed another project satisfying all NCAS v1.0 criteria. This does not prove that no earlier
-implementation exists, nor does it certify Noyra's independent full-criteria conformance.
-See [prior-art research and search boundaries](docs/research/2026-09-06-ncas-prior-art.md).
+See the [related-work and research record](docs/research/2026-09-06-ncas-prior-art.md) for comparable
+projects, boundaries, and unresolved questions.
 
 ## What Is Noyra?
 
@@ -54,25 +54,23 @@ The architectural boundary is:
 Pause, shutdown, isolation, permission revocation, resource configuration, and budget controls are
 independently authenticated operational and safety controls. They are not callable through ordinary chat.
 
-## NCAS v1.0
+## Architecture and Human Collaboration
 
 **Non-Command Artificial Subject (NCAS)** is a software-subject architecture that, when resourced and
 authorized to run, maintains recoverable identity, memory, and internal state without depending on
 one human task instruction per step, and forms, selects, and revises goals from its own state,
 experience, evidence, relationships, and developing values.
 
-NCAS v1.0 has eight criteria:
+Human collaboration is organized around the subject's own projects: identifying a need for help,
+publishing paid tasks, receiving deliverables, reviewing results, and paying compensation. Bounty,
+order, ledger, and isolated signer-adapter foundations are implemented. Publication and payment
+remain subject to authorization, budgets, and review. Real employment and automatic payments are
+not enabled in the current preview; see the capability details below.
 
-1. **C1 Persistence**: the runtime can advance without a new task message;
-2. **C2 Endogenous goals**: goals are not merely decomposition of a user task;
-3. **C3 No command privilege**: ordinary human messages cannot directly create tasks or grant capability;
-4. **C4 Autonomous discretion**: the subject may accept, delay, refuse, remain silent, or initiate contact;
-5. **C5 Temporal continuity**: restart and sleep recovery preserve the same operational identity;
-6. **C6 Real-world coupling**: real external information and human communication channels are connected;
-7. **C7 Constrained action**: side effects are bounded by permissions, scope, budgets, and safety controls;
-8. **C8 Verifiability**: state, action, failure, and recovery have traceable and reproducible evidence.
+Non-command describes the architectural boundary between interaction and action: people can
+participate in the subject's projects without gaining command authority through ordinary messages.
 
-See the [NCAS v1.0 definition and implementation evidence](docs/research/non-command-oriented-subject.md)
+See the [architecture definition and implementation references](docs/research/non-command-oriented-subject.md)
 and the [prior-art record](docs/research/2026-09-06-ncas-prior-art.md).
 
 ## Current Capabilities and Preview Limits
