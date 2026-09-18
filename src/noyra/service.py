@@ -128,7 +128,6 @@ from noyra.wallet import (
     WALLET_BALANCE_OBSERVATION_MAX_GROUPS,
     WALLET_BALANCE_OBSERVATION_MAX_WINDOW_SECONDS,
     BountyInput,
-    HTTPSWalletSigner,
     PaymentPolicyInput,
     RewardEvidenceDecisionInput,
     RewardIncidentResolutionInput,
@@ -149,6 +148,7 @@ from noyra.wallet import (
     WalletSigner,
     WalletStore,
 )
+from noyra.wallet.config import configured_wallet_signer_from_env
 from noyra.wallet.types import canonical_timestamp
 from noyra.world import SafeWebReader
 
@@ -1333,8 +1333,10 @@ class NoyraHTTPServer:
         self.server.server_close()
         self.wallet_acquisition_runner.close()
         self.export_jobs.close()
-        if self._close_wallet_signer and isinstance(self.wallet_signer, HTTPSWalletSigner):
-            self.wallet_signer.close()
+        if self._close_wallet_signer and self.wallet_signer is not None:
+            close = getattr(self.wallet_signer, "close", None)
+            if callable(close):
+                close()
         self._closed = True
 
     def begin_drain(self) -> None:
@@ -7009,28 +7011,8 @@ class NoyraService:
     def from_env(cls, *, wallet_signer: WalletSigner | None = None) -> NoyraService:
         owns_wallet_signer = False
         if wallet_signer is None:
-            signer_endpoint = os.getenv("NOYRA_WALLET_SIGNER_ENDPOINT", "").strip()
-            if signer_endpoint:
-                signer_id = os.getenv("NOYRA_WALLET_SIGNER_ID", "").strip()
-                if not signer_id:
-                    raise ValueError(
-                        "NOYRA_WALLET_SIGNER_ID is required when a wallet signer endpoint "
-                        "is configured"
-                    )
-                raw_timeout = os.getenv("NOYRA_WALLET_SIGNER_TIMEOUT_SECONDS", "15")
-                try:
-                    signer_timeout = float(raw_timeout)
-                except ValueError as error:
-                    raise ValueError(
-                        "NOYRA_WALLET_SIGNER_TIMEOUT_SECONDS must be numeric"
-                    ) from error
-                wallet_signer = HTTPSWalletSigner(
-                    signer_endpoint,
-                    signer_id=signer_id,
-                    timeout_seconds=signer_timeout,
-                    bearer_token=os.getenv("NOYRA_WALLET_SIGNER_BEARER_TOKEN"),
-                )
-                owns_wallet_signer = True
+            wallet_signer = configured_wallet_signer_from_env()
+            owns_wallet_signer = wallet_signer is not None
         try:
             service = cls(
                 ServiceSettings.from_env(),
@@ -7038,12 +7020,16 @@ class NoyraService:
                 close_wallet_signer=owns_wallet_signer,
             )
         except Exception:
-            if owns_wallet_signer and isinstance(wallet_signer, HTTPSWalletSigner):
-                wallet_signer.close()
+            if owns_wallet_signer and wallet_signer is not None:
+                close = getattr(wallet_signer, "close", None)
+                if callable(close):
+                    close()
             raise
         if service._unowned_preflight:
-            if owns_wallet_signer and isinstance(wallet_signer, HTTPSWalletSigner):
-                wallet_signer.close()
+            if owns_wallet_signer and wallet_signer is not None:
+                close = getattr(wallet_signer, "close", None)
+                if callable(close):
+                    close()
             return service
         try:
             service._wallet_automation_config = _wallet_automation_from_env()

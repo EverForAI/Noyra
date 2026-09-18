@@ -1,7 +1,7 @@
-"""Wallet observation, bounty accounting, and bounded payment execution.
+"""Wallet observation, bounded payment execution, and selectable signers.
 
-Signing credentials remain outside this package. Production transfers cross only the
-fixed native/ERC-20 envelope exposed by an independently injected signer.
+Signing can use the protected local keystore or an independently operated HTTPS
+signer. Payments remain disabled unless an operator explicitly enables a mode.
 """
 
 from .acquisition import (
@@ -16,6 +16,7 @@ from .acquisition import (
     WalletBalanceAcquisitionRunner,
     WalletBalanceAcquisitionRunRecord,
 )
+from .config import configured_wallet_signer_from_env
 from .economy import WalletEconomyStore
 from .economy_types import (
     BountyInput,
@@ -47,6 +48,8 @@ from .execution import (
     WalletTransferIntent,
     WalletUnsignedTransfer,
 )
+from .keystore import create_keystore, load_account, read_password_file
+from .local import LocalWalletSigner
 from .rpc import WalletRPCBalanceAcquirer, WalletRPCError
 from .store import (
     WALLET_BALANCE_HISTORY_MAX_CURSOR_LENGTH,
@@ -109,6 +112,7 @@ __all__ = [
     "LedgerBalance",
     "LedgerEntryRecord",
     "LedgerJournalRecord",
+    "LocalWalletSigner",
     "MockSigner",
     "PaymentOrderRecord",
     "PaymentPolicyInput",
@@ -163,4 +167,8 @@ __all__ = [
     "canonical_amount",
     "canonical_balance",
     "canonical_evm_address",
+    "configured_wallet_signer_from_env",
+    "create_keystore",
+    "load_account",
+    "read_password_file",
 ]

@@ -14,7 +14,7 @@ remain project goals; their temporary disablement does not remove their code.
 | Cognition | `NOYRA_COGNITION_ENABLED=false` for this offline configuration check |
 | Automatic payments | `NOYRA_WALLET_AUTOMATION_ENABLED=false` |
 | Automatic publishing | `NOYRA_WALLET_AUTOMATION_AUTO_PUBLISH=false` |
-| Wallet signing | Empty `NOYRA_WALLET_SIGNER_ENDPOINT`, `NOYRA_WALLET_SIGNER_ID`, `NOYRA_WALLET_SIGNER_BEARER_TOKEN`; no programmatically injected signer |
+| Wallet signing | `NOYRA_WALLET_MODE=disabled` (explicitly overrides stale endpoint/local settings); no programmatically injected signer |
 | File capabilities | No file read/write grants; no grants copied from an older database |
 | Economic state | No real wallet, spending address, payment order or funds |
 | External providers | No live model, embedding, search, S3 or communication credentials |
@@ -29,7 +29,11 @@ Remove inherited `NOYRA_*` settings from the isolated test process before applyi
 the reviewed example and disposable overrides. In particular, an inherited signer
 endpoint can activate a signer even if a newly copied example omits that field.
 Disabling automation does not revoke existing durable permissions or erase old
-orders. The fresh-data requirement is mandatory, not a convenience.
+orders. The fresh-data requirement is mandatory, not a convenience. A configured
+deployment may use `local` encrypted keystore or `external` HTTPS signer; see
+`local-wallet.md`. Valid recipients do not need an address allowlist entry, while
+registered network/asset records and all payment limits and emergency pause remain
+enforced.
 
 At-rest `development` mode is allowed only for disposable test state. Real private
 state requires validated encrypted storage and recovery arrangements. A file-tool

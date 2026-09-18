@@ -1,9 +1,9 @@
-"""Bounded wallet payment execution behind an independent signer boundary.
+"""Bounded wallet payment execution behind a signer boundary.
 
 Only fixed native/ERC-20 transfer envelopes cross this boundary. No private key,
 seed, mnemonic, arbitrary RPC method, URL, calldata, or model-controlled
-transaction is accepted here. Production signers should implement the Protocol
-in a separate process or service; MockSigner is test-only.
+transaction is accepted here. Signers may be an in-process encrypted local
+wallet or a separate HTTPS service; MockSigner is test-only.
 """
 
 from __future__ import annotations
@@ -510,7 +510,7 @@ class HTTPSWalletSigner:
 
 
 class WalletSigner(Protocol):
-    """Independent signer process/service contract."""
+    """Contract shared by local, external, and test signers."""
 
     signer_id: str
 

@@ -1058,9 +1058,23 @@ class WalletEconomyStore:
             return False
         if row["payment_mode"] == "automatic" and str(policy["mode"]) != "automatic":
             return False
-        if row["network_id"] not in strict_json_loads(policy["allowed_network_ids_json"]):
-            return False
-        if row["asset_id"] not in strict_json_loads(policy["allowed_asset_ids_json"]):
+        # Network and asset allowlists are retained as durable policy metadata
+        # for compatibility and reporting.  A payment still needs a currently
+        # active registered network/asset pair; only the recipient itself is
+        # intentionally free of an address allowlist.
+        registered = c.execute(
+            "SELECT n.status AS network_status, a.status AS asset_status, a.network_id "
+            "FROM wallet_networks AS n "
+            "JOIN wallet_assets AS a ON a.subject_id=n.subject_id AND a.network_id=n.network_id "
+            "WHERE n.subject_id=? AND n.network_id=? AND a.asset_id=?",
+            (row["subject_id"], row["network_id"], row["asset_id"]),
+        ).fetchone()
+        if (
+            registered is None
+            or registered["network_status"] != "active"
+            or registered["asset_status"] != "active"
+            or registered["network_id"] != row["network_id"]
+        ):
             return False
         amount = int(row["amount"])
         if amount <= 0 or (

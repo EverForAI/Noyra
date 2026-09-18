@@ -122,7 +122,8 @@ def native_balance(values: tuple[Any, ...], balance: str, *, age: int = 0) -> No
 
 
 @pytest.mark.parametrize(
-    "condition", ["missing_asset", "missing_snapshot", "stale", "future", "reserved"]
+    "condition",
+    ["missing_asset", "revoked_order_asset", "missing_snapshot", "stale", "future", "reserved"],
 )
 def test_token_fee_admission_fails_before_signer(tmp_path: Path, condition: str) -> None:
     values = setup_token(tmp_path)
@@ -130,6 +131,10 @@ def test_token_fee_admission_fails_before_signer(tmp_path: Path, condition: str)
     if condition == "missing_asset":
         WalletStore(db).revoke_asset(
             native.asset_id, subject_id=subject, actor="operator", reason="test"
+        )
+    elif condition == "revoked_order_asset":
+        WalletStore(db).revoke_asset(
+            _token.asset_id, subject_id=subject, actor="operator", reason="test"
         )
     elif condition in {"stale", "future", "reserved"}:
         native_balance(
@@ -139,7 +144,12 @@ def test_token_fee_admission_fails_before_signer(tmp_path: Path, condition: str)
         )
     signer = MockSigner()
     engine = WalletPaymentExecutionEngine(db, signer, max_fee_per_gas="1")
-    with pytest.raises(WalletExecutionError):
+    expected_error = (
+        (ValueError, WalletExecutionError)
+        if condition == "revoked_order_asset"
+        else WalletExecutionError
+    )
+    with pytest.raises(expected_error):
         engine.execute_order(order.order_id, subject, actor="operator")
     assert not signer.requests
     assert engine._order_execution(order.order_id, subject) is None
