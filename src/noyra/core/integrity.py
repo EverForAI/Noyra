@@ -50,6 +50,7 @@ from .types import (
     strict_json_loads,
     utc_now,
 )
+from .wallet_schema import WalletLegacyApproval
 
 if TYPE_CHECKING:
     from .runtime import SubjectKernel
@@ -1150,6 +1151,96 @@ _CORE_AUDIT_ACTIONS = frozenset(
         "training_export_aborted",
         "training_exported",
         "training_policy_updated",
+        "wallet_legacy_state_authorized",
+    }
+)
+# audit_records is shared by the core and wallet domains. Only these exact
+# wallet actions may leave the core-specific validator; their references are
+# checked below, and wallet.state still verifies the associated durable state.
+_WALLET_AUDIT_REFERENCES = {
+    **{
+        f"wallet_{resource}_{operation}": (table, f"{resource}_id")
+        for resource, table in (
+            ("network", "wallet_networks"),
+            ("asset", "wallet_assets"),
+            ("address", "wallet_addresses"),
+        )
+        for operation in ("registered", "revoked")
+    },
+    **{
+        f"wallet_balance_acquisition_{operation}": ("wallet_balance_acquisition_runs", "run_id")
+        for operation in ("queued", "failed", "unknown", "retried", "succeeded", "cancelled")
+    },
+    **{
+        f"wallet_bounty_{operation}": ("wallet_bounties", "bounty_id")
+        for operation in ("created", "published", "closed", "cancelled", "expired")
+    },
+    **{
+        action: ("wallet_bounty_submissions", "submission_id")
+        for action in (
+            "wallet_bounty_submission_created",
+            "wallet_submission_accepted",
+            "wallet_submission_rejected",
+            "wallet_submission_withdrawn",
+            "wallet_payment_order_created",
+        )
+    },
+    **{
+        f"wallet_payment_order_{operation}": ("wallet_payment_orders", "order_id")
+        for operation in (
+            "awaiting_confirmation",
+            "reserved",
+            "rejected",
+            "cancelled",
+            "expired",
+            "signing",
+            "broadcast",
+            "unknown",
+            "failed",
+            "confirmed",
+            "refunded",
+        )
+    },
+    **{
+        f"wallet_payment_{operation}": ("wallet_payment_orders", "order_id")
+        for operation in (
+            "execution_signing",
+            "execution_retry",
+            "broadcast",
+            "unknown",
+            "failed",
+            "confirmed",
+        )
+    },
+    **{
+        f"wallet_reward_workflow_{operation}": ("wallet_reward_workflows", "workflow_id")
+        for operation in ("created", "open", "closed", "manual_intervention")
+    },
+    **{
+        f"wallet_reward_submission_{operation}": ("wallet_reward_submission_links", "submission_id")
+        for operation in ("linked", "accepted", "rejected")
+    },
+    "wallet_reward_incident_opened": ("wallet_reward_workflows", "workflow_id"),
+    "wallet_reward_incident_resolved": ("wallet_reward_incidents", "incident_id"),
+}
+_OPERATOR_AUDIT_ACTIONS = frozenset(
+    {
+        "operator_pause",
+        "operator_resume",
+        "operator_reset",
+        "operator_action_reconcile",
+        "operator_model_call_reconcile",
+    }
+)
+_ADMIN_AUDIT_ACTIONS = frozenset(
+    {
+        "admin_login_succeeded",
+        "admin_login_failed",
+        "admin_logout",
+        "admin_break_glass_rejected_session",
+        "public_post_moderated",
+        "public_post_controls_updated",
+        "inbound_message_received",
     }
 )
 _TRAINING_POLICY_FIELDS = (
@@ -1365,14 +1456,22 @@ def _provenance_time(value: object, context: str) -> str:
     return timestamp
 
 
-def _provenance_object(value: object, context: str) -> dict[str, Any]:
+def _provenance_object(
+    value: object, context: str, *, legacy_admin_json: bool = False
+) -> dict[str, Any]:
     if not isinstance(value, str):
         raise IntegrityError(f"{context} JSON is invalid")
     try:
         parsed = strict_json_loads(value)
     except (TypeError, ValueError) as error:
         raise IntegrityError(f"{context} JSON is invalid") from error
-    if not isinstance(parsed, dict) or canonical_json(parsed) != value:
+    # The management HTTP writer historically used json.dumps(sort_keys=True),
+    # including spaces and ASCII escapes. Accept only that exact legacy form
+    # for its known actions; duplicate keys and non-finite values remain invalid.
+    if not isinstance(parsed, dict) or (
+        canonical_json(parsed) != value
+        and not (legacy_admin_json and json.dumps(parsed, sort_keys=True) == value)
+    ):
         raise IntegrityError(f"{context} JSON is invalid")
     return {str(key): item for key, item in parsed.items()}
 
@@ -2476,6 +2575,168 @@ def _bounded_tree_size(root: Path, context: IntegrityContext) -> int:
     return total
 
 
+def _audit_reference(
+    context: IntegrityContext, table: str, key: str, identifier: object, label: str
+) -> Any:
+    value = _provenance_text(identifier, f"{label} {key}")
+    row = context.connection.execute(f"SELECT * FROM {table} WHERE {key}=?", (value,)).fetchone()
+    if row is None or row["subject_id"] != context.subject_id:
+        raise IntegrityError(f"{label} reference ownership is invalid")
+    return row
+
+
+def _verify_management_audit_provenance(
+    context: IntegrityContext, row: Any, payload: Mapping[str, Any]
+) -> bool:
+    action, actor = row["action"], row["actor"]
+    label = f"audit record {row['audit_id']}"
+    if action in _OPERATOR_AUDIT_ACTIONS:
+        reason = _provenance_text(payload.get("reason"), f"{label} reason")
+        if (
+            actor.strip().casefold() == "subject"
+            or len(actor) > 256
+            or len(reason) > 2000
+            or payload.get("reason_hash") != content_hash(reason)
+        ):
+            raise IntegrityError(f"{label} operator evidence is invalid")
+        base = {"reason", "reason_hash"}
+        if action in {"operator_pause", "operator_resume", "operator_reset"}:
+            _provenance_keys(
+                payload,
+                base
+                | {"idempotent"}
+                | ({"preserved_subject_data"} if action == "operator_reset" else set()),
+                label,
+            )
+            _provenance_json_bool(payload["idempotent"], f"{label} idempotent")
+            if action == "operator_reset" and (
+                payload["preserved_subject_data"] is not True or payload["idempotent"] is not False
+            ):
+                raise IntegrityError(f"{label} reset evidence is invalid")
+        else:
+            is_action = action == "operator_action_reconcile"
+            table, key = ("actions", "action_id") if is_action else ("model_calls", "call_id")
+            _provenance_keys(payload, base | {key, "outcome"}, label)
+            _audit_reference(context, table, key, payload[key], label)
+            allowed = {"succeeded", "failed", "cancelled" if is_action else "prepared"}
+            if _provenance_text(payload["outcome"], f"{label} outcome") not in allowed:
+                raise IntegrityError(f"{label} reconciliation outcome is invalid")
+        return True
+    if action not in _ADMIN_AUDIT_ACTIONS:
+        return False
+    if action in {"admin_login_succeeded", "admin_logout"}:
+        _provenance_keys(payload, {"role"}, label)
+        if _provenance_text(payload["role"], f"{label} role") not in {"operator", "admin"}:
+            raise IntegrityError(f"{label} session role is invalid")
+    elif action == "admin_login_failed":
+        _provenance_keys(payload, {"path"}, label)
+        if payload["path"] != "/admin/session":
+            raise IntegrityError(f"{label} login path is invalid")
+    elif action == "admin_break_glass_rejected_session":
+        _provenance_keys(payload, set(), label)
+    elif action == "public_post_moderated":
+        _provenance_keys(payload, {"post_id", "operation", "reason", "status"}, label)
+        _audit_reference(context, "public_posts", "post_id", payload["post_id"], label)
+        _provenance_text(payload["reason"], f"{label} reason")
+        operation = _provenance_text(payload["operation"], f"{label} operation")
+        if _provenance_text(payload["status"], f"{label} status") != {
+            "publish": "published",
+            "reject": "rejected",
+            "archive": "archived",
+        }.get(operation):
+            raise IntegrityError(f"{label} moderation status is invalid")
+    elif action == "inbound_message_received":
+        _provenance_keys(
+            payload,
+            {"event_id", "interaction_id", "channel", "duplicate", "scheduling_priority"},
+            label,
+        )
+        event = _audit_reference(
+            context, "interaction_inbound_events", "event_id", payload["event_id"], label
+        )
+        _audit_reference(
+            context, "interactions", "interaction_id", payload["interaction_id"], label
+        )
+        priority = _provenance_int(payload["scheduling_priority"], f"{label} priority")
+        _provenance_json_bool(payload["duplicate"], f"{label} duplicate")
+        if (
+            event["interaction_id"] != payload["interaction_id"]
+            or event["channel"] != payload["channel"]
+            or priority != event["scheduling_priority"]
+            or actor != f"transport:{event['channel']}"
+        ):
+            raise IntegrityError(f"{label} inbound evidence is invalid")
+    else:
+        bounds = {
+            "rate_limit_per_hour": (1, 100_000),
+            "queue_cap": (1, None),
+            "captcha_ttl_seconds": (30, 3600),
+            "captcha_max_attempts": (1, 20),
+            "storage_cap_bytes": (1_000_000, None),
+            "captcha_issue_limit_per_hour": (1, 100_000),
+            "captcha_global_rate_per_minute": (1, 100_000),
+        }
+        _provenance_keys(payload, set(bounds) | {"captcha_mode"}, label)
+        for key, (minimum, maximum) in bounds.items():
+            value = _provenance_int(payload[key], f"{label} {key}", minimum=minimum)
+            if maximum is not None and value > maximum:
+                raise IntegrityError(f"{label} control value is invalid")
+        if _provenance_text(payload["captcha_mode"], f"{label} CAPTCHA mode") not in {
+            "letters",
+            "digits",
+            "alphanumeric",
+        }:
+            raise IntegrityError(f"{label} CAPTCHA mode is invalid")
+    return True
+
+
+def _verify_wallet_audit_provenance(
+    context: IntegrityContext, row: Any, payload: Mapping[str, Any]
+) -> bool:
+    connection = context.connection
+    subject_id = context.subject_id
+    action = row["action"]
+    label = f"audit record {row['audit_id']}"
+    if action != "wallet_payment_policy_updated" and action not in _WALLET_AUDIT_REFERENCES:
+        return False
+    if row["actor"].strip() == "subject":
+        raise IntegrityError(f"{label} wallet actor is invalid")
+    if action == "wallet_payment_policy_updated":
+        _provenance_keys(payload, {"policy_version", "mode"}, label)
+        version = _provenance_int(payload["policy_version"], f"{label} policy version", minimum=2)
+        mode = _provenance_text(payload["mode"], f"{label} mode")
+        policy = connection.execute(
+            "SELECT policy_version, mode FROM wallet_payment_policies WHERE subject_id=?",
+            (subject_id,),
+        ).fetchone()
+        if (
+            policy is None
+            or version > policy["policy_version"]
+            or mode not in {"disabled", "conditional_confirmation", "automatic"}
+            or (version == policy["policy_version"] and mode != policy["mode"])
+        ):
+            raise IntegrityError(f"{label} wallet policy reference is invalid")
+        return True
+    reference = _WALLET_AUDIT_REFERENCES.get(action)
+    if reference is None:
+        return False
+    table, key = reference
+    resource = _audit_reference(context, table, key, payload.get(key), label)
+    if "subject_id" in payload and payload["subject_id"] != subject_id:
+        raise IntegrityError(f"{label} wallet reference ownership is invalid")
+    if table in {"wallet_networks", "wallet_assets", "wallet_addresses"}:
+        from noyra.wallet.store import WalletStore
+
+        audit_key = "created_audit_id" if action.endswith("_registered") else "revoked_audit_id"
+        if resource[audit_key] != row["audit_id"]:
+            raise IntegrityError(f"{label} wallet lifecycle audit is unbound")
+        resource_type = action.split("_")[1]
+        store = WalletStore(context.database)
+        record = getattr(store, f"_{resource_type}_from_row")(resource)
+        store._verify_resource_audits(connection, resource_type, resource, record)
+    return True
+
+
 def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
     from .storage import TrainingStore
 
@@ -2607,9 +2868,19 @@ def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
         row_subject = _provenance_text(row["subject_id"], f"{context_label} subject")
         action = _provenance_text(row["action"], f"{context_label} action")
         _provenance_text(row["actor"], f"{context_label} actor")
-        payload = _provenance_object(row["payload_json"], f"{context_label} payload")
+        payload = _provenance_object(
+            row["payload_json"],
+            f"{context_label} payload",
+            legacy_admin_json=action in _ADMIN_AUDIT_ACTIONS,
+        )
         occurred_at = _provenance_time(row["occurred_at"], f"{context_label} occurred_at")
-        if row_subject != subject_id or action not in _CORE_AUDIT_ACTIONS:
+        if row_subject != subject_id:
+            raise IntegrityError(f"{context_label} ownership or action is invalid")
+        if action not in _CORE_AUDIT_ACTIONS:
+            if _verify_management_audit_provenance(context, row, payload):
+                continue
+            if _verify_wallet_audit_provenance(context, row, payload):
+                continue
             raise IntegrityError(f"{context_label} ownership or action is invalid")
 
         if action == "integrity_safe_pause_fallback":
@@ -2622,6 +2893,35 @@ def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
             ):
                 raise IntegrityError(f"{context_label} payload is invalid")
             _provenance_int(payload["version"], f"{context_label} version", minimum=1)
+        elif action == "wallet_legacy_state_authorized":
+            _provenance_keys(
+                payload,
+                {
+                    "expected_fingerprint",
+                    "reason",
+                    "target_schema",
+                    "historical_authenticity_proven",
+                },
+                context_label,
+            )
+            _provenance_hash(
+                payload["expected_fingerprint"],
+                f"{context_label} expected fingerprint",
+            )
+            _provenance_text(payload["reason"], f"{context_label} reason")
+            try:
+                WalletLegacyApproval(
+                    payload["expected_fingerprint"], row["actor"], payload["reason"]
+                )
+            except ValueError as error:
+                raise IntegrityError(f"{context_label} wallet authorization is invalid") from error
+            if _provenance_int(payload["target_schema"], f"{context_label} target schema") != 60:
+                raise IntegrityError(f"{context_label} target schema is invalid")
+            if _provenance_json_bool(
+                payload["historical_authenticity_proven"],
+                f"{context_label} historical authenticity",
+            ):
+                raise IntegrityError(f"{context_label} historical authenticity is invalid")
         elif action in {"model_unknown_retry_authorized", "model_unknown_retry_cancelled"}:
             _provenance_keys(payload, {"call_id", "reason"}, context_label)
             _provenance_text(payload["call_id"], f"{context_label} call id")

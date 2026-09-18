@@ -49,9 +49,7 @@ def test_local_requires_private_settings(monkeypatch: pytest.MonkeyPatch) -> Non
         configured_wallet_signer_from_env()
 
 
-def test_local_rejects_external_fields(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_local_rejects_external_fields(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("NOYRA_WALLET_MODE", "local")
     monkeypatch.setenv("NOYRA_WALLET_KEYSTORE_PATH", str(tmp_path / "wallet.json"))
     monkeypatch.setenv("NOYRA_WALLET_PASSWORD_FILE", str(tmp_path / "password"))
@@ -61,9 +59,7 @@ def test_local_rejects_external_fields(
         configured_wallet_signer_from_env()
 
 
-def test_external_rejects_local_fields(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_external_rejects_local_fields(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("NOYRA_WALLET_MODE", "external")
     monkeypatch.setenv("NOYRA_WALLET_SIGNER_ENDPOINT", "https://signer.example")
     monkeypatch.setenv("NOYRA_WALLET_SIGNER_ID", "external")
@@ -78,6 +74,8 @@ def test_rpc_urls_reject_duplicate_or_non_https_keys(
     monkeypatch.setenv("NOYRA_WALLET_MODE", "local")
     monkeypatch.setenv("NOYRA_WALLET_KEYSTORE_PATH", str(tmp_path / "wallet.json"))
     monkeypatch.setenv("NOYRA_WALLET_PASSWORD_FILE", str(tmp_path / "password"))
-    monkeypatch.setenv("NOYRA_WALLET_RPC_URLS_JSON", '{"1":"https://rpc.example","01":"https://rpc2.example"}')
+    monkeypatch.setenv(
+        "NOYRA_WALLET_RPC_URLS_JSON", '{"1":"https://rpc.example","01":"https://rpc2.example"}'
+    )
     with pytest.raises(ValueError, match="local wallet configuration is invalid"):
         configured_wallet_signer_from_env()

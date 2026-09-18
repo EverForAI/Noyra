@@ -97,15 +97,11 @@ def configured_wallet_signer_from_env() -> WalletSigner | None:
     if mode == "local":
         if endpoint or signer_id or bearer:
             raise _invalid()
-        keystore = _local_setting(
-            "NOYRA_WALLET_KEYSTORE_PATH", "NOYRA_WALLET_LOCAL_KEYSTORE_PATH"
-        )
+        keystore = _local_setting("NOYRA_WALLET_KEYSTORE_PATH", "NOYRA_WALLET_LOCAL_KEYSTORE_PATH")
         password_file = _local_setting(
             "NOYRA_WALLET_PASSWORD_FILE", "NOYRA_WALLET_LOCAL_PASSWORD_FILE"
         )
-        rpc_json = _local_setting(
-            "NOYRA_WALLET_RPC_URLS_JSON", "NOYRA_WALLET_LOCAL_RPC_URLS_JSON"
-        )
+        rpc_json = _local_setting("NOYRA_WALLET_RPC_URLS_JSON", "NOYRA_WALLET_LOCAL_RPC_URLS_JSON")
         if not keystore or not password_file or not rpc_json:
             raise _invalid()
         try:
