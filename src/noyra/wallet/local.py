@@ -54,8 +54,12 @@ class LocalWalletSigner:
     """An in-process signer; it is not a security boundary against host compromise."""
 
     def __init__(
-        self, account: LocalAccount, rpc_urls: dict[int, str], *,
-        client: httpx.Client | None = None, timeout_seconds: float = 15.0,
+        self,
+        account: LocalAccount,
+        rpc_urls: dict[int, str],
+        *,
+        client: httpx.Client | None = None,
+        timeout_seconds: float = 15.0,
     ) -> None:
         if not isinstance(account, LocalAccount):
             raise ValueError("local wallet account is invalid")
@@ -105,12 +109,20 @@ class LocalWalletSigner:
         if self._account is None:
             raise WalletSignerError("local wallet is closed")
         try:
-            signed = self._account.sign_transaction(cast(Any, {
-                "chainId": transfer.chain_id, "nonce": transfer.nonce,
-                "gas": transfer.gas_limit, "gasPrice": int(transfer.max_fee_per_gas),
-                "to": to_checksum_address(transfer.to_address), "value": int(transfer.value),
-                "data": transfer.data,
-            }))
+            signed = self._account.sign_transaction(
+                cast(
+                    Any,
+                    {
+                        "chainId": transfer.chain_id,
+                        "nonce": transfer.nonce,
+                        "gas": transfer.gas_limit,
+                        "gasPrice": int(transfer.max_fee_per_gas),
+                        "to": to_checksum_address(transfer.to_address),
+                        "value": int(transfer.value),
+                        "data": transfer.data,
+                    },
+                )
+            )
             return "0x" + bytes(signed.raw_transaction).hex(), "0x" + bytes(signed.hash).hex()
         except Exception:
             raise WalletSignerError("local wallet could not sign transfer") from None
@@ -118,8 +130,10 @@ class LocalWalletSigner:
     @staticmethod
     def _rpc_transfer(transfer: WalletUnsignedTransfer) -> dict[str, object]:
         return {
-            "from": transfer.source_address, "to": transfer.to_address,
-            "value": hex(int(transfer.value)), "data": transfer.data,
+            "from": transfer.source_address,
+            "to": transfer.to_address,
+            "value": hex(int(transfer.value)),
+            "data": transfer.data,
         }
 
     def _admit(self, transfer: WalletUnsignedTransfer, tx_hash: str, deadline: float) -> None:
@@ -150,23 +164,36 @@ class LocalWalletSigner:
         fee = _quantity(self._rpc.call(transfer.chain_id, "eth_gasPrice", [], deadline=deadline))
         if not 21_000 <= gas <= transfer.gas_limit or not 0 < fee <= int(transfer.max_fee_per_gas):
             raise WalletSignerError("local wallet gas or fee exceeds authorized envelope")
-        balance = _quantity(self._rpc.call(
-            transfer.chain_id, "eth_getBalance", [self.address, "pending"], deadline=deadline
-        ))
+        balance = _quantity(
+            self._rpc.call(
+                transfer.chain_id, "eth_getBalance", [self.address, "pending"], deadline=deadline
+            )
+        )
         if balance < int(transfer.value) + transfer.gas_limit * int(transfer.max_fee_per_gas):
             raise WalletSignerError("local wallet native balance is insufficient")
         if transfer.asset_type == "token":
-            result = self._rpc.call(transfer.chain_id, "eth_call", [{
-                "to": transfer.contract_address,
-                "data": "0x70a08231" + self.address[2:].rjust(64, "0"),
-            }, "pending"], deadline=deadline)
+            result = self._rpc.call(
+                transfer.chain_id,
+                "eth_call",
+                [
+                    {
+                        "to": transfer.contract_address,
+                        "data": "0x70a08231" + self.address[2:].rjust(64, "0"),
+                    },
+                    "pending",
+                ],
+                deadline=deadline,
+            )
             if not isinstance(result, str) or not _WORD.fullmatch(result):
                 raise WalletSignerError("local wallet token balance is invalid")
             if int(result, 16) < int(transfer.data[-64:], 16):
                 raise WalletSignerError("local wallet token balance is insufficient")
 
     def sign_and_broadcast(
-        self, transfer: WalletUnsignedTransfer, *, request_id: str,
+        self,
+        transfer: WalletUnsignedTransfer,
+        *,
+        request_id: str,
     ) -> WalletBroadcastResult:
         if type(request_id) is not str or not 1 <= len(request_id) <= 256:
             raise WalletSignerError("local wallet request identity is invalid")
@@ -183,9 +210,11 @@ class LocalWalletSigner:
             except WalletExecutionError:
                 raise WalletSignerError("local wallet preflight unavailable") from None
             try:
-                result = _hash(self._rpc.call(
-                    checked.chain_id, "eth_sendRawTransaction", [raw], deadline=deadline
-                ))
+                result = _hash(
+                    self._rpc.call(
+                        checked.chain_id, "eth_sendRawTransaction", [raw], deadline=deadline
+                    )
+                )
                 if result != tx_hash:
                     raise WalletExecutionError("transaction hash mismatch")
             except Exception:
@@ -236,23 +265,37 @@ class LocalWalletSigner:
         token = data != "0x"
         if _quantity(tx.get("chainId")) != chain_id or _quantity(tx.get("type", "0x0")) != 0:
             raise WalletExecutionError("local wallet transaction chain or type is invalid")
-        return self._validate(WalletUnsignedTransfer(
-            chain_id=chain_id, nonce=_quantity(tx.get("nonce"), maximum=SQLITE_INT64_MAX),
-            gas_limit=_quantity(tx.get("gas")), max_fee_per_gas=str(_quantity(tx.get("gasPrice"))),
-            source_address=tx["from"], to_address=tx["to"], value=str(_quantity(tx.get("value"))),
-            data=data, asset_type="token" if token else "native",
-            contract_address=tx["to"] if token else None,
-        ))
+        return self._validate(
+            WalletUnsignedTransfer(
+                chain_id=chain_id,
+                nonce=_quantity(tx.get("nonce"), maximum=SQLITE_INT64_MAX),
+                gas_limit=_quantity(tx.get("gas")),
+                max_fee_per_gas=str(_quantity(tx.get("gasPrice"))),
+                source_address=tx["from"],
+                to_address=tx["to"],
+                value=str(_quantity(tx.get("value"))),
+                data=data,
+                asset_type="token" if token else "native",
+                contract_address=tx["to"] if token else None,
+            )
+        )
 
     @staticmethod
     def _token_effect(
-        logs: object, transfer: WalletUnsignedTransfer, tx_hash: str, block_hash: str, block: int,
+        logs: object,
+        transfer: WalletUnsignedTransfer,
+        tx_hash: str,
+        block_hash: str,
+        block: int,
     ) -> None:
         if not isinstance(logs, list):
             raise WalletExecutionError("local wallet receipt logs are invalid")
         recipient, amount = LocalWalletSigner._effect(transfer)
-        topics = [_TRANSFER_TOPIC, "0x" + transfer.source_address[2:].rjust(64, "0"),
-                  "0x" + recipient[2:].rjust(64, "0")]
+        topics = [
+            _TRANSFER_TOPIC,
+            "0x" + transfer.source_address[2:].rjust(64, "0"),
+            "0x" + recipient[2:].rjust(64, "0"),
+        ]
         matched_amounts: list[int] = []
         # Require exactly the authorized outgoing transfer. Fee-on-transfer or
         # unusual ERC-20 implementations remain unconfirmed for investigation.
@@ -272,7 +315,8 @@ class LocalWalletSigner:
                 or _hash(log.get("transactionHash")) != tx_hash
                 or _hash(log.get("blockHash")) != block_hash
                 or _quantity(log.get("blockNumber")) != block
-                or not isinstance(log.get("data"), str) or not _WORD.fullmatch(log["data"])
+                or not isinstance(log.get("data"), str)
+                or not _WORD.fullmatch(log["data"])
             ):
                 raise WalletExecutionError("local wallet token effect differs from transfer")
             matched_amounts.append(int(log["data"], 16))
@@ -311,7 +355,8 @@ class LocalWalletSigner:
                 # the RPC transaction fields to its actual transaction hash.
                 _, expected_hash = self._signed(transfer)
                 if (
-                    expected_hash != requested or _hash(tx.get("blockHash")) != block_hash
+                    expected_hash != requested
+                    or _hash(tx.get("blockHash")) != block_hash
                     or _quantity(tx.get("blockNumber")) != block
                     or canonical_evm_address(raw["from"]) != transfer.source_address
                     or canonical_evm_address(raw["to"]) != transfer.to_address
@@ -320,23 +365,44 @@ class LocalWalletSigner:
                 canonical = self._rpc.call(
                     chain_id, "eth_getBlockByNumber", [hex(block), False], deadline=deadline
                 )
-                if (not isinstance(canonical, dict) or _hash(canonical.get("hash")) != block_hash
-                        or _quantity(canonical.get("number")) != block):
+                if (
+                    not isinstance(canonical, dict)
+                    or _hash(canonical.get("hash")) != block_hash
+                    or _quantity(canonical.get("number")) != block
+                ):
                     raise ValueError("receipt block is not canonical")
-                latest = _quantity(self._rpc.call(
-                    chain_id, "eth_blockNumber", [], deadline=deadline
-                ), maximum=SQLITE_INT64_MAX)
+                latest = _quantity(
+                    self._rpc.call(chain_id, "eth_blockNumber", [], deadline=deadline),
+                    maximum=SQLITE_INT64_MAX,
+                )
                 if latest < block:
                     raise ValueError("chain tip precedes receipt")
                 if status == 1 and transfer.asset_type == "token":
                     self._token_effect(raw.get("logs"), transfer, requested, block_hash, block)
                 recipient, amount = self._effect(transfer)
-                effect_hash = None if status == 0 else "0x" + content_hash({
-                    "tx_hash": requested, "chain_id": chain_id, "asset_type": transfer.asset_type,
-                    "contract_address": transfer.contract_address,
-                    "recipient_address": recipient, "amount": amount,
-                })
-                return WalletReceipt(requested, chain_id, cast(Literal[0, 1], status), block,
-                                     block_hash, latest - block + 1, effect_hash)
+                effect_hash = (
+                    None
+                    if status == 0
+                    else "0x"
+                    + content_hash(
+                        {
+                            "tx_hash": requested,
+                            "chain_id": chain_id,
+                            "asset_type": transfer.asset_type,
+                            "contract_address": transfer.contract_address,
+                            "recipient_address": recipient,
+                            "amount": amount,
+                        }
+                    )
+                )
+                return WalletReceipt(
+                    requested,
+                    chain_id,
+                    cast(Literal[0, 1], status),
+                    block,
+                    block_hash,
+                    latest - block + 1,
+                    effect_hash,
+                )
             except Exception:
                 raise WalletExecutionError("local wallet receipt validation failed") from None

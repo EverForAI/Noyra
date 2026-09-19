@@ -10,8 +10,9 @@ import pytest
 from noyra.core import Database, IdentityStore
 from noyra.core import database as database_module
 from noyra.core.errors import IntegrityError
+from noyra.core.integrity import IntegrityRegistry
 from noyra.core.locking import ProcessLock
-from noyra.core.types import content_hash
+from noyra.core.types import canonical_json, content_hash
 from noyra.core.wallet_schema import (
     WalletLegacyApproval,
     legacy_entry_hash,
@@ -103,6 +104,91 @@ def test_custom_legacy_policy_requires_bound_explicit_authorization(
     assert len(audits) == 1
     assert audits[0]["actor"] == approval.actor
     assert json.loads(audits[0]["payload_json"])["historical_authenticity_proven"] is False
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_schema60_authorization_audit_is_accepted_by_core_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configured: bool
+) -> None:
+    monkeypatch.setattr(database_module, "CURRENT_SCHEMA_VERSION", 59)
+    if configured:
+        database, subject_id, *_rest = _fixture(tmp_path)
+    else:
+        database = Database(tmp_path / "noyra.sqlite3")
+        subject_id = "Noyra-schema60-provenance"
+        IdentityStore(database).ensure(subject_id, content_hash({"subject": subject_id}))
+    _legacy_policy(database, subject_id)
+    approval = _approval(database)
+    monkeypatch.setattr(database_module, "CURRENT_SCHEMA_VERSION", 62)
+
+    database.initialize(wallet_legacy_approval=approval)
+
+    report = IntegrityRegistry().run(
+        database,
+        subject_id,
+        tmp_path,
+        profile="manual",
+        policy_mode="alert",
+        deadline_seconds=5,
+        check_ids=("core.actions", "wallet.state"),
+    )
+    assert report.status == "ok"
+    assert report.p0 == ()
+    assert report.checks[0].details["audit_records"] == (5 if configured else 1)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("actor", "subject"),
+        ("actor", " system "),
+        ("actor", "x" * 257),
+        ("reason", " "),
+        ("reason", "x" * 2001),
+        ("expected_fingerprint", "not-a-fingerprint"),
+        ("expected_fingerprint", "A" * 64),
+        ("target_schema", 61),
+        ("target_schema", 60.0),
+        ("historical_authenticity_proven", True),
+        ("historical_authenticity_proven", 0),
+        ("unexpected_field", "unrecognized"),
+    ],
+)
+def test_schema60_authorization_audit_rejects_invalid_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: object
+) -> None:
+    monkeypatch.setattr(database_module, "CURRENT_SCHEMA_VERSION", 59)
+    database = Database(tmp_path / "noyra.sqlite3")
+    subject_id = "Noyra-schema60-invalid-audit"
+    IdentityStore(database).ensure(subject_id, content_hash({"subject": subject_id}))
+    _legacy_policy(database, subject_id)
+    approval = _approval(database)
+    monkeypatch.setattr(database_module, "CURRENT_SCHEMA_VERSION", 62)
+    database.initialize(wallet_legacy_approval=approval)
+    with database.transaction() as connection:
+        row = connection.execute(
+            "SELECT * FROM audit_records WHERE action='wallet_legacy_state_authorized'"
+        ).fetchone()
+        connection.execute("DROP TRIGGER prevent_audit_record_update")
+        if field == "actor":
+            connection.execute("UPDATE audit_records SET actor=?", (value,))
+        else:
+            payload = json.loads(row["payload_json"])
+            payload[field] = value
+            connection.execute(
+                "UPDATE audit_records SET payload_json=?", (canonical_json(payload),)
+            )
+
+    report = IntegrityRegistry().run(
+        database,
+        subject_id,
+        tmp_path,
+        profile="manual",
+        policy_mode="alert",
+        deadline_seconds=5,
+        check_ids=("core.actions",),
+    )
+    assert report.p0 == ("core.actions:integrity_error",)
 
 
 def test_schema60_temporal_upgrade_accepts_bound_authorization(

@@ -31,11 +31,17 @@ def account() -> LocalAccount:
 
 def transfer(*, token: bool = False) -> WalletUnsignedTransfer:
     return WalletUnsignedTransfer(
-        chain_id=1, nonce=0, gas_limit=100_000 if token else 21_000,
-        max_fee_per_gas="2000000000", source_address=account().address.lower(),
-        to_address=CONTRACT if token else RECIPIENT, value="0" if token else "1000",
+        chain_id=1,
+        nonce=0,
+        gas_limit=100_000 if token else 21_000,
+        max_fee_per_gas="2000000000",
+        source_address=account().address.lower(),
+        to_address=CONTRACT if token else RECIPIENT,
+        value="0" if token else "1000",
         data="0xa9059cbb" + RECIPIENT[2:].rjust(64, "0") + hex(1000)[2:].rjust(64, "0")
-        if token else "0x", asset_type="token" if token else "native",
+        if token
+        else "0x",
+        asset_type="token" if token else "native",
         contract_address=CONTRACT if token else None,
     )
 
@@ -52,10 +58,14 @@ class Chain:
         body = json.loads(request.content)
         method, params = body["method"], body["params"]
         defaults = {
-            "eth_chainId": "0x1", "eth_getTransactionCount": "0x0",
-            "eth_getBalance": hex(10**20), "eth_gasPrice": hex(10**9),
-            "eth_estimateGas": "0x5208", "eth_call": "0x" + hex(10**20)[2:].rjust(64, "0"),
-            "eth_getTransactionReceipt": self.receipt, "eth_getTransactionByHash": self.transaction,
+            "eth_chainId": "0x1",
+            "eth_getTransactionCount": "0x0",
+            "eth_getBalance": hex(10**20),
+            "eth_gasPrice": hex(10**9),
+            "eth_estimateGas": "0x5208",
+            "eth_call": "0x" + hex(10**20)[2:].rjust(64, "0"),
+            "eth_getTransactionReceipt": self.receipt,
+            "eth_getTransactionByHash": self.transaction,
             "eth_getBlockByNumber": {"number": "0x64", "hash": BLOCK_HASH},
             "eth_blockNumber": "0x66",
         }
@@ -105,10 +115,15 @@ def test_lost_broadcast_preserves_transaction_hash() -> None:
     assert "private provider" not in str(error.value)
 
 
-@pytest.mark.parametrize("method,result", [
-    ("eth_chainId", "0x2"), ("eth_getBalance", "0x0"),
-    ("eth_estimateGas", "0xffffff"), ("eth_gasPrice", hex(10**18)),
-])
+@pytest.mark.parametrize(
+    "method,result",
+    [
+        ("eth_chainId", "0x2"),
+        ("eth_getBalance", "0x0"),
+        ("eth_estimateGas", "0xffffff"),
+        ("eth_gasPrice", hex(10**18)),
+    ],
+)
 def test_local_preflight_rejects_invalid_chain_balance_or_fees(method: str, result: str) -> None:
     chain = Chain()
     chain.overrides[method] = result
@@ -148,26 +163,44 @@ def test_nonce_quote_and_fee_quote_are_chain_derived() -> None:
 
 def mined(chain: Chain, envelope: WalletUnsignedTransfer, tx_hash: str) -> None:
     chain.transaction = {
-        "hash": tx_hash, "chainId": "0x1", "nonce": "0x0",
-        "from": envelope.source_address, "to": envelope.to_address,
-        "value": hex(int(envelope.value)), "gas": hex(envelope.gas_limit),
-        "gasPrice": hex(int(envelope.max_fee_per_gas)), "input": envelope.data,
-        "blockHash": BLOCK_HASH, "blockNumber": "0x64", "type": "0x0",
+        "hash": tx_hash,
+        "chainId": "0x1",
+        "nonce": "0x0",
+        "from": envelope.source_address,
+        "to": envelope.to_address,
+        "value": hex(int(envelope.value)),
+        "gas": hex(envelope.gas_limit),
+        "gasPrice": hex(int(envelope.max_fee_per_gas)),
+        "input": envelope.data,
+        "blockHash": BLOCK_HASH,
+        "blockNumber": "0x64",
+        "type": "0x0",
     }
     chain.receipt = {
-        "transactionHash": tx_hash, "blockHash": BLOCK_HASH, "blockNumber": "0x64",
-        "status": "0x1", "from": envelope.source_address, "to": envelope.to_address,
+        "transactionHash": tx_hash,
+        "blockHash": BLOCK_HASH,
+        "blockNumber": "0x64",
+        "status": "0x1",
+        "from": envelope.source_address,
+        "to": envelope.to_address,
         "logs": [],
     }
     if envelope.asset_type == "token":
-        chain.receipt["logs"] = [{
-            "address": CONTRACT, "topics": [
-                "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
-                "0x" + envelope.source_address[2:].rjust(64, "0"),
-                "0x" + RECIPIENT[2:].rjust(64, "0"),
-            ], "data": "0x" + hex(1000)[2:].rjust(64, "0"), "removed": False,
-            "transactionHash": tx_hash, "blockHash": BLOCK_HASH, "blockNumber": "0x64",
-        }]
+        chain.receipt["logs"] = [
+            {
+                "address": CONTRACT,
+                "topics": [
+                    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+                    "0x" + envelope.source_address[2:].rjust(64, "0"),
+                    "0x" + RECIPIENT[2:].rjust(64, "0"),
+                ],
+                "data": "0x" + hex(1000)[2:].rjust(64, "0"),
+                "removed": False,
+                "transactionHash": tx_hash,
+                "blockHash": BLOCK_HASH,
+                "blockNumber": "0x64",
+            }
+        ]
 
 
 @pytest.mark.parametrize("token", [False, True])
@@ -181,11 +214,16 @@ def test_receipt_verifies_canonical_block_and_transfer_effect(token: bool) -> No
         receipt = wallet.get_receipt(result.tx_hash, chain_id=1)
         assert receipt is not None
         assert receipt.status == 1 and receipt.confirmations == 3
-        assert receipt.effect_hash == "0x" + content_hash({
-            "tx_hash": result.tx_hash, "chain_id": 1, "asset_type": envelope.asset_type,
-            "contract_address": envelope.contract_address,
-            "recipient_address": RECIPIENT, "amount": "1000",
-        })
+        assert receipt.effect_hash == "0x" + content_hash(
+            {
+                "tx_hash": result.tx_hash,
+                "chain_id": 1,
+                "asset_type": envelope.asset_type,
+                "contract_address": envelope.contract_address,
+                "recipient_address": RECIPIENT,
+                "amount": "1000",
+            }
+        )
         chain.overrides["eth_getBlockByNumber"] = {"number": "0x64", "hash": "0x" + "bb" * 32}
         with pytest.raises(WalletExecutionError):
             wallet.get_receipt(result.tx_hash, chain_id=1)
@@ -210,7 +248,9 @@ def test_successful_token_receipt_without_matching_effect_is_rejected(corruption
             wallet.get_receipt(result.tx_hash, chain_id=1)
 
 
-@pytest.mark.parametrize("url", ["http://rpc.example", "https://127.0.0.1", "https://a:b@rpc.example"])
+@pytest.mark.parametrize(
+    "url", ["http://rpc.example", "https://127.0.0.1", "https://a:b@rpc.example"]
+)
 def test_local_rpc_rejects_unsafe_endpoint(url: str) -> None:
     with pytest.raises(ValueError):
         LocalWalletSigner(account(), {1: url})
