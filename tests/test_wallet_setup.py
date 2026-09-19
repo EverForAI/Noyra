@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -26,7 +27,7 @@ def _private_file(path: Path, value: str) -> Path:
 
 def _run(*args: str, input_text: str = "") -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(Path(".venv/Scripts/python.exe")), "-m", "noyra", *args],
+        [sys.executable, "-m", "noyra", *args],
         input=input_text,
         capture_output=True,
         text=True,
