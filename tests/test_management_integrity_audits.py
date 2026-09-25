@@ -12,6 +12,7 @@ from noyra.core.types import canonical_json
 from noyra.interaction import InboundEnvelope, PublicPostInput, TransportInput
 from noyra.service import NoyraService
 from test_m42_p1_02_integrity_runtime import _active_kernel
+from test_m42_p3_06_operator_controls import _put_kernel_to_deep_sleep
 from test_m42_p3_06_operator_controls import service as management_service  # noqa: F401
 
 
@@ -57,6 +58,27 @@ def test_pause_resume_reset_and_reconciliation_keep_core_integrity(tmp_path: Pat
             check_ids=("core.actions",),
         )
         assert damaged.p0 == ("core.actions:integrity_error",)
+    finally:
+        kernel.close()
+
+
+def test_operator_wake_keeps_core_actions_integrity(tmp_path: Path) -> None:
+    kernel = _active_kernel(tmp_path, "Noyra-operator-wake-audit")
+    try:
+        _put_kernel_to_deep_sleep(kernel)
+        OperatorControlService(kernel).wake(
+            actor="operator", reason="wake for controlled verification"
+        )
+        report = IntegrityRegistry().run(
+            kernel.database,
+            kernel.subject_id,
+            tmp_path,
+            profile="manual",
+            policy_mode="alert",
+            deadline_seconds=10,
+            check_ids=("core.actions",),
+        )
+        assert report.status == "ok", report.to_dict()
     finally:
         kernel.close()
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -17,6 +18,7 @@ from noyra.mind.memory import MemoryStore
 from noyra.model import BudgetLimits
 from noyra.model.ledger import ModelLedger
 from noyra.service import NoyraService, ServiceSettings
+from noyra.sleep import SleepEngine, SleepReflectionPlan
 
 
 def _kernel(tmp_path: Path, subject_id: str) -> SubjectKernel:
@@ -118,6 +120,82 @@ def test_pause_resume_are_authorized_audited_and_idempotent(tmp_path: Path) -> N
         assert "bounded maintenance" not in json.dumps(
             [row["payload_json"] for row in lifecycle_payloads]
         )
+    finally:
+        kernel.close()
+
+
+def _put_kernel_to_deep_sleep(kernel: SubjectKernel) -> str:
+    sleep = SleepEngine(kernel.database, kernel.subject_id)
+    run = sleep.start(
+        "subject_choice",
+        "operator wake test",
+        wake_after=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+    )
+    sleep.begin_reflection(run.sleep_id)
+    sleep.commit_reflection(
+        run.sleep_id,
+        SleepReflectionPlan(summary="operator wake test reflection"),
+    )
+    sleep.enter_deep_sleep(run.sleep_id)
+    return run.sleep_id
+
+
+def test_operator_wake_finishes_scheduled_deep_sleep_and_audits(tmp_path: Path) -> None:
+    kernel = _kernel(tmp_path, "Noyra-p306-wake")
+    controls = OperatorControlService(kernel)
+    sleep_id = _put_kernel_to_deep_sleep(kernel)
+    try:
+        result = controls.wake(actor="web-operator", reason="run wallet verification now")
+
+        assert result.operation == "wake"
+        assert result.lifecycle["state"] == "active"
+        assert kernel.lifecycle.current().state == "active"
+        assert SleepEngine(kernel.database, kernel.subject_id).get(sleep_id).status == "complete"
+        with kernel.database.connection() as connection:
+            audit = connection.execute(
+                "SELECT action, actor, payload_json FROM audit_records "
+                "WHERE subject_id = ? AND action = 'operator_wake' "
+                "ORDER BY rowid DESC LIMIT 1",
+                (kernel.subject_id,),
+            ).fetchone()
+        assert audit is not None
+        assert audit["actor"] == "web-operator"
+        assert "run wallet verification now" in audit["payload_json"]
+    finally:
+        kernel.close()
+
+
+def test_operator_wake_rejects_active_lifecycle(tmp_path: Path) -> None:
+    kernel = _kernel(tmp_path, "Noyra-p306-wake-active")
+    try:
+        with pytest.raises(OperatorControlConflict, match="lifecycle_wake_unavailable"):
+            OperatorControlService(kernel).wake(actor="web-operator", reason="wake active runtime")
+    finally:
+        kernel.close()
+
+
+def test_sleep_wake_early_commits_lifecycle_and_sleep_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kernel = _kernel(tmp_path, "Noyra-p306-wake-atomic")
+    sleep_id = _put_kernel_to_deep_sleep(kernel)
+    sleep = SleepEngine(kernel.database, kernel.subject_id)
+    original_restore = sleep._restore_fatigue_connection
+
+    def fail_restore(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("wake restore failed")
+
+    monkeypatch.setattr(sleep, "_restore_fatigue_connection", fail_restore)
+    try:
+        with pytest.raises(RuntimeError, match="wake restore failed"):
+            sleep.wake_early(sleep_id, "operator wake")
+        assert kernel.lifecycle.current().state == "deep_sleep"
+        assert sleep.get(sleep_id).status == "deep_sleep"
+
+        monkeypatch.setattr(sleep, "_restore_fatigue_connection", original_restore)
+        completed = sleep.wake_early(sleep_id, "operator wake")
+        assert completed.status == "complete"
+        assert kernel.lifecycle.current().state == "active"
     finally:
         kernel.close()
 
@@ -277,6 +355,36 @@ def test_http_lifecycle_requires_operator_role_without_mutating_state(
     )
     assert status == 200
     assert resumed["lifecycle"]["state"] == "active"  # type: ignore[index]
+
+
+def test_http_lifecycle_wake_requires_operator_and_supports_api_v1(
+    service: tuple[NoyraService, str, str],
+) -> None:
+    instance, operator_token, read_token = service
+    sleep_id = _put_kernel_to_deep_sleep(instance.kernel)
+
+    status, body = _request(
+        instance,
+        "/api/v1/admin/lifecycle/wake",
+        token=read_token,
+        payload={"reason": "read token must not wake"},
+    )
+    assert status == 401
+    assert body == {"error": "unauthorized"}
+
+    status, body = _request(
+        instance,
+        "/api/v1/admin/lifecycle/wake",
+        token=operator_token,
+        payload={"reason": "run wallet verification now"},
+    )
+    assert status == 200
+    assert body["operation"] == "wake"
+    assert body["lifecycle"]["state"] == "active"  # type: ignore[index]
+    assert (
+        SleepEngine(instance.kernel.database, instance.kernel.subject_id).get(sleep_id).status
+        == "complete"
+    )
 
 
 def test_http_reconcile_prepared_action_then_reset_without_data_wipe(

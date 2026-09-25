@@ -1228,6 +1228,7 @@ _OPERATOR_AUDIT_ACTIONS = frozenset(
         "operator_pause",
         "operator_resume",
         "operator_reset",
+        "operator_wake",
         "operator_action_reconcile",
         "operator_model_call_reconcile",
     }
@@ -2600,7 +2601,7 @@ def _verify_management_audit_provenance(
         ):
             raise IntegrityError(f"{label} operator evidence is invalid")
         base = {"reason", "reason_hash"}
-        if action in {"operator_pause", "operator_resume", "operator_reset"}:
+        if action in {"operator_pause", "operator_resume", "operator_reset", "operator_wake"}:
             _provenance_keys(
                 payload,
                 base
