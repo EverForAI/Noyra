@@ -15,6 +15,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
+from noyra.sleep import SleepEngine
+
 from .actions import ActionLedger
 from .archive import ArchiveKeyring
 from .database import CURRENT_SCHEMA_VERSION, Database
@@ -135,6 +137,46 @@ class OperatorControlService:
             self.kernel.admission.open(epoch=state.version)
             self._audit("operator_resume", actor, reason, {"idempotent": False})
             return OperatorMutation("resume", state.__dict__, False)
+
+    def wake(self, *, actor: str, reason: str) -> OperatorMutation:
+        """Wake a scheduled deep-sleep run early through the sleep protocol."""
+        actor, reason = self._validate_actor_reason(actor, reason)
+        with self._lock:
+            self._require_resume_health()
+            current = self.kernel.lifecycle.current()
+            if current.state != "deep_sleep":
+                raise OperatorControlConflict(
+                    "lifecycle_wake_unavailable",
+                    detail=f"wake requires deep_sleep lifecycle, got {current.state}",
+                )
+            with self.database.connection() as connection:
+                work = self._work_counts_connection(connection)
+            if work["blocking"]:
+                raise OperatorControlConflict(
+                    "wake_blocked_by_recoverable_work",
+                    detail="prepared, unknown, executing, or in-flight work remains",
+                )
+            sleep = SleepEngine(self.database, self.subject_id)
+            run = sleep.current()
+            if run is None or run.status != "deep_sleep":
+                raise OperatorControlConflict("lifecycle_wake_unavailable")
+            public_reason = self._public_reason("wake")
+            try:
+                sleep.wake_early(run.sleep_id, public_reason, actor=actor)
+            except (
+                InvalidTransitionError,
+                IntegrityError,
+                NotFoundError,
+                RuntimeError,
+                ValueError,
+            ) as error:
+                raise OperatorControlConflict(
+                    "lifecycle_wake_failed", detail=type(error).__name__
+                ) from error
+            state = self.kernel.lifecycle.current()
+            self.kernel.admission.open(epoch=state.version)
+            self._audit("operator_wake", actor, reason, {"idempotent": False})
+            return OperatorMutation("wake", state.__dict__, False)
 
     def reset(self, *, actor: str, reason: str) -> OperatorMutation:
         """Reset transient runtime control state without deleting subject data.

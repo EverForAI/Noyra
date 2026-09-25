@@ -1476,6 +1476,7 @@ class NoyraHTTPServer:
             "/api/admin/lifecycle/pause",
             "/api/admin/lifecycle/resume",
             "/api/admin/lifecycle/reset",
+            "/api/admin/lifecycle/wake",
         } or self._is_recovery_mutation(path)
 
     def _run_export(
@@ -3240,6 +3241,7 @@ class NoyraHTTPServer:
                     "/api/admin/lifecycle/pause",
                     "/api/admin/lifecycle/resume",
                     "/api/admin/lifecycle/reset",
+                    "/api/admin/lifecycle/wake",
                 }:
                     try:
                         with owner.admission.lifecycle_control_scope():
@@ -3292,6 +3294,7 @@ class NoyraHTTPServer:
                     "/api/admin/lifecycle/pause",
                     "/api/admin/lifecycle/resume",
                     "/api/admin/lifecycle/reset",
+                    "/api/admin/lifecycle/wake",
                 }:
                     self._lifecycle_control()
                     return
@@ -3733,6 +3736,7 @@ class NoyraHTTPServer:
                         "pause": controls.pause,
                         "resume": controls.resume,
                         "reset": controls.reset,
+                        "wake": controls.wake,
                     }[operation](
                         actor=self._actor(),
                         reason=str(payload["reason"]),

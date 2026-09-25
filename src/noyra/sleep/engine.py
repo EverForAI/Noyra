@@ -331,6 +331,56 @@ class SleepEngine:
             self._transition_run(connection, row, "complete", reason, completed_at=self.clock())
             return self._load_connection(connection, sleep_id)
 
+    def wake_early(
+        self,
+        sleep_id: str,
+        reason: str,
+        *,
+        actor: str = "subject",
+    ) -> SleepRunRecord:
+        """Complete an early wake in one transaction.
+
+        The lifecycle, sleep run, fatigue restoration, and both lifecycle
+        edges are committed together so a failed wake cannot leave the
+        subject in ``waking`` with a completed runtime lifecycle.
+        """
+        if not reason.strip():
+            raise ValueError("wake reason is required")
+        if not actor.strip():
+            raise ValueError("wake actor is required")
+        with self.database.transaction() as connection:
+            row = self._get_row(connection, sleep_id)
+            if row["status"] == "complete":
+                return self._from_row(row)
+            if row["status"] != "deep_sleep":
+                raise SleepStateConflictError("early wake can begin only from deep sleep")
+
+            self.lifecycle._transition_connection(connection, "waking", reason, actor=actor)
+            self._transition_run(connection, row, "waking", reason)
+            waking = self._get_row(connection, sleep_id)
+            self.lifecycle._transition_connection(connection, "active", reason, actor=actor)
+            wake_time = self.clock()
+            hours = max(
+                0.0,
+                (
+                    self._parse_time(wake_time) - self._parse_time(waking["started_at"])
+                ).total_seconds()
+                / 3600,
+            )
+            reset_resource_pressure = (
+                waking["trigger_type"] == "budget"
+                and self._parse_time(wake_time).date()
+                > self._parse_time(waking["started_at"]).date()
+            )
+            self._restore_fatigue_connection(
+                connection,
+                hours,
+                reason,
+                reset_resource_pressure=reset_resource_pressure,
+            )
+            self._transition_run(connection, waking, "complete", reason, completed_at=wake_time)
+            return self._load_connection(connection, sleep_id)
+
     def get(self, sleep_id: str) -> SleepRunRecord:
         with self.database.connection() as connection:
             return self._load_connection(connection, sleep_id)
