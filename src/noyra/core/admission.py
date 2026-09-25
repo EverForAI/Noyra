@@ -99,6 +99,15 @@ class RuntimeAdmissionGate:
     def quarantine(self) -> int:
         return self.invalidate(quarantined=True)
 
+    def clear_quarantine(self) -> None:
+        """Clear a startup quarantine after integrity recovery without opening admission."""
+        with self._condition:
+            if self._closed:
+                raise OperationInvalidated("runtime is draining")
+            self._quarantined = False
+            self._accepting = False
+            self._condition.notify_all()
+
     def begin_drain(self) -> int:
         return self.invalidate(closed=True)
 
