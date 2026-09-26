@@ -437,6 +437,9 @@ _OWNERSHIP_GRAPH_V61 = _OWNERSHIP_GRAPH_V60
 # Schema 62 only adds receipt evidence columns to an existing subject-owned
 # execution table; export ownership is unchanged.
 _OWNERSHIP_GRAPH_V62 = _OWNERSHIP_GRAPH_V61
+# Schema 63 changes active-address uniqueness without changing subject
+# ownership or export selection.
+_OWNERSHIP_GRAPH_V63 = _OWNERSHIP_GRAPH_V62
 
 _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     33: _OWNERSHIP_GRAPH_V33,
@@ -469,6 +472,7 @@ _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     60: _OWNERSHIP_GRAPH_V60,
     61: _OWNERSHIP_GRAPH_V61,
     62: _OWNERSHIP_GRAPH_V62,
+    63: _OWNERSHIP_GRAPH_V63,
 }
 
 

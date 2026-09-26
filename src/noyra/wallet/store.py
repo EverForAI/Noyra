@@ -293,6 +293,7 @@ class WalletStore:
                 conflict = connection.execute(
                     "SELECT address_id FROM wallet_addresses "
                     "WHERE subject_id = ? AND network_id = ? "
+                    "AND status = 'active' "
                     "AND (label = ? OR address = ?) LIMIT 1",
                     (subject_id, proposal.network_id, proposal.label, proposal.address),
                 ).fetchone()

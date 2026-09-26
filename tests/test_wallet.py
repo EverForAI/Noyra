@@ -852,6 +852,123 @@ def test_wallet_revocation_audits_revisions_and_history_are_append_only(
     assert store.verify_integrity(subject_id)["wallet_balance_snapshots"] == 1
 
 
+def test_wallet_can_re_register_revoked_address_with_new_purpose(
+    wallet_store: WalletFixture,
+) -> None:
+    _database, subject_id, store = wallet_store
+    network = store.register_network(subject_id, _network_input(), actor="operator")
+    original = store.register_address(
+        subject_id,
+        WalletAddressInput(
+            network_id=network.network_id,
+            label="Treasury",
+            address="0xA111111111111111111111111111111111111111",
+            purpose="treasury",
+        ),
+        actor="operator",
+    )
+    store.revoke_address(
+        original.address_id,
+        reason="replace address purpose",
+        actor="operator",
+        subject_id=subject_id,
+    )
+
+    replacement = store.register_address(
+        subject_id,
+        WalletAddressInput(
+            network_id=network.network_id,
+            label="Spending",
+            address=original.address,
+            purpose="spending",
+        ),
+        actor="operator",
+    )
+
+    assert replacement.address == original.address
+    assert replacement.purpose == "spending"
+    assert replacement.status == "active"
+    assert store.verify_integrity(subject_id)["wallet_addresses"] == 2
+
+
+def test_schema_63_preserves_revoked_address_history_and_child_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "wallet-address-schema-63.sqlite3"
+    monkeypatch.setattr(database_module, "CURRENT_SCHEMA_VERSION", 62)
+    legacy_database = Database(path)
+    subject_id = "Noyra-wallet-address-migration"
+    IdentityStore(legacy_database).ensure(subject_id, content_hash({"subject": subject_id}))
+    legacy_store = WalletStore(legacy_database)
+    network, asset, original = _register_graph(legacy_store, subject_id)
+    snapshot = legacy_store.record_balance_snapshot(
+        subject_id,
+        WalletBalanceSnapshotInput(
+            asset_id=asset.asset_id,
+            address_id=original.address_id,
+            balance="17",
+        ),
+        actor="operator",
+    )
+    legacy_store.revoke_address(
+        original.address_id,
+        reason="replace wallet address purpose",
+        actor="operator",
+        subject_id=subject_id,
+    )
+
+    monkeypatch.setattr(database_module, "CURRENT_SCHEMA_VERSION", 63)
+    migrated_database = Database(path)
+    migrated_store = WalletStore(migrated_database)
+    replacement = migrated_store.register_address(
+        subject_id,
+        WalletAddressInput(
+            network_id=network.network_id,
+            label="Spending",
+            address=original.address,
+            purpose="spending",
+        ),
+        actor="operator",
+    )
+
+    with migrated_database.connection() as connection:
+        version = connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()["value"]
+        old_row = connection.execute(
+            "SELECT status,purpose FROM wallet_addresses WHERE address_id=?",
+            (original.address_id,),
+        ).fetchone()
+        history = connection.execute(
+            "SELECT status FROM wallet_address_revisions WHERE address_id=? "
+            "ORDER BY revision_number",
+            (original.address_id,),
+        ).fetchall()
+        preserved_snapshot = connection.execute(
+            "SELECT snapshot_id FROM wallet_balance_snapshots WHERE snapshot_id=? AND address_id=?",
+            (snapshot.snapshot_id, original.address_id),
+        ).fetchone()
+        foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+        address_indexes = {
+            row["name"]: row["sql"]
+            for row in connection.execute(
+                "SELECT name,sql FROM sqlite_master WHERE type='index' "
+                "AND tbl_name='wallet_addresses'"
+            )
+        }
+
+    assert version == "63"
+    assert tuple(old_row) == ("revoked", "treasury")
+    assert [row["status"] for row in history] == ["active", "revoked"]
+    assert preserved_snapshot is not None
+    assert not foreign_key_errors
+    assert "WHERE status = 'active'" in address_indexes["uq_wallet_addresses_active_label"]
+    assert "WHERE status = 'active'" in address_indexes["uq_wallet_addresses_active_address"]
+    assert replacement.address_id != original.address_id
+    assert replacement.purpose == "spending"
+    assert migrated_store.verify_integrity(subject_id)["wallet_addresses"] == 2
+
+
 def test_wallet_integrity_registry_detects_audit_and_state_tampering(
     tmp_path: Path,
     wallet_store: WalletFixture,
