@@ -231,7 +231,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 62
+CURRENT_SCHEMA_VERSION = 63
 
 MIGRATIONS: dict[int, str] = {
     2: """
@@ -6119,6 +6119,231 @@ WHEN NOT (
 )
 BEGIN SELECT RAISE(ABORT,'wallet payment execution transition is invalid'); END;
 """,
+    63: """
+-- Revoked wallet addresses remain immutable audit history, but no longer
+-- reserve their label or address forever. Rebuild the table because SQLite
+-- cannot remove table-level UNIQUE constraints in place.
+DROP TRIGGER IF EXISTS validate_wallet_address_creation_audit;
+DROP TRIGGER IF EXISTS prevent_wallet_address_identity_update;
+DROP TRIGGER IF EXISTS validate_wallet_address_transition;
+DROP TRIGGER IF EXISTS prevent_wallet_address_delete;
+DROP TRIGGER IF EXISTS validate_wallet_address_revision_insert;
+DROP TRIGGER IF EXISTS prevent_wallet_address_revision_update;
+DROP TRIGGER IF EXISTS prevent_wallet_address_revision_delete;
+DROP TRIGGER IF EXISTS validate_wallet_network_transition;
+DROP TRIGGER IF EXISTS validate_wallet_balance_snapshot_insert;
+DROP TRIGGER IF EXISTS validate_wallet_balance_acquisition_run_insert;
+DROP TRIGGER IF EXISTS validate_wallet_address_revisions_address_id_subject_insert;
+DROP TRIGGER IF EXISTS validate_wallet_address_revisions_address_id_subject_update;
+DROP TRIGGER IF EXISTS validate_wallet_balance_snapshots_address_id_subject_insert;
+DROP TRIGGER IF EXISTS validate_wallet_balance_snapshots_address_id_subject_update;
+DROP TRIGGER IF EXISTS validate_wallet_balance_acquisition_runs_address_id_subject_insert;
+DROP TRIGGER IF EXISTS validate_wallet_balance_acquisition_runs_address_id_subject_update;
+DROP TRIGGER IF EXISTS validate_wallet_balance_acquisition_attempts_address_id_subject_insert;
+DROP TRIGGER IF EXISTS validate_wallet_balance_acquisition_attempts_address_id_subject_update;
+
+CREATE TABLE wallet_addresses_v63 (
+    address_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    network_id TEXT NOT NULL REFERENCES wallet_networks(network_id),
+    label TEXT NOT NULL CHECK (label = trim(label) AND length(label) BETWEEN 1 AND 128),
+    address TEXT NOT NULL CHECK (
+        length(address) = 42
+        AND substr(address, 1, 2) = '0x'
+        AND lower(address) = address
+        AND substr(address, 3) NOT GLOB '*[^0-9a-f]*'
+    ),
+    purpose TEXT NOT NULL CHECK (
+        purpose IN ('treasury', 'spending', 'observation', 'external')
+    ),
+    status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
+    state_hash TEXT NOT NULL CHECK (
+        length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    created_at TEXT NOT NULL,
+    revoked_at TEXT,
+    revoke_reason TEXT,
+    created_audit_id TEXT NOT NULL REFERENCES audit_records(audit_id),
+    revoked_audit_id TEXT REFERENCES audit_records(audit_id),
+    CHECK (
+        (status = 'active' AND revoked_at IS NULL AND revoke_reason IS NULL
+         AND revoked_audit_id IS NULL)
+        OR (status = 'revoked' AND revoked_at IS NOT NULL
+            AND revoke_reason IS NOT NULL AND length(trim(revoke_reason)) > 0
+            AND revoked_audit_id IS NOT NULL)
+    )
+);
+INSERT INTO wallet_addresses_v63(
+    address_id, subject_id, network_id, label, address, purpose, status,
+    state_hash, created_at, revoked_at, revoke_reason,
+    created_audit_id, revoked_audit_id
+)
+SELECT
+    address_id, subject_id, network_id, label, address, purpose, status,
+    state_hash, created_at, revoked_at, revoke_reason,
+    created_audit_id, revoked_audit_id
+FROM wallet_addresses;
+DROP TABLE wallet_addresses;
+ALTER TABLE wallet_addresses_v63 RENAME TO wallet_addresses;
+
+CREATE UNIQUE INDEX uq_wallet_addresses_active_label
+    ON wallet_addresses(subject_id, network_id, label)
+    WHERE status = 'active';
+CREATE UNIQUE INDEX uq_wallet_addresses_active_address
+    ON wallet_addresses(subject_id, network_id, address)
+    WHERE status = 'active';
+CREATE INDEX idx_wallet_addresses_subject_network_status
+    ON wallet_addresses(subject_id, network_id, status, created_at DESC, address_id);
+
+CREATE TRIGGER validate_wallet_address_creation_audit
+BEFORE INSERT ON wallet_addresses
+WHEN NOT EXISTS (
+    SELECT 1 FROM audit_records a
+    WHERE a.audit_id = NEW.created_audit_id
+      AND a.subject_id = NEW.subject_id
+      AND a.action = 'wallet_address_registered'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'wallet address creation audit mismatch');
+END;
+CREATE TRIGGER prevent_wallet_address_identity_update
+BEFORE UPDATE OF address_id, subject_id, network_id, label, address, purpose,
+                 created_at, created_audit_id ON wallet_addresses
+BEGIN
+    SELECT RAISE(ABORT, 'wallet address identity is immutable');
+END;
+CREATE TRIGGER validate_wallet_address_transition
+BEFORE UPDATE ON wallet_addresses
+WHEN NOT (
+    (NEW.status = OLD.status
+     AND NEW.state_hash = OLD.state_hash
+     AND NEW.revoked_at IS OLD.revoked_at
+     AND NEW.revoke_reason IS OLD.revoke_reason
+     AND NEW.revoked_audit_id IS OLD.revoked_audit_id)
+    OR (
+        OLD.status = 'active' AND NEW.status = 'revoked'
+        AND NEW.state_hash <> OLD.state_hash
+        AND NEW.revoked_at IS NOT NULL
+        AND NEW.revoke_reason IS NOT NULL
+        AND NEW.revoked_audit_id IS NOT NULL
+        AND EXISTS (
+            SELECT 1 FROM audit_records a
+            WHERE a.audit_id = NEW.revoked_audit_id
+              AND a.subject_id = NEW.subject_id
+              AND a.action = 'wallet_address_revoked'
+        )
+    )
+)
+BEGIN
+    SELECT RAISE(ABORT, 'wallet address transition is invalid');
+END;
+CREATE TRIGGER prevent_wallet_address_delete
+BEFORE DELETE ON wallet_addresses
+BEGIN
+    SELECT RAISE(ABORT, 'wallet addresses cannot be deleted');
+END;
+CREATE TRIGGER validate_wallet_address_revision_insert
+BEFORE INSERT ON wallet_address_revisions
+WHEN NOT EXISTS (
+    SELECT 1 FROM wallet_addresses a
+    JOIN audit_records audit ON audit.audit_id = NEW.audit_id
+    WHERE a.address_id = NEW.address_id
+      AND a.subject_id = NEW.subject_id
+      AND a.status = NEW.status
+      AND audit.subject_id = NEW.subject_id
+      AND ((NEW.status = 'active' AND audit.action = 'wallet_address_registered')
+           OR (NEW.status = 'revoked' AND audit.action = 'wallet_address_revoked'))
+) OR NEW.revision_number != COALESCE((
+    SELECT MAX(r.revision_number) + 1 FROM wallet_address_revisions r
+    WHERE r.address_id = NEW.address_id
+), 1) OR (NEW.revision_number = 1 AND NEW.status != 'active')
+OR (NEW.revision_number = 2 AND (
+    NEW.status != 'revoked' OR NOT EXISTS (
+        SELECT 1 FROM wallet_address_revisions r
+        WHERE r.address_id = NEW.address_id AND r.revision_number = 1 AND r.status = 'active'
+    )
+))
+BEGIN
+    SELECT RAISE(ABORT, 'wallet address revision is invalid');
+END;
+CREATE TRIGGER prevent_wallet_address_revision_update
+BEFORE UPDATE ON wallet_address_revisions
+BEGIN
+    SELECT RAISE(ABORT, 'wallet address revisions are append-only');
+END;
+CREATE TRIGGER prevent_wallet_address_revision_delete
+BEFORE DELETE ON wallet_address_revisions
+BEGIN
+    SELECT RAISE(ABORT, 'wallet address revisions cannot be deleted');
+END;
+
+CREATE TRIGGER validate_wallet_network_transition
+BEFORE UPDATE ON wallet_networks
+WHEN NOT (
+    (NEW.status = OLD.status
+     AND NEW.state_hash = OLD.state_hash
+     AND NEW.revoked_at IS OLD.revoked_at
+     AND NEW.revoke_reason IS OLD.revoke_reason
+     AND NEW.revoked_audit_id IS OLD.revoked_audit_id)
+    OR (
+        OLD.status = 'active' AND NEW.status = 'revoked'
+        AND NEW.state_hash <> OLD.state_hash
+        AND NEW.revoked_at IS NOT NULL
+        AND NEW.revoke_reason IS NOT NULL
+        AND NEW.revoked_audit_id IS NOT NULL
+        AND EXISTS (
+            SELECT 1 FROM audit_records a
+            WHERE a.audit_id = NEW.revoked_audit_id
+              AND a.subject_id = NEW.subject_id
+              AND a.action = 'wallet_network_revoked'
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM wallet_assets a
+            WHERE a.subject_id = NEW.subject_id AND a.network_id = NEW.network_id
+              AND a.status = 'active'
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM wallet_addresses a
+            WHERE a.subject_id = NEW.subject_id AND a.network_id = NEW.network_id
+              AND a.status = 'active'
+        )
+    )
+)
+BEGIN
+    SELECT RAISE(ABORT, 'wallet network transition is invalid');
+END;
+CREATE TRIGGER validate_wallet_balance_snapshot_insert
+BEFORE INSERT ON wallet_balance_snapshots
+WHEN NOT EXISTS (
+    SELECT 1 FROM wallet_networks n
+    JOIN wallet_assets a ON a.asset_id = NEW.asset_id
+    JOIN wallet_addresses d ON d.address_id = NEW.address_id
+    WHERE n.network_id = NEW.network_id
+      AND n.subject_id = NEW.subject_id
+      AND a.subject_id = NEW.subject_id AND a.network_id = NEW.network_id
+      AND d.subject_id = NEW.subject_id AND d.network_id = NEW.network_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'wallet balance snapshot reference mismatch');
+END;
+CREATE TRIGGER validate_wallet_balance_acquisition_run_insert
+BEFORE INSERT ON wallet_balance_acquisition_runs
+WHEN NOT EXISTS (
+    SELECT 1 FROM wallet_networks n
+    JOIN wallet_assets a ON a.asset_id = NEW.asset_id
+    JOIN wallet_addresses d ON d.address_id = NEW.address_id
+    JOIN audit_records audit ON audit.audit_id = NEW.created_audit_id
+    WHERE n.network_id = NEW.network_id
+      AND n.subject_id = NEW.subject_id
+      AND a.subject_id = NEW.subject_id AND a.network_id = NEW.network_id
+      AND d.subject_id = NEW.subject_id AND d.network_id = NEW.network_id
+      AND audit.subject_id = NEW.subject_id
+      AND audit.action = 'wallet_balance_acquisition_queued'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'wallet balance acquisition run reference mismatch');
+END;
+""",
 }
 
 
@@ -8827,6 +9052,36 @@ END;
                     except Exception:
                         connection.rollback()
                         raise
+                    continue
+                if target_version == 63:
+                    foreign_keys_enabled = bool(
+                        connection.execute("PRAGMA foreign_keys").fetchone()[0]
+                    )
+                    try:
+                        # The address table is referenced by historical child
+                        # tables. SQLite only permits this rebuild with FK
+                        # enforcement disabled outside the transaction.
+                        connection.execute("PRAGMA foreign_keys = OFF")
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._execute_sql_script(connection, migration)
+                        self._ensure_subject_scoped_triggers(connection)
+                        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+                        if violations:
+                            raise RuntimeError(
+                                "wallet address migration introduced foreign-key violations"
+                            )
+                        connection.execute(
+                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                            (str(target_version),),
+                        )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    finally:
+                        connection.execute(
+                            f"PRAGMA foreign_keys = {'ON' if foreign_keys_enabled else 'OFF'}"
+                        )
                     continue
                 if target_version in {33, 48, 50, 51, 52}:
                     try:
