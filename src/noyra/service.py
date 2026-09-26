@@ -7286,11 +7286,13 @@ class NoyraService:
         # A restart can legitimately land in a sleep/paused lifecycle.  The
         # startup integrity policy decides whether cognition initialization is
         # allowed (pause-mode findings return before this method), while the
-        # admission gate itself must only open for an active lifecycle.  Keep
-        # policy synchronization and the cognition bootstrap compatible with
-        # the historical alert-mode behavior without reopening paused work.
+        # admission gate must remain closed for work while allowing lifecycle
+        # controls after a clean audit. Keep policy synchronization and the
+        # cognition bootstrap compatible with historical alert-mode behavior.
         if current.state == "active":
             self.kernel.admission.open(epoch=current.version)
+        else:
+            self.kernel.admission.clear_quarantine()
         self._sync_training_policy()
         if self.cognition is not None:
             self.cognition.bootstrap()

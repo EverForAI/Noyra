@@ -387,6 +387,51 @@ def test_http_lifecycle_wake_requires_operator_and_supports_api_v1(
     )
 
 
+def test_http_lifecycle_wake_after_clean_restart_from_deep_sleep(tmp_path: Path) -> None:
+    operator_token = "operator-" + "o" * 40
+    settings = ServiceSettings(
+        data_dir=tmp_path / "service",
+        subject_id="Noyra-p306-wake-restart",
+        genesis_hash=content_hash({"test": "p3-06-wake-restart"}),
+        host="127.0.0.1",
+        port=0,
+        operator_token=SecretStr(operator_token),
+        integrity_mode="alert",
+    )
+
+    seed = NoyraService(settings)
+    try:
+        seed.boot()
+        _put_kernel_to_deep_sleep(seed.kernel)
+    finally:
+        seed.http.close()
+        seed.kernel.close()
+
+    restarted = NoyraService(settings)
+    try:
+        restarted.boot()
+        restarted.http.start()
+
+        assert restarted.kernel.lifecycle.current().state == "deep_sleep"
+        assert restarted.integrity.summary()["status"] == "ok"
+        assert restarted.kernel.admission.quarantined is False
+        assert restarted.kernel.admission.accepting is False
+
+        status, body = _request(
+            restarted,
+            "/api/v1/admin/lifecycle/wake",
+            token=operator_token,
+            payload={"reason": "wake after clean process restart"},
+        )
+
+        assert status == 200
+        assert body["operation"] == "wake"
+        assert body["lifecycle"]["state"] == "active"  # type: ignore[index]
+    finally:
+        restarted.http.close()
+        restarted.kernel.close()
+
+
 def test_http_reconcile_prepared_action_then_reset_without_data_wipe(
     service: tuple[NoyraService, str, str],
 ) -> None:
