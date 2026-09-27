@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import quote_plus
 
 import httpx
+from pydantic import SecretStr
 
 from noyra.core.actions import ActionLedger
 from noyra.core.database import Database
@@ -207,6 +208,34 @@ class SearchExecutor:
             results,
         )
 
+    async def test_unstored(
+        self,
+        provider_type: str,
+        api_key: SecretStr,
+        *,
+        query: str = "Noyra search API connection test",
+    ) -> dict[str, Any]:
+        """Check draft search credentials without creating a provider or action."""
+        if provider_type not in SEARCH_ENDPOINTS:
+            raise ValueError("search provider type is invalid")
+        if not isinstance(api_key, SecretStr):
+            raise ValueError("search provider key is invalid")
+        key = api_key.get_secret_value()
+        normalized_query = " ".join(query.split())
+        if not key.strip() or len(key) > 4_096:
+            raise ValueError("search provider key is invalid")
+        if not normalized_query or len(normalized_query) > 512:
+            raise ValueError("search test query is invalid")
+        started = asyncio.get_running_loop().time()
+        response = await self._request_provider(provider_type, key, normalized_query, 3)
+        results = self._parse(provider_type, response, 3)
+        return {
+            "ok": True,
+            "provider_type": provider_type,
+            "result_count": len(results),
+            "elapsed_ms": round((asyncio.get_running_loop().time() - started) * 1000),
+        }
+
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
@@ -275,23 +304,28 @@ class SearchExecutor:
         self, config: SearchProviderRecord, query: str, limit: int
     ) -> httpx.Response:
         key = self.providers.api_key(config.config_id, subject_id=config.subject_id)
-        endpoint = SEARCH_ENDPOINTS[config.provider_type]
+        return await self._request_provider(config.provider_type, key, query, limit)
+
+    async def _request_provider(
+        self, provider_type: str, key: str, query: str, limit: int
+    ) -> httpx.Response:
+        endpoint = SEARCH_ENDPOINTS[provider_type]
         headers = {
             "Accept": "application/json",
             "Accept-Encoding": "identity",
             "User-Agent": "Noyra-Research/0.1.0",
         }
-        if config.provider_type == "brave":
+        if provider_type == "brave":
             headers["X-Subscription-Token"] = key
             method = "GET"
             url = f"{endpoint}?q={quote_plus(query)}&count={limit}"
             request_kwargs: dict[str, Any] = {"headers": headers}
-        elif config.provider_type == "bing":
+        elif provider_type == "bing":
             headers["Ocp-Apim-Subscription-Key"] = key
             method = "GET"
             url = f"{endpoint}?q={quote_plus(query)}&count={limit}"
             request_kwargs = {"headers": headers}
-        elif config.provider_type == "tavily":
+        elif provider_type == "tavily":
             method = "POST"
             url = endpoint
             request_kwargs = {

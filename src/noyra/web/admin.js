@@ -8,6 +8,7 @@ let walletNetworks = [];
 let walletAssets = [];
 let walletAddresses = [];
 let walletBalances = [];
+let walletPolicy = null;
 let walletAcquisitionRows = [];
 let walletGraphLoadVersion = 0;
 let walletQueueLoadVersion = 0;
@@ -19,7 +20,7 @@ let walletExecutionLoadVersion = 0;
 const MODEL_KEY_REQUEST_CONCURRENCY = 4;
 const $ = (selector) => document.querySelector(selector);
 const esc = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
-const errorText = (error) => ({ unauthorized: "令牌无效或会话已过期", json_required: "请求格式不正确", model_resource_label_exists: "该认知池已有相同名称", invalid_model_resource_update: "预算或路由参数不符合要求", model_resource_not_found: "认知资源不存在", model_resource_key_not_found: "模型密钥不存在", model_resource_integrity_unavailable: "认知资源完整性检查未通过，请稍后重试", invalid_capability: "能力授权请求不符合要求", capability_not_found: "能力授权不存在", cognition_unavailable: "认知功能尚未启用", public_post_not_found: "帖子不存在或已不可用", invalid_public_post_moderation: "审核状态或理由不符合要求", public_post_moderation_conflict: "帖子状态或幂等请求已发生变化，请刷新后重试", public_post_integrity_unavailable: "帖子完整性检查未通过，审核已暂停", invalid_wallet_acquisition: "采集目标或参数不符合要求", invalid_wallet_acquisition_query: "采集队列筛选条件不符合要求", invalid_wallet_acquisition_run: "采集执行上限不符合要求", invalid_wallet_acquisition_retry: "重试参数不符合要求", invalid_wallet_acquisition_cancel: "取消参数不符合要求", wallet_acquisition_conflict: "相同目标已有活动采集，或幂等键指向其他目标", wallet_acquisition_target_not_found: "采集目标不存在", wallet_acquisition_not_found: "采集运行不存在", wallet_acquisition_unknown_retry_not_allowed: "只有结果未知的运行可以重试", wallet_acquisition_attempt_limit_reached: "采集已达到最大尝试次数", wallet_acquisition_cancel_not_allowed: "当前状态不允许取消", wallet_integrity_unavailable: "钱包完整性检查未通过，请稍后重试", wallet_network_not_found: "钱包网络不存在", invalid_wallet_observation_health_query: "钱包观测健康筛选条件不符合要求", wallet_execution_unavailable: "独立签名器未配置，转账执行已关闭", wallet_execution_not_found: "转账执行不存在", wallet_execution_integrity_unavailable: "转账执行完整性检查未通过，请稍后重试", invalid_wallet_order_execution: "转账执行参数或状态不符合要求", wallet_order_transition_conflict: "订单状态已变化，请刷新后重试", invalid_wallet_receipt_request: "回执查询请求不符合要求", invalid_wallet_execution_recovery: "未完成转账恢复参数不符合要求" }[error?.code] || error?.code || error?.message || "请求失败");
+const errorText = (error) => ({ unauthorized: "令牌无效或会话已过期", json_required: "请求格式不正确", invalid_model_resource_test: "模型测试信息不完整", invalid_model_discovery: "模型发现信息不完整", provider_auth_failed: "模型服务拒绝了密钥，请检查密钥和地址", provider_response_empty: "模型服务返回了空内容", provider_response_invalid: "模型服务响应格式不正确", provider_connect_failed: "无法连接模型服务", invalid_search_provider: "搜索 API 配置不完整", invalid_search_provider_test: "搜索 API 测试信息不完整", search_provider_test_failed: "搜索 API 连接失败", search_provider_test_unknown: "搜索 API 结果未知，请稍后查看供应商记录", model_discovery_unsupported: "该接口不支持获取模型列表，请手动填写模型名称", model_discovery_invalid_response: "模型列表响应格式不正确", model_resource_label_exists: "该认知池已有相同名称", invalid_model_resource_update: "预算或路由参数不符合要求", model_resource_not_found: "认知资源不存在", model_resource_key_not_found: "模型密钥不存在", model_resource_integrity_unavailable: "认知资源完整性检查未通过，请稍后重试", search_provider_not_found: "搜索 API 不存在", search_provider_integrity_unavailable: "搜索 API 完整性检查未通过，请稍后重试", search_routing_integrity_unavailable: "搜索方式完整性检查未通过，请稍后重试", invalid_search_routing: "搜索方式配置不正确", invalid_capability: "能力授权请求不符合要求", capability_not_found: "能力授权不存在", cognition_unavailable: "认知功能尚未启用", public_post_not_found: "帖子不存在或已不可用", invalid_public_post_moderation: "审核状态或理由不符合要求", public_post_moderation_conflict: "帖子状态或幂等请求已发生变化，请刷新后重试", public_post_integrity_unavailable: "帖子完整性检查未通过，审核已暂停", invalid_wallet_acquisition: "采集目标或参数不符合要求", invalid_wallet_acquisition_query: "采集队列筛选条件不符合要求", invalid_wallet_acquisition_run: "采集执行上限不符合要求", invalid_wallet_acquisition_retry: "重试参数不符合要求", invalid_wallet_acquisition_cancel: "取消参数不符合要求", wallet_acquisition_conflict: "相同目标已有活动采集，或幂等键指向其他目标", wallet_acquisition_target_not_found: "采集目标不存在", wallet_acquisition_not_found: "采集运行不存在", wallet_acquisition_unknown_retry_not_allowed: "只有结果未知的运行可以重试", wallet_acquisition_attempt_limit_reached: "采集已达到最大尝试次数", wallet_acquisition_cancel_not_allowed: "当前状态不允许取消", wallet_integrity_unavailable: "钱包完整性检查未通过，请稍后重试", wallet_network_not_found: "钱包网络不存在", invalid_wallet_observation_health_query: "钱包观测健康筛选条件不符合要求", wallet_execution_unavailable: "独立签名器未配置，转账执行已关闭", wallet_execution_not_found: "转账执行不存在", wallet_execution_integrity_unavailable: "转账执行完整性检查未通过，请稍后重试", invalid_wallet_order_execution: "转账执行参数或状态不符合要求", wallet_order_transition_conflict: "订单状态已变化，请刷新后重试", invalid_wallet_receipt_request: "回执查询请求不符合要求", invalid_wallet_execution_recovery: "未完成转账恢复参数不符合要求" }[error?.code] || error?.code || error?.message || "请求失败");
 
 async function request(path, options = {}) {
   const headers = { ...(options.body ? { "Content-Type": "application/json" } : {}), ...(options.headers || {}) };
@@ -32,7 +33,7 @@ async function request(path, options = {}) {
 }
 
 function setStatus(target, message, error = false) { const node = $(target); node.textContent = message || ""; node.classList.toggle("error", error); }
-function showSection(section) { activeSection = section; document.querySelectorAll("[data-section-panel]").forEach((panel) => { panel.hidden = panel.dataset.sectionPanel !== section; }); document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.section === section)); $("#page-title").textContent = { overview: "总览", conversation: "私密交流", "public-posts": "内容审核", models: "认知资源", capabilities: "能力授权", channels: "通讯渠道", wallet: "钱包采集", runtime: "运行防护" }[section]; }
+function showSection(section) { activeSection = section; document.querySelectorAll("[data-section-panel]").forEach((panel) => { panel.hidden = panel.dataset.sectionPanel !== section; }); document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.section === section)); $("#page-title").textContent = { overview: "总览", conversation: "私密交流", "public-posts": "内容审核", models: "认知资源", search: "搜索配置", capabilities: "能力授权", channels: "通讯渠道", wallet: "钱包采集", runtime: "运行防护" }[section]; }
 function summaryRows(items) { return items.map(([label, value]) => `<div class="summary-row"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join(""); }
 const integerFormatter = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 });
 const modelResourceStatusLabels = { active: "可用", disabled: "已停用", revoked: "已撤销" };
@@ -386,6 +387,23 @@ async function loadWalletEconomy() {
   $("#wallet-ledger-list").innerHTML = Array.isArray(ledger) ? ledger.map((item) => `<div class="summary-row"><span>${esc(item.account)}</span><strong>${esc(item.net)}</strong></div>`).join("") : "";
 }
 
+function renderWalletPolicy(policy) {
+  walletPolicy = policy && typeof policy === "object" ? policy : null;
+  if (!walletPolicy) return;
+  $("#wallet-policy-mode").value = walletPolicy.mode || "disabled";
+  $("#wallet-policy-per-order").value = walletPolicy.per_order_limit ?? "0";
+  $("#wallet-policy-daily").value = walletPolicy.daily_limit ?? "0";
+  $("#wallet-policy-allowlist-enabled").checked = walletPolicy.recipient_allowlist_enabled === true;
+  $("#wallet-policy-allowlist").value = Array.isArray(walletPolicy.allowed_recipient_addresses)
+    ? walletPolicy.allowed_recipient_addresses.join("\n")
+    : "";
+}
+async function loadWalletPolicy() {
+  const policy = await request("/api/admin/wallet-policy");
+  renderWalletPolicy(policy);
+  setStatus("#wallet-policy-status", "策略已加载");
+}
+
 const walletExecutionStatusLabels = { signing: "签名中", broadcast: "已广播", unknown: "结果未知", confirmed: "已确认", failed: "失败" };
 function renderWalletExecutions(rows) {
   const list = $("#wallet-execution-list");
@@ -411,7 +429,7 @@ async function loadWalletExecutions() {
 }
 async function loadWallet() {
   await loadWalletGraph();
-  await Promise.all([loadWalletBudget(), loadWalletAcquisitions(), loadWalletObservationHealth(), loadWalletEconomy(), loadWalletExecutions()]);
+  await Promise.all([loadWalletPolicy(), loadWalletBudget(), loadWalletAcquisitions(), loadWalletObservationHealth(), loadWalletEconomy(), loadWalletExecutions()]);
 }
 const publicPostStatusLabels = {
   pending_review: "待审核",
@@ -531,6 +549,22 @@ async function loadModels() {
     return `<article class="resource-item model-resource-item"><div class="model-resource-main"><div class="model-resource-title"><h3>${esc(item.label)}</h3><span class="status-chip status-${esc(item.status)}">${esc(status)}</span></div><p class="model-resource-identity">${esc(pool)} · ${esc(item.model)}</p><dl class="model-resource-facts"><div><dt>可用密钥</dt><dd>${esc(formatInteger(item.available_key_count))} / ${esc(formatInteger(item.key_count))}</dd></div><div><dt>最大尝试</dt><dd>${esc(formatInteger(exactBudget.max_attempts))}</dd></div><div><dt>优先级</dt><dd>${esc(formatInteger(exactBudget.priority))}</dd></div><div><dt>权重</dt><dd>${esc(formatInteger(exactBudget.weight))}</dd></div></dl><div class="model-keys"><strong>密钥状态与非秘密元数据</strong>${keyMarkup}</div>${limits}</div><div class="resource-actions model-resource-actions">${item.status === "active" ? `<button class="primary" data-model-action="test" data-id="${esc(item.group_id)}" type="button">测试连接</button><button data-model-action="disable" data-id="${esc(item.group_id)}" type="button">停用</button>` : item.status === "disabled" ? `<button data-model-action="enable" data-id="${esc(item.group_id)}" type="button">启用</button>` : ""}</div></article>`;
   }).join("") : '<div class="empty-state">尚未配置认知资源</div>';
 }
+function draftModelPayload(includeModel = true) {
+  const keys = $("#admin-model-keys").value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  const payload = { base_url: $("#admin-model-url").value.trim(), api_keys: keys };
+  if (includeModel) payload.model = $("#admin-model-name").value.trim();
+  return payload;
+}
+async function loadSearchProviders() {
+  const [providers, routing] = await Promise.all([request("/api/config/search-providers"), request("/api/config/search-routing")]);
+  $("#search-routing-mode").value = routing.mode || "auto";
+  const statusLabels = { active: "可用", revoked: "已撤销" };
+  $("#search-provider-list").innerHTML = providers.length ? providers.map((item) => {
+    const enabled = item.status === "active" && item.enabled !== false;
+    const controls = item.status === "active" ? `<button data-search-provider-action="${enabled ? "disable" : "enable"}" data-id="${esc(item.config_id)}" type="button">${enabled ? "停用" : "启用"}</button><button data-search-provider-action="revoke" data-id="${esc(item.config_id)}" type="button">撤销</button>` : "";
+    return `<article class="resource-item"><div><h3>${esc(item.label)} · ${esc(item.provider_type)}</h3><p>密钥指纹：${esc(item.key_fingerprint)} · 状态：${esc(item.status === "active" ? (enabled ? "可用" : "已停用") : statusLabels[item.status] || "未知")}</p></div><div class="resource-actions">${controls}</div></article>`;
+  }).join("") : '<div class="empty-state">尚未配置搜索 API</div>';
+}
 async function loadCapabilities() { const rows = await request("/api/config/capabilities"); $("#capability-list").innerHTML = rows.length ? rows.map((item) => { const scope = item.scope?.public_https ? "所有经过安全边界的公网 HTTPS 来源" : JSON.stringify(item.scope || {}); const canRevoke = item.status === "active"; return `<article class="resource-item"><div><h3>${esc(item.capability_type)} · ${esc(item.effective_status || item.status)}</h3><p>${esc(scope)}</p><small>签发者：${esc(item.issuer)} · 每小时：${esc(item.rate_limit_per_hour)} · ${esc(item.expires_at || "长期")}</small></div>${canRevoke ? `<button data-capability-action="revoke" data-id="${esc(item.grant_id)}" type="button">撤销</button>` : ""}</article>`; }).join("") : '<div class="muted">暂无能力授权</div>'; }
 async function loadChannels() {
   const [transports, bindings] = await Promise.all([request("/api/config/transports"), request("/api/config/inbound-bindings")]);
@@ -541,10 +575,10 @@ async function loadChannels() {
   void transportMap;
 }
 async function loadRuntime() { const [diagnostics, controls] = await Promise.all([request("/api/diagnostics"), request("/api/admin/public-post-controls")]); const cognition = diagnostics.cognition || {}; $("#runtime-summary").innerHTML = summaryRows([["认知状态", cognition.enabled ? "已启用" : "未启用"], ["待处理消息", cognition.pending_interactions?.length || 0], ["认知等待任务", cognition.waiting_interaction_tasks?.length || 0], ["入站去重", JSON.stringify(diagnostics.inbound || {})], ["未知模型调用", diagnostics.unknown?.model_calls || 0], ["外部投递", JSON.stringify(diagnostics.deliveries || {})], ["完整性", diagnostics.integrity?.status || "未配置"]]).replaceAll("summary-row", "runtime-item"); $("#public-post-rate-limit").value = controls.rate_limit_per_hour; $("#public-post-queue-cap").value = controls.queue_cap; $("#public-post-captcha-ttl").value = controls.captcha_ttl_seconds; $("#public-post-captcha-attempts").value = controls.captcha_max_attempts; $("#public-post-captcha-mode").value = controls.captcha_mode; $("#public-post-captcha-issue-limit").value = controls.captcha_issue_limit_per_hour; $("#public-post-captcha-global-rate").value = controls.captcha_global_rate_per_minute; $("#public-post-storage-cap").value = controls.storage_cap_bytes; const usage = controls.usage || {}; $("#public-post-usage").innerHTML = summaryRows([["待审核", usage.pending_count ?? 0], ["帖子总数", usage.post_count ?? 0], ["帖子内容", `${usage.byte_size ?? 0} / ${usage.storage_cap_bytes ?? controls.storage_cap_bytes} 字节`]]); }
-async function loadAll() { try { await Promise.all([loadOverview(), loadMailbox(), loadPublicPosts(), loadModels(), loadCapabilities(), loadChannels(), loadWallet(), loadRuntime()]); setStatus("#global-status", ""); } catch (error) { setStatus("#global-status", errorText(error), true); if (error.status === 401) logout(); } }
+async function loadAll() { try { await Promise.all([loadOverview(), loadMailbox(), loadPublicPosts(), loadModels(), loadSearchProviders(), loadCapabilities(), loadChannels(), loadWallet(), loadRuntime()]); setStatus("#global-status", ""); } catch (error) { setStatus("#global-status", errorText(error), true); if (error.status === 401) logout(); } }
 async function restoreSession() { try { const result = await request("/admin/session"); if (!result.authenticated) return; csrfToken = result.csrf_token; $("#login-shell").hidden = true; $("#admin-shell").hidden = false; await loadAll(); } catch (error) { setStatus("#login-status", errorText(error), true); } }
 
-$("#login-form").addEventListener("submit", login); $("#logout").addEventListener("click", logout); $("#refresh-admin").addEventListener("click", loadAll); $("#refresh-mailbox").addEventListener("click", loadMailbox); $("#refresh-models").addEventListener("click", loadModels); $("#refresh-capabilities").addEventListener("click", loadCapabilities); $("#refresh-runtime").addEventListener("click", loadRuntime); document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => showSection(button.dataset.section)));
+$("#login-form").addEventListener("submit", login); $("#logout").addEventListener("click", logout); $("#refresh-admin").addEventListener("click", loadAll); $("#refresh-mailbox").addEventListener("click", loadMailbox); $("#refresh-models").addEventListener("click", loadModels); $("#refresh-search-providers").addEventListener("click", loadSearchProviders); $("#refresh-capabilities").addEventListener("click", loadCapabilities); $("#refresh-runtime").addEventListener("click", loadRuntime); document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => showSection(button.dataset.section)));
 $("#admin-message-form").addEventListener("submit", async (event) => { event.preventDefault(); const form = event.currentTarget; const button = submitButton(form, event); if (button) button.disabled = true; try { await request("/api/interactions", { method: "POST", body: JSON.stringify({ channel: "web", counterparty: "web-user", content: $("#admin-message").value.trim(), idempotency_key: crypto.randomUUID() }) }); $("#admin-message").value = ""; setStatus("#message-status", "消息已记录，正在等待认知处理"); await Promise.all([loadMailbox(), loadOverview()]); } catch (error) { setStatus("#message-status", errorText(error), true); } finally { if (button) button.disabled = false; } });
 
 $("#wallet-enqueue-asset").addEventListener("change", updateWalletAddressOptions);
@@ -555,6 +589,7 @@ $("#wallet-acquisition-status-filter").addEventListener("change", () => { void l
 $("#refresh-wallet-acquisitions").addEventListener("click", () => { void loadWalletAcquisitions().catch(() => {}); });
 $("#wallet-observation-group").addEventListener("change", () => { void loadWalletObservationHealth().catch(() => {}); });
 $("#refresh-wallet-observation-health").addEventListener("click", () => { void loadWalletObservationHealth().catch(() => {}); });
+$("#refresh-wallet-policy").addEventListener("click", () => { void loadWalletPolicy().catch((error) => setStatus("#wallet-policy-status", errorText(error), true)); });
 $("#refresh-wallet-economy").addEventListener("click", () => { void loadWalletEconomy().catch((error) => setStatus("#global-status", errorText(error), true)); });
 $("#run-wallet-acquisitions").addEventListener("click", async (event) => {
   const button = event.currentTarget;
@@ -896,6 +931,139 @@ $("#wallet-order-list").addEventListener("click", async (event) => {
     await request(`/api/admin/wallet-orders/${encodeURIComponent(button.dataset.orderId)}/execute`, { method: "POST", body: JSON.stringify({}) });
     await Promise.all([loadWalletExecutions(), loadWalletEconomy()]);
   } catch (error) { setStatus("#wallet-execution-status", errorText(error), true); }
+  finally { button.disabled = false; }
+});
+
+$("#admin-model-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = submitButton(form, event);
+  if (button) button.disabled = true;
+  try {
+    await request("/api/config/model-resources", { method: "POST", body: JSON.stringify({ pool: $("#admin-model-pool").value, label: $("#admin-model-label").value.trim(), base_url: $("#admin-model-url").value.trim(), model: $("#admin-model-name").value.trim(), api_keys: $("#admin-model-keys").value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean) }) });
+    form.reset();
+    $("#admin-model-options").hidden = true;
+    setStatus("#model-status", "认知资源已保存");
+    await Promise.all([loadModels(), loadOverview()]);
+  } catch (error) { setStatus("#model-status", errorText(error), true); }
+  finally { if (button) button.disabled = false; }
+});
+$("#admin-model-test").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const result = await request("/api/config/model-resources/test", { method: "POST", body: JSON.stringify(draftModelPayload(true)) });
+    setStatus("#model-status", `连接测试成功：${result.model}`);
+  } catch (error) { setStatus("#model-status", errorText(error), true); }
+  finally { button.disabled = false; }
+});
+$("#admin-model-discover").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const result = await request("/api/config/model-resources/models", { method: "POST", body: JSON.stringify(draftModelPayload(false)) });
+    const select = $("#admin-model-options");
+    select.innerHTML = '<option value="">请选择模型</option>' + (result.models || []).map((model) => `<option value="${esc(model)}">${esc(model)}</option>`).join("");
+    select.hidden = !(result.models || []).length;
+    setStatus("#model-status", result.models?.length ? `已获取 ${result.models.length} 个模型` : "接口返回的模型列表为空");
+  } catch (error) { setStatus("#model-status", errorText(error), true); }
+  finally { button.disabled = false; }
+});
+$("#admin-model-options").addEventListener("change", (event) => { if (event.currentTarget.value) $("#admin-model-name").value = event.currentTarget.value; });
+
+$("#wallet-policy-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!walletPolicy) {
+    setStatus("#wallet-policy-status", "策略尚未加载，请先更新", true);
+    return;
+  }
+  const form = event.currentTarget;
+  const button = submitButton(form, event);
+  const perOrder = $("#wallet-policy-per-order").value.trim();
+  const daily = $("#wallet-policy-daily").value.trim();
+  if (!/^\d+$/.test(perOrder) || !/^\d+$/.test(daily)) {
+    setStatus("#wallet-policy-status", "额度必须是非负整数", true);
+    return;
+  }
+  const allowedRecipients = $("#wallet-policy-allowlist").value
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (button) button.disabled = true;
+  try {
+    await request("/api/admin/wallet-policy", {
+      method: "POST",
+      body: JSON.stringify({
+        expected_version: walletPolicy.policy_version,
+        mode: $("#wallet-policy-mode").value,
+        allowed_network_ids: walletPolicy.allowed_network_ids || [],
+        allowed_asset_ids: walletPolicy.allowed_asset_ids || [],
+        per_order_limit: perOrder,
+        daily_limit: daily,
+        monthly_limit: walletPolicy.monthly_limit || "0",
+        daily_order_limit: walletPolicy.daily_order_limit || 0,
+        monthly_order_limit: walletPolicy.monthly_order_limit || 0,
+        min_balance: walletPolicy.min_balance || "0",
+        max_observation_age_seconds: walletPolicy.max_observation_age_seconds || 0,
+        automatic_max_amount: perOrder,
+        anomaly_block: walletPolicy.anomaly_block !== false,
+        emergency_paused: walletPolicy.emergency_paused === true,
+        recipient_allowlist_enabled: $("#wallet-policy-allowlist-enabled").checked,
+        allowed_recipient_addresses: allowedRecipients,
+      }),
+    });
+    await loadWalletPolicy();
+    setStatus("#wallet-policy-status", "自动付款策略已保存");
+  } catch (error) {
+    setStatus("#wallet-policy-status", errorText(error), true);
+    if (error.status === 401) await logout();
+  } finally {
+    if (button) button.disabled = false;
+  }
+});
+
+$("#admin-search-provider-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = submitButton(form, event);
+  if (button) button.disabled = true;
+  try {
+    await request("/api/config/search-providers", { method: "POST", body: JSON.stringify({ provider_type: $("#admin-search-provider-type").value, label: $("#admin-search-provider-label").value.trim(), api_key: $("#admin-search-provider-key").value }) });
+    form.reset();
+    setStatus("#search-provider-status", "搜索 API 已保存");
+    await loadSearchProviders();
+  } catch (error) { setStatus("#search-provider-status", errorText(error), true); }
+  finally { if (button) button.disabled = false; }
+});
+$("#admin-search-provider-test").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const result = await request("/api/config/search-providers/test", { method: "POST", body: JSON.stringify({ provider_type: $("#admin-search-provider-type").value, api_key: $("#admin-search-provider-key").value }) });
+    setStatus("#search-provider-status", `连接测试成功，返回 ${result.result_count} 条结果`);
+  } catch (error) { setStatus("#search-provider-status", errorText(error), true); }
+  finally { button.disabled = false; }
+});
+$("#admin-search-routing-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = submitButton(event.currentTarget, event);
+  if (button) button.disabled = true;
+  try { await request("/api/config/search-routing", { method: "POST", body: JSON.stringify({ mode: $("#search-routing-mode").value }) }); setStatus("#search-routing-status", "搜索方式已保存"); }
+  catch (error) { setStatus("#search-routing-status", errorText(error), true); }
+  finally { if (button) button.disabled = false; }
+});
+$("#search-provider-list").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-search-provider-action]");
+  if (!button) return;
+  button.disabled = true;
+  try {
+    const action = button.dataset.searchProviderAction;
+    const path = action === "revoke" ? "revoke" : action;
+    const reason = action === "revoke" ? "管理员撤销搜索 API" : (action === "enable" ? "管理员启用搜索 API" : "管理员停用搜索 API");
+    await request(`/api/config/search-providers/${encodeURIComponent(button.dataset.id)}/${path}`, { method: "POST", body: JSON.stringify({ reason }) });
+    await loadSearchProviders();
+  }
+  catch (error) { setStatus("#search-provider-status", errorText(error), true); }
   finally { button.disabled = false; }
 });
 $("#wallet-execution-list").addEventListener("click", async (event) => {

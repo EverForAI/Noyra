@@ -31,6 +31,7 @@ from noyra.research import (
     SearchProviderStore,
     SearchResult,
 )
+from noyra.research.routing import get_search_routing_mode, list_search_provider_controls
 from noyra.research.types import SearchMethod
 from noyra.sleep import FatigueInputs, FatigueTracker
 from noyra.world import SourceRegistry, canonical_public_url
@@ -186,10 +187,13 @@ class AutonomousResearch:
         assert goal is not None
         assert plan.query is not None
         assert plan.expected_information is not None
+        requested_method = plan.method
+        current_method, provider_id = self._preferred_initial_method(
+            requested_method, plan.provider_config_id, providers
+        )
+        plan = plan.model_copy(update={"method": current_method, "provider_config_id": provider_id})
         rounds: list[dict[str, Any]] = []
         all_results: list[SearchResult] = []
-        current_method: SearchMethod = plan.method
-        provider_id = plan.provider_config_id
         final_method: SearchMethod = current_method
         for round_number in range(1, self.settings.max_search_rounds_per_run + 1):
             results, action_id = await self._search_round(
@@ -205,6 +209,8 @@ class AutonomousResearch:
                 {
                     "round": round_number,
                     "method": current_method,
+                    "requested_method": requested_method,
+                    "routing_mode": self._routing_mode(),
                     "provider_config_id": provider_id,
                     "action_id": action_id,
                     "result_count": len(results),
@@ -238,6 +244,27 @@ class AutonomousResearch:
         )
         self._record_fatigue(planner_call_id, len(all_results), status)
         return f"research_{status}"
+
+    def _routing_mode(self) -> str:
+        mode, _ = get_search_routing_mode(self.database, self.subject_id)
+        return mode
+
+    def _preferred_initial_method(
+        self,
+        requested: SearchMethod,
+        provider_id: str | None,
+        providers: list[SearchProviderRecord],
+    ) -> tuple[SearchMethod, str | None]:
+        mode = self._routing_mode()
+        controls = list_search_provider_controls(self.database, self.subject_id)
+        providers = [item for item in providers if controls.get(item.config_id, True)]
+        if mode == "model_first":
+            return "model", None
+        if mode == "api_first" and providers:
+            return "api", providers[0].config_id
+        if requested == "api" and provider_id not in {item.config_id for item in providers}:
+            return ("model", None) if not providers else ("api", providers[0].config_id)
+        return requested, provider_id
 
     async def aclose(self) -> None:
         if self._owns_search:
@@ -300,6 +327,8 @@ class AutonomousResearch:
                 )
             ).resolve()
             provider_store.verify_integrity(self.subject_id)
+            get_search_routing_mode(self.database, self.subject_id)
+            list_search_provider_controls(self.database, self.subject_id)
         return len(rows)
 
     def latest(self) -> AutonomousResearchRecord | None:
@@ -464,38 +493,44 @@ class AutonomousResearch:
             if provider_id is None or provider_id not in context.providers:
                 return (), None
             provider = context.providers[provider_id]
-            execution = await self.search.search(
-                self.subject_id,
-                provider,
-                plan.query,
-                goal_id=goal.goal_id,
-                project_id=None if binding is None else binding[0],
-                phase_id=None if binding is None else binding[1],
-                strategy_id=content_hash(
-                    {"goal": goal.goal_id, "query": plan.query, "method": method}
-                )[:32],
-                expected_outcome=plan.expected_information,
-                idempotency_key=(
-                    f"research-search:{self._committed_count()}:{round_number}:{provider_id}"
-                ),
-                limit=self.settings.max_search_results_per_round,
-            )
+            try:
+                execution = await self.search.search(
+                    self.subject_id,
+                    provider,
+                    plan.query,
+                    goal_id=goal.goal_id,
+                    project_id=None if binding is None else binding[0],
+                    phase_id=None if binding is None else binding[1],
+                    strategy_id=content_hash(
+                        {"goal": goal.goal_id, "query": plan.query, "method": method}
+                    )[:32],
+                    expected_outcome=plan.expected_information,
+                    idempotency_key=(
+                        f"research-search:{self._committed_count()}:{round_number}:{provider_id}"
+                    ),
+                    limit=self.settings.max_search_results_per_round,
+                )
+            except PermissionError:
+                return (), None
             return execution.results, execution.action_id
         if method == "browser":
-            execution = await self.browser_search.search(
-                self.subject_id,
-                plan.query,
-                goal_id=goal.goal_id,
-                project_id=None if binding is None else binding[0],
-                phase_id=None if binding is None else binding[1],
-                strategy_id=content_hash(
-                    {"goal": goal.goal_id, "query": plan.query, "method": method}
-                )[:32],
-                expected_outcome=plan.expected_information,
-                idempotency_key=(f"research-browser:{self._committed_count()}:{round_number}"),
-                limit=self.settings.max_search_results_per_round,
-                hourly_limit=self.settings.max_browser_searches_per_hour,
-            )
+            try:
+                execution = await self.browser_search.search(
+                    self.subject_id,
+                    plan.query,
+                    goal_id=goal.goal_id,
+                    project_id=None if binding is None else binding[0],
+                    phase_id=None if binding is None else binding[1],
+                    strategy_id=content_hash(
+                        {"goal": goal.goal_id, "query": plan.query, "method": method}
+                    )[:32],
+                    expected_outcome=plan.expected_information,
+                    idempotency_key=(f"research-browser:{self._committed_count()}:{round_number}"),
+                    limit=self.settings.max_search_results_per_round,
+                    hourly_limit=self.settings.max_browser_searches_per_hour,
+                )
+            except PermissionError:
+                return (), None
             return execution.results, execution.action_id
         purpose = f"research_{method}_search:{self._committed_count()}:{round_number}"
         try:

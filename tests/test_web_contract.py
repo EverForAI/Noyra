@@ -27,11 +27,14 @@ def test_export_frontend_has_bounded_streaming_and_backoff() -> None:
     assert "/api/admin/export-jobs/${encodeURIComponent(jobId)}/cancel" in APP
 
 
-def test_operator_surface_exposes_controls_and_confirmation() -> None:
-    assert 'id="operator-controls"' in HTML
-    assert 'id="knowledge-trust-form"' in HTML
-    assert 'id="knowledge-import-form"' in HTML
-    assert 'id="knowledge-peer-form"' in HTML
+def test_public_surface_keeps_operator_controls_private() -> None:
+    for marker in (
+        'id="operator-controls"',
+        'id="knowledge-trust-form"',
+        'id="knowledge-import-form"',
+        'id="knowledge-peer-form"',
+    ):
+        assert marker not in HTML
     assert "confirmPrivilegedAction" in APP
     for path in (
         "/api/admin/lifecycle/",
@@ -60,6 +63,32 @@ def test_admin_surface_assets_and_session_contract() -> None:
     assert 'credentials: "same-origin"' in ADMIN_JS
     assert 'headers["X-CSRF-Token"]' in ADMIN_JS
     assert "fetch(path" in ADMIN_JS
+
+
+def test_public_surface_has_branded_archive_and_captcha_states() -> None:
+    for marker in (
+        'class="hero"',
+        'src="/assets/public-hero.webp"',
+        'id="archive"',
+        'id="contribute"',
+        'id="captcha-status"',
+        'id="header-state-dot"',
+    ):
+        assert marker in HTML
+    for marker in (
+        "publicErrorMessage",
+        "at_rest_boundary_unavailable",
+        "captcha-image-wrap",
+        "is-online",
+    ):
+        assert marker in APP or marker in HTML
+
+
+def test_public_surface_localizes_network_failures() -> None:
+    assert "public_network_unavailable" in APP
+    assert "公开档案暂时无法连接" in APP
+    assert "稍后刷新页面" in APP
+    assert "publicErrorMessage(error)" in APP
 
 
 def test_admin_model_resource_controls_are_precise_bounded_and_escaped() -> None:
@@ -114,3 +143,25 @@ def test_admin_forms_have_labels_hidden_containers_and_submit_fallbacks() -> Non
     assert "container.hidden = !visible" in ADMIN_JS
     assert "form.reset()" in ADMIN_JS
     assert "event.target.reset()" not in ADMIN_JS
+
+
+def test_admin_model_and_search_configuration_controls_are_present() -> None:
+    for marker in (
+        'id="admin-model-test"',
+        'id="admin-model-discover"',
+        'id="admin-model-options"',
+        'data-section-panel="search"',
+        'id="admin-search-provider-form"',
+        'id="admin-search-provider-test"',
+        'id="search-routing-mode"',
+    ):
+        assert marker in ADMIN_HTML
+    for marker in (
+        "/api/config/model-resources/test",
+        "/api/config/model-resources/models",
+        "/api/config/search-providers",
+        "model_first",
+        "api_first",
+        "auto",
+    ):
+        assert marker in ADMIN_JS or marker in ADMIN_HTML

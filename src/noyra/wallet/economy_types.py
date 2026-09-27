@@ -165,6 +165,8 @@ class PaymentPolicyInput(BaseModel):
     automatic_max_amount: str = "0"
     anomaly_block: bool = True
     emergency_paused: bool = False
+    recipient_allowlist_enabled: bool = False
+    allowed_recipient_addresses: list[str] = Field(default_factory=list, max_length=256)
 
     @field_validator("allowed_network_ids", "allowed_asset_ids")
     @classmethod
@@ -172,6 +174,14 @@ class PaymentPolicyInput(BaseModel):
         cleaned = [_identifier(item, "allow-list identifier") for item in value]
         if len(set(cleaned)) != len(cleaned):
             raise ValueError("wallet policy allow-list contains duplicates")
+        return cleaned
+
+    @field_validator("allowed_recipient_addresses")
+    @classmethod
+    def recipient_allowlist(cls, value: list[str]) -> list[str]:
+        cleaned = [canonical_evm_address(item) for item in value]
+        if len(set(cleaned)) != len(cleaned):
+            raise ValueError("wallet recipient allow-list contains duplicates")
         return cleaned
 
     @field_validator(
@@ -240,6 +250,8 @@ class PaymentPolicyRecord:
     emergency_paused: bool
     policy_version: int
     updated_at: str
+    recipient_allowlist_enabled: bool
+    allowed_recipient_addresses: tuple[str, ...]
 
 
 @dataclass(frozen=True)

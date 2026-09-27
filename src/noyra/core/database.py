@@ -231,7 +231,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 63
+CURRENT_SCHEMA_VERSION = 66
 
 MIGRATIONS: dict[int, str] = {
     2: """
@@ -5812,6 +5812,8 @@ CREATE TABLE IF NOT EXISTS wallet_payment_policies (
     automatic_max_amount TEXT NOT NULL,
     anomaly_block INTEGER NOT NULL CHECK(anomaly_block IN (0,1)),
     emergency_paused INTEGER NOT NULL CHECK(emergency_paused IN (0,1)),
+    recipient_allowlist_enabled INTEGER NOT NULL DEFAULT 0 CHECK(recipient_allowlist_enabled IN (0,1)),
+    allowed_recipient_addresses_json TEXT NOT NULL DEFAULT '[]',
     policy_version INTEGER NOT NULL CHECK(policy_version > 0),
     updated_at TEXT NOT NULL,
     state_hash TEXT NOT NULL
@@ -5874,9 +5876,10 @@ INSERT OR IGNORE INTO wallet_payment_policies(
     subject_id, mode, allowed_network_ids_json, allowed_asset_ids_json,
     per_order_limit, daily_limit, monthly_limit, daily_order_limit, monthly_order_limit,
     min_balance, max_observation_age_seconds, automatic_max_amount, anomaly_block,
-    emergency_paused, policy_version, updated_at, state_hash
+    emergency_paused, recipient_allowlist_enabled, allowed_recipient_addresses_json,
+    policy_version, updated_at, state_hash
 )
-SELECT subject_id, 'disabled', '[]', '[]', '0', '0', '0', 0, 0, '0', 0, '0', 1, 0,
+SELECT subject_id, 'disabled', '[]', '[]', '0', '0', '0', 0, 0, '0', 0, '0', 1, 0, 0, '[]',
        1, updated_at, 'bootstrap'
 FROM subject_identity;
 CREATE TRIGGER IF NOT EXISTS prevent_wallet_bounty_identity_update
@@ -6344,6 +6347,44 @@ BEGIN
     SELECT RAISE(ABORT, 'wallet balance acquisition run reference mismatch');
 END;
 """,
+    64: """
+CREATE TABLE IF NOT EXISTS search_routing_settings (
+    subject_id TEXT PRIMARY KEY REFERENCES subject_identity(subject_id),
+    mode TEXT NOT NULL CHECK (mode IN ('model_first', 'api_first', 'auto')),
+    state_hash TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS search_provider_controls (
+    config_id TEXT PRIMARY KEY REFERENCES search_provider_configs(config_id),
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    state_hash TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_search_provider_controls_config
+    ON search_provider_controls(config_id, enabled);
+""",
+    65: """
+CREATE TABLE IF NOT EXISTS search_provider_controls_v65 (
+    config_id TEXT PRIMARY KEY REFERENCES search_provider_configs(config_id),
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    state_hash TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+INSERT OR REPLACE INTO search_provider_controls_v65(config_id, enabled, state_hash, updated_at)
+SELECT config_id, enabled, state_hash, updated_at FROM search_provider_controls;
+DROP TABLE IF EXISTS search_provider_controls;
+ALTER TABLE search_provider_controls_v65 RENAME TO search_provider_controls;
+CREATE INDEX IF NOT EXISTS idx_search_provider_controls_config
+    ON search_provider_controls(config_id, enabled);
+""",
+    66: """
+-- Optional recipient allow-list fields are added and included in the policy
+-- state hash by the Python migration hook.  Keeping the DDL marker empty
+-- makes the migration replay-safe for fresh schemas whose base DDL already
+-- contains the columns.
+SELECT 1;
+""",
 }
 
 
@@ -6465,8 +6506,55 @@ def wallet_payment_policy_state_hash(
     emergency_paused: int | bool,
     policy_version: int,
     updated_at: str,
+    recipient_allowlist_enabled: int | bool = False,
+    allowed_recipient_addresses_json: str = "[]",
 ) -> str:
     """Hash the complete durable wallet payment policy state."""
+    validate_wallet_timestamp(updated_at)
+    return content_hash(
+        {
+            "subject_id": subject_id,
+            "mode": mode,
+            "allowed_network_ids_json": allowed_network_ids_json,
+            "allowed_asset_ids_json": allowed_asset_ids_json,
+            "per_order_limit": per_order_limit,
+            "daily_limit": daily_limit,
+            "monthly_limit": monthly_limit,
+            "daily_order_limit": strict_int(daily_order_limit),
+            "monthly_order_limit": strict_int(monthly_order_limit),
+            "min_balance": min_balance,
+            "max_observation_age_seconds": strict_int(max_observation_age_seconds),
+            "automatic_max_amount": automatic_max_amount,
+            "anomaly_block": int(anomaly_block),
+            "emergency_paused": int(emergency_paused),
+            "recipient_allowlist_enabled": int(recipient_allowlist_enabled),
+            "allowed_recipient_addresses_json": allowed_recipient_addresses_json,
+            "policy_version": strict_int(policy_version),
+            "updated_at": updated_at,
+        }
+    )
+
+
+def legacy_wallet_payment_policy_state_hash_v65(
+    *,
+    subject_id: str,
+    mode: str,
+    allowed_network_ids_json: str,
+    allowed_asset_ids_json: str,
+    per_order_limit: str,
+    daily_limit: str,
+    monthly_limit: str,
+    daily_order_limit: int,
+    monthly_order_limit: int,
+    min_balance: str,
+    max_observation_age_seconds: int,
+    automatic_max_amount: str,
+    anomaly_block: int | bool,
+    emergency_paused: int | bool,
+    policy_version: int,
+    updated_at: str,
+) -> str:
+    """Hash contract used immediately before schema 66 added recipient policy."""
     validate_wallet_timestamp(updated_at)
     return content_hash(
         {
@@ -8219,6 +8307,101 @@ END;
             )
 
     @staticmethod
+    def _upgrade_wallet_payment_policy_recipient_allowlist(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Add optional recipient policy fields and migrate their hash safely."""
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(wallet_payment_policies)")
+        }
+        if "recipient_allowlist_enabled" not in columns:
+            connection.execute(
+                "ALTER TABLE wallet_payment_policies ADD COLUMN "
+                "recipient_allowlist_enabled INTEGER NOT NULL DEFAULT 0 "
+                "CHECK(recipient_allowlist_enabled IN (0,1))"
+            )
+        if "allowed_recipient_addresses_json" not in columns:
+            connection.execute(
+                "ALTER TABLE wallet_payment_policies ADD COLUMN "
+                "allowed_recipient_addresses_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        rows = connection.execute(
+            "SELECT p.*, s.created_at AS identity_created_at "
+            "FROM wallet_payment_policies p JOIN subject_identity s USING(subject_id) "
+            "ORDER BY p.subject_id"
+        ).fetchall()
+        for row in rows:
+            expected = wallet_payment_policy_state_hash(
+                subject_id=str(row["subject_id"]),
+                mode=str(row["mode"]),
+                allowed_network_ids_json=str(row["allowed_network_ids_json"]),
+                allowed_asset_ids_json=str(row["allowed_asset_ids_json"]),
+                per_order_limit=str(row["per_order_limit"]),
+                daily_limit=str(row["daily_limit"]),
+                monthly_limit=str(row["monthly_limit"]),
+                daily_order_limit=strict_int(row["daily_order_limit"]),
+                monthly_order_limit=strict_int(row["monthly_order_limit"]),
+                min_balance=str(row["min_balance"]),
+                max_observation_age_seconds=strict_int(row["max_observation_age_seconds"]),
+                automatic_max_amount=str(row["automatic_max_amount"]),
+                anomaly_block=int(row["anomaly_block"]),
+                emergency_paused=int(row["emergency_paused"]),
+                recipient_allowlist_enabled=int(row["recipient_allowlist_enabled"]),
+                allowed_recipient_addresses_json=str(row["allowed_recipient_addresses_json"]),
+                policy_version=strict_int(row["policy_version"]),
+                updated_at=str(row["updated_at"]),
+            )
+            if str(row["state_hash"]) == expected:
+                continue
+            legacy = legacy_wallet_payment_policy_state_hash_v65(
+                subject_id=str(row["subject_id"]),
+                mode=str(row["mode"]),
+                allowed_network_ids_json=str(row["allowed_network_ids_json"]),
+                allowed_asset_ids_json=str(row["allowed_asset_ids_json"]),
+                per_order_limit=str(row["per_order_limit"]),
+                daily_limit=str(row["daily_limit"]),
+                monthly_limit=str(row["monthly_limit"]),
+                daily_order_limit=strict_int(row["daily_order_limit"]),
+                monthly_order_limit=strict_int(row["monthly_order_limit"]),
+                min_balance=str(row["min_balance"]),
+                max_observation_age_seconds=strict_int(row["max_observation_age_seconds"]),
+                automatic_max_amount=str(row["automatic_max_amount"]),
+                anomaly_block=int(row["anomaly_block"]),
+                emergency_paused=int(row["emergency_paused"]),
+                policy_version=strict_int(row["policy_version"]),
+                updated_at=str(row["updated_at"]),
+            )
+            is_default_bootstrap = (
+                str(row["state_hash"]) == "bootstrap"
+                and str(row["mode"]) == "disabled"
+                and str(row["allowed_network_ids_json"]) == "[]"
+                and str(row["allowed_asset_ids_json"]) == "[]"
+                and str(row["per_order_limit"]) == "0"
+                and str(row["daily_limit"]) == "0"
+                and str(row["monthly_limit"]) == "0"
+                and int(row["daily_order_limit"]) == 0
+                and int(row["monthly_order_limit"]) == 0
+                and str(row["min_balance"]) == "0"
+                and int(row["max_observation_age_seconds"]) == 0
+                and str(row["automatic_max_amount"]) == "0"
+                and int(row["anomaly_block"]) == 1
+                and int(row["emergency_paused"]) == 0
+                and int(row["recipient_allowlist_enabled"]) == 0
+                and str(row["allowed_recipient_addresses_json"]) == "[]"
+                and int(row["policy_version"]) == 1
+                and str(row["updated_at"]) == str(row["identity_created_at"])
+            )
+            if str(row["state_hash"]) != legacy and not is_default_bootstrap:
+                raise RuntimeError(
+                    "wallet payment policy hash mismatch before recipient allow-list migration: "
+                    f"{row['subject_id']}"
+                )
+            connection.execute(
+                "UPDATE wallet_payment_policies SET state_hash=? WHERE subject_id=?",
+                (expected, row["subject_id"]),
+            )
+
+    @staticmethod
     def _upgrade_wallet_ledger_hashes(connection: sqlite3.Connection, *, approved: bool) -> None:
         for table, primary_key, trigger, hasher, legacy_hasher in (
             (
@@ -9082,6 +9265,20 @@ END;
                         connection.execute(
                             f"PRAGMA foreign_keys = {'ON' if foreign_keys_enabled else 'OFF'}"
                         )
+                    continue
+                if target_version == 66:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._upgrade_wallet_payment_policy_recipient_allowlist(connection)
+                        self._execute_sql_script(connection, migration)
+                        connection.execute(
+                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                            (str(target_version),),
+                        )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
                     continue
                 if target_version in {33, 48, 50, 51, 52}:
                     try:

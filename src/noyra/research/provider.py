@@ -18,6 +18,7 @@ from noyra.core.types import (
     utc_now,
 )
 
+from .routing import list_search_provider_controls
 from .types import SearchProviderInput, SearchProviderRecord
 
 _MAX_SEARCH_RESULTS = 20
@@ -212,7 +213,8 @@ class SearchProviderStore:
                 "AND status = 'active' ORDER BY label, created_at",
                 (subject_id,),
             ).fetchall()
-        return [self._from_row(row) for row in rows]
+        controls = list_search_provider_controls(self.database, subject_id)
+        return [self._from_row(row) for row in rows if controls.get(str(row["config_id"]), True)]
 
     def list(self, subject_id: str) -> list[SearchProviderRecord]:
         with self.database.connection() as connection:

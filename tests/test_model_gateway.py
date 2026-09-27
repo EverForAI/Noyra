@@ -1649,6 +1649,74 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.code, "provider_model_mismatch")
         self.assertEqual(requests, [])
 
+    async def test_provider_can_probe_unstored_configuration_without_resource_state(self) -> None:
+        captured: dict[str, Any] = {}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            captured["path"] = request.url.path
+            captured["authorization"] = request.headers.get("authorization")
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        result = await OpenAICompatibleProvider.probe_unstored(
+            base_url="https://models.example/v1",
+            model="remote-model",
+            api_key=SecretStr("unstored-secret"),
+            client=client,
+        )
+        await client.aclose()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["model"], "remote-model")
+        self.assertEqual(captured["path"], "/v1/chat/completions")
+        self.assertEqual(captured["authorization"], "Bearer unstored-secret")
+        self.assertNotIn("unstored-secret", repr(result))
+
+    async def test_provider_lists_models_from_openai_compatible_endpoint(self) -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.path, "/v1/models")
+            return httpx.Response(
+                200,
+                json={"data": [{"id": "model-b"}, {"id": "model-a"}, {"id": "model-b"}]},
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        models = await OpenAICompatibleProvider.list_models_unstored(
+            base_url="https://models.example/v1",
+            api_key=SecretStr("unstored-secret"),
+            client=client,
+        )
+        await client.aclose()
+        self.assertEqual(models, ["model-a", "model-b"])
+
+    async def test_probe_reports_elapsed_and_rejects_empty_choice_content(self) -> None:
+        async def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"choices": [{"message": {"content": ""}}]})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with self.assertRaises(ProviderCallError) as caught:
+            await OpenAICompatibleProvider.probe_unstored(
+                base_url="https://models.example/v1",
+                model="remote-model",
+                api_key=SecretStr("k"),
+                client=client,
+            )
+        await client.aclose()
+        self.assertEqual(caught.exception.code, "provider_response_empty")
+
+    async def test_list_models_rejects_malformed_items_without_secret(self) -> None:
+        async def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"data": [{"id": "ok"}, {"id": 3}]})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with self.assertRaises(ProviderCallError) as caught:
+            await OpenAICompatibleProvider.list_models_unstored(
+                base_url="https://models.example/v1", api_key=SecretStr("secret"), client=client
+            )
+        await client.aclose()
+        self.assertEqual(caught.exception.code, "model_discovery_invalid_response")
+        self.assertNotIn("secret", str(caught.exception))
+
 
 @pytest.mark.asyncio
 async def test_model_secret_is_not_persisted(tmp_path: Path) -> None:

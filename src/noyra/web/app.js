@@ -5,6 +5,7 @@ const requestControllers = new Map();
 const MAX_EXPORT_DOWNLOAD_BYTES = 128 * 1024 * 1024;
 let publicPostCaptchaId = "";
 let publicPostIdempotencyKey = "";
+let publicPostCaptchaGeneration = 0;
 
 // Private management routes and forms belong exclusively to /admin.
 // These names document the boundary covered by the compatibility contract:
@@ -59,6 +60,28 @@ async function getJson(path, options = {}) {
   return payload;
 }
 
+function publicErrorMessage(error) {
+  const messages = {
+    at_rest_boundary_unavailable: "安全存储暂时不可用，验证码无法生成。请稍后刷新，或联系管理员检查服务器存储。",
+    public_post_integrity_unavailable: "公开内容服务正在进行完整性检查，请稍后再试。",
+    public_post_capacity_full: "当前公开投稿容量已满，请稍后再试。",
+    public_post_queue_full: "审核队列暂时已满，请稍后再试。",
+    captcha_rate_limited: "验证码请求过于频繁，请稍后再试。",
+    invalid_captcha: "验证码不正确或已过期，请换一张。",
+    public_network_unavailable: "公开档案暂时无法连接，请稍后刷新页面。",
+    service_unavailable: "公开服务暂时不可用，请稍后刷新页面。",
+  };
+  if (error?.message === "Failed to fetch" || error?.name === "TypeError") {
+    return messages.public_network_unavailable;
+  }
+  const message = error?.message;
+  if (messages[message]) return messages[message];
+  if (typeof message === "string" && (/^HTTP \d+$/i.test(message) || /^[a-z][a-z0-9_]+$/.test(message))) {
+    return "公开服务暂时不可用，请稍后刷新页面。";
+  }
+  return message || "服务暂时不可用，请稍后再试";
+}
+
 function table(rows, columns) {
   if (!rows.length) return '<div class="empty">暂无记录</div>';
   const head = columns.map(([, label]) => `<th>${escapeHtml(label)}</th>`).join("");
@@ -69,26 +92,47 @@ function table(rows, columns) {
 function renderDiary(rows) {
   return rows.length
     ? rows.map((entry) => `<article class="diary-entry"><h2>${escapeHtml(entry.title)}</h2><time>${escapeHtml(entry.created_at)}</time><p>${escapeHtml(entry.body)}</p></article>`).join("")
-    : '<div class="empty">暂无公开日记</div>';
+    : '<div class="empty empty-state"><span class="empty-mark" aria-hidden="true">N</span><strong>新的公开记录尚未出现</strong><p>当 Noyra 留下可公开的日记时，它们会按时间收录在这里。</p></div>';
 }
 
 function renderPosts(rows) {
   const provenanceLabels = { visitor: "访客自填／未验证", subject: "主体", operator: "创建者", verified_channel: "已验证渠道" };
   return rows.length
     ? rows.map((post) => `<article class="diary-entry"><h2>${escapeHtml(post.title)}</h2><div class="goal-meta"><span>${escapeHtml(post.kind)}</span><span>${escapeHtml(post.author_label)}</span><span>${escapeHtml(provenanceLabels[post.author_provenance] || "来源未知")}</span><time>${escapeHtml(post.published_at)}</time></div><p>${escapeHtml(post.content)}</p></article>`).join("")
-    : '<div class="empty">暂无已发布帖子</div>';
+    : '<div class="empty empty-state"><span class="empty-mark" aria-hidden="true">N</span><strong>这里还没有已发布的帖子</strong><p>通过审核的公开投稿会显示在这里。</p></div>';
 }
 
 async function loadState(generation, signal) {
   const state = await getJson("/api/state", { signal });
   if (!currentViewGeneration(generation)) return;
-  document.querySelector("#identity").textContent = state.display_name || state.subject_id || "Noyra";
-  document.querySelector("#lifecycle").textContent = state.lifecycle?.state || "-";
-  document.querySelector("#online-status").textContent = state.online ? "在线" : "离线";
-  document.querySelector("#version").textContent = state.schema_version ?? "-";
-  document.querySelector("#diary-count").textContent = state.public_diary_count ?? "-";
-  document.querySelector("#private-plan").textContent = "未公开";
-  document.querySelector("#state-format").textContent = state.schema || "-";
+  const identity = document.querySelector("#identity");
+  const lifecycleNode = document.querySelector("#lifecycle");
+  const onlineNode = document.querySelector("#online-status");
+  const versionNode = document.querySelector("#version");
+  const diaryCountNode = document.querySelector("#diary-count");
+  const privatePlanNode = document.querySelector("#private-plan");
+  const stateFormatNode = document.querySelector("#state-format");
+  if (identity) identity.textContent = state.display_name || state.subject_id || "Noyra";
+  if (lifecycleNode) lifecycleNode.textContent = state.lifecycle?.state || "-";
+  if (onlineNode) onlineNode.textContent = state.online ? "在线" : "离线";
+  if (versionNode) versionNode.textContent = state.schema_version ?? "-";
+  if (diaryCountNode) diaryCountNode.textContent = state.public_diary_count ?? "-";
+  if (privatePlanNode) privatePlanNode.textContent = "未公开";
+  if (stateFormatNode) stateFormatNode.textContent = state.schema || "-";
+  const lifecycle = state.lifecycle?.state || "未知";
+  const dot = document.querySelector("#header-state-dot");
+  const label = document.querySelector("#header-state-label");
+  dot?.classList.toggle("is-online", Boolean(state.online));
+  dot?.classList.toggle("is-offline", !state.online);
+  if (label) label.textContent = state.online ? "在线运行" : "暂时离线";
+  const status = document.querySelector("#subject-status");
+  if (status) status.textContent = state.online ? "公开状态可读取" : "等待恢复连接";
+  const heroLifecycle = document.querySelector("#hero-lifecycle");
+  const heroVersion = document.querySelector("#hero-version");
+  const heroUpdated = document.querySelector("#hero-updated");
+  if (heroLifecycle) heroLifecycle.textContent = lifecycle;
+  if (heroVersion) heroVersion.textContent = state.schema_version ?? "-";
+  if (heroUpdated) heroUpdated.textContent = state.online ? "刚刚同步" : "暂不可用";
 }
 
 async function loadView(generation, signal) {
@@ -121,15 +165,22 @@ async function refresh() {
     ]);
   } catch (error) {
     if (!isAbortError(error) && currentViewGeneration(generation)) {
-      content.innerHTML = `<div class="empty">${escapeHtml(error.message || "加载失败")}</div>`;
+      content.innerHTML = `<div class="empty empty-state error-state"><span class="empty-mark" aria-hidden="true">!</span><strong>${escapeHtml(publicErrorMessage(error))}</strong><p>请稍后刷新页面。如果问题持续存在，请联系管理员检查公开服务。</p></div>`;
     }
   }
 }
 
 async function loadPublicPostCaptcha() {
+  const generation = ++publicPostCaptchaGeneration;
   const image = document.querySelector("#public-post-captcha-image");
   const answer = document.querySelector("#public-post-captcha-answer");
+  const imageWrap = document.querySelector("#captcha-image-wrap");
+  const loading = document.querySelector("#captcha-loading");
+  const status = document.querySelector("#captcha-status");
   if (!image || !answer) return;
+  imageWrap?.classList.remove("has-image");
+  if (loading) loading.textContent = "正在生成验证码";
+  if (status) { status.textContent = ""; status.classList.remove("error"); }
   try {
     const response = await fetch("/api/public-posts/captcha", {
       method: "POST",
@@ -143,13 +194,19 @@ async function loadPublicPostCaptcha() {
     if (typeof payload?.challenge_id !== "string" || typeof payload?.image !== "string" || !payload.image.startsWith("data:image/png;base64,")) {
       throw new Error("验证码响应无效");
     }
-    publicPostCaptchaId = payload.challenge_id;
+    if (generation !== publicPostCaptchaGeneration) return;
     image.src = payload.image;
+    await image.decode();
+    if (generation !== publicPostCaptchaGeneration) return;
+    publicPostCaptchaId = payload.challenge_id;
+    imageWrap?.classList.add("has-image");
     answer.value = "";
   } catch (error) {
+    if (generation !== publicPostCaptchaGeneration) return;
     publicPostCaptchaId = "";
     image.removeAttribute("src");
-    document.querySelector("#public-post-status").textContent = error.message || "验证码加载失败";
+    if (loading) loading.textContent = "验证码暂时不可用";
+    if (status) { status.textContent = publicErrorMessage(error); status.classList.add("error"); }
   }
 }
 
@@ -204,7 +261,7 @@ document.querySelector("#public-post-form")?.addEventListener("submit", async (e
     status.textContent = "已提交，等待审核";
     await loadPublicPostCaptcha();
   } catch (error) {
-    status.textContent = error.message || "提交失败";
+    status.textContent = publicErrorMessage(error);
     if (error.message === "invalid_captcha") {
       await loadPublicPostCaptcha();
     }

@@ -116,7 +116,13 @@ from noyra.model.errors import (
     ProviderCallError,
     StructuredOutputError,
 )
-from noyra.research import SearchProviderInput, SearchProviderStore
+from noyra.research import SearchExecutor, SearchProviderInput, SearchProviderStore
+from noyra.research.routing import (
+    get_search_routing_mode,
+    list_search_provider_controls,
+    set_search_provider_enabled,
+    set_search_routing_mode,
+)
 from noyra.service_contract import APIRouteContract, route_contracts
 from noyra.sleep import FatigueTracker, SleepReflectionPlan, SleepRunRecord
 from noyra.wallet import (
@@ -1957,6 +1963,9 @@ class NoyraHTTPServer:
                 if parsed.path == "/styles.css":
                     self._asset("styles.css", "text/css; charset=utf-8")
                     return
+                if parsed.path == "/assets/public-hero.webp":
+                    self._asset("assets/public-hero.webp", "image/webp")
+                    return
                 if parsed.path == "/favicon.ico":
                     self.send_response(HTTPStatus.NO_CONTENT)
                     self._headers("image/x-icon", 0)
@@ -2594,6 +2603,17 @@ class NoyraHTTPServer:
                     if not self._authorized():
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
+                    try:
+                        controls = list_search_provider_controls(
+                            owner.kernel.database, owner.kernel.subject_id
+                        )
+                    except IntegrityError:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "search_provider_integrity_unavailable"},
+                            retry_after=60,
+                        )
+                        return
                     self._json(
                         HTTPStatus.OK,
                         [
@@ -2604,11 +2624,33 @@ class NoyraHTTPServer:
                                 "key_fingerprint": record.key_fingerprint[:12],
                                 "rate_limit_per_hour": record.rate_limit_per_hour,
                                 "status": record.status,
+                                "enabled": controls.get(record.config_id, True)
+                                if record.status == "active"
+                                else False,
                                 "created_at": record.created_at,
                                 "revoked_at": record.revoked_at,
                             }
                             for record in owner.search_providers.list(owner.kernel.subject_id)
                         ],
+                    )
+                elif parsed.path == "/api/config/search-routing":
+                    if not self._authorized():
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    try:
+                        mode, updated_at = get_search_routing_mode(
+                            owner.kernel.database, owner.kernel.subject_id
+                        )
+                    except IntegrityError:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "search_routing_integrity_unavailable"},
+                            retry_after=60,
+                        )
+                        return
+                    self._json(
+                        HTTPStatus.OK,
+                        {"mode": mode, "updated_at": updated_at},
                     )
                 elif parsed.path == "/api/config/wallet-networks":
                     if not self._authorized():
@@ -3405,6 +3447,12 @@ class NoyraHTTPServer:
                 if self.path == "/api/config/search-providers":
                     self._configure_search_provider()
                     return
+                if self.path == "/api/config/search-providers/test":
+                    self._test_unstored_search_provider()
+                    return
+                if self.path == "/api/config/search-routing":
+                    self._configure_search_routing()
+                    return
                 if self.path == "/api/config/inbound-bindings":
                     self._configure_inbound_binding()
                     return
@@ -3416,8 +3464,19 @@ class NoyraHTTPServer:
                 ):
                     self._revoke_search_provider()
                     return
+                if self.path.startswith("/api/config/search-providers/") and (
+                    self.path.endswith("/enable") or self.path.endswith("/disable")
+                ):
+                    self._set_search_provider_enabled()
+                    return
                 if self.path == "/api/config/model-resources":
                     self._configure_model_resource()
+                    return
+                if self.path == "/api/config/model-resources/test":
+                    self._test_unstored_model_resource()
+                    return
+                if self.path == "/api/config/model-resources/models":
+                    self._discover_unstored_models()
                     return
                 if self.path == "/api/config/embedding-resources":
                     self._configure_embedding_resource()
@@ -5000,6 +5059,138 @@ class NoyraHTTPServer:
                     },
                 )
 
+            def _configure_search_routing(self) -> None:
+                if not self._authorized():
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+                    return
+                payload = self._request_json()
+                if payload is None:
+                    return
+                if (
+                    not isinstance(payload, dict)
+                    or set(payload) != {"mode"}
+                    or not isinstance(payload.get("mode"), str)
+                    or payload["mode"] not in {"model_first", "api_first", "auto"}
+                ):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_search_routing"})
+                    return
+                mode = str(payload["mode"])
+                now = set_search_routing_mode(owner.kernel.database, owner.kernel.subject_id, mode)
+                owner.audit_admin_event("search_routing_updated", self._actor(), {"mode": mode})
+                self._json(HTTPStatus.OK, {"mode": mode, "updated_at": now})
+
+            def _set_search_provider_enabled(self) -> None:
+                if not self._authorized():
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+                    return
+                payload = self._request_json()
+                if payload is None:
+                    return
+                if not isinstance(payload, dict) or set(payload) != {"reason"}:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_search_provider"})
+                    return
+                reason = payload.get("reason")
+                if not isinstance(reason, str) or not reason.strip():
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_search_provider"})
+                    return
+                prefix = "/api/config/search-providers/"
+                suffix = "/enable" if self.path.endswith("/enable") else "/disable"
+                config_id = self.path.removeprefix(prefix).removesuffix(suffix)
+                try:
+                    now = set_search_provider_enabled(
+                        owner.kernel.database,
+                        config_id,
+                        owner.kernel.subject_id,
+                        suffix == "/enable",
+                    )
+                except ValueError:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_search_provider"})
+                    return
+                owner.audit_admin_event(
+                    "search_provider_enabled"
+                    if suffix == "/enable"
+                    else "search_provider_disabled",
+                    self._actor(),
+                    {"config_id": config_id, "reason": reason},
+                )
+                self._json(
+                    HTTPStatus.OK,
+                    {"config_id": config_id, "enabled": suffix == "/enable", "updated_at": now},
+                )
+
+            def _test_unstored_search_provider(self) -> None:
+                if not self._authorized():
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+                    return
+                payload = self._request_json()
+                if payload is None:
+                    return
+                if (
+                    not isinstance(payload, dict)
+                    or set(payload) != {"provider_type", "api_key"}
+                    or not isinstance(payload.get("provider_type"), str)
+                    or not isinstance(payload.get("api_key"), str)
+                ):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_search_provider_test"})
+                    return
+                provider_type = payload["provider_type"]
+                api_key = payload["api_key"]
+                try:
+                    if not api_key.strip() or len(api_key) > 4_096:
+                        raise ValueError("invalid key")
+
+                    async def _test() -> dict[str, Any]:
+                        executor = SearchExecutor(owner.kernel.database, owner.search_providers)
+                        try:
+                            return await executor.test_unstored(provider_type, SecretStr(api_key))
+                        finally:
+                            await executor.aclose()
+
+                    result = asyncio.run(_test())
+                except ValueError:
+                    self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "invalid_search_provider_test"},
+                    )
+                    return
+                except Exception as error:
+                    safe_error = (
+                        "search_provider_test_unknown"
+                        if type(error).__name__ == "SearchOutcomeUnknownError"
+                        else "search_provider_test_failed"
+                    )
+                    owner.audit_admin_event(
+                        "search_provider_test_failed",
+                        self._actor(),
+                        {"provider_type": provider_type, "error": safe_error},
+                    )
+                    self._json(HTTPStatus.BAD_GATEWAY, {"error": safe_error})
+                    return
+                owner.audit_admin_event(
+                    "search_provider_test_succeeded",
+                    self._actor(),
+                    {
+                        "provider_type": provider_type,
+                        "result_count": result["result_count"],
+                    },
+                )
+                self._json(HTTPStatus.OK, result)
+
             def _configure_transport(self) -> None:
                 if not self._authorized():
                     self._discard_small_request_body()
@@ -5527,6 +5718,130 @@ class NoyraHTTPServer:
                         "status": record.status,
                     },
                 )
+
+            def _draft_model_credentials(
+                self, payload: object, *, require_model: bool
+            ) -> tuple[str, str, SecretStr]:
+                if not isinstance(payload, dict):
+                    raise ValueError("model draft must be an object")
+                allowed = {"base_url", "model", "api_keys", "api_key"}
+                if set(payload) - allowed:
+                    raise ValueError("unknown model draft field")
+                base_url = payload.get("base_url")
+                model = payload.get("model", "model-discovery-placeholder")
+                keys = payload.get("api_keys")
+                if keys is None and isinstance(payload.get("api_key"), str):
+                    keys = [payload["api_key"]]
+                if not isinstance(base_url, str) or not base_url.strip():
+                    raise ValueError("model draft base URL is required")
+                if not isinstance(model, str) or not model.strip():
+                    raise ValueError("model draft model is required")
+                if require_model and model == "model-discovery-placeholder":
+                    raise ValueError("model draft model is required")
+                if (
+                    not isinstance(keys, list)
+                    or not keys
+                    or len(keys) > 128
+                    or any(
+                        not isinstance(key, str) or not key.strip() or len(key) > 4096
+                        for key in keys
+                    )
+                ):
+                    raise ValueError("model draft API key is invalid")
+                return base_url, model, SecretStr(keys[0])
+
+            def _test_unstored_model_resource(self) -> None:
+                if not self._authorized():
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+                    return
+                payload = self._request_json()
+                if payload is None:
+                    return
+                try:
+                    base_url, model, api_key = self._draft_model_credentials(
+                        payload, require_model=True
+                    )
+                    result = asyncio.run(
+                        OpenAICompatibleProvider.probe_unstored(
+                            base_url=base_url, model=model, api_key=api_key
+                        )
+                    )
+                except (ValueError, TypeError):
+                    owner.audit_admin_event(
+                        "model_resource_draft_test_rejected",
+                        self._actor(),
+                        {"error": "invalid_model_resource_test"},
+                    )
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_model_resource_test"})
+                    return
+                except ProviderCallError as error:
+                    owner.audit_admin_event(
+                        "model_resource_draft_test_failed",
+                        self._actor(),
+                        {"error": error.code},
+                    )
+                    self._json(HTTPStatus.BAD_GATEWAY, {"error": error.code})
+                    return
+                owner.audit_admin_event(
+                    "model_resource_draft_test_succeeded",
+                    self._actor(),
+                    {"model": result.get("model")},
+                )
+                self._json(HTTPStatus.OK, result)
+
+            def _discover_unstored_models(self) -> None:
+                if not self._authorized():
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+                    return
+                payload = self._request_json()
+                if payload is None:
+                    return
+                try:
+                    base_url, _, api_key = self._draft_model_credentials(
+                        payload, require_model=False
+                    )
+                    models = asyncio.run(
+                        OpenAICompatibleProvider.list_models_unstored(
+                            base_url=base_url, api_key=api_key
+                        )
+                    )
+                except (ValueError, TypeError):
+                    owner.audit_admin_event(
+                        "model_resource_discovery_rejected",
+                        self._actor(),
+                        {"error": "invalid_model_discovery"},
+                    )
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_model_discovery"})
+                    return
+                except ProviderCallError as error:
+                    status = (
+                        HTTPStatus.NOT_IMPLEMENTED
+                        if error.code == "model_discovery_unsupported"
+                        else HTTPStatus.BAD_GATEWAY
+                    )
+                    owner.audit_admin_event(
+                        "model_resource_discovery_failed",
+                        self._actor(),
+                        {"error": error.code},
+                    )
+                    self._json(status, {"error": error.code})
+                    return
+                owner.audit_admin_event(
+                    "model_resource_discovery_succeeded",
+                    self._actor(),
+                    {"model_count": len(models)},
+                )
+                self._json(HTTPStatus.OK, {"models": models})
 
             def _configure_embedding_resource(self) -> None:
                 if not self._authorized():

@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -31,10 +31,12 @@ from noyra.model import (
     EmbeddingResourceStore,
     FakeProvider,
     ModelUsage,
+    OpenAICompatibleProvider,
     ProviderResponse,
     RoutedModelGateway,
 )
 from noyra.model.errors import ProviderCallError
+from noyra.research import SearchExecutor
 from noyra.service import NoyraHTTPServer, NoyraService, ServiceSettings
 from noyra.sleep import SleepEngine, SleepReflectionPlan
 
@@ -179,7 +181,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(knowledge_status, 200)
         assert isinstance(knowledge, dict)
         self.assertIn("review_queue", knowledge)
-        for asset in ("/app.js", "/styles.css"):
+        for asset in ("/app.js", "/styles.css", "/assets/public-hero.webp"):
             with urlopen(f"{self.base_url}{asset}", timeout=5) as response:
                 self.assertGreater(len(response.read()), 100)
         self.assertEqual(self.get_json("/api/diary?limit=invalid"), [])
@@ -824,6 +826,120 @@ class ServiceTestCase(unittest.TestCase):
 
         database_bytes = (self.data_dir / "noyra.sqlite3").read_bytes()
         self.assertNotIn(secret.encode(), database_bytes)
+
+    def test_unstored_model_probe_and_discovery_do_not_create_resource(self) -> None:
+        payload = {
+            "base_url": "https://models.example/v1",
+            "model": "draft-model",
+            "api_keys": ["draft-secret"],
+        }
+        with (
+            patch.object(
+                OpenAICompatibleProvider,
+                "probe_unstored",
+                new=AsyncMock(return_value={"ok": True, "model": "draft-model"}),
+            ) as probe,
+            patch.object(
+                OpenAICompatibleProvider,
+                "list_models_unstored",
+                new=AsyncMock(return_value=["draft-model", "other-model"]),
+            ) as discover,
+        ):
+            status, result = self.authorized_json(
+                "/api/config/model-resources/test", payload=payload
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(result, {"ok": True, "model": "draft-model"})
+            status, result = self.authorized_json(
+                "/api/config/model-resources/models",
+                payload={"base_url": payload["base_url"], "api_keys": payload["api_keys"]},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(result, {"models": ["draft-model", "other-model"]})
+            probe.assert_awaited_once()
+            discover.assert_awaited_once()
+        self.assertEqual(self.authorized_json("/api/config/model-resources")[1], [])
+        secret_dir = self.data_dir / "secrets" / "models"
+        self.assertEqual(list(secret_dir.glob("*")), [])
+
+    def test_search_routing_mode_is_authenticated_persistent_and_audited(self) -> None:
+        status, current = self.authorized_json("/api/config/search-routing")
+        self.assertEqual(status, 200)
+        self.assertEqual(current["mode"], "auto")
+        status, updated = self.authorized_json(
+            "/api/config/search-routing", payload={"mode": "api_first"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["mode"], "api_first")
+        status, current = self.authorized_json("/api/config/search-routing")
+        self.assertEqual(status, 200)
+        self.assertEqual(current["mode"], "api_first")
+        with self.kernel.database.connection() as connection:
+            audit = connection.execute(
+                "SELECT action, payload_json FROM audit_records WHERE action = ?",
+                ("search_routing_updated",),
+            ).fetchone()
+        self.assertIsNotNone(audit)
+        self.assertIn("api_first", audit["payload_json"])
+
+    def test_search_routing_rejects_non_string_mode(self) -> None:
+        request = Request(
+            f"{self.base_url}/api/config/search-routing",
+            data=json.dumps({"mode": []}).encode(),
+            method="POST",
+            headers={
+                "Authorization": "Bearer test-admin-token-with-sufficient-entropy",
+                "Content-Type": "application/json",
+            },
+        )
+        with self.assertRaises(HTTPError) as error:
+            urlopen(request, timeout=5)
+        self.assertEqual(error.exception.code, 400)
+
+    def test_unstored_search_provider_test_does_not_save_secret(self) -> None:
+        secret = "search-draft-secret"
+        with patch.object(
+            SearchExecutor,
+            "test_unstored",
+            new=AsyncMock(return_value={"ok": True, "provider_type": "brave", "result_count": 1}),
+        ) as test_provider:
+            status, result = self.authorized_json(
+                "/api/config/search-providers/test",
+                payload={"provider_type": "brave", "api_key": secret},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(result["result_count"], 1)
+        test_provider.assert_awaited_once()
+        self.assertEqual(self.authorized_json("/api/config/search-providers")[1], [])
+        self.assertNotIn(secret.encode(), (self.data_dir / "noyra.sqlite3").read_bytes())
+
+    def test_search_provider_can_be_disabled_and_reenabled(self) -> None:
+        status, created = self.authorized_json(
+            "/api/config/search-providers",
+            payload={
+                "provider_type": "brave",
+                "label": "toggle-search",
+                "api_key": "toggle-secret",
+            },
+        )
+        self.assertEqual(status, 201)
+        config_id = created["config_id"]
+        status, disabled = self.authorized_json(
+            f"/api/config/search-providers/{config_id}/disable",
+            payload={"reason": "temporary maintenance"},
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(disabled["enabled"])
+        providers = self.authorized_json("/api/config/search-providers")[1]
+        self.assertFalse(
+            next(item for item in providers if item["config_id"] == config_id)["enabled"]
+        )
+        status, enabled = self.authorized_json(
+            f"/api/config/search-providers/{config_id}/enable",
+            payload={"reason": "maintenance complete"},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(enabled["enabled"])
 
     def test_model_resource_configuration_requires_auth_and_hides_keys(self) -> None:
         secret = "model-resource-secret-that-must-not-leak"

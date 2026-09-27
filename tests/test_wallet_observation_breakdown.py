@@ -345,12 +345,13 @@ def test_breakdown_http_route_error_matrix_and_redaction(
 
     network = _network(server.wallets, server.kernel.subject_id, "HTTP", 7007)
     asset, address = _pair(server.wallets, server.kernel.subject_id, network.network_id, 7)
+    redacted_balance = "987654321012345678"
     _record(
         server.wallets,
         server.kernel.subject_id,
         asset.asset_id,
         address.address_id,
-        "123",
+        redacted_balance,
         "rpc_http",
         "2026-09-01T00:00:00.000+00:00",
     )
@@ -362,7 +363,7 @@ def test_breakdown_http_route_error_matrix_and_redaction(
     assert payload["group_by"] == "source"
     assert payload["groups"][0]["value"] == "rpc_http"
     serialized = json.dumps(payload, sort_keys=True)
-    assert "123" not in serialized
+    assert redacted_balance not in serialized
     assert network.network_id not in serialized
     assert asset.asset_id not in serialized
     assert address.address_id not in serialized

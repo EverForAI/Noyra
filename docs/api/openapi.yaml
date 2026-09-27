@@ -736,6 +736,64 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/config/search-providers/test:
+    post:
+      tags: [configuration]
+      operationId: testUnstoredSearchProvider
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+  /api/v1/config/search-routing:
+    get:
+      tags: [configuration]
+      operationId: getSearchRouting
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    post:
+      tags: [configuration]
+      operationId: setSearchRouting
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/search-providers/{configId}/enable:
+    post:
+      tags: [configuration]
+      operationId: enableSearchProvider
+      security: [{ operatorBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ConfigId' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReasonInput' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/config/search-providers/{configId}/disable:
+    post:
+      tags: [configuration]
+      operationId: disableSearchProvider
+      security: [{ operatorBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ConfigId' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReasonInput' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
   /api/v1/config/search-providers/{configId}/revoke:
     post:
       tags: [configuration]
@@ -1019,6 +1077,31 @@ paths:
         '409': { $ref: '#/components/responses/Conflict' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/model-resources/test:
+    post:
+      tags: [configuration]
+      operationId: testUnstoredModelResource
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+  /api/v1/config/model-resources/models:
+    post:
+      tags: [configuration]
+      operationId: discoverUnstoredModels
+      security: [{ operatorBearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '501': { $ref: '#/components/responses/NotImplemented' }
+        '502': { $ref: '#/components/responses/BadGateway' }
   /api/v1/config/model-resources:
     get:
       tags: [configuration]

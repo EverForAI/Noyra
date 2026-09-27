@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
+from pydantic import SecretStr
 
 from noyra.cognition import AutonomousResearch, CognitionSettings
 from noyra.core import EventStore, SubjectKernel
@@ -31,6 +32,7 @@ from noyra.research import (
     SearchExecutor,
     SearchProviderInput,
     SearchProviderStore,
+    set_search_routing_mode,
 )
 from noyra.world import SourceRegistry
 
@@ -209,6 +211,72 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
                 "evidence_event_ids": [self.evidence.event_id],
             }
         )
+
+    def test_search_routing_mode_selects_configured_preference(self) -> None:
+        research = self.research(FakeProvider([]))
+        set_search_routing_mode(
+            self.kernel.database,
+            self.subject_id,
+            "api_first",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+        self.assertEqual(research._routing_mode(), "api_first")
+
+    def test_search_routing_rejects_tampered_persistent_mode(self) -> None:
+        research = self.research(FakeProvider([]))
+        with self.kernel.database.transaction() as connection:
+            connection.execute(
+                "INSERT INTO search_routing_settings(subject_id, mode, state_hash, updated_at) "
+                "VALUES (?, ?, ?, ?)",
+                (self.subject_id, "model_first", "tampered", "2026-01-01T00:00:00+00:00"),
+            )
+        with self.assertRaises(IntegrityError):
+            research._routing_mode()
+
+    def test_search_routing_modes_choose_expected_initial_method(self) -> None:
+        config = self.provider_store.configure(
+            self.subject_id,
+            SearchProviderInput(provider_type="brave", label="routing", api_key="routing-secret"),
+            actor="operator",
+        )
+        research = self.research(FakeProvider([]))
+        for mode, expected_method, expected_provider in (
+            ("model_first", "model", None),
+            ("api_first", "api", config.config_id),
+            ("auto", "model", None),
+        ):
+            set_search_routing_mode(self.kernel.database, self.subject_id, mode)
+            self.assertEqual(
+                research._preferred_initial_method("model", None, [config]),
+                (expected_method, expected_provider),
+            )
+
+    async def test_search_provider_can_test_unstored_credentials_without_persisting_them(
+        self,
+    ) -> None:
+        authorization: list[str] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            authorization.append(request.headers.get("x-subscription-token", ""))
+            return httpx.Response(
+                200,
+                json={"web": {"results": [{"title": "Example", "url": "https://example.org"}]}},
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        executor = SearchExecutor(
+            self.kernel.database,
+            self.provider_store,
+            client=client,
+        )
+        result = await executor.test_unstored(
+            "brave", SecretStr("search-draft-secret"), query="connection test"
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["result_count"], 1)
+        self.assertEqual(authorization, ["search-draft-secret"])
+        self.assertEqual(self.provider_store.list(self.subject_id), [])
+        await client.aclose()
 
     async def test_configured_api_is_a_resource_and_autonomous_search_registers_sources(
         self,

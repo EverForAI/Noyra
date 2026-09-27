@@ -101,10 +101,12 @@ class IdentityStore:
                     subject_id, mode, allowed_network_ids_json, allowed_asset_ids_json,
                     per_order_limit, daily_limit, monthly_limit, daily_order_limit,
                     monthly_order_limit, min_balance, max_observation_age_seconds,
-                    automatic_max_amount, anomaly_block, emergency_paused, policy_version,
+                    automatic_max_amount, anomaly_block, emergency_paused,
+                    recipient_allowlist_enabled, allowed_recipient_addresses_json, policy_version,
                     updated_at, state_hash
                 ) VALUES (
-                    ?, 'disabled', '[]', '[]', '0', '0', '0', 0, 0, '0', 0, '0', 1, 0, 1, ?,
+                    ?, 'disabled', '[]', '[]', '0', '0', '0', 0, 0, '0', 0, '0', 1, 0, 0, '[]',
+                    1, ?,
                     ?
                 )""",
                 (
@@ -125,6 +127,8 @@ class IdentityStore:
                         automatic_max_amount="0",
                         anomaly_block=1,
                         emergency_paused=0,
+                        recipient_allowlist_enabled=0,
+                        allowed_recipient_addresses_json="[]",
                         policy_version=1,
                         updated_at=now,
                     ),

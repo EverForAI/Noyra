@@ -440,6 +440,22 @@ _OWNERSHIP_GRAPH_V62 = _OWNERSHIP_GRAPH_V61
 # Schema 63 changes active-address uniqueness without changing subject
 # ownership or export selection.
 _OWNERSHIP_GRAPH_V63 = _OWNERSHIP_GRAPH_V62
+_SUBJECT_TABLES_V64 = frozenset({"search_routing_settings"})
+_PARENT_TABLES_V64 = {
+    "search_provider_controls": _parent_rule("search_provider_configs", "config_id", "config_id"),
+}
+_OWNERSHIP_GRAPH_V64 = {
+    **_OWNERSHIP_GRAPH_V63,
+    **{table: _subject_rule() for table in _SUBJECT_TABLES_V64},
+    **_PARENT_TABLES_V64,
+}
+_OWNERSHIP_GRAPH_V65 = {
+    **_OWNERSHIP_GRAPH_V64,
+    "search_provider_controls": _parent_rule("search_provider_configs", "config_id", "config_id"),
+}
+# Schema 66 adds recipient policy columns to an existing subject-owned table;
+# export ownership is unchanged.
+_OWNERSHIP_GRAPH_V66 = _OWNERSHIP_GRAPH_V65
 
 _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     33: _OWNERSHIP_GRAPH_V33,
@@ -473,6 +489,9 @@ _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     61: _OWNERSHIP_GRAPH_V61,
     62: _OWNERSHIP_GRAPH_V62,
     63: _OWNERSHIP_GRAPH_V63,
+    64: _OWNERSHIP_GRAPH_V64,
+    65: _OWNERSHIP_GRAPH_V65,
+    66: _OWNERSHIP_GRAPH_V66,
 }
 
 
