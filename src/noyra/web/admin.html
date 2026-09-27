@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
   <title>Noyra 管理台</title>
   <link rel="stylesheet" href="/admin.css">
 </head>
@@ -53,8 +54,16 @@
       <p class="form-status global-status" id="global-status" role="status"></p>
       <section class="admin-section" data-section-panel="overview">
         <div class="hero-strip"><div><p class="eyebrow">CURRENT SUBJECT</p><h2 id="subject-name">连接中</h2><p id="subject-meta">正在读取公开状态</p></div><div class="health-mark" id="health-mark">●</div></div>
+        <article class="surface-card setup-guide-card" id="setup-guide" aria-labelledby="setup-guide-title">
+          <div class="card-heading"><div><h2 id="setup-guide-title">首次配置向导</h2><p class="muted">先配置认知模型，搜索、通讯与付款都可以按需启用。</p></div><span class="card-state" id="setup-guide-state">正在检查</span></div>
+          <ol id="setup-guide-list" class="setup-guide-list" aria-live="polite"><li class="setup-guide-loading">正在读取配置状态…</li></ol>
+        </article>
         <div class="metric-grid" id="overview-metrics"></div>
         <div class="two-column"><article class="surface-card"><div class="card-heading"><div><p class="eyebrow">COGNITION</p><h2>认知诊断</h2></div><span class="card-state" id="cognition-state">-</span></div><div id="cognition-summary" class="summary-list"></div></article><article class="surface-card"><div class="card-heading"><div><p class="eyebrow">STORAGE</p><h2>运行环境</h2></div></div><div id="storage-summary" class="summary-list"></div></article></div>
+        <article class="surface-card observability-card" id="model-observability">
+          <div class="card-heading"><div><h2>模型与搜索用量</h2><p class="muted">汇总最近 7 天已有的记录；不会为每次 API 请求额外写入日志。</p></div><button class="text-button" id="refresh-observability" type="button">更新</button></div>
+          <div id="model-observability-summary" class="summary-list"><div class="muted">正在读取聚合用量…</div></div>
+        </article>
       </section>
       <section class="admin-section" data-section-panel="conversation" hidden>
         <div class="section-intro"><div><p class="eyebrow">PRIVATE CHANNEL</p><h2>与主体交流</h2><p>消息会进入认知流程，回复、沉默、延迟和失败都会保留明确状态。</p></div></div>
@@ -130,8 +139,8 @@
           <article class="surface-card wallet-policy-card"><div class="card-heading"><div><h2>自动付款策略</h2><p class="muted">自动付款只受单笔上限和每日总额上限控制；白名单默认关闭。</p></div><button class="text-button" id="refresh-wallet-policy" type="button">更新</button></div>
             <form id="wallet-policy-form" class="model-grid">
               <div class="field-group"><label for="wallet-policy-mode">付款模式</label><select id="wallet-policy-mode"><option value="disabled">关闭付款</option><option value="conditional_confirmation">人工确认后付款</option><option value="automatic">自动付款</option></select></div>
-              <div class="field-group"><label for="wallet-policy-per-order">单笔上限（最小单位）</label><input id="wallet-policy-per-order" inputmode="numeric" pattern="[0-9]+" required><small class="muted">填写 0 表示不限；自动付款建议填写正数。</small></div>
-              <div class="field-group"><label for="wallet-policy-daily">每日总额上限（最小单位）</label><input id="wallet-policy-daily" inputmode="numeric" pattern="[0-9]+" required><small class="muted">自动付款只按自然日累计。</small></div>
+              <div class="field-group"><label for="wallet-policy-per-order">单笔上限（最小单位）</label><input id="wallet-policy-per-order" inputmode="numeric" pattern="[0-9]+" required><small class="muted">自动付款必须填写大于 0 的金额；关闭付款时可以填 0。</small></div>
+              <div class="field-group"><label for="wallet-policy-daily">每日总额上限（最小单位）</label><input id="wallet-policy-daily" inputmode="numeric" pattern="[0-9]+" required><small class="muted">自动付款必须填写大于 0 的每日总额上限。</small></div>
               <label class="field-group checkbox-field"><span><input id="wallet-policy-allowlist-enabled" type="checkbox"> 启用收款地址白名单</span><small class="muted">关闭时，任何通过地址格式校验的收款地址都可以使用。</small></label>
               <div class="field-group"><label for="wallet-policy-allowlist">允许的收款地址（每行一个）</label><textarea id="wallet-policy-allowlist" rows="4" spellcheck="false" placeholder="0x…"></textarea></div>
               <button type="submit">保存自动付款策略</button>
@@ -142,6 +151,7 @@
           <article class="surface-card"><div class="card-heading"><h2>支付订单与账本</h2></div><div id="wallet-order-list" class="resource-list"></div><div id="wallet-ledger-list" class="summary-list"></div></article>
         </div>
         <article class="surface-card wallet-execution-card"><div class="card-heading"><div><h2>链上转账执行</h2><p class="muted">只允许固定的原生资产或登记 ERC-20 转账。广播未知时必须先查回执，再由操作员明确重试或退款。</p></div><div class="resource-actions"><button class="text-button" id="recover-wallet-executions" type="button">恢复未完成</button><button class="text-button" id="refresh-wallet-executions" type="button">更新</button></div></div><div id="wallet-execution-list" class="resource-list" aria-live="polite"></div><p class="form-status" id="wallet-execution-status" role="status"></p></article>
+        <article class="surface-card wallet-audit-card"><div class="card-heading"><div><h2>钱包审计历史</h2><p class="muted">只展示操作与状态变化，不返回密钥或完整原始载荷。</p></div><button class="text-button" id="refresh-wallet-audits" type="button">更新</button></div><div id="wallet-audit-list" class="resource-list" aria-live="polite"><div class="muted">正在读取审计记录…</div></div><p class="form-status" id="wallet-audit-status" role="status"></p></article>
         <article class="surface-card wallet-acquisition-card"><div class="card-heading"><div><h2>余额采集队列</h2><p class="muted">运行到期读取会消耗 RPC 预算；未知结果只能由操作员明确重试。</p></div><div class="resource-actions"><label for="wallet-acquisition-status-filter">状态</label><select id="wallet-acquisition-status-filter"><option value="all">全部</option><option value="queued">排队中</option><option value="running">执行中</option><option value="retry_wait">等待重试</option><option value="unknown">结果未知</option><option value="failed">失败</option><option value="succeeded">成功</option><option value="cancelled">已取消</option></select><label for="wallet-run-limit">处理上限</label><input id="wallet-run-limit" type="number" min="1" max="32" value="1"><button id="run-wallet-acquisitions" class="primary" type="button">处理到期读取</button><button class="text-button" id="refresh-wallet-acquisitions" type="button">更新</button></div></div>
           <form id="wallet-enqueue-form" class="wallet-enqueue-form"><div class="field-group"><label for="wallet-enqueue-asset">资产</label><select id="wallet-enqueue-asset" required></select></div><div class="field-group"><label for="wallet-enqueue-address">地址</label><select id="wallet-enqueue-address" required></select></div><div class="field-group"><label for="wallet-enqueue-idempotency">幂等键（可选）</label><input id="wallet-enqueue-idempotency" maxlength="128" pattern="[A-Za-z0-9._:-]+" placeholder="相同目标可复用"></div><div class="field-group"><label for="wallet-enqueue-attempts">最大尝试次数</label><input id="wallet-enqueue-attempts" type="number" min="1" max="5" value="5" required></div><button type="submit">加入采集队列</button></form><p class="form-status" id="wallet-acquisition-form-status" role="status"></p>
           <div id="wallet-acquisition-list" class="resource-list wallet-acquisition-list" aria-live="polite"></div><p class="form-status" id="wallet-acquisition-status" role="status"></p>

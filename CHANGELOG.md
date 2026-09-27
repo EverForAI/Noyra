@@ -9,6 +9,13 @@
   budget reset visibility, and common-knowledge review/revocation views.
 - Hardened legacy sparse-database migration and cold event payload restoration
   in runtime exports.
+- Improved the Chinese management console with a configuration guide, resilient
+  partial loading, clearer request errors, and model/search usage summaries.
+- Added bounded wallet audit history and automatic payment limits that require
+  positive per-order and daily caps; the optional recipient allowlist stays off
+  by default and legacy caps no longer add hidden automatic-payment limits.
+- Added configurable canonical and social metadata, crawler rules, a sitemap,
+  and cache validation for public assets.
 
 ## preview-2026.09.07-r1
 

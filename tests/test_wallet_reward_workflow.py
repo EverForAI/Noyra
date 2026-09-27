@@ -211,6 +211,7 @@ def _fixture(
             allowed_network_ids=[network.network_id],
             allowed_asset_ids=[asset.asset_id],
             per_order_limit="100",
+            daily_limit="1000",
             automatic_max_amount="100",
         ),
         expected_version=1,

@@ -63,7 +63,7 @@ def _goal(database: Database, subject_id: str, goal_id: str = "goal-release") ->
 def _fixture(
     tmp_path: Path,
     *,
-    daily_limit: str = "0",
+    daily_limit: str = "1000000",
     per_order_limit: str = "100",
     emergency_paused: bool = False,
 ) -> tuple[Database, str, WalletStore, WalletEconomyStore, Any, Any, Any]:
@@ -282,6 +282,7 @@ def test_emergency_pause_fails_closed_for_existing_and_new_orders(tmp_path: Path
             allowed_network_ids=[network.network_id],
             allowed_asset_ids=[asset.asset_id],
             per_order_limit="100",
+            daily_limit="1000",
             automatic_max_amount="100",
             emergency_paused=True,
         ),

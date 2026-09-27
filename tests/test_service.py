@@ -5,12 +5,14 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import tempfile
 import threading
 import time
 import unittest
 import zipfile
 from collections.abc import Mapping
+from datetime import date
 from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
@@ -24,7 +26,7 @@ from noyra.capability import CapabilityGrant
 from noyra.core import EventStore, OperationInvalidated, SubjectKernel
 from noyra.core.database import CURRENT_SCHEMA_VERSION
 from noyra.core.errors import IntegrityError
-from noyra.core.types import content_hash
+from noyra.core.types import content_hash, utc_now
 from noyra.interaction import InteractionStore, PublicProjection
 from noyra.mind import GoalCandidate, GoalStore
 from noyra.model import (
@@ -865,14 +867,17 @@ class ServiceTestCase(unittest.TestCase):
     def test_search_routing_mode_is_authenticated_persistent_and_audited(self) -> None:
         status, current = self.authorized_json("/api/config/search-routing")
         self.assertEqual(status, 200)
+        assert isinstance(current, dict)
         self.assertEqual(current["mode"], "auto")
         status, updated = self.authorized_json(
             "/api/config/search-routing", payload={"mode": "api_first"}
         )
         self.assertEqual(status, 200)
+        assert isinstance(updated, dict)
         self.assertEqual(updated["mode"], "api_first")
         status, current = self.authorized_json("/api/config/search-routing")
         self.assertEqual(status, 200)
+        assert isinstance(current, dict)
         self.assertEqual(current["mode"], "api_first")
         with self.kernel.database.connection() as connection:
             audit = connection.execute(
@@ -908,6 +913,7 @@ class ServiceTestCase(unittest.TestCase):
                 payload={"provider_type": "brave", "api_key": secret},
             )
         self.assertEqual(status, 200)
+        assert isinstance(result, dict)
         self.assertEqual(result["result_count"], 1)
         test_provider.assert_awaited_once()
         self.assertEqual(self.authorized_json("/api/config/search-providers")[1], [])
@@ -923,14 +929,18 @@ class ServiceTestCase(unittest.TestCase):
             },
         )
         self.assertEqual(status, 201)
+        assert isinstance(created, dict)
         config_id = created["config_id"]
         status, disabled = self.authorized_json(
             f"/api/config/search-providers/{config_id}/disable",
             payload={"reason": "temporary maintenance"},
         )
         self.assertEqual(status, 200)
+        assert isinstance(disabled, dict)
         self.assertFalse(disabled["enabled"])
-        providers = self.authorized_json("/api/config/search-providers")[1]
+        providers_result = self.authorized_json("/api/config/search-providers")[1]
+        assert isinstance(providers_result, list)
+        providers = cast(list[dict[str, Any]], providers_result)
         self.assertFalse(
             next(item for item in providers if item["config_id"] == config_id)["enabled"]
         )
@@ -939,6 +949,7 @@ class ServiceTestCase(unittest.TestCase):
             payload={"reason": "maintenance complete"},
         )
         self.assertEqual(status, 200)
+        assert isinstance(enabled, dict)
         self.assertTrue(enabled["enabled"])
 
     def test_model_resource_configuration_requires_auth_and_hides_keys(self) -> None:
@@ -1285,6 +1296,266 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(pending[0]["interaction_id"], invitation.interaction_id)
         self.assertEqual(pending[0]["status"], "offered")
         self.assertNotIn("content", pending[0])
+
+    def test_diagnostics_aggregates_existing_model_and_search_records_only(self) -> None:
+        day = date.today().isoformat()
+        call_id = "diagnostic-model-call"
+        with self.kernel.database.transaction() as connection:
+            connection.execute(
+                """INSERT INTO model_calls(
+                    call_id,subject_id,provider,model,purpose,request_hash,idempotency_key,
+                    status,usage_estimated,created_at,completed_at,resource_pool
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    call_id,
+                    self.kernel.subject_id,
+                    "diagnostic-provider",
+                    "private-model-name",
+                    "diagnostic-test",
+                    "request-hash",
+                    "diagnostic-model-call-key",
+                    "succeeded",
+                    0,
+                    utc_now(),
+                    utc_now(),
+                    "economy",
+                ),
+            )
+            connection.execute(
+                """INSERT INTO model_calls(
+                    call_id,subject_id,provider,model,purpose,request_hash,idempotency_key,
+                    status,usage_estimated,created_at,completed_at,resource_pool
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "diagnostic-model-call-without-attempt",
+                    self.kernel.subject_id,
+                    "diagnostic-provider",
+                    "private-model-name",
+                    "diagnostic-test",
+                    "request-hash-2",
+                    "diagnostic-model-call-key-2",
+                    "failed",
+                    0,
+                    utc_now(),
+                    utc_now(),
+                    "economy",
+                ),
+            )
+            connection.execute(
+                """INSERT INTO model_attempts(
+                    attempt_id,call_id,subject_id,budget_day,attempt_number,status,
+                    reserved_input_tokens,reserved_output_tokens,reserved_cost_microusd,
+                    input_tokens,output_tokens,cost_microusd
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "diagnostic-model-attempt",
+                    call_id,
+                    self.kernel.subject_id,
+                    day,
+                    1,
+                    "succeeded",
+                    16,
+                    8,
+                    400,
+                    11,
+                    7,
+                    123,
+                ),
+            )
+            connection.execute(
+                """INSERT INTO research_search_runs(
+                    research_id,subject_id,planner_call_id,idempotency_key,status,
+                    initial_method,final_method,query_hash,result_count,
+                    accepted_source_ids_json,rounds_json,plan_json,plan_hash,state_hash,
+                    created_at,completed_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "diagnostic-search-run",
+                    self.kernel.subject_id,
+                    call_id,
+                    "diagnostic-search-key",
+                    "accepted",
+                    "api",
+                    "api",
+                    "query-hash",
+                    2,
+                    "[]",
+                    "[]",
+                    "{}",
+                    content_hash({"plan": "diagnostic"}),
+                    content_hash({"state": "diagnostic"}),
+                    utc_now(),
+                    utc_now(),
+                ),
+            )
+        with self.kernel.database.connection() as connection:
+            before = (
+                connection.execute("SELECT count(*) FROM model_calls").fetchone()[0],
+                connection.execute("SELECT count(*) FROM model_attempts").fetchone()[0],
+            )
+
+        status, diagnostics = self.authorized_json("/api/diagnostics")
+
+        self.assertEqual(status, 200)
+        assert isinstance(diagnostics, dict)
+        metrics = diagnostics["model_observability"]
+        self.assertEqual(metrics["window_days"], 7)
+        self.assertEqual(metrics["calls"], 2)
+        self.assertEqual(metrics["succeeded_calls"], 1)
+        self.assertEqual(metrics["attempts"], 1)
+        self.assertEqual(metrics["succeeded_attempts"], 1)
+        self.assertEqual(metrics["input_tokens"], 11)
+        self.assertEqual(metrics["output_tokens"], 7)
+        self.assertEqual(metrics["cost_microusd"], "123")
+        self.assertEqual(metrics["search"]["runs"], 1)
+        self.assertEqual(metrics["search"]["by_method"]["api"]["accepted"], 1)
+        serialized = json.dumps(metrics)
+        self.assertNotIn("private-model-name", serialized)
+        self.assertNotIn("diagnostic-provider", serialized)
+        with self.kernel.database.connection() as connection:
+            after = (
+                connection.execute("SELECT count(*) FROM model_calls").fetchone()[0],
+                connection.execute("SELECT count(*) FROM model_attempts").fetchone()[0],
+            )
+        self.assertEqual(after, before)
+
+    def test_wallet_audit_history_is_operator_only_and_redacts_unknown_payload_fields(self) -> None:
+        with self.kernel.database.transaction() as connection:
+            connection.execute(
+                "INSERT INTO audit_records("
+                "audit_id,subject_id,action,actor,payload_json,occurred_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (
+                    "wallet-audit-contract-test",
+                    self.kernel.subject_id,
+                    "wallet_payment_order_reserved",
+                    "operator",
+                    json.dumps(
+                        {
+                            "order_id": "payorder-test",
+                            "from": "pending_policy",
+                            "to": "reserved",
+                            "reason": "verified Bearer sensitive-audit-token-value",
+                            "api_key": "must-not-be-returned",
+                        }
+                    ),
+                    utc_now(),
+                ),
+            )
+        with self.assertRaises(HTTPError) as error:
+            urlopen(f"{self.base_url}/api/admin/wallet-audits?limit=100", timeout=5)
+        self.assertEqual(error.exception.code, 401)
+
+        status, rows = self.authorized_json("/api/admin/wallet-audits?limit=100")
+
+        self.assertEqual(status, 200)
+        assert isinstance(rows, list)
+        row = next(item for item in rows if item["audit_id"] == "wallet-audit-contract-test")
+        self.assertEqual(row["action"], "wallet_payment_order_reserved")
+        self.assertEqual(row["details"]["order_id"], "payorder-test")
+        self.assertEqual(row["details"]["reason"], "verified Bearer [REDACTED]")
+        self.assertNotIn("api_key", row["details"])
+        self.assertNotIn("must-not-be-returned", json.dumps(rows))
+
+    def test_automatic_wallet_policy_rejects_missing_amount_caps(self) -> None:
+        for per_order_limit, daily_limit in (("0", "100"), ("20", "0")):
+            with self.subTest(per_order_limit=per_order_limit, daily_limit=daily_limit):
+                request = Request(
+                    f"{self.base_url}/api/admin/wallet-policy",
+                    data=json.dumps(
+                        {
+                            "expected_version": 1,
+                            "mode": "automatic",
+                            "per_order_limit": per_order_limit,
+                            "daily_limit": daily_limit,
+                        }
+                    ).encode(),
+                    method="POST",
+                    headers={
+                        "Authorization": "Bearer test-admin-token-with-sufficient-entropy",
+                        "Content-Type": "application/json",
+                    },
+                )
+                with self.assertRaises(HTTPError) as error:
+                    urlopen(request, timeout=5)
+                self.assertEqual(error.exception.code, 400)
+                self.assertEqual(
+                    json.loads(error.exception.read())["error"], "invalid_wallet_policy"
+                )
+        status, policy = self.authorized_json("/api/admin/wallet-policy")
+        self.assertEqual(status, 200)
+        assert isinstance(policy, dict)
+        self.assertEqual(policy["policy_version"], 1)
+
+    def test_public_site_metadata_crawlers_and_asset_cache_are_correct(self) -> None:
+        settings = self.settings.model_copy(
+            update={"public_site_url": "https://archive.noyra.example"}
+        )
+        site_http = NoyraHTTPServer(self.kernel, settings)
+        site_http.start()
+        _, site_port = site_http.address
+        site_base_url = f"http://127.0.0.1:{site_port}"
+
+        try:
+            with urlopen(f"{site_base_url}/", timeout=5) as response:
+                html = response.read().decode()
+                self.assertIn('href="https://archive.noyra.example/"', html)
+                self.assertIn(
+                    'content="https://archive.noyra.example/assets/public-hero.webp?v=', html
+                )
+                self.assertEqual(response.headers["Cache-Control"], "no-cache")
+
+            hero_match = re.search(r"public-hero\.webp\?v=([a-f0-9]{16})", html)
+            self.assertIsNotNone(hero_match)
+            assert hero_match is not None
+            with urlopen(f"{site_base_url}/robots.txt", timeout=5) as response:
+                robots = response.read().decode()
+                self.assertEqual(response.headers["Content-Type"].split(";", 1)[0], "text/plain")
+                self.assertIn("Disallow: /api/", robots)
+                self.assertIn("Sitemap: https://archive.noyra.example/sitemap.xml", robots)
+            with urlopen(f"{site_base_url}/sitemap.xml", timeout=5) as response:
+                sitemap = response.read().decode()
+                self.assertIn("<loc>https://archive.noyra.example/</loc>", sitemap)
+
+            with urlopen(f"{site_base_url}/app.js", timeout=5) as response:
+                self.assertEqual(
+                    response.headers["Cache-Control"], "public, max-age=300, must-revalidate"
+                )
+            with urlopen(
+                f"{site_base_url}/assets/public-hero.webp?v={hero_match.group(1)}", timeout=5
+            ) as response:
+                body = response.read()
+                self.assertEqual(hashlib.sha256(body).hexdigest()[:16], hero_match.group(1))
+                self.assertEqual(
+                    response.headers["Cache-Control"], "public, max-age=31536000, immutable"
+                )
+        finally:
+            site_http.close()
+
+    def test_public_site_url_requires_https_origin_without_path_or_credentials(self) -> None:
+        for invalid_url in (
+            "http://archive.example",
+            "https://user:password@archive.example",
+            "https://archive.example/private",
+            "https://archive.example:0",
+            "https://archive.example?query=1",
+            "https://archive.example#fragment",
+        ):
+            with self.subTest(url=invalid_url), self.assertRaises(ValidationError):
+                ServiceSettings(
+                    data_dir=self.data_dir,
+                    subject_id="Noyra-public-seo-test",
+                    genesis_hash=content_hash({"seed": "public-seo"}),
+                    public_site_url=invalid_url,
+                )
+
+        settings = ServiceSettings(
+            data_dir=self.data_dir,
+            subject_id="Noyra-public-seo-test",
+            genesis_hash=content_hash({"seed": "public-seo-valid"}),
+            public_site_url="https://archive.example:8443/",
+        )
+        self.assertEqual(settings.public_site_url, "https://archive.example:8443")
 
     def test_model_resource_test_endpoint_is_explicit_and_targets_only_requested_resource(
         self,

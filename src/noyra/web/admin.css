@@ -141,3 +141,31 @@ textarea { min-height: 112px; resize: vertical; }
 @media (max-width: 860px) { .admin-shell { grid-template-columns: 1fr; }.sidebar { position: static; height: auto; padding: 17px 18px; }.sidebar-subtitle { margin-bottom: 14px; }.sidebar nav { display: flex; overflow-x: auto; }.nav-item { flex: 0 0 auto; }.sidebar-footer { display: flex; margin-top: 16px; padding-top: 14px; }.main-panel { padding-top: 22px; } }
 @media (max-width: 860px) { .wallet-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }.wallet-enqueue-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }.wallet-subsections { grid-template-columns: 1fr; } }
 @media (max-width: 640px) { .topbar, .hero-strip, .composer-footer { align-items: flex-start; flex-direction: column; }.metric-grid, .two-column, .conversation-layout, .resource-columns, .wallet-columns, .runtime-grid { grid-template-columns: 1fr; }.wallet-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }.wallet-enqueue-form { grid-template-columns: 1fr; }.login-panel { padding: 28px 22px; }.surface-card { padding: 17px; }.resource-item { align-items: flex-start; flex-direction: column; }.resource-actions { justify-content: flex-start; }.topbar-actions { width: 100%; justify-content: space-between; }.model-resource-main, .model-resource-actions { width: 100%; }.model-resource-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }.model-key-details summary { grid-template-columns: 1fr; }.model-key-counters { text-align: left; }.model-key-metadata, .model-limit-form, .wallet-acquisition-facts { grid-template-columns: 1fr; }.model-limit-heading, .model-limit-form button { grid-column: 1; }.wallet-acquisition-controls, .wallet-attempt-row { align-items: flex-start; display: flex; flex-direction: column; }.wallet-acquisition-controls input { max-width: none; }.wallet-attempt-row time { text-align: left; } }
+
+.setup-guide-card, .observability-card, .wallet-audit-card { margin-top: 16px; }
+.setup-guide-card { border-color: #c9ddd0; background: linear-gradient(135deg, #fbfdfb, #f2f8f4); }
+.setup-guide-list { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
+.setup-guide-item { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 13px; border: 1px solid #e0e8e2; border-radius: 9px; background: #fff; }
+.setup-step-number { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 50%; background: #e6eee9; color: #466055; font-size: 12px; font-weight: 750; }
+.setup-guide-item.is-ready .setup-step-number { background: #d8efe0; color: #176446; }
+.setup-step-copy { min-width: 0; }
+.setup-step-title { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.setup-step-state, .setup-required, .setup-optional { padding: 3px 7px; border-radius: 999px; background: #edf1ee; color: #5b6e63; font-size: 10px; font-weight: 650; }
+.setup-guide-item.is-ready .setup-step-state { background: #d8efe0; color: #176446; }
+.setup-required { background: #fff2dc; color: #805516; }
+.setup-step-copy p { margin: 5px 0 2px; font-size: 13px; }
+.setup-step-copy small { display: block; color: #75847b; line-height: 1.5; }
+.setup-guide-item > button { white-space: nowrap; }
+.setup-guide-loading { padding: 12px; color: #6b7c72; }
+.observability-card .summary-list { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 20px; }
+.observability-card .summary-row { min-width: 0; }
+.observability-sampled-at { grid-column: 1 / -1; margin: 4px 0 0; font-size: 11px; }
+.wallet-audit-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.wallet-audit-heading time { flex: 0 0 auto; color: #718078; font-size: 11px; }
+.wallet-audit-item > p { margin: 7px 0; color: #53645a; font-size: 12px; }
+.wallet-audit-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; margin: 10px 0; }
+.wallet-audit-details div { min-width: 0; }
+.wallet-audit-details dt { color: #718078; font-size: 10px; }
+.wallet-audit-details dd { margin: 3px 0 0; color: #34463d; font-size: 11px; overflow-wrap: anywhere; }
+.wallet-audit-item small { overflow-wrap: anywhere; }
+@media (max-width: 640px) { .setup-guide-item { grid-template-columns: 30px minmax(0, 1fr); }.setup-guide-item > button { grid-column: 2; justify-self: start; }.observability-card .summary-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }.wallet-audit-details { grid-template-columns: 1fr; }.wallet-audit-heading { display: block; }.wallet-audit-heading time { display: block; margin-top: 4px; } }

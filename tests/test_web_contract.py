@@ -68,7 +68,7 @@ def test_admin_surface_assets_and_session_contract() -> None:
 def test_public_surface_has_branded_archive_and_captcha_states() -> None:
     for marker in (
         'class="hero"',
-        'src="/assets/public-hero.webp"',
+        'src="/assets/public-hero.webp?v=__PUBLIC_HERO_VERSION__"',
         'id="archive"',
         'id="contribute"',
         'id="captcha-status"',
@@ -165,3 +165,32 @@ def test_admin_model_and_search_configuration_controls_are_present() -> None:
         "auto",
     ):
         assert marker in ADMIN_JS or marker in ADMIN_HTML
+
+
+def test_admin_setup_guide_and_observability_are_present_and_localized() -> None:
+    for marker in (
+        'id="setup-guide"',
+        'id="setup-guide-list"',
+        'id="model-observability"',
+        'id="wallet-audit-list"',
+    ):
+        assert marker in ADMIN_HTML
+    assert "renderSetupGuide" in ADMIN_JS
+    assert "diagnostics.model_observability" in ADMIN_JS
+    assert '"/api/admin/wallet-audits?limit=100"' in ADMIN_JS
+    assert 'wallet_reward_workflow_manual_intervention: "奖励流程需要人工处理"' in ADMIN_JS
+    assert 'wallet_payment_order_awaiting_confirmation: "等待付款确认"' in ADMIN_JS
+    assert 'walletAuditActionLabels[row.action] || "其他钱包操作"' in ADMIN_JS
+    assert "Promise.allSettled" in ADMIN_JS
+    assert "admin_network_unavailable" in ADMIN_JS
+    assert "管理台暂时无法连接服务" in ADMIN_JS
+
+
+def test_public_page_has_search_metadata_crawler_rules_and_versioned_assets() -> None:
+    for marker in (
+        "<!-- NOYRA_SEO_METADATA -->",
+        "public-hero.webp?v=__PUBLIC_HERO_VERSION__",
+        'name="twitter:card"',
+    ):
+        assert marker in HTML
+    assert 'name="robots" content="noindex, nofollow"' in ADMIN_HTML

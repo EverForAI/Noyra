@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import hashlib
 import hmac
+import html
 import ipaddress
 import json
 import logging
@@ -752,6 +753,7 @@ class ServiceSettings(BaseModel):
     public_post_storage_cap_bytes: int = Field(default=250_000_000, ge=1_000_000, le=2_000_000_000)
     public_post_captcha_issue_limit_per_hour: int = Field(default=30, ge=1, le=100_000)
     public_post_captcha_global_rate_per_minute: int = Field(default=300, ge=1, le=100_000)
+    public_site_url: str | None = None
     active_interval_seconds: float = Field(default=30, ge=1, le=86_400)
     sleep_interval_seconds: float = Field(default=60, ge=1, le=86_400)
     deep_sleep_seconds: float = Field(default=21_600, ge=0, le=604_800)
@@ -818,6 +820,43 @@ class ServiceSettings(BaseModel):
         "<token",
         "<replace",
     )
+
+    @field_validator("public_site_url", mode="before")
+    @classmethod
+    def validate_public_site_url(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("public site URL must be a string")
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if any(character.isspace() or ord(character) < 0x21 for character in normalized):
+            raise ValueError("public site URL contains whitespace")
+        try:
+            parsed = urlsplit(normalized)
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError as error:
+            raise ValueError("public site URL is invalid") from error
+        if (
+            parsed.scheme.lower() != "https"
+            or not hostname
+            or port == 0
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("public site URL must be an HTTPS origin")
+        try:
+            ascii_hostname = hostname.encode("idna").decode("ascii").lower()
+        except UnicodeError as error:
+            raise ValueError("public site URL host is invalid") from error
+        authority_host = f"[{ascii_hostname}]" if ":" in ascii_hostname else ascii_hostname
+        authority = authority_host if port is None else f"{authority_host}:{port}"
+        return f"https://{authority}"
 
     @field_validator("host")
     @classmethod
@@ -985,6 +1024,7 @@ class ServiceSettings(BaseModel):
             public_post_captcha_global_rate_per_minute=int(
                 os.getenv("NOYRA_PUBLIC_POST_CAPTCHA_GLOBAL_RATE_PER_MINUTE", "300")
             ),
+            public_site_url=os.getenv("NOYRA_PUBLIC_SITE_URL"),
             active_interval_seconds=float(os.getenv("NOYRA_ACTIVE_INTERVAL_SECONDS", "30")),
             sleep_interval_seconds=float(os.getenv("NOYRA_SLEEP_INTERVAL_SECONDS", "60")),
             deep_sleep_seconds=float(os.getenv("NOYRA_DEEP_SLEEP_SECONDS", "21600")),
@@ -1652,6 +1692,15 @@ class NoyraHTTPServer:
         pending_interaction_rows: list[dict[str, Any]] = []
         interaction_call_rows: list[dict[str, Any]] = []
         interaction_wait_rows: list[dict[str, Any]] = []
+        # Preserve sub-second precision so events written earlier in this same
+        # second are included in the aggregation window.
+        observed_at = datetime.now(UTC)
+        window_start = observed_at - timedelta(days=7)
+        model_observation: dict[str, Any] = {}
+        search_observation: dict[str, Any] = {
+            "runs": 0,
+            "by_method": {method: {} for method in ("api", "model", "browser", "wait")},
+        }
         with self.kernel.database.connection() as connection:
             loop = connection.execute(
                 "SELECT circuit_status, consecutive_failures, next_retry_at, "
@@ -1743,6 +1792,66 @@ class NoyraHTTPServer:
                     (self.kernel.subject_id, DIAGNOSTICS_MAX_WAITING_TASKS),
                 )
             ]
+            usage = connection.execute(
+                """SELECT COUNT(DISTINCT call.call_id) AS calls,
+                    COUNT(DISTINCT CASE WHEN call.status='succeeded' THEN call.call_id END)
+                        AS succeeded_calls,
+                    COUNT(DISTINCT CASE WHEN call.status='failed' THEN call.call_id END)
+                        AS failed_calls,
+                    COUNT(DISTINCT CASE WHEN call.status='unknown' THEN call.call_id END)
+                        AS unknown_calls,
+                    COUNT(attempt.attempt_id) AS attempts,
+                    SUM(CASE WHEN attempt.status='succeeded' THEN 1 ELSE 0 END) AS succeeded,
+                    SUM(CASE WHEN attempt.status='failed' THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN attempt.status='unknown' THEN 1 ELSE 0 END) AS unknown,
+                    SUM(COALESCE(attempt.input_tokens, 0)) AS input_tokens,
+                    SUM(COALESCE(attempt.output_tokens, 0)) AS output_tokens,
+                    SUM(CASE WHEN attempt.cost_microusd IS NULL
+                             THEN attempt.reserved_cost_microusd
+                             ELSE attempt.cost_microusd END) AS cost_microusd,
+                    SUM(CASE WHEN attempt.attempt_id IS NOT NULL
+                                  AND (attempt.cost_microusd IS NULL OR call.usage_estimated=1)
+                             THEN 1 ELSE 0 END) AS estimated_cost_attempts
+                FROM model_calls AS call
+                LEFT JOIN model_attempts AS attempt
+                    ON attempt.call_id=call.call_id AND attempt.subject_id=call.subject_id
+                WHERE call.subject_id=?
+                    AND call.created_at>=? AND call.created_at<=?""",
+                (
+                    self.kernel.subject_id,
+                    window_start.isoformat(),
+                    observed_at.isoformat(),
+                ),
+            ).fetchone()
+            model_observation = {
+                "calls": int(usage["calls"] or 0),
+                "succeeded_calls": int(usage["succeeded_calls"] or 0),
+                "failed_calls": int(usage["failed_calls"] or 0),
+                "unknown_calls": int(usage["unknown_calls"] or 0),
+                "attempts": int(usage["attempts"] or 0),
+                "succeeded_attempts": int(usage["succeeded"] or 0),
+                "failed_attempts": int(usage["failed"] or 0),
+                "unknown_attempts": int(usage["unknown"] or 0),
+                "input_tokens": int(usage["input_tokens"] or 0),
+                "output_tokens": int(usage["output_tokens"] or 0),
+                "cost_microusd": str(int(usage["cost_microusd"] or 0)),
+                "estimated_cost_attempts": int(usage["estimated_cost_attempts"] or 0),
+            }
+            for row in connection.execute(
+                """SELECT final_method, status, COUNT(*) AS count
+                FROM research_search_runs WHERE subject_id=? AND created_at>=? AND created_at<=?
+                GROUP BY final_method, status ORDER BY final_method, status LIMIT 20""",
+                (
+                    self.kernel.subject_id,
+                    window_start.isoformat(),
+                    observed_at.isoformat(),
+                ),
+            ):
+                method = str(row["final_method"])
+                status = str(row["status"])
+                if method in search_observation["by_method"]:
+                    search_observation["by_method"][method][status] = int(row["count"])
+                    search_observation["runs"] += int(row["count"])
         storage_payload: dict[str, Any] | None = None
         if storage is not None:
             try:
@@ -1799,6 +1908,13 @@ class NoyraHTTPServer:
             "wallet_acquisition": wallet_acquisition,
             "wallet_execution": self.wallet_execution_health(),
             "cognition": cognition_diagnostics,
+            "model_observability": {
+                "window_days": 7,
+                "since": window_start.isoformat(),
+                "sampled_at": observed_at.isoformat(),
+                **model_observation,
+                "search": search_observation,
+            },
         }
 
     def public_post_controls(self) -> dict[str, Any]:
@@ -1942,7 +2058,7 @@ class NoyraHTTPServer:
                     self._wechat_webhook_challenge()
                     return
                 parsed = urlsplit(self.path)
-                if parsed.path == "/admin":
+                if parsed.path in {"/admin", "/admin.html"}:
                     self._asset("admin.html", "text/html; charset=utf-8")
                     return
                 if parsed.path == "/admin.js":
@@ -1965,6 +2081,12 @@ class NoyraHTTPServer:
                     return
                 if parsed.path == "/assets/public-hero.webp":
                     self._asset("assets/public-hero.webp", "image/webp")
+                    return
+                if parsed.path == "/robots.txt":
+                    self._robots_txt()
+                    return
+                if parsed.path == "/sitemap.xml":
+                    self._sitemap_xml()
                     return
                 if parsed.path == "/favicon.ico":
                     self.send_response(HTTPStatus.NO_CONTENT)
@@ -2479,6 +2601,33 @@ class NoyraHTTPServer:
                             )
                         ],
                     )
+                elif parsed.path == "/api/admin/wallet-audits":
+                    if not self._authorized():
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    try:
+                        audit_query = parse_qs(parsed.query, keep_blank_values=True)
+                        if set(audit_query) - {"limit"} or len(audit_query.get("limit", [])) > 1:
+                            raise ValueError("invalid wallet audit query")
+                        raw_limit = audit_query.get("limit", ["100"])[0]
+                        audit_limit = int(raw_limit)
+                        audit_rows = owner.wallet_economy.list_audit_history(
+                            owner.kernel.subject_id, limit=audit_limit
+                        )
+                    except (ValueError, TypeError):
+                        self._json(
+                            HTTPStatus.BAD_REQUEST,
+                            {"error": "invalid_wallet_audit_query"},
+                        )
+                        return
+                    except IntegrityError:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "wallet_integrity_unavailable"},
+                            retry_after=60,
+                        )
+                        return
+                    self._json(HTTPStatus.OK, audit_rows)
                 elif parsed.path == "/api/admin/wallet-rewards":
                     if not self._authorized():
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -7040,8 +7189,99 @@ class NoyraHTTPServer:
                 except OSError:
                     self._json(HTTPStatus.NOT_FOUND, {"error": "asset_not_found"})
                     return
+                cache_control = "no-store"
+                if filename == "index.html":
+                    hero_path = Path(__file__).with_name("web") / "assets" / "public-hero.webp"
+                    try:
+                        hero_body = hero_path.read_bytes()
+                    except OSError:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "asset_not_found"})
+                        return
+                    hero_version = hashlib.sha256(hero_body).hexdigest()[:16]
+                    body = body.replace(b"__PUBLIC_HERO_VERSION__", hero_version.encode("ascii"))
+                    site_url = owner.settings.public_site_url
+                    metadata = [
+                        '<meta property="og:type" content="website">',
+                        '<meta property="og:locale" content="zh_CN">',
+                        '<meta property="og:title" content="Noyra \u00b7 '
+                        '\u516c\u5f00\u6863\u6848">',
+                        '<meta property="og:description" '
+                        'content="Noyra '
+                        "\u7684\u516c\u5f00\u6863\u6848\uff1a\u8bb0\u5f55\u4e00\u4e2a"
+                        "\u6301\u7eed\u8fd0\u884c\u7684"
+                        "\u4eba\u5de5\u4e3b\u4f53"
+                        '\u5982\u4f55\u89c2\u5bdf\u3001\u5224\u65ad\u4e0e\u53cd\u601d">',
+                    ]
+                    if site_url:
+                        escaped_url = html.escape(site_url + "/", quote=True)
+                        image_url = html.escape(
+                            f"{site_url}/assets/public-hero.webp?v={hero_version}", quote=True
+                        )
+                        metadata.extend(
+                            (
+                                f'<link rel="canonical" href="{escaped_url}">',
+                                f'<meta property="og:url" content="{escaped_url}">',
+                                f'<meta property="og:image" content="{image_url}">',
+                                f'<meta name="twitter:image" content="{image_url}">',
+                            )
+                        )
+                    body = body.replace(
+                        b"<!-- NOYRA_SEO_METADATA -->", "\n  ".join(metadata).encode("utf-8")
+                    )
+                    cache_control = "no-cache"
+                elif filename in {"app.js", "styles.css"}:
+                    cache_control = "public, max-age=300, must-revalidate"
+                elif filename == "assets/public-hero.webp":
+                    versions = parse_qs(urlsplit(self.path).query).get("v", [])
+                    expected_version = hashlib.sha256(body).hexdigest()[:16]
+                    cache_control = (
+                        "public, max-age=31536000, immutable"
+                        if len(versions) == 1 and hmac.compare_digest(versions[0], expected_version)
+                        else "no-cache"
+                    )
                 self.send_response(HTTPStatus.OK)
-                self._headers(content_type, len(body))
+                self._headers(content_type, len(body), cache_control=cache_control)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _robots_txt(self) -> None:
+                lines = [
+                    "User-agent: *",
+                    "Disallow: /admin",
+                    "Disallow: /admin.html",
+                    "Disallow: /api/",
+                    "Disallow: /health/",
+                ]
+                if owner.settings.public_site_url:
+                    lines.append(f"Sitemap: {owner.settings.public_site_url}/sitemap.xml")
+                body = ("\n".join(lines) + "\n").encode("utf-8")
+                self._text(HTTPStatus.OK, "text/plain; charset=utf-8", body)
+
+            def _sitemap_xml(self) -> None:
+                site_url = owner.settings.public_site_url
+                if not site_url:
+                    self._text(
+                        HTTPStatus.NOT_FOUND,
+                        "text/plain; charset=utf-8",
+                        b"Configure NOYRA_PUBLIC_SITE_URL to publish a sitemap.\n",
+                    )
+                    return
+                location = html.escape(site_url + "/", quote=False)
+                body = (
+                    '<?xml version="1.0" encoding="UTF-8"?>\n'
+                    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+                    f"  <url><loc>{location}</loc></url>\n"
+                    "</urlset>\n"
+                ).encode()
+                self._text(
+                    HTTPStatus.OK,
+                    "application/xml; charset=utf-8",
+                    body,
+                )
+
+            def _text(self, status: HTTPStatus, content_type: str, body: bytes) -> None:
+                self.send_response(status)
+                self._headers(content_type, len(body), cache_control="public, max-age=300")
                 self.end_headers()
                 self.wfile.write(body)
 
@@ -7083,10 +7323,12 @@ class NoyraHTTPServer:
                 self.end_headers()
                 self.wfile.write(body)
 
-            def _headers(self, content_type: str, length: int) -> None:
+            def _headers(
+                self, content_type: str, length: int, *, cache_control: str = "no-store"
+            ) -> None:
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(length))
-                self.send_header("Cache-Control", "no-store")
+                self.send_header("Cache-Control", cache_control)
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("X-Frame-Options", "DENY")
                 self.send_header("Referrer-Policy", "no-referrer")

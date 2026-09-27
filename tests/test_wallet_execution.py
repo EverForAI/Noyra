@@ -24,6 +24,7 @@ from noyra.wallet import (
     SubmissionInput,
     WalletAddressInput,
     WalletAssetInput,
+    WalletBalanceSnapshotInput,
     WalletEconomyStore,
     WalletNetworkInput,
     WalletPaymentExecutionEngine,
@@ -49,7 +50,7 @@ def test_reward_execution_incident_taxonomy_is_bounded(
     assert WalletRewardWorkflow._execution_incident_kind(error_code, status) == expected
 
 
-def fixture(tmp_path: Path) -> tuple[Database, str, Any, Any, Any, Any]:
+def fixture(tmp_path: Path, *, min_balance: str = "0") -> tuple[Database, str, Any, Any, Any, Any]:
     db = Database(tmp_path / "db.sqlite3")
     subject = "Noyra-execution-test"
     IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
@@ -82,6 +83,17 @@ def fixture(tmp_path: Path) -> tuple[Database, str, Any, Any, Any, Any]:
         ),
         actor="operator",
     )
+    if min_balance != "0":
+        wallets.record_balance_snapshot(
+            subject,
+            WalletBalanceSnapshotInput(
+                asset_id=asset.asset_id,
+                address_id=source.address_id,
+                balance="50000000000000",
+                observed_at=utc_now(),
+            ),
+            actor="operator",
+        )
     goal = "goal_execution"
     now = utc_now()
     with db.transaction() as c:
@@ -100,6 +112,8 @@ def fixture(tmp_path: Path) -> tuple[Database, str, Any, Any, Any, Any]:
             allowed_network_ids=[network.network_id],
             allowed_asset_ids=[asset.asset_id],
             per_order_limit="20",
+            daily_limit="100",
+            min_balance=min_balance,
             automatic_max_amount="20",
         ),
         expected_version=1,
@@ -336,6 +350,17 @@ def test_native_execution_confirm_and_settle(tmp_path: Path) -> None:
         ("paid", "-10"),
         ("reserved", "0"),
     ]
+
+
+def test_automatic_execution_does_not_apply_legacy_minimum_balance_reserve(
+    tmp_path: Path,
+) -> None:
+    db, subject, network, _asset, source, order = fixture(tmp_path, min_balance="100000000000000")
+    record = WalletPaymentExecutionEngine(
+        db, MockSigner(chain_id=network.chain_id, source_address=source.address)
+    ).execute_order(order.order_id, subject, actor="operator")
+
+    assert record.status == "broadcast"
 
 
 def test_broadcast_response_loss_is_unknown_and_requires_explicit_retry(tmp_path: Path) -> None:

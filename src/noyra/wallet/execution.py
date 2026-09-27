@@ -1392,7 +1392,9 @@ class WalletPaymentExecutionEngine:
                     network_id=execution.network_id,
                     asset_type=execution.asset_type,
                     source_address_id=source["address_id"],
-                    min_balance=policy["min_balance"],
+                    min_balance=(
+                        "0" if order["payment_mode"] == "automatic" else policy["min_balance"]
+                    ),
                     gas_limit=gas_value,
                     max_fee_per_gas=fee_value,
                     max_observation_age_seconds=int(policy["max_observation_age_seconds"]),
@@ -1575,7 +1577,9 @@ class WalletPaymentExecutionEngine:
                 network_id=order["network_id"],
                 asset_type=asset["asset_type"],
                 source_address_id=source_row["address_id"],
-                min_balance=policy["min_balance"],
+                min_balance=(
+                    "0" if order["payment_mode"] == "automatic" else policy["min_balance"]
+                ),
                 gas_limit=gas_value,
                 max_fee_per_gas=fee,
                 max_observation_age_seconds=int(policy["max_observation_age_seconds"]),

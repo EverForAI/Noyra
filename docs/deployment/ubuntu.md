@@ -95,6 +95,13 @@ sudoedit /etc/noyra/noyra.env
 sudo systemctl enable --now noyra
 ```
 
+For a public archive served through your HTTPS reverse proxy, set the optional
+`NOYRA_PUBLIC_SITE_URL` value in `/etc/noyra/noyra.env` to the site's origin,
+for example `https://archive.example.com` (no path or trailing route), then
+restart Noyra. The public page uses that origin for canonical and social-share
+metadata and publishes `/robots.txt` and `/sitemap.xml`. Leave it empty for a
+private or tunnel-only installation; the sitemap stays unpublished in that mode.
+
 The installer creates `/var/lib/noyra` as `noyra:noyra` mode `0700`, installs a separate backup
 keyring at `/etc/noyra/backup-keyring.json` as `root:noyra` mode `0640`, and enables
 `NOYRA_AT_REST_MODE=required`. It does not format or encrypt a disk. Mount the intended LUKS volume

@@ -13,6 +13,7 @@ from noyra.core.database import (
 )
 from noyra.core.errors import IntegrityError, InvalidTransitionError, NotFoundError
 from noyra.core.identity import validate_subject_id
+from noyra.core.redaction import redact_secret_text
 from noyra.core.types import (
     canonical_json,
     content_hash,
@@ -64,6 +65,27 @@ _ORDER_TRANSITIONS = {
     "failed": {"refunded"},
     "refunded": set(),
 }
+_WALLET_AUDIT_DETAIL_FIELDS = frozenset(
+    {
+        "amount",
+        "asset_id",
+        "attempt_id",
+        "attempt_number",
+        "bounty_id",
+        "error_code",
+        "execution_id",
+        "from",
+        "mode",
+        "network_id",
+        "order_id",
+        "policy_version",
+        "reason",
+        "status",
+        "submission_id",
+        "to",
+        "tx_hash",
+    }
+)
 
 
 def _now() -> str:
@@ -575,6 +597,10 @@ class WalletEconomyStore:
         validate_subject_id(subject_id)
         if type(expected_version) is not int or expected_version < 1:
             raise ValueError("invalid policy version")
+        if proposal.mode == "automatic" and (
+            int(proposal.per_order_limit) <= 0 or int(proposal.daily_limit) <= 0
+        ):
+            raise ValueError("automatic payment requires per-order and daily amount limits")
         with self.database.transaction() as c:
             row = c.execute(
                 "SELECT * FROM wallet_payment_policies WHERE subject_id=?", (subject_id,)
@@ -606,6 +632,42 @@ class WalletEconomyStore:
                 (subject_id, limit),
             ).fetchall()
         return [self._order_from_row(r) for r in rows]
+
+    def list_audit_history(self, subject_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Return a bounded wallet audit view without exposing arbitrary payload fields."""
+        validate_subject_id(subject_id)
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError("invalid wallet audit limit")
+        with self.database.read_transaction() as connection:
+            rows = connection.execute(
+                "SELECT audit_id,action,actor,payload_json,occurred_at FROM audit_records "
+                "WHERE subject_id=? AND substr(action,1,7)='wallet_' "
+                "ORDER BY occurred_at DESC,audit_id DESC LIMIT ?",
+                (subject_id, limit),
+            ).fetchall()
+        output: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = strict_json_loads(row["payload_json"])
+            except (TypeError, ValueError) as error:
+                raise IntegrityError("wallet audit payload is invalid") from error
+            if not isinstance(payload, dict):
+                raise IntegrityError("wallet audit payload is invalid")
+            details: dict[str, Any] = {}
+            for key in _WALLET_AUDIT_DETAIL_FIELDS:
+                value = payload.get(key)
+                if type(value) in {bool, int} or (isinstance(value, str) and len(value) <= 256):
+                    details[key] = redact_secret_text(value) if isinstance(value, str) else value
+            output.append(
+                {
+                    "audit_id": row["audit_id"],
+                    "action": row["action"],
+                    "actor": redact_secret_text(str(row["actor"])),
+                    "occurred_at": row["occurred_at"],
+                    "details": details,
+                }
+            )
+        return output
 
     def order_for_submission(
         self, submission_id: str, subject_id: str
@@ -1086,11 +1148,14 @@ class WalletEconomyStore:
             return False
         amount = int(row["amount"])
         single_limit = int(policy["per_order_limit"])
-        if row["payment_mode"] == "automatic" and int(policy["automatic_max_amount"]) > 0:
-            automatic_limit = int(policy["automatic_max_amount"])
-            single_limit = (
-                automatic_limit if single_limit == 0 else min(single_limit, automatic_limit)
-            )
+        daily_limit = int(policy["daily_limit"])
+        if row["payment_mode"] == "automatic" and (single_limit <= 0 or daily_limit <= 0):
+            return False
+        # ``automatic_max_amount`` belongs to the legacy policy schema.  New
+        # automatic payments are bounded only by the explicit per-order and
+        # daily amount limits; keep the legacy value readable without making
+        # it a second hidden cap.  A zero limit retains the historic unlimited
+        # meaning for already persisted policies.
         if amount <= 0 or (single_limit > 0 and amount > single_limit):
             return False
         if int(policy["recipient_allowlist_enabled"]):
@@ -1155,7 +1220,7 @@ class WalletEconomyStore:
             and month_count >= int(policy["monthly_order_limit"])
         ):
             return False
-        if int(policy["daily_limit"]) and day_total + amount > int(policy["daily_limit"]):
+        if daily_limit and day_total + amount > daily_limit:
             return False
         if (
             row["payment_mode"] != "automatic"
@@ -1177,7 +1242,8 @@ class WalletEconomyStore:
                 "ORDER BY observed_at DESC,snapshot_id DESC LIMIT 1",
                 (row["subject_id"], row["network_id"], row["asset_id"], source["address_id"]),
             ).fetchone()
-        if int(policy["anomaly_block"]):
+        automatic = row["payment_mode"] == "automatic"
+        if not automatic and int(policy["anomaly_block"]):
             if source is None:
                 return False
             previous = c.execute(
@@ -1195,10 +1261,14 @@ class WalletEconomyStore:
             # public observation health projection classifies them as
             # attention; payment authorization must fail closed as well.
             return False
-        if policy["max_observation_age_seconds"] > 0 and (
-            latest_balance is None
-            or (now - _parse_time(latest_balance["observed_at"])).total_seconds()
-            > int(policy["max_observation_age_seconds"])
+        if (
+            not automatic
+            and policy["max_observation_age_seconds"] > 0
+            and (
+                latest_balance is None
+                or (now - _parse_time(latest_balance["observed_at"])).total_seconds()
+                > int(policy["max_observation_age_seconds"])
+            )
         ):
             return False
         # A fresh balance observation is authoritative for this spending
@@ -1221,9 +1291,10 @@ class WalletEconomyStore:
                     ),
                 )
             )
-            if available < amount + int(policy["min_balance"]):
+            minimum_reserve = 0 if automatic else int(policy["min_balance"])
+            if available < amount + minimum_reserve:
                 return False
-        elif int(policy["min_balance"]) > 0:
+        elif not automatic and int(policy["min_balance"]) > 0:
             # Without an observation, an explicit reserve requirement cannot
             # be proven.  Preserve the legacy read-only behavior only when no
             # minimum balance was requested.

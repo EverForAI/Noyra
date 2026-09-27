@@ -88,6 +88,8 @@ def setup_token(tmp_path: Path, *, min_balance: str = "0", max_age: int = 300) -
             mode="automatic",
             allowed_network_ids=[network.network_id],
             allowed_asset_ids=[native.asset_id, token.asset_id],
+            per_order_limit="1000000000000000000",
+            daily_limit="1000000000000000000",
             min_balance=min_balance,
             max_observation_age_seconds=max_age,
         ),

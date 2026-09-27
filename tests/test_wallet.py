@@ -1328,6 +1328,7 @@ def test_wallet_execution_http_happy_path_with_isolated_signer(tmp_path: Path) -
                 allowed_network_ids=[network.network_id],
                 allowed_asset_ids=[asset.asset_id],
                 per_order_limit="20",
+                daily_limit="100",
                 automatic_max_amount="20",
             ),
             expected_version=1,

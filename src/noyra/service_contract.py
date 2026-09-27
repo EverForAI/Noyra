@@ -129,6 +129,7 @@ API_ROUTE_CONTRACTS: tuple[APIRouteContract, ...] = (
     _get("/api/v1/admin/wallet-bounties", "operator", 200, 400, 401, 503),
     _get("/api/v1/admin/wallet-submissions", "operator", 200, 400, 401, 503),
     _get("/api/v1/admin/wallet-orders", "operator", 200, 400, 401, 503),
+    _get("/api/v1/admin/wallet-audits", "operator", 200, 400, 401, 503),
     _get("/api/v1/admin/wallet-rewards", "operator", 200, 400, 401, 503),
     _get("/api/v1/admin/wallet-reward-incidents", "operator", 200, 400, 401, 503),
     _get("/api/v1/admin/wallet-executions", "operator", 200, 400, 401, 503),

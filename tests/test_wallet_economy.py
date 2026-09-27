@@ -151,7 +151,17 @@ def test_automatic_policy_reserves_and_releases_once(tmp_path: Path) -> None:
     wallets.record_balance_snapshot(
         subject_id,
         WalletBalanceSnapshotInput(
-            asset_id=asset_id, address_id=address.address_id, balance="100", observed_at=utc_now()
+            asset_id=asset_id,
+            address_id=address.address_id,
+            balance="100",
+            observed_at=(datetime.now(UTC) - timedelta(seconds=2)).isoformat(),
+        ),
+        actor="operator",
+    )
+    wallets.record_balance_snapshot(
+        subject_id,
+        WalletBalanceSnapshotInput(
+            asset_id=asset_id, address_id=address.address_id, balance="250", observed_at=utc_now()
         ),
         actor="operator",
     )
@@ -209,7 +219,20 @@ def test_automatic_policy_uses_only_daily_and_per_order_amount_limits(
     wallets.record_balance_snapshot(
         subject_id,
         WalletBalanceSnapshotInput(
-            asset_id=asset_id, address_id=address.address_id, balance="100", observed_at=utc_now()
+            asset_id=asset_id,
+            address_id=address.address_id,
+            balance="100",
+            observed_at=(datetime.now(UTC) - timedelta(seconds=40)).isoformat(),
+        ),
+        actor="operator",
+    )
+    wallets.record_balance_snapshot(
+        subject_id,
+        WalletBalanceSnapshotInput(
+            asset_id=asset_id,
+            address_id=address.address_id,
+            balance="250",
+            observed_at=(datetime.now(UTC) - timedelta(seconds=30)).isoformat(),
         ),
         actor="operator",
     )
@@ -222,6 +245,9 @@ def test_automatic_policy_uses_only_daily_and_per_order_amount_limits(
             monthly_limit="20",
             daily_order_limit=1,
             monthly_order_limit=1,
+            min_balance="249",
+            max_observation_age_seconds=1,
+            anomaly_block=True,
         ),
         expected_version=1,
         actor="operator",
@@ -260,6 +286,55 @@ def test_automatic_policy_uses_only_daily_and_per_order_amount_limits(
         "reserved",
         "reserved",
     ]
+
+
+def test_automatic_payment_uses_explicit_caps_without_legacy_extra_cap(tmp_path: Path) -> None:
+    database, subject_id, wallets, economy, network_id, asset_id = _fixture(tmp_path)
+    wallets.register_address(
+        subject_id,
+        WalletAddressInput(
+            network_id=network_id,
+            label="Spend",
+            address="0xA111111111111111111111111111111111111111",
+            purpose="spending",
+        ),
+        actor="operator",
+    )
+    policy = PaymentPolicyInput(
+        mode="automatic",
+        per_order_limit="20",
+        daily_limit="100",
+        automatic_max_amount="1",
+        min_balance="1000",
+    )
+    economy.update_policy(subject_id, policy, expected_version=1, actor="operator")
+    bounty = _bounty(
+        economy, subject_id, network_id, asset_id, _goal(database, subject_id), key="unbounded-auto"
+    )
+    economy.publish_bounty(bounty.bounty_id, subject_id, actor="operator")
+    submission = economy.submit(
+        bounty.bounty_id,
+        subject_id,
+        SubmissionInput(
+            counterparty="human",
+            content="proof",
+            recipient_address="0xB111111111111111111111111111111111111111",
+            idempotency_key="unbounded-auto-submission",
+            consent_version=1,
+        ),
+    )
+
+    economy.decide_submission(
+        submission.submission_id,
+        subject_id,
+        accepted=True,
+        reason="verified",
+        actor="operator",
+    )
+
+    order = economy.order_for_submission(submission.submission_id, subject_id)
+    assert order is not None
+    assert order.status == "reserved"
 
 
 def test_recipient_allowlist_is_disabled_by_default_and_optional_when_enabled(
@@ -313,9 +388,9 @@ def test_recipient_allowlist_is_disabled_by_default_and_optional_when_enabled(
         reason="verified",
         actor="operator",
     )
-    assert (
-        economy.order_for_submission(open_submission.submission_id, subject_id).status == "reserved"
-    )
+    open_order = economy.order_for_submission(open_submission.submission_id, subject_id)
+    assert open_order is not None
+    assert open_order.status == "reserved"
 
     policy = economy.update_policy(
         subject_id,
@@ -354,10 +429,9 @@ def test_recipient_allowlist_is_disabled_by_default_and_optional_when_enabled(
         reason="verified",
         actor="operator",
     )
-    assert (
-        economy.order_for_submission(blocked_submission.submission_id, subject_id).status
-        == "rejected"
-    )
+    blocked_order = economy.order_for_submission(blocked_submission.submission_id, subject_id)
+    assert blocked_order is not None
+    assert blocked_order.status == "rejected"
 
 
 def test_recipient_policy_fields_migrate_and_rehash_existing_policy(tmp_path: Path) -> None:
