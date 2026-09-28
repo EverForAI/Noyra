@@ -2811,6 +2811,14 @@ class NoyraHTTPServer:
                         HTTPStatus.OK,
                         owner.wallet_economy.get_policy(owner.kernel.subject_id).__dict__,
                     )
+                elif parsed.path in {
+                    "/api/v1/admin/wallet-automation",
+                    "/api/admin/wallet-automation",
+                }:
+                    if not self._authorized():
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    self._json(HTTPStatus.OK, self._wallet_automation_projection())
                 elif parsed.path == "/api/admin/wallet-ledger":
                     if not self._authorized():
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -3626,6 +3634,20 @@ class NoyraHTTPServer:
                     return
                 if self.path == "/api/admin/wallet-policy":
                     self._update_wallet_policy()
+                    return
+                if self.path in {
+                    "/api/v1/admin/wallet-automation",
+                    "/api/admin/wallet-automation",
+                }:
+                    self._update_wallet_automation()
+                    return
+                if self.path in {
+                    "/api/v1/admin/wallet-automation/pause",
+                    "/api/admin/wallet-automation/pause",
+                    "/api/v1/admin/wallet-automation/resume",
+                    "/api/admin/wallet-automation/resume",
+                }:
+                    self._set_wallet_automation_pause(self.path.endswith("/pause"))
                     return
                 if self.path == "/api/config/wallet-networks":
                     self._configure_wallet_network()
@@ -4730,6 +4752,163 @@ class NoyraHTTPServer:
                         HTTPStatus.CONFLICT if "version" in str(error) else HTTPStatus.BAD_REQUEST,
                         {"error": "invalid_wallet_policy"},
                     )
+
+            def _wallet_automation_projection(self) -> dict[str, Any]:
+                policy = owner.wallet_economy.get_policy(owner.kernel.subject_id)
+                pending: dict[str, int] = {}
+                try:
+                    with owner.kernel.database.read_transaction() as connection:
+                        rows = connection.execute(
+                            "SELECT error_code, COUNT(*) AS count FROM wallet_payment_executions "
+                            "WHERE subject_id=? AND status IN ('unknown','failed') "
+                            "GROUP BY error_code",
+                            (owner.kernel.subject_id,),
+                        ).fetchall()
+                    from noyra.wallet.execution import WalletPaymentExecutionEngine
+
+                    for row in rows:
+                        code = WalletPaymentExecutionEngine.normalize_reason_code(row["error_code"])
+                        pending[code] = pending.get(code, 0) + int(row["count"])
+                except Exception:
+                    pending = {}
+                active = 0
+                try:
+                    with owner.kernel.database.read_transaction() as connection:
+                        active = int(
+                            connection.execute(
+                                "SELECT COUNT(*) FROM wallet_payment_executions "
+                                "WHERE subject_id=? AND status IN ('signing','broadcast','unknown')",
+                                (owner.kernel.subject_id,),
+                            ).fetchone()[0]
+                        )
+                except Exception:
+                    pass
+                return {
+                    "automation_enabled": bool(policy.automation_enabled),
+                    "mode": policy.mode,
+                    "emergency_paused": bool(policy.emergency_paused),
+                    "policy_version": policy.policy_version,
+                    "per_order_limit": policy.per_order_limit,
+                    "daily_limit": policy.daily_limit,
+                    "active_executions": active,
+                    "pending_reason_counts": pending,
+                    "status": (
+                        "paused"
+                        if policy.emergency_paused
+                        else "enabled"
+                        if policy.automation_enabled and policy.mode == "automatic"
+                        else "disabled"
+                    ),
+                }
+
+            def _update_wallet_automation(self, payload: object | None = None) -> None:
+                if payload is None:
+                    payload = self._wallet_payload()
+                if payload is None:
+                    return
+                if not isinstance(payload, dict):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_wallet_automation"})
+                    return
+                try:
+                    expected = int(payload.pop("expected_version"))
+                    reason = str(payload.pop("reason", "管理员更新自动付款设置")).strip()
+                    if not reason or len(reason) > 2000:
+                        raise ValueError("reason")
+                    idem = str(payload.pop("idempotency_key", "")).strip()
+                    if not idem or len(idem) > 128:
+                        raise ValueError("idempotency_key")
+                    with owner.kernel.database.read_transaction() as connection:
+                        duplicate = connection.execute(
+                            "SELECT payload_json FROM audit_records WHERE subject_id=? "
+                            "AND action='wallet_automation_updated' ORDER BY occurred_at DESC",
+                            (owner.kernel.subject_id,),
+                        ).fetchall()
+                    for row in duplicate:
+                        try:
+                            if strict_json_loads(row["payload_json"]).get("idempotency_key") == idem:
+                                self._json(HTTPStatus.OK, self._wallet_automation_projection())
+                                return
+                        except (TypeError, ValueError, AttributeError):
+                            continue
+                    current = owner.wallet_economy.get_policy(owner.kernel.subject_id)
+                    allowed = {
+                        "mode": current.mode,
+                        "allowed_network_ids": list(current.allowed_network_ids),
+                        "allowed_asset_ids": list(current.allowed_asset_ids),
+                        "per_order_limit": current.per_order_limit,
+                        "daily_limit": current.daily_limit,
+                        "monthly_limit": current.monthly_limit,
+                        "daily_order_limit": current.daily_order_limit,
+                        "monthly_order_limit": current.monthly_order_limit,
+                        "min_balance": current.min_balance,
+                        "max_observation_age_seconds": current.max_observation_age_seconds,
+                        "automatic_max_amount": current.automatic_max_amount,
+                        "anomaly_block": current.anomaly_block,
+                        "emergency_paused": bool(payload.pop("emergency_paused", current.emergency_paused)),
+                        "automation_enabled": bool(payload.pop("automation_enabled")),
+                        "recipient_allowlist_enabled": current.recipient_allowlist_enabled,
+                        "allowed_recipient_addresses": list(current.allowed_recipient_addresses),
+                    }
+                    if "mode" in payload:
+                        allowed["mode"] = payload.pop("mode")
+                    if payload:
+                        raise ValueError("unknown fields")
+                    record = owner.wallet_economy.update_policy(
+                        owner.kernel.subject_id,
+                        PaymentPolicyInput.model_validate(allowed),
+                        expected_version=expected,
+                        actor=self._actor(),
+                    )
+                    with owner.kernel.database.transaction() as connection:
+                        owner.wallet_economy._audit(
+                            connection,
+                            owner.kernel.subject_id,
+                            "wallet_automation_updated",
+                            self._actor(),
+                            {"idempotency_key": idem, "reason": reason, "policy_version": record.policy_version},
+                        )
+                    self._json(HTTPStatus.OK, self._wallet_automation_projection())
+                except Exception as error:
+                    self._json(
+                        HTTPStatus.CONFLICT if "version" in str(error) else HTTPStatus.BAD_REQUEST,
+                        {"error": "invalid_wallet_automation"},
+                    )
+
+            def _set_wallet_automation_pause(self, paused: bool) -> None:
+                payload = self._wallet_payload()
+                if payload is None:
+                    return
+                if not isinstance(payload, dict):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_wallet_automation"})
+                    return
+                payload["emergency_paused"] = paused
+                payload["automation_enabled"] = owner.wallet_economy.get_policy(
+                    owner.kernel.subject_id
+                ).automation_enabled
+                payload.setdefault("mode", owner.wallet_economy.get_policy(owner.kernel.subject_id).mode)
+                payload.setdefault("idempotency_key", f"pause-{paused}-{time.time_ns()}")
+                payload.setdefault("reason", "管理员紧急暂停" if paused else "管理员解除紧急暂停")
+                # Pause/resume is an explicit policy update; keep all unrelated
+                # policy fields from the durable record.
+                current = owner.wallet_economy.get_policy(owner.kernel.subject_id)
+                payload.update(
+                    {
+                        "allowed_network_ids": list(current.allowed_network_ids),
+                        "allowed_asset_ids": list(current.allowed_asset_ids),
+                        "per_order_limit": current.per_order_limit,
+                        "daily_limit": current.daily_limit,
+                        "monthly_limit": current.monthly_limit,
+                        "daily_order_limit": current.daily_order_limit,
+                        "monthly_order_limit": current.monthly_order_limit,
+                        "min_balance": current.min_balance,
+                        "max_observation_age_seconds": current.max_observation_age_seconds,
+                        "automatic_max_amount": current.automatic_max_amount,
+                        "anomaly_block": current.anomaly_block,
+                        "recipient_allowlist_enabled": current.recipient_allowlist_enabled,
+                        "allowed_recipient_addresses": list(current.allowed_recipient_addresses),
+                    }
+                )
+                self._update_wallet_automation(payload)
 
             def _configure_wallet_network(self) -> None:
                 if not self._authorized():

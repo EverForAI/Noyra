@@ -456,6 +456,8 @@ _OWNERSHIP_GRAPH_V65 = {
 # Schema 66 adds recipient policy columns to an existing subject-owned table;
 # export ownership is unchanged.
 _OWNERSHIP_GRAPH_V66 = _OWNERSHIP_GRAPH_V65
+# Schema 67 adds only a closed-by-default wallet policy flag.
+_OWNERSHIP_GRAPH_V67 = _OWNERSHIP_GRAPH_V66
 
 _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     33: _OWNERSHIP_GRAPH_V33,
@@ -492,6 +494,7 @@ _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     64: _OWNERSHIP_GRAPH_V64,
     65: _OWNERSHIP_GRAPH_V65,
     66: _OWNERSHIP_GRAPH_V66,
+    67: _OWNERSHIP_GRAPH_V67,
 }
 
 

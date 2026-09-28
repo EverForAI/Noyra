@@ -484,6 +484,7 @@ function renderWalletPolicy(policy) {
   $("#wallet-policy-mode").value = walletPolicy.mode || "disabled";
   $("#wallet-policy-per-order").value = walletPolicy.per_order_limit ?? "0";
   $("#wallet-policy-daily").value = walletPolicy.daily_limit ?? "0";
+  $("#wallet-policy-automation-enabled").checked = walletPolicy.automation_enabled === true;
   $("#wallet-policy-allowlist-enabled").checked = walletPolicy.recipient_allowlist_enabled === true;
   $("#wallet-policy-allowlist").value = Array.isArray(walletPolicy.allowed_recipient_addresses)
     ? walletPolicy.allowed_recipient_addresses.join("\n")
@@ -492,6 +493,13 @@ function renderWalletPolicy(policy) {
 async function loadWalletPolicy() {
   const policy = await request("/api/admin/wallet-policy");
   renderWalletPolicy(policy);
+  try {
+    const automation = await request("/api/v1/admin/wallet-automation");
+    const label = automation.status === "paused" ? "紧急暂停中" : automation.status === "enabled" ? "自动付款已开启" : "自动付款已关闭";
+    $("#wallet-automation-status").textContent = `${label} · 待处理 ${Object.values(automation.pending_reason_counts || {}).reduce((a, b) => a + Number(b || 0), 0)} 项`;
+    $("#wallet-automation-pause").disabled = automation.emergency_paused === true;
+    $("#wallet-automation-resume").disabled = automation.emergency_paused !== true;
+  } catch (error) { setStatus("#wallet-automation-status", errorText(error), true); }
   setStatus("#wallet-policy-status", "策略已加载");
 }
 
@@ -1233,6 +1241,7 @@ $("#wallet-policy-form").addEventListener("submit", async (event) => {
         automatic_max_amount: "0",
         anomaly_block: walletPolicy.anomaly_block !== false,
         emergency_paused: walletPolicy.emergency_paused === true,
+        automation_enabled: $("#wallet-policy-automation-enabled").checked,
         recipient_allowlist_enabled: $("#wallet-policy-allowlist-enabled").checked,
         allowed_recipient_addresses: allowedRecipients,
       }),
@@ -1246,6 +1255,21 @@ $("#wallet-policy-form").addEventListener("submit", async (event) => {
     if (button) button.disabled = false;
   }
 });
+
+async function setWalletAutomationPause(paused) {
+  if (!walletPolicy) return;
+  const button = paused ? $("#wallet-automation-pause") : $("#wallet-automation-resume");
+  button.disabled = true;
+  try {
+    await request(`/api/v1/admin/wallet-automation/${paused ? "pause" : "resume"}`, {
+      method: "POST",
+      body: JSON.stringify({ expected_version: walletPolicy.policy_version, reason: paused ? "管理员紧急暂停自动付款" : "管理员解除自动付款暂停" }),
+    });
+    await loadWalletPolicy();
+  } catch (error) { setStatus("#wallet-policy-status", errorText(error), true); button.disabled = false; }
+}
+$("#wallet-automation-pause").addEventListener("click", () => { void setWalletAutomationPause(true); });
+$("#wallet-automation-resume").addEventListener("click", () => { void setWalletAutomationPause(false); });
 
 $("#admin-search-provider-form").addEventListener("submit", async (event) => {
   event.preventDefault();

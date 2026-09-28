@@ -6508,6 +6508,7 @@ def wallet_payment_policy_state_hash(
     updated_at: str,
     recipient_allowlist_enabled: int | bool = False,
     allowed_recipient_addresses_json: str = "[]",
+    automation_enabled: int | bool = False,
 ) -> str:
     """Hash the complete durable wallet payment policy state."""
     validate_wallet_timestamp(updated_at)
@@ -6527,6 +6528,7 @@ def wallet_payment_policy_state_hash(
             "automatic_max_amount": automatic_max_amount,
             "anomaly_block": int(anomaly_block),
             "emergency_paused": int(emergency_paused),
+            "automation_enabled": int(automation_enabled),
             "recipient_allowlist_enabled": int(recipient_allowlist_enabled),
             "allowed_recipient_addresses_json": allowed_recipient_addresses_json,
             "policy_version": strict_int(policy_version),
@@ -6841,6 +6843,8 @@ class Database:
                     raise
             self._migrate(wallet_legacy_approval=wallet_legacy_approval)
             self._ensure_optional_features()
+            with self.transaction() as connection:
+                self._upgrade_wallet_payment_policy_automation(connection)
             self._ensure_training_policies()
             with self.connection() as connection:
                 connection.execute("PRAGMA journal_mode = WAL")
@@ -8259,6 +8263,11 @@ END;
                 automatic_max_amount=str(row["automatic_max_amount"]),
                 anomaly_block=int(row["anomaly_block"]),
                 emergency_paused=int(row["emergency_paused"]),
+                automation_enabled=(
+                    int(row["automation_enabled"])
+                    if "automation_enabled" in row.keys()
+                    else 0
+                ),
                 policy_version=strict_int(row["policy_version"]),
                 updated_at=str(row["updated_at"]),
             )
@@ -8396,6 +8405,46 @@ END;
                     "wallet payment policy hash mismatch before recipient allow-list migration: "
                     f"{row['subject_id']}"
                 )
+            connection.execute(
+                "UPDATE wallet_payment_policies SET state_hash=? WHERE subject_id=?",
+                (expected, row["subject_id"]),
+            )
+
+    @staticmethod
+    def _upgrade_wallet_payment_policy_automation(connection: sqlite3.Connection) -> None:
+        """Add the closed-by-default automation switch and bind it to policy hashes."""
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(wallet_payment_policies)")
+        }
+        if "automation_enabled" not in columns:
+            connection.execute(
+                "ALTER TABLE wallet_payment_policies ADD COLUMN automation_enabled "
+                "INTEGER NOT NULL DEFAULT 0 CHECK(automation_enabled IN (0,1))"
+            )
+        for row in connection.execute(
+            "SELECT * FROM wallet_payment_policies ORDER BY subject_id"
+        ).fetchall():
+            expected = wallet_payment_policy_state_hash(
+                subject_id=str(row["subject_id"]),
+                mode=str(row["mode"]),
+                allowed_network_ids_json=str(row["allowed_network_ids_json"]),
+                allowed_asset_ids_json=str(row["allowed_asset_ids_json"]),
+                per_order_limit=str(row["per_order_limit"]),
+                daily_limit=str(row["daily_limit"]),
+                monthly_limit=str(row["monthly_limit"]),
+                daily_order_limit=int(row["daily_order_limit"]),
+                monthly_order_limit=int(row["monthly_order_limit"]),
+                min_balance=str(row["min_balance"]),
+                max_observation_age_seconds=int(row["max_observation_age_seconds"]),
+                automatic_max_amount=str(row["automatic_max_amount"]),
+                anomaly_block=int(row["anomaly_block"]),
+                emergency_paused=int(row["emergency_paused"]),
+                recipient_allowlist_enabled=int(row["recipient_allowlist_enabled"]),
+                allowed_recipient_addresses_json=str(row["allowed_recipient_addresses_json"]),
+                automation_enabled=int(row["automation_enabled"]),
+                policy_version=int(row["policy_version"]),
+                updated_at=str(row["updated_at"]),
+            )
             connection.execute(
                 "UPDATE wallet_payment_policies SET state_hash=? WHERE subject_id=?",
                 (expected, row["subject_id"]),

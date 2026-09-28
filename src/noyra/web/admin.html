@@ -136,9 +136,12 @@
           <article class="surface-card"><div class="card-heading"><div><h2>RPC 预算</h2><p class="muted">每个网络独立限制窗口和请求间隔。</p></div><button class="text-button" id="refresh-wallet-budget" type="button">更新</button></div><label for="wallet-budget-network">网络</label><select id="wallet-budget-network"></select><div id="wallet-budget-summary" class="summary-list wallet-budget-summary"></div><p class="form-status" id="wallet-budget-status" role="status"></p></article>
         </div>
         <div class="wallet-columns wallet-economy-columns">
-          <article class="surface-card wallet-policy-card"><div class="card-heading"><div><h2>自动付款策略</h2><p class="muted">自动付款只受单笔上限和每日总额上限控制；白名单默认关闭。</p></div><button class="text-button" id="refresh-wallet-policy" type="button">更新</button></div>
+          <article class="surface-card wallet-policy-card"><div class="card-heading"><div><h2>自动付款策略</h2><p class="muted">自动付款只受总开关、单笔上限和每日总额上限控制；白名单默认关闭。</p></div><button class="text-button" id="refresh-wallet-policy" type="button">更新</button></div>
+            <div id="wallet-automation-status" class="wallet-automation-status" role="status" aria-live="polite">正在读取自动付款状态…</div>
+            <div class="resource-actions wallet-automation-actions"><button id="wallet-automation-pause" type="button">紧急暂停</button><button id="wallet-automation-resume" type="button">解除暂停</button></div>
             <form id="wallet-policy-form" class="model-grid">
               <div class="field-group"><label for="wallet-policy-mode">付款模式</label><select id="wallet-policy-mode"><option value="disabled">关闭付款</option><option value="conditional_confirmation">人工确认后付款</option><option value="automatic">自动付款</option></select></div>
+              <label class="field-group checkbox-field"><span><input id="wallet-policy-automation-enabled" type="checkbox"> 开启自动付款总开关</span><small class="muted">开启后仍受单笔上限、每日总额和紧急暂停保护。</small></label>
               <div class="field-group"><label for="wallet-policy-per-order">单笔上限（最小单位）</label><input id="wallet-policy-per-order" inputmode="numeric" pattern="[0-9]+" required><small class="muted">自动付款必须填写大于 0 的金额；关闭付款时可以填 0。</small></div>
               <div class="field-group"><label for="wallet-policy-daily">每日总额上限（最小单位）</label><input id="wallet-policy-daily" inputmode="numeric" pattern="[0-9]+" required><small class="muted">自动付款必须填写大于 0 的每日总额上限。</small></div>
               <label class="field-group checkbox-field"><span><input id="wallet-policy-allowlist-enabled" type="checkbox"> 启用收款地址白名单</span><small class="muted">关闭时，任何通过地址格式校验的收款地址都可以使用。</small></label>

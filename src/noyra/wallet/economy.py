@@ -608,6 +608,12 @@ class WalletEconomyStore:
             current = 1 if row is None else int(row["policy_version"])
             if expected_version != current:
                 raise ValueError("wallet payment policy version conflict")
+            # Preserve the pre-switch API contract for callers that only set
+            # mode=automatic. New management clients send an explicit bool.
+            if proposal.automation_enabled is None:
+                proposal = proposal.model_copy(
+                    update={"automation_enabled": proposal.mode == "automatic"}
+                )
             now = self.clock()
             self._insert_policy(c, subject_id, proposal, current + 1, now, replace=True)
             self._audit(
@@ -806,6 +812,7 @@ class WalletEconomyStore:
                         "automatic_max_amount": policy["automatic_max_amount"],
                         "anomaly_block": bool(policy["anomaly_block"]),
                         "emergency_paused": bool(policy["emergency_paused"]),
+                        "automation_enabled": bool(policy["automation_enabled"]),
                         "recipient_allowlist_enabled": bool(policy["recipient_allowlist_enabled"]),
                         "allowed_recipient_addresses": strict_json_loads(
                             policy["allowed_recipient_addresses_json"]
@@ -1127,6 +1134,8 @@ class WalletEconomyStore:
         if str(policy["mode"]) == "disabled":
             return False
         if row["payment_mode"] == "automatic" and str(policy["mode"]) != "automatic":
+            return False
+        if row["payment_mode"] == "automatic" and not bool(policy["automation_enabled"]):
             return False
         # Network and asset allowlists are retained as durable policy metadata
         # for compatibility and reporting.  A payment still needs a currently
@@ -1734,6 +1743,7 @@ class WalletEconomyStore:
             automatic_max_amount=str(row["automatic_max_amount"]),
             anomaly_block=int(row["anomaly_block"]),
             emergency_paused=int(row["emergency_paused"]),
+            automation_enabled=int(row["automation_enabled"]),
             recipient_allowlist_enabled=int(row["recipient_allowlist_enabled"]),
             allowed_recipient_addresses_json=str(row["allowed_recipient_addresses_json"]),
             policy_version=strict_int(row["policy_version"]),
@@ -1862,6 +1872,7 @@ class WalletEconomyStore:
             r["automatic_max_amount"],
             bool(r["anomaly_block"]),
             bool(r["emergency_paused"]),
+            bool(r["automation_enabled"]),
             int(r["policy_version"]),
             r["updated_at"],
             bool(r["recipient_allowlist_enabled"]),
@@ -1913,6 +1924,7 @@ class WalletEconomyStore:
             p.automatic_max_amount,
             int(p.anomaly_block),
             int(p.emergency_paused),
+            int(bool(p.automation_enabled)),
             int(p.recipient_allowlist_enabled),
             canonical_json(p.allowed_recipient_addresses),
             version,
@@ -1932,6 +1944,7 @@ class WalletEconomyStore:
                 automatic_max_amount=p.automatic_max_amount,
                 anomaly_block=p.anomaly_block,
                 emergency_paused=p.emergency_paused,
+                automation_enabled=bool(p.automation_enabled),
                 recipient_allowlist_enabled=p.recipient_allowlist_enabled,
                 allowed_recipient_addresses_json=canonical_json(p.allowed_recipient_addresses),
                 policy_version=version,
@@ -1940,6 +1953,6 @@ class WalletEconomyStore:
         )
         sql = "INSERT OR REPLACE" if replace else "INSERT OR IGNORE"
         c.execute(
-            f"{sql} INTO wallet_payment_policies(subject_id,mode,allowed_network_ids_json,allowed_asset_ids_json,per_order_limit,daily_limit,monthly_limit,daily_order_limit,monthly_order_limit,min_balance,max_observation_age_seconds,automatic_max_amount,anomaly_block,emergency_paused,recipient_allowlist_enabled,allowed_recipient_addresses_json,policy_version,updated_at,state_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            f"{sql} INTO wallet_payment_policies(subject_id,mode,allowed_network_ids_json,allowed_asset_ids_json,per_order_limit,daily_limit,monthly_limit,daily_order_limit,monthly_order_limit,min_balance,max_observation_age_seconds,automatic_max_amount,anomaly_block,emergency_paused,automation_enabled,recipient_allowlist_enabled,allowed_recipient_addresses_json,policy_version,updated_at,state_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             vals,
         )

@@ -46,6 +46,20 @@ _MAX_GAS_LIMIT = 30_000_000
 _SIGNER_MAX_RESPONSE_BYTES = 16_384
 _SIGNER_MAX_HEADER_BYTES = DEFAULT_MAX_HEADER_BYTES
 
+WALLET_PAYMENT_REASON_CODES = frozenset(
+    {
+        "insufficient_balance",
+        "gas_too_high",
+        "nonce_conflict",
+        "confirmation_timeout",
+        "chain_reorg",
+        "rpc_unavailable",
+        "fee_quote_unavailable",
+        "broadcast_unknown",
+        "receipt_failed",
+    }
+)
+
 
 class WalletExecutionError(RuntimeError):
     """Base class for classified execution failures."""
@@ -731,6 +745,10 @@ class WalletExecutionRecord:
     created_at: str
     updated_at: str
 
+    @property
+    def reason_code(self) -> str:
+        return WalletPaymentExecutionEngine.normalize_reason_code(self.error_code)
+
 
 @dataclass(frozen=True)
 class WalletExecutionAttemptRecord:
@@ -748,6 +766,31 @@ class WalletExecutionAttemptRecord:
 
 class WalletPaymentExecutionEngine:
     """Crash-safe orchestrator for reserved payment orders."""
+
+    REASON_CODES = frozenset(
+        {
+            "insufficient_balance",
+            "gas_too_high",
+            "nonce_conflict",
+            "confirmation_timeout",
+            "chain_reorg",
+            "rpc_unavailable",
+            "fee_quote_unavailable",
+            "broadcast_unknown",
+            "receipt_failed",
+        }
+    )
+
+    @classmethod
+    def normalize_reason_code(cls, value: str | None) -> str:
+        if value in cls.REASON_CODES:
+            return str(value)
+        return "unknown" if value else "none"
+
+    @classmethod
+    def reason_projection(cls, execution: WalletExecutionRecord | Any) -> dict[str, str | None]:
+        raw = execution.error_code if hasattr(execution, "error_code") else execution["error_code"]
+        return {"reason_code": cls.normalize_reason_code(raw), "legacy_error_code": raw}
 
     def __init__(
         self,

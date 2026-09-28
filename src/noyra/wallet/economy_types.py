@@ -165,6 +165,10 @@ class PaymentPolicyInput(BaseModel):
     automatic_max_amount: str = "0"
     anomaly_block: bool = True
     emergency_paused: bool = False
+    # ``None`` keeps legacy policy clients compatible: explicitly supplied
+    # admin updates can turn automation off, while old mode=automatic callers
+    # retain their existing behavior until they adopt the new switch.
+    automation_enabled: bool | None = None
     recipient_allowlist_enabled: bool = False
     allowed_recipient_addresses: list[str] = Field(default_factory=list, max_length=256)
 
@@ -248,6 +252,7 @@ class PaymentPolicyRecord:
     automatic_max_amount: str
     anomaly_block: bool
     emergency_paused: bool
+    automation_enabled: bool
     policy_version: int
     updated_at: str
     recipient_allowlist_enabled: bool
