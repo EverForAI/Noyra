@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, cast
 
@@ -34,6 +35,25 @@ def test_external_legacy_endpoint_is_preserved(monkeypatch: pytest.MonkeyPatch) 
     signer = configured_wallet_signer_from_env()
     assert signer is not None
     assert signer.signer_id == "legacy"
+    cast(Any, signer).close()
+
+
+def test_external_signer_bearer_token_can_use_a_private_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    token_path = tmp_path / "signer.token"
+    token_path.write_text("file-signer-token\n", encoding="utf-8")
+    if os.name == "posix":
+        token_path.chmod(0o600)
+    monkeypatch.setenv("NOYRA_WALLET_MODE", "external")
+    monkeypatch.setenv("NOYRA_WALLET_SIGNER_ENDPOINT", "https://signer.example")
+    monkeypatch.setenv("NOYRA_WALLET_SIGNER_ID", "external")
+    monkeypatch.setenv("NOYRA_WALLET_SIGNER_BEARER_TOKEN_FILE", str(token_path))
+    monkeypatch.setenv("NOYRA_WALLET_SIGNER_BEARER_TOKEN", "inline-secret-must-not-win")
+
+    signer = configured_wallet_signer_from_env()
+    assert signer is not None
+    assert cast(Any, signer).bearer_token == "file-signer-token"
     cast(Any, signer).close()
 
 

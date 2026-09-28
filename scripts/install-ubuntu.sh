@@ -71,6 +71,7 @@ PREVIOUS_LINK="$INSTALL_DIR/previous"
 LOCK_FILE="$INSTALL_DIR/.install.lock"
 DATA_DIR=/var/lib/noyra
 CONFIG_DIR=/etc/noyra
+CREDENTIALS_DIR="$CONFIG_DIR/credentials"
 UNIT_FILE=/etc/systemd/system/noyra.service
 PROFILE_DROPIN_DIR=/etc/systemd/system/noyra.service.d
 PROFILE_DROPIN="$PROFILE_DROPIN_DIR/profile.conf"
@@ -221,7 +222,7 @@ restore_backup_dir() {
 }
 
 id -u noyra >/dev/null 2>&1 || useradd --system --home-dir "$INSTALL_DIR" --shell /usr/sbin/nologin noyra
-for protected_dir in "$INSTALL_DIR" "$RELEASES_DIR" "$DATA_DIR" "$CONFIG_DIR"; do
+for protected_dir in "$INSTALL_DIR" "$RELEASES_DIR" "$DATA_DIR" "$CONFIG_DIR" "$CREDENTIALS_DIR"; do
   if [[ -L "$protected_dir" ]]; then
     echo "Protected deployment directory cannot be a symlink: $protected_dir" >&2
     exit 1
@@ -230,6 +231,7 @@ done
 install -d -o root -g root -m 0755 "$INSTALL_DIR" "$RELEASES_DIR"
 install -d -o noyra -g noyra -m 0700 "$DATA_DIR"
 install -d -o root -g noyra -m 0750 "$CONFIG_DIR"
+install -d -o root -g noyra -m 0750 "$CREDENTIALS_DIR"
 
 assert_safe_segment() {
   local value="$1" name="$2"

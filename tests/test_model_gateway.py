@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -1617,6 +1618,22 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertRaises(ConfigurationError),
         ):
             OpenAICompatibleSettings.from_env()
+
+    def test_model_api_key_can_be_loaded_from_a_private_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            key_path = Path(temporary_directory) / "model.key"
+            key_path.write_text("file-model-secret\n", encoding="utf-8")
+            if os.name == "posix":
+                key_path.chmod(0o600)
+            environment = {
+                "NOYRA_MODEL_BASE_URL": "https://models.example/v1",
+                "NOYRA_MODEL_NAME": "file-model",
+                "NOYRA_MODEL_API_KEY": "inline-secret-must-not-win",
+                "NOYRA_MODEL_API_KEY_FILE": str(key_path),
+            }
+            with mock.patch.dict(os.environ, environment, clear=False):
+                settings = OpenAICompatibleSettings.from_env()
+            self.assertEqual(settings.api_key.get_secret_value(), "file-model-secret")
 
     def test_runtime_budget_settings_convert_usd_without_float_rounding(self) -> None:
         environment = {

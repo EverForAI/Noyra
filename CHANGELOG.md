@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added protected-file and systemd-credential sources for model, embedding,
+  grouped model, and external wallet signer credentials; configuration examples
+  keep inline API keys empty and document secret-free exports.
 - Added HTTPS reverse-proxy deployment examples for the public site and admin console,
   operator-token rotation, per-client admin login throttling, secure session cookie support,
   and browser security response headers.

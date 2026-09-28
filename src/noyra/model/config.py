@@ -15,6 +15,8 @@ from pydantic import (
     model_validator,
 )
 
+from noyra.core.credentials import read_env_secret
+
 from .errors import ConfigurationError
 from .types import BudgetLimits, ModelPricing, RetryPolicy
 
@@ -68,7 +70,15 @@ class OpenAICompatibleSettings(BaseModel):
     def from_env(cls) -> OpenAICompatibleSettings:
         base_url = os.getenv("NOYRA_MODEL_BASE_URL", "")
         model = os.getenv("NOYRA_MODEL_NAME", "")
-        api_key = os.getenv("NOYRA_MODEL_API_KEY", "")
+        try:
+            api_key = read_env_secret(
+                value_var="NOYRA_MODEL_API_KEY",
+                file_var="NOYRA_MODEL_API_KEY_FILE",
+                credential_var="NOYRA_MODEL_API_KEY_CREDENTIAL",
+                label="model API key",
+            )
+        except ValueError as error:
+            raise ConfigurationError("invalid model API key source") from error
         required = {"base_url": base_url, "model": model, "api_key": api_key}
         missing = [name for name, value in required.items() if not value]
         if missing:

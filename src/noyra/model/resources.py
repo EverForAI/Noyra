@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from noyra.core.at_rest import validate_private_file, validate_private_root
+from noyra.core.credentials import read_secret_file
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError, RuntimeOwnershipError
 from noyra.core.locking import ProcessLock
@@ -3652,7 +3653,39 @@ class _NoopProvider:
 
 
 def resource_groups_from_env(pool: CognitivePool) -> tuple[CognitiveResourceGroupInput, ...]:
-    raw = os.getenv(f"NOYRA_{pool.upper()}_MODEL_GROUPS_JSON", "[]")
+    prefix = f"NOYRA_{pool.upper()}_MODEL_GROUPS"
+    config_file = os.getenv(f"{prefix}_FILE", "").strip()
+    config_credential = os.getenv(f"{prefix}_CREDENTIAL", "").strip()
+    if config_file and config_credential:
+        raise ConfigurationError(f"invalid {pool} model group secret source")
+    if config_file:
+        try:
+            raw = read_secret_file(
+                config_file,
+                label=f"{pool} model group configuration",
+                single_line=False,
+                max_bytes=1024 * 1024,
+            )
+        except ValueError as error:
+            raise ConfigurationError(f"invalid {pool} model group secret source") from error
+    elif config_credential:
+        credential_dir = os.getenv("CREDENTIALS_DIRECTORY", "").strip()
+        if (
+            not credential_dir
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", config_credential) is None
+        ):
+            raise ConfigurationError(f"invalid {pool} model group credential source")
+        try:
+            raw = read_secret_file(
+                Path(credential_dir) / config_credential,
+                label=f"{pool} model group credential",
+                single_line=False,
+                max_bytes=1024 * 1024,
+            )
+        except ValueError as error:
+            raise ConfigurationError(f"invalid {pool} model group credential source") from error
+    else:
+        raw = os.getenv(f"{prefix}_JSON", "[]")
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as error:
@@ -3666,12 +3699,37 @@ def resource_groups_from_env(pool: CognitivePool) -> tuple[CognitiveResourceGrou
                 raise ValueError("model group must be an object")
             normalized = dict(item)
             normalized["pool"] = pool
-            raw_keys = normalized.get("api_keys", [])
+            raw_keys = normalized.pop("api_keys", [])
+            raw_key_files = normalized.pop("api_key_files", [])
+            raw_key_credentials = normalized.pop("api_key_credentials", [])
             if not isinstance(raw_keys, list):
                 raise ValueError("model group api_keys must be a JSON array")
             if any(type(value) is not str for value in raw_keys):
                 raise ValueError("model group api_keys must contain only strings")
-            normalized["api_keys"] = tuple(SecretStr(value) for value in raw_keys)
+            if not isinstance(raw_key_files, list) or any(
+                type(value) is not str for value in raw_key_files
+            ):
+                raise ValueError("model group api_key_files must be a JSON array of strings")
+            if not isinstance(raw_key_credentials, list) or any(
+                type(value) is not str for value in raw_key_credentials
+            ):
+                raise ValueError("model group api_key_credentials must be a JSON array of strings")
+            resolved_keys = [*raw_keys]
+            for key_path in raw_key_files:
+                resolved_keys.append(read_secret_file(key_path, label="model API key"))
+            credential_dir = os.getenv("CREDENTIALS_DIRECTORY", "").strip()
+            if raw_key_credentials and not credential_dir:
+                raise ValueError("model group API key credentials require CREDENTIALS_DIRECTORY")
+            for credential_name in raw_key_credentials:
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", credential_name):
+                    raise ValueError("model group API credential name is invalid")
+                resolved_keys.append(
+                    read_secret_file(
+                        Path(credential_dir) / credential_name,
+                        label="model API key credential",
+                    )
+                )
+            normalized["api_keys"] = tuple(SecretStr(value) for value in resolved_keys)
             groups.append(CognitiveResourceGroupInput.model_validate(normalized))
     except (TypeError, ValueError) as error:
         raise ConfigurationError(f"invalid {pool} model group configuration") from error

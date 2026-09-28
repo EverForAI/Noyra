@@ -1,13 +1,33 @@
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 
+import pytest
 from pydantic import SecretStr
 
 from noyra.core import Database, IdentityStore
 from noyra.core.types import content_hash
-from noyra.model import EmbeddingResourceInput, EmbeddingResourceStore
+from noyra.model import EmbeddingResourceInput, EmbeddingResourceStore, EmbeddingSettings
+
+
+def test_embedding_api_key_can_be_loaded_from_a_private_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key_path = tmp_path / "embedding.key"
+    key_path.write_text("file-embedding-secret\n", encoding="utf-8")
+    if os.name == "posix":
+        key_path.chmod(0o600)
+    monkeypatch.setenv("NOYRA_EMBEDDING_BASE_URL", "https://embedding.example/v1")
+    monkeypatch.setenv("NOYRA_EMBEDDING_MODEL", "embed-v1")
+    monkeypatch.setenv("NOYRA_EMBEDDING_API_KEY", "inline-secret-must-not-win")
+    monkeypatch.setenv("NOYRA_EMBEDDING_API_KEY_FILE", str(key_path))
+
+    settings = EmbeddingSettings.from_env()
+
+    assert settings is not None
+    assert settings.api_key.get_secret_value() == "file-embedding-secret"
 
 
 def test_embedding_resource_is_independent_and_secret_free_in_database() -> None:

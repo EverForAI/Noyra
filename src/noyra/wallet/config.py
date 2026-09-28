@@ -14,6 +14,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from noyra.core.credentials import read_env_secret
+
 from .execution import HTTPSWalletSigner, WalletSigner
 
 
@@ -88,11 +90,19 @@ def configured_wallet_signer_from_env() -> WalletSigner | None:
     mode = _env("NOYRA_WALLET_MODE").casefold()
     endpoint = _env("NOYRA_WALLET_SIGNER_ENDPOINT")
     signer_id = _env("NOYRA_WALLET_SIGNER_ID")
-    bearer = _env("NOYRA_WALLET_SIGNER_BEARER_TOKEN")
     if mode and mode not in {"disabled", "external", "local"}:
         raise ValueError("NOYRA_WALLET_MODE is invalid")
     if mode == "disabled":
         return None
+    try:
+        bearer = read_env_secret(
+            value_var="NOYRA_WALLET_SIGNER_BEARER_TOKEN",
+            file_var="NOYRA_WALLET_SIGNER_BEARER_TOKEN_FILE",
+            credential_var="NOYRA_WALLET_SIGNER_BEARER_TOKEN_CREDENTIAL",
+            label="wallet signer credential",
+        )
+    except ValueError as error:
+        raise ValueError("external wallet signer configuration is invalid") from error
 
     if mode == "local":
         if endpoint or signer_id or bearer:

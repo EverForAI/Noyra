@@ -85,6 +85,8 @@ def test_ubuntu_installer_uses_atomic_release_lifecycle_and_rollback() -> None:
     assert 'rm -f -- "$backup_staging/.noyra-staging-marker"' in installer
     assert 'rmdir -- "$backup_staging"' in installer
     assert "profile.conf" in installer
+    assert 'CREDENTIALS_DIR="$CONFIG_DIR/credentials"' in installer
+    assert 'install -d -o root -g noyra -m 0750 "$CREDENTIALS_DIR"' in installer
     assert "S3 archive is configured; install with --profile cloud instead of base." in installer
     assert "/opt/noyra/current/.venv/bin/python" in unit
     assert "WorkingDirectory=/opt/noyra/current" in unit

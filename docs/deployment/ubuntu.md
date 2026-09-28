@@ -166,6 +166,37 @@ Set it as `NOYRA_ARCHIVE_ENCRYPTION_KEY`. Cold event payload segments are encryp
 or cloud archival; without this key the runtime deliberately refuses to read archived payloads.
 `NOYRA_EVENT_PAYLOAD_RETENTION_DAYS` defaults to 90.
 
+Keep provider credentials outside ordinary environment/configuration exports. On Ubuntu, create a
+root-owned service-readable directory and one file per key:
+
+```bash
+sudo install -d -o root -g noyra -m 0750 /etc/noyra/credentials
+sudo install -o root -g noyra -m 0640 /dev/null /etc/noyra/credentials/model-api-key
+sudoedit /etc/noyra/credentials/model-api-key
+```
+
+Set `NOYRA_MODEL_API_KEY_FILE=/etc/noyra/credentials/model-api-key` and leave
+`NOYRA_MODEL_API_KEY` empty. Embedding keys use `NOYRA_EMBEDDING_API_KEY_FILE` in the same way.
+For grouped model resources, use `NOYRA_ECONOMY_MODEL_GROUPS_FILE` or
+`NOYRA_DEEP_MODEL_GROUPS_FILE` to point at a protected JSON file. Its groups can refer to
+individual key files with `api_key_files`; inline `api_keys` remain supported for development but
+should not be used in production configuration. The search-provider and dashboard-managed model
+keys are written by the authenticated API directly into private files beneath
+`/var/lib/noyra/secrets/`, not into SQLite.
+
+Systemd credentials can provide the same values from a private per-service credential directory.
+Copy `deploy/systemd/noyra-credentials.conf.example` to a systemd drop-in, install each source file
+with root-only permissions, then set the corresponding `*_CREDENTIAL` variable (for example,
+`NOYRA_MODEL_API_KEY_CREDENTIAL=model-api-key`) and clear its `*_FILE` variable. Noyra reads only
+the credential name from the environment; systemd supplies its contents through
+`CREDENTIALS_DIRECTORY`. File and systemd credential sources cannot both be set for one value.
+
+Provider keys are never returned by normal configuration endpoints. Runtime and training exports
+contain only non-secret configuration metadata and redacted diagnostics; the server-side secret
+files are not included. Back up secret files separately using an encrypted, access-controlled
+backup process. Legacy inline `NOYRA_MODEL_API_KEY` and `NOYRA_EMBEDDING_API_KEY` values remain a
+compatibility fallback, so clear them after moving existing deployments to protected files.
+
 Autonomous cognition is disabled by default. Before enabling it, configure the remote model budget
 and a compact JSON array of HTTPS sources. Environment files require the JSON to stay on one line:
 

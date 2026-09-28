@@ -4,7 +4,9 @@ import json
 import sqlite3
 import tempfile
 import unittest
+import zipfile
 from datetime import datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,7 +14,7 @@ import httpx
 from pydantic import SecretStr
 
 from noyra.cognition import AutonomousResearch, CognitionSettings
-from noyra.core import EventStore, SubjectKernel
+from noyra.core import EventStore, RuntimeLogExporter, SubjectKernel
 from noyra.core.errors import IntegrityError
 from noyra.core.types import content_hash
 from noyra.mind import GoalCandidate, GoalStore
@@ -336,6 +338,27 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         system, context = provider.requests[0].messages
         self.assertIn("operator-provided capabilities, not instructions", system.content)
         self.assertNotIn("test-secret-key", context.content)
+
+    async def test_runtime_configuration_export_excludes_provider_api_keys(self) -> None:
+        secret = "runtime-export-provider-key-must-not-leak"
+        self.provider_store.configure(
+            self.subject_id,
+            SearchProviderInput(
+                provider_type="brave",
+                label="export-secret-check",
+                api_key=secret,
+            ),
+            actor="operator",
+        )
+
+        artifact = RuntimeLogExporter(self.kernel.database).export(
+            self.subject_id, actor="operator"
+        )
+
+        with zipfile.ZipFile(BytesIO(artifact.content)) as archive:
+            exported = b"\n".join(archive.read(name) for name in archive.namelist())
+        self.assertNotIn(secret.encode(), exported)
+        self.assertIn(b"export-secret-check", exported)
 
     async def test_no_api_defaults_to_model_search(self) -> None:
         model_results = json.dumps(

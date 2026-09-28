@@ -13,6 +13,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
+from noyra.core.credentials import read_env_secret
 from noyra.core.errors import IntegrityError
 from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
@@ -156,7 +157,15 @@ class EmbeddingSettings(BaseModel):
     @classmethod
     def from_env(cls) -> EmbeddingSettings | None:
         base_url = os.getenv("NOYRA_EMBEDDING_BASE_URL", "").strip()
-        api_key = os.getenv("NOYRA_EMBEDDING_API_KEY", "").strip()
+        try:
+            api_key = read_env_secret(
+                value_var="NOYRA_EMBEDDING_API_KEY",
+                file_var="NOYRA_EMBEDDING_API_KEY_FILE",
+                credential_var="NOYRA_EMBEDDING_API_KEY_CREDENTIAL",
+                label="embedding API key",
+            )
+        except ValueError as error:
+            raise ValueError("embedding API key source is invalid") from error
         model = os.getenv("NOYRA_EMBEDDING_MODEL", "").strip()
         if not (base_url or api_key or model):
             return None

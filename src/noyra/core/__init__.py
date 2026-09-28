@@ -37,6 +37,7 @@ from .at_rest import (
     VolumeEncryptionProbe,
     VolumeEncryptionStatus,
 )
+from .credentials import CredentialError, read_env_secret, read_secret_file
 from .database import Database
 from .events import EventStore
 from .export_jobs import ExportControl, ExportJob, ExportJobManager
@@ -110,6 +111,7 @@ __all__ = [
     "BackupKeyUnavailableError",
     "BackupKeyring",
     "CloudArchiveCoordinator",
+    "CredentialError",
     "Database",
     "EncryptedBackupManager",
     "EventStore",
@@ -167,5 +169,7 @@ __all__ = [
     "assert_current_lease",
     "bind_lease",
     "current_lease",
+    "read_env_secret",
+    "read_secret_file",
     "validate_subject_id",
 ]
