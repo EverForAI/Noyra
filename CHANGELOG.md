@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added HTTPS reverse-proxy deployment examples for the public site and admin console,
+  operator-token rotation, per-client admin login throttling, secure session cookie support,
+  and browser security response headers.
 - Added bounded asynchronous runtime and training export jobs with status,
   cancellation, and authenticated download endpoints.
 - Added independent embedding resource configuration with secret isolation.

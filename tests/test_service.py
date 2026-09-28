@@ -1789,6 +1789,100 @@ class ServiceTestCase(unittest.TestCase):
         with urlopen(post_with_csrf, timeout=5) as response:
             self.assertEqual(response.status, 201)
 
+    def test_admin_login_failures_are_rate_limited_per_client(self) -> None:
+        settings = self.settings.model_copy(update={"admin_login_rate_limit_per_minute": 2})
+        http = NoyraHTTPServer(self.kernel, settings)
+        http.start()
+        base_url = f"http://127.0.0.1:{http.address[1]}"
+        try:
+            for expected_status in (401, 401):
+                request = Request(
+                    f"{base_url}/admin/session",
+                    data=json.dumps({"token": "wrong-token"}).encode(),
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with self.assertRaises(HTTPError) as error:
+                    urlopen(request, timeout=5)
+                self.assertEqual(error.exception.code, expected_status)
+            request = Request(
+                f"{base_url}/admin/session",
+                data=json.dumps({"token": "wrong-token"}).encode(),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with self.assertRaises(HTTPError) as error:
+                urlopen(request, timeout=5)
+            self.assertEqual(error.exception.code, 429)
+            self.assertEqual(error.exception.headers["Retry-After"], "60")
+        finally:
+            http.close()
+
+    def test_admin_session_secure_cookie_and_security_headers_follow_https_setting(self) -> None:
+        settings = self.settings.model_copy(
+            update={
+                "admin_session_cookie_secure": True,
+                "public_site_url": "https://archive.example",
+            }
+        )
+        http = NoyraHTTPServer(self.kernel, settings)
+        http.start()
+        base_url = f"http://127.0.0.1:{http.address[1]}"
+        try:
+            with urlopen(f"{base_url}/", timeout=5) as response:
+                self.assertEqual(
+                    response.headers["Strict-Transport-Security"],
+                    "max-age=31536000; includeSubDomains",
+                )
+                self.assertEqual(response.headers["Cross-Origin-Opener-Policy"], "same-origin")
+                self.assertEqual(response.headers["Cross-Origin-Resource-Policy"], "same-origin")
+            request = Request(
+                f"{base_url}/admin/session",
+                data=json.dumps({"token": "test-admin-token-with-sufficient-entropy"}).encode(),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(request, timeout=5) as response:
+                self.assertIn("Secure", response.headers["Set-Cookie"])
+        finally:
+            http.close()
+
+    def test_operator_token_file_overrides_inline_environment_token(self) -> None:
+        token_path = self.data_dir / "operator.token"
+        token_path.write_text("file-operator-token-with-sufficient-entropy\n", encoding="ascii")
+        environment = {
+            "NOYRA_DATA_DIR": str(self.data_dir / "from-env-token-file"),
+            "NOYRA_SUBJECT_ID": "Noyra-operator-token-file",
+            "NOYRA_GENESIS_HASH": content_hash({"seed": "operator-token-file"}),
+            "NOYRA_OPERATOR_TOKEN": "inline-operator-token-with-sufficient-entropy",
+            "NOYRA_OPERATOR_TOKEN_FILE": str(token_path),
+            "NOYRA_HOST": "127.0.0.1",
+            "NOYRA_PORT": "0",
+        }
+        with patch.dict(os.environ, environment, clear=False):
+            settings = ServiceSettings.from_env()
+        self.assertEqual(
+            settings.operator_token.get_secret_value(),
+            "file-operator-token-with-sufficient-entropy",
+        )
+
+    def test_operator_token_file_rejects_unsafe_posix_permissions(self) -> None:
+        if os.name != "posix":
+            self.skipTest("POSIX token-file permission checks are not portable")
+        token_path = self.data_dir / "operator.token"
+        token_path.write_text("file-operator-token-with-sufficient-entropy\n", encoding="ascii")
+        token_path.chmod(0o644)
+        environment = {
+            "NOYRA_DATA_DIR": str(self.data_dir / "from-unsafe-token-file"),
+            "NOYRA_SUBJECT_ID": "Noyra-unsafe-operator-token-file",
+            "NOYRA_GENESIS_HASH": content_hash({"seed": "unsafe-operator-token-file"}),
+            "NOYRA_OPERATOR_TOKEN_FILE": str(token_path),
+            "NOYRA_HOST": "127.0.0.1",
+            "NOYRA_PORT": "0",
+        }
+        with patch.dict(os.environ, environment, clear=False), self.assertRaises(ValueError):
+            ServiceSettings.from_env()
+
     def test_embedding_resource_configuration_is_independent(self) -> None:
         secret = "embedding-api-key-that-must-not-export"
         status, created = self.authorized_json(

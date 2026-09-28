@@ -8,6 +8,9 @@ HTML = (ROOT / "src" / "noyra" / "web" / "index.html").read_text(encoding="utf-8
 ADMIN_HTML = (ROOT / "src" / "noyra" / "web" / "admin.html").read_text(encoding="utf-8")
 ADMIN_JS = (ROOT / "src" / "noyra" / "web" / "admin.js").read_text(encoding="utf-8")
 ADMIN_CSS = (ROOT / "src" / "noyra" / "web" / "admin.css").read_text(encoding="utf-8")
+CADDY = (ROOT / "deploy" / "caddy" / "noyra.Caddyfile.example").read_text(encoding="utf-8")
+NGINX = (ROOT / "deploy" / "nginx" / "noyra.conf.example").read_text(encoding="utf-8")
+TOKEN_ROTATION = (ROOT / "scripts" / "rotate-operator-token.sh").read_text(encoding="utf-8")
 
 
 def test_frontend_request_lifecycle_is_generation_and_abort_safe() -> None:
@@ -194,3 +197,11 @@ def test_public_page_has_search_metadata_crawler_rules_and_versioned_assets() ->
     ):
         assert marker in HTML
     assert 'name="robots" content="noindex, nofollow"' in ADMIN_HTML
+
+
+def test_https_public_and_admin_deployment_contract_is_documented() -> None:
+    assert "reverse_proxy 127.0.0.1:8765" in CADDY
+    assert "proxy_pass http://127.0.0.1:8765" in NGINX
+    assert "return 301 https://$host$request_uri" in NGINX
+    assert "NOYRA_OPERATOR_TOKEN_FILE" in TOKEN_ROTATION
+    assert "systemctl restart" in TOKEN_ROTATION

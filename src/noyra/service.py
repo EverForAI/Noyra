@@ -739,11 +739,13 @@ class ServiceSettings(BaseModel):
     admin_token: SecretStr | None = None
     read_token: SecretStr | None = None
     operator_token: SecretStr | None = None
+    operator_token_file: Path | None = None
     export_token: SecretStr | None = None
     break_glass_token: SecretStr | None = None
     allow_insecure_non_loopback: bool = False
     max_http_threads: int = Field(default=32, ge=4, le=512)
     request_rate_limit_per_minute: int = Field(default=120, ge=10, le=100_000)
+    admin_login_rate_limit_per_minute: int = Field(default=5, ge=1, le=1_000)
     trusted_proxy_cidrs: tuple[str, ...] = ()
     public_post_rate_limit_per_hour: int = Field(default=10, ge=1, le=100_000)
     public_post_queue_cap: int = Field(default=1_000, ge=1, le=100_000)
@@ -865,6 +867,16 @@ class ServiceSettings(BaseModel):
             raise ValueError("service host cannot be blank")
         return value
 
+    @field_validator("operator_token_file", mode="before")
+    @classmethod
+    def validate_operator_token_file(cls, value: object) -> Path | None:
+        if value is None or value == "":
+            return None
+        path = Path(str(value)).expanduser()
+        if not path.is_absolute():
+            raise ValueError("operator token file must be an absolute path")
+        return path
+
     @field_validator("subject_id")
     @classmethod
     def validate_subject_id(cls, value: str) -> str:
@@ -956,6 +968,24 @@ class ServiceSettings(BaseModel):
         raise ValueError(f"{name} must be true or false")
 
     @staticmethod
+    def _read_operator_token_file(path: Path | None) -> str | None:
+        if path is None:
+            return None
+        try:
+            stat_result = path.stat()
+            if not path.is_file():
+                raise ValueError("operator token file must be a regular file")
+            if os.name == "posix" and stat_result.st_mode & 0o026:
+                raise ValueError("operator token file permissions are too broad")
+            value = path.read_text(encoding="ascii")
+        except (OSError, UnicodeError) as error:
+            raise ValueError("operator token file is unreadable") from error
+        value = value.strip()
+        if not value:
+            raise ValueError("operator token file is empty")
+        return value
+
+    @staticmethod
     def _optional_environment_flag(name: str) -> bool | None:
         value = os.getenv(name)
         if value is None:
@@ -975,7 +1005,15 @@ class ServiceSettings(BaseModel):
         )
         token = os.getenv("NOYRA_ADMIN_TOKEN")
         read_token = os.getenv("NOYRA_READ_TOKEN")
-        operator_token = os.getenv("NOYRA_OPERATOR_TOKEN")
+        operator_token_file_value = os.getenv("NOYRA_OPERATOR_TOKEN_FILE")
+        operator_token_file = (
+            cls.validate_operator_token_file(operator_token_file_value)
+            if operator_token_file_value
+            else None
+        )
+        operator_token = cls._read_operator_token_file(operator_token_file) or os.getenv(
+            "NOYRA_OPERATOR_TOKEN"
+        )
         export_token = os.getenv("NOYRA_EXPORT_TOKEN")
         break_glass_token = os.getenv("NOYRA_BREAK_GLASS_TOKEN")
         return cls(
@@ -987,6 +1025,7 @@ class ServiceSettings(BaseModel):
             admin_token=SecretStr(token) if token else None,
             read_token=SecretStr(read_token) if read_token else None,
             operator_token=SecretStr(operator_token) if operator_token else None,
+            operator_token_file=operator_token_file,
             export_token=SecretStr(export_token) if export_token else None,
             break_glass_token=SecretStr(break_glass_token) if break_glass_token else None,
             allow_insecure_non_loopback=cls._environment_flag(
@@ -995,6 +1034,9 @@ class ServiceSettings(BaseModel):
             max_http_threads=int(os.getenv("NOYRA_MAX_HTTP_THREADS", "32")),
             request_rate_limit_per_minute=int(
                 os.getenv("NOYRA_REQUEST_RATE_LIMIT_PER_MINUTE", "120")
+            ),
+            admin_login_rate_limit_per_minute=int(
+                os.getenv("NOYRA_ADMIN_LOGIN_RATE_LIMIT_PER_MINUTE", "5")
             ),
             trusted_proxy_cidrs=tuple(
                 item.strip()
@@ -1310,6 +1352,7 @@ class NoyraHTTPServer:
         handler = self._handler_type()
         self._rate_lock = threading.Lock()
         self._request_times: dict[str, deque[float]] = defaultdict(deque)
+        self._admin_login_failures: dict[str, deque[float]] = defaultdict(deque)
         self._health_cache_lock = threading.Lock()
         self._health_cache_at = 0.0
         self._health_cache: tuple[HTTPStatus, dict[str, Any]] | None = None
@@ -1554,16 +1597,20 @@ class NoyraHTTPServer:
         self.training_exporter.start_after_ownership()
         self.export_jobs.start_after_ownership(self.kernel.subject_id)
 
-    def allow_request(self, client_ip: str) -> bool:
-        now = time.monotonic()
-        cutoff = now - 60
+    @staticmethod
+    def _rate_limit_bucket_key(client_ip: str) -> str:
         try:
             address = ipaddress.ip_address(client_ip)
             if isinstance(address, ipaddress.IPv6Address):
                 address = ipaddress.ip_network(f"{address}/64", strict=False).network_address
-            bucket_key = str(address)
+            return str(address)
         except ValueError:
-            bucket_key = client_ip[:128]
+            return client_ip[:128]
+
+    def allow_request(self, client_ip: str) -> bool:
+        now = time.monotonic()
+        cutoff = now - 60
+        bucket_key = self._rate_limit_bucket_key(client_ip)
         with self._rate_lock:
             if bucket_key not in self._request_times and len(self._request_times) >= 10_000:
                 self._request_times = defaultdict(
@@ -1583,6 +1630,33 @@ class NoyraHTTPServer:
                 return False
             bucket.append(now)
             return True
+
+    def allow_admin_login(self, client_ip: str) -> bool:
+        """Apply a separate failure budget to the public admin login endpoint."""
+        now = time.monotonic()
+        cutoff = now - 60
+        bucket_key = self._rate_limit_bucket_key(client_ip)
+        with self._rate_lock:
+            bucket = self._admin_login_failures[bucket_key]
+            while bucket and bucket[0] <= cutoff:
+                bucket.popleft()
+            if len(bucket) >= self.settings.admin_login_rate_limit_per_minute:
+                return False
+            bucket.append(now)
+            if len(self._admin_login_failures) > 10_000:
+                self._admin_login_failures = defaultdict(
+                    deque,
+                    {
+                        key: values
+                        for key, values in self._admin_login_failures.items()
+                        if values and values[-1] > cutoff
+                    },
+                )
+            return True
+
+    def clear_admin_login_failures(self, client_ip: str) -> None:
+        with self._rate_lock:
+            self._admin_login_failures.pop(self._rate_limit_bucket_key(client_ip), None)
 
     def client_ip(self, peer: str, forwarded_for: str | None = None) -> str:
         """Resolve a rate-limit identity without trusting spoofable headers.
@@ -6514,6 +6588,22 @@ class NoyraHTTPServer:
                     self._discard_small_request_body()
                     self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
                     return
+                client_ip = owner.client_ip(
+                    str(self.client_address[0]), self.headers.get("X-Forwarded-For")
+                )
+                if not owner.allow_admin_login(client_ip):
+                    self._discard_small_request_body()
+                    owner.audit_admin_event(
+                        "admin_login_rate_limited",
+                        "web-anonymous",
+                        {"path": "/admin/session"},
+                    )
+                    self._json(
+                        HTTPStatus.TOO_MANY_REQUESTS,
+                        {"error": "admin_login_rate_limited"},
+                        retry_after=60,
+                    )
+                    return
                 payload = self._request_json()
                 if payload is None:
                     return
@@ -6538,11 +6628,13 @@ class NoyraHTTPServer:
                     self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                     return
                 if role == "break_glass":
+                    owner.clear_admin_login_failures(client_ip)
                     owner.audit_admin_event(
                         "admin_break_glass_rejected_session", "web-break_glass", {}
                     )
                     self._json(HTTPStatus.FORBIDDEN, {"error": "break_glass_session_forbidden"})
                     return
+                owner.clear_admin_login_failures(client_ip)
                 session_id, session = owner.create_admin_session(role=role, actor=f"web-{role}")
                 owner.audit_admin_event("admin_login_succeeded", session.actor, {"role": role})
                 body = json.dumps(
@@ -7333,6 +7425,14 @@ class NoyraHTTPServer:
                 self.send_header("X-Frame-Options", "DENY")
                 self.send_header("Referrer-Policy", "no-referrer")
                 self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+                self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+                self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+                self.send_header("X-Permitted-Cross-Domain-Policies", "none")
+                if owner.settings.public_site_url or owner.settings.admin_session_cookie_secure:
+                    self.send_header(
+                        "Strict-Transport-Security",
+                        "max-age=31536000; includeSubDomains",
+                    )
                 self.send_header(
                     "Content-Security-Policy",
                     "default-src 'self'; img-src 'self' data:; base-uri 'none'; object-src 'none'; "

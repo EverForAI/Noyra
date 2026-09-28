@@ -15,14 +15,48 @@ capabilities. Those grants remain operator-owned records.
 - Outbound HTTPS access only to explicitly configured model and world-source hosts.
 - An inbound firewall that does not expose port 8765 directly to the public internet.
 
-Keep the service bound to `127.0.0.1`. The public site is available at `/`; the creator management
-surface is `/admin`. The management surface uses the configured operator/admin/break-glass token
-only at login, then keeps an in-memory HttpOnly session with a CSRF token for writes. Sessions are
-intentionally invalidated on service restart. Access both surfaces through an SSH tunnel or a TLS
-reverse proxy with its own authentication; the `/admin` path is not a security boundary. The public
-site deliberately exposes only public state, public diary entries, redacted behavior logs, and
-interactions sent on a `public:*` channel. Incoming messages and private outgoing messages are never
-returned by the public API.
+Keep the service bound to `127.0.0.1`. A TLS reverse proxy such as Caddy or Nginx can publish the
+public site at `/` and the creator management surface at `/admin` over a normal HTTPS URL. The
+management surface uses the configured operator/admin token only at login, then keeps an in-memory
+HttpOnly session with a CSRF token for writes. Sessions expire and are invalidated on service
+restart. Set `NOYRA_ADMIN_SESSION_COOKIE_SECURE=true` whenever browsers reach the service through
+HTTPS. The login endpoint has a separate per-client failure limit, and the service sends browser
+security headers. The `/admin` path is protected by authentication, not by an IP allowlist, so it
+works from phones and changing networks. The public site deliberately exposes only public state,
+public diary entries, redacted behavior logs, and interactions sent on a `public:*` channel. Incoming
+messages and private outgoing messages are never returned by the public API.
+
+For a production reverse proxy, trust only the proxy's address in `NOYRA_TRUSTED_PROXY_CIDRS` and
+forward `Host`, `X-Forwarded-For`, and `X-Forwarded-Proto`. Do not expose port 8765 directly. A
+minimal Caddy configuration is:
+
+```caddyfile
+archive.example.com {
+    reverse_proxy 127.0.0.1:8765
+}
+```
+
+The repository also includes ready-to-edit examples at
+`deploy/caddy/noyra.Caddyfile.example` and `deploy/nginx/noyra.conf.example`.
+After DNS points at the server, copy the Caddy example into Caddy's configuration
+directory and replace `archive.example.com` with the real hostname. Set these
+values in `/etc/noyra/noyra.env` before restarting:
+
+```dotenv
+NOYRA_PUBLIC_SITE_URL=https://archive.example.com
+NOYRA_TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
+NOYRA_ADMIN_SESSION_COOKIE_SECURE=true
+```
+
+The same hostname serves the public archive at `/` and the management console at
+`/admin.html`. Both are reachable from a phone or computer. The management
+console still requires the operator token; its session expires according to
+`NOYRA_ADMIN_SESSION_TTL_SECONDS` and every write requires a CSRF token.
+
+The optional root-owned `NOYRA_OPERATOR_TOKEN_FILE` keeps the active operator token out of the
+environment file. Rotate it on the server with `sudo scripts/rotate-operator-token.sh`; the script
+atomically replaces the token, updates the environment file, restarts Noyra, and verifies that the
+service is active. Store the new token in a password manager before closing the current session.
 
 If a reverse proxy fronts the public site, set `NOYRA_TRUSTED_PROXY_CIDRS` to the smallest network
 that contains only that proxy (for a same-host proxy, normally `127.0.0.1/32` and/or `::1/128`).
