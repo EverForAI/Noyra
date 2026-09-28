@@ -476,6 +476,6 @@ def test_recipient_policy_fields_migrate_and_rehash_existing_policy(tmp_path: Pa
             connection.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()[0]
-            == "66"
+            == "67"
         )
     WalletEconomyStore(upgraded).verify_integrity(subject_id)

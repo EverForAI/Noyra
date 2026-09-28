@@ -503,6 +503,62 @@ async function loadWalletPolicy() {
   setStatus("#wallet-policy-status", "策略已加载");
 }
 
+const providerHealthStateLabels = { healthy: "正常", degraded: "降级", cooldown: "冷却中", half_open: "恢复探测", unknown: "暂无数据" };
+function renderProviderHealthList(target, rows) {
+  const list = $(target);
+  if (!Array.isArray(rows) || !rows.length) {
+    list.innerHTML = '<div class="empty-state compact">暂无供应商健康数据</div>';
+    return;
+  }
+  list.innerHTML = rows.map((row) => {
+    const state = providerHealthStateLabels[row.state] || row.state || "未知";
+    const failureRate = `${Math.round((Number(row.failure_rate) || 0) * 100)}%`;
+    const latency = Number.isFinite(Number(row.average_latency_ms)) ? `${Math.round(Number(row.average_latency_ms))} ms` : "暂无";
+    return `<article class="provider-health-item"><div><strong>${esc(row.provider_id)}</strong><span class="status-chip status-${esc(row.state || "unknown")}">${esc(state)}</span><dl><div><dt>失败率</dt><dd>${esc(failureRate)}</dd></div><div><dt>平均响应</dt><dd>${esc(latency)}</dd></div><div><dt>最近成功</dt><dd>${esc(formatTimestamp(row.last_success_at))}</dd></div><div><dt>统计次数</dt><dd>${esc(formatInteger(row.attempt_count))}</dd></div></dl></div></article>`;
+  }).join("");
+}
+async function loadProviderHealth() {
+  const [models, search] = await Promise.all([
+    request("/api/admin/provider-health?kind=model"),
+    request("/api/admin/provider-health?kind=search"),
+  ]);
+  renderProviderHealthList("#model-provider-health-list", models?.providers);
+  renderProviderHealthList("#search-provider-health-list", search?.providers);
+  setStatus("#provider-health-status", `已更新 · ${formatTimestamp(new Date().toISOString())}`);
+}
+function renderRetention(payload) {
+  const settings = payload?.settings || {};
+  const estimate = payload?.estimate || {};
+  const latest = payload?.latest;
+  const latestDeleted = latest?.deleted_by_table ? (() => { try { return JSON.stringify(JSON.parse(latest.deleted_by_table)); } catch { return String(latest.deleted_by_table); } })() : "暂无清理记录";
+  $("#retention-summary").innerHTML = summaryRows([
+    ["健康聚合保留", `${formatInteger(settings.health_days)} 天`],
+    ["搜索限速记录保留", `${formatInteger(settings.search_use_hours ?? 2)} 小时`],
+    ["每批上限", `${formatInteger(settings.batch_size)} 行`],
+    ["清理运行历史", `保留最近 ${formatInteger(settings.run_history ?? 100)} 次`],
+    ["待清理健康桶", formatInteger(estimate.provider_health_buckets)],
+    ["待清理搜索限速记录", formatInteger(estimate.search_provider_uses)],
+    ["待清理运行记录", formatInteger(estimate.retention_runs)],
+    ["最近清理", latest ? formatTimestamp(latest.completed_at || latest.started_at) : "暂无"],
+    ["最近删除", latestDeleted],
+  ]);
+}
+async function loadRetention() {
+  const payload = await request("/api/admin/retention");
+  renderRetention(payload);
+  setStatus("#retention-status", "保留设置已更新");
+}
+async function runRetention() {
+  const button = $("#run-retention");
+  button.disabled = true;
+  try {
+    const result = await request("/api/admin/retention/run", { method: "POST", body: JSON.stringify({ reason: "管理员执行聚合数据保留清理" }) });
+    setStatus("#retention-status", `已完成一批清理：${formatInteger(Object.values(result.deleted_by_table || {}).reduce((sum, value) => sum + Number(value || 0), 0))} 行；另清理 ${formatInteger(result.pruned_run_history || 0)} 条旧运行记录`);
+    await loadRetention();
+  } catch (error) { setStatus("#retention-status", errorText(error), true); }
+  finally { button.disabled = false; }
+}
+
 const walletExecutionStatusLabels = { signing: "签名中", broadcast: "已广播", unknown: "结果未知", confirmed: "已确认", failed: "失败" };
 function renderWalletExecutions(rows) {
   const list = $("#wallet-execution-list");
@@ -762,7 +818,8 @@ async function loadSearchProviders() {
   $("#search-provider-list").innerHTML = providers.length ? providers.map((item) => {
     const enabled = item.status === "active" && item.enabled !== false;
     const controls = item.status === "active" ? `<button data-search-provider-action="${enabled ? "disable" : "enable"}" data-id="${esc(item.config_id)}" type="button">${enabled ? "停用" : "启用"}</button><button data-search-provider-action="revoke" data-id="${esc(item.config_id)}" type="button">撤销</button>` : "";
-    return `<article class="resource-item"><div><h3>${esc(item.label)} · ${esc(item.provider_type)}</h3><p>密钥指纹：${esc(item.key_fingerprint)} · 状态：${esc(item.status === "active" ? (enabled ? "可用" : "已停用") : statusLabels[item.status] || "未知")}</p></div><div class="resource-actions">${controls}</div></article>`;
+    const routing = item.status === "active" ? `<form class="provider-routing-form" data-search-routing-form data-id="${esc(item.config_id)}" aria-label="设置 ${esc(item.label)} 的搜索优先级"><label>优先级<input name="priority" type="number" min="0" max="1000" step="1" value="${esc(item.priority ?? 100)}" required></label><label>权重<input name="weight" type="number" min="1" max="1000" step="1" value="${esc(item.weight ?? 1)}" required></label><label class="provider-routing-reason">调整原因<input name="reason" type="text" maxlength="500" value="管理员调整搜索供应商优先级" required></label><button type="submit">保存优先级</button><span data-routing-status role="status"></span></form>` : "";
+    return `<article class="resource-item"><div><h3>${esc(item.label)} · ${esc(item.provider_type)}</h3><p>密钥指纹：${esc(item.key_fingerprint)} · 状态：${esc(item.status === "active" ? (enabled ? "可用" : "已停用") : statusLabels[item.status] || "未知")} · 优先级 ${esc(formatInteger(item.priority ?? 100))} · 权重 ${esc(formatInteger(item.weight ?? 1))}</p></div><div class="resource-actions">${controls}</div>${routing}</article>`;
   }).join("") : '<div class="empty-state">尚未配置搜索 API</div>';
 }
 async function loadCapabilities() { const rows = await request("/api/config/capabilities"); $("#capability-list").innerHTML = rows.length ? rows.map((item) => { const scope = item.scope?.public_https ? "所有经过安全边界的公网 HTTPS 来源" : JSON.stringify(item.scope || {}); const canRevoke = item.status === "active"; return `<article class="resource-item"><div><h3>${esc(item.capability_type)} · ${esc(item.effective_status || item.status)}</h3><p>${esc(scope)}</p><small>签发者：${esc(item.issuer)} · 每小时：${esc(item.rate_limit_per_hour)} · ${esc(item.expires_at || "长期")}</small></div>${canRevoke ? `<button data-capability-action="revoke" data-id="${esc(item.grant_id)}" type="button">撤销</button>` : ""}</article>`; }).join("") : '<div class="muted">暂无能力授权</div>'; }
@@ -777,7 +834,7 @@ async function loadChannels() {
 async function loadRuntime() { const [diagnostics, controls] = await Promise.all([request("/api/diagnostics"), request("/api/admin/public-post-controls")]); const cognition = diagnostics.cognition || {}; $("#runtime-summary").innerHTML = summaryRows([["认知状态", cognition.enabled ? "已启用" : "未启用"], ["待处理消息", cognition.pending_interactions?.length || 0], ["认知等待任务", cognition.waiting_interaction_tasks?.length || 0], ["入站去重", JSON.stringify(diagnostics.inbound || {})], ["未知模型调用", diagnostics.unknown?.model_calls || 0], ["外部投递", JSON.stringify(diagnostics.deliveries || {})], ["完整性", diagnostics.integrity?.status || "未配置"]]).replaceAll("summary-row", "runtime-item"); $("#public-post-rate-limit").value = controls.rate_limit_per_hour; $("#public-post-queue-cap").value = controls.queue_cap; $("#public-post-captcha-ttl").value = controls.captcha_ttl_seconds; $("#public-post-captcha-attempts").value = controls.captcha_max_attempts; $("#public-post-captcha-mode").value = controls.captcha_mode; $("#public-post-captcha-issue-limit").value = controls.captcha_issue_limit_per_hour; $("#public-post-captcha-global-rate").value = controls.captcha_global_rate_per_minute; $("#public-post-storage-cap").value = controls.storage_cap_bytes; const usage = controls.usage || {}; $("#public-post-usage").innerHTML = summaryRows([["待审核", usage.pending_count ?? 0], ["帖子总数", usage.post_count ?? 0], ["帖子内容", `${usage.byte_size ?? 0} / ${usage.storage_cap_bytes ?? controls.storage_cap_bytes} 字节`]]); }
 async function loadAll() {
   const tasks = [
-    ["总览", loadOverview], ["私密交流", loadMailbox], ["内容审核", loadPublicPosts],
+    ["总览", loadOverview], ["供应商健康", loadProviderHealth], ["数据保留", loadRetention], ["私密交流", loadMailbox], ["内容审核", loadPublicPosts],
     ["认知资源", loadModels], ["搜索配置", loadSearchProviders], ["能力授权", loadCapabilities],
     ["通讯渠道", loadChannels], ["钱包与转账", loadWallet], ["运行防护", loadRuntime],
   ];
@@ -802,7 +859,7 @@ async function loadAll() {
 }
 async function restoreSession() { try { const result = await request("/admin/session"); if (!result.authenticated) return; csrfToken = result.csrf_token; $("#login-shell").hidden = true; $("#admin-shell").hidden = false; await loadAll(); } catch (error) { setStatus("#login-status", errorText(error), true); } }
 
-$("#login-form").addEventListener("submit", login); $("#logout").addEventListener("click", logout); $("#refresh-admin").addEventListener("click", loadAll); $("#refresh-observability").addEventListener("click", () => { void loadOverview().catch((error) => setStatus("#global-status", errorText(error), true)); }); $("#refresh-mailbox").addEventListener("click", loadMailbox); $("#refresh-models").addEventListener("click", loadModels); $("#refresh-search-providers").addEventListener("click", loadSearchProviders); $("#refresh-capabilities").addEventListener("click", loadCapabilities); $("#refresh-runtime").addEventListener("click", loadRuntime); document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => showSection(button.dataset.section)));
+$("#login-form").addEventListener("submit", login); $("#logout").addEventListener("click", logout); $("#refresh-admin").addEventListener("click", loadAll); $("#refresh-observability").addEventListener("click", () => { void loadOverview().catch((error) => setStatus("#global-status", errorText(error), true)); }); $("#refresh-provider-health").addEventListener("click", () => { void loadProviderHealth().catch((error) => setStatus("#provider-health-status", errorText(error), true)); }); $("#refresh-retention").addEventListener("click", () => { void loadRetention().catch((error) => setStatus("#retention-status", errorText(error), true)); }); $("#run-retention").addEventListener("click", () => { void runRetention(); }); $("#refresh-mailbox").addEventListener("click", loadMailbox); $("#refresh-models").addEventListener("click", loadModels); $("#refresh-search-providers").addEventListener("click", loadSearchProviders); $("#refresh-capabilities").addEventListener("click", loadCapabilities); $("#refresh-runtime").addEventListener("click", loadRuntime); document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => showSection(button.dataset.section)));
 $("#setup-guide-list").addEventListener("click", (event) => { const button = event.target.closest("[data-setup-go]"); if (button) showSection(button.dataset.setupGo); });
 $("#refresh-wallet-audits").addEventListener("click", () => { void loadWalletAudits().catch(() => {}); });
 $("#admin-message-form").addEventListener("submit", async (event) => { event.preventDefault(); const form = event.currentTarget; const button = submitButton(form, event); if (button) button.disabled = true; try { await request("/api/interactions", { method: "POST", body: JSON.stringify({ channel: "web", counterparty: "web-user", content: $("#admin-message").value.trim(), idempotency_key: crypto.randomUUID() }) }); $("#admin-message").value = ""; setStatus("#message-status", "消息已记录，正在等待认知处理"); await Promise.all([loadMailbox(), loadOverview()]); } catch (error) { setStatus("#message-status", errorText(error), true); } finally { if (button) button.disabled = false; } });
@@ -1314,6 +1371,31 @@ $("#search-provider-list").addEventListener("click", async (event) => {
   }
   catch (error) { setStatus("#search-provider-status", errorText(error), true); }
   finally { button.disabled = false; }
+});
+$("#search-provider-list").addEventListener("submit", async (event) => {
+  const form = event.target.closest("[data-search-routing-form]");
+  if (!form) return;
+  event.preventDefault();
+  if (!form.reportValidity()) return;
+  const button = submitButton(form, event);
+  const status = form.querySelector("[data-routing-status]");
+  if (button) button.disabled = true;
+  try {
+    const priority = Number(form.elements.priority.value);
+    const weight = Number(form.elements.weight.value);
+    if (!Number.isInteger(priority) || !Number.isInteger(weight)) throw new Error("优先级和权重必须是整数");
+    await request(`/api/config/search-providers/${encodeURIComponent(form.dataset.id)}/routing`, {
+      method: "POST",
+      body: JSON.stringify({ priority, weight, reason: form.elements.reason.value.trim() }),
+    });
+    status.textContent = "优先级已保存";
+    status.classList.remove("error");
+    await loadSearchProviders();
+  } catch (error) {
+    status.textContent = error?.code === "invalid_search_provider_routing" ? "搜索优先级或权重不符合要求" : errorText(error);
+    status.classList.add("error");
+  }
+  finally { if (button) button.disabled = false; }
 });
 $("#wallet-execution-list").addEventListener("click", async (event) => {
   const button = event.target.closest("[data-wallet-execution-action]");

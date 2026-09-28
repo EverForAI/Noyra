@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -31,8 +32,107 @@ class SearchProviderStore:
         self.database = database
         self.secret_dir = validate_private_root(secret_dir, create=True, label="search secret root")
         self.secret_cleanup = SecretCleanupQueue(database)
+        self._ensure_routing_table()
         if repair_on_init:
             self.secret_cleanup.repair(None, "search", self.secret_dir)
+
+    def _ensure_routing_table(self) -> None:
+        with self.database.transaction() as connection:
+            self.database._execute_sql_script(
+                connection,
+                """
+                CREATE TABLE IF NOT EXISTS search_provider_routing (
+                    config_id TEXT PRIMARY KEY REFERENCES search_provider_configs(config_id),
+                    priority INTEGER NOT NULL CHECK(priority BETWEEN 0 AND 1000),
+                    weight INTEGER NOT NULL CHECK(weight BETWEEN 1 AND 1000),
+                    updated_at TEXT NOT NULL,
+                    state_hash TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_search_provider_routing_order
+                    ON search_provider_routing(priority, config_id);
+                """,
+            )
+
+    @staticmethod
+    def _routing_hash(config_id: str, priority: int, weight: int, updated_at: str) -> str:
+        return content_hash(
+            {
+                "config_id": config_id,
+                "priority": priority,
+                "weight": weight,
+                "updated_at": updated_at,
+            }
+        )
+
+    @staticmethod
+    def _apply_routing(record: SearchProviderRecord, row: Any | None) -> SearchProviderRecord:
+        if row is None:
+            return record
+        priority = strict_int(row["priority"])
+        weight = strict_int(row["weight"])
+        updated_at = row["updated_at"]
+        if (
+            not 0 <= priority <= 1000
+            or not 1 <= weight <= 1000
+            or not isinstance(updated_at, str)
+            or row["state_hash"]
+            != SearchProviderStore._routing_hash(record.config_id, priority, weight, updated_at)
+        ):
+            raise IntegrityError("search provider routing state is invalid")
+        return replace(record, priority=priority, weight=weight)
+
+    def _with_routing(self, record: SearchProviderRecord) -> SearchProviderRecord:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT priority, weight, updated_at, state_hash
+                FROM search_provider_routing WHERE config_id=?
+                """,
+                (record.config_id,),
+            ).fetchone()
+        return self._apply_routing(record, row)
+
+    def set_routing(
+        self, config_id: str, subject_id: str, *, priority: int, weight: int = 1
+    ) -> SearchProviderRecord:
+        if (
+            isinstance(priority, bool)
+            or not isinstance(priority, int)
+            or not 0 <= priority <= 1000
+            or isinstance(weight, bool)
+            or not isinstance(weight, int)
+            or not 1 <= weight <= 1000
+        ):
+            raise ValueError("search provider routing settings are invalid")
+        now = utc_now()
+        with self.database.transaction() as connection:
+            provider = self._get_row(connection, config_id, subject_id=subject_id)
+            if provider["status"] != "active":
+                raise ValueError("search provider is not active")
+            existing_routing = connection.execute(
+                "SELECT priority, weight, updated_at, state_hash "
+                "FROM search_provider_routing WHERE config_id=?",
+                (config_id,),
+            ).fetchone()
+            self._apply_routing(self._from_row(provider), existing_routing)
+            connection.execute(
+                """
+                INSERT INTO search_provider_routing(
+                    config_id, priority, weight, updated_at, state_hash
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(config_id) DO UPDATE SET
+                    priority=excluded.priority, weight=excluded.weight,
+                    updated_at=excluded.updated_at, state_hash=excluded.state_hash
+                """,
+                (
+                    config_id,
+                    priority,
+                    weight,
+                    now,
+                    self._routing_hash(config_id, priority, weight, now),
+                ),
+            )
+        return self.get(config_id, subject_id=subject_id)
 
     def configure(
         self,
@@ -102,6 +202,14 @@ class SearchProviderStore:
                         state_hash,
                         now,
                     ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO search_provider_routing(
+                        config_id, priority, weight, updated_at, state_hash
+                    ) VALUES (?, 100, 1, ?, ?)
+                    """,
+                    (config_id, now, self._routing_hash(config_id, 100, 1, now)),
                 )
                 self._insert_revision(
                     connection,
@@ -214,7 +322,14 @@ class SearchProviderStore:
                 (subject_id,),
             ).fetchall()
         controls = list_search_provider_controls(self.database, subject_id)
-        return [self._from_row(row) for row in rows if controls.get(str(row["config_id"]), True)]
+        records = [
+            self._with_routing(self._from_row(row))
+            for row in rows
+            if controls.get(str(row["config_id"]), True)
+        ]
+        return sorted(
+            records, key=lambda item: (item.priority, item.label.casefold(), item.config_id)
+        )
 
     def list(self, subject_id: str) -> list[SearchProviderRecord]:
         with self.database.connection() as connection:
@@ -223,11 +338,12 @@ class SearchProviderStore:
                 "ORDER BY created_at DESC, config_id DESC",
                 (subject_id,),
             ).fetchall()
-        return [self._from_row(row) for row in rows]
+        return [self._with_routing(self._from_row(row)) for row in rows]
 
     def get(self, config_id: str, *, subject_id: str) -> SearchProviderRecord:
         with self.database.connection() as connection:
-            return self._from_row(self._get_row(connection, config_id, subject_id=subject_id))
+            record = self._from_row(self._get_row(connection, config_id, subject_id=subject_id))
+        return self._with_routing(record)
 
     def api_key(self, config_id: str, *, subject_id: str) -> str:
         with self.database.connection() as connection:
@@ -252,6 +368,30 @@ class SearchProviderStore:
             ).fetchall()
             config_rows = {str(row["config_id"]): row for row in configs}
             verified_secrets = 0
+            routing_table = connection.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type='table' AND name='search_provider_routing'
+                """
+            ).fetchone()
+            if routing_table is None:
+                if config_rows:
+                    raise IntegrityError("search provider routing table is missing")
+                routing_rows = []
+            else:
+                routing_rows = connection.execute(
+                    """
+                    SELECT r.* FROM search_provider_routing r
+                    JOIN search_provider_configs c ON c.config_id=r.config_id
+                    WHERE c.subject_id=? ORDER BY r.config_id
+                    """,
+                    (subject_id,),
+                ).fetchall()
+            for routing in routing_rows:
+                config = config_rows.get(str(routing["config_id"]))
+                if config is None:
+                    raise IntegrityError("search provider routing ownership is invalid")
+                self._apply_routing(self._from_row(config), routing)
             for row in configs:
                 record = self._from_row(row)
                 config_id = record.config_id
@@ -393,6 +533,7 @@ class SearchProviderStore:
                     raise IntegrityError(f"search provider use action mismatch: {use_id}")
         return {
             "search_provider_configs": len(configs),
+            "search_provider_routing": len(routing_rows),
             "search_provider_revisions": len(revisions),
             "search_provider_uses": len(uses),
             "search_provider_secrets": verified_secrets,

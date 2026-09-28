@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import contextlib
+import hashlib
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote_plus
@@ -19,6 +21,7 @@ from noyra.core.http import (
     read_bounded_response,
     validate_response_headers,
 )
+from noyra.core.provider_health import ProviderHealthStore
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.world import canonical_public_url
 
@@ -52,6 +55,10 @@ class SearchExecutor:
         self.database = database
         self.providers = providers
         self.actions = ActionLedger(database)
+        # HTTP-boundary tests and lightweight callers may intentionally omit a
+        # durable database.  Health aggregation is best-effort telemetry and
+        # must never make the search adapter unusable in that mode.
+        self.provider_health = ProviderHealthStore(database) if database is not None else None
         self.clock = clock
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
@@ -115,14 +122,25 @@ class SearchExecutor:
                 config.provider_type,
                 normalized_query,
                 self._results_from_action(action.result),
+                "succeeded",
             )
-        if action.status in {"failed", "cancelled", "unknown"}:
+        if action.status == "failed":
             return SearchExecution(
                 action.action_id,
                 config.config_id,
                 config.provider_type,
                 normalized_query,
                 (),
+                "failed",
+            )
+        if action.status in {"cancelled", "unknown"}:
+            return SearchExecution(
+                action.action_id,
+                config.config_id,
+                config.provider_type,
+                normalized_query,
+                (),
+                "unknown",
             )
         try:
             self._reserve_use(config, action.action_id, normalized_query)
@@ -133,6 +151,7 @@ class SearchExecutor:
         if action.status != "prepared":
             raise RuntimeError(f"search action cannot resume from state {action.status}")
         action = self.actions.start(action.action_id)
+        started = asyncio.get_running_loop().time()
         try:
             response = await self._request(config, normalized_query, limit)
             results = self._parse(config.provider_type, response, limit)
@@ -165,8 +184,20 @@ class SearchExecutor:
                 config.provider_type,
                 normalized_query,
                 (),
+                "unknown",
             )
         except Exception as error:
+            with contextlib.suppress(Exception):
+                if self.provider_health is not None:
+                    self.provider_health.record_attempt(
+                        subject_id,
+                        "search",
+                        config.config_id,
+                        action.action_id,
+                        False,
+                        round((asyncio.get_running_loop().time() - started) * 1000),
+                        type(error).__name__,
+                    )
             self.actions.finish(
                 action.action_id,
                 "failed",
@@ -183,7 +214,19 @@ class SearchExecutor:
                 config.provider_type,
                 normalized_query,
                 (),
+                "failed",
             )
+        with contextlib.suppress(Exception):
+            if self.provider_health is not None:
+                self.provider_health.record_attempt(
+                    subject_id,
+                    "search",
+                    config.config_id,
+                    action.action_id,
+                    True,
+                    round((asyncio.get_running_loop().time() - started) * 1000),
+                    None,
+                )
         self.actions.finish(
             action.action_id,
             "succeeded",
@@ -207,6 +250,106 @@ class SearchExecutor:
             normalized_query,
             results,
         )
+
+    async def search_with_fallback(
+        self,
+        subject_id: str,
+        configs: Sequence[SearchProviderRecord],
+        query: str,
+        *,
+        preferred_provider_id: str | None,
+        goal_id: str,
+        project_id: str | None = None,
+        phase_id: str | None = None,
+        strategy_id: str,
+        expected_outcome: str,
+        idempotency_key: str,
+        limit: int = 8,
+    ) -> SearchExecution | None:
+        """Try active search providers in configured order.
+
+        Only a known failed or locally unavailable attempt may advance to the
+        next provider. A result with unknown completion stops routing so the
+        same logical search is never issued again automatically.
+        """
+        candidates = self._route_order(
+            (
+                config
+                for config in configs
+                if config.subject_id == subject_id and config.status == "active"
+            ),
+            preferred_provider_id=preferred_provider_id,
+            idempotency_key=idempotency_key,
+        )
+        last_failure: SearchExecution | None = None
+        for config in candidates:
+            if self.provider_health is not None and not self.provider_health.route_available(
+                subject_id, "search", config.config_id
+            ):
+                continue
+            try:
+                execution = await self.search(
+                    subject_id,
+                    config,
+                    query,
+                    goal_id=goal_id,
+                    project_id=project_id,
+                    phase_id=phase_id,
+                    strategy_id=strategy_id,
+                    expected_outcome=expected_outcome,
+                    idempotency_key=f"{idempotency_key}:{config.config_id}",
+                    limit=limit,
+                )
+            except PermissionError:
+                # Local policy or a rate limit stopped the request before it
+                # reached a provider; this is a known safe point to continue.
+                continue
+            if execution.status == "unknown":
+                return execution
+            if execution.status == "succeeded":
+                return execution
+            last_failure = execution
+        return last_failure
+
+    @staticmethod
+    def _route_order(
+        configs: Iterable[SearchProviderRecord],
+        *,
+        preferred_provider_id: str | None,
+        idempotency_key: str,
+    ) -> list[SearchProviderRecord]:
+        """Order priority tiers and use configured weights for their first choice.
+
+        The stable idempotency key spreads requests across equally prioritized
+        providers without storing per-call routing state. Explicit model
+        preference still wins within its priority tier. Remaining providers
+        are kept as a deterministic fallback sequence.
+        """
+        tiers: dict[int, list[SearchProviderRecord]] = {}
+        for config in configs:
+            tiers.setdefault(config.priority, []).append(config)
+
+        ordered: list[SearchProviderRecord] = []
+        for priority in sorted(tiers):
+            tier = sorted(tiers[priority], key=lambda item: item.config_id)
+            preferred = next(
+                (item for item in tier if item.config_id == preferred_provider_id), None
+            )
+            if preferred is None:
+                total_weight = sum(item.weight for item in tier)
+                digest = hashlib.sha256(f"{idempotency_key}:{priority}".encode()).digest()
+                slot = int.from_bytes(digest[:8], "big") % total_weight
+                first = tier[0]
+                for config in tier:
+                    if slot < config.weight:
+                        first = config
+                        break
+                    slot -= config.weight
+            else:
+                first = preferred
+            ordered.append(first)
+            ordered.extend(item for item in tier if item.config_id != first.config_id)
+        return ordered
 
     async def test_unstored(
         self,

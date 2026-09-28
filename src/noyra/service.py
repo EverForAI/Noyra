@@ -62,7 +62,9 @@ from noyra.core.operator_controls import (
     OperatorControlNotFound,
     OperatorControlService,
 )
+from noyra.core.provider_health import ProviderHealthStore
 from noyra.core.redaction import redact_secrets
+from noyra.core.retention import RetentionManager, RetentionSettings
 from noyra.core.runtime import SubjectKernel
 from noyra.core.runtime_export import RuntimeLogExporter
 from noyra.core.storage import StorageLayout, TrainingStore
@@ -1252,6 +1254,8 @@ class NoyraHTTPServer:
         self.at_rest: AtRestGuard | None = None
         self.operator_controls: OperatorControlService | None = None
         self.projection = PublicProjection(kernel.database)
+        self.provider_health = ProviderHealthStore(kernel.database)
+        self.retention = RetentionManager(kernel.database, RetentionSettings.from_env())
         self.capabilities = CapabilityStore(kernel.database)
         self.common_knowledge = CommonKnowledgeStore(
             kernel.database,
@@ -2156,6 +2160,12 @@ class NoyraHTTPServer:
                 if parsed.path == "/assets/public-hero.webp":
                     self._asset("assets/public-hero.webp", "image/webp")
                     return
+                if parsed.path == "/assets/public-hero-mobile.webp":
+                    self._asset("assets/public-hero-mobile.webp", "image/webp")
+                    return
+                if parsed.path == "/assets/public-social.png":
+                    self._asset("assets/public-social.png", "image/png")
+                    return
                 if parsed.path == "/robots.txt":
                     self._robots_txt()
                     return
@@ -2819,6 +2829,54 @@ class NoyraHTTPServer:
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
                     self._json(HTTPStatus.OK, self._wallet_automation_projection())
+                elif parsed.path in {
+                    "/api/v1/admin/provider-health",
+                    "/api/admin/provider-health",
+                }:
+                    if not self._authorized():
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    kind = query.get("kind", ["model"])[0]
+                    if kind not in {"model", "search"}:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_provider_kind"})
+                        return
+                    try:
+                        providers = owner.provider_health.list_projection(
+                            owner.kernel.subject_id, kind
+                        )
+                    except IntegrityError:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "provider_health_integrity_unavailable"},
+                            retry_after=60,
+                        )
+                        return
+                    self._json(
+                        HTTPStatus.OK,
+                        {
+                            "provider_kind": kind,
+                            "providers": providers,
+                        },
+                    )
+                elif parsed.path in {"/api/v1/admin/retention", "/api/admin/retention"}:
+                    if not self._authorized():
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    settings = owner.retention.settings
+                    self._json(
+                        HTTPStatus.OK,
+                        {
+                            "settings": {
+                                "health_days": settings.health_days,
+                                "search_use_hours": settings.search_use_hours,
+                                "batch_size": settings.batch_size,
+                                "interval_seconds": settings.interval_seconds,
+                                "run_history": settings.run_history,
+                            },
+                            "estimate": owner.retention.estimate(owner.kernel.subject_id),
+                            "latest": owner.retention.latest(owner.kernel.subject_id),
+                        },
+                    )
                 elif parsed.path == "/api/admin/wallet-ledger":
                     if not self._authorized():
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -2838,6 +2896,7 @@ class NoyraHTTPServer:
                         controls = list_search_provider_controls(
                             owner.kernel.database, owner.kernel.subject_id
                         )
+                        search_records = owner.search_providers.list(owner.kernel.subject_id)
                     except IntegrityError:
                         self._json(
                             HTTPStatus.SERVICE_UNAVAILABLE,
@@ -2854,6 +2913,8 @@ class NoyraHTTPServer:
                                 "label": record.label,
                                 "key_fingerprint": record.key_fingerprint[:12],
                                 "rate_limit_per_hour": record.rate_limit_per_hour,
+                                "priority": record.priority,
+                                "weight": record.weight,
                                 "status": record.status,
                                 "enabled": controls.get(record.config_id, True)
                                 if record.status == "active"
@@ -2861,7 +2922,7 @@ class NoyraHTTPServer:
                                 "created_at": record.created_at,
                                 "revoked_at": record.revoked_at,
                             }
-                            for record in owner.search_providers.list(owner.kernel.subject_id)
+                            for record in search_records
                         ],
                     )
                 elif parsed.path == "/api/config/search-routing":
@@ -3649,6 +3710,9 @@ class NoyraHTTPServer:
                 }:
                     self._set_wallet_automation_pause(self.path.endswith("/pause"))
                     return
+                if self.path in {"/api/v1/admin/retention/run", "/api/admin/retention/run"}:
+                    self._run_retention_batch()
+                    return
                 if self.path == "/api/config/wallet-networks":
                     self._configure_wallet_network()
                     return
@@ -3697,6 +3761,11 @@ class NoyraHTTPServer:
                     return
                 if self.path == "/api/config/search-routing":
                     self._configure_search_routing()
+                    return
+                if self.path.startswith("/api/config/search-providers/") and self.path.endswith(
+                    "/routing"
+                ):
+                    self._set_search_provider_routing()
                     return
                 if self.path == "/api/config/inbound-bindings":
                     self._configure_inbound_binding()
@@ -4049,6 +4118,41 @@ class NoyraHTTPServer:
                     self._json(self._operator_error_status(error), {"error": error.code})
                     return
                 self._json(HTTPStatus.OK, mutation.public())
+
+            def _run_retention_batch(self) -> None:
+                if not self._authorized():
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+                    return
+                payload = self._request_json()
+                if payload is None:
+                    return
+                if set(payload) - {"reason", "batch_size"} or not isinstance(
+                    payload.get("reason"), str
+                ):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_retention_run"})
+                    return
+                batch_size = payload.get("batch_size")
+                if batch_size is not None and (
+                    isinstance(batch_size, bool) or not isinstance(batch_size, int)
+                ):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_retention_run"})
+                    return
+                result = owner.retention.run_batch(owner.kernel.subject_id, batch_size=batch_size)
+                owner.audit_admin_event(
+                    "retention_batch_run",
+                    self._actor(),
+                    {
+                        "reason": payload["reason"],
+                        "deleted_by_table": result["deleted_by_table"],
+                        "protected_rows": result["protected_rows"],
+                    },
+                )
+                self._json(HTTPStatus.OK, result)
 
             def _reconcile_action(self) -> None:
                 if not self._authorized():
@@ -4776,8 +4880,10 @@ class NoyraHTTPServer:
                     with owner.kernel.database.read_transaction() as connection:
                         active = int(
                             connection.execute(
-                                "SELECT COUNT(*) FROM wallet_payment_executions "
-                                "WHERE subject_id=? AND status IN ('signing','broadcast','unknown')",
+                                """
+                                SELECT COUNT(*) FROM wallet_payment_executions
+                                WHERE subject_id=? AND status IN ('signing','broadcast','unknown')
+                                """,
                                 (owner.kernel.subject_id,),
                             ).fetchone()[0]
                         )
@@ -4825,7 +4931,10 @@ class NoyraHTTPServer:
                         ).fetchall()
                     for row in duplicate:
                         try:
-                            if strict_json_loads(row["payload_json"]).get("idempotency_key") == idem:
+                            if (
+                                strict_json_loads(row["payload_json"]).get("idempotency_key")
+                                == idem
+                            ):
                                 self._json(HTTPStatus.OK, self._wallet_automation_projection())
                                 return
                         except (TypeError, ValueError, AttributeError):
@@ -4844,7 +4953,9 @@ class NoyraHTTPServer:
                         "max_observation_age_seconds": current.max_observation_age_seconds,
                         "automatic_max_amount": current.automatic_max_amount,
                         "anomaly_block": current.anomaly_block,
-                        "emergency_paused": bool(payload.pop("emergency_paused", current.emergency_paused)),
+                        "emergency_paused": bool(
+                            payload.pop("emergency_paused", current.emergency_paused)
+                        ),
                         "automation_enabled": bool(payload.pop("automation_enabled")),
                         "recipient_allowlist_enabled": current.recipient_allowlist_enabled,
                         "allowed_recipient_addresses": list(current.allowed_recipient_addresses),
@@ -4865,7 +4976,11 @@ class NoyraHTTPServer:
                             owner.kernel.subject_id,
                             "wallet_automation_updated",
                             self._actor(),
-                            {"idempotency_key": idem, "reason": reason, "policy_version": record.policy_version},
+                            {
+                                "idempotency_key": idem,
+                                "reason": reason,
+                                "policy_version": record.policy_version,
+                            },
                         )
                     self._json(HTTPStatus.OK, self._wallet_automation_projection())
                 except Exception as error:
@@ -4885,7 +5000,9 @@ class NoyraHTTPServer:
                 payload["automation_enabled"] = owner.wallet_economy.get_policy(
                     owner.kernel.subject_id
                 ).automation_enabled
-                payload.setdefault("mode", owner.wallet_economy.get_policy(owner.kernel.subject_id).mode)
+                payload.setdefault(
+                    "mode", owner.wallet_economy.get_policy(owner.kernel.subject_id).mode
+                )
                 payload.setdefault("idempotency_key", f"pause-{paused}-{time.time_ns()}")
                 payload.setdefault("reason", "管理员紧急暂停" if paused else "管理员解除紧急暂停")
                 # Pause/resume is an explicit policy update; keep all unrelated
@@ -5485,6 +5602,80 @@ class NoyraHTTPServer:
                 now = set_search_routing_mode(owner.kernel.database, owner.kernel.subject_id, mode)
                 owner.audit_admin_event("search_routing_updated", self._actor(), {"mode": mode})
                 self._json(HTTPStatus.OK, {"mode": mode, "updated_at": now})
+
+            def _set_search_provider_routing(self) -> None:
+                if not self._authorized():
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+                    return
+                payload = self._request_json()
+                if payload is None:
+                    return
+                if (
+                    not isinstance(payload, dict)
+                    or set(payload) != {"priority", "weight", "reason"}
+                    or isinstance(payload.get("priority"), bool)
+                    or not isinstance(payload.get("priority"), int)
+                    or isinstance(payload.get("weight"), bool)
+                    or not isinstance(payload.get("weight"), int)
+                    or not isinstance(payload.get("reason"), str)
+                    or not payload["reason"].strip()
+                    or len(payload["reason"]) > 500
+                ):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_search_provider_routing"})
+                    return
+                config_id = self.path.removeprefix("/api/config/search-providers/").removesuffix(
+                    "/routing"
+                )
+                if not config_id or "/" in config_id:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_search_provider_routing"})
+                    return
+                try:
+                    record = owner.search_providers.set_routing(
+                        config_id,
+                        owner.kernel.subject_id,
+                        priority=payload["priority"],
+                        weight=payload["weight"],
+                    )
+                except NotFoundError:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "search_provider_not_found"})
+                    return
+                except IntegrityError:
+                    self._json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "search_provider_integrity_unavailable"},
+                        retry_after=60,
+                    )
+                    return
+                except (ValueError, TypeError, PermissionError):
+                    self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "invalid_search_provider_routing"},
+                    )
+                    return
+                owner.audit_admin_event(
+                    "search_provider_routing_updated",
+                    self._actor(),
+                    {
+                        "config_id": record.config_id,
+                        "priority": record.priority,
+                        "weight": record.weight,
+                        "reason": payload["reason"].strip(),
+                    },
+                )
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "config_id": record.config_id,
+                        "priority": record.priority,
+                        "weight": record.weight,
+                        "updated_at": utc_now(),
+                    },
+                )
 
             def _set_search_provider_enabled(self) -> None:
                 if not self._authorized():
@@ -7469,7 +7660,17 @@ class NoyraHTTPServer:
                         self._json(HTTPStatus.NOT_FOUND, {"error": "asset_not_found"})
                         return
                     hero_version = hashlib.sha256(hero_body).hexdigest()[:16]
+                    mobile_hero_path = hero_path.with_name("public-hero-mobile.webp")
+                    try:
+                        mobile_hero_body = mobile_hero_path.read_bytes()
+                    except OSError:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "asset_not_found"})
+                        return
+                    mobile_hero_version = hashlib.sha256(mobile_hero_body).hexdigest()[:16]
                     body = body.replace(b"__PUBLIC_HERO_VERSION__", hero_version.encode("ascii"))
+                    body = body.replace(
+                        b"__PUBLIC_HERO_MOBILE_VERSION__", mobile_hero_version.encode("ascii")
+                    )
                     site_url = owner.settings.public_site_url
                     metadata = [
                         '<meta property="og:type" content="website">',
@@ -7485,14 +7686,16 @@ class NoyraHTTPServer:
                     ]
                     if site_url:
                         escaped_url = html.escape(site_url + "/", quote=True)
-                        image_url = html.escape(
-                            f"{site_url}/assets/public-hero.webp?v={hero_version}", quote=True
-                        )
+                        image_url = html.escape(f"{site_url}/assets/public-social.png", quote=True)
                         metadata.extend(
                             (
                                 f'<link rel="canonical" href="{escaped_url}">',
                                 f'<meta property="og:url" content="{escaped_url}">',
                                 f'<meta property="og:image" content="{image_url}">',
+                                '<meta property="og:image:width" content="1200">',
+                                '<meta property="og:image:height" content="630">',
+                                '<meta property="og:image:alt" content="Noyra '
+                                '公开档案的治愈科技视觉">',
                                 f'<meta name="twitter:image" content="{image_url}">',
                             )
                         )
@@ -7502,7 +7705,10 @@ class NoyraHTTPServer:
                     cache_control = "no-cache"
                 elif filename in {"app.js", "styles.css"}:
                     cache_control = "public, max-age=300, must-revalidate"
-                elif filename == "assets/public-hero.webp":
+                elif filename in {
+                    "assets/public-hero.webp",
+                    "assets/public-hero-mobile.webp",
+                }:
                     versions = parse_qs(urlsplit(self.path).query).get("v", [])
                     expected_version = hashlib.sha256(body).hexdigest()[:16]
                     cache_control = (
@@ -7510,6 +7716,8 @@ class NoyraHTTPServer:
                         if len(versions) == 1 and hmac.compare_digest(versions[0], expected_version)
                         else "no-cache"
                     )
+                elif filename == "assets/public-social.png":
+                    cache_control = "public, max-age=31536000, immutable"
                 self.send_response(HTTPStatus.OK)
                 self._headers(content_type, len(body), cache_control=cache_control)
                 self.end_headers()
@@ -7827,6 +8035,7 @@ class NoyraService:
         self._integrity_worker: asyncio.Task[Any] | None = None
         self._thread_workers: set[asyncio.Task[Any]] = set()
         self._boot_recovery_pending = False
+        self._last_retention_run_at: datetime | None = None
         self._construction_complete = True
 
     def _http_quarantine_active(self) -> bool:
@@ -8422,6 +8631,9 @@ class NoyraService:
             lease.assert_current()
             if not storage.cognition_allowed:
                 return "storage_pressure"
+            with bind_lease(lease):
+                await self._tracked_to_thread(self._run_retention_if_due)
+            lease.assert_current()
             try:
                 with bind_lease(lease):
                     await self._tracked_to_thread(
@@ -8480,6 +8692,22 @@ class NoyraService:
             return "shutdown_pending"
         finally:
             self.kernel.admission.finish(lease)
+
+    def _run_retention_if_due(self) -> None:
+        """Prune derived aggregates at a low frequency without blocking cognition."""
+        manager = getattr(self.http, "retention", None)
+        if manager is None:
+            return
+        now = datetime.now(UTC)
+        interval = timedelta(seconds=manager.settings.interval_seconds)
+        if self._last_retention_run_at is not None and now - self._last_retention_run_at < interval:
+            return
+        self._last_retention_run_at = now
+        try:
+            result = manager.run_batch(self.kernel.subject_id, now=now)
+            LOGGER.info("retention batch completed: %s", result.get("deleted_by_table", {}))
+        except Exception as error:
+            LOGGER.warning("retention batch deferred: %s", type(error).__name__)
 
     def _advance_autonomous_reward_workflows(self, subject_id: str, *, limit: int = 4) -> int:
         """Create and, when explicitly enabled, publish bounded help bounties.

@@ -448,6 +448,42 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/provider-health:
+    get:
+      tags: [observation]
+      operationId: adminProviderHealth
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - name: kind
+          in: query
+          schema: { type: string, enum: [model, search], default: model }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/retention:
+    get:
+      tags: [observation]
+      operationId: adminRetention
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/retention/run:
+    post:
+      tags: [configuration]
+      operationId: runRetention
+      security: [{ operatorBearer: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ReasonInput' } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/v1/admin/wallet-audits:
     get:
       tags: [configuration]
@@ -796,6 +832,31 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/config/search-providers/{configId}/routing:
+    post:
+      tags: [configuration]
+      operationId: setSearchProviderRouting
+      security: [{ operatorBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ConfigId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [priority, weight, reason]
+              properties:
+                priority: { type: integer, minimum: 0, maximum: 1000 }
+                weight: { type: integer, minimum: 1, maximum: 1000 }
+                reason: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/v1/config/search-providers/{configId}/disable:
     post:
       tags: [configuration]

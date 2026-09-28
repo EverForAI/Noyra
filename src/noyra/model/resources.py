@@ -24,6 +24,7 @@ from noyra.core.credentials import read_secret_file
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError, RuntimeOwnershipError
 from noyra.core.locking import ProcessLock
+from noyra.core.provider_health import ProviderHealthStore
 from noyra.core.secret_cleanup import SecretCleanupQueue
 from noyra.core.types import (
     content_hash,
@@ -2427,6 +2428,7 @@ class RoutedModelGateway(ModelGateway):
         self.capture_model_io = capture_model_io
         self.capture_model_io_getter = capture_model_io_getter
         self.enforce_training_policy = enforce_training_policy
+        self.provider_health = ProviderHealthStore(database)
         self.limits = self._aggregate_limits("deep")
 
     @property
@@ -2771,6 +2773,18 @@ class RoutedModelGateway(ModelGateway):
                     )
                 except (ProviderCallError, StructuredOutputError) as error:
                     latency = int((time.monotonic() - started) * 1000)
+                    if not (isinstance(error, ProviderCallError) and error.outcome_unknown):
+                        with suppress(Exception):
+                            self.provider_health.record_attempt(
+                                self.subject_id,
+                                "model",
+                                group.group_id,
+                                f"{routed_idempotency}:attempt:{attempt_number}",
+                                False,
+                                latency,
+                                getattr(error, "code", type(error).__name__),
+                                cooldown_seconds=self.cooldown_seconds,
+                            )
                     self.resources.record_failure(
                         key.key_id,
                         type(error).__name__,
@@ -2791,6 +2805,13 @@ class RoutedModelGateway(ModelGateway):
                         latency,
                     )
                     terminal_error = error
+                    if forced_state is None and not self.provider_health.route_available(
+                        self.subject_id, "model", group.group_id
+                    ):
+                        # A provider-level cooldown applies to the whole group,
+                        # including its other keys. Continue with the next
+                        # configured priority group instead of hammering it.
+                        break
                     if forced_state is not None or (
                         isinstance(error, ProviderCallError) and error.outcome_unknown
                     ):
@@ -2816,6 +2837,17 @@ class RoutedModelGateway(ModelGateway):
                     break
                 else:
                     latency = int((time.monotonic() - started) * 1000)
+                    with suppress(Exception):
+                        self.provider_health.record_attempt(
+                            self.subject_id,
+                            "model",
+                            group.group_id,
+                            f"{routed_idempotency}:attempt:{attempt_number}",
+                            True,
+                            latency,
+                            None,
+                            cooldown_seconds=self.cooldown_seconds,
+                        )
                     self.resources.record_success(key.key_id, subject_id=self.subject_id)
                     self._record_attempt(
                         decision.decision_id,
@@ -3265,6 +3297,13 @@ class RoutedModelGateway(ModelGateway):
         self, groups: Sequence[CognitiveResourceGroupRecord]
     ) -> builtins.list[CognitiveResourceGroupRecord]:
         """Choose the least-used weighted share within each priority tier."""
+        if not groups:
+            return []
+        groups = [
+            group
+            for group in groups
+            if self.provider_health.route_available(self.subject_id, "model", group.group_id)
+        ]
         if not groups:
             return []
         group_ids = [group.group_id for group in groups]

@@ -454,8 +454,11 @@ _OWNERSHIP_GRAPH_V65 = {
     "search_provider_controls": _parent_rule("search_provider_configs", "config_id", "config_id"),
 }
 # Schema 66 adds recipient policy columns to an existing subject-owned table;
-# export ownership is unchanged.
-_OWNERSHIP_GRAPH_V66 = _OWNERSHIP_GRAPH_V65
+# export ownership is unchanged. Provider health is additive runtime evidence
+# and is scoped by subject, so it belongs in the same graph.
+_OWNERSHIP_GRAPH_V66 = {
+    **_OWNERSHIP_GRAPH_V65,
+}
 # Schema 67 adds only a closed-by-default wallet policy flag.
 _OWNERSHIP_GRAPH_V67 = _OWNERSHIP_GRAPH_V66
 
@@ -809,6 +812,30 @@ class RuntimeLogExporter:
             raise RuntimeError(
                 f"runtime export ownership graph is unavailable for schema {schema_version}"
             )
+        # Provider health and retention are lazy additive tables.  They are
+        # created by the service after database initialization, so historical
+        # fixture databases legitimately do not contain them.  Classify them
+        # when present while retaining the strict inventory check for every
+        # schema-owned table.
+        optional_subject_tables = {
+            "provider_health_attempts",
+            "provider_health_buckets",
+            "provider_health_state",
+            "retention_runs",
+        }
+        graph = {
+            **graph,
+            **{table: _subject_rule() for table in optional_subject_tables if table in tables},
+        }
+        optional_parent_tables = {
+            "search_provider_routing": _parent_rule(
+                "search_provider_configs", "config_id", "config_id"
+            ),
+        }
+        graph = {
+            **graph,
+            **{table: rule for table, rule in optional_parent_tables.items() if table in tables},
+        }
         missing = sorted(set(tables) - set(graph))
         if missing:
             raise RuntimeError(

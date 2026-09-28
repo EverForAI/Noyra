@@ -49,6 +49,8 @@ class SearchProviderRecord:
     created_at: str
     revoked_at: str | None
     revoke_reason: str | None
+    priority: int = 100
+    weight: int = 1
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,7 @@ class SearchExecution:
     provider_type: str
     query: str
     results: tuple[SearchResult, ...]
+    status: Literal["succeeded", "failed", "unknown"] = "succeeded"
 
 
 class ResearchPlanProposal(BaseModel):

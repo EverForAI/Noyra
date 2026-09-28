@@ -196,7 +196,7 @@ class AutonomousResearch:
         all_results: list[SearchResult] = []
         final_method: SearchMethod = current_method
         for round_number in range(1, self.settings.max_search_rounds_per_run + 1):
-            results, action_id = await self._search_round(
+            results, action_id, actual_provider_id = await self._search_round(
                 plan,
                 goal,
                 current_method,
@@ -211,7 +211,8 @@ class AutonomousResearch:
                     "method": current_method,
                     "requested_method": requested_method,
                     "routing_mode": self._routing_mode(),
-                    "provider_config_id": provider_id,
+                    "provider_config_id": actual_provider_id,
+                    "requested_provider_config_id": provider_id,
                     "action_id": action_id,
                     "result_count": len(results),
                     "result_hash": content_hash([item.__dict__ for item in results]),
@@ -487,17 +488,17 @@ class AutonomousResearch:
         context: ResearchContext,
         *,
         binding: tuple[str, str, str] | None = None,
-    ) -> tuple[tuple[SearchResult, ...], str | None]:
+    ) -> tuple[tuple[SearchResult, ...], str | None, str | None]:
         assert plan.query is not None and plan.expected_information is not None
         if method == "api":
             if provider_id is None or provider_id not in context.providers:
-                return (), None
-            provider = context.providers[provider_id]
+                return (), None, None
             try:
-                execution = await self.search.search(
+                execution = await self.search.search_with_fallback(
                     self.subject_id,
-                    provider,
+                    tuple(context.providers.values()),
                     plan.query,
+                    preferred_provider_id=provider_id,
                     goal_id=goal.goal_id,
                     project_id=None if binding is None else binding[0],
                     phase_id=None if binding is None else binding[1],
@@ -505,14 +506,14 @@ class AutonomousResearch:
                         {"goal": goal.goal_id, "query": plan.query, "method": method}
                     )[:32],
                     expected_outcome=plan.expected_information,
-                    idempotency_key=(
-                        f"research-search:{self._committed_count()}:{round_number}:{provider_id}"
-                    ),
+                    idempotency_key=f"research-search:{self._committed_count()}:{round_number}",
                     limit=self.settings.max_search_results_per_round,
                 )
             except PermissionError:
-                return (), None
-            return execution.results, execution.action_id
+                return (), None, None
+            if execution is None:
+                return (), None, None
+            return execution.results, execution.action_id, execution.provider_config_id
         if method == "browser":
             try:
                 execution = await self.browser_search.search(
@@ -530,8 +531,8 @@ class AutonomousResearch:
                     hourly_limit=self.settings.max_browser_searches_per_hour,
                 )
             except PermissionError:
-                return (), None
-            return execution.results, execution.action_id
+                return (), None, None
+            return execution.results, execution.action_id, None
         purpose = f"research_{method}_search:{self._committed_count()}:{round_number}"
         try:
             result = await self.gateway.complete_structured(
@@ -549,8 +550,8 @@ class AutonomousResearch:
             StructuredOutputError,
             ModelCallStateError,
         ):
-            return (), None
-        return self._validated_results(result.output.results), None
+            return (), None, None
+        return self._validated_results(result.output.results), None, None
 
     @staticmethod
     def _fallback_messages(query: str, method: str) -> tuple[ModelMessage, ...]:

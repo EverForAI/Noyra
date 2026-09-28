@@ -1185,6 +1185,79 @@ class ServiceTestCase(unittest.TestCase):
                 payload={"reason": "integrity regression test"},
             )
 
+    def test_provider_health_integrity_failure_is_a_retryable_service_error(self) -> None:
+        admin_token = self.settings.admin_token
+        assert admin_token is not None
+        request = Request(
+            f"{self.base_url}/api/admin/provider-health?kind=search",
+            headers={"Authorization": "Bearer " + admin_token.get_secret_value()},
+        )
+        with (
+            patch.object(
+                self.http.provider_health,
+                "list_projection",
+                side_effect=IntegrityError("provider health hash mismatch"),
+            ),
+            self.assertRaises(HTTPError) as raised,
+        ):
+            urlopen(request, timeout=5)
+
+        error = raised.exception
+        self.assertEqual(error.code, 503)
+        self.assertEqual(error.headers.get("Retry-After"), "60")
+        assert error.fp is not None
+        self.assertEqual(
+            json.loads(error.read()),
+            {"error": "provider_health_integrity_unavailable"},
+        )
+
+    def test_search_provider_routing_api_validates_and_returns_configured_order(self) -> None:
+        status, configured = self.authorized_json(
+            "/api/config/search-providers",
+            payload={
+                "provider_type": "brave",
+                "label": "routing contract",
+                "api_key": "search-routing-contract-secret",
+            },
+        )
+        self.assertEqual(status, 201)
+        assert isinstance(configured, dict)
+        config_id = str(configured["config_id"])
+
+        with self.assertRaises(HTTPError) as invalid:
+            self.authorized_json(
+                f"/api/config/search-providers/{config_id}/routing",
+                payload={"priority": 1001, "weight": 5, "reason": "invalid boundary"},
+            )
+        self.assertEqual(invalid.exception.code, 400)
+        assert invalid.exception.fp is not None
+        self.assertEqual(
+            json.loads(invalid.exception.read()),
+            {"error": "invalid_search_provider_routing"},
+        )
+
+        status, updated = self.authorized_json(
+            f"/api/config/search-providers/{config_id}/routing",
+            payload={"priority": 4, "weight": 5, "reason": "promote healthy route"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            updated,
+            {
+                "config_id": config_id,
+                "priority": 4,
+                "weight": 5,
+                "updated_at": updated.get("updated_at"),
+            },
+        )
+        self.assertIsInstance(updated.get("updated_at"), str)
+        self.assertTrue(updated["updated_at"])
+        status, providers = self.authorized_json("/api/config/search-providers")
+        self.assertEqual(status, 200)
+        assert isinstance(providers, list)
+        provider = next(item for item in providers if item["config_id"] == config_id)
+        self.assertEqual((provider["priority"], provider["weight"]), (4, 5))
+
     def test_model_resource_routes_fail_closed_for_malformed_paths_and_bodies(self) -> None:
         """Malformed resource URLs must answer promptly instead of hanging."""
 
@@ -1500,14 +1573,21 @@ class ServiceTestCase(unittest.TestCase):
             with urlopen(f"{site_base_url}/", timeout=5) as response:
                 html = response.read().decode()
                 self.assertIn('href="https://archive.noyra.example/"', html)
+                self.assertIn('src="/assets/public-hero.webp?v=', html)
+                self.assertIn('srcset="/assets/public-hero-mobile.webp?v=', html)
                 self.assertIn(
-                    'content="https://archive.noyra.example/assets/public-hero.webp?v=', html
+                    'property="og:image" content="https://archive.noyra.example/assets/public-social.png"',
+                    html,
                 )
+                self.assertEqual(html.count('property="og:image"'), 1)
                 self.assertEqual(response.headers["Cache-Control"], "no-cache")
 
             hero_match = re.search(r"public-hero\.webp\?v=([a-f0-9]{16})", html)
+            mobile_hero_match = re.search(r"public-hero-mobile\.webp\?v=([a-f0-9]{16})", html)
             self.assertIsNotNone(hero_match)
+            self.assertIsNotNone(mobile_hero_match)
             assert hero_match is not None
+            assert mobile_hero_match is not None
             with urlopen(f"{site_base_url}/robots.txt", timeout=5) as response:
                 robots = response.read().decode()
                 self.assertEqual(response.headers["Content-Type"].split(";", 1)[0], "text/plain")
@@ -1526,6 +1606,15 @@ class ServiceTestCase(unittest.TestCase):
             ) as response:
                 body = response.read()
                 self.assertEqual(hashlib.sha256(body).hexdigest()[:16], hero_match.group(1))
+                self.assertEqual(
+                    response.headers["Cache-Control"], "public, max-age=31536000, immutable"
+                )
+            with urlopen(
+                f"{site_base_url}/assets/public-hero-mobile.webp?v={mobile_hero_match.group(1)}",
+                timeout=5,
+            ) as response:
+                body = response.read()
+                self.assertEqual(hashlib.sha256(body).hexdigest()[:16], mobile_hero_match.group(1))
                 self.assertEqual(
                     response.headers["Cache-Control"], "public, max-age=31536000, immutable"
                 )

@@ -64,6 +64,19 @@
           <div class="card-heading"><div><h2>模型与搜索用量</h2><p class="muted">汇总最近 7 天已有的记录；不会为每次 API 请求额外写入日志。</p></div><button class="text-button" id="refresh-observability" type="button">更新</button></div>
           <div id="model-observability-summary" class="summary-list"><div class="muted">正在读取聚合用量…</div></div>
         </article>
+        <article class="surface-card provider-health-card" id="provider-health" aria-labelledby="provider-health-title">
+          <div class="card-heading"><div><h2 id="provider-health-title">供应商健康</h2><p class="muted">只保留聚合指标，不记录单次调用。供应商冷却结束后，会在下一次需要时自动进行一次恢复请求。</p></div><div class="resource-actions"><button class="text-button" id="refresh-provider-health" type="button">更新</button></div></div>
+          <div class="provider-health-columns">
+            <section aria-labelledby="model-health-title"><h3 id="model-health-title">模型供应商</h3><div id="model-provider-health-list" class="provider-health-list" aria-live="polite"><div class="muted">正在读取…</div></div></section>
+            <section aria-labelledby="search-health-title"><h3 id="search-health-title">搜索供应商</h3><div id="search-provider-health-list" class="provider-health-list" aria-live="polite"><div class="muted">正在读取…</div></div></section>
+          </div>
+          <p class="form-status" id="provider-health-status" role="status"></p>
+        </article>
+        <article class="surface-card retention-card" id="retention-panel" aria-labelledby="retention-title">
+          <div class="card-heading"><div><h2 id="retention-title">数据保留与清理</h2><p class="muted">健康聚合数据按保留周期分批清理，关键审计记录不会被此操作删除。</p></div><div class="resource-actions"><button class="text-button" id="refresh-retention" type="button">更新</button><button id="run-retention" type="button">立即清理一批</button></div></div>
+          <div id="retention-summary" class="summary-list"><div class="muted">正在读取保留设置…</div></div>
+          <p class="form-status" id="retention-status" role="status"></p>
+        </article>
       </section>
       <section class="admin-section" data-section-panel="conversation" hidden>
         <div class="section-intro"><div><p class="eyebrow">PRIVATE CHANNEL</p><h2>与主体交流</h2><p>消息会进入认知流程，回复、沉默、延迟和失败都会保留明确状态。</p></div></div>

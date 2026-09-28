@@ -548,6 +548,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
             self.provider_store.verify_integrity(self.subject_id),
             {
                 "search_provider_configs": 1,
+                "search_provider_routing": 1,
                 "search_provider_revisions": 1,
                 "search_provider_uses": 0,
                 "search_provider_secrets": 1,
@@ -609,6 +610,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
             self.provider_store.verify_integrity(self.subject_id),
             {
                 "search_provider_configs": 1,
+                "search_provider_routing": 1,
                 "search_provider_revisions": 2,
                 "search_provider_uses": 0,
                 "search_provider_secrets": 0,

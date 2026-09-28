@@ -231,7 +231,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 66
+CURRENT_SCHEMA_VERSION = 67
 
 MIGRATIONS: dict[int, str] = {
     2: """
@@ -6385,6 +6385,19 @@ CREATE INDEX IF NOT EXISTS idx_search_provider_controls_config
 -- contains the columns.
 SELECT 1;
 """,
+    67: """
+-- Search-use rows only support the rolling one-hour provider rate limit.
+-- Preserve a two-hour minimum window while allowing retention to remove older
+-- operational detail; the action ledger remains the durable audit record.
+DROP TRIGGER IF EXISTS prevent_search_provider_use_delete;
+CREATE TRIGGER prevent_search_provider_use_delete
+BEFORE DELETE ON search_provider_uses
+WHEN julianday(OLD.created_at) IS NULL
+  OR julianday(OLD.created_at) >= julianday('now', '-2 hours')
+BEGIN
+    SELECT RAISE(ABORT, 'recent search provider uses cannot be deleted');
+END;
+""",
 }
 
 
@@ -6508,7 +6521,7 @@ def wallet_payment_policy_state_hash(
     updated_at: str,
     recipient_allowlist_enabled: int | bool = False,
     allowed_recipient_addresses_json: str = "[]",
-    automation_enabled: int | bool = False,
+    automation_enabled: int | bool | None = None,
 ) -> str:
     """Hash the complete durable wallet payment policy state."""
     validate_wallet_timestamp(updated_at)
@@ -6528,7 +6541,12 @@ def wallet_payment_policy_state_hash(
             "automatic_max_amount": automatic_max_amount,
             "anomaly_block": int(anomaly_block),
             "emergency_paused": int(emergency_paused),
-            "automation_enabled": int(automation_enabled),
+            # Older callers derived the switch from the payment mode.  Keep
+            # that compatibility behavior while new durable call sites pass
+            # the explicit audited value.
+            "automation_enabled": int(
+                mode == "automatic" if automation_enabled is None else automation_enabled
+            ),
             "recipient_allowlist_enabled": int(recipient_allowlist_enabled),
             "allowed_recipient_addresses_json": allowed_recipient_addresses_json,
             "policy_version": strict_int(policy_version),
@@ -8264,8 +8282,9 @@ END;
                 anomaly_block=int(row["anomaly_block"]),
                 emergency_paused=int(row["emergency_paused"]),
                 automation_enabled=(
+                    # sqlite3.Row exposes column names through keys().
                     int(row["automation_enabled"])
-                    if "automation_enabled" in row.keys()
+                    if "automation_enabled" in row.keys()  # noqa: SIM118
                     else 0
                 ),
                 policy_version=strict_int(row["policy_version"]),
