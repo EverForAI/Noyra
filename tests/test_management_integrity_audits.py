@@ -8,6 +8,7 @@ from pydantic import SecretStr
 
 from noyra.core.integrity import IntegrityRegistry
 from noyra.core.operator_controls import OperatorControlService
+from noyra.core.retention import RetentionManager
 from noyra.core.types import canonical_json
 from noyra.interaction import InboundEnvelope, PublicPostInput, TransportInput
 from noyra.service import NoyraService
@@ -96,6 +97,29 @@ def test_operations_integrity_checks_cover_provider_health_and_retention(tmp_pat
             check_ids=("operations.provider_health", "operations.retention"),
         )
         assert report.status == "ok", report.to_dict()
+    finally:
+        kernel.close()
+
+
+def test_retention_integrity_recomputes_provenance_hash(tmp_path: Path) -> None:
+    kernel = _active_kernel(tmp_path, "Noyra-retention-integrity-hash")
+    try:
+        RetentionManager(kernel.database).run_batch(kernel.subject_id)
+        with kernel.database.transaction() as connection:
+            connection.execute(
+                "UPDATE retention_runs SET state_hash=? WHERE subject_id=?",
+                ("0" * 64, kernel.subject_id),
+            )
+        report = IntegrityRegistry().run(
+            kernel.database,
+            kernel.subject_id,
+            tmp_path,
+            profile="manual",
+            policy_mode="alert",
+            deadline_seconds=10,
+            check_ids=("operations.retention",),
+        )
+        assert report.status == "corrupt", report.to_dict()
     finally:
         kernel.close()
 

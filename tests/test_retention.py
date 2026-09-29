@@ -163,3 +163,53 @@ def test_retention_failure_is_persisted_for_diagnostics(tmp_path):
     assert latest is not None
     assert latest["failed_reason"] == "RuntimeError"
     assert latest["failure_stage"] == "delete"
+
+
+def test_retention_resumes_from_previous_keyset_cursor(tmp_path):
+    db = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-retention-resume"
+    IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
+    health = ProviderHealthStore(db, failure_threshold=1)
+    for provider in ("a", "b"):
+        health.record_attempt(subject, "model", provider, f"attempt-{provider}", True, 10, None)
+    old = (datetime.now(UTC) - timedelta(days=60)).isoformat()
+    with db.transaction() as connection:
+        connection.execute(
+            "UPDATE provider_health_buckets SET bucket_start=?, state_hash=? WHERE subject_id=?",
+            (old, content_hash({"legacy": True}), subject),
+        )
+    manager = RetentionManager(db, RetentionSettings(batch_size=1))
+    observed: list[object] = []
+    original = manager._delete_table
+
+    def wrapped(connection, table, subject_id, cutoff, limit, cursor):
+        if table == "provider_health_buckets":
+            observed.append(cursor)
+        return original(connection, table, subject_id, cutoff, limit, cursor)
+
+    with patch.object(manager, "_delete_table", side_effect=wrapped):
+        assert manager.run_batch(subject, batch_size=1)["failed_reason"] is None
+        assert manager.run_batch(subject, batch_size=1)["failed_reason"] is None
+
+    assert observed[0] is None
+    assert isinstance(observed[1], dict)
+    assert observed[1]["bucket_start"] == old
+
+
+def test_retention_never_schedules_append_only_route_history(tmp_path):
+    db = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-retention-route-history"
+    IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
+    manager = RetentionManager(db)
+    calls: list[str] = []
+    original = manager._delete_table
+
+    def wrapped(connection, table, subject_id, cutoff, limit, cursor):
+        calls.append(table)
+        return original(connection, table, subject_id, cutoff, limit, cursor)
+
+    with patch.object(manager, "_delete_table", side_effect=wrapped):
+        result = manager.run_batch(subject)
+    assert result["failed_reason"] is None
+    assert "cognitive_route_attempts" not in calls
+    assert "cognitive_route_outcomes" not in calls

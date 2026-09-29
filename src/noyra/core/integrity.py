@@ -1540,20 +1540,18 @@ def _check_provider_health(context: IntegrityContext) -> IntegrityCheckOutcome:
 
 
 def _check_retention_runs(context: IntegrityContext) -> IntegrityCheckOutcome:
-    row = context.connection.execute(
-        "SELECT COUNT(*) AS count FROM retention_runs WHERE subject_id=?",
+    from .retention import validate_retention_run_row
+
+    rows = context.connection.execute(
+        "SELECT * FROM retention_runs WHERE subject_id=? ORDER BY started_at, rowid",
         (context.subject_id,),
-    ).fetchone()
-    if row is None:
-        raise IntegrityError("retention schema is unavailable")
-    invalid = context.connection.execute(
-        "SELECT run_id FROM retention_runs WHERE subject_id=? "
-        "AND (length(state_hash) != 64 OR next_cursor IS NULL) LIMIT 1",
-        (context.subject_id,),
-    ).fetchone()
-    if invalid is not None:
-        raise IntegrityError("retention run provenance is incomplete")
-    return IntegrityCheckOutcome(details={"runs": int(row["count"])})
+    ).fetchall()
+    for row in rows:
+        try:
+            validate_retention_run_row(row)
+        except (TypeError, ValueError) as error:
+            raise IntegrityError(f"retention run provenance is invalid: {error}") from error
+    return IntegrityCheckOutcome(details={"runs": len(rows)})
 
 
 def _check_foreign_keys(context: IntegrityContext) -> IntegrityCheckOutcome:
