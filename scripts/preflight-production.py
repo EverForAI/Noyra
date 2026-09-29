@@ -52,6 +52,21 @@ def evaluate(settings: ServiceSettings | None, error: Exception | None = None) -
                     bool(settings.trusted_proxy_cidrs),
                     "production proxy source ranges must be explicit",
                 ),
+                _check(
+                    "at_rest_mode",
+                    settings.at_rest_mode == "required",
+                    "production requires at-rest protection",
+                ),
+                _check(
+                    "backup_keyring",
+                    settings.backup_keyring_path is not None,
+                    "production requires an external backup keyring",
+                ),
+                _check(
+                    "developer_log_export",
+                    settings.developer_log_export_enabled is False,
+                    "production must disable developer runtime export",
+                ),
             ]
         )
         hash_key_path = settings.public_hash_key_file or (
@@ -111,6 +126,12 @@ def main() -> int:
             except ValueError as error:
                 raise SystemExit(f"invalid environment value for {key}") from error
             values[key] = parsed[0] if parsed else ""
+        # The file is the complete production configuration contract.  Do not
+        # let a parent shell, CI runner, or sudo environment silently supply
+        # omitted NOYRA_* values and change what this preflight validates.
+        for key in tuple(os.environ):
+            if key.startswith("NOYRA_"):
+                os.environ.pop(key, None)
         os.environ.update(values)
     settings: ServiceSettings | None = None
     error: Exception | None = None

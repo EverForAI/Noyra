@@ -927,6 +927,10 @@ class ServiceSettings(BaseModel):
             # A production operator must not be able to downgrade the session
             # cookie through a stale environment file or template value.
             object.__setattr__(self, "admin_session_cookie_secure", True)
+            if self.at_rest_mode != "required":
+                raise ValueError("production profile requires at-rest protection")
+            if self.developer_log_export_enabled:
+                raise ValueError("production profile must disable developer runtime export")
         if self.host.casefold() not in loopback and not self.allow_insecure_non_loopback:
             raise ValueError(
                 "non-loopback HTTP listener requires NOYRA_ALLOW_INSECURE_NON_LOOPBACK=true"
@@ -989,18 +993,9 @@ class ServiceSettings(BaseModel):
         if path is None:
             return None
         try:
-            stat_result = path.stat()
-            if not path.is_file():
-                raise ValueError("operator token file must be a regular file")
-            if os.name == "posix" and stat_result.st_mode & 0o026:
-                raise ValueError("operator token file permissions are too broad")
-            value = path.read_text(encoding="ascii")
-        except (OSError, UnicodeError) as error:
+            return read_secret_file(path, label="operator token file", single_line=True)
+        except (CredentialError, OSError, UnicodeError, ValueError) as error:
             raise ValueError("operator token file is unreadable") from error
-        value = value.strip()
-        if not value:
-            raise ValueError("operator token file is empty")
-        return value
 
     @staticmethod
     def _optional_environment_flag(name: str) -> bool | None:
@@ -1018,7 +1013,10 @@ class ServiceSettings(BaseModel):
     def from_env(cls) -> ServiceSettings:
         profile = os.getenv("NOYRA_PROFILE", "development").strip().lower()
         subject_id = os.getenv("NOYRA_SUBJECT_ID", "Noyra-0001")
-        genesis_hash = os.getenv("NOYRA_GENESIS_HASH") or content_hash(
+        configured_genesis_hash = os.getenv("NOYRA_GENESIS_HASH", "").strip()
+        if profile == "production" and not configured_genesis_hash:
+            raise ValueError("production requires an explicit NOYRA_GENESIS_HASH")
+        genesis_hash = configured_genesis_hash or content_hash(
             {"project": "Noyra", "subject_id": subject_id, "origin": "configured-runtime"}
         )
         token = os.getenv("NOYRA_ADMIN_TOKEN")
@@ -1121,7 +1119,8 @@ class ServiceSettings(BaseModel):
             health_cache_ttl_seconds=float(os.getenv("NOYRA_HEALTH_CACHE_TTL_SECONDS", "5")),
             max_request_bytes=int(os.getenv("NOYRA_MAX_REQUEST_BYTES", "100000")),
             developer_log_export_enabled=cls._environment_flag(
-                "NOYRA_DEVELOPER_LOG_EXPORT_ENABLED", "true"
+                "NOYRA_DEVELOPER_LOG_EXPORT_ENABLED",
+                "false" if profile == "production" else "true",
             ),
             subject_storage_quota_bytes=int(
                 os.getenv("NOYRA_SUBJECT_STORAGE_QUOTA_BYTES", "2000000000")
