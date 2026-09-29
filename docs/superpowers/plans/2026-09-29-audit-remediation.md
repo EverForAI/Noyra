@@ -1,6 +1,6 @@
 # Noyra 审计问题修复实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 按只读审计报告的根因依赖关系修复 A1–A18，建立可验证的生产安全、数据生命周期、Provider 故障切换、钱包状态机和发布门禁闭环。
 
@@ -38,7 +38,7 @@
 - production profile 默认 `admin_session_cookie_secure=True`，且当配置了公网管理 URL 时不能显式降级。
 - `scripts/preflight-production.py` 输出 JSON `{status, checks:[{id,status,reason}]}`，缺项时以非零退出。
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_production_rejects_insecure_non_loopback():
@@ -60,23 +60,23 @@ def test_preflight_reports_missing_trusted_proxy_cidr(tmp_path):
     assert any(item["id"] == "trusted_proxy_cidrs" for item in result.json["checks"])
 ```
 
-- [ ] **Step 2: Run the tests and verify the expected failure**
+- [x] **Step 2: Run the tests and verify the expected failure**
 
 Run: `python -m pytest -q tests/test_service_security_profile.py`
 
 Expected: FAIL because the current settings do not have a production profile or preflight contract.
 
-- [ ] **Step 3: Implement the smallest production-profile change**
+- [x] **Step 3: Implement the smallest production-profile change**
 
 Add a profile parser and make production fail closed for insecure listener combinations. Keep development/test behavior compatible. Set the production cookie default to secure and make the preflight evaluate listener, HTTPS URL, trusted proxy, token, at-rest and secret-source requirements without mutating state.
 
-- [ ] **Step 4: Run focused and existing service tests**
+- [x] **Step 4: Run focused and existing service tests**
 
 Run: `python -m pytest -q tests/test_service_security_profile.py tests/test_service.py`
 
 Expected: all pass except the existing platform-specific skip.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/noyra/service.py scripts/preflight-production.py deploy/noyra.env.example scripts/install-ubuntu.sh tests/test_service_security_profile.py
@@ -96,11 +96,11 @@ git commit -m "fix: enforce production listener and session security"
 - development/test 可以通过 `NOYRA_ALLOW_INLINE_SECRETS=true` 显式启用 inline fallback。
 - preflight 必须报告每个 provider secret 的实际来源类别，但绝不输出 secret 值。
 
-- [ ] **Step 1: Add failing tests for production rejection and explicit development compatibility.**
-- [ ] **Step 2: Run the focused tests and verify they fail for the current fallback behavior.**
-- [ ] **Step 3: Implement source selection with explicit profile and non-secret diagnostics.**
-- [ ] **Step 4: Run credential, provider, service and preflight tests.**
-- [ ] **Step 5: Commit with `git commit -m "fix: require file-backed provider secrets in production"`.**
+- [x] **Step 1: Add failing tests for production rejection and explicit development compatibility.**
+- [x] **Step 2: Run the focused tests and verify they fail for the current fallback behavior.**
+- [x] **Step 3: Implement source selection with explicit profile and non-secret diagnostics.**
+- [x] **Step 4: Run credential, provider, service and preflight tests.**
+- [x] **Step 5: Commit with `git commit -m "fix: require file-backed provider secrets in production"`.**
 
 #### Task 0.3：CAPTCHA/IP 哈希密钥稳定化（A13）
 
@@ -114,11 +114,11 @@ git commit -m "fix: enforce production listener and session security"
 - `PublicPostStore`/CAPTCHA hashing accepts an injected key and never generates a new production key during process startup.
 - Development/test may generate an ephemeral key only when explicitly selected.
 
-- [ ] **Step 1: Add a restart-style failing test showing the same IP/challenge hashes differ with the current process-random key.**
-- [ ] **Step 2: Run it and confirm the failure.**
-- [ ] **Step 3: Load and validate the persistent key through the existing credential reader; reject missing production key.**
-- [ ] **Step 4: Test stable hashes, key permission errors, and public post regression behavior.**
-- [ ] **Step 5: Commit with `git commit -m "fix: persist public anti-abuse hash key"`.**
+- [x] **Step 1: Add a restart-style failing test showing the same IP/challenge hashes differ with the current process-random key.**
+- [x] **Step 2: Run it and confirm the failure.**
+- [x] **Step 3: Load and validate the persistent key through the existing credential reader; reject missing production key.**
+- [x] **Step 4: Test stable hashes, key permission errors, and public post regression behavior.**
+- [x] **Step 5: Commit with `git commit -m "fix: persist public anti-abuse hash key"`.**
 
 ### Gate 1：数据生命周期、Schema 与完整性合同
 
@@ -134,11 +134,11 @@ git commit -m "fix: enforce production listener and session security"
 - A failure is written in a short independent transaction with stage, error class, retry time and failure count.
 - `protected_rows` is computed from explicit retention predicates; if no predicate exists the API reports `protected_rows=None` with a reason rather than zero.
 
-- [ ] **Step 1: Add failing tests for multi-table cursor continuation, durable failure rows and protected-row counts.**
-- [ ] **Step 2: Run `python -m pytest -q tests/test_retention.py` and verify those tests fail.**
-- [ ] **Step 3: Implement per-table cursor and independent failure recording without changing protected/core tables.**
-- [ ] **Step 4: Run the retention suite plus database migration tests; verify restart continuation and rollback behavior.**
-- [ ] **Step 5: Commit with `git commit -m "fix: make retention runs resumable and durable"`.**
+- [x] **Step 1: Add failing tests for multi-table cursor continuation, durable failure rows and protected-row counts.**
+- [x] **Step 2: Run `python -m pytest -q tests/test_retention.py` and verify those tests fail.**
+- [x] **Step 3: Implement per-table cursor and independent failure recording without changing protected/core tables.**
+- [x] **Step 4: Run the retention suite plus database migration tests; verify restart continuation and rollback behavior.**
+- [x] **Step 5: Commit with `git commit -m "fix: make retention runs resumable and durable"`.**
 
 #### Task 1.2：Retention 覆盖范围和数据分类（A7）
 
@@ -153,11 +153,11 @@ git commit -m "fix: enforce production listener and session security"
 - Each reclaimable table has a retention period, ordering key, independent cursor and protected predicate.
 - Dry-run and run projections list table, cutoff, candidate count, protected count and deletion result.
 
-- [ ] **Step 1: Add fixture-backed failing tests for model calls, action attempts, behavior logs, research runs and provider/search aggregates.**
-- [ ] **Step 2: Verify the new tests fail because those tables are not in the current delete registry.**
-- [ ] **Step 3: Add the registry and route deletion through it, preserving immutable evidence and wallet audit rows.**
-- [ ] **Step 4: Run retention, export, integrity and storage-health tests; inspect generated projection for every table class.**
-- [ ] **Step 5: Commit with `git commit -m "fix: classify and retain all growing runtime tables"`.**
+- [x] **Step 1: Add fixture-backed failing tests for model calls, action attempts, behavior logs, research runs and provider/search aggregates.**
+- [x] **Step 2: Verify the new tests fail because those tables are not in the current delete registry.**
+- [x] **Step 3: Add the registry and route deletion through it, preserving immutable evidence and wallet audit rows.**
+- [x] **Step 4: Run retention, export, integrity and storage-health tests; inspect generated projection for every table class.**
+- [x] **Step 5: Commit with `git commit -m "fix: classify and retain all growing runtime tables"`.**
 
 #### Task 1.3：正式 Schema/feature marker 和 Integrity checks（A14、A15）
 
@@ -174,11 +174,11 @@ git commit -m "fix: enforce production listener and session security"
 - Integrity registry exposes explicit checks for provider health state/buckets and retention runs/cursors.
 - Older databases migrate deterministically; future versions fail closed before worker startup.
 
-- [ ] **Step 1: Add failing migration and integrity tests from an empty database, schema 67 database, and partially initialized database.**
-- [ ] **Step 2: Verify they fail because constructors currently create tables and registry has no explicit checks.**
-- [ ] **Step 3: Move DDL into migrations, add feature markers and versioned registry checks.**
-- [ ] **Step 4: Run migration, export, integrity, provider and retention suites, including rollback/quick-check tests.**
-- [ ] **Step 5: Commit with `git commit -m "fix: version runtime tables and integrity checks"`.**
+- [x] **Step 1: Add failing migration and integrity tests from an empty database, schema 67 database, and partially initialized database.**
+- [x] **Step 2: Verify they fail because constructors currently create tables and registry has no explicit checks.**
+- [x] **Step 3: Move DDL into migrations, add feature markers and versioned registry checks.**
+- [x] **Step 4: Run migration, export, integrity, provider and retention suites, including rollback/quick-check tests.**
+- [x] **Step 5: Commit with `git commit -m "fix: version runtime tables and integrity checks"`.**
 
 ### Gate 2：Provider 健康与故障切换
 
@@ -195,11 +195,11 @@ git commit -m "fix: enforce production listener and session security"
 - Logical requests keep one trace/idempotency identity across failover; unknown outcomes enter reconcile and are not silently retried as a new side effect.
 - Half-open recovery permits one probe and records its result.
 
-- [ ] **Step 1: Add failing tests for bounded windows, percentile fields, unknown outcome and one-probe cooldown recovery.**
-- [ ] **Step 2: Run provider/routing tests and verify missing fields or wrong transitions fail.**
-- [ ] **Step 3: Implement bounded aggregates and explicit outcome classification without storing URLs, tokens or full response bodies.**
-- [ ] **Step 4: Run provider, model, search and service health tests, then perform deterministic fault-injection tests for timeout, 429, 5xx, auth, schema and unknown.**
-- [ ] **Step 5: Commit with `git commit -m "fix: harden provider health and failover evidence"`.**
+- [x] **Step 1: Add failing tests for bounded windows, percentile fields, unknown outcome and one-probe cooldown recovery.**
+- [x] **Step 2: Run provider/routing tests and verify missing fields or wrong transitions fail.**
+- [x] **Step 3: Implement bounded aggregates and explicit outcome classification without storing URLs, tokens or full response bodies.**
+- [x] **Step 4: Run provider, model, search and service health tests, then perform deterministic fault-injection tests for timeout, 429, 5xx, auth, schema and unknown.**
+- [x] **Step 5: Commit with `git commit -m "fix: harden provider health and failover evidence"`.**
 
 ### Gate 3：钱包状态机与自动付款验收
 
@@ -216,11 +216,11 @@ git commit -m "fix: enforce production listener and session security"
 - A logical payment ID remains stable across replacement/nonce bump; no new external side effect is created solely by an unknown receipt.
 - Management projection shows current state, reason, age, retry/reconcile action and pause status.
 
-- [ ] **Step 1: Add failing fake-RPC/signer tests for each reason and unknown receipt path.**
-- [ ] **Step 2: Run wallet tests to confirm current coarse codes fail the assertions.**
-- [ ] **Step 3: Implement classification and state transitions with explicit evidence requirements.**
-- [ ] **Step 4: Run all wallet execution, fee admission, observation, economy, acquisition and release-gate tests.**
-- [ ] **Step 5: Commit with `git commit -m "fix: map wallet outcomes to explicit chain states"`.**
+- [x] **Step 1: Add failing fake-RPC/signer tests for each reason and unknown receipt path.**
+- [x] **Step 2: Run wallet tests to confirm current coarse codes fail the assertions.**
+- [x] **Step 3: Implement classification and state transitions with explicit evidence requirements.**
+- [x] **Step 4: Run all wallet execution, fee admission, observation, economy, acquisition and release-gate tests.**
+- [x] **Step 5: Commit with `git commit -m "fix: map wallet outcomes to explicit chain states"`.**
 
 #### Task 3.2：自动付款组合故障验收（A18）
 
@@ -235,11 +235,11 @@ git commit -m "fix: enforce production listener and session security"
 - Concurrent admission cannot exceed daily limits; retry/replacement uses the same logical payment identity.
 - The management projection shows automation enabled/paused, limits, last failure state and reconciliation requirement.
 
-- [ ] **Step 1: Add failing concurrent and combined-fault tests (pause+retry, gas high+balance low, nonce conflict+restart, timeout+reorg).**
-- [ ] **Step 2: Verify failure against the current state machine.**
-- [ ] **Step 3: Implement only the missing atomic transitions and evidence persistence.**
-- [ ] **Step 4: Run the complete wallet suite and deterministic Sepolia-independent fake chain gate.**
-- [ ] **Step 5: Commit with `git commit -m "test: close automatic payment fault matrix"`.**
+- [x] **Step 1: Add failing concurrent and combined-fault tests (pause+retry, gas high+balance low, nonce conflict+restart, timeout+reorg).**
+- [x] **Step 2: Verify failure against the current state machine.**
+- [x] **Step 3: Implement only the missing atomic transitions and evidence persistence.**
+- [x] **Step 4: Run the complete wallet suite and deterministic Sepolia-independent fake chain gate.**
+- [x] **Step 5: Commit with `git commit -m "test: close automatic payment fault matrix"`.**
 
 ### Gate 4：部署文档、反向代理与发布供应链
 
@@ -256,11 +256,11 @@ git commit -m "fix: enforce production listener and session security"
 - Examples declare HTTPS, trusted proxy CIDR, cookie security, public/admin host separation and loopback upstream together.
 - A contract test checks every documented environment key and endpoint against the current runtime settings/API.
 
-- [ ] **Step 1: Add failing contract tests for missing proxy CIDR, stale endpoint and stale secret instructions.**
-- [ ] **Step 2: Run them and verify the current docs fail.**
-- [ ] **Step 3: Update examples and docs to the current capability matrix, including production preflight.**
-- [ ] **Step 4: Run documentation contract tests and installer syntax checks.**
-- [ ] **Step 5: Commit with `git commit -m "docs: align deployment contracts with runtime"`.**
+- [x] **Step 1: Add failing contract tests for missing proxy CIDR, stale endpoint and stale secret instructions.**
+- [x] **Step 2: Run them and verify the current docs fail.**
+- [x] **Step 3: Update examples and docs to the current capability matrix, including production preflight.**
+- [x] **Step 4: Run documentation contract tests and installer syntax checks.**
+- [x] **Step 5: Commit with `git commit -m "docs: align deployment contracts with runtime"`.**
 
 #### Task 4.2：Release workflow 最小权限和生产证据门禁（A17）
 
@@ -274,16 +274,16 @@ git commit -m "fix: enforce production listener and session security"
 - Release artifact includes SHA, schema/feature markers, test evidence and offline-verifiable signatures.
 - External evidence is marked as missing rather than inferred from local tests.
 
-- [ ] **Step 1: Add failing YAML/contract tests for top-level write permissions and missing production evidence declarations.**
-- [ ] **Step 2: Verify current workflow fails the contract.**
-- [ ] **Step 3: Split permissions by job, require protected release environment and add evidence manifest fields.**
-- [ ] **Step 4: Run workflow contract, gate runner and artifact verification tests.**
-- [ ] **Step 5: Commit with `git commit -m "ci: tighten release permissions and evidence gates"`.**
+- [x] **Step 1: Add failing YAML/contract tests for top-level write permissions and missing production evidence declarations.**
+- [x] **Step 2: Verify current workflow fails the contract.**
+- [x] **Step 3: Split permissions by job, require protected release environment and add evidence manifest fields.**
+- [x] **Step 4: Run workflow contract, gate runner and artifact verification tests.**
+- [x] **Step 5: Commit with `git commit -m "ci: tighten release permissions and evidence gates"`.**
 
 ## Final verification gate
 
-- [ ] Run the full project test suite with the project environment.
-- [ ] Run `python -m compileall -q src`, `ruff check .`, `ruff format --check .`, deployment shell syntax checks and `git diff --check`.
-- [ ] Review `git diff` and `git status --short`; confirm no server files, secrets, runtime database or generated artifacts changed.
-- [ ] Reconcile every A1–A18 row against a test or an explicitly documented external validation requirement.
-- [ ] Commit only after fresh verification; do not push.
+- [x] Run the full project test suite with the project environment.
+- [x] Run `python -m compileall -q src`, `ruff check .`, `ruff format --check .`, deployment shell syntax checks and `git diff --check`.
+- [x] Review `git diff` and `git status --short`; confirm no server files, secrets, runtime database or generated artifacts changed.
+- [x] Reconcile every A1–A18 row against a test or an explicitly documented external validation requirement.
+- [x] Commit only after fresh verification; do not push.
