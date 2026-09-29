@@ -490,6 +490,20 @@ function renderWalletPolicy(policy) {
     ? walletPolicy.allowed_recipient_addresses.join("\n")
     : "";
 }
+const walletFailureReasonLabels = {
+  insufficient_balance: "余额不足",
+  gas_too_high: "Gas 费用过高",
+  nonce_conflict: "Nonce 冲突",
+  confirmation_timeout: "确认超时",
+  chain_reorg: "链重组",
+  rpc_unavailable: "RPC 暂不可用",
+  fee_quote_unavailable: "Gas 报价不可用",
+  broadcast_unknown: "广播结果未知",
+  receipt_failed: "链上执行失败",
+  reconcile_required: "需要人工对账",
+  unknown: "原因未知",
+  none: "无原因码",
+};
 async function loadWalletPolicy() {
   const policy = await request("/api/admin/wallet-policy");
   renderWalletPolicy(policy);
@@ -497,6 +511,10 @@ async function loadWalletPolicy() {
     const automation = await request("/api/v1/admin/wallet-automation");
     const label = automation.status === "paused" ? "紧急暂停中" : automation.status === "enabled" ? "自动付款已开启" : "自动付款已关闭";
     $("#wallet-automation-status").textContent = `${label} · 待处理 ${Object.values(automation.pending_reason_counts || {}).reduce((a, b) => a + Number(b || 0), 0)} 项`;
+    const failure = automation.latest_failure;
+    $("#wallet-automation-failure").textContent = failure
+      ? `${failure.requires_reconciliation ? "需人工对账" : "最近付款失败"}：${walletFailureReasonLabels[failure.reason_code] || "原因未知"} · ${failure.status} · ${failure.updated_at}`
+      : "暂无待处理的付款失败或未知结果。";
     $("#wallet-automation-pause").disabled = automation.emergency_paused === true;
     $("#wallet-automation-resume").disabled = automation.emergency_paused !== true;
   } catch (error) { setStatus("#wallet-automation-status", errorText(error), true); }

@@ -68,6 +68,13 @@ def test_admin_surface_assets_and_session_contract() -> None:
     assert "fetch(path" in ADMIN_JS
 
 
+def test_wallet_automation_admin_surface_shows_reconciliation_state() -> None:
+    assert 'id="wallet-automation-failure"' in ADMIN_HTML
+    assert "automation.latest_failure" in ADMIN_JS
+    assert "failure.requires_reconciliation" in ADMIN_JS
+    assert "broadcast_unknown" in ADMIN_JS
+
+
 def test_public_surface_has_branded_archive_and_captcha_states() -> None:
     for marker in (
         'class="hero"',

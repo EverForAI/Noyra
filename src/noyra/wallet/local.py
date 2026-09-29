@@ -419,5 +419,7 @@ class LocalWalletSigner:
                     latest - block + 1,
                     effect_hash,
                 )
+            except WalletRPCError:
+                raise
             except Exception:
                 raise WalletExecutionError("local wallet receipt validation failed") from None

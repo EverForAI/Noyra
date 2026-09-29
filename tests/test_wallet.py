@@ -1267,7 +1267,7 @@ def test_wallet_execution_http_happy_path_with_isolated_signer(tmp_path: Path) -
     kernel.orient()
     kernel.activate()
     source_address = "0xA111111111111111111111111111111111111111"
-    signer = MockSigner(chain_id=1, source_address=source_address)
+    signer = MockSigner(chain_id=1, source_address=source_address, lose_first_response=True)
     server = NoyraHTTPServer(kernel, settings, wallet_signer=signer)
     server.start()
     _host, port = server.address
@@ -1383,8 +1383,30 @@ def test_wallet_execution_http_happy_path_with_isolated_signer(tmp_path: Path) -
             token=token,
         )
         assert status == 200 and isinstance(executed, dict)
-        assert executed["status"] == "broadcast"
+        assert executed["status"] == "unknown"
         execution_id = str(executed["execution_id"])
+
+        status, automation = _http_json(base_url, "/api/v1/admin/wallet-automation", token=token)
+        assert status == 200 and isinstance(automation, dict)
+        assert automation["status"] == "enabled"
+        assert automation["active_executions"] == 1
+        assert automation["pending_reason_counts"] == {"broadcast_unknown": 1}
+        assert automation["latest_failure"] == {
+            "execution_id": execution_id,
+            "status": "unknown",
+            "reason_code": "broadcast_unknown",
+            "updated_at": executed["updated_at"],
+            "requires_reconciliation": True,
+        }
+
+        status, retried = _http_json(
+            base_url,
+            f"/api/admin/wallet-orders/{order.order_id}/retry",
+            payload={"reason": "test explicit retry"},
+            token=token,
+        )
+        assert status == 200 and isinstance(retried, dict)
+        assert retried["status"] == "broadcast"
 
         for path in (
             "/api/v1/admin/wallet-executions?limit=100",
@@ -1405,6 +1427,9 @@ def test_wallet_execution_http_happy_path_with_isolated_signer(tmp_path: Path) -
         assert status == 200 and isinstance(confirmed, dict)
         assert confirmed["status"] == "confirmed"
         assert server.wallet_economy.list_orders(settings.subject_id)[0].status == "confirmed"
+        status, automation = _http_json(base_url, "/api/v1/admin/wallet-automation", token=token)
+        assert status == 200 and isinstance(automation, dict)
+        assert automation["latest_failure"] is None
     finally:
         server.close()
         kernel.close()

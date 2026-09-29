@@ -186,6 +186,31 @@ def test_token_fee_snapshot_has_bounded_age_when_policy_age_is_disabled(tmp_path
         )
 
 
+def test_high_fee_quote_and_low_native_balance_fail_closed_before_signer_broadcast(
+    tmp_path: Path,
+) -> None:
+    values = setup_token(tmp_path)
+    db, subject, network, _native, _source, _native_order, _token, order = values
+    native_balance(values, "0")
+
+    class HighFeeQuoteSigner(MockSigner):
+        def get_fee_quote(self, transfer: Any) -> tuple[int, str]:
+            assert transfer.chain_id == network.chain_id
+            return 100_000, "1000000000"
+
+    signer = HighFeeQuoteSigner()
+    engine = WalletPaymentExecutionEngine(db, signer)
+    with pytest.raises(WalletExecutionError, match="cannot cover wallet fees"):
+        engine.execute_order(order.order_id, subject, actor="operator")
+    assert signer.requests == []
+    assert engine._order_execution(order.order_id, subject) is None
+    with db.connection() as connection:
+        status = connection.execute(
+            "SELECT status FROM wallet_payment_orders WHERE order_id=?", (order.order_id,)
+        ).fetchone()[0]
+    assert status == "reserved"
+
+
 def test_concurrent_token_executions_cannot_share_fee_reservation(tmp_path: Path) -> None:
     values = setup_token(tmp_path)
     db, subject, network, _native, _source, _native_order, token, first = values

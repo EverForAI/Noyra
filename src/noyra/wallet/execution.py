@@ -2057,6 +2057,9 @@ class WalletPaymentExecutionEngine:
         for tx in hashes:
             try:
                 receipt = self.signer.get_receipt(tx, chain_id=execution.chain_id)
+            except WalletRPCError as failure:
+                error = failure.reason_code
+                continue
             except WalletSignerError as failure:
                 error = self._signer_error_code(failure)
                 if error == "signer_rejected":
@@ -2066,12 +2069,17 @@ class WalletPaymentExecutionEngine:
                 message = str(failure).casefold()
                 error = (
                     "rpc_unavailable"
-                    if "lookup failed" in message or "request failed" in message
+                    if message
+                    in {
+                        "wallet signer receipt lookup failed",
+                        "local wallet rpc request failed",
+                        "local wallet rpc deadline exceeded",
+                    }
                     else "reconcile_required"
                 )
                 continue
             except Exception:
-                error = "rpc_unavailable"
+                error = "reconcile_required"
                 continue
             if receipt is not None:
                 if self._valid_receipt(

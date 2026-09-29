@@ -27,6 +27,7 @@ from noyra.wallet import (
     WalletEconomyStore,
     WalletNetworkInput,
     WalletPaymentExecutionEngine,
+    WalletSignerError,
     WalletStore,
 )
 
@@ -320,6 +321,176 @@ def test_emergency_pause_fails_closed_for_existing_and_new_orders(tmp_path: Path
     )
     new_order = economy.order_for_submission(decided.submission_id, subject_id)
     assert new_order is not None and new_order.status == "rejected"
+
+
+def test_pause_during_unknown_payment_blocks_retry_without_new_attempt(tmp_path: Path) -> None:
+    database, subject_id, _wallets, economy, network, _asset, source = _fixture(tmp_path)
+    goal_id = _goal(database, subject_id, goal_id="pause-retry-goal")
+    bounty = _bounty(
+        economy,
+        subject_id,
+        network.network_id,
+        _asset.asset_id,
+        goal_id,
+        amount="7",
+        key="pause-retry",
+    )
+    economy.publish_bounty(bounty.bounty_id, subject_id, actor="operator")
+    submission = economy.submit(bounty.bounty_id, subject_id, _submission(22))
+    accepted = economy.decide_submission(
+        submission.submission_id,
+        subject_id,
+        accepted=True,
+        reason="verified",
+        actor="operator",
+    )
+    order = economy.order_for_submission(accepted.submission_id, subject_id)
+    assert order is not None
+    signer = MockSigner(
+        chain_id=network.chain_id, source_address=source.address, lose_first_response=True
+    )
+    engine = WalletPaymentExecutionEngine(database, signer, economy=economy)
+    unknown = engine.execute_order(order.order_id, subject_id, actor="operator")
+    assert unknown.status == "unknown" and unknown.attempt_count == 1
+
+    policy = economy.get_policy(subject_id)
+    economy.update_policy(
+        subject_id,
+        PaymentPolicyInput(
+            mode="automatic",
+            per_order_limit=policy.per_order_limit,
+            daily_limit=policy.daily_limit,
+            emergency_paused=True,
+            automation_enabled=True,
+        ),
+        expected_version=policy.policy_version,
+        actor="operator",
+    )
+    with pytest.raises(ValueError, match=r"paused|disabled"):
+        engine.retry_unknown(order.order_id, subject_id, actor="operator", reason="pause test")
+    current = engine.get_execution(unknown.execution_id, subject_id)
+    assert current.status == "unknown" and current.attempt_count == 1
+    assert len(signer.requests) == 1
+
+
+def test_nonce_conflict_after_restart_preserves_original_payment_identity(tmp_path: Path) -> None:
+    database, subject_id, _wallets, economy, network, _asset, source = _fixture(tmp_path)
+    goal_id = _goal(database, subject_id, goal_id="nonce-conflict-restart-goal")
+    bounty = _bounty(
+        economy,
+        subject_id,
+        network.network_id,
+        _asset.asset_id,
+        goal_id,
+        amount="7",
+        key="nonce-conflict-restart",
+    )
+    economy.publish_bounty(bounty.bounty_id, subject_id, actor="operator")
+    submission = economy.submit(bounty.bounty_id, subject_id, _submission(24))
+    accepted = economy.decide_submission(
+        submission.submission_id,
+        subject_id,
+        accepted=True,
+        reason="verified",
+        actor="operator",
+    )
+    order = economy.order_for_submission(accepted.submission_id, subject_id)
+    assert order is not None
+
+    class LostResponseThenNonceConflict(MockSigner):
+        def __init__(self) -> None:
+            super().__init__(
+                signer_id="stable-release-signer",
+                chain_id=network.chain_id,
+                source_address=source.address,
+                lose_first_response=True,
+            )
+            self.request_ids: list[str] = []
+            self.retry_transfers: list[Any] = []
+
+        def sign_and_broadcast(self, transfer: Any, *, request_id: str) -> Any:
+            self.request_ids.append(request_id)
+            if len(self.request_ids) > 1:
+                self.retry_transfers.append(transfer)
+                raise WalletSignerError("nonce was already used", reason_code="nonce_conflict")
+            return super().sign_and_broadcast(transfer, request_id=request_id)
+
+    signer = LostResponseThenNonceConflict()
+    first_engine = WalletPaymentExecutionEngine(database, signer, economy=economy)
+    unknown = first_engine.execute_order(order.order_id, subject_id, actor="operator")
+    assert unknown.status == "unknown" and unknown.tx_hash is not None
+    assert unknown.nonce == 0
+
+    restarted_database = Database(database.path)
+    restarted_economy = WalletEconomyStore(restarted_database)
+    restarted_engine = WalletPaymentExecutionEngine(
+        restarted_database, signer, economy=restarted_economy
+    )
+    conflicted = restarted_engine.retry_unknown(
+        order.order_id,
+        subject_id,
+        actor="operator",
+        reason="recover after restart",
+    )
+
+    assert conflicted.status == "unknown"
+    assert conflicted.error_code == "nonce_conflict"
+    assert conflicted.execution_id == unknown.execution_id
+    assert conflicted.tx_hash == unknown.tx_hash
+    assert conflicted.nonce == unknown.nonce
+    assert len(signer.request_ids) == 2
+    assert signer.request_ids[0].startswith(f"{order.order_id}:attempt:")
+    assert signer.request_ids[1].startswith(f"{order.order_id}:attempt:")
+    assert signer.request_ids[0] != signer.request_ids[1]
+    assert signer.retry_transfers == [signer.requests[0]]
+    assert conflicted.attempt_count == 2
+    restarted_engine.verify_integrity(subject_id)
+
+
+def test_confirmation_timeout_then_receipt_reconciles_without_duplicate_settlement(
+    tmp_path: Path,
+) -> None:
+    database, subject_id, _wallets, economy, network, _asset, source = _fixture(tmp_path)
+    goal_id = _goal(database, subject_id, goal_id="timeout-reconcile-goal")
+    bounty = _bounty(
+        economy,
+        subject_id,
+        network.network_id,
+        _asset.asset_id,
+        goal_id,
+        amount="7",
+        key="timeout-reconcile",
+    )
+    economy.publish_bounty(bounty.bounty_id, subject_id, actor="operator")
+    submission = economy.submit(bounty.bounty_id, subject_id, _submission(23))
+    accepted = economy.decide_submission(
+        submission.submission_id,
+        subject_id,
+        accepted=True,
+        reason="verified",
+        actor="operator",
+    )
+    order = economy.order_for_submission(accepted.submission_id, subject_id)
+    assert order is not None
+    signer = MockSigner(chain_id=network.chain_id, source_address=source.address)
+    engine = WalletPaymentExecutionEngine(
+        database, signer, economy=economy, confirmation_timeout_seconds=0
+    )
+    unknown = engine.execute_order(order.order_id, subject_id, actor="operator")
+    timed_out = engine.poll_receipt(unknown.execution_id, subject_id, actor="operator")
+    assert timed_out.status == "unknown" and timed_out.error_code == "confirmation_timeout"
+    assert timed_out.tx_hash is not None
+    signer.set_receipt(timed_out.tx_hash, chain_id=network.chain_id, status=1, block_number=12)
+    reconciled = engine.retry_unknown(
+        order.order_id, subject_id, actor="operator", reason="receipt arrived"
+    )
+    assert reconciled.status == "confirmed"
+    assert reconciled.attempt_count == 1
+    with database.connection() as connection:
+        settlements = connection.execute(
+            "SELECT COUNT(*) FROM wallet_ledger_journals WHERE journal_type='settlement'"
+        ).fetchone()[0]
+    assert settlements == 1
 
 
 class _NoFetchallCursor:

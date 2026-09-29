@@ -151,6 +151,7 @@
         <div class="wallet-columns wallet-economy-columns">
           <article class="surface-card wallet-policy-card"><div class="card-heading"><div><h2>自动付款策略</h2><p class="muted">自动付款只受总开关、单笔上限和每日总额上限控制；白名单默认关闭。</p></div><button class="text-button" id="refresh-wallet-policy" type="button">更新</button></div>
             <div id="wallet-automation-status" class="wallet-automation-status" role="status" aria-live="polite">正在读取自动付款状态…</div>
+            <div id="wallet-automation-failure" class="muted" role="status" aria-live="polite">正在读取最近付款状态…</div>
             <div class="resource-actions wallet-automation-actions"><button id="wallet-automation-pause" type="button">紧急暂停</button><button id="wallet-automation-resume" type="button">解除暂停</button></div>
             <form id="wallet-policy-form" class="model-grid">
               <div class="field-group"><label for="wallet-policy-mode">付款模式</label><select id="wallet-policy-mode"><option value="disabled">关闭付款</option><option value="conditional_confirmation">人工确认后付款</option><option value="automatic">自动付款</option></select></div>

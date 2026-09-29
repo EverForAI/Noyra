@@ -15,6 +15,7 @@ from noyra.core.types import content_hash
 from noyra.wallet.execution import (
     WalletBroadcastUnknownError,
     WalletExecutionError,
+    WalletRPCError,
     WalletSignerError,
     WalletUnsignedTransfer,
 )
@@ -160,6 +161,16 @@ def test_local_rpc_errors_are_classified_without_provider_text(
     assert error.value.reason_code == reason_code
     assert message not in str(error.value)
     assert chain.sent == []
+
+
+def test_receipt_rpc_failure_remains_distinguishable_from_bad_receipt_evidence() -> None:
+    chain = Chain()
+    chain.errors["eth_getTransactionReceipt"] = "private provider diagnostic"
+    tx_hash = "0x" + "aa" * 32
+    with signer(chain) as wallet, pytest.raises(WalletRPCError) as error:
+        wallet.get_receipt(tx_hash, chain_id=1)
+    assert error.value.reason_code == "rpc_unavailable"
+    assert "private provider diagnostic" not in str(error.value)
 
 
 def test_advanced_nonce_is_unknown_so_prior_payment_is_not_released() -> None:

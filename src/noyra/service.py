@@ -4903,6 +4903,7 @@ class NoyraHTTPServer:
             def _wallet_automation_projection(self) -> dict[str, Any]:
                 policy = owner.wallet_economy.get_policy(owner.kernel.subject_id)
                 pending: dict[str, int] = {}
+                latest_failure: dict[str, Any] | None = None
                 try:
                     with owner.kernel.database.read_transaction() as connection:
                         rows = connection.execute(
@@ -4911,13 +4912,34 @@ class NoyraHTTPServer:
                             "GROUP BY error_code",
                             (owner.kernel.subject_id,),
                         ).fetchall()
+                        latest = connection.execute(
+                            "SELECT execution_id,status,error_code,updated_at "
+                            "FROM wallet_payment_executions "
+                            "WHERE subject_id=? AND status IN ('unknown','failed') "
+                            "ORDER BY updated_at DESC,execution_id DESC LIMIT 1",
+                            (owner.kernel.subject_id,),
+                        ).fetchone()
                     from noyra.wallet.execution import WalletPaymentExecutionEngine
 
                     for row in rows:
                         code = WalletPaymentExecutionEngine.normalize_reason_code(row["error_code"])
                         pending[code] = pending.get(code, 0) + int(row["count"])
+                    if latest is not None:
+                        reason_code = WalletPaymentExecutionEngine.normalize_reason_code(
+                            latest["error_code"]
+                        )
+                        latest_failure = {
+                            "execution_id": str(latest["execution_id"]),
+                            "status": str(latest["status"]),
+                            "reason_code": reason_code,
+                            "updated_at": str(latest["updated_at"]),
+                            "requires_reconciliation": (
+                                latest["status"] == "unknown" or reason_code == "reconcile_required"
+                            ),
+                        }
                 except Exception:
                     pending = {}
+                    latest_failure = None
                 active = 0
                 try:
                     with owner.kernel.database.read_transaction() as connection:
@@ -4941,6 +4963,7 @@ class NoyraHTTPServer:
                     "daily_limit": policy.daily_limit,
                     "active_executions": active,
                     "pending_reason_counts": pending,
+                    "latest_failure": latest_failure,
                     "status": (
                         "paused"
                         if policy.emergency_paused

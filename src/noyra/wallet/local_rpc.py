@@ -138,4 +138,4 @@ class LocalWalletRPC:
         except Exception:
             # Provider messages/transport exceptions can contain URLs or signed
             # payloads. Never propagate their text or exception chain.
-            raise WalletExecutionError("local wallet RPC request failed") from None
+            raise WalletRPCError("rpc_unavailable") from None

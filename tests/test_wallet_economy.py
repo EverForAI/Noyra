@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from noyra.core import Database, IdentityStore
-from noyra.core.database import legacy_wallet_payment_policy_state_hash_v65
+from noyra.core.database import CURRENT_SCHEMA_VERSION, legacy_wallet_payment_policy_state_hash_v65
 from noyra.core.errors import InvalidTransitionError
 from noyra.core.types import content_hash, utc_now
 from noyra.wallet import (
@@ -472,10 +472,7 @@ def test_recipient_policy_fields_migrate_and_rehash_existing_policy(tmp_path: Pa
     assert policy.recipient_allowlist_enabled is False
     assert policy.allowed_recipient_addresses == ()
     with upgraded.read_transaction() as connection:
-        assert (
-            connection.execute(
-                "SELECT value FROM schema_meta WHERE key='schema_version'"
-            ).fetchone()[0]
-            == "67"
-        )
+        assert connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == str(CURRENT_SCHEMA_VERSION)
     WalletEconomyStore(upgraded).verify_integrity(subject_id)

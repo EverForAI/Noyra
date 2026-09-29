@@ -386,6 +386,21 @@ def test_receipt_lookup_failure_is_reconcileable_rpc_state(tmp_path: Path) -> No
     assert result.error_code == "rpc_unavailable"
 
 
+def test_unclassified_receipt_failure_requires_manual_reconciliation(tmp_path: Path) -> None:
+    class BrokenReceiptSigner(MockSigner):
+        def get_receipt(self, tx_hash: str, *, chain_id: int) -> Any:
+            del tx_hash, chain_id
+            raise RuntimeError("unclassified internal failure")
+
+    db, subject, network, _asset, source, order = fixture(tmp_path)
+    signer = BrokenReceiptSigner(chain_id=network.chain_id, source_address=source.address)
+    engine = WalletPaymentExecutionEngine(db, signer)
+    broadcast = engine.execute_order(order.order_id, subject, actor="operator")
+    result = engine.poll_receipt(broadcast.execution_id, subject, actor="operator")
+    assert result.status == "unknown"
+    assert result.error_code == "reconcile_required"
+
+
 def test_broadcast_without_receipt_enters_confirmation_timeout_state(tmp_path: Path) -> None:
     db, subject, network, _asset, source, order = fixture(tmp_path)
     signer = MockSigner(chain_id=network.chain_id, source_address=source.address)
