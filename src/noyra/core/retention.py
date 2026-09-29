@@ -82,6 +82,17 @@ class RetentionManager:
                     ON retention_runs(subject_id, started_at DESC);
                 """,
             )
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(retention_runs)").fetchall()
+            }
+            for name, definition in (
+                ("failure_stage", "TEXT"),
+                ("retry_at", "TEXT"),
+                ("failure_count", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE retention_runs ADD COLUMN {name} {definition}")
 
     @staticmethod
     def _table_exists(connection: Any, table: str) -> bool:
@@ -154,78 +165,39 @@ class RetentionManager:
         }
         protected = 0
         failed_reason: str | None = None
-        cursor: str | None = None
+        cursor: dict[str, dict[str, Any]] = {
+            table: {"cursor": None, "cutoff": cutoff, "deleted": 0, "protected": None}
+            for table in (
+                "provider_health_buckets",
+                "search_provider_uses",
+                "provider_health_attempts",
+            )
+        }
         pruned_run_history = 0
+        failure_stage: str | None = None
         try:
             with self.database.transaction() as connection:
-                # Attempts are independent derived evidence. Delete buckets
-                # first and keep the whole transaction below the hard batch cap.
                 remaining = size
-                rows = (
-                    connection.execute(
-                        """
-                        SELECT subject_id, provider_kind, provider_id, bucket_start
-                        FROM provider_health_buckets
-                        WHERE subject_id=? AND bucket_start < ?
-                        ORDER BY bucket_start LIMIT ?
-                        """,
-                        (subject_id, cutoff, remaining),
-                    ).fetchall()
-                    if self._table_exists(connection, "provider_health_buckets")
-                    else []
-                )
-                for row in rows:
-                    connection.execute(
-                        """
-                        DELETE FROM provider_health_buckets
-                        WHERE subject_id=? AND provider_kind=? AND provider_id=? AND bucket_start=?
-                        """,
-                        tuple(row),
+                for table, table_cutoff in (
+                    ("provider_health_buckets", cutoff),
+                    ("search_provider_uses", search_use_cutoff),
+                    ("provider_health_attempts", cutoff),
+                ):
+                    if not remaining or not self._table_exists(connection, table):
+                        continue
+                    failure_stage = "delete"
+                    count, last_cursor = self._delete_table(
+                        connection,
+                        table,
+                        subject_id,
+                        table_cutoff,
+                        remaining,
+                        cursor[table]["cursor"],
                     )
-                deleted["provider_health_buckets"] = len(rows)
-                remaining -= len(rows)
-                if remaining and self._table_exists(connection, "search_provider_uses"):
-                    search_rows = connection.execute(
-                        "SELECT use_id FROM search_provider_uses WHERE subject_id=? "
-                        "AND created_at < ? ORDER BY created_at, use_id LIMIT ?",
-                        (subject_id, search_use_cutoff, remaining),
-                    ).fetchall()
-                    for row in search_rows:
-                        connection.execute(
-                            "DELETE FROM search_provider_uses WHERE use_id=? AND subject_id=?",
-                            (row["use_id"], subject_id),
-                        )
-                    deleted["search_provider_uses"] = len(search_rows)
-                    remaining -= len(search_rows)
-                    if search_rows:
-                        cursor = str(search_rows[-1]["use_id"])
-                # Databases created by an early development build may contain
-                # individual health attempts. They are no longer written and
-                # are removed as legacy detail, under the same strict batch cap.
-                legacy_attempts = connection.execute(
-                    """
-                    SELECT 1 FROM sqlite_master
-                    WHERE type='table' AND name='provider_health_attempts'
-                    """
-                ).fetchone()
-                if remaining and legacy_attempts:
-                    rows = connection.execute(
-                        """
-                        SELECT attempt_key FROM provider_health_attempts
-                        WHERE subject_id=? AND occurred_at < ?
-                        ORDER BY occurred_at, attempt_key LIMIT ?
-                        """,
-                        (subject_id, cutoff, remaining),
-                    ).fetchall()
-                    for row in rows:
-                        connection.execute(
-                            "DELETE FROM provider_health_attempts WHERE attempt_key=?", (row[0],)
-                        )
-                    deleted["provider_health_attempts"] = len(rows)
-                if rows:
-                    cursor = str(rows[-1][0])
-                if sum(deleted.values()) >= size:
-                    cursor = cursor or str(rows[-1][0])
+                    deleted[table] = count
+                    cursor[table]["deleted"] += count
+                    cursor[table]["cursor"] = last_cursor
+                    remaining -= count
                 payload = {
                     "run_id": run_id,
                     "subject_id": subject_id,
@@ -234,7 +206,11 @@ class RetentionManager:
                     "cursor": cursor,
                 }
                 connection.execute(
-                    "INSERT INTO retention_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    """INSERT INTO retention_runs(
+                        run_id, subject_id, started_at, completed_at, deleted_by_table_json,
+                        protected_rows, failed_reason, next_cursor, state_hash,
+                        failure_stage, retry_at, failure_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         run_id,
                         subject_id,
@@ -243,8 +219,11 @@ class RetentionManager:
                         canonical_json(deleted),
                         protected,
                         failed_reason,
-                        cursor,
+                        canonical_json(cursor),
                         content_hash(payload),
+                        None,
+                        None,
+                        0,
                     ),
                 )
                 # Retention run summaries are bounded operational metadata,
@@ -263,6 +242,46 @@ class RetentionManager:
                 pruned_run_history = len(stale_runs)
         except Exception as error:
             failed_reason = type(error).__name__
+            retry_at = (moment + timedelta(seconds=self.settings.interval_seconds)).isoformat()
+            try:
+                with self.database.transaction() as connection:
+                    previous = connection.execute(
+                        "SELECT failure_count FROM retention_runs WHERE subject_id=? "
+                        "ORDER BY started_at DESC LIMIT 1",
+                        (subject_id,),
+                    ).fetchone()
+                    failure_count = int(previous["failure_count"] or 0) + 1 if previous else 1
+                    payload = {
+                        "run_id": run_id,
+                        "subject_id": subject_id,
+                        "failed_reason": failed_reason,
+                        "failure_stage": failure_stage or "transaction",
+                        "cursor": cursor,
+                    }
+                    connection.execute(
+                        """INSERT INTO retention_runs(
+                            run_id, subject_id, started_at, completed_at, deleted_by_table_json,
+                            protected_rows, failed_reason, next_cursor, state_hash,
+                            failure_stage, retry_at, failure_count
+                        ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            run_id,
+                            subject_id,
+                            started,
+                            canonical_json(deleted),
+                            protected,
+                            failed_reason,
+                            canonical_json(cursor),
+                            content_hash(payload),
+                            failure_stage or "transaction",
+                            retry_at,
+                            failure_count,
+                        ),
+                    )
+            except Exception:
+                # A second failure (for example, a full disk) is returned to
+                # the caller; it cannot safely be made durable.
+                pass
         return {
             "run_id": run_id,
             "deleted_by_table": deleted,
@@ -271,6 +290,65 @@ class RetentionManager:
             "failed_reason": failed_reason,
             "next_cursor": cursor,
         }
+
+    def _delete_table(
+        self,
+        connection: Any,
+        table: str,
+        subject_id: str,
+        cutoff: str,
+        limit: int,
+        cursor: Any,
+    ) -> tuple[int, Any]:
+        """Delete one bounded table and return its real ordering cursor."""
+        if table == "provider_health_buckets":
+            rows = connection.execute(
+                """SELECT subject_id, provider_kind, provider_id, bucket_start
+                   FROM provider_health_buckets
+                   WHERE subject_id=? AND bucket_start < ?
+                   ORDER BY bucket_start, provider_kind, provider_id LIMIT ?""",
+                (subject_id, cutoff, limit),
+            ).fetchall()
+            for row in rows:
+                connection.execute(
+                    """DELETE FROM provider_health_buckets
+                       WHERE subject_id=? AND provider_kind=? AND provider_id=?
+                         AND bucket_start=?""",
+                    tuple(row),
+                )
+            last = None
+            if rows:
+                row = rows[-1]
+                last = {
+                    "bucket_start": row["bucket_start"],
+                    "provider_kind": row["provider_kind"],
+                    "provider_id": row["provider_id"],
+                }
+            return len(rows), last
+        if table == "search_provider_uses":
+            rows = connection.execute(
+                """SELECT use_id FROM search_provider_uses
+                   WHERE subject_id=? AND created_at < ?
+                   ORDER BY created_at, use_id LIMIT ?""",
+                (subject_id, cutoff, limit),
+            ).fetchall()
+            for row in rows:
+                connection.execute(
+                    "DELETE FROM search_provider_uses WHERE use_id=? AND subject_id=?",
+                    (row["use_id"], subject_id),
+                )
+            return len(rows), (str(rows[-1]["use_id"]) if rows else None)
+        rows = connection.execute(
+            """SELECT attempt_key FROM provider_health_attempts
+               WHERE subject_id=? AND occurred_at < ?
+               ORDER BY occurred_at, attempt_key LIMIT ?""",
+            (subject_id, cutoff, limit),
+        ).fetchall()
+        for row in rows:
+            connection.execute(
+                "DELETE FROM provider_health_attempts WHERE attempt_key=?", (row["attempt_key"],)
+            )
+        return len(rows), (str(rows[-1]["attempt_key"]) if rows else None)
 
     def latest(self, subject_id: str) -> dict[str, Any] | None:
         with self.database.connection() as connection:
@@ -287,5 +365,8 @@ class RetentionManager:
             "deleted_by_table": strict_json_loads(row["deleted_by_table_json"]),
             "protected_rows": row["protected_rows"],
             "failed_reason": row["failed_reason"],
-            "next_cursor": row["next_cursor"],
+            "next_cursor": strict_json_loads(row["next_cursor"]) if row["next_cursor"] else None,
+            "failure_stage": row["failure_stage"],
+            "retry_at": row["retry_at"],
+            "failure_count": row["failure_count"],
         }

@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 
@@ -116,3 +117,48 @@ def test_run_batch_prunes_only_expired_search_rate_limit_records(tmp_path):
             (subject,),
         ).fetchall()
     assert [row["use_id"] for row in remaining] == ["use-recent"]
+
+
+def test_retention_next_cursor_is_per_table_and_resumes_each_table(tmp_path):
+    db = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-retention-cursors"
+    IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
+    health = ProviderHealthStore(db, failure_threshold=1)
+    for provider in ("a", "b"):
+        health.record_attempt(subject, "model", provider, f"attempt-{provider}", True, 10, None)
+    old = (datetime.now(UTC) - timedelta(days=60)).isoformat()
+    with db.transaction() as connection:
+        connection.execute(
+            "UPDATE provider_health_buckets SET bucket_start=?, state_hash=? WHERE subject_id=?",
+            (old, content_hash({"legacy": True}), subject),
+        )
+    manager = RetentionManager(db, RetentionSettings(batch_size=1))
+
+    first = manager.run_batch(subject, batch_size=1)
+    second = manager.run_batch(subject, batch_size=1)
+
+    assert first["failed_reason"] is None
+    assert second["failed_reason"] is None
+    assert set(first["next_cursor"]) >= {
+        "provider_health_buckets",
+        "search_provider_uses",
+        "provider_health_attempts",
+    }
+    assert first["next_cursor"]["provider_health_buckets"]["cutoff"]
+    assert second["next_cursor"]["provider_health_buckets"]["deleted"] >= 0
+
+
+def test_retention_failure_is_persisted_for_diagnostics(tmp_path):
+    db = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-retention-failure"
+    IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
+    manager = RetentionManager(db)
+
+    with patch.object(manager, "_delete_table", side_effect=RuntimeError("locked")):
+        result = manager.run_batch(subject)
+
+    assert result["failed_reason"] == "RuntimeError"
+    latest = manager.latest(subject)
+    assert latest is not None
+    assert latest["failed_reason"] == "RuntimeError"
+    assert latest["failure_stage"] == "delete"
