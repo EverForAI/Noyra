@@ -97,6 +97,59 @@ def test_missing_configured_file_fails_closed_instead_of_using_inline_value(
         )
 
 
+def test_production_profile_rejects_inline_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NOYRA_PROFILE", "production")
+    monkeypatch.setenv("NOYRA_TEST_SECRET", "inline-secret")
+    monkeypatch.delenv("NOYRA_TEST_SECRET_FILE", raising=False)
+    monkeypatch.delenv("NOYRA_TEST_SECRET_CREDENTIAL", raising=False)
+
+    with pytest.raises(CredentialError, match="inline secret is disabled"):
+        read_env_secret(
+            value_var="NOYRA_TEST_SECRET",
+            file_var="NOYRA_TEST_SECRET_FILE",
+            credential_var="NOYRA_TEST_SECRET_CREDENTIAL",
+            label="provider API key",
+        )
+
+
+def test_production_profile_allows_managed_file_secret(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path = _private_file(tmp_path / "provider.key", "file-secret")
+    monkeypatch.setenv("NOYRA_PROFILE", "production")
+    monkeypatch.setenv("NOYRA_TEST_SECRET", "inline-secret")
+    monkeypatch.setenv("NOYRA_TEST_SECRET_FILE", str(path))
+    monkeypatch.delenv("NOYRA_TEST_SECRET_CREDENTIAL", raising=False)
+
+    assert (
+        read_env_secret(
+            value_var="NOYRA_TEST_SECRET",
+            file_var="NOYRA_TEST_SECRET_FILE",
+            credential_var="NOYRA_TEST_SECRET_CREDENTIAL",
+            label="provider API key",
+        )
+        == "file-secret"
+    )
+
+
+def test_inline_secret_can_be_disabled_explicitly_in_development(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NOYRA_PROFILE", "development")
+    monkeypatch.setenv("NOYRA_ALLOW_INLINE_SECRETS", "false")
+    monkeypatch.setenv("NOYRA_TEST_SECRET", "inline-secret")
+    monkeypatch.delenv("NOYRA_TEST_SECRET_FILE", raising=False)
+    monkeypatch.delenv("NOYRA_TEST_SECRET_CREDENTIAL", raising=False)
+
+    with pytest.raises(CredentialError, match="inline secret is disabled"):
+        read_env_secret(
+            value_var="NOYRA_TEST_SECRET",
+            file_var="NOYRA_TEST_SECRET_FILE",
+            credential_var="NOYRA_TEST_SECRET_CREDENTIAL",
+            label="provider API key",
+        )
+
+
 def test_secret_file_rejects_group_or_world_access_on_posix(tmp_path: Path) -> None:
     if os.name != "posix":
         pytest.skip("POSIX permission contract")

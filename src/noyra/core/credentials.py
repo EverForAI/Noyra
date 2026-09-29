@@ -147,12 +147,13 @@ def read_env_secret(
     file_var: str,
     credential_var: str,
     label: str,
+    allow_inline: bool | None = None,
 ) -> str:
-    """Resolve a secret from file, system credential, or legacy inline env.
+    """Resolve a secret from file, system credential, or an explicit dev fallback.
 
     File and system credential sources are mutually exclusive and take
-    precedence over the legacy inline variable.  The latter remains supported
-    for development and backwards compatibility.
+    precedence over the inline variable.  Production profiles reject inline
+    values so a deployment cannot silently bypass its managed secret source.
     """
 
     file_value = os.getenv(file_var, "").strip()
@@ -165,6 +166,21 @@ def read_env_secret(
         return read_secret_file(
             _systemd_credential_path(credential_value, label=label), label=label
         )
+    if allow_inline is None:
+        profile = os.getenv("NOYRA_PROFILE", "development").strip().lower()
+        if profile == "production":
+            allow_inline = False
+        else:
+            configured = os.getenv("NOYRA_ALLOW_INLINE_SECRETS")
+            if configured is None:
+                allow_inline = profile in {"development", "test"}
+            else:
+                normalized = configured.strip().lower()
+                if normalized not in {"0", "1", "false", "true", "no", "yes", "off", "on"}:
+                    raise CredentialError("NOYRA_ALLOW_INLINE_SECRETS must be true or false")
+                allow_inline = normalized in {"1", "true", "yes", "on"}
+    if not allow_inline and os.getenv(value_var, "").strip():
+        raise CredentialError(f"inline secret is disabled for {label}")
     return os.getenv(value_var, "").strip()
 
 

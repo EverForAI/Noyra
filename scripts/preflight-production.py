@@ -53,6 +53,23 @@ def evaluate(settings: ServiceSettings | None, error: Exception | None = None) -
                 ),
             ]
         )
+        for kind in ("MODEL", "EMBEDDING"):
+            configured = bool(
+                os.getenv(f"NOYRA_{kind}_BASE_URL", "").strip()
+                or os.getenv(f"NOYRA_{kind}_MODEL", "").strip()
+            )
+            inline = bool(os.getenv(f"NOYRA_{kind}_API_KEY", "").strip())
+            managed = bool(
+                os.getenv(f"NOYRA_{kind}_API_KEY_FILE", "").strip()
+                or os.getenv(f"NOYRA_{kind}_API_KEY_CREDENTIAL", "").strip()
+            )
+            checks.append(
+                _check(
+                    f"{kind.lower()}_api_key_source",
+                    not configured or (managed and not inline),
+                    "managed file/systemd credential required when the provider is configured",
+                )
+            )
     return {
         "status": "pass" if checks and all(item["status"] == "pass" for item in checks) else "fail",
         "checks": checks,
