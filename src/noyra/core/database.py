@@ -6447,8 +6447,10 @@ CREATE INDEX IF NOT EXISTS idx_retention_runs_subject_time
     ON retention_runs(subject_id, started_at DESC);
 """,
     69: """
-ALTER TABLE provider_health_buckets ADD COLUMN error_counts_json TEXT NOT NULL DEFAULT '{}';
-ALTER TABLE provider_health_buckets ADD COLUMN latency_samples_json TEXT NOT NULL DEFAULT '[]';
+-- Provider health metric columns are added by the idempotent migration hook.
+-- Keeping the SQL marker replay-safe matters for databases whose schema marker
+-- is deliberately rewound during migration verification.
+SELECT 1;
 """,
 }
 
@@ -9216,6 +9218,29 @@ END;
             )
             connection.commit()
 
+    @staticmethod
+    def _upgrade_provider_health_metrics(connection: sqlite3.Connection) -> None:
+        """Add provider health metric columns without making replay unsafe."""
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_health_buckets'"
+        ).fetchone()
+        if table is None:
+            raise RuntimeError("provider health buckets table is missing")
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(provider_health_buckets)")
+        }
+        if "error_counts_json" not in columns:
+            connection.execute(
+                "ALTER TABLE provider_health_buckets "
+                "ADD COLUMN error_counts_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "latency_samples_json" not in columns:
+            connection.execute(
+                "ALTER TABLE provider_health_buckets "
+                "ADD COLUMN latency_samples_json TEXT NOT NULL DEFAULT '[]'"
+            )
+
     def _migrate(self, *, wallet_legacy_approval: WalletLegacyApproval | None = None) -> None:
         with self.connection() as connection:
             row = connection.execute(
@@ -9391,6 +9416,19 @@ END;
                         connection.execute("BEGIN IMMEDIATE")
                         self._upgrade_wallet_payment_policy_recipient_allowlist(connection)
                         self._execute_sql_script(connection, migration)
+                        connection.execute(
+                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                            (str(target_version),),
+                        )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
+                if target_version == 69:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._upgrade_provider_health_metrics(connection)
                         connection.execute(
                             "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                             (str(target_version),),

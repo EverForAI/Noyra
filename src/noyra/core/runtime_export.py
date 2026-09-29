@@ -461,6 +461,11 @@ _OWNERSHIP_GRAPH_V66 = {
 }
 # Schema 67 adds only a closed-by-default wallet policy flag.
 _OWNERSHIP_GRAPH_V67 = _OWNERSHIP_GRAPH_V66
+# Schema 68 adds subject-scoped provider health and retention runtime tables;
+# their ownership is classified dynamically when those tables are present.
+_OWNERSHIP_GRAPH_V68 = _OWNERSHIP_GRAPH_V67
+# Schema 69 adds provider health metric columns without changing ownership.
+_OWNERSHIP_GRAPH_V69 = _OWNERSHIP_GRAPH_V68
 
 _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     33: _OWNERSHIP_GRAPH_V33,
@@ -498,6 +503,8 @@ _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     65: _OWNERSHIP_GRAPH_V65,
     66: _OWNERSHIP_GRAPH_V66,
     67: _OWNERSHIP_GRAPH_V67,
+    68: _OWNERSHIP_GRAPH_V68,
+    69: _OWNERSHIP_GRAPH_V69,
 }
 
 
