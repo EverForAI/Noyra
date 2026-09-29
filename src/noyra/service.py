@@ -41,6 +41,7 @@ from noyra.cognition import (
 from noyra.core.admission import OperationInvalidated, bind_lease, current_lease
 from noyra.core.archive import CloudArchiveCoordinator, S3ArchiveProvider, StorageQuota
 from noyra.core.at_rest import AtRestConfig, AtRestError, AtRestGuard
+from noyra.core.credentials import CredentialError, read_secret_file
 from noyra.core.database import Database
 from noyra.core.errors import (
     IntegrityError,
@@ -758,6 +759,7 @@ class ServiceSettings(BaseModel):
     public_post_storage_cap_bytes: int = Field(default=250_000_000, ge=1_000_000, le=2_000_000_000)
     public_post_captcha_issue_limit_per_hour: int = Field(default=30, ge=1, le=100_000)
     public_post_captcha_global_rate_per_minute: int = Field(default=300, ge=1, le=100_000)
+    public_hash_key_file: Path | None = None
     public_site_url: str | None = None
     active_interval_seconds: float = Field(default=30, ge=1, le=86_400)
     sleep_interval_seconds: float = Field(default=60, ge=1, le=86_400)
@@ -1083,6 +1085,11 @@ class ServiceSettings(BaseModel):
             public_post_captcha_global_rate_per_minute=int(
                 os.getenv("NOYRA_PUBLIC_POST_CAPTCHA_GLOBAL_RATE_PER_MINUTE", "300")
             ),
+            public_hash_key_file=(
+                Path(value)
+                if (value := os.getenv("NOYRA_PUBLIC_HASH_KEY_FILE", "").strip())
+                else None
+            ),
             public_site_url=os.getenv("NOYRA_PUBLIC_SITE_URL"),
             active_interval_seconds=float(os.getenv("NOYRA_ACTIVE_INTERVAL_SECONDS", "30")),
             sleep_interval_seconds=float(os.getenv("NOYRA_SLEEP_INTERVAL_SECONDS", "60")),
@@ -1173,6 +1180,23 @@ class ServiceSettings(BaseModel):
         )
 
 
+def _load_public_post_hash_key(settings: ServiceSettings) -> bytes | None:
+    path = settings.public_hash_key_file or (
+        settings.data_dir / "secrets" / "public-post-ip-hash.key"
+    )
+    if not path.exists():
+        if settings.profile == "production":
+            raise ValueError("production requires a persistent public anti-abuse hash key")
+        return None
+    try:
+        key = read_secret_file(path, label="public anti-abuse hash key").encode("utf-8")
+    except CredentialError as error:
+        raise ValueError("public anti-abuse hash key is unavailable or unsafe") from error
+    if len(key) < 32:
+        raise ValueError("public anti-abuse hash key must contain at least 32 bytes")
+    return key
+
+
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
     """Threading server with a hard connection-worker ceiling."""
 
@@ -1259,6 +1283,7 @@ class NoyraHTTPServer:
         wallet_signer: WalletSigner | None = None,
         close_wallet_signer: bool = False,
     ):
+        public_hash_key = _load_public_post_hash_key(settings)
         self.kernel = kernel
         self.settings = settings
         self.admission = kernel.admission
@@ -1295,6 +1320,8 @@ class NoyraHTTPServer:
             minimum_free_bytes=settings.minimum_free_storage_bytes,
             captcha_issue_limit_per_hour=settings.public_post_captcha_issue_limit_per_hour,
             captcha_global_rate_per_minute=(settings.public_post_captcha_global_rate_per_minute),
+            ip_hash_key=public_hash_key,
+            allow_ephemeral_ip_hash_key=settings.profile != "production",
         )
         self.transports = TransportStore(
             kernel.database,

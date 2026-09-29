@@ -80,6 +80,8 @@ class PublicPostStore:
         captcha_issue_limit_per_hour: int = DEFAULT_CAPTCHA_ISSUE_LIMIT_PER_HOUR,
         captcha_global_rate_per_minute: int = DEFAULT_CAPTCHA_GLOBAL_RATE_PER_MINUTE,
         captcha_active_per_client: int = DEFAULT_CAPTCHA_ACTIVE_PER_CLIENT,
+        ip_hash_key: bytes | None = None,
+        allow_ephemeral_ip_hash_key: bool = True,
     ):
         if (
             type(rate_limit_per_hour) is not int
@@ -113,8 +115,14 @@ class PublicPostStore:
         self.captcha_issue_limit_per_hour = captcha_issue_limit_per_hour
         self.captcha_global_rate_per_minute = captcha_global_rate_per_minute
         self.captcha_active_per_client = captcha_active_per_client
+        if ip_hash_key is None:
+            if not allow_ephemeral_ip_hash_key:
+                raise ValueError("a persistent IP hash key is required")
+            ip_hash_key = _PROCESS_IP_HASH_KEY
+        if not isinstance(ip_hash_key, bytes) or len(ip_hash_key) < 32:
+            raise ValueError("IP hash key must contain at least 32 bytes")
         self._ip_hash_key = hmac.new(
-            _PROCESS_IP_HASH_KEY,
+            ip_hash_key,
             str(database.path).encode("utf-8"),
             hashlib.sha256,
         ).digest()

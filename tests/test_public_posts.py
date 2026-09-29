@@ -868,6 +868,25 @@ def test_public_post_service_queue_cap_matches_durable_post_cap(tmp_path: Path) 
         )
 
 
+def test_public_post_ip_hash_is_stable_across_store_instances_with_persistent_key(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "stable-ip-hash.sqlite3")
+    key = b"persistent-test-key-with-at-least-32-bytes"
+
+    first = PublicPostStore(database, ip_hash_key=key)
+    second = PublicPostStore(database, ip_hash_key=key)
+
+    assert first._client_bucket("192.0.2.41") == second._client_bucket("192.0.2.41")
+
+
+def test_public_post_store_can_forbid_ephemeral_ip_hash_key(tmp_path: Path) -> None:
+    database = Database(tmp_path / "production-ip-hash.sqlite3")
+
+    with pytest.raises(ValueError, match="persistent IP hash key"):
+        PublicPostStore(database, allow_ephemeral_ip_hash_key=False)
+
+
 def test_public_post_captcha_http_endpoint_returns_a_challenge(tmp_path: Path) -> None:
     service = NoyraService(
         ServiceSettings(

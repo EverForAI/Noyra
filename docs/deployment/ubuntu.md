@@ -73,6 +73,13 @@ environment values are initialization defaults. CAPTCHA is a human-friction laye
 security boundary. See `docs/implementation/m45-public-post-moderation.md` for the trust and proxy
 model before publishing the site.
 
+The installer provisions `/var/lib/noyra/secrets/public-post-ip-hash.key` once with service-account
+ownership and mode `0600`. Keep this key stable across upgrades and include it in the encrypted
+backup. It makes client rate-limit buckets and CAPTCHA ownership survive a service restart. If you
+choose a custom `NOYRA_PUBLIC_HASH_KEY_FILE`, provision a private file containing at least 32 bytes
+before running the production preflight. Replacing the key deliberately invalidates old client
+buckets and outstanding CAPTCHA ownership; do not rotate it as routine maintenance.
+
 ## Single-disk encrypted storage
 
 When a second data disk is not practical, the supported personal-deployment option is a LUKS2

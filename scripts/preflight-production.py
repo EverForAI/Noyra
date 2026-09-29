@@ -16,6 +16,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from noyra.core.credentials import CredentialError, read_secret_file  # noqa: E402
 from noyra.service import ServiceSettings  # noqa: E402
 
 
@@ -52,6 +53,21 @@ def evaluate(settings: ServiceSettings | None, error: Exception | None = None) -
                     "production proxy source ranges must be explicit",
                 ),
             ]
+        )
+        hash_key_path = settings.public_hash_key_file or (
+            settings.data_dir / "secrets" / "public-post-ip-hash.key"
+        )
+        try:
+            hash_key = read_secret_file(hash_key_path, label="public anti-abuse hash key")
+            hash_key_ready = len(hash_key.encode("utf-8")) >= 32
+        except (CredentialError, OSError, ValueError):
+            hash_key_ready = False
+        checks.append(
+            _check(
+                "public_hash_key",
+                hash_key_ready,
+                "persistent private public anti-abuse hash key of at least 32 bytes is required",
+            )
         )
         for kind in ("MODEL", "EMBEDDING"):
             configured = bool(

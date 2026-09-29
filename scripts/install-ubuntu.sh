@@ -779,6 +779,33 @@ install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra.service" "$UNI
 if [[ ! -f "$CONFIG_DIR/noyra.env" ]]; then
   install -o root -g noyra -m 0640 "$SOURCE_DIR/deploy/noyra.env.example" "$CONFIG_DIR/noyra.env"
 fi
+public_hash_key_file="$(env_value NOYRA_PUBLIC_HASH_KEY_FILE "$DATA_DIR/secrets/public-post-ip-hash.key")"
+if [[ "$public_hash_key_file" == "$DATA_DIR/secrets/public-post-ip-hash.key" ]]; then
+  if [[ -L "$public_hash_key_file" || ( -e "$public_hash_key_file" && ! -f "$public_hash_key_file" ) ]]; then
+    echo 'Public anti-abuse hash key must be a regular file, not a symlink.' >&2
+    on_error 1
+  fi
+  if [[ ! -e "$public_hash_key_file" ]]; then
+    runuser --user=noyra --group=noyra -- "$release_root/.venv/bin/python" - "$public_hash_key_file" <<'PY'
+import os
+import secrets
+import sys
+
+path = os.fsencode(sys.argv[1])
+descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    os.write(descriptor, secrets.token_urlsafe(48).encode("ascii"))
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+  fi
+  hash_key_metadata="$(stat -c '%U:%G:%a:%h' -- "$public_hash_key_file" 2>/dev/null || true)"
+  [[ "$hash_key_metadata" == 'noyra:noyra:600:1' ]] || {
+    echo 'Public anti-abuse hash key must be noyra:noyra mode 0600 and not hard-linked.' >&2
+    on_error 1
+  }
+fi
 if [[ -L "$PROFILE_DROPIN_DIR" ]]; then
   echo "Profile drop-in directory cannot be a symlink: $PROFILE_DROPIN_DIR" >&2
   exit 1
@@ -815,7 +842,8 @@ if [[ "$(env_value NOYRA_PROFILE development)" == "production" ]]; then
   preflight_script="$INSTALL_DIR/current/scripts/preflight-production.py"
   [[ -x "$preflight_python" ]] || { echo 'Production preflight Python is missing.' >&2; on_error 1; }
   [[ -f "$preflight_script" ]] || { echo 'Production preflight script is missing.' >&2; on_error 1; }
-  "$preflight_python" "$preflight_script" --env-file "$CONFIG_DIR/noyra.env" || {
+  runuser --user=noyra --group=noyra -- "$preflight_python" "$preflight_script" \
+    --env-file "$CONFIG_DIR/noyra.env" || {
     echo 'Production preflight failed; refusing to start the new release.' >&2
     on_error 1
   }

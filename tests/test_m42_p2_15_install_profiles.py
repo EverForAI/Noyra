@@ -87,8 +87,11 @@ def test_ubuntu_installer_uses_atomic_release_lifecycle_and_rollback() -> None:
     assert "profile.conf" in installer
     assert 'CREDENTIALS_DIR="$CONFIG_DIR/credentials"' in installer
     assert 'install -d -o root -g noyra -m 0750 "$CREDENTIALS_DIR"' in installer
+    assert "NOYRA_PUBLIC_HASH_KEY_FILE" in installer
+    assert "token_urlsafe(48)" in installer
     assert "S3 archive is configured; install with --profile cloud instead of base." in installer
     assert "/opt/noyra/current/.venv/bin/python" in unit
     assert "WorkingDirectory=/opt/noyra/current" in unit
     assert "ExecStartPre=/usr/bin/test -x /opt/noyra/current/.venv/bin/python" in unit
     assert "Code rollback is not a data rollback" in deployment
+    assert "public-post-ip-hash.key" in deployment
