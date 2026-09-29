@@ -55,6 +55,84 @@ def test_projection_rejects_tampered_health_aggregate(tmp_path: Path):
         store.list_projection(subject, "model")
 
 
+def test_projection_includes_the_actual_metric_window(tmp_path: Path):
+    db, subject = fixture(tmp_path)
+    store = ProviderHealthStore(db)
+    store.record_attempt(subject, "model", "provider-a", "attempt-1", True, 100, None)
+    row = store.list_projection(subject, "model")[0]
+    assert row["bucket_count"] == 1
+    assert row["window_start"]
+    assert row["window_end"]
+    assert row["window_start"] <= row["window_end"]
+
+
+def test_missing_state_for_recorded_provider_fails_closed(tmp_path: Path):
+    db, subject = fixture(tmp_path)
+    store = ProviderHealthStore(db)
+    store.record_attempt(subject, "model", "provider-a", "attempt-1", False, 100, "timeout")
+    with db.transaction() as connection:
+        connection.execute(
+            "DELETE FROM provider_health_state WHERE subject_id=? AND provider_id=?",
+            (subject, "provider-a"),
+        )
+    with pytest.raises(IntegrityError):
+        store.route_available(subject, "model", "provider-a")
+
+
+def test_probe_completion_requires_the_matching_probe_token(tmp_path: Path):
+    db, subject = fixture(tmp_path)
+    store = ProviderHealthStore(db, failure_threshold=1)
+    store.record_attempt(subject, "model", "provider-a", "attempt-1", False, 100, "timeout")
+    with db.transaction() as connection:
+        row = connection.execute(
+            "SELECT * FROM provider_health_state WHERE subject_id=? AND provider_id=?",
+            (subject, "provider-a"),
+        ).fetchone()
+        expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+        state_hash = store._state_hash(
+            subject,
+            "model",
+            "provider-a",
+            row["state"],
+            expired,
+            row["probe_token"],
+            row["probe_started_at"],
+            row["consecutive_failures"],
+            row["last_success_at"],
+            row["last_failure_at"],
+            row["updated_at"],
+        )
+        connection.execute(
+            "UPDATE provider_health_state SET cooldown_until=?, state_hash=? "
+            "WHERE subject_id=? AND provider_id=?",
+            (expired, state_hash, subject, "provider-a"),
+        )
+    assert store.route_available(subject, "model", "provider-a") is True
+    with db.connection() as connection:
+        token = connection.execute(
+            "SELECT probe_token FROM provider_health_state WHERE subject_id=? AND provider_id=?",
+            (subject, "provider-a"),
+        ).fetchone()[0]
+    store.record_attempt(
+        subject,
+        "model",
+        "provider-a",
+        "attempt-stale",
+        True,
+        10,
+        None,
+        probe_token="wrong-token",
+    )
+    with db.connection() as connection:
+        assert (
+            connection.execute(
+                "SELECT probe_token FROM provider_health_state WHERE subject_id=? AND provider_id=?",
+                (subject, "provider-a"),
+            ).fetchone()[0]
+            == token
+        )
+
+
 def test_health_cooldown_recovers_with_one_automatic_probe(tmp_path: Path):
     db, subject = fixture(tmp_path)
     store = ProviderHealthStore(db, failure_threshold=1)

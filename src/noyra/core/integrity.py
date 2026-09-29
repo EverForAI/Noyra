@@ -1519,6 +1519,7 @@ def _check_provider_health(context: IntegrityContext) -> IntegrityCheckOutcome:
     bucket_rows = context.connection.execute(
         "SELECT * FROM provider_health_buckets WHERE subject_id=?", (context.subject_id,)
     ).fetchall()
+    bucket_providers: set[tuple[str, str]] = set()
     for row in bucket_rows:
         expected = ProviderHealthStore._bucket_hash(
             row["subject_id"],
@@ -1536,7 +1537,18 @@ def _check_provider_health(context: IntegrityContext) -> IntegrityCheckOutcome:
         )
         if row["state_hash"] not in {expected, ProviderHealthStore._legacy_bucket_hash(row)}:
             raise IntegrityError("provider health bucket state hash mismatch")
-    return IntegrityCheckOutcome(details={"buckets": len(bucket_rows)})
+        bucket_providers.add((str(row["provider_kind"]), str(row["provider_id"])))
+    state_rows = context.connection.execute(
+        "SELECT * FROM provider_health_state WHERE subject_id=?", (context.subject_id,)
+    ).fetchall()
+    state_providers: set[tuple[str, str]] = set()
+    for row in state_rows:
+        ProviderHealthStore._verify_state(row)
+        state_providers.add((str(row["provider_kind"]), str(row["provider_id"])))
+    if not bucket_providers <= state_providers:
+        missing = sorted(bucket_providers - state_providers)
+        raise IntegrityError(f"provider health state is missing: {missing[0]}")
+    return IntegrityCheckOutcome(details={"buckets": len(bucket_rows), "states": len(state_rows)})
 
 
 def _check_retention_runs(context: IntegrityContext) -> IntegrityCheckOutcome:

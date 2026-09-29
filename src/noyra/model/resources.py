@@ -2773,18 +2773,21 @@ class RoutedModelGateway(ModelGateway):
                     )
                 except (ProviderCallError, StructuredOutputError) as error:
                     latency = int((time.monotonic() - started) * 1000)
-                    if not (isinstance(error, ProviderCallError) and error.outcome_unknown):
-                        with suppress(Exception):
-                            self.provider_health.record_attempt(
-                                self.subject_id,
-                                "model",
-                                group.group_id,
-                                f"{routed_idempotency}:attempt:{attempt_number}",
-                                False,
-                                latency,
-                                getattr(error, "code", type(error).__name__),
-                                cooldown_seconds=self.cooldown_seconds,
-                            )
+                    with suppress(Exception):
+                        self.provider_health.record_attempt(
+                            self.subject_id,
+                            "model",
+                            group.group_id,
+                            f"{routed_idempotency}:attempt:{attempt_number}",
+                            False,
+                            latency,
+                            (
+                                "outcome_unknown"
+                                if isinstance(error, ProviderCallError) and error.outcome_unknown
+                                else getattr(error, "code", type(error).__name__)
+                            ),
+                            cooldown_seconds=self.cooldown_seconds,
+                        )
                     self.resources.record_failure(
                         key.key_id,
                         type(error).__name__,

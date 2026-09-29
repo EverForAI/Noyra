@@ -247,6 +247,7 @@ class ProviderHealthStore:
         error_code: str | None,
         *,
         cooldown_seconds: int = 60,
+        probe_token: str | None = None,
     ) -> bool:
         if not all(
             isinstance(value, str) and value
@@ -263,6 +264,8 @@ class ProviderHealthStore:
             or cooldown_seconds < 0
         ):
             raise ValueError("latency and cooldown must be non-negative")
+        if probe_token is not None and (not isinstance(probe_token, str) or not probe_token):
+            raise ValueError("probe token must be a non-empty string")
         now = utc_now()
         bucket = _bucket(now)
         category = _error_category(error_code)
@@ -349,6 +352,12 @@ class ProviderHealthStore:
             ).fetchone()
             if state is not None:
                 self._verify_state(state)
+                # A completion from an older/in-flight request must never
+                # release a newer half-open probe claim.  Callers that own the
+                # claim may pass the exact token; legacy callers remain safe
+                # by leaving the claim in place until its lease expires.
+                if state["probe_token"] and state["probe_token"] != probe_token:
+                    return True
             consecutive = 0 if success else (int(state["consecutive_failures"]) + 1 if state else 1)
             cooldown_until = None
             state_name = "healthy" if success else "degraded"
@@ -438,8 +447,17 @@ class ProviderHealthStore:
                     "last_success": None,
                     "errors": {},
                     "samples": [],
+                    "window_start": None,
+                    "window_end": None,
+                    "bucket_count": 0,
                 },
             )
+            aggregate["bucket_count"] += 1
+            bucket_start = str(bucket["bucket_start"])
+            if aggregate["window_start"] is None or bucket_start < aggregate["window_start"]:
+                aggregate["window_start"] = bucket_start
+            if aggregate["window_end"] is None or bucket_start > aggregate["window_end"]:
+                aggregate["window_end"] = bucket_start
             aggregate["attempts"] += int(bucket["attempt_count"])
             aggregate["successes"] += int(bucket["success_count"])
             aggregate["failures"] += int(bucket["failure_count"])
@@ -466,6 +484,9 @@ class ProviderHealthStore:
                     "last_success": None,
                     "errors": {},
                     "samples": [],
+                    "window_start": None,
+                    "window_end": None,
+                    "bucket_count": 0,
                 },
             )
             attempts = int(aggregate["attempts"])
@@ -491,6 +512,9 @@ class ProviderHealthStore:
                     "error_counts": dict(sorted(aggregate.get("errors", {}).items())),
                     "last_success_at": aggregate["last_success"] or row["last_success_at"],
                     "cooldown_until": row["cooldown_until"],
+                    "window_start": aggregate["window_start"],
+                    "window_end": aggregate["window_end"],
+                    "bucket_count": int(aggregate["bucket_count"]),
                 }
             )
         return result
@@ -505,6 +529,13 @@ class ProviderHealthStore:
                 (subject_id, provider_kind, provider_id),
             ).fetchone()
             if row is None:
+                recorded = connection.execute(
+                    "SELECT 1 FROM provider_health_buckets WHERE subject_id=? "
+                    "AND provider_kind=? AND provider_id=? LIMIT 1",
+                    (subject_id, provider_kind, provider_id),
+                ).fetchone()
+                if recorded is not None:
+                    raise IntegrityError("provider health state is missing for recorded provider")
                 return True
             self._verify_state(row)
             if row["state"] in {"healthy", "degraded"}:

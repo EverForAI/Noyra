@@ -8,6 +8,7 @@ from pydantic import SecretStr
 
 from noyra.core.integrity import IntegrityRegistry
 from noyra.core.operator_controls import OperatorControlService
+from noyra.core.provider_health import ProviderHealthStore
 from noyra.core.retention import RetentionManager
 from noyra.core.types import canonical_json
 from noyra.interaction import InboundEnvelope, PublicPostInput, TransportInput
@@ -118,6 +119,31 @@ def test_retention_integrity_recomputes_provenance_hash(tmp_path: Path) -> None:
             policy_mode="alert",
             deadline_seconds=10,
             check_ids=("operations.retention",),
+        )
+        assert report.status == "corrupt", report.to_dict()
+    finally:
+        kernel.close()
+
+
+def test_provider_health_integrity_requires_state_for_recorded_buckets(tmp_path: Path) -> None:
+    kernel = _active_kernel(tmp_path, "Noyra-provider-health-state-audit")
+    try:
+        ProviderHealthStore(kernel.database).record_attempt(
+            kernel.subject_id, "model", "provider-a", "attempt-1", False, 100, "timeout"
+        )
+        with kernel.database.transaction() as connection:
+            connection.execute(
+                "DELETE FROM provider_health_state WHERE subject_id=? AND provider_id=?",
+                (kernel.subject_id, "provider-a"),
+            )
+        report = IntegrityRegistry().run(
+            kernel.database,
+            kernel.subject_id,
+            tmp_path,
+            profile="manual",
+            policy_mode="alert",
+            deadline_seconds=10,
+            check_ids=("operations.provider_health",),
         )
         assert report.status == "corrupt", report.to_dict()
     finally:

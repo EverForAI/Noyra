@@ -156,6 +156,17 @@ class SearchExecutor:
             response = await self._request(config, normalized_query, limit)
             results = self._parse(config.provider_type, response, limit)
         except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                if self.provider_health is not None:
+                    self.provider_health.record_attempt(
+                        subject_id,
+                        "search",
+                        config.config_id,
+                        action.action_id,
+                        False,
+                        round((asyncio.get_running_loop().time() - started) * 1000),
+                        "outcome_unknown",
+                    )
             self.actions.finish(
                 action.action_id,
                 "unknown",
@@ -168,6 +179,17 @@ class SearchExecutor:
             )
             raise
         except SearchOutcomeUnknownError as error:
+            with contextlib.suppress(Exception):
+                if self.provider_health is not None:
+                    self.provider_health.record_attempt(
+                        subject_id,
+                        "search",
+                        config.config_id,
+                        action.action_id,
+                        False,
+                        round((asyncio.get_running_loop().time() - started) * 1000),
+                        "outcome_unknown",
+                    )
             self.actions.finish(
                 action.action_id,
                 "unknown",
