@@ -27,6 +27,9 @@ def test_health_persists_only_hourly_aggregates_and_latency(tmp_path: Path):
     assert row["success_count"] == 1
     assert row["failure_rate"] == 2 / 3
     assert row["average_latency_ms"] == 1300 / 3
+    assert row["p50_latency_ms"] == 300
+    assert row["p95_latency_ms"] == 900
+    assert row["error_counts"] == {"timeout": 2}
     assert row["last_success_at"]
     with db.connection() as connection:
         tables = {

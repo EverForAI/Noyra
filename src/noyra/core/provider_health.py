@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -20,6 +21,29 @@ def _bucket(value: str) -> str:
     stamp = _parse_time(value)
     assert stamp is not None
     return stamp.replace(minute=0, second=0, microsecond=0).isoformat()
+
+
+def _error_category(error_code: str | None) -> str | None:
+    if not error_code:
+        return None
+    normalized = error_code.casefold()
+    if "timeout" in normalized:
+        return "timeout"
+    if "429" in normalized or "rate" in normalized or "throttle" in normalized:
+        return "rate_limited"
+    if "401" in normalized or "403" in normalized or "auth" in normalized:
+        return "auth"
+    if "schema" in normalized or "json" in normalized or "format" in normalized:
+        return "schema"
+    if any(code in normalized for code in ("500", "502", "503", "504", "5xx")):
+        return "server_error"
+    return "unknown"
+
+
+def _percentile(samples: list[int], fraction: float) -> int:
+    if not samples:
+        return 0
+    return samples[min(len(samples) - 1, int(len(samples) * fraction))]
 
 
 class ProviderHealthStore:
@@ -65,6 +89,8 @@ class ProviderHealthStore:
         latency_total_ms: int,
         last_success_at: str | None,
         last_failure_at: str | None,
+        error_counts: dict[str, int] | None = None,
+        latency_samples: list[int] | tuple[int, ...] | None = None,
     ) -> str:
         return content_hash(
             {
@@ -78,6 +104,8 @@ class ProviderHealthStore:
                 "latency_total_ms": latency_total_ms,
                 "last_success_at": last_success_at,
                 "last_failure_at": last_failure_at,
+                "error_counts": error_counts or {},
+                "latency_samples": list(latency_samples or ()),
             }
         )
 
@@ -146,6 +174,11 @@ class ProviderHealthStore:
         successes = int(row["success_count"])
         failures = int(row["failure_count"])
         latency = int(row["latency_total_ms"])
+        try:
+            error_counts = json.loads(row["error_counts_json"] or "{}")
+            latency_samples = json.loads(row["latency_samples_json"] or "[]")
+        except (TypeError, ValueError) as error:
+            raise IntegrityError("provider health detail counters are invalid") from error
         if (
             attempts < 0
             or successes < 0
@@ -165,6 +198,8 @@ class ProviderHealthStore:
                     latency,
                     row["last_success_at"],
                     row["last_failure_at"],
+                    error_counts,
+                    latency_samples,
                 ),
                 cls._legacy_bucket_hash(row),
             }
@@ -230,7 +265,7 @@ class ProviderHealthStore:
             raise ValueError("latency and cooldown must be non-negative")
         now = utc_now()
         bucket = _bucket(now)
-        del error_code  # Stable counters only; even error codes are not retained.
+        category = _error_category(error_code)
         with self.database.transaction() as connection:
             existing = connection.execute(
                 """
@@ -245,6 +280,13 @@ class ProviderHealthStore:
             failure_count = int(existing["failure_count"]) if existing else 0
             attempt_count = int(existing["attempt_count"]) if existing else 0
             latency_total = int(existing["latency_total_ms"]) if existing else 0
+            error_counts = json.loads(existing["error_counts_json"] or "{}") if existing else {}
+            latency_samples = (
+                json.loads(existing["latency_samples_json"] or "[]") if existing else []
+            )
+            if category is not None:
+                error_counts[category] = int(error_counts.get(category, 0)) + 1
+            latency_samples = [*latency_samples, latency_ms][-128:]
             success_count += int(success)
             failure_count += int(not success)
             attempt_count += 1
@@ -264,11 +306,13 @@ class ProviderHealthStore:
                 latency_total,
                 last_success,
                 last_failure,
+                error_counts,
+                latency_samples,
             )
             connection.execute(
                 """
                 INSERT INTO provider_health_buckets
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(subject_id, provider_kind, provider_id, bucket_start)
                 DO UPDATE SET attempt_count=excluded.attempt_count,
                     success_count=excluded.success_count,
@@ -276,6 +320,8 @@ class ProviderHealthStore:
                     latency_total_ms=excluded.latency_total_ms,
                     last_success_at=excluded.last_success_at,
                     last_failure_at=excluded.last_failure_at,
+                    error_counts_json=excluded.error_counts_json,
+                    latency_samples_json=excluded.latency_samples_json,
                     state_hash=excluded.state_hash
                 """,
                 (
@@ -290,6 +336,8 @@ class ProviderHealthStore:
                     last_success,
                     last_failure,
                     bucket_hash,
+                    json.dumps(error_counts, sort_keys=True, separators=(",", ":")),
+                    json.dumps(latency_samples, separators=(",", ":")),
                 ),
             )
             state = connection.execute(
@@ -382,12 +430,23 @@ class ProviderHealthStore:
             self._verify_bucket(bucket)
             aggregate = aggregates.setdefault(
                 str(bucket["provider_id"]),
-                {"attempts": 0, "successes": 0, "failures": 0, "latency": 0, "last_success": None},
+                {
+                    "attempts": 0,
+                    "successes": 0,
+                    "failures": 0,
+                    "latency": 0,
+                    "last_success": None,
+                    "errors": {},
+                    "samples": [],
+                },
             )
             aggregate["attempts"] += int(bucket["attempt_count"])
             aggregate["successes"] += int(bucket["success_count"])
             aggregate["failures"] += int(bucket["failure_count"])
             aggregate["latency"] += int(bucket["latency_total_ms"])
+            for category, count in json.loads(bucket["error_counts_json"] or "{}").items():
+                aggregate["errors"][category] = aggregate["errors"].get(category, 0) + int(count)
+            aggregate["samples"].extend(json.loads(bucket["latency_samples_json"] or "[]"))
             if bucket["last_success_at"] and (
                 aggregate["last_success"] is None
                 or bucket["last_success_at"] > aggregate["last_success"]
@@ -399,10 +458,20 @@ class ProviderHealthStore:
             self._verify_state(row)
             aggregate = aggregates.get(
                 str(row["provider_id"]),
-                {"attempts": 0, "successes": 0, "failures": 0, "latency": 0, "last_success": None},
+                {
+                    "attempts": 0,
+                    "successes": 0,
+                    "failures": 0,
+                    "latency": 0,
+                    "last_success": None,
+                    "errors": {},
+                    "samples": [],
+                },
             )
             attempts = int(aggregate["attempts"])
             failures = int(aggregate["failures"])
+            samples = sorted(int(value) for value in aggregate.get("samples", []))
+
             cooldown = _parse_time(row["cooldown_until"])
             state = row["state"]
             if state == "cooldown" and cooldown and cooldown <= now and not row["probe_token"]:
@@ -417,6 +486,9 @@ class ProviderHealthStore:
                     "failure_count": failures,
                     "failure_rate": (failures / attempts) if attempts else 0.0,
                     "average_latency_ms": (int(aggregate["latency"]) / attempts) if attempts else 0,
+                    "p50_latency_ms": _percentile(samples, 0.50),
+                    "p95_latency_ms": _percentile(samples, 0.95),
+                    "error_counts": dict(sorted(aggregate.get("errors", {}).items())),
                     "last_success_at": aggregate["last_success"] or row["last_success_at"],
                     "cooldown_until": row["cooldown_until"],
                 }

@@ -231,7 +231,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 68
+CURRENT_SCHEMA_VERSION = 69
 
 MIGRATIONS: dict[int, str] = {
     2: """
@@ -6445,6 +6445,10 @@ CREATE TABLE IF NOT EXISTS retention_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_retention_runs_subject_time
     ON retention_runs(subject_id, started_at DESC);
+""",
+    69: """
+ALTER TABLE provider_health_buckets ADD COLUMN error_counts_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE provider_health_buckets ADD COLUMN latency_samples_json TEXT NOT NULL DEFAULT '[]';
 """,
 }
 

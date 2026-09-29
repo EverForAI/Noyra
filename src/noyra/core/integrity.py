@@ -1531,8 +1531,10 @@ def _check_provider_health(context: IntegrityContext) -> IntegrityCheckOutcome:
             int(row["latency_total_ms"]),
             row["last_success_at"],
             row["last_failure_at"],
+            json.loads(row["error_counts_json"] or "{}"),
+            json.loads(row["latency_samples_json"] or "[]"),
         )
-        if row["state_hash"] != expected:
+        if row["state_hash"] not in {expected, ProviderHealthStore._legacy_bucket_hash(row)}:
             raise IntegrityError("provider health bucket state hash mismatch")
     return IntegrityCheckOutcome(details={"buckets": len(bucket_rows)})
 
