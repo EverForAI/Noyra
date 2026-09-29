@@ -810,6 +810,16 @@ fi
 atomic_pointer "$CURRENT_LINK" "$release_id"
 
 systemctl daemon-reload
+if [[ "$(env_value NOYRA_PROFILE development)" == "production" ]]; then
+  preflight_python="$INSTALL_DIR/current/.venv/bin/python"
+  preflight_script="$INSTALL_DIR/current/scripts/preflight-production.py"
+  [[ -x "$preflight_python" ]] || { echo 'Production preflight Python is missing.' >&2; on_error 1; }
+  [[ -f "$preflight_script" ]] || { echo 'Production preflight script is missing.' >&2; on_error 1; }
+  "$preflight_python" "$preflight_script" --env-file "$CONFIG_DIR/noyra.env" || {
+    echo 'Production preflight failed; refusing to start the new release.' >&2
+    on_error 1
+  }
+fi
 if [[ "$service_active" == true ]]; then
   if start_and_check; then
     :

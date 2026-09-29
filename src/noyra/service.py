@@ -736,6 +736,7 @@ class ServiceSettings(BaseModel):
     data_dir: Path
     subject_id: str = Field(min_length=8, max_length=128)
     genesis_hash: str = Field(min_length=64, max_length=64)
+    profile: Literal["development", "test", "production"] = "development"
     host: str = Field(default="127.0.0.1", min_length=1, max_length=255)
     port: int = Field(default=8765, ge=0, le=65_535)
     admin_token: SecretStr | None = None
@@ -912,6 +913,18 @@ class ServiceSettings(BaseModel):
     @model_validator(mode="after")
     def validate_listener_security(self) -> ServiceSettings:
         loopback = {"127.0.0.1", "::1", "localhost"}
+        if self.profile == "production":
+            # Production is always terminated by a trusted HTTPS proxy while
+            # the runtime remains on loopback.  The explicit insecure escape
+            # hatch is intentionally unavailable in this profile.
+            if self.host.casefold() not in loopback:
+                raise ValueError(
+                    "production profile requires a loopback HTTP listener; "
+                    "terminate HTTPS at the trusted proxy"
+                )
+            # A production operator must not be able to downgrade the session
+            # cookie through a stale environment file or template value.
+            object.__setattr__(self, "admin_session_cookie_secure", True)
         if self.host.casefold() not in loopback and not self.allow_insecure_non_loopback:
             raise ValueError(
                 "non-loopback HTTP listener requires NOYRA_ALLOW_INSECURE_NON_LOOPBACK=true"
@@ -1001,6 +1014,7 @@ class ServiceSettings(BaseModel):
 
     @classmethod
     def from_env(cls) -> ServiceSettings:
+        profile = os.getenv("NOYRA_PROFILE", "development").strip().lower()
         subject_id = os.getenv("NOYRA_SUBJECT_ID", "Noyra-0001")
         genesis_hash = os.getenv("NOYRA_GENESIS_HASH") or content_hash(
             {"project": "Noyra", "subject_id": subject_id, "origin": "configured-runtime"}
@@ -1022,6 +1036,7 @@ class ServiceSettings(BaseModel):
             data_dir=Path(os.getenv("NOYRA_DATA_DIR", ".runtime/data")),
             subject_id=subject_id,
             genesis_hash=genesis_hash,
+            profile=cast(Literal["development", "test", "production"], profile),
             host=os.getenv("NOYRA_HOST", "127.0.0.1"),
             port=int(os.getenv("NOYRA_PORT", "8765")),
             admin_token=SecretStr(token) if token else None,
@@ -1152,7 +1167,8 @@ class ServiceSettings(BaseModel):
             admin_session_ttl_seconds=int(os.getenv("NOYRA_ADMIN_SESSION_TTL_SECONDS", "43200")),
             admin_session_max_count=int(os.getenv("NOYRA_ADMIN_SESSION_MAX_COUNT", "256")),
             admin_session_cookie_secure=cls._environment_flag(
-                "NOYRA_ADMIN_SESSION_COOKIE_SECURE", "false"
+                "NOYRA_ADMIN_SESSION_COOKIE_SECURE",
+                "true" if profile == "production" else "false",
             ),
         )
 
