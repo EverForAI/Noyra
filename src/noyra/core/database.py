@@ -231,7 +231,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 70
+CURRENT_SCHEMA_VERSION = 71
 
 MIGRATIONS: dict[int, str] = {
     2: """
@@ -6464,6 +6464,76 @@ CREATE TABLE IF NOT EXISTS persistent_features (
     updated_at TEXT NOT NULL
 );
 """,
+    71: """
+CREATE TABLE IF NOT EXISTS wallet_payment_reconciliation_events (
+    event_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    order_id TEXT NOT NULL REFERENCES wallet_payment_orders(order_id),
+    execution_id TEXT NOT NULL REFERENCES wallet_payment_executions(execution_id),
+    previous_status TEXT NOT NULL CHECK(previous_status = 'confirmed'),
+    reason TEXT NOT NULL,
+    tx_hash TEXT,
+    created_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL CHECK(length(state_hash)=64 AND state_hash NOT GLOB '*[^0-9a-f]*')
+);
+CREATE INDEX IF NOT EXISTS idx_wallet_payment_reconciliation_subject
+    ON wallet_payment_reconciliation_events(subject_id, created_at DESC, event_id DESC);
+CREATE TRIGGER IF NOT EXISTS prevent_wallet_payment_reconciliation_update
+BEFORE UPDATE ON wallet_payment_reconciliation_events
+BEGIN SELECT RAISE(ABORT,'wallet payment reconciliation events are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS prevent_wallet_payment_reconciliation_delete
+BEFORE DELETE ON wallet_payment_reconciliation_events
+BEGIN SELECT RAISE(ABORT,'wallet payment reconciliation events cannot be deleted'); END;
+DROP TRIGGER IF EXISTS validate_wallet_execution_transition;
+CREATE TRIGGER validate_wallet_execution_transition
+BEFORE UPDATE ON wallet_payment_executions
+WHEN NOT (
+    NEW.status IS OLD.status
+        AND NEW.tx_hash IS OLD.tx_hash
+        AND NEW.error_code IS OLD.error_code
+        AND NEW.receipt_status IS OLD.receipt_status
+        AND NEW.receipt_block_number IS OLD.receipt_block_number
+        AND NEW.attempt_count IS OLD.attempt_count
+        AND NEW.state_hash IS OLD.state_hash
+        AND NEW.last_audit_id IS OLD.last_audit_id
+        AND NEW.updated_at IS OLD.updated_at
+    OR OLD.status='signing' AND NEW.status IN ('broadcast','unknown','failed')
+    OR OLD.status='broadcast' AND NEW.status IN ('unknown','confirmed','failed')
+    OR OLD.status='unknown' AND NEW.status IN ('signing','broadcast','confirmed','failed')
+    OR OLD.status='confirmed' AND NEW.status='unknown'
+)
+BEGIN SELECT RAISE(ABORT,'wallet payment execution transition is invalid'); END;
+DROP TRIGGER IF EXISTS validate_wallet_execution_attempt_transition;
+CREATE TRIGGER validate_wallet_execution_attempt_transition
+BEFORE UPDATE ON wallet_payment_execution_attempts
+WHEN NOT (
+    NEW.status IS OLD.status
+        AND NEW.tx_hash IS OLD.tx_hash
+        AND NEW.error_code IS OLD.error_code
+        AND NEW.completed_at IS OLD.completed_at
+        AND NEW.state_hash IS OLD.state_hash
+    OR OLD.status='signing' AND NEW.status IN ('broadcast','unknown','failed')
+    OR OLD.status='broadcast' AND NEW.status IN ('unknown','confirmed','failed')
+    OR OLD.status='unknown' AND NEW.status IN ('broadcast','confirmed','failed')
+    OR OLD.status='confirmed' AND NEW.status='unknown'
+)
+BEGIN SELECT RAISE(ABORT,'wallet payment execution attempt transition is invalid'); END;
+DROP TRIGGER IF EXISTS validate_wallet_order_transition;
+CREATE TRIGGER validate_wallet_order_transition
+BEFORE UPDATE ON wallet_payment_orders
+WHEN NOT (
+    NEW.status = OLD.status AND NEW.state_hash = OLD.state_hash AND NEW.updated_at = OLD.updated_at
+    OR OLD.status = 'pending_policy' AND NEW.status IN ('awaiting_confirmation','reserved','rejected','cancelled','expired')
+    OR OLD.status = 'awaiting_confirmation' AND NEW.status IN ('reserved','rejected','cancelled','expired')
+    OR OLD.status = 'reserved' AND NEW.status IN ('cancelled','expired','signing')
+    OR OLD.status = 'signing' AND NEW.status IN ('broadcast','unknown','failed')
+    OR OLD.status = 'broadcast' AND NEW.status IN ('unknown','confirmed','failed')
+    OR OLD.status = 'unknown' AND NEW.status IN ('signing','broadcast','confirmed','failed','refunded')
+    OR OLD.status = 'confirmed' AND NEW.status='unknown'
+    OR OLD.status = 'failed' AND NEW.status = 'refunded'
+)
+BEGIN SELECT RAISE(ABORT,'wallet payment order transition is invalid'); END;
+""",
 }
 
 
@@ -7179,6 +7249,16 @@ CREATE TABLE IF NOT EXISTS secret_cleanup_queue (
     updated_at TEXT NOT NULL,
     UNIQUE(resource_type, resource_id, secret_reference)
 );
+CREATE TABLE IF NOT EXISTS persistent_features (
+    feature_id TEXT PRIMARY KEY,
+    feature_version INTEGER NOT NULL CHECK (feature_version >= 1),
+    ddl_fingerprint TEXT NOT NULL CHECK (
+        length(ddl_fingerprint) = 64
+        AND ddl_fingerprint NOT GLOB '*[^0-9a-f]*'
+    ),
+    installed_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_secret_cleanup_subject_status
     ON secret_cleanup_queue(subject_id, status, updated_at);
 CREATE TABLE IF NOT EXISTS secret_file_intents (
@@ -7503,6 +7583,11 @@ END;
 """,
             )
 
+            schema_version = int(
+                connection.execute(
+                    "SELECT value FROM schema_meta WHERE key='schema_version'"
+                ).fetchone()[0]
+            )
             required_tables = {
                 "interaction_transports",
                 "interaction_deliveries",
@@ -7542,6 +7627,8 @@ END;
                 "wallet_reward_submission_links",
                 "wallet_reward_incidents",
             }
+            if schema_version >= 71:
+                required_tables.add("wallet_payment_reconciliation_events")
             installed_tables = {
                 str(row[0])
                 for row in connection.execute(
@@ -7582,11 +7669,6 @@ END;
             )
             self._ensure_wallet_acquisition_triggers(connection)
             self._ensure_wallet_execution_triggers(connection)
-            schema_version = int(
-                connection.execute(
-                    "SELECT value FROM schema_meta WHERE key='schema_version'"
-                ).fetchone()[0]
-            )
             if schema_version >= 59:
                 self._ensure_wallet_submission_consent_contract(connection)
             self._ensure_behavior_log_revision_triggers(connection)
@@ -8285,8 +8367,97 @@ END;
 
     @staticmethod
     def _ensure_wallet_execution_triggers(connection: sqlite3.Connection) -> None:
-        """Replay the canonical v56 guards for databases opened at v56."""
+        """Repair wallet transition guards without replaying stale contracts."""
+        # v56 remains the historical table/identity bootstrap.  Its transition
+        # guards are intentionally superseded below: replaying them alone would
+        # remove receipt-evidence checks from schema 62 and reconciliation from
+        # schema 71 on every startup.
         Database._execute_sql_script(connection, MIGRATIONS[56])
+        execution_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(wallet_payment_executions)")
+        }
+        has_receipt_evidence = {
+            "receipt_block_hash",
+            "receipt_confirmations",
+            "receipt_effect_hash",
+        }.issubset(execution_columns)
+        has_reconciliation_events = (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='wallet_payment_reconciliation_events'"
+            ).fetchone()
+            is not None
+        )
+        receipt_guard = "".join(
+            f"        AND NEW.{column} IS OLD.{column}\n"
+            for column in (
+                "receipt_block_hash",
+                "receipt_confirmations",
+                "receipt_effect_hash",
+            )
+        ) if has_receipt_evidence else ""
+        reconciliation_transition = (
+            "    OR OLD.status='confirmed' AND NEW.status='unknown'\n"
+            if has_reconciliation_events
+            else ""
+        )
+        order_reconciliation_transition = (
+            "    OR OLD.status = 'confirmed' AND NEW.status='unknown'\n"
+            if has_reconciliation_events
+            else ""
+        )
+        Database._execute_sql_script(
+            connection,
+            f"""
+DROP TRIGGER IF EXISTS validate_wallet_execution_transition;
+CREATE TRIGGER validate_wallet_execution_transition
+BEFORE UPDATE ON wallet_payment_executions
+WHEN NOT (
+    NEW.status IS OLD.status
+        AND NEW.tx_hash IS OLD.tx_hash
+        AND NEW.error_code IS OLD.error_code
+        AND NEW.receipt_status IS OLD.receipt_status
+        AND NEW.receipt_block_number IS OLD.receipt_block_number
+{receipt_guard}        AND NEW.attempt_count IS OLD.attempt_count
+        AND NEW.state_hash IS OLD.state_hash
+        AND NEW.last_audit_id IS OLD.last_audit_id
+        AND NEW.updated_at IS OLD.updated_at
+    OR OLD.status='signing' AND NEW.status IN ('broadcast','unknown','failed')
+    OR OLD.status='broadcast' AND NEW.status IN ('unknown','confirmed','failed')
+    OR OLD.status='unknown' AND NEW.status IN ('signing','broadcast','confirmed','failed')
+{reconciliation_transition})
+BEGIN SELECT RAISE(ABORT,'wallet payment execution transition is invalid'); END;
+DROP TRIGGER IF EXISTS validate_wallet_execution_attempt_transition;
+CREATE TRIGGER validate_wallet_execution_attempt_transition
+BEFORE UPDATE ON wallet_payment_execution_attempts
+WHEN NOT (
+    NEW.status IS OLD.status
+        AND NEW.tx_hash IS OLD.tx_hash
+        AND NEW.error_code IS OLD.error_code
+        AND NEW.completed_at IS OLD.completed_at
+        AND NEW.state_hash IS OLD.state_hash
+    OR OLD.status='signing' AND NEW.status IN ('broadcast','unknown','failed')
+    OR OLD.status='broadcast' AND NEW.status IN ('unknown','confirmed','failed')
+    OR OLD.status='unknown' AND NEW.status IN ('broadcast','confirmed','failed')
+{reconciliation_transition})
+BEGIN SELECT RAISE(ABORT,'wallet payment execution attempt transition is invalid'); END;
+DROP TRIGGER IF EXISTS validate_wallet_order_transition;
+CREATE TRIGGER validate_wallet_order_transition
+BEFORE UPDATE ON wallet_payment_orders
+WHEN NOT (
+    NEW.status = OLD.status AND NEW.state_hash = OLD.state_hash AND NEW.updated_at = OLD.updated_at
+    OR OLD.status = 'pending_policy' AND NEW.status IN ('awaiting_confirmation','reserved','rejected','cancelled','expired')
+    OR OLD.status = 'awaiting_confirmation' AND NEW.status IN ('reserved','rejected','cancelled','expired')
+    OR OLD.status = 'reserved' AND NEW.status IN ('cancelled','expired','signing')
+    OR OLD.status = 'signing' AND NEW.status IN ('broadcast','unknown','failed')
+    OR OLD.status = 'broadcast' AND NEW.status IN ('unknown','confirmed','failed')
+    OR OLD.status = 'unknown' AND NEW.status IN ('signing','broadcast','confirmed','failed','refunded')
+{order_reconciliation_transition}    OR OLD.status = 'failed' AND NEW.status = 'refunded'
+)
+BEGIN SELECT RAISE(ABORT,'wallet payment order transition is invalid'); END;
+""",
+        )
 
     @staticmethod
     def _ensure_wallet_submission_consent_contract(connection: sqlite3.Connection) -> None:

@@ -783,6 +783,17 @@ def test_confirmed_receipt_reorganization_opens_incident_before_completion(
     assert reorganized.workflow.status == "manual_intervention"
     assert reorganized.incident is not None
     assert reorganized.incident.kind == "chain_reorganization"
+    current_execution = engine.get_execution(execution.execution_id, fixture.subject_id)
+    assert current_execution.status == "unknown"
+    assert current_execution.error_code == "reconcile_required"
+    with fixture.database.connection() as connection:
+        reconciliation = connection.execute(
+            "SELECT previous_status, reason FROM wallet_payment_reconciliation_events "
+            "WHERE execution_id=?",
+            (execution.execution_id,),
+        ).fetchone()
+    assert reconciliation is not None
+    assert reconciliation["previous_status"] == "confirmed"
 
 
 def test_native_inbound_submission_preserves_verified_event_provenance(tmp_path: Path) -> None:

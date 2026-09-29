@@ -467,6 +467,11 @@ _OWNERSHIP_GRAPH_V68 = _OWNERSHIP_GRAPH_V67
 # Schema 69 adds provider health metric columns without changing ownership.
 _OWNERSHIP_GRAPH_V69 = _OWNERSHIP_GRAPH_V68
 _OWNERSHIP_GRAPH_V70 = _OWNERSHIP_GRAPH_V69
+_SUBJECT_TABLES_V71 = frozenset({"wallet_payment_reconciliation_events"})
+_OWNERSHIP_GRAPH_V71 = {
+    **_OWNERSHIP_GRAPH_V70,
+    **{table: _subject_rule() for table in _SUBJECT_TABLES_V71},
+}
 
 _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     33: _OWNERSHIP_GRAPH_V33,
@@ -507,6 +512,7 @@ _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     68: _OWNERSHIP_GRAPH_V68,
     69: _OWNERSHIP_GRAPH_V69,
     70: _OWNERSHIP_GRAPH_V70,
+    71: _OWNERSHIP_GRAPH_V71,
 }
 
 

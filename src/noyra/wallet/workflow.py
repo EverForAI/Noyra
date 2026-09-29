@@ -587,6 +587,15 @@ class WalletRewardWorkflow:
                             execution_id=execution.execution_id,
                         )
             except WalletChainReorganizationError as error:
+                reconcile_execution = self.execution._order_execution(target.order_id, subject_id)
+                if reconcile_execution is None:
+                    raise IntegrityError("wallet reward execution is missing") from error
+                current_execution = self.execution.mark_reconcile_required(
+                    reconcile_execution.execution_id,
+                    subject_id,
+                    actor=actor,
+                    reason=str(error),
+                )
                 with self.database.transaction() as c:
                     workflow = self._workflow_row(c, row["workflow_id"], subject_id)
                     execution = c.execute(
@@ -602,7 +611,11 @@ class WalletRewardWorkflow:
                             "chain_reorganization",
                             str(error),
                             f"chain-reorganization:{target.order_id}",
-                            execution_id=None if execution is None else execution["execution_id"],
+                            execution_id=(
+                                current_execution.execution_id
+                                if current_execution is not None
+                                else None
+                            ),
                         )
                     )
             except Exception as error:

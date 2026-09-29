@@ -61,7 +61,7 @@ _ORDER_TRANSITIONS = {
     "signing": {"broadcast", "unknown", "failed"},
     "broadcast": {"unknown", "confirmed", "failed"},
     "unknown": {"signing", "broadcast", "confirmed", "failed", "refunded"},
-    "confirmed": set(),
+    "confirmed": {"unknown"},
     "failed": {"refunded"},
     "refunded": set(),
 }
@@ -1406,7 +1406,18 @@ class WalletEconomyStore:
         if row["status"] not in {"broadcast", "unknown"}:
             raise InvalidTransitionError("order is not awaiting settlement")
         self._transition_order(c, row, "confirmed", actor, reason)
-        self._post_order_journal(c, row, "settlement", ("reserved", "debit"), ("paid", "credit"))
+        # A chain-reorganization reconciliation can move a previously
+        # confirmed order back to ``unknown``.  The original settlement is
+        # immutable historical evidence; do not post it twice when a later
+        # canonical receipt is observed.
+        existing = c.execute(
+            "SELECT 1 FROM wallet_ledger_journals WHERE order_id=? AND journal_type='settlement'",
+            (row["order_id"],),
+        ).fetchone()
+        if existing is None:
+            self._post_order_journal(
+                c, row, "settlement", ("reserved", "debit"), ("paid", "credit")
+            )
 
     @staticmethod
     def _require_resolved_legacy_payments(c: Any, subject_id: str, network_id: str) -> None:

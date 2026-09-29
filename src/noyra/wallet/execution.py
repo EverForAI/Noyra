@@ -1087,6 +1087,90 @@ class WalletPaymentExecutionEngine:
             raise WalletChainReorganizationError("confirmed wallet receipt evidence changed")
         return execution
 
+    def mark_reconcile_required(
+        self,
+        execution_id: str,
+        subject_id: str,
+        *,
+        actor: str,
+        reason: str = "confirmed receipt evidence changed",
+    ) -> WalletExecutionRecord:
+        """Durably quarantine a confirmed payment after a chain reorganization."""
+        actor = self.economy._operator(actor)
+        reason = reason.strip()
+        if not reason or len(reason) > 2000:
+            raise ValueError("reconciliation reason is invalid")
+        with self.database.transaction() as c:
+            execution = c.execute(
+                "SELECT * FROM wallet_payment_executions WHERE execution_id=? AND subject_id=?",
+                (execution_id, subject_id),
+            ).fetchone()
+            if execution is None:
+                raise NotFoundError("wallet payment execution not found")
+            if execution["status"] != "confirmed":
+                return self._execution_from_row(execution)
+            order = self.economy._order_row(c, execution["order_id"], subject_id)
+            if order["status"] != "confirmed":
+                raise IntegrityError("confirmed execution does not have a confirmed order")
+            now = utc_now()
+            audit_id = self.economy._audit(
+                c,
+                subject_id,
+                "wallet_payment_reconcile_required",
+                actor,
+                {
+                    "order_id": execution["order_id"],
+                    "execution_id": execution_id,
+                    "tx_hash": execution["tx_hash"],
+                    "reason": reason,
+                },
+            )
+            self.economy._transition_order(c, order, "unknown", actor, "reconcile_required")
+            state_hash = self._execution_hash_values_from_row(
+                execution,
+                "unknown",
+                execution["tx_hash"],
+                "reconcile_required",
+                execution["receipt_status"],
+                execution["receipt_block_number"],
+                execution["receipt_block_hash"],
+                execution["receipt_confirmations"],
+                execution["receipt_effect_hash"],
+                int(execution["attempt_count"]),
+                now,
+            )
+            c.execute(
+                "UPDATE wallet_payment_executions SET status='unknown',error_code=?,"
+                "last_audit_id=?,updated_at=?,state_hash=? WHERE execution_id=?",
+                ("reconcile_required", audit_id, now, state_hash, execution_id),
+            )
+            self._finish_attempt(
+                c, execution, "unknown", execution["tx_hash"], "reconcile_required", now
+            )
+            event_id = new_id("wallet-reconcile")
+            event_payload = {
+                "event_id": event_id,
+                "subject_id": subject_id,
+                "order_id": execution["order_id"],
+                "execution_id": execution_id,
+                "previous_status": "confirmed",
+                "reason": reason,
+                "tx_hash": execution["tx_hash"],
+                "created_at": now,
+            }
+            c.execute(
+                "INSERT INTO wallet_payment_reconciliation_events("
+                "event_id,subject_id,order_id,execution_id,previous_status,reason,"
+                "tx_hash,created_at,state_hash) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (*event_payload.values(), content_hash(event_payload)),
+            )
+            return self._execution_from_row(
+                c.execute(
+                    "SELECT * FROM wallet_payment_executions WHERE execution_id=?", (execution_id,)
+                ).fetchone()
+            )
+
     def refund(
         self, order_id: str, subject_id: str, *, actor: str, reason: str
     ) -> PaymentOrderRecord:
