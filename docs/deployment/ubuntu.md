@@ -48,10 +48,13 @@ NOYRA_TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
 NOYRA_ADMIN_SESSION_COOKIE_SECURE=true
 ```
 
-The same hostname serves the public archive at `/` and the management console at
-`/admin.html`. Both are reachable from a phone or computer. The management
-console still requires the operator token; its session expires according to
-`NOYRA_ADMIN_SESSION_TTL_SECONDS` and every write requires a CSRF token.
+You may use one hostname for both surfaces, or use separate origins such as
+`https://archive.example.com/` for the public archive and
+`https://admin.example.com/admin.html` for management. Both are reachable from a
+phone or computer. The management console still requires the operator token; its
+session expires according to `NOYRA_ADMIN_SESSION_TTL_SECONDS` and every write
+requires a CSRF token. The proxy examples include both origins and the complete
+loopback, trusted-proxy, and secure-cookie settings.
 
 The optional root-owned `NOYRA_OPERATOR_TOKEN_FILE` keeps the active operator token out of the
 environment file. Rotate it on the server with `sudo scripts/rotate-operator-token.sh`; the script
