@@ -57,6 +57,7 @@ WALLET_PAYMENT_REASON_CODES = frozenset(
         "fee_quote_unavailable",
         "broadcast_unknown",
         "receipt_failed",
+        "reconcile_required",
     }
 )
 
@@ -65,8 +66,45 @@ class WalletExecutionError(RuntimeError):
     """Base class for classified execution failures."""
 
 
+class WalletRPCError(WalletExecutionError):
+    """A bounded RPC failure with a safe, non-provider-specific reason code."""
+
+    def __init__(self, reason_code: str = "rpc_unavailable") -> None:
+        if reason_code not in {
+            "insufficient_balance",
+            "gas_too_high",
+            "nonce_conflict",
+            "rpc_unavailable",
+        }:
+            reason_code = "rpc_unavailable"
+        self.reason_code = reason_code
+        super().__init__(reason_code)
+
+
+_WALLET_SIGNER_REASON_CODES = frozenset(
+    {
+        "signer_rejected",
+        "insufficient_balance",
+        "gas_too_high",
+        "nonce_conflict",
+        "rpc_unavailable",
+    }
+)
+
+
 class WalletSignerError(WalletExecutionError):
-    """The isolated signer rejected the fixed transfer."""
+    """The isolated signer rejected a fixed transfer with a safe reason code."""
+
+    def __init__(
+        self,
+        message: str = "wallet signer rejected operation",
+        *,
+        reason_code: str = "signer_rejected",
+    ) -> None:
+        if reason_code not in _WALLET_SIGNER_REASON_CODES:
+            reason_code = "signer_rejected"
+        self.reason_code = reason_code
+        super().__init__(message)
 
 
 class WalletBroadcastUnknownError(WalletExecutionError):
@@ -778,6 +816,7 @@ class WalletPaymentExecutionEngine:
             "fee_quote_unavailable",
             "broadcast_unknown",
             "receipt_failed",
+            "reconcile_required",
         }
     )
 
@@ -801,6 +840,7 @@ class WalletPaymentExecutionEngine:
         adapter: EVMTransferAdapter | None = None,
         max_fee_per_gas: str = "1000000000",
         min_confirmations: int = 1,
+        confirmation_timeout_seconds: int = 900,
     ):
         self.database = database
         self.economy = economy or WalletEconomyStore(database)
@@ -815,6 +855,12 @@ class WalletPaymentExecutionEngine:
         if type(min_confirmations) is not int or not 1 <= min_confirmations <= SQLITE_INT64_MAX:
             raise ValueError("wallet minimum confirmations is invalid")
         self.min_confirmations = min_confirmations
+        if (
+            type(confirmation_timeout_seconds) is not int
+            or not 0 <= confirmation_timeout_seconds <= SQLITE_INT64_MAX
+        ):
+            raise ValueError("wallet confirmation timeout is invalid")
+        self.confirmation_timeout_seconds = confirmation_timeout_seconds
 
     def execute_order(
         self,
@@ -903,7 +949,7 @@ class WalletPaymentExecutionEngine:
                     existing.execution_id,
                     subject_id,
                     actor=actor,
-                    code="chain_receipt_failed",
+                    code="receipt_failed",
                     receipt_tx_hash=receipt.tx_hash,
                     receipt_status=0,
                     receipt_block_number=receipt.block_number,
@@ -990,6 +1036,14 @@ class WalletPaymentExecutionEngine:
                 code=error,
             )
         if receipt is None:
+            if execution.status == "broadcast" and self._confirmation_timed_out(execution):
+                return self._mark_unknown(
+                    execution_id,
+                    subject_id,
+                    actor=actor,
+                    tx_hash=execution.tx_hash,
+                    code="confirmation_timeout",
+                )
             return execution
         if receipt.status == 1:
             return self._mark_confirmed(execution_id, subject_id, actor=actor, receipt=receipt)
@@ -997,7 +1051,7 @@ class WalletPaymentExecutionEngine:
             execution_id,
             subject_id,
             actor=actor,
-            code="chain_receipt_failed",
+            code="receipt_failed",
             receipt_tx_hash=receipt.tx_hash,
             receipt_status=0,
             receipt_block_number=receipt.block_number,
@@ -1350,8 +1404,18 @@ class WalletPaymentExecutionEngine:
     @staticmethod
     def _signer_error_code(error: WalletSignerError) -> str:
         """Persist only a non-secret signer error classification."""
-        del error
-        return "signer_rejected"
+        reason_code = getattr(error, "reason_code", "signer_rejected")
+        return reason_code if reason_code in _WALLET_SIGNER_REASON_CODES else "signer_rejected"
+
+    def _confirmation_timed_out(self, execution: WalletExecutionRecord) -> bool:
+        if self.confirmation_timeout_seconds == 0:
+            return True
+        try:
+            started = datetime.fromisoformat(execution.updated_at)
+            now = datetime.fromisoformat(self.economy.clock())
+            return (now - started).total_seconds() >= self.confirmation_timeout_seconds
+        except (TypeError, ValueError, OverflowError):
+            return False
 
     def _prepare(
         self,
@@ -1993,8 +2057,21 @@ class WalletPaymentExecutionEngine:
         for tx in hashes:
             try:
                 receipt = self.signer.get_receipt(tx, chain_id=execution.chain_id)
+            except WalletSignerError as failure:
+                error = self._signer_error_code(failure)
+                if error == "signer_rejected":
+                    error = "reconcile_required"
+                continue
+            except WalletExecutionError as failure:
+                message = str(failure).casefold()
+                error = (
+                    "rpc_unavailable"
+                    if "lookup failed" in message or "request failed" in message
+                    else "reconcile_required"
+                )
+                continue
             except Exception:
-                error = "receipt_lookup_unknown"
+                error = "rpc_unavailable"
                 continue
             if receipt is not None:
                 if self._valid_receipt(
@@ -2003,7 +2080,7 @@ class WalletPaymentExecutionEngine:
                     min_confirmations=self.min_confirmations,
                 ):
                     return receipt, None
-                error = "receipt_invalid"
+                error = "reconcile_required"
         return None, error
 
     def _mark_failed(

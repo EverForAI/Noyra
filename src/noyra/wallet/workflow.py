@@ -622,7 +622,12 @@ class WalletRewardWorkflow:
 
     @staticmethod
     def _execution_incident_kind(error_code: str | None, status: str) -> str:
-        if error_code == "signer_rejected":
+        if error_code in {
+            "signer_rejected",
+            "insufficient_balance",
+            "gas_too_high",
+            "nonce_conflict",
+        }:
             return "signer_rejection"
         if error_code in {
             "broadcast_unknown",
@@ -630,7 +635,16 @@ class WalletRewardWorkflow:
             "signer_response_invalid",
         }:
             return "broadcast_unknown"
-        if error_code in {"receipt_lookup_unknown", "receipt_invalid", "chain_receipt_failed"}:
+        if error_code in {
+            "receipt_lookup_unknown",
+            "receipt_invalid",
+            "chain_receipt_failed",
+            "receipt_failed",
+            "confirmation_timeout",
+            "rpc_unavailable",
+            "reconcile_required",
+            "chain_reorg",
+        }:
             return "receipt_chain_unknown"
         return "recovery_mismatch" if status == "failed" else "payment_unknown"
 

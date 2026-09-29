@@ -50,6 +50,7 @@ class Chain:
     def __init__(self) -> None:
         self.sent: list[str] = []
         self.overrides: dict[str, Any] = {}
+        self.errors: dict[str, str] = {}
         self.lose_response = False
         self.receipt: dict[str, Any] | None = None
         self.transaction: dict[str, Any] | None = None
@@ -57,6 +58,15 @@ class Chain:
     def handle(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         method, params = body["method"], body["params"]
+        if method in self.errors:
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "error": {"code": -32000, "message": self.errors[method]},
+                },
+            )
         defaults = {
             "eth_chainId": "0x1",
             "eth_getTransactionCount": "0x0",
@@ -129,6 +139,26 @@ def test_local_preflight_rejects_invalid_chain_balance_or_fees(method: str, resu
     chain.overrides[method] = result
     with signer(chain) as wallet, pytest.raises(WalletSignerError):
         wallet.sign_and_broadcast(transfer(), request_id="payment")
+    assert chain.sent == []
+
+
+@pytest.mark.parametrize(
+    ("method", "message", "reason_code"),
+    [
+        ("eth_getBalance", "insufficient funds for transfer", "insufficient_balance"),
+        ("eth_estimateGas", "gas required exceeds allowance", "gas_too_high"),
+        ("eth_getTransactionCount", "nonce too low", "nonce_conflict"),
+    ],
+)
+def test_local_rpc_errors_are_classified_without_provider_text(
+    method: str, message: str, reason_code: str
+) -> None:
+    chain = Chain()
+    chain.errors[method] = message
+    with signer(chain) as wallet, pytest.raises(WalletSignerError) as error:
+        wallet.sign_and_broadcast(transfer(), request_id="payment")
+    assert error.value.reason_code == reason_code
+    assert message not in str(error.value)
     assert chain.sent == []
 
 

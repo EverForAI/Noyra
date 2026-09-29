@@ -16,7 +16,7 @@ from noyra.core.http import (
 )
 from noyra.core.types import strict_json_loads
 
-from .execution import WalletExecutionError
+from .execution import WalletExecutionError, WalletRPCError
 from .types import SQLITE_INT64_MAX, _rpc_url
 
 _RPC_ID = "noyra-local-wallet-v1"
@@ -115,11 +115,26 @@ class LocalWalletRPC:
                 not isinstance(body, dict)
                 or body.get("jsonrpc") != "2.0"
                 or body.get("id") != _RPC_ID
-                or "error" in body
                 or "result" not in body
             ):
+                if isinstance(body, dict) and isinstance(body.get("error"), dict):
+                    error = body["error"]
+                    raw_message = str(error.get("message", "")).casefold()
+                    if "insufficient" in raw_message and "fund" in raw_message:
+                        reason = "insufficient_balance"
+                    elif "nonce" in raw_message or "replacement" in raw_message:
+                        reason = "nonce_conflict"
+                    elif (
+                        "gas" in raw_message or "fee" in raw_message or "underpriced" in raw_message
+                    ):
+                        reason = "gas_too_high"
+                    else:
+                        reason = "rpc_unavailable"
+                    raise WalletRPCError(reason)
                 raise ValueError("invalid RPC response")
             return body["result"]
+        except WalletRPCError:
+            raise
         except Exception:
             # Provider messages/transport exceptions can contain URLs or signed
             # payloads. Never propagate their text or exception chain.

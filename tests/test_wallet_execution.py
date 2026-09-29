@@ -38,7 +38,13 @@ from noyra.wallet import (
     ("error_code", "status", "expected"),
     [
         ("signer_rejected", "failed", "signer_rejection"),
+        ("insufficient_balance", "failed", "signer_rejection"),
+        ("gas_too_high", "failed", "signer_rejection"),
+        ("nonce_conflict", "failed", "signer_rejection"),
         ("broadcast_unknown", "unknown", "broadcast_unknown"),
+        ("confirmation_timeout", "unknown", "receipt_chain_unknown"),
+        ("rpc_unavailable", "unknown", "receipt_chain_unknown"),
+        ("reconcile_required", "unknown", "receipt_chain_unknown"),
         ("receipt_lookup_unknown", "unknown", "receipt_chain_unknown"),
         (None, "failed", "recovery_mismatch"),
         (None, "unknown", "payment_unknown"),
@@ -332,6 +338,62 @@ def test_signer_exception_is_classified_without_persisting_secret(tmp_path: Path
             for value in row
         )
     assert "private-key-material-must-not-leak" not in values
+
+
+@pytest.mark.parametrize(
+    ("reason_code", "expected"),
+    [
+        ("insufficient_balance", "insufficient_balance"),
+        ("gas_too_high", "gas_too_high"),
+        ("nonce_conflict", "nonce_conflict"),
+        ("rpc_unavailable", "rpc_unavailable"),
+    ],
+)
+def test_signer_failures_map_to_explicit_wallet_reason_codes(
+    reason_code: str, expected: str
+) -> None:
+    from noyra.wallet.execution import WalletSignerError
+
+    assert (
+        WalletPaymentExecutionEngine._signer_error_code(
+            WalletSignerError("opaque internal/provider text", reason_code=reason_code)
+        )
+        == expected
+    )
+
+
+def test_untrusted_signer_error_text_does_not_select_persisted_reason_code() -> None:
+    from noyra.wallet.execution import WalletSignerError
+
+    error = WalletSignerError("provider says insufficient balance at https://secret.example")
+    assert WalletPaymentExecutionEngine._signer_error_code(error) == "signer_rejected"
+
+
+def test_receipt_lookup_failure_is_reconcileable_rpc_state(tmp_path: Path) -> None:
+    class UnavailableReceiptSigner(MockSigner):
+        def get_receipt(self, tx_hash: str, *, chain_id: int) -> Any:
+            del tx_hash, chain_id
+            from noyra.wallet.execution import WalletExecutionError
+
+            raise WalletExecutionError("wallet signer receipt lookup failed")
+
+    db, subject, network, _asset, source, order = fixture(tmp_path)
+    signer = UnavailableReceiptSigner(chain_id=network.chain_id, source_address=source.address)
+    engine = WalletPaymentExecutionEngine(db, signer)
+    broadcast = engine.execute_order(order.order_id, subject, actor="operator")
+    result = engine.poll_receipt(broadcast.execution_id, subject, actor="operator")
+    assert result.status == "unknown"
+    assert result.error_code == "rpc_unavailable"
+
+
+def test_broadcast_without_receipt_enters_confirmation_timeout_state(tmp_path: Path) -> None:
+    db, subject, network, _asset, source, order = fixture(tmp_path)
+    signer = MockSigner(chain_id=network.chain_id, source_address=source.address)
+    engine = WalletPaymentExecutionEngine(db, signer, confirmation_timeout_seconds=0)
+    broadcast = engine.execute_order(order.order_id, subject, actor="operator")
+    timed_out = engine.poll_receipt(broadcast.execution_id, subject, actor="operator")
+    assert timed_out.status == "unknown"
+    assert timed_out.error_code == "confirmation_timeout"
 
 
 def test_native_execution_confirm_and_settle(tmp_path: Path) -> None:

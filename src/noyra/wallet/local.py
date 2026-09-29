@@ -23,6 +23,7 @@ from .execution import (
     WalletBroadcastUnknownError,
     WalletExecutionError,
     WalletReceipt,
+    WalletRPCError,
     WalletSignerError,
     WalletUnsignedTransfer,
 )
@@ -151,7 +152,9 @@ class LocalWalletSigner:
             # A prior attempt may have mined while its response was lost.
             raise WalletBroadcastUnknownError(tx_hash=tx_hash)
         if nonce < transfer.nonce:
-            raise WalletSignerError("local wallet nonce is ahead of chain")
+            raise WalletSignerError(
+                "local wallet nonce is ahead of chain", reason_code="nonce_conflict"
+            )
         gas = _quantity(
             self._rpc.call(
                 transfer.chain_id,
@@ -163,14 +166,18 @@ class LocalWalletSigner:
         )
         fee = _quantity(self._rpc.call(transfer.chain_id, "eth_gasPrice", [], deadline=deadline))
         if not 21_000 <= gas <= transfer.gas_limit or not 0 < fee <= int(transfer.max_fee_per_gas):
-            raise WalletSignerError("local wallet gas or fee exceeds authorized envelope")
+            raise WalletSignerError(
+                "local wallet gas or fee exceeds authorized envelope", reason_code="gas_too_high"
+            )
         balance = _quantity(
             self._rpc.call(
                 transfer.chain_id, "eth_getBalance", [self.address, "pending"], deadline=deadline
             )
         )
         if balance < int(transfer.value) + transfer.gas_limit * int(transfer.max_fee_per_gas):
-            raise WalletSignerError("local wallet native balance is insufficient")
+            raise WalletSignerError(
+                "local wallet native balance is insufficient", reason_code="insufficient_balance"
+            )
         if transfer.asset_type == "token":
             result = self._rpc.call(
                 transfer.chain_id,
@@ -187,7 +194,9 @@ class LocalWalletSigner:
             if not isinstance(result, str) or not _WORD.fullmatch(result):
                 raise WalletSignerError("local wallet token balance is invalid")
             if int(result, 16) < int(transfer.data[-64:], 16):
-                raise WalletSignerError("local wallet token balance is insufficient")
+                raise WalletSignerError(
+                    "local wallet token balance is insufficient", reason_code="insufficient_balance"
+                )
 
     def sign_and_broadcast(
         self,
@@ -207,8 +216,14 @@ class LocalWalletSigner:
                 raise
             except WalletSignerError:
                 raise
+            except WalletRPCError as error:
+                raise WalletSignerError(
+                    f"local wallet {error.reason_code}", reason_code=error.reason_code
+                ) from None
             except WalletExecutionError:
-                raise WalletSignerError("local wallet preflight unavailable") from None
+                raise WalletSignerError(
+                    "local wallet preflight unavailable", reason_code="rpc_unavailable"
+                ) from None
             try:
                 result = _hash(
                     self._rpc.call(
