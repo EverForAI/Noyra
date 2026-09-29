@@ -31,6 +31,7 @@ class RetentionSettings:
     batch_size: int = 500
     interval_seconds: int = 86_400
     run_history: int = 100
+    runtime_days: int = 90
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> RetentionSettings:
@@ -56,7 +57,16 @@ class RetentionSettings:
             run_history=_positive(
                 env.get("NOYRA_RETENTION_RUN_HISTORY", "100"), "run history", maximum=10_000
             ),
+            runtime_days=_positive(env.get("NOYRA_RETENTION_RUNTIME_DAYS", "90"), "runtime days"),
         )
+
+
+# Only rebuildable runtime projections belong here. Immutable actions,
+# moderation, wallet and audit evidence are intentionally excluded.
+DERIVED_RUNTIME_TABLES: dict[str, tuple[str, str]] = {
+    "cognitive_route_attempts": ("created_at", "attempt_id"),
+    "cognitive_route_outcomes": ("created_at", "outcome_id"),
+}
 
 
 class RetentionManager:
@@ -90,6 +100,7 @@ class RetentionManager:
                 ("failure_stage", "TEXT"),
                 ("retry_at", "TEXT"),
                 ("failure_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("protected_rows_reason", "TEXT"),
             ):
                 if name not in columns:
                     connection.execute(f"ALTER TABLE retention_runs ADD COLUMN {name} {definition}")
@@ -156,6 +167,7 @@ class RetentionManager:
         moment = now or datetime.now(UTC)
         cutoff = (moment - timedelta(days=self.settings.health_days)).isoformat()
         search_use_cutoff = (moment - timedelta(hours=self.settings.search_use_hours)).isoformat()
+        runtime_cutoff = (moment - timedelta(days=self.settings.runtime_days)).isoformat()
         run_id = new_id("retention")
         started = utc_now()
         deleted: dict[str, int] = {
@@ -171,6 +183,7 @@ class RetentionManager:
                 "provider_health_buckets",
                 "search_provider_uses",
                 "provider_health_attempts",
+                *DERIVED_RUNTIME_TABLES,
             )
         }
         pruned_run_history = 0
@@ -182,6 +195,7 @@ class RetentionManager:
                     ("provider_health_buckets", cutoff),
                     ("search_provider_uses", search_use_cutoff),
                     ("provider_health_attempts", cutoff),
+                    *[(table, runtime_cutoff) for table in DERIVED_RUNTIME_TABLES],
                 ):
                     if not remaining or not self._table_exists(connection, table):
                         continue
@@ -209,8 +223,8 @@ class RetentionManager:
                     """INSERT INTO retention_runs(
                         run_id, subject_id, started_at, completed_at, deleted_by_table_json,
                         protected_rows, failed_reason, next_cursor, state_hash,
-                        failure_stage, retry_at, failure_count
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        failure_stage, retry_at, failure_count, protected_rows_reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         run_id,
                         subject_id,
@@ -224,6 +238,7 @@ class RetentionManager:
                         None,
                         None,
                         0,
+                        "protected row predicates are not configured for this registry",
                     ),
                 )
                 # Retention run summaries are bounded operational metadata,
@@ -262,8 +277,8 @@ class RetentionManager:
                         """INSERT INTO retention_runs(
                             run_id, subject_id, started_at, completed_at, deleted_by_table_json,
                             protected_rows, failed_reason, next_cursor, state_hash,
-                            failure_stage, retry_at, failure_count
-                        ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            failure_stage, retry_at, failure_count, protected_rows_reason
+                        ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             run_id,
                             subject_id,
@@ -276,6 +291,7 @@ class RetentionManager:
                             failure_stage or "transaction",
                             retry_at,
                             failure_count,
+                            "protected row predicates are not configured for this registry",
                         ),
                     )
             except Exception:
@@ -285,7 +301,10 @@ class RetentionManager:
         return {
             "run_id": run_id,
             "deleted_by_table": deleted,
-            "protected_rows": protected,
+            "protected_rows": None,
+            "protected_rows_reason": (
+                "protected row predicates are not configured for this registry"
+            ),
             "pruned_run_history": pruned_run_history,
             "failed_reason": failed_reason,
             "next_cursor": cursor,
@@ -338,6 +357,19 @@ class RetentionManager:
                     (row["use_id"], subject_id),
                 )
             return len(rows), (str(rows[-1]["use_id"]) if rows else None)
+        if table in DERIVED_RUNTIME_TABLES:
+            time_column, id_column = DERIVED_RUNTIME_TABLES[table]
+            rows = connection.execute(
+                f"SELECT {id_column} FROM {table} WHERE subject_id=? "
+                f"AND {time_column} < ? ORDER BY {time_column}, {id_column} LIMIT ?",
+                (subject_id, cutoff, limit),
+            ).fetchall()
+            for row in rows:
+                connection.execute(
+                    f"DELETE FROM {table} WHERE {id_column}=? AND subject_id=?",
+                    (row[id_column], subject_id),
+                )
+            return len(rows), (str(rows[-1][id_column]) if rows else None)
         rows = connection.execute(
             """SELECT attempt_key FROM provider_health_attempts
                WHERE subject_id=? AND occurred_at < ?
@@ -363,7 +395,8 @@ class RetentionManager:
             "started_at": row["started_at"],
             "completed_at": row["completed_at"],
             "deleted_by_table": strict_json_loads(row["deleted_by_table_json"]),
-            "protected_rows": row["protected_rows"],
+            "protected_rows": None,
+            "protected_rows_reason": row["protected_rows_reason"],
             "failed_reason": row["failed_reason"],
             "next_cursor": strict_json_loads(row["next_cursor"]) if row["next_cursor"] else None,
             "failure_stage": row["failure_stage"],

@@ -18,6 +18,7 @@ def test_settings_defaults_and_bounds():
     assert settings.batch_size == 500
     assert settings.run_history == 100
     assert settings.search_use_hours == 2
+    assert settings.runtime_days == 90
     with pytest.raises(ValueError):
         RetentionSettings.from_env({"NOYRA_RETENTION_BATCH_SIZE": "501"})
     with pytest.raises(ValueError):
