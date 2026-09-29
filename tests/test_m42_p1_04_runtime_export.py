@@ -674,6 +674,7 @@ def test_explicit_graph_reconciles_every_table_and_prevents_id_collision_leaks(
         "memory_fts_data",
         "memory_fts_docsize",
         "memory_fts_idx",
+        "persistent_features",
     }
     for entry in manifest_a["tables"]:
         assert entry["expected_rows"] == entry["exported_rows"] == entry["rows"]

@@ -231,7 +231,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 69
+CURRENT_SCHEMA_VERSION = 70
 
 MIGRATIONS: dict[int, str] = {
     2: """
@@ -6452,6 +6452,18 @@ CREATE INDEX IF NOT EXISTS idx_retention_runs_subject_time
 -- is deliberately rewound during migration verification.
 SELECT 1;
 """,
+    70: """
+CREATE TABLE IF NOT EXISTS persistent_features (
+    feature_id TEXT PRIMARY KEY,
+    feature_version INTEGER NOT NULL CHECK (feature_version >= 1),
+    ddl_fingerprint TEXT NOT NULL CHECK (
+        length(ddl_fingerprint) = 64
+        AND ddl_fingerprint NOT GLOB '*[^0-9a-f]*'
+    ),
+    installed_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+""",
 }
 
 
@@ -7300,6 +7312,56 @@ BEGIN
 END;
 """,
             )
+            feature_objects = {
+                "secret_cleanup": ("secret_cleanup_queue", "idx_secret_cleanup_subject_status"),
+                "secret_file_intents": (
+                    "secret_file_intents",
+                    "idx_secret_file_intents_subject_state",
+                    "validate_secret_file_intent_reference_binding",
+                    "validate_secret_file_intent_intent_binding",
+                    "validate_secret_file_intent_reference_binding_update",
+                    "validate_secret_file_intent_identity_immutable",
+                    "prevent_secret_file_intent_delete",
+                    "validate_secret_file_intent_transition",
+                    "validate_secret_file_intent_operation_state",
+                ),
+            }
+            now = utc_now()
+            for feature_id, object_names in feature_objects.items():
+                definitions = []
+                for object_name in object_names:
+                    row = connection.execute(
+                        "SELECT type, name, sql FROM sqlite_master WHERE name=?",
+                        (object_name,),
+                    ).fetchone()
+                    if row is None or not row["sql"]:
+                        raise RuntimeError(
+                            f"optional feature {feature_id} is missing database object {object_name}"
+                        )
+                    definitions.append(
+                        {"type": str(row["type"]), "name": str(row["name"]), "sql": str(row["sql"])}
+                    )
+                fingerprint = content_hash(definitions)
+                existing = connection.execute(
+                    "SELECT feature_version, ddl_fingerprint, installed_at "
+                    "FROM persistent_features WHERE feature_id=?",
+                    (feature_id,),
+                ).fetchone()
+                if existing is not None and (
+                    int(existing["feature_version"]) != 1
+                    or str(existing["ddl_fingerprint"]) != fingerprint
+                ):
+                    raise RuntimeError(
+                        f"optional feature {feature_id} registry fingerprint does not match installed DDL"
+                    )
+                connection.execute(
+                    """INSERT INTO persistent_features(
+                        feature_id, feature_version, ddl_fingerprint, installed_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(feature_id) DO UPDATE SET
+                        updated_at=excluded.updated_at""",
+                    (feature_id, 1, fingerprint, now, now),
+                )
             columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(model_calls)").fetchall()
@@ -7457,6 +7519,7 @@ END;
                 "observation_content_segments",
                 "secret_cleanup_queue",
                 "secret_file_intents",
+                "persistent_features",
                 "storage_usage_samples",
                 "common_knowledge_versions",
                 "common_knowledge_sync_events",

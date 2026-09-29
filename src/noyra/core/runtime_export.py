@@ -466,6 +466,7 @@ _OWNERSHIP_GRAPH_V67 = _OWNERSHIP_GRAPH_V66
 _OWNERSHIP_GRAPH_V68 = _OWNERSHIP_GRAPH_V67
 # Schema 69 adds provider health metric columns without changing ownership.
 _OWNERSHIP_GRAPH_V69 = _OWNERSHIP_GRAPH_V68
+_OWNERSHIP_GRAPH_V70 = _OWNERSHIP_GRAPH_V69
 
 _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     33: _OWNERSHIP_GRAPH_V33,
@@ -505,6 +506,7 @@ _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     67: _OWNERSHIP_GRAPH_V67,
     68: _OWNERSHIP_GRAPH_V68,
     69: _OWNERSHIP_GRAPH_V69,
+    70: _OWNERSHIP_GRAPH_V70,
 }
 
 
@@ -843,6 +845,15 @@ class RuntimeLogExporter:
             **graph,
             **{table: rule for table, rule in optional_parent_tables.items() if table in tables},
         }
+        if "persistent_features" in tables:
+            graph = {
+                **graph,
+                "persistent_features": _ExportOwnershipRule(
+                    "skipped",
+                    "global feature registry",
+                    reason="migration feature metadata is not subject runtime state",
+                ),
+            }
         missing = sorted(set(tables) - set(graph))
         if missing:
             raise RuntimeError(

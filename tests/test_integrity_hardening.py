@@ -60,6 +60,28 @@ class IntegrityHardeningTestCase(unittest.TestCase):
         )
         self.assertTrue({"content_archive_key", "content_archived_at"} <= observation_columns)
 
+    def test_optional_features_have_versioned_ddl_fingerprints(self) -> None:
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                "SELECT feature_id, feature_version, ddl_fingerprint "
+                "FROM persistent_features ORDER BY feature_id"
+            ).fetchall()
+        self.assertEqual(
+            {str(row["feature_id"]) for row in rows},
+            {"secret_cleanup", "secret_file_intents"},
+        )
+        self.assertTrue(all(int(row["feature_version"]) >= 1 for row in rows))
+        self.assertTrue(all(len(str(row["ddl_fingerprint"])) == 64 for row in rows))
+
+    def test_optional_feature_registry_mismatch_fails_closed(self) -> None:
+        with self.database.transaction() as connection:
+            connection.execute(
+                "UPDATE persistent_features SET ddl_fingerprint=? WHERE feature_id=?",
+                ("0" * 64, "secret_cleanup"),
+            )
+        with self.assertRaisesRegex(RuntimeError, "registry fingerprint"):
+            Database(self.database.path)
+
     def test_event_chain_uses_append_sequence_for_late_events(self) -> None:
         first = self.events.append(
             self.subject_id,
