@@ -231,7 +231,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 67
+CURRENT_SCHEMA_VERSION = 68
 
 MIGRATIONS: dict[int, str] = {
     2: """
@@ -6397,6 +6397,54 @@ WHEN julianday(OLD.created_at) IS NULL
 BEGIN
     SELECT RAISE(ABORT, 'recent search provider uses cannot be deleted');
 END;
+    """,
+    68: """
+CREATE TABLE IF NOT EXISTS provider_health_buckets (
+    subject_id TEXT NOT NULL,
+    provider_kind TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    bucket_start TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    latency_total_ms INTEGER NOT NULL DEFAULT 0,
+    last_success_at TEXT,
+    last_failure_at TEXT,
+    state_hash TEXT NOT NULL,
+    PRIMARY KEY(subject_id, provider_kind, provider_id, bucket_start)
+);
+CREATE TABLE IF NOT EXISTS provider_health_state (
+    subject_id TEXT NOT NULL,
+    provider_kind TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    cooldown_until TEXT,
+    probe_token TEXT,
+    probe_started_at TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    last_success_at TEXT,
+    last_failure_at TEXT,
+    updated_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL,
+    PRIMARY KEY(subject_id, provider_kind, provider_id)
+);
+CREATE TABLE IF NOT EXISTS retention_runs (
+    run_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    deleted_by_table_json TEXT NOT NULL,
+    protected_rows INTEGER NOT NULL DEFAULT 0,
+    failed_reason TEXT,
+    next_cursor TEXT,
+    state_hash TEXT NOT NULL,
+    failure_stage TEXT,
+    retry_at TEXT,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    protected_rows_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_retention_runs_subject_time
+    ON retention_runs(subject_id, started_at DESC);
 """,
 }
 

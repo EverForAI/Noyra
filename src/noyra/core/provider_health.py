@@ -39,40 +39,18 @@ class ProviderHealthStore:
         self._ensure_tables()
 
     def _ensure_tables(self) -> None:
-        with self.database.transaction() as connection:
-            self.database._execute_sql_script(
-                connection,
-                """
-                CREATE TABLE IF NOT EXISTS provider_health_buckets (
-                    subject_id TEXT NOT NULL,
-                    provider_kind TEXT NOT NULL,
-                    provider_id TEXT NOT NULL,
-                    bucket_start TEXT NOT NULL,
-                    attempt_count INTEGER NOT NULL DEFAULT 0,
-                    success_count INTEGER NOT NULL DEFAULT 0,
-                    failure_count INTEGER NOT NULL DEFAULT 0,
-                    latency_total_ms INTEGER NOT NULL DEFAULT 0,
-                    last_success_at TEXT,
-                    last_failure_at TEXT,
-                    state_hash TEXT NOT NULL,
-                    PRIMARY KEY(subject_id, provider_kind, provider_id, bucket_start)
-                );
-                CREATE TABLE IF NOT EXISTS provider_health_state (
-                    subject_id TEXT NOT NULL,
-                    provider_kind TEXT NOT NULL,
-                    provider_id TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    cooldown_until TEXT,
-                    probe_token TEXT,
-                    probe_started_at TEXT,
-                    consecutive_failures INTEGER NOT NULL DEFAULT 0,
-                    last_success_at TEXT,
-                    last_failure_at TEXT,
-                    updated_at TEXT NOT NULL,
-                    state_hash TEXT NOT NULL,
-                    PRIMARY KEY(subject_id, provider_kind, provider_id)
-                );
-                """,
+        with self.database.connection() as connection:
+            missing = [
+                table
+                for table in ("provider_health_buckets", "provider_health_state")
+                if connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                ).fetchone()
+                is None
+            ]
+        if missing:
+            raise IntegrityError(
+                "provider health schema is unavailable; run the database migrations first"
             )
 
     @staticmethod

@@ -83,6 +83,23 @@ def test_operator_wake_keeps_core_actions_integrity(tmp_path: Path) -> None:
         kernel.close()
 
 
+def test_operations_integrity_checks_cover_provider_health_and_retention(tmp_path: Path) -> None:
+    kernel = _active_kernel(tmp_path, "Noyra-operations-integrity")
+    try:
+        report = IntegrityRegistry().run(
+            kernel.database,
+            kernel.subject_id,
+            tmp_path,
+            profile="manual",
+            policy_mode="alert",
+            deadline_seconds=10,
+            check_ids=("operations.provider_health", "operations.retention"),
+        )
+        assert report.status == "ok", report.to_dict()
+    finally:
+        kernel.close()
+
+
 @pytest.mark.usefixtures("management_service")
 @pytest.mark.parametrize("damage", ["none", "role", "role_type", "duplicate_keys"])
 def test_admin_audits_accept_the_service_json_format_and_validate_roles(

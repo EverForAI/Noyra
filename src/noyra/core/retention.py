@@ -73,37 +73,12 @@ class RetentionManager:
     def __init__(self, database: Database, settings: RetentionSettings | None = None):
         self.database = database
         self.settings = settings or RetentionSettings()
-        with self.database.transaction() as connection:
-            self.database._execute_sql_script(
-                connection,
-                """
-                CREATE TABLE IF NOT EXISTS retention_runs (
-                    run_id TEXT PRIMARY KEY,
-                    subject_id TEXT NOT NULL,
-                    started_at TEXT NOT NULL,
-                    completed_at TEXT,
-                    deleted_by_table_json TEXT NOT NULL,
-                    protected_rows INTEGER NOT NULL DEFAULT 0,
-                    failed_reason TEXT,
-                    next_cursor TEXT,
-                    state_hash TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_retention_runs_subject_time
-                    ON retention_runs(subject_id, started_at DESC);
-                """,
-            )
-            columns = {
-                str(row["name"])
-                for row in connection.execute("PRAGMA table_info(retention_runs)").fetchall()
-            }
-            for name, definition in (
-                ("failure_stage", "TEXT"),
-                ("retry_at", "TEXT"),
-                ("failure_count", "INTEGER NOT NULL DEFAULT 0"),
-                ("protected_rows_reason", "TEXT"),
-            ):
-                if name not in columns:
-                    connection.execute(f"ALTER TABLE retention_runs ADD COLUMN {name} {definition}")
+        with self.database.connection() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='retention_runs'"
+            ).fetchone()
+        if exists is None:
+            raise RuntimeError("retention schema is unavailable; run the database migrations first")
 
     @staticmethod
     def _table_exists(connection: Any, table: str) -> bool:

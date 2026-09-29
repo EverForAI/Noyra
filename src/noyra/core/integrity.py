@@ -1303,6 +1303,20 @@ def _default_checks() -> tuple[IntegrityCheckSpec, ...]:
             "core.storage_boundary", 1, "core", _DEEP_PROFILES, _check_storage_boundary
         ),
         IntegrityCheckSpec("core.actions", 1, "core", _DEEP_PROFILES, _check_actions),
+        IntegrityCheckSpec(
+            "operations.provider_health",
+            1,
+            "operations",
+            _DEEP_PROFILES,
+            _check_provider_health,
+        ),
+        IntegrityCheckSpec(
+            "operations.retention",
+            1,
+            "operations",
+            _DEEP_PROFILES,
+            _check_retention_runs,
+        ),
         IntegrityCheckSpec("mind.state", 1, "mind", _DEEP_PROFILES, _check_mind),
         IntegrityCheckSpec("mind.memory_blocks", 1, "mind", _DEEP_PROFILES, _check_memory_blocks),
         IntegrityCheckSpec("mind.entities", 1, "mind", _DEEP_PROFILES, _check_entities),
@@ -1487,6 +1501,57 @@ def _check_sqlite(context: IntegrityContext) -> IntegrityCheckOutcome:
     if result != "ok":
         return IntegrityCheckOutcome("corrupt", "p0", "sqlite_quick_check", {"result": result})
     return IntegrityCheckOutcome(details={"result": "ok"})
+
+
+def _check_provider_health(context: IntegrityContext) -> IntegrityCheckOutcome:
+    tables = {"provider_health_buckets", "provider_health_state"}
+    present = {
+        str(row[0])
+        for row in context.connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?, ?) ",
+            tuple(tables),
+        ).fetchall()
+    }
+    if present != tables:
+        raise IntegrityError("provider health schema is incomplete")
+    from .provider_health import ProviderHealthStore
+
+    bucket_rows = context.connection.execute(
+        "SELECT * FROM provider_health_buckets WHERE subject_id=?", (context.subject_id,)
+    ).fetchall()
+    for row in bucket_rows:
+        expected = ProviderHealthStore._bucket_hash(
+            row["subject_id"],
+            row["provider_kind"],
+            row["provider_id"],
+            row["bucket_start"],
+            int(row["attempt_count"]),
+            int(row["success_count"]),
+            int(row["failure_count"]),
+            int(row["latency_total_ms"]),
+            row["last_success_at"],
+            row["last_failure_at"],
+        )
+        if row["state_hash"] != expected:
+            raise IntegrityError("provider health bucket state hash mismatch")
+    return IntegrityCheckOutcome(details={"buckets": len(bucket_rows)})
+
+
+def _check_retention_runs(context: IntegrityContext) -> IntegrityCheckOutcome:
+    row = context.connection.execute(
+        "SELECT COUNT(*) AS count FROM retention_runs WHERE subject_id=?",
+        (context.subject_id,),
+    ).fetchone()
+    if row is None:
+        raise IntegrityError("retention schema is unavailable")
+    invalid = context.connection.execute(
+        "SELECT run_id FROM retention_runs WHERE subject_id=? "
+        "AND (length(state_hash) != 64 OR next_cursor IS NULL) LIMIT 1",
+        (context.subject_id,),
+    ).fetchone()
+    if invalid is not None:
+        raise IntegrityError("retention run provenance is incomplete")
+    return IntegrityCheckOutcome(details={"runs": int(row["count"])})
 
 
 def _check_foreign_keys(context: IntegrityContext) -> IntegrityCheckOutcome:
