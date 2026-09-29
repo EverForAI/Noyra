@@ -35,6 +35,10 @@ def test_fresh_preview_has_no_external_economic_or_file_authority(
 ) -> None:
     environment = {key: value for key, value in os.environ.items() if not key.startswith("NOYRA_")}
     example = read_env(relative)
+    public_hash_key = tmp_path / "public-post-ip-hash.key"
+    if example.get("NOYRA_PROFILE") == "production":
+        public_hash_key.write_text("preview-test-key-that-is-at-least-32-bytes", encoding="utf-8")
+        example["NOYRA_PUBLIC_HASH_KEY_FILE"] = str(public_hash_key)
     for key in (
         "NOYRA_COGNITION_ENABLED",
         "NOYRA_WALLET_AUTOMATION_ENABLED",

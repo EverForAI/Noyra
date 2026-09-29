@@ -65,6 +65,8 @@ _CHECK_IDS = (
     "core.event_causal_order",
     "core.storage_boundary",
     "core.actions",
+    "operations.provider_health",
+    "operations.retention",
     "mind.state",
     "mind.memory_blocks",
     "mind.entities",

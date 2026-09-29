@@ -42,13 +42,17 @@
 
 ```python
 def test_production_rejects_insecure_non_loopback():
-    settings = ServiceSettings(host="0.0.0.0", profile="production", allow_insecure_non_loopback=True)
+    settings = ServiceSettings(
+        host="0.0.0.0", profile="production", allow_insecure_non_loopback=True
+    )
     with pytest.raises(ValueError, match="production.*non-loopback"):
         settings.validate_listener_security()
+
 
 def test_production_sets_secure_admin_cookie_by_default():
     settings = ServiceSettings(profile="production")
     assert settings.admin_session_cookie_secure is True
+
 
 def test_preflight_reports_missing_trusted_proxy_cidr(tmp_path):
     result = run_preflight(tmp_path, {"NOYRA_PROFILE": "production", "NOYRA_HOST": "127.0.0.1"})
