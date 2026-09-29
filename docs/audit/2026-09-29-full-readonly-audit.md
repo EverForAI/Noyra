@@ -2,9 +2,9 @@
 
 - 审计日期：2026-09-29
 - 审计类型：代码、数据库、HTTP、部署、前端、CI/CD 与运行合同的只读审计
-- 审计基线：分支 codex/wake-after-clean-restart，提交 cb04247fafb16c995e33f96724c850a216d35784
+- 审计基线：分支 `codex/wake-after-clean-restart`；业务代码提交 `cb04247fafb16c995e33f96724c850a216d35784`；当前报告提交 `18ef7cdf2df8b5bbb4982182515efee20a1a2f9f`
 - 审计范围：src/noyra、tests、deploy、scripts、.github/workflows、部署与实现文档
-- 变更边界：本审计只新增本报告；没有修改业务代码、数据库、部署配置、服务器状态，也没有推送远端
+- 变更边界：本审计只新增或更新本报告；没有修改业务代码、数据库、部署配置、服务器状态，也没有推送远端。报告提交相对于业务代码基线只包含文档变更。
 
 ## 1. 审计结论
 
@@ -481,11 +481,12 @@ Noyra 的主要边界如下：
 
 ### 已有或本次确认的证据
 
-- 当前工作区基线干净，HEAD 为 cb04247fafb16c995e33f96724c850a216d35784。
+- 本次复核开始时工作区干净；当前 HEAD 为 `18ef7cdf2df8b5bbb4982182515efee20a1a2f9f`，其父提交 `cb04247fafb16c995e33f96724c850a216d35784` 是本次业务代码审阅基线。
 - 代码静态审阅覆盖 HTTP/auth、public projection、transport SSRF、runtime export、integrity、wallet、provider health、retention、CAPTCHA、数据库 schema、部署和 CI。
-- 已确认 schema 当前版本为 67，integrity 默认 registry 包含 38 个周期检查。
-- 既有审计证据显示全量测试、Ruff、格式检查、JS 语法和站点构建曾通过；这些证据来自之前同一基线的验证记录。
-- 当前 Windows 系统 Python 缺少 eth_account，直接运行系统 Python 的 pytest 会在收集阶段失败；项目 .venv 已能开始收集测试，但本次审计没有等待完整长套件结束，不能把本次中断运行当作新的全量通过证据。
+- 已确认 schema 当前版本为 67，完整性 registry 版本为 `noyra-integrity-registry/v2`，`periodic_deep` 配置包含 38 个检查。
+- 本次只读复核通过：`python -m compileall -q src`、`ruff check .`、`ruff format --check .` 和 `git diff --check`。
+- 使用项目 `.venv` 执行管理完整性、钱包自动化、钱包执行和服务测试：89 passed、1 skipped、8 个 subtests passed；唯一跳过项是 Windows 不可移植的 POSIX token-file 权限检查。另行执行 retention、provider health 和公开视觉契约测试，分别为 4、3、2 项通过。
+- 系统 Python 环境缺少 `eth_account`，因此部分依赖钱包导入的测试在收集阶段失败；这属于本机测试环境差异，不能作为代码通过证据，也不改变项目 `.venv` 的上述结果。
 - 本报告没有访问生产服务器、真实 GitHub 仓库设置、真实 S3/KMS、主网、外部 signer 或多日 soak 环境。
 
 ### 未完成的外部验证
