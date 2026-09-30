@@ -12,11 +12,10 @@ EXPECTED = {
     "en/research/index.html": "en",
 }
 POSITIONING = {
-    "zh-CN": "\u5168\u7403\u9996\u4e2a\u9762\u5411\u771f\u5b9e\u4e16\u754c\u6301\u7eed\u8fd0\u884c\u7684\u4eba\u5de5\u4e3b\u4f53",
-    "en": "the world's first artificial subject for continuous real-world operation",
+    "zh-CN": "\u4e16\u754c\u9996\u4e2a\u76ee\u6807\u5185\u751f\u3001\u53ef\u96c7\u4f63\u4eba\u7c7b\u52b3\u52a8\u7684\u975e\u547d\u4ee4\u5f0f\u4eba\u5de5\u4e3b\u4f53",
+    "en": "the world's first non-command artificial subject with endogenous goals and the capacity to hire human labor",
 }
 RETIRED_COPY = (
-    "\u4e16\u754c\u9996\u4e2a",
     "\u9996\u4e2a\u771f\u5b9e\u4e16\u754c",
     "\u5168\u7403\u4f18\u5148\u6027",
     "global priority",

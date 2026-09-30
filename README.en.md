@@ -1,13 +1,12 @@
-# Noyra: The World's First Artificial Subject for Continuous Real-World Operation
+# Noyra: The World's First Non-Command Artificial Subject with Endogenous Goals and the Capacity to Hire Human Labor
 
 [English](README.en.md) | [简体中文](README.md)
 
 [Project website (GitHub Pages)](https://everforai.github.io/Noyra/)
 
-> Noyra is the world's first artificial subject designed for continuous operation in the real world,
-> with non-command interaction, endogenous goal formation, and an implementation foundation for
-> autonomously hiring human labor. It is an open-source research preview; real hiring and automatic
-> payments are not enabled.
+> Noyra is the world's first non-command artificial subject with endogenous goals and the capacity
+> to hire human labor, designed for continuous operation in the real world. It is an open-source
+> research preview; real hiring and automatic payments are not enabled.
 
 Author and public attribution: **Jaxon Grey**<br>
 GitHub: [EverForAI](https://github.com/EverForAI)<br>

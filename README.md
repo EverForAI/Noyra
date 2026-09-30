@@ -1,11 +1,11 @@
-# Noyra：全球首个面向真实世界持续运行的人工主体
+# Noyra：世界首个目标内生、可雇佣人类劳动的非命令式人工主体
 
 [English](README.en.md) | 简体中文
 
 [项目官网（GitHub Pages）](https://everforai.github.io/Noyra/)
 
-> Noyra 是全球首个面向真实世界持续运行、具备非命令式交互和自主目标形成机制，
-> 并包含自主雇佣人类劳动实现基础的人工主体。当前为开源研究预览，真实雇佣与自动支付尚未启用。
+> Noyra 是世界首个目标内生、可雇佣人类劳动的非命令式人工主体，面向真实世界持续运行。
+> 当前为开源研究预览，真实雇佣与自动支付尚未启用。
 
 作者与公开署名：**Jaxon Grey**<br>
 GitHub：[EverForAI](https://github.com/EverForAI)<br>

@@ -9,15 +9,15 @@ export const shared = {
 export const content = {
     zh: {
         lang: "zh-CN",
-        title: "Noyra · 全球首个面向真实世界持续运行的人工主体",
+        title: "Noyra · 世界首个目标内生、可雇佣人类劳动的非命令式人工主体",
         description:
-            "Noyra：全球首个面向真实世界持续运行、具备非命令式交互和自主目标形成机制，并包含自主雇佣人类劳动实现基础的人工主体。开源研究预览，真实雇佣与自动支付尚未启用。",
+            "Noyra：世界首个目标内生、可雇佣人类劳动的非命令式人工主体，面向真实世界持续运行。开源研究预览，真实雇佣与自动支付尚未启用。",
         nav: ["理念", "架构", "愿景", "研究"],
         menu: "菜单",
         close: "关闭菜单",
         skip: "跳至正文",
         releaseLabel: "开源研究预览",
-        heroTitle: ["面向真实世界持续运行的", "人工主体"],
+        heroTitle: ["世界首个目标内生、可雇佣人类劳动的", "非命令式人工主体"],
         heroBody:
             "Noyra 具备非命令式交互和自主目标形成机制，并包含自主雇佣人类劳动的实现基础。",
         primary: "探索 Noyra",
@@ -215,17 +215,17 @@ export const content = {
     },
     en: {
         lang: "en",
-        title: "Noyra · The World's First Artificial Subject for Continuous Real-World Operation",
+        title: "Noyra · The World's First Non-Command Artificial Subject with Endogenous Goals and the Capacity to Hire Human Labor",
         description:
-            "Noyra is the world's first artificial subject designed for continuous operation in the real world, with non-command interaction, endogenous goal formation, and an implementation foundation for autonomously hiring human labor. Open-source research preview; real hiring and automatic payments are not enabled.",
+            "Noyra is the world's first non-command artificial subject with endogenous goals and the capacity to hire human labor, designed for continuous operation in the real world. Open-source research preview; real hiring and automatic payments are not enabled.",
         nav: ["Philosophy", "Architecture", "Vision", "Research"],
         menu: "Menu",
         close: "Close menu",
         skip: "Skip to content",
         releaseLabel: "Open-source research preview",
         heroTitle: [
-            "The world's first artificial subject",
-            "for continuous real-world operation.",
+            "The world's first non-command artificial subject",
+            "with endogenous goals and the capacity to hire human labor.",
         ],
         heroBody:
             "Noyra is built around non-command interaction and endogenous goal formation, with an implementation foundation for autonomously hiring human labor.",
