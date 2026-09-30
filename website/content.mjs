@@ -157,7 +157,7 @@ export const content = {
         researchTitle: "研究与证据",
         researchIntro: "研究一种面向真实世界持续运行的人工主体。",
         researchBody:
-            "Noyra 以非命令式交互、自主目标形成和自主雇佣人类劳动的实现基础为核心，探索面向真实世界持续运行的人工主体。这里介绍 Noyra 的架构、实现进展与相关研究。",
+            "Noyra 以非命令式人工主体（NCAS）为研究框架，具备非命令式交互、自主目标形成和自主雇佣人类劳动的实现基础，探索面向真实世界持续运行的人工主体。这里介绍 Noyra 的架构、实现进展与相关研究。",
         criteriaTag: "01 / 架构与研究",
         criteriaTitle: "持续存在，自主形成方向。",
         researchTopicLink: "架构要点",
@@ -379,7 +379,7 @@ export const content = {
         researchTitle: "Research & evidence",
         researchIntro: "Study an artificial subject designed for continuous operation in the real world.",
         researchBody:
-            "Noyra explores an artificial subject designed for continuous operation in the real world, with non-command interaction, endogenous goal formation and an implementation foundation for autonomously hiring human labor. Explore its architecture, implementation progress and related research.",
+            "Noyra uses the Non-Command Artificial Subject (NCAS) framework to explore an artificial subject designed for continuous operation in the real world, with non-command interaction, endogenous goal formation and an implementation foundation for autonomously hiring human labor. Explore its architecture, implementation progress and related research.",
         criteriaTag: "01 / ARCHITECTURE & RESEARCH",
         criteriaTitle: "Continuity with an internal direction.",
         researchTopicLink: "Architecture",
