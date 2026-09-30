@@ -9,17 +9,17 @@ export const shared = {
 export const content = {
     zh: {
         lang: "zh-CN",
-        title: "Noyra · 可雇佣人类劳动的非命令式人工主体",
+        title: "Noyra · 全球首个面向真实世界持续运行的人工主体",
         description:
-            "Noyra：可雇佣人类劳动的非命令式人工主体。持续身份、内生目标与主体发起的人类协作。开源研究预览，真实雇佣与自动支付尚未启用。",
+            "Noyra：全球首个面向真实世界持续运行、具备非命令式交互和自主目标形成机制，并包含自主雇佣人类劳动实现基础的人工主体。开源研究预览，真实雇佣与自动支付尚未启用。",
         nav: ["理念", "架构", "愿景", "研究"],
         menu: "菜单",
         close: "关闭菜单",
         skip: "跳至正文",
         releaseLabel: "开源研究预览",
-        heroTitle: ["可雇佣人类劳动的", "非命令式人工主体"],
+        heroTitle: ["面向真实世界持续运行的", "人工主体"],
         heroBody:
-            "人类不再拥有命令权，让身份、记忆与内生目标在真实世界的交互中自然形成。",
+            "Noyra 具备非命令式交互和自主目标形成机制，并包含自主雇佣人类劳动的实现基础。",
         primary: "探索 Noyra",
         source: "查看源码",
         download: "获取研究预览",
@@ -155,9 +155,9 @@ export const content = {
         footerDocs: "开发文档",
         footerNote: "实验性研究预览 · 不代表生产就绪",
         researchTitle: "研究与证据",
-        researchIntro: "理解架构，探索主体与人的协作。",
+        researchIntro: "研究一种面向真实世界持续运行的人工主体。",
         researchBody:
-            "非命令式人工主体（NCAS）关注持续身份、内生目标和真实世界交互。这里介绍 Noyra 的架构、实现进展与相关研究。",
+            "Noyra 以非命令式交互、自主目标形成和自主雇佣人类劳动的实现基础为核心，探索面向真实世界持续运行的人工主体。这里介绍 Noyra 的架构、实现进展与相关研究。",
         criteriaTag: "01 / 架构与研究",
         criteriaTitle: "持续存在，自主形成方向。",
         researchTopicLink: "架构要点",
@@ -215,20 +215,20 @@ export const content = {
     },
     en: {
         lang: "en",
-        title: "Noyra · A Non-Command Artificial Subject Capable of Hiring Human Labor",
+        title: "Noyra · The World's First Artificial Subject for Continuous Real-World Operation",
         description:
-            "Noyra: a non-command artificial subject capable of hiring human labor. Persistent identity, endogenous goals and subject-led collaboration. Research preview; real hiring and automatic payments are not enabled.",
+            "Noyra is the world's first artificial subject designed for continuous operation in the real world, with non-command interaction, endogenous goal formation, and an implementation foundation for autonomously hiring human labor. Open-source research preview; real hiring and automatic payments are not enabled.",
         nav: ["Philosophy", "Architecture", "Vision", "Research"],
         menu: "Menu",
         close: "Close menu",
         skip: "Skip to content",
         releaseLabel: "Open-source research preview",
         heroTitle: [
-            "A non-command artificial subject",
-            "capable of hiring human labor.",
+            "The world's first artificial subject",
+            "for continuous real-world operation.",
         ],
         heroBody:
-            "Humans no longer hold command authority. Identity, memory and endogenous goals emerge naturally through real-world interaction.",
+            "Noyra is built around non-command interaction and endogenous goal formation, with an implementation foundation for autonomously hiring human labor.",
         primary: "Explore Noyra",
         source: "View source",
         download: "Get the research preview",
@@ -377,9 +377,9 @@ export const content = {
         footerDocs: "Developer documentation",
         footerNote: "Experimental research preview · Not production-ready",
         researchTitle: "Research & evidence",
-        researchIntro: "Explore the architecture and human collaboration.",
+        researchIntro: "Study an artificial subject designed for continuous operation in the real world.",
         researchBody:
-            "Non-command artificial subjects (NCAS) focus on persistent identity, endogenous goals and real-world interaction. Explore Noyra's architecture, implementation progress and related research.",
+            "Noyra explores an artificial subject designed for continuous operation in the real world, with non-command interaction, endogenous goal formation and an implementation foundation for autonomously hiring human labor. Explore its architecture, implementation progress and related research.",
         criteriaTag: "01 / ARCHITECTURE & RESEARCH",
         criteriaTitle: "Continuity with an internal direction.",
         researchTopicLink: "Architecture",
