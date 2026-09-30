@@ -239,7 +239,12 @@ class StorageUsage:
 
     def over_quota(self, quota: StorageQuotaLike) -> tuple[str, ...]:
         over: list[str] = []
-        if self.subject_bytes > quota.subject_bytes:
+        # SQLite freelist pages are immediately reusable by the same subject.
+        # Quota admission therefore uses the effective subject footprint while
+        # the physical value remains available for diagnostics and disk-floor
+        # protection.  Treating physical bytes as quota usage made a database
+        # with reclaimable pages permanently block its own cleanup path.
+        if self.effective_subject_bytes > quota.subject_bytes:
             over.append("subject")
         if self.training_bytes > quota.training_bytes:
             over.append("training")
@@ -250,7 +255,7 @@ class StorageUsage:
     def warnings(self, quota: StorageQuotaLike) -> tuple[str, ...]:
         warnings: list[str] = []
         for name, value, limit in (
-            ("subject", self.subject_bytes, quota.subject_bytes),
+            ("subject", self.effective_subject_bytes, quota.subject_bytes),
             ("training", self.training_bytes, quota.training_bytes),
             ("workspace", self.workspace_bytes, quota.workspace_bytes),
         ):

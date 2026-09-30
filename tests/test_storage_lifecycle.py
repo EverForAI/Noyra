@@ -218,9 +218,13 @@ class StorageLifecycleTestCase(unittest.TestCase):
         service._thread_workers = set()
         service.storage_lifecycle = cast(Any, Lifecycle())
         service.cloud_archives = cast(Any, Cloud())
+        service._run_retention_if_due = lambda: order.append("retention")
 
         self.assertEqual(asyncio.run(service._active_tick()), "storage_pressure")
-        self.assertEqual(order, ["maintain:True", "cloud:True:False", "reassess"])
+        self.assertEqual(
+            order,
+            ["maintain:True", "cloud:True:False", "reassess", "retention"],
+        )
         self.assertEqual(service._thread_workers, set())
 
     def test_active_tick_disables_cloud_staging_for_noncritical_quota_pressure(self) -> None:

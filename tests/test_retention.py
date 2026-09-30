@@ -6,7 +6,12 @@ import pytest
 from noyra.core import Database, IdentityStore
 from noyra.core.actions import ActionLedger
 from noyra.core.provider_health import ProviderHealthStore
-from noyra.core.retention import RetentionManager, RetentionSettings
+from noyra.core.retention import (
+    RETENTION_REGISTRY,
+    RetentionManager,
+    RetentionSettings,
+    retention_registry_diagnostics,
+)
 from noyra.core.types import content_hash
 from noyra.research.provider import SearchProviderStore
 from noyra.research.types import SearchProviderInput
@@ -213,3 +218,60 @@ def test_retention_never_schedules_append_only_route_history(tmp_path):
     assert result["failed_reason"] is None
     assert "cognitive_route_attempts" not in calls
     assert "cognitive_route_outcomes" not in calls
+
+
+def test_long_lived_tables_have_explicit_retention_classification():
+    expected = {
+        "cognitive_route_decisions",
+        "cognitive_route_attempts",
+        "cognitive_route_outcomes",
+        "model_calls",
+        "model_attempts",
+        "research_search_runs",
+        "action_deliberation_runs",
+        "behavior_logs",
+        "provider_health_buckets",
+        "provider_health_attempts",
+        "search_provider_uses",
+        "retention_runs",
+    }
+    registry = {item.table: item for item in RETENTION_REGISTRY}
+    assert expected <= set(registry)
+    assert all(item.retention_class for item in registry.values())
+    assert all(item.retention_action in {"preserve", "delete"} for item in registry.values())
+
+
+def test_append_only_evidence_is_never_in_delete_registry():
+    diagnostics = retention_registry_diagnostics()
+    assert diagnostics["unclassified"] == ()
+    assert diagnostics["delete_tables"] == (
+        "provider_health_buckets",
+        "provider_health_attempts",
+        "search_provider_uses",
+        "retention_runs",
+    )
+    registry = {item.table: item for item in RETENTION_REGISTRY}
+    for table in (
+        "cognitive_route_decisions",
+        "cognitive_route_attempts",
+        "cognitive_route_outcomes",
+        "model_calls",
+        "model_attempts",
+        "research_search_runs",
+        "action_deliberation_runs",
+        "behavior_logs",
+    ):
+        assert registry[table].retention_action == "preserve"
+
+
+def test_retention_projection_uses_registry_cutoff_metadata(tmp_path):
+    db = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-retention-registry"
+    IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
+    projection = RetentionManager(db).estimate(subject)
+    assert set(projection) >= {
+        "provider_health_buckets",
+        "search_provider_uses",
+        "provider_health_attempts",
+        "retention_runs",
+    }

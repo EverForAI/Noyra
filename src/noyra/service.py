@@ -8655,6 +8655,11 @@ class NoyraService:
             except Exception as error:
                 LOGGER.warning("cloud archive tick deferred: %s", type(error).__name__)
             storage = await self._tracked_to_thread(self.storage_lifecycle.reassess, storage)
+            # Retention is a bounded, deletion-only recovery action.  It must
+            # still run when cognition is blocked by storage pressure; placing
+            # it after the pressure decision made a freelist-heavy database
+            # unable to clean its own reclaimable aggregates.
+            await self._tracked_to_thread(self._run_retention_if_due)
             return "storage_pressure" if not storage.cognition_allowed else None
         try:
             lease = self.kernel.admission.begin("active_tick")
@@ -8694,11 +8699,11 @@ class NoyraService:
                     checkpoint=lease.assert_current,
                 )
             lease.assert_current()
-            if not storage.cognition_allowed:
-                return "storage_pressure"
             with bind_lease(lease):
                 await self._tracked_to_thread(self._run_retention_if_due)
             lease.assert_current()
+            if not storage.cognition_allowed:
+                return "storage_pressure"
             try:
                 with bind_lease(lease):
                     await self._tracked_to_thread(
@@ -8760,7 +8765,8 @@ class NoyraService:
 
     def _run_retention_if_due(self) -> None:
         """Prune derived aggregates at a low frequency without blocking cognition."""
-        manager = getattr(self.http, "retention", None)
+        http = getattr(self, "http", None)
+        manager = getattr(http, "retention", None)
         if manager is None:
             return
         now = datetime.now(UTC)

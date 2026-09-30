@@ -66,6 +66,54 @@ def test_snapshot_compaction_uses_bounded_batches_and_byte_budget() -> None:
         assert store.verify_archives(subject_id) == len(archives)
 
 
+def test_reclaimable_sqlite_pages_do_not_trigger_subject_quota_pressure() -> None:
+    usage = StorageUsage(
+        subject_bytes=120,
+        effective_subject_bytes=70,
+        database_bytes=120,
+        database_reclaimable_bytes=30,
+        training_bytes=0,
+        workspace_bytes=0,
+        free_bytes=10_000_000,
+    )
+    quota = StorageQuota(subject_bytes=100)
+
+    assert usage.over_quota(quota) == ()
+    assert usage.warnings(quota) == ()
+
+
+def test_lifecycle_keeps_maintenance_admitted_when_freelist_is_reusable() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        layout = StorageLayout.create(directory)
+        database = Database(Path(directory) / "noyra.sqlite3")
+        subject_id = "gate2-reclaimable-pressure"
+        IdentityStore(database).ensure(subject_id, "f" * 64)
+        manager = StorageLifecycleManager(
+            database,
+            subject_id,
+            layout,
+            StorageQuota(subject_bytes=100),
+            minimum_free_bytes=10,
+            initialize_archives=False,
+        )
+        usage = StorageUsage(
+            subject_bytes=120,
+            effective_subject_bytes=70,
+            database_bytes=120,
+            database_reclaimable_bytes=30,
+            training_bytes=0,
+            workspace_bytes=0,
+            free_bytes=10_000_000,
+        )
+        manager.scanner.scan = Mock(return_value=usage)  # type: ignore[method-assign]
+
+        result = manager.maintain()
+
+        assert result.over_quota == ()
+        assert result.cognition_allowed is True
+        assert result.write_amplification_allowed is True
+
+
 def test_snapshot_compaction_enforces_total_row_and_byte_budgets() -> None:
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "noyra.sqlite3")

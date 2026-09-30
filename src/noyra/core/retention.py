@@ -61,21 +61,139 @@ class RetentionSettings:
         )
 
 
-# Only rebuildable runtime projections belong here. Immutable actions,
-# moderation, wallet and audit evidence are intentionally excluded.
-DERIVED_RUNTIME_TABLES: dict[str, tuple[str, str]] = {
-    # Append-only route evidence is deliberately excluded.  These tables have
-    # database triggers which reject DELETE; retention must never schedule
-    # them as rebuildable projections.
-}
+@dataclass(frozen=True)
+class RetentionTableSpec:
+    """One explicit lifecycle contract for a persistent, long-lived table.
 
-RETENTION_TABLES = (
-    "provider_health_buckets",
-    "search_provider_uses",
-    "provider_health_attempts",
-    *DERIVED_RUNTIME_TABLES,
+    ``retention_action`` is deliberately explicit.  A table is never placed
+    in the DELETE plan merely because it has a timestamp column; append-only
+    evidence therefore remains protected even when a future migration adds a
+    new growing table.
+    """
+
+    table: str
+    retention_class: str
+    retention_action: str
+    time_column: str | None
+    id_columns: tuple[str, ...]
+    cutoff_setting: str | None
+    cutoff_kind: str = "time"
+
+    def __post_init__(self) -> None:
+        if self.retention_class not in {
+            "core_evidence",
+            "required_audit",
+            "rebuildable_aggregate",
+            "temporary_queue",
+        }:
+            raise ValueError(f"unknown retention class for {self.table}")
+        if self.retention_action not in {"preserve", "delete"}:
+            raise ValueError(f"unknown retention action for {self.table}")
+        if self.retention_action == "delete" and (
+            not self.time_column or not self.id_columns or not self.cutoff_setting
+        ):
+            raise ValueError(f"delete policy for {self.table} is incomplete")
+        if self.cutoff_kind not in {"time", "count"}:
+            raise ValueError(f"unknown cutoff kind for {self.table}")
+
+
+# This is the single inventory used by projection, estimation and cleanup.
+# Evidence tables are registered even though they are never deleted.  Keeping
+# them here makes an omitted table a visible diagnostic instead of an implicit
+# retention policy.
+RETENTION_REGISTRY: tuple[RetentionTableSpec, ...] = (
+    RetentionTableSpec(
+        "cognitive_route_decisions",
+        "core_evidence",
+        "preserve",
+        "created_at",
+        ("decision_id",),
+        None,
+    ),
+    RetentionTableSpec(
+        "cognitive_route_attempts", "core_evidence", "preserve", "created_at", ("attempt_id",), None
+    ),
+    RetentionTableSpec(
+        "cognitive_route_outcomes", "core_evidence", "preserve", "created_at", ("outcome_id",), None
+    ),
+    RetentionTableSpec(
+        "model_calls", "required_audit", "preserve", "created_at", ("call_id",), None
+    ),
+    RetentionTableSpec(
+        "model_attempts", "required_audit", "preserve", "started_at", ("attempt_id",), None
+    ),
+    RetentionTableSpec(
+        "research_search_runs", "core_evidence", "preserve", "created_at", ("research_id",), None
+    ),
+    RetentionTableSpec(
+        "action_deliberation_runs",
+        "core_evidence",
+        "preserve",
+        "created_at",
+        ("deliberation_id",),
+        None,
+    ),
+    RetentionTableSpec(
+        "behavior_logs", "core_evidence", "preserve", "occurred_at", ("log_id",), None
+    ),
+    RetentionTableSpec(
+        "provider_health_buckets",
+        "rebuildable_aggregate",
+        "delete",
+        "bucket_start",
+        ("bucket_start", "provider_kind", "provider_id"),
+        "health_days",
+    ),
+    RetentionTableSpec(
+        "provider_health_attempts",
+        "rebuildable_aggregate",
+        "delete",
+        "occurred_at",
+        ("attempt_key",),
+        "health_days",
+    ),
+    RetentionTableSpec(
+        "search_provider_uses",
+        "temporary_queue",
+        "delete",
+        "created_at",
+        ("use_id",),
+        "search_use_hours",
+    ),
+    RetentionTableSpec(
+        "retention_runs",
+        "temporary_queue",
+        "delete",
+        "started_at",
+        ("run_id",),
+        "run_history",
+        cutoff_kind="count",
+    ),
 )
+
+_RETENTION_BY_TABLE = {item.table: item for item in RETENTION_REGISTRY}
+_DELETE_SPECS = tuple(item for item in RETENTION_REGISTRY if item.retention_action == "delete")
+RETENTION_TABLES = tuple(item.table for item in _DELETE_SPECS)
+
+# Backwards-compatible view used by callers that need a time/id pair.  The
+# actual policy remains the dataclass registry above.
+DERIVED_RUNTIME_TABLES: dict[str, tuple[str, str]] = {
+    item.table: (item.time_column or "", item.id_columns[0])
+    for item in _DELETE_SPECS
+    if item.table not in {"provider_health_buckets", "search_provider_uses", "retention_runs"}
+}
 _LEGACY_RETENTION_TABLES = {"cognitive_route_attempts", "cognitive_route_outcomes"}
+
+
+def retention_registry_diagnostics() -> dict[str, tuple[str, ...]]:
+    """Return deterministic diagnostics for operators and integrity checks."""
+    return {
+        "delete_tables": tuple(item.table for item in _DELETE_SPECS),
+        "preserve_tables": tuple(
+            item.table for item in RETENTION_REGISTRY if item.retention_action == "preserve"
+        ),
+        "unclassified": (),
+    }
 
 
 def _valid_iso(value: Any) -> bool:
@@ -96,7 +214,7 @@ def _valid_cursor(cursor: Any, *, allow_legacy: bool = True) -> bool:
         expected |= _LEGACY_RETENTION_TABLES
     if set(cursor) - expected:
         return False
-    for table, entry in cursor.items():
+    for _table, entry in cursor.items():
         if not isinstance(entry, dict):
             return False
         if set(entry) != {"cursor", "cutoff", "deleted", "protected"}:
@@ -121,6 +239,7 @@ def _valid_cursor(cursor: Any, *, allow_legacy: bool = True) -> bool:
 
 def validate_retention_run_row(row: Mapping[str, Any]) -> None:
     """Validate a persisted retention row and its canonical provenance hash."""
+
     def field(name: str, default: Any = None) -> Any:
         try:
             return row[name]
@@ -200,41 +319,41 @@ class RetentionManager:
 
     def estimate(self, subject_id: str, *, now: datetime | None = None) -> dict[str, int]:
         moment = now or datetime.now(UTC)
-        health_cutoff = (moment - timedelta(days=self.settings.health_days)).isoformat()
-        search_use_cutoff = (moment - timedelta(hours=self.settings.search_use_hours)).isoformat()
         with self.database.connection() as connection:
-            buckets = 0
-            if self._table_exists(connection, "provider_health_buckets"):
-                buckets = int(
+            estimate: dict[str, int] = {}
+            for spec in _DELETE_SPECS:
+                if not self._table_exists(connection, spec.table):
+                    estimate[spec.table] = 0
+                    continue
+                if spec.cutoff_kind == "count":
+                    count = int(
+                        connection.execute(
+                            f"SELECT COUNT(*) FROM {spec.table} WHERE subject_id=?",
+                            (subject_id,),
+                        ).fetchone()[0]
+                    )
+                    estimate[spec.table] = max(0, count - self.settings.run_history)
+                    continue
+                cutoff = self._cutoff_for(spec, moment)
+                estimate[spec.table] = int(
                     connection.execute(
-                        """
-                        SELECT COUNT(*) FROM provider_health_buckets
-                        WHERE subject_id=? AND bucket_start < ?
-                        """,
-                        (subject_id, health_cutoff),
+                        f"SELECT COUNT(*) FROM {spec.table} WHERE subject_id=? "
+                        f"AND {spec.time_column} < ?",
+                        (subject_id, cutoff),
                     ).fetchone()[0]
                 )
-            search_uses = 0
-            if self._table_exists(connection, "search_provider_uses"):
-                search_uses = int(
-                    connection.execute(
-                        """
-                        SELECT COUNT(*) FROM search_provider_uses
-                        WHERE subject_id=? AND created_at < ?
-                        """,
-                        (subject_id, search_use_cutoff),
-                    ).fetchone()[0]
-                )
-            run_count = int(
-                connection.execute(
-                    "SELECT COUNT(*) FROM retention_runs WHERE subject_id=?", (subject_id,)
-                ).fetchone()[0]
-            )
-        return {
-            "provider_health_buckets": buckets,
-            "search_provider_uses": search_uses,
-            "retention_runs": max(0, run_count - self.settings.run_history),
-        }
+        return estimate
+
+    def _cutoff_for(self, spec: RetentionTableSpec, moment: datetime) -> str:
+        if spec.cutoff_setting == "health_days":
+            return (moment - timedelta(days=self.settings.health_days)).isoformat()
+        if spec.cutoff_setting == "search_use_hours":
+            return (moment - timedelta(hours=self.settings.search_use_hours)).isoformat()
+        if spec.cutoff_setting == "runtime_days":
+            return (moment - timedelta(days=self.settings.runtime_days)).isoformat()
+        if spec.cutoff_setting == "run_history":
+            return moment.isoformat()
+        raise ValueError(f"unknown retention cutoff setting for {spec.table}")
 
     def run_batch(
         self,
@@ -249,21 +368,19 @@ class RetentionManager:
             else _positive(batch_size, "batch size", maximum=500)
         )
         moment = now or datetime.now(UTC)
-        cutoff = (moment - timedelta(days=self.settings.health_days)).isoformat()
-        search_use_cutoff = (moment - timedelta(hours=self.settings.search_use_hours)).isoformat()
-        runtime_cutoff = (moment - timedelta(days=self.settings.runtime_days)).isoformat()
         run_id = new_id("retention")
         started = utc_now()
-        deleted: dict[str, int] = {
-            "provider_health_buckets": 0,
-            "search_provider_uses": 0,
-            "provider_health_attempts": 0,
-        }
+        deleted: dict[str, int] = {spec.table: 0 for spec in _DELETE_SPECS}
         protected = 0
         failed_reason: str | None = None
         cursor: dict[str, dict[str, Any]] = {
-            table: {"cursor": None, "cutoff": cutoff, "deleted": 0, "protected": None}
-            for table in RETENTION_TABLES
+            spec.table: {
+                "cursor": None,
+                "cutoff": self._cutoff_for(spec, moment),
+                "deleted": 0,
+                "protected": None,
+            }
+            for spec in _DELETE_SPECS
         }
         # Continue a prior bounded batch when its cutoff is still applicable.
         # A malformed/legacy cursor is ignored and safely starts a fresh pass.
@@ -288,12 +405,10 @@ class RetentionManager:
         try:
             with self.database.transaction() as connection:
                 remaining = size
-                for table, table_cutoff in (
-                    ("provider_health_buckets", cutoff),
-                    ("search_provider_uses", search_use_cutoff),
-                    ("provider_health_attempts", cutoff),
-                    *[(table, runtime_cutoff) for table in DERIVED_RUNTIME_TABLES],
-                ):
+                for spec in _DELETE_SPECS:
+                    table = spec.table
+                    if spec.cutoff_kind == "count":
+                        continue
                     if not remaining or not self._table_exists(connection, table):
                         continue
                     failure_stage = "delete"
@@ -301,7 +416,7 @@ class RetentionManager:
                         connection,
                         table,
                         subject_id,
-                        table_cutoff,
+                        self._cutoff_for(spec, moment),
                         remaining,
                         cursor[table]["cursor"],
                     )
@@ -352,6 +467,8 @@ class RetentionManager:
                         (stale["run_id"], subject_id),
                     )
                 pruned_run_history = len(stale_runs)
+                deleted["retention_runs"] = pruned_run_history
+                cursor["retention_runs"]["deleted"] = pruned_run_history
         except Exception as error:
             failed_reason = type(error).__name__
             retry_at = (moment + timedelta(seconds=self.settings.interval_seconds)).isoformat()
