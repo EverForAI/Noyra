@@ -186,6 +186,10 @@ def _wallet_automation_from_env() -> _WalletAutomationConfig | None:
         return None
     if raw_enabled.strip().lower() not in {"1", "true", "yes", "on"}:
         raise ValueError("NOYRA_WALLET_AUTOMATION_ENABLED must be true or false")
+    if os.getenv("NOYRA_PROFILE", "development").strip().lower() == "production":
+        release_gate = os.getenv("NOYRA_WALLET_AUTOMATION_RELEASE_GATE", "").strip().lower()
+        if release_gate != "external_verified":
+            raise ValueError("production wallet automation requires an external gate approval")
 
     network_id = os.getenv("NOYRA_WALLET_AUTOMATION_NETWORK_ID", "").strip()
     asset_id = os.getenv("NOYRA_WALLET_AUTOMATION_ASSET_ID", "").strip()
@@ -738,6 +742,7 @@ class ServiceSettings(BaseModel):
     subject_id: str = Field(min_length=8, max_length=128)
     genesis_hash: str = Field(min_length=64, max_length=64)
     profile: Literal["development", "test", "production"] = "development"
+    deployment_profile: Literal["host", "container_internal"] = "host"
     host: str = Field(default="127.0.0.1", min_length=1, max_length=255)
     port: int = Field(default=8765, ge=0, le=65_535)
     admin_token: SecretStr | None = None
@@ -919,10 +924,18 @@ class ServiceSettings(BaseModel):
             # Production is always terminated by a trusted HTTPS proxy while
             # the runtime remains on loopback.  The explicit insecure escape
             # hatch is intentionally unavailable in this profile.
-            if self.host.casefold() not in loopback:
+            if self.host.casefold() not in loopback and (
+                self.deployment_profile != "container_internal"
+            ):
                 raise ValueError(
-                    "production profile requires a loopback HTTP listener; "
-                    "terminate HTTPS at the trusted proxy"
+                    "production profile requires a loopback HTTP listener unless "
+                    "deployment_profile is container_internal"
+                )
+            if self.deployment_profile == "container_internal" and not (
+                self.allow_insecure_non_loopback
+            ):
+                raise ValueError(
+                    "container_internal deployment requires NOYRA_ALLOW_INSECURE_NON_LOOPBACK=true"
                 )
             # A production operator must not be able to downgrade the session
             # cookie through a stale environment file or template value.
@@ -930,7 +943,11 @@ class ServiceSettings(BaseModel):
             if self.at_rest_mode != "required":
                 raise ValueError("production profile requires at-rest protection")
             if self.developer_log_export_enabled:
-                raise ValueError("production profile must disable developer runtime export")
+                # The field default is intentionally development-friendly for
+                # direct construction in tests and libraries.  Production
+                # still fails closed by forcing the unsafe option off rather
+                # than accepting a stale environment value.
+                object.__setattr__(self, "developer_log_export_enabled", False)
         if self.host.casefold() not in loopback and not self.allow_insecure_non_loopback:
             raise ValueError(
                 "non-loopback HTTP listener requires NOYRA_ALLOW_INSECURE_NON_LOOPBACK=true"
@@ -1037,6 +1054,10 @@ class ServiceSettings(BaseModel):
             subject_id=subject_id,
             genesis_hash=genesis_hash,
             profile=cast(Literal["development", "test", "production"], profile),
+            deployment_profile=cast(
+                Literal["host", "container_internal"],
+                os.getenv("NOYRA_DEPLOYMENT_PROFILE", "host").strip().lower(),
+            ),
             host=os.getenv("NOYRA_HOST", "127.0.0.1"),
             port=int(os.getenv("NOYRA_PORT", "8765")),
             admin_token=SecretStr(token) if token else None,

@@ -51,12 +51,17 @@ def test_fresh_preview_has_no_external_economic_or_file_authority(
         ):
             assert not value, key
     assert example["NOYRA_HOST"] == "127.0.0.1"
+    # The deployment template is intentionally production-first.  This test
+    # exercises a fresh local preview, so downgrade only the test process to
+    # the isolated test profile instead of weakening production validation.
+    preview_profile = "test" if example.get("NOYRA_PROFILE") == "production" else None
     environment.update(example)
     environment.update(
         {
             "NOYRA_DATA_DIR": str(tmp_path / "fresh-data"),
             "NOYRA_HOST": "127.0.0.1",
             "NOYRA_PORT": "0",
+            "NOYRA_PROFILE": preview_profile or environment.get("NOYRA_PROFILE", "development"),
             "NOYRA_SUBJECT_ID": "Noyra-public-preview-test",
             "NOYRA_GENESIS_HASH": hashlib.sha256(b"public-preview-test").hexdigest(),
             "NOYRA_AT_REST_MODE": "development",

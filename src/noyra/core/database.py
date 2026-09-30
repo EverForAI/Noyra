@@ -8389,14 +8389,18 @@ END;
             ).fetchone()
             is not None
         )
-        receipt_guard = "".join(
-            f"        AND NEW.{column} IS OLD.{column}\n"
-            for column in (
-                "receipt_block_hash",
-                "receipt_confirmations",
-                "receipt_effect_hash",
+        receipt_guard = (
+            "".join(
+                f"        AND NEW.{column} IS OLD.{column}\n"
+                for column in (
+                    "receipt_block_hash",
+                    "receipt_confirmations",
+                    "receipt_effect_hash",
+                )
             )
-        ) if has_receipt_evidence else ""
+            if has_receipt_evidence
+            else ""
+        )
         reconciliation_transition = (
             "    OR OLD.status='confirmed' AND NEW.status='unknown'\n"
             if has_reconciliation_events

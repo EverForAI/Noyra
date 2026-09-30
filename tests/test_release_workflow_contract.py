@@ -25,6 +25,7 @@ def test_release_artifact_declares_schema_integrity_and_external_evidence() -> N
         "release-evidence.json",
         "EXPECTED_SHA",
         "external-gates.json",
+        "EXTERNAL_GATES_PUBLIC_KEY must be configured",
         "SHA256SUMS.sig",
     ):
         assert marker in WORKFLOW, marker

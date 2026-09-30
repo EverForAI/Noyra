@@ -17,6 +17,8 @@ if str(SRC) not in sys.path:
 
 
 def main() -> int:
+    from verify_external_gates import EXPECTED_GATE_IDS
+
     from noyra.core.database import CURRENT_SCHEMA_VERSION
     from noyra.core.integrity import IntegrityRegistry
 
@@ -40,6 +42,9 @@ def main() -> int:
         "wallet_gate_evidence": "artifacts/release/stage4b4/<commit_sha>/",
         "external_gates_required": True,
         "external_gates_file": "external-gates.json",
+        "external_gates_format": "noyra-external-gates/v1",
+        "external_gate_ids": list(EXPECTED_GATE_IDS),
+        "external_gate_max_age_hours": 72,
         "signature_artifacts": ["SHA256SUMS", "SHA256SUMS.sig", "SHA256SUMS.pem"],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

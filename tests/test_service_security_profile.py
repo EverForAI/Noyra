@@ -43,6 +43,25 @@ def test_production_profile_rejects_insecure_non_loopback_listener() -> None:
         )
 
 
+def test_container_internal_production_profile_allows_container_listener() -> None:
+    settings = _settings(
+        profile="production",
+        deployment_profile="container_internal",
+        host="0.0.0.0",
+        allow_insecure_non_loopback=True,
+    )
+    assert settings.deployment_profile == "container_internal"
+
+
+def test_container_internal_profile_requires_explicit_insecure_opt_in() -> None:
+    with pytest.raises(ValueError, match="container_internal"):
+        _settings(
+            profile="production",
+            deployment_profile="container_internal",
+            host="0.0.0.0",
+        )
+
+
 def test_from_env_reads_profile_and_production_cookie_default() -> None:
     environment = {
         "NOYRA_PROFILE": "production",
@@ -79,8 +98,9 @@ def test_production_from_env_requires_explicit_genesis_hash() -> None:
         "NOYRA_AT_REST_MODE": "required",
         "NOYRA_BACKUP_KEYRING_PATH": ".runtime/test-security-profile-genesis/backup.keys",
     }
-    with patch.dict(os.environ, environment, clear=True), pytest.raises(
-        ValueError, match="explicit NOYRA_GENESIS_HASH"
+    with (
+        patch.dict(os.environ, environment, clear=True),
+        pytest.raises(ValueError, match="explicit NOYRA_GENESIS_HASH"),
     ):
         ServiceSettings.from_env()
 

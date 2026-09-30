@@ -126,7 +126,10 @@ def test_probe_completion_requires_the_matching_probe_token(tmp_path: Path):
     with db.connection() as connection:
         assert (
             connection.execute(
-                "SELECT probe_token FROM provider_health_state WHERE subject_id=? AND provider_id=?",
+                (
+                    "SELECT probe_token FROM provider_health_state "
+                    "WHERE subject_id=? AND provider_id=?"
+                ),
                 (subject, "provider-a"),
             ).fetchone()[0]
             == token

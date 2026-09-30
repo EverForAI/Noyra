@@ -34,8 +34,18 @@ def evaluate(settings: ServiceSettings | None, error: Exception | None = None) -
                 _check("profile", settings.profile == "production", "profile must be production"),
                 _check(
                     "listener",
-                    settings.host.casefold() in {"127.0.0.1", "::1", "localhost"},
-                    "production runtime must listen on loopback behind HTTPS",
+                    settings.host.casefold() in {"127.0.0.1", "::1", "localhost"}
+                    or (
+                        settings.deployment_profile == "container_internal"
+                        and settings.allow_insecure_non_loopback
+                    ),
+                    "production runtime must use loopback or an explicit "
+                    "container-internal listener",
+                ),
+                _check(
+                    "deployment_profile",
+                    settings.deployment_profile in {"host", "container_internal"},
+                    "deployment profile must be explicit",
                 ),
                 _check(
                     "admin_session_cookie_secure",

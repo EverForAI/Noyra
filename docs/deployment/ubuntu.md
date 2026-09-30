@@ -316,10 +316,13 @@ docker compose ps
 curl --fail http://127.0.0.1:8765/health
 ```
 
-Compose explicitly forces the container listener to `0.0.0.0:8765` so the container network can
-reach it, but publishes the host port only on `127.0.0.1`. The standalone image defaults to
-loopback and rejects non-loopback plaintext; changing either binding is an explicit deployment
-decision that must be paired with a TLS reverse proxy and authentication. Compose also uses a
+Compose explicitly selects `NOYRA_PROFILE=production` with
+`NOYRA_DEPLOYMENT_PROFILE=container_internal` and forces the container listener to
+`0.0.0.0:8765` so the container network can reach it, but publishes the host port only on
+`127.0.0.1`. The container-internal profile is the only production exception to the loopback
+listener rule; it is valid only because the host binding remains loopback-only. The standalone
+image defaults to loopback and rejects non-loopback plaintext; changing either binding is an
+explicit deployment decision that must be paired with a TLS reverse proxy and authentication. Compose also uses a
 read-only root filesystem, drops Linux capabilities, disables privilege escalation, limits process
 creation, and stores the subject database in the `noyra-data` volume.
 

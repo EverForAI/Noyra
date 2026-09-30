@@ -102,6 +102,9 @@ def test_gate3_deployment_restart_and_log_limits_are_bounded() -> None:
     assert "restart: on-failure:5" in compose
     assert 'max-size: "10m"' in compose
     assert 'max-file: "3"' in compose
+    assert "NOYRA_PROFILE: production" in compose
+    assert "NOYRA_DEPLOYMENT_PROFILE: container_internal" in compose
+    assert '"127.0.0.1:8765:8765"' in compose
 
 
 def test_global_error_contract_contains_boundary_statuses() -> None:
