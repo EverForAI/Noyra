@@ -107,6 +107,7 @@ from noyra.knowledge import (
     CommonKnowledgeStore,
     CommonKnowledgeSyncError,
 )
+from noyra.migration import MigrationStore, TargetRegistry
 from noyra.model import (
     CognitiveResourceGroupInput,
     CognitiveResourceGroupRecord,
@@ -1467,6 +1468,8 @@ class NoyraHTTPServer:
         self.self_modification = ControlledSelfModification(
             kernel.database, kernel.subject_id, CognitionSettings()
         )
+        self.migration_store = MigrationStore(kernel.database)
+        self.migration_targets = TargetRegistry(kernel.database, self.migration_store)
         handler = self._handler_type()
         self._rate_lock = threading.Lock()
         self._request_times: dict[str, deque[float]] = defaultdict(deque)
@@ -2348,6 +2351,34 @@ class NoyraHTTPServer:
                 else:
                     query = parse_qs(parsed.query)
                 limit = self._limit(query)
+                if parsed.path == "/api/admin/migration/policy":
+                    if not self._authorized("operator"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    self._json(
+                        HTTPStatus.OK,
+                        owner.migration_store.read_policy(owner.kernel.subject_id).__dict__,
+                    )
+                    return
+                if parsed.path == "/api/admin/migration/targets":
+                    if not self._authorized("operator"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    with owner.kernel.database.connection() as connection:
+                        rows = connection.execute(
+                            "SELECT target_id,subject_id,key_fingerprint,enrollment_generation,"
+                            "endpoint,capabilities_json,region,provider,release_sha,os_arch,"
+                            "encrypted_volume,status,created_at,updated_at FROM migration_targets "
+                            "WHERE subject_id=? ORDER BY created_at DESC LIMIT ?",
+                            (owner.kernel.subject_id, limit),
+                        ).fetchall()
+                    output = []
+                    for row in rows:
+                        item = dict(row)
+                        item["capabilities"] = json.loads(item.pop("capabilities_json"))
+                        output.append(item)
+                    self._json(HTTPStatus.OK, output)
+                    return
                 if (
                     parsed.path != "/health"
                     and parsed.path.startswith("/api/")
@@ -3757,7 +3788,98 @@ class NoyraHTTPServer:
                 finally:
                     owner.admission.finish(lease)
 
+            def do_PUT(self) -> None:
+                """Route authenticated JSON updates through the same admission boundary."""
+                self.command = "PUT"
+                self.do_POST()
+
             def _dispatch_post(self) -> None:
+                if self.path == "/api/admin/migration/policy":
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    try:
+                        expected_revision = payload.pop("expected_revision")
+                        updated = owner.migration_store.update_policy(
+                            owner.kernel.subject_id,
+                            expected_revision,
+                            payload,
+                            self._actor(),
+                        )
+                    except KeyError:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "expected_revision_required"})
+                        return
+                    except Exception as error:
+                        if error.__class__.__name__ == "MigrationPolicyConflictError":
+                            self._json(HTTPStatus.CONFLICT, {"error": "migration_policy_conflict"})
+                        else:
+                            self._json(
+                                HTTPStatus.BAD_REQUEST,
+                                {"error": "invalid_migration_policy"},
+                            )
+                        return
+                    self._json(HTTPStatus.OK, updated.__dict__)
+                    return
+                if self.path == "/api/admin/migration/targets":
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    try:
+                        target = owner.migration_targets.register(
+                            owner.kernel.subject_id,
+                            target_id=str(payload["target_id"]),
+                            public_key=str(payload["public_key"]),
+                            endpoint=str(payload["endpoint"]),
+                            capabilities=payload.get("capabilities", {}),
+                            region=payload.get("region"),
+                            provider=payload.get("provider"),
+                            release_sha=str(payload["release_sha"]),
+                            os_arch=str(payload["os_arch"]),
+                            encrypted_volume=payload.get("encrypted_volume") is True,
+                            actor=self._actor(),
+                        )
+                    except Exception:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_migration_target"})
+                        return
+                    self._json(HTTPStatus.CREATED, target.__dict__)
+                    return
+                if self.path.startswith("/api/admin/migration/targets/") and self.path.endswith(
+                    "/revoke"
+                ):
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    target_id = (
+                        self.path.removeprefix("/api/admin/migration/targets/")
+                        .removesuffix("/revoke")
+                        .strip("/")
+                    )
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    try:
+                        owner.migration_targets.revoke(
+                            target_id,
+                            reason=str(payload.get("reason", "revoked by operator")),
+                            actor=self._actor(),
+                        )
+                    except Exception:
+                        self._json(
+                            HTTPStatus.BAD_REQUEST,
+                            {"error": "migration_target_revoke_failed"},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, {"target_id": target_id, "status": "revoked"})
+                    return
                 if self.path == "/api/admin/upgrade":
                     self._start_upgrade()
                     return
@@ -7138,7 +7260,7 @@ class NoyraHTTPServer:
                     "break_glass",
                 }:
                     return False
-                if self.command == "POST" and self.path not in {
+                if self.command in {"POST", "PUT"} and self.path not in {
                     "/admin/session",
                     "/admin/session/logout",
                 }:
