@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import stat as stat_module
 import subprocess
 import tempfile
 from collections.abc import Sequence
@@ -191,7 +192,7 @@ def create_backup(path: str | Path, backup_root: str | Path, mode: str = "defaul
         "backup_path": str(target),
         "sha256": digest,
         "mode": mode,
-        "file_mode": stat.st_mode,
+        "file_mode": stat_module.S_IMODE(stat.st_mode),
         "uid": getattr(stat, "st_uid", None),
         "gid": getattr(stat, "st_gid", None),
     }
@@ -201,23 +202,53 @@ def create_backup(path: str | Path, backup_root: str | Path, mode: str = "defaul
         target,
         metadata_path,
         digest,
-        stat.st_mode,
+        stat_module.S_IMODE(stat.st_mode),
         getattr(stat, "st_uid", None),
         getattr(stat, "st_gid", None),
     )
 
 
 def restore_backup(record: BackupRecord) -> None:
-    if hashlib.sha256(record.backup_path.read_bytes()).hexdigest() != record.sha256:
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        raise SetupError("BACKUP_PERMISSION", "restoring deployment backups requires root")
+    try:
+        backup_stat = record.backup_path.stat()
+        if (
+            record.uid is not None
+            and hasattr(backup_stat, "st_uid")
+            and backup_stat.st_uid != record.uid
+        ):
+            raise SetupError("BACKUP_OWNERSHIP", "backup ownership does not match metadata")
+        digest = hashlib.sha256(record.backup_path.read_bytes()).hexdigest()
+    except SetupError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise SetupError("BACKUP_UNREADABLE", f"cannot read backup: {record.backup_path}") from exc
+    if digest != record.sha256:
         raise SetupError("BACKUP_CHECKSUM", "backup checksum verification failed")
-    record.original_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(
-        prefix=f".{record.original_path.name}.", dir=record.original_path.parent
-    )
+    if record.original_path.exists() and record.uid is not None:
+        try:
+            target_stat = record.original_path.stat()
+            if hasattr(target_stat, "st_uid") and target_stat.st_uid != record.uid:
+                raise SetupError("BACKUP_OWNERSHIP", "target ownership does not match metadata")
+        except SetupError:
+            raise
+        except OSError as exc:
+            raise SetupError("BACKUP_TARGET", "cannot inspect restore target") from exc
+    try:
+        record.original_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{record.original_path.name}.", dir=record.original_path.parent
+        )
+    except OSError as exc:
+        raise SetupError("BACKUP_TARGET", "cannot create atomic restore target") from exc
     os.close(fd)
     temp = Path(temp_name)
     try:
         shutil.copy2(record.backup_path, temp)
+        os.chmod(temp, record.mode if record.mode is not None else 0o600)
+        if record.uid is not None and hasattr(os, "chown"):
+            os.chown(temp, record.uid, record.gid if record.gid is not None else -1)
         os.replace(temp, record.original_path)
     finally:
         temp.unlink(missing_ok=True)
@@ -229,12 +260,29 @@ class SetupRunner:
         self.runner = runner or SubprocessRunner()
 
     def run(self) -> SetupResult:
+        if self.options.mode == "local":
+            return self.run_local()
+        if self.options.mode == "public":
+            return self.run_public()
+        if self.options.mode == "cloudflare":
+            return self.run_cloudflare()
+        raise SetupError("INVALID_MODE", f"unsupported deployment mode: {self.options.mode}")
+
+    def run_local(self) -> SetupResult:
         actions = [f"validate mode {self.options.mode}"]
-        if self.options.public_domain and self.options.admin_domain:
-            render_caddyfile(self.options.public_domain, self.options.admin_domain)
-            actions.append("render caddyfile")
+        if self.options.env_path.is_symlink():
+            raise SetupError("ENV_SYMLINK", "environment path must not be a symlink")
+        if not self.options.env_path.exists():
+            raise SetupError(
+                "ENV_MISSING", f"environment file does not exist: {self.options.env_path}"
+            )
+        actions.append(f"validate environment file {self.options.env_path}")
         return SetupResult(actions=actions)
 
-    run_local = run
-    run_public = run
-    run_cloudflare = run
+    def run_public(self) -> SetupResult:
+        raise SetupError("NOT_IMPLEMENTED", "public deployment mode is implemented in a later task")
+
+    def run_cloudflare(self) -> SetupResult:
+        raise SetupError(
+            "NOT_IMPLEMENTED", "cloudflare deployment mode is implemented in a later task"
+        )
