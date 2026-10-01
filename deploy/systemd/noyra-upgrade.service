@@ -1,0 +1,19 @@
+[Unit]
+Description=Install an administrator-approved Noyra release
+After=network-online.target noyra-upgrade-recover.service
+Wants=network-online.target
+RequiresMountsFor=/var/lib/noyra
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/
+ExecStart=/usr/local/libexec/noyra-upgrade-runner.sh
+TimeoutStartSec=infinity
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+StandardOutput=journal
+StandardError=journal

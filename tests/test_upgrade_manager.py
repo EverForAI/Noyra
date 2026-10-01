@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from noyra.core.upgrade import UpgradeError, UpgradeManager
 
@@ -63,6 +64,23 @@ class UpgradeManagerTestCase(unittest.TestCase):
         self.assertEqual(error.exception.code, "upgrade_source_dirty")
         self.assertFalse(self.request.exists())
 
+    def test_start_allows_the_runner_to_create_its_first_source_checkout(self) -> None:
+        self.manager.source_path = self.root / "not-yet-cloned-source"
+        self.manager.check_version()
+
+        started = self.manager.start(reason="first upgrade", idempotency_key="request-1")
+
+        self.assertEqual(started["status"], "queued")
+        self.assertTrue(self.request.is_file())
+
+    def test_git_commands_explicitly_trust_the_root_owned_upgrade_source(self) -> None:
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        with patch("noyra.core.upgrade.subprocess.run", return_value=completed) as run:
+            self.manager._git("status", "--porcelain", "--untracked-files=all")
+
+        command = run.call_args.args[0]
+        self.assertIn(f"safe.directory={self.repo.resolve()}", command)
+
     def test_version_check_returns_bounded_safe_projection(self) -> None:
         result = self.manager.check_version()
         self.assertEqual(result["latest"]["sha"], self.latest_sha)
@@ -73,8 +91,9 @@ class UpgradeManagerTestCase(unittest.TestCase):
     def test_status_is_persisted_and_reloaded(self) -> None:
         self.manager.check_version()
         self.manager.start(reason="routine update", idempotency_key="request-1")
+        self.request.unlink()
         self.status_path.parent.mkdir(parents=True, exist_ok=True)
-        expected = {
+        expected: dict[str, object] = {
             "task_id": "from-runner",
             "status": "completed",
             "phase": "complete",
@@ -105,6 +124,14 @@ class UpgradeManagerTestCase(unittest.TestCase):
         self.assertEqual(first["task_id"], second["task_id"])
         request = json.loads(self.request.read_text(encoding="utf-8"))
         self.assertEqual(request["target_sha"], self.latest_sha)
+
+    def test_status_reports_queued_request_before_root_runner_starts(self) -> None:
+        self.manager.check_version()
+        started = self.manager.start(reason="routine update", idempotency_key="request-1")
+        status = self.manager.status()
+        self.assertEqual(status["task_id"], started["task_id"])
+        self.assertEqual(status["status"], "queued")
+        self.assertEqual(status["target_sha"], self.latest_sha)
 
     def test_target_must_be_from_a_recent_successful_check(self) -> None:
         with self.assertRaises(UpgradeError) as error:
@@ -140,11 +167,12 @@ class UpgradeManagerTestCase(unittest.TestCase):
         self.manager.start(reason="routine update", idempotency_key="request-1")
         self.assertEqual(self.status_path.read_bytes(), original)
         self.assertEqual(
-            {path.name for path in self.status_path.parent.iterdir()}, {"status.json"}
+            {path.name for path in self.status_path.parent.iterdir()},
+            {"manager.lock", "status.json"},
         )
         self.assertEqual(
             {path.name for path in self.request.parent.iterdir()},
-            {"pending.json", "manager.lock"},
+            {"pending.json"},
         )
 
     def test_release_projection_uses_current_symlink_target_without_git_metadata(self) -> None:

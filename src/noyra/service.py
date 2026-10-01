@@ -7062,6 +7062,7 @@ class NoyraHTTPServer:
                     {
                         "task_id": started["task_id"],
                         "target_short_sha": str(started["target_sha"])[:12],
+                        "reason": reason.strip()[:256],
                     },
                 )
                 self._json(HTTPStatus.ACCEPTED, started)

@@ -67,7 +67,10 @@ class UpgradeManager:
         self.github_branch = self._bounded_name(github_branch)
         self.github_fetcher = github_fetcher or self._fetch_github_metadata
         self.check_ttl = timedelta(seconds=max(30, min(int(check_ttl_seconds), 3600)))
-        self._lock = ProcessLock(self.request_path.parent / "manager.lock")
+        # The installer's state directory is root-owned and shared with the
+        # privileged runner. Keeping this lock outside the app-writable request
+        # directory lets both sides serialize the request handoff safely.
+        self._lock = ProcessLock(self.status_path.parent / "manager.lock")
         self._thread_lock = threading.RLock()
         self._checked: tuple[str, datetime] | None = None
 
@@ -95,8 +98,16 @@ class UpgradeManager:
 
     def _git(self, *args: str, cwd: Path | None = None) -> str:
         try:
+            repository = (cwd or self.source_path).resolve(strict=True)
             result = subprocess.run(
-                ["git", "-C", str(cwd or self.source_path), *args],
+                [
+                    "git",
+                    "-c",
+                    f"safe.directory={repository}",
+                    "-C",
+                    str(repository),
+                    *args,
+                ],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -140,6 +151,13 @@ class UpgradeManager:
         return value
 
     def _require_clean_source(self) -> None:
+        if self.source_path.is_symlink():
+            raise UpgradeError("upgrade_start_failed")
+        if not self.source_path.exists():
+            # The privileged runner creates this fixed official checkout on
+            # the first upgrade; the application must not create root-owned
+            # source files itself.
+            return
         if not self.source_path.is_dir():
             raise UpgradeError("upgrade_start_failed")
         if self._git("status", "--porcelain", "--untracked-files=all"):
@@ -210,6 +228,32 @@ class UpgradeManager:
 
     def status(self) -> dict[str, Any]:
         self._require_available()
+        pending = self._read_pending_unlocked()
+        if pending is not None:
+            current = self._read_status_unlocked()
+            if current is None or current.get("status") not in _ACTIVE_STATES:
+                task_id = pending.get("task_id")
+                target_sha = pending.get("target_sha")
+                requested_at = pending.get("requested_at")
+                if (
+                    not isinstance(task_id, str)
+                    or not re.fullmatch(r"[a-f0-9]{32}", task_id)
+                    or not isinstance(target_sha, str)
+                    or not _SHA.fullmatch(target_sha)
+                    or not isinstance(requested_at, str)
+                    or len(requested_at) > 40
+                ):
+                    raise UpgradeError("upgrade_unavailable")
+                return self._public_status(
+                    {
+                        "task_id": task_id,
+                        "status": "queued",
+                        "phase": "queued",
+                        "started_at": requested_at,
+                        "target_sha": target_sha,
+                        "logs": [],
+                    }
+                )
         try:
             with self.status_path.open("rb") as stream:
                 raw = stream.read(8193)
@@ -248,9 +292,7 @@ class UpgradeManager:
         if not isinstance(raw_logs, list):
             raw_logs = []
         result["logs"] = [
-            redact_text(line[:240])
-            for line in raw_logs[:20]
-            if isinstance(line, str)
+            redact_text(line[:240]) for line in raw_logs[:20] if isinstance(line, str)
         ]
         for field, maximum in (("task_id", 64), ("status", 32), ("phase", 32), ("error_code", 64)):
             value = result[field]

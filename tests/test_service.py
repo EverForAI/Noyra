@@ -157,7 +157,7 @@ class ServiceTestCase(unittest.TestCase):
         start_status, started = self.authorized_json(
             "/api/v1/admin/upgrade",
             payload={
-                "reason": "routine update",
+                "reason": "routine update; token=do-not-record",
                 "idempotency_key": "admin-upgrade-test-1",
                 "target_sha": latest_sha,
             },
@@ -168,6 +168,16 @@ class ServiceTestCase(unittest.TestCase):
             (self.data_dir / "upgrade-requests" / "pending.json").read_text(encoding="utf-8")
         )
         self.assertEqual(request["target_sha"], latest_sha)
+        self.assertNotIn("reason", request)
+        with self.kernel.database.connection() as connection:
+            audit = connection.execute(
+                "SELECT payload_json FROM audit_records WHERE action = ? "
+                "ORDER BY occurred_at DESC LIMIT 1",
+                ("admin_upgrade_started",),
+            ).fetchone()
+        self.assertIsNotNone(audit)
+        audit_payload = json.loads(audit["payload_json"])
+        self.assertEqual(audit_payload["reason"], "routine update; token=[REDACTED]")
 
     def test_admin_upgrade_post_rejects_unchecked_sha_with_stable_error(self) -> None:
         repo = self.data_dir / "upgrade-source"

@@ -472,6 +472,26 @@ inactive or first-time service is left stopped. Code rollback is not a data roll
 migrations are forward-only, so a failed code deployment may still require restoring the recorded
 pre-update backup before the old release can safely run.
 
+### Upgrade from the management page
+
+After a native Ubuntu installation that includes the upgrade runner, open the HTTPS management page
+and use **总览 → Noyra 版本与升级**. Select **检查最新版本** to read the official GitHub `main`
+commit, then review its short SHA, commit time, and title before selecting **升级到最新版** and
+confirming. The check is read-only. A confirmed task runs in a separate root-owned systemd service,
+so closing the tab, losing the SSH session, or restarting the browser does not cancel it. Reopen the
+management page to see its status and bounded progress summary.
+
+The Ubuntu installer provisions the fixed systemd path trigger and recovery unit, keeps the runner
+source checkout root-owned, and gives the Noyra service access only to submit a fixed SHA request and
+read the redacted status. The runner accepts only the current tip of the official repository's `main`
+branch and preserves the installed `base` or `cloud` profile. It delegates backups, atomic release
+switching, readiness checks, and code rollback to the existing installer. If the checked commit
+changes before the runner fetches it, the request is rejected and the page asks you to check again.
+
+This workflow currently applies to the native Ubuntu/systemd installation. Docker and other deployment
+types continue to use their deployment-specific update process. An older Ubuntu installation must be
+updated once through the existing installer before this management-page control becomes available.
+
 Run the deployment audit before an update. The installer also creates an encrypted cold backup
 outside `/var/lib/noyra` before replacing an existing release:
 
@@ -520,6 +540,18 @@ sudo ./scripts/install-ubuntu.sh --rollback
 sudo systemctl status noyra
 curl --fail http://127.0.0.1:8765/health/ready
 ```
+
+If the management session is unavailable, inspect the fixed upgrade service and its redacted journal
+summary as a recovery path:
+
+```bash
+sudo systemctl status noyra-upgrade.service noyra-upgrade.path
+sudo journalctl -u noyra-upgrade.service -n 80 --no-pager
+sudo cat /var/lib/noyra/upgrade/status.json
+```
+
+Do not run the installer manually while the management task is active; both routes use the installer's
+exclusive lock, and the second attempt will be refused.
 
 Do not delete `/opt/noyra/releases/<id>` while it is selected by `current` or `previous`. Keep at
 least one verified backup keyring copy separate from the subject data; losing retired key material
