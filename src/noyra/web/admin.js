@@ -24,6 +24,10 @@ let upgradeStatusAvailable = false;
 let upgradePollTimer = null;
 let upgradePollController = null;
 let upgradePollDelay = 3000;
+const migrationRiskErrors = {
+  migration_policy_confirmation_required: "开启策略自动前必须再次确认风险",
+  migration_local_wallet_confirmation_required: "开启本地钱包迁移前必须再次确认风险",
+};
 const MODEL_KEY_REQUEST_CONCURRENCY = 4;
 const $ = (selector) => document.querySelector(selector);
 const esc = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
@@ -50,9 +54,9 @@ function setStatus(target, message, error = false) { const node = $(target); nod
 function showSection(section) { activeSection = section; document.querySelectorAll("[data-section-panel]").forEach((panel) => { panel.hidden = panel.dataset.sectionPanel !== section; }); document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.section === section)); $("#page-title").textContent = { overview: "总览", conversation: "私密交流", "public-posts": "内容审核", models: "认知资源", search: "搜索配置", capabilities: "能力授权", channels: "通讯渠道", wallet: "钱包采集", migration: "迁移与庇护所", runtime: "运行防护" }[section]; }
 async function loadMigration() {
   const [policy, targets, proposals, tasks] = await Promise.all([request("/api/v1/admin/migration/policy"), request("/api/v1/admin/migration/targets"), request("/api/v1/admin/migration/proposals"), request("/api/v1/admin/migration/tasks")]);
-  $("#migration-enabled").checked = Boolean(policy.enabled); $("#migration-approval-mode").value = policy.approval_mode; $("#migration-cooldown").value = Math.round((policy.rejection_cooldown_seconds || 0) / 86400); $("#migration-wallet-mode").value = policy.wallet_mode; $("#migration-local-wallet").checked = Boolean(policy.local_wallet_transfer_enabled); $("#migration-policy-summary").innerHTML = summaryRows([["当前状态", policy.enabled ? "已开启" : "已关闭"], ["策略版本", policy.revision], ["审批模式", policy.approval_mode], ["钱包模式", policy.wallet_mode]]);
+  $("#migration-enabled").checked = Boolean(policy.enabled); $("#migration-approval-mode").value = policy.approval_mode; $("#migration-cooldown").value = Math.round((policy.rejection_cooldown_seconds || 0) / 86400); $("#migration-wallet-mode").value = policy.wallet_mode; $("#migration-local-wallet").checked = Boolean(policy.local_wallet_transfer_enabled); $("#migration-policy-summary").innerHTML = summaryRows([["当前状态", policy.enabled ? "已开启" : "已关闭"], ["策略版本", policy.revision], ["审批模式", policy.approval_mode], ["钱包模式", policy.wallet_mode], ["活动 epoch", policy.active_epoch ? `${policy.active_epoch.epoch_number} · ${policy.active_epoch.target_id}` : "无"]]);
   $("#migration-target-list").innerHTML = targets.length ? targets.map((item) => `<article class="resource-item"><div><h3>${esc(item.target_id)}</h3><p>${item.status === "active" ? "已验证" : "等待验证"} · ${esc(item.region || "未设置区域")}</p><small>${esc(item.endpoint)} · ${esc(item.key_fingerprint)}</small></div><div class="resource-actions"><button type="button" data-migration-challenge="${esc(item.target_id)}">${item.status === "active" ? "重新验证" : "发起验证"}</button>${item.status !== "revoked" ? `<button class="text-button" type="button" data-migration-revoke="${esc(item.target_id)}">撤销</button>` : ""}</div></article>`).join("") : '<div class="muted">尚未注册迁移目标</div>';
-  $("#migration-proposal-list").innerHTML = proposals.length ? proposals.map((item) => `<article class="resource-item"><div><h3>${esc(item.reason_code)}</h3><p>${esc(item.status)} · 目标 ${esc(item.target_id)}</p><small>${esc(item.reason)}</small></div>${["awaiting_approval", "planned"].includes(item.status) ? `<div class="resource-actions"><button type="button" data-migration-approve="${esc(item.proposal_id)}">批准</button><button class="text-button" type="button" data-migration-reject="${esc(item.proposal_id)}">拒绝</button></div>` : ""}</article>`).join("") : '<div class="muted">暂无迁移提案</div>';
+  $("#migration-proposal-list").innerHTML = proposals.length ? proposals.map((item) => `<article class="resource-item"><div><h3>${esc(item.reason_code)}</h3><p>${esc(item.status)} · 目标 ${esc(item.target_id)} · 策略版本 ${esc(item.policy_revision)}</p><small>${esc(item.reason)}</small><small>收益 ${esc(item.benefit_score)} · 风险 ${esc(item.risk_score)} · 过期 ${esc(item.expires_at)}</small><small>证据：${esc(JSON.stringify(item.evidence || {}))}</small></div>${["awaiting_approval", "planned"].includes(item.status) ? `<div class="resource-actions"><button type="button" data-migration-approve="${esc(item.proposal_id)}">批准</button><button class="text-button" type="button" data-migration-reject="${esc(item.proposal_id)}">拒绝</button></div>` : ""}</article>`).join("") : '<div class="muted">暂无迁移提案</div>';
   $("#migration-task-list").innerHTML = tasks.length ? tasks.map((item) => `<article class="resource-item"><div><h3>${esc(item.task_id)}</h3><p>${esc(item.status)} · 目标 ${esc(item.target_id)}</p><small>${esc(item.updated_at || item.created_at)}</small></div>${["preparing", "validating", "cutover"].includes(item.status) ? `<div class="resource-actions"><button type="button" data-migration-cutover="${esc(item.task_id)}">执行切换</button></div>` : ""}${["approved", "preflight", "awaiting_approval"].includes(item.status) ? `<div class="resource-actions"><button class="text-button" type="button" data-migration-cancel="${esc(item.task_id)}">取消任务</button></div>` : ""}${!["committed", "rolled_back", "cancelled"].includes(item.status) ? `<div class="resource-actions"><button class="text-button" type="button" data-migration-rollback="${esc(item.task_id)}">回滚</button></div>` : ""}</article>`).join("") : '<div class="muted">暂无迁移任务</div>';
 }
 function summaryRows(items) { return items.map(([label, value]) => `<div class="summary-row"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join(""); }
@@ -1136,7 +1140,7 @@ $("#migration-proposal-list").addEventListener("click", async (event) => {
   const reject = event.target.closest("[data-migration-reject]");
   try {
     if (approve) {
-      await request(`/api/v1/admin/migration/proposals/${encodeURIComponent(approve.dataset.migrationApprove)}/approve`, { method: "POST", body: JSON.stringify({ idempotency_key: crypto.randomUUID() }) });
+      await request(`/api/v1/admin/migration/proposals/${encodeURIComponent(approve.dataset.migrationApprove)}/approve`, { method: "POST", body: JSON.stringify({ idempotency_key: `admin-approve-${approve.dataset.migrationApprove}` }) });
       setStatus("#migration-status", "迁移提案已批准"); await loadMigration();
     } else if (reject) {
       const reason = window.prompt("请输入拒绝原因：");
@@ -1171,13 +1175,24 @@ $("#migration-policy-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
     const current = await request("/api/v1/admin/migration/policy");
+    const approvalMode = $("#migration-approval-mode").value;
+    const walletMode = $("#migration-wallet-mode").value;
+    const localWalletEnabled = $("#migration-local-wallet").checked;
+    const enteringPolicyAuto = approvalMode === "policy_auto" && (current.approval_mode !== "policy_auto" || !current.enabled);
+    const enteringLocalWallet = walletMode === "local_wallet_transfer" && localWalletEnabled && (current.wallet_mode !== "local_wallet_transfer" || !current.local_wallet_transfer_enabled);
+    const confirmPolicyAuto = !enteringPolicyAuto || window.confirm("策略自动模式会允许无需逐次人工批准的迁移，必须确认目标、资源和回滚边界均已验证。继续吗？");
+    if (!confirmPolicyAuto) return;
+    const confirmLocalWallet = !enteringLocalWallet || window.confirm("本地钱包迁移会在受保护通道中转移密钥，必须确认已准备二次批准和回滚方案。继续吗？");
+    if (!confirmLocalWallet) return;
     await request("/api/v1/admin/migration/policy", { method: "PUT", body: JSON.stringify({
       expected_revision: current.revision,
       enabled: $("#migration-enabled").checked,
-      approval_mode: $("#migration-approval-mode").value,
+      approval_mode: approvalMode,
       rejection_cooldown_seconds: Number($("#migration-cooldown").value) * 86400,
-      wallet_mode: $("#migration-wallet-mode").value,
-      local_wallet_transfer_enabled: $("#migration-local-wallet").checked,
+      wallet_mode: walletMode,
+      local_wallet_transfer_enabled: localWalletEnabled,
+      ...(enteringPolicyAuto ? { confirm_policy_auto: true } : {}),
+      ...(enteringLocalWallet ? { confirm_local_wallet_transfer: true } : {}),
     }) });
     setStatus("#migration-status", "迁移策略已保存");
     await loadMigration();

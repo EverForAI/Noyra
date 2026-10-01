@@ -2368,9 +2368,19 @@ class NoyraHTTPServer:
                     if not self._authorized("operator"):
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
+                    policy = owner.migration_store.read_policy(owner.kernel.subject_id)
+                    projection = dict(policy.__dict__)
+                    with owner.kernel.database.connection() as connection:
+                        epoch = connection.execute(
+                            "SELECT epoch_id,target_id,epoch_number,status,acquired_at,revoked_at "
+                            "FROM migration_epochs WHERE subject_id=? AND status='active' "
+                            "ORDER BY epoch_number DESC LIMIT 1",
+                            (owner.kernel.subject_id,),
+                        ).fetchone()
+                    projection["active_epoch"] = None if epoch is None else dict(epoch)
                     self._json(
                         HTTPStatus.OK,
-                        owner.migration_store.read_policy(owner.kernel.subject_id).__dict__,
+                        projection,
                     )
                     return
                 if parsed.path == "/api/admin/migration/targets":
@@ -3966,6 +3976,51 @@ class NoyraHTTPServer:
                         return
                     try:
                         expected_revision = payload.pop("expected_revision")
+                        current_policy = owner.migration_store.read_policy(owner.kernel.subject_id)
+                        requested_mode = payload.get("approval_mode", current_policy.approval_mode)
+                        requested_enabled = payload.get("enabled", current_policy.enabled)
+                        requested_wallet_mode = payload.get(
+                            "wallet_mode", current_policy.wallet_mode
+                        )
+                        requested_local_wallet = payload.get(
+                            "local_wallet_transfer_enabled",
+                            current_policy.local_wallet_transfer_enabled,
+                        )
+                        entering_policy_auto = bool(
+                            requested_enabled
+                            and requested_mode == "policy_auto"
+                            and (
+                                current_policy.approval_mode != "policy_auto"
+                                or not current_policy.enabled
+                            )
+                        )
+                        entering_local_wallet = bool(
+                            requested_enabled
+                            and requested_wallet_mode == "local_wallet_transfer"
+                            and requested_local_wallet
+                            and (
+                                current_policy.wallet_mode != "local_wallet_transfer"
+                                or not current_policy.local_wallet_transfer_enabled
+                            )
+                        )
+                        if entering_policy_auto:
+                            if payload.pop("confirm_policy_auto", False) is not True:
+                                self._json(
+                                    HTTPStatus.BAD_REQUEST,
+                                    {"error": "migration_policy_confirmation_required"},
+                                )
+                                return
+                        else:
+                            payload.pop("confirm_policy_auto", None)
+                        if entering_local_wallet:
+                            if payload.pop("confirm_local_wallet_transfer", False) is not True:
+                                self._json(
+                                    HTTPStatus.BAD_REQUEST,
+                                    {"error": "migration_local_wallet_confirmation_required"},
+                                )
+                                return
+                        else:
+                            payload.pop("confirm_local_wallet_transfer", None)
                         updated = owner.migration_store.update_policy(
                             owner.kernel.subject_id,
                             expected_revision,

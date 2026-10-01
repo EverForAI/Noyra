@@ -257,6 +257,11 @@ class MigrationManager:
             if row is None:
                 raise NotFoundError(f"migration proposal not found: {proposal_id}")
             self._assert_proposal_integrity(row)
+            if row["status"] == "rejected":
+                # Replaying a rejection is safe and must not append a second
+                # cooldown or audit event. A different decision requires a new
+                # proposal after the existing cooldown expires.
+                return self._proposal(row)
             if row["status"] not in _PROPOSAL_ACTIVE:
                 raise ValueError("migration proposal is not awaiting approval")
             policy_row = connection.execute(
@@ -476,7 +481,9 @@ class MigrationManager:
             raise ValueError("migration cancellation reason is required")
         safe_reason = redact_secret_text(reason.strip())[:256]
         task = self.get_task(task_id)
-        if task.status in {"committed", "rolled_back", "cancelled", "failed"}:
+        if task.status == "cancelled":
+            return task
+        if task.status in {"committed", "rolled_back", "failed"}:
             raise ValueError("migration task cannot be cancelled")
         if "cancelled" not in _TASK_TRANSITIONS.get(task.status, frozenset()):
             raise ValueError("migration task cannot be cancelled after transfer begins")

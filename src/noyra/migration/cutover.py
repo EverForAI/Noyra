@@ -40,7 +40,9 @@ class CutoverCoordinator:
         if not reason.strip():
             raise ValueError("rollback reason is required")
         task = self.manager.get_task(task_id)
-        if task.status in {"committed", "rolled_back"}:
+        if task.status == "rolled_back":
+            return {"task_id": task_id, "status": "rolled_back"}
+        if task.status == "committed":
             raise ValueError("migration task cannot be rolled back")
         epoch = self._epoch_for_task(task_id)
         if task.status == "rolling_back" and epoch is None:

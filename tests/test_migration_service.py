@@ -52,6 +52,21 @@ def _json_request(url: str, *, authenticated: bool) -> tuple[int, object]:
         return error.code, json.loads(error.read())
 
 
+def _json_mutation(
+    url: str, payload: dict[str, object], *, authenticated: bool = True
+) -> tuple[int, object]:
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {ADMIN_TOKEN}" if authenticated else "",
+    }
+    request = Request(url, headers=headers, method="PUT", data=json.dumps(payload).encode())
+    try:
+        with urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read())
+    except HTTPError as error:
+        return error.code, json.loads(error.read())
+
+
 def _add_attested_target(server: NoyraHTTPServer) -> None:
     private = Ed25519PrivateKey.generate()
     public = base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode()
@@ -111,6 +126,85 @@ def test_disabled_migration_does_not_discover_candidates(
     )
     assert status == 200
     assert candidates == []
+
+
+def test_policy_auto_and_local_wallet_require_explicit_risk_confirmation(
+    migration_http: tuple[NoyraHTTPServer, str],
+) -> None:
+    server, base_url = migration_http
+    policy = server.migration_store.read_policy(server.kernel.subject_id)
+    status, error = _json_mutation(
+        f"{base_url}/api/v1/admin/migration/policy",
+        {
+            "expected_revision": policy.revision,
+            "enabled": True,
+            "approval_mode": "policy_auto",
+            "allowed_target_ids": ["migration-target-1"],
+        },
+    )
+    assert status == 400
+    assert error == {"error": "migration_policy_confirmation_required"}
+
+    status, updated = _json_mutation(
+        f"{base_url}/api/v1/admin/migration/policy",
+        {
+            "expected_revision": policy.revision,
+            "enabled": True,
+            "approval_mode": "policy_auto",
+            "allowed_target_ids": ["migration-target-1"],
+            "confirm_policy_auto": True,
+        },
+    )
+    assert status == 200
+    assert updated["approval_mode"] == "policy_auto"
+
+    current = server.migration_store.read_policy(server.kernel.subject_id)
+    status, error = _json_mutation(
+        f"{base_url}/api/v1/admin/migration/policy",
+        {
+            "expected_revision": current.revision,
+            "wallet_mode": "local_wallet_transfer",
+            "local_wallet_transfer_enabled": True,
+        },
+    )
+    assert status == 400
+    assert error == {"error": "migration_local_wallet_confirmation_required"}
+
+
+def test_policy_projection_exposes_active_epoch_without_secrets(
+    migration_http: tuple[NoyraHTTPServer, str],
+) -> None:
+    server, base_url = migration_http
+    _add_attested_target(server)
+    with server.kernel.database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO migration_epochs("
+            "epoch_id,subject_id,target_id,epoch_number,status,acquired_at,state_hash) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                "migrationepoch-test",
+                server.kernel.subject_id,
+                "migration-target-1",
+                1,
+                "active",
+                "2099-01-01T00:00:00+00:00",
+                content_hash(
+                    {
+                        "epoch_id": "migrationepoch-test",
+                        "subject_id": server.kernel.subject_id,
+                        "target_id": "migration-target-1",
+                        "epoch_number": 1,
+                        "status": "active",
+                        "acquired_at": "2099-01-01T00:00:00+00:00",
+                        "revoked_at": None,
+                    }
+                ),
+            ),
+        )
+    status, payload = _json_request(f"{base_url}/api/v1/admin/migration/policy", authenticated=True)
+    assert status == 200
+    assert payload["active_epoch"]["epoch_id"] == "migrationepoch-test"
+    assert "private_key" not in json.dumps(payload)
 
 
 def test_migration_proposal_detail_is_subject_scoped_and_integrity_checked(
