@@ -15,3 +15,9 @@ def test_agent_rejects_secret_fields() -> None:
     agent = MigrationAgent(target_id="target-1", key_fingerprint="a" * 64)
     with pytest.raises(ValueError, match="secret"):
         agent.receive({"artifact_id": "artifact-1", "byte_size": 1, "api_key": "secret"})
+
+
+def test_agent_rejects_nested_secret_fields() -> None:
+    agent = MigrationAgent(target_id="target-1", key_fingerprint="a" * 64)
+    with pytest.raises(ValueError, match="secret"):
+        agent.receive({"artifact_id": "artifact-1", "byte_size": 1, "credentials": {"token": "x"}})

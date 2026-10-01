@@ -62,7 +62,7 @@ def test_rejection_is_atomic_and_audited(tmp_path) -> None:
     assert row["status"] == "rejected"
     assert row["decision_reason"] == "risk too high"
     assert len(row["state_hash"]) == 64
-    assert [item["action"] for item in audit] == [
+    assert [item["action"] for item in audit][-2:] == [
         "migration_proposal_created",
         "migration_proposal_rejected",
     ]

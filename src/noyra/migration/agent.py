@@ -40,8 +40,11 @@ class MigrationAgent:
     def receive(self, manifest: Mapping[str, Any]) -> ReceiveReceipt:
         if not isinstance(manifest, Mapping) or len(manifest) > 32:
             raise ValueError("migration manifest is invalid")
-        forbidden = {"secret", "token", "password", "private_key", "api_key"}
-        if any(key.casefold() in forbidden for key in manifest):
+        forbidden = {"secret", "token", "password", "private_key", "api_key", "bearer"}
+        if any(
+            self._contains_forbidden_key(key, value, forbidden)
+            for key, value in manifest.items()
+        ):
             raise ValueError("migration manifest contains a forbidden secret field")
         encoded = canonical_json(dict(manifest)).encode()
         if len(encoded) > 1_000_000:
@@ -56,3 +59,18 @@ class MigrationAgent:
         if receipt.manifest_digest != expected_digest:
             raise ValueError("migration manifest digest mismatch")
         return {"target_id": self.target_id, "generation": self.generation, "status": "healthy"}
+
+    @classmethod
+    def _contains_forbidden_key(cls, key: Any, value: Any, forbidden: set[str]) -> bool:
+        if not isinstance(key, str):
+            return True
+        if key.casefold() in forbidden:
+            return True
+        if isinstance(value, Mapping):
+            return any(
+                cls._contains_forbidden_key(child_key, child_value, forbidden)
+                for child_key, child_value in value.items()
+            )
+        if isinstance(value, (list, tuple)):
+            return any(cls._contains_forbidden_key("", item, forbidden) for item in value)
+        return False
