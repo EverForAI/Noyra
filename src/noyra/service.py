@@ -107,7 +107,15 @@ from noyra.knowledge import (
     CommonKnowledgeStore,
     CommonKnowledgeSyncError,
 )
-from noyra.migration import MigrationManager, MigrationProposalStore, MigrationStore, TargetRegistry
+from noyra.migration import (
+    CutoverCoordinator,
+    MigrationManager,
+    MigrationProposalStore,
+    MigrationStore,
+    RecoveryCoordinator,
+    RecoveryRequest,
+    TargetRegistry,
+)
 from noyra.model import (
     CognitiveResourceGroupInput,
     CognitiveResourceGroupRecord,
@@ -1472,6 +1480,8 @@ class NoyraHTTPServer:
         self.migration_targets = TargetRegistry(kernel.database, self.migration_store)
         self.migration_proposals = MigrationProposalStore(kernel.database)
         self.migration_manager = MigrationManager(kernel.database, self.migration_store)
+        self.migration_cutover = CutoverCoordinator(kernel.database)
+        self.migration_recovery = RecoveryCoordinator()
         handler = self._handler_type()
         self._rate_lock = threading.Lock()
         self._request_times: dict[str, deque[float]] = defaultdict(deque)
@@ -2400,6 +2410,21 @@ class NoyraHTTPServer:
                         item["evidence"] = json.loads(item.pop("evidence_json"))
                         items.append(item)
                     self._json(HTTPStatus.OK, items)
+                    return
+                if parsed.path.startswith("/api/admin/migration/tasks/"):
+                    if not self._authorized("operator"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    task_id = parsed.path.removeprefix("/api/admin/migration/tasks/").strip("/")
+                    with owner.kernel.database.connection() as connection:
+                        row = connection.execute(
+                            "SELECT * FROM migration_tasks WHERE task_id=? AND subject_id=?",
+                            (task_id, owner.kernel.subject_id),
+                        ).fetchone()
+                    if row is None:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "migration_task_not_found"})
+                    else:
+                        self._json(HTTPStatus.OK, dict(row))
                     return
                 if (
                     parsed.path != "/health"
@@ -3982,6 +4007,74 @@ class NoyraHTTPServer:
                         HTTPStatus.OK,
                         {"proposal_id": proposal_id, "rejection_id": rejection_id},
                     )
+                    return
+                if self.path.startswith("/api/admin/migration/tasks/") and self.path.endswith(
+                    "/cutover"
+                ):
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    task_id = (
+                        self.path.removeprefix("/api/admin/migration/tasks/")
+                        .removesuffix("/cutover")
+                        .strip("/")
+                    )
+                    try:
+                        result = self.migration_cutover.prepare(task_id)
+                        committed = self.migration_cutover.commit(task_id)
+                    except ValueError:
+                        self._json(HTTPStatus.CONFLICT, {"error": "migration_cutover_rejected"})
+                        return
+                    self._json(HTTPStatus.OK, {**result.__dict__, **committed})
+                    return
+                if self.path.startswith("/api/admin/migration/tasks/") and self.path.endswith(
+                    "/rollback"
+                ):
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    task_id = (
+                        self.path.removeprefix("/api/admin/migration/tasks/")
+                        .removesuffix("/rollback")
+                        .strip("/")
+                    )
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    try:
+                        result = self.migration_cutover.rollback(
+                            task_id, str(payload.get("reason", "operator rollback"))
+                        )
+                    except ValueError:
+                        self._json(HTTPStatus.CONFLICT, {"error": "migration_rollback_rejected"})
+                        return
+                    self._json(HTTPStatus.OK, result)
+                    return
+                if self.path == "/api/admin/migration/recovery":
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    try:
+                        policy = owner.migration_store.read_policy(owner.kernel.subject_id)
+                        result = owner.migration_recovery.restore_standby(
+                            RecoveryRequest(
+                                task_id=str(payload["task_id"]),
+                                standby_target_id=str(payload["standby_target_id"]),
+                                verified_backup_id=str(payload["verified_backup_id"]),
+                                source_failure_evidence=str(payload["source_failure_evidence"]),
+                            ),
+                            policy,
+                        )
+                    except (KeyError, ValueError):
+                        self._json(HTTPStatus.CONFLICT, {"error": "migration_recovery_rejected"})
+                        return
+                    self._json(HTTPStatus.ACCEPTED, result)
                     return
                 if self.path == "/api/admin/upgrade":
                     self._start_upgrade()
