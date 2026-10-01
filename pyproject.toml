@@ -18,6 +18,7 @@ dependencies = [
 ]
 
 [project.scripts]
+noyra = "noyra.__main__:main"
 noyra-service = "noyra.service:main"
 noyra-desktop = "noyra.desktop:main"
 

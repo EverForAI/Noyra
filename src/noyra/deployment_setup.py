@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import stat as stat_module
 import subprocess
 import tempfile
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -33,6 +35,10 @@ class SetupOptions:
     caddy_path: Path = Path("/etc/caddy/Caddyfile")
     tunnel_token_path: Path | None = None
     dry_run: bool = False
+    non_interactive: bool = False
+    replace: bool = False
+    backup_root: Path = Path("/var/backups/noyra")
+    server: str = "server"
 
 
 @dataclass
@@ -313,7 +319,60 @@ class SetupRunner:
                 "ENV_NOT_FILE", f"environment path is not a file: {self.options.env_path}"
             )
         actions.append(f"validate environment file {self.options.env_path}")
-        return SetupResult(actions=actions)
+        assignments = {
+            key: value
+            for key, value in parse_env_file(
+                self.options.env_path.read_text(encoding="utf-8")
+            )
+            if value is not None and key and not key.startswith("#")
+        }
+        if assignments.get("NOYRA_HOST", "127.0.0.1") != "127.0.0.1":
+            raise SetupError("UNSAFE_LISTENER", "local mode requires NOYRA_HOST=127.0.0.1")
+        actions.append("validate NOYRA_HOST=127.0.0.1")
+
+        token_file = assignments.get("NOYRA_OPERATOR_TOKEN_FILE")
+        token_inline = assignments.get("NOYRA_OPERATOR_TOKEN")
+        has_token = bool(token_inline)
+        if token_file:
+            token_path = Path(token_file)
+            with suppress(OSError):
+                has_token = has_token or bool(token_path.read_text(encoding="utf-8").strip())
+        if not has_token and not self.options.dry_run:
+            raise SetupError("OPERATOR_TOKEN_MISSING", "an operator token source is required")
+        actions.append("validate operator token source")
+
+        if self.options.dry_run:
+            actions.extend(
+                [
+                    "check root execution (deferred in dry-run)",
+                    "check /var/lib/noyra mount visibility (deferred in dry-run)",
+                    "check systemctl is-active noyra (deferred in dry-run)",
+                    "check live and ready health endpoints (deferred in dry-run)",
+                    f"SSH: ssh -N -L 8765:127.0.0.1:8765 {self.options.server}",
+                ]
+            )
+            return SetupResult(actions=actions, stdout="\n".join(actions) + "\n")
+
+        if platform.system().lower() == "linux":
+            if hasattr(os, "geteuid") and os.geteuid() != 0:
+                raise SetupError("ROOT_REQUIRED", "local checks require root")
+            if not Path("/var/lib/noyra").exists():
+                raise SetupError("DATA_MOUNT_MISSING", "/var/lib/noyra is not visible")
+            actions.append("validate /var/lib/noyra mount visibility")
+            active = self.runner.run(("systemctl", "is-active", "noyra"), check=False)
+            if active.returncode != 0 or active.stdout.strip() != "active":
+                raise SetupError("SERVICE_INACTIVE", "noyra service is not active")
+            actions.append("validate systemctl is-active noyra")
+            for endpoint in ("live", "ready"):
+                check = self.runner.run(
+                    ("curl", "--fail", f"http://127.0.0.1:8765/health/{endpoint}"), check=False
+                )
+                if check.returncode != 0:
+                    raise SetupError(
+                        "HEALTHCHECK_FAILED", f"health endpoint is unavailable: {endpoint}"
+                    )
+                actions.append(f"validate /health/{endpoint}")
+        return SetupResult(actions=actions, stdout="\n".join(actions) + "\n")
 
     def run_public(self) -> SetupResult:
         raise SetupError("NOT_IMPLEMENTED", "public deployment mode is implemented in a later task")

@@ -1,7 +1,9 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from noyra.__main__ import _setup_command
 from noyra.deployment_setup import (
     SetupError,
     create_backup,
@@ -12,6 +14,22 @@ from noyra.deployment_setup import (
     update_env_text,
     validate_hostname,
 )
+
+
+def invoke_setup(arguments: list[str]) -> SimpleNamespace:
+    from contextlib import redirect_stderr, redirect_stdout
+    from io import StringIO
+
+    stdout = StringIO()
+    stderr = StringIO()
+    try:
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            _setup_command(arguments)
+    except SystemExit as exc:
+        return SimpleNamespace(
+            exit_code=exc.code, stdout=stdout.getvalue(), stderr=stderr.getvalue()
+        )
+    return SimpleNamespace(exit_code=0, stdout=stdout.getvalue(), stderr=stderr.getvalue())
 
 
 def test_validate_hostname_accepts_dns_name() -> None:
@@ -51,3 +69,20 @@ def test_backup_restore(tmp_path: Path) -> None:
     restore_backup(record)
     assert source.read_text(encoding="utf-8") == "secret"
     assert "secret" not in record.metadata_path.read_text(encoding="utf-8")
+
+
+def test_setup_local_dry_run_does_not_mutate(tmp_path: Path) -> None:
+    env_path = tmp_path / "noyra.env"
+    env_path.write_text("NOYRA_HOST=127.0.0.1\n", encoding="utf-8")
+    result = invoke_setup(["--mode", "local", "--dry-run", "--env-file", str(env_path)])
+    assert result.exit_code == 0
+    assert env_path.read_text(encoding="utf-8") == "NOYRA_HOST=127.0.0.1\n"
+    assert "SSH" in result.stdout
+
+
+def test_setup_local_rejects_public_listener(tmp_path: Path) -> None:
+    env_path = tmp_path / "noyra.env"
+    env_path.write_text("NOYRA_HOST=0.0.0.0\n", encoding="utf-8")
+    result = invoke_setup(["--mode", "local", "--env-file", str(env_path)])
+    assert result.exit_code != 0
+    assert "NOYRA_SETUP_UNSAFE_LISTENER" in result.stderr
