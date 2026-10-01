@@ -3973,40 +3973,22 @@ class NoyraHTTPServer:
                     payload = self._request_json()
                     if payload is None:
                         return
-                    with owner.kernel.database.transaction() as connection:
-                        row = connection.execute(
-                            "SELECT target_id,reason_code,policy_revision FROM migration_proposals "
-                            "WHERE proposal_id=? AND subject_id=?",
-                            (proposal_id, owner.kernel.subject_id),
-                        ).fetchone()
-                        if row is None:
-                            self._json(
-                                HTTPStatus.NOT_FOUND,
-                                {"error": "migration_proposal_not_found"},
-                            )
-                            return
-                        reason = str(payload.get("reason", "rejected by operator"))
-                        now = utc_now()
-                        connection.execute(
-                            "UPDATE migration_proposals SET status='rejected', "
-                            "decided_at=?, decision_reason=? WHERE proposal_id=?",
-                            (now, reason[:512], proposal_id),
+                    try:
+                        rejected = owner.migration_manager.reject(
+                            proposal_id,
+                            actor=self._actor(),
+                            reason=str(payload.get("reason", "rejected by operator")),
                         )
-                    rejection_id = owner.migration_proposals.record_rejection(
-                        subject_id=owner.kernel.subject_id,
-                        target_id=str(row["target_id"]),
-                        reason_code=str(row["reason_code"]),
-                        reason=reason,
-                        policy_revision=int(row["policy_revision"]),
-                        cooldown_seconds=owner.migration_store.read_policy(
-                            owner.kernel.subject_id
-                        ).rejection_cooldown_seconds,
-                        actor=self._actor(),
-                    )
-                    self._json(
-                        HTTPStatus.OK,
-                        {"proposal_id": proposal_id, "rejection_id": rejection_id},
-                    )
+                    except NotFoundError:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "migration_proposal_not_found"})
+                        return
+                    except ValueError:
+                        self._json(
+                            HTTPStatus.CONFLICT,
+                            {"error": "migration_proposal_rejection_failed"},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, rejected.__dict__)
                     return
                 if self.path.startswith("/api/admin/migration/tasks/") and self.path.endswith(
                     "/cutover"
@@ -4021,8 +4003,8 @@ class NoyraHTTPServer:
                         .strip("/")
                     )
                     try:
-                        result = self.migration_cutover.prepare(task_id)
-                        committed = self.migration_cutover.commit(task_id)
+                        result = self.migration_cutover.prepare(task_id, actor=self._actor())
+                        committed = self.migration_cutover.commit(task_id, actor=self._actor())
                     except ValueError:
                         self._json(HTTPStatus.CONFLICT, {"error": "migration_cutover_rejected"})
                         return
@@ -4045,7 +4027,9 @@ class NoyraHTTPServer:
                         return
                     try:
                         result = self.migration_cutover.rollback(
-                            task_id, str(payload.get("reason", "operator rollback"))
+                            task_id,
+                            str(payload.get("reason", "operator rollback")),
+                            actor=self._actor(),
                         )
                     except ValueError:
                         self._json(HTTPStatus.CONFLICT, {"error": "migration_rollback_rejected"})

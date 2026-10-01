@@ -9,6 +9,9 @@ from dataclasses import dataclass
 from noyra.core.database import Database
 from noyra.core.types import utc_now
 
+from .manager import MigrationManager
+from .policy import MigrationStore
+
 
 @dataclass(frozen=True)
 class CutoverPlan:
@@ -22,51 +25,45 @@ class CutoverPlan:
 class CutoverCoordinator:
     def __init__(self, database: Database):
         self.database = database
+        self.manager = MigrationManager(database, MigrationStore(database))
 
-    def prepare(self, task_id: str) -> CutoverPlan:
-        with self.database.transaction() as connection:
-            row = connection.execute(
-                "SELECT task_id,source_epoch,target_id,status FROM migration_tasks WHERE task_id=?",
-                (task_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("migration task not found")
-            if row["status"] not in {"approved", "preparing"}:
-                raise ValueError("migration task is not ready for cutover")
-            connection.execute(
-                "UPDATE migration_tasks SET status='preparing',updated_at=? WHERE task_id=?",
-                (utc_now(), task_id),
-            )
-            return CutoverPlan(task_id, row["source_epoch"], row["target_id"], "preparing", utc_now())
+    def prepare(self, task_id: str, *, actor: str = "operator") -> CutoverPlan:
+        task = self.manager.get_task(task_id)
+        if task.status == "approved":
+            task = self.manager.transition_task(task_id, "preparing", actor=actor)
+        elif task.status != "preparing":
+            raise ValueError("migration task is not ready for cutover")
+        return CutoverPlan(task.task_id, self._source_epoch(task_id), task.target_id, task.status, utc_now())
 
-    def commit(self, task_id: str) -> dict[str, str]:
-        with self.database.transaction() as connection:
-            row = connection.execute(
-                "SELECT status FROM migration_tasks WHERE task_id=?", (task_id,)
-            ).fetchone()
-            if row is None:
-                raise ValueError("migration task not found")
-            if row["status"] not in {"preparing", "validating", "cutover"}:
-                raise ValueError("migration task is not in cutover state")
-            connection.execute(
-                "UPDATE migration_tasks SET status='committed',updated_at=? WHERE task_id=?",
-                (utc_now(), task_id),
-            )
+    def commit(self, task_id: str, *, actor: str = "operator") -> dict[str, str]:
+        task = self.manager.get_task(task_id)
+        if task.status == "committed":
+            return {"task_id": task_id, "status": "committed"}
+        if task.status not in {"preparing", "validating", "cutover"}:
+            raise ValueError("migration task is not in cutover state")
+        self.manager.transition_task(task_id, "committed", actor=actor)
         return {"task_id": task_id, "status": "committed"}
 
-    def rollback(self, task_id: str, reason: str) -> dict[str, str]:
+    def rollback(self, task_id: str, reason: str, *, actor: str = "operator") -> dict[str, str]:
         if not reason.strip():
             raise ValueError("rollback reason is required")
-        with self.database.transaction() as connection:
-            row = connection.execute(
-                "SELECT status FROM migration_tasks WHERE task_id=?", (task_id,)
-            ).fetchone()
-            if row is None:
-                raise ValueError("migration task not found")
-            if row["status"] in {"committed", "rolled_back"}:
-                raise ValueError("migration task cannot be rolled back")
-            connection.execute(
-                "UPDATE migration_tasks SET status='rolled_back',error_code=?,updated_at=? WHERE task_id=?",
-                (reason.strip()[:256], utc_now(), task_id),
+        task = self.manager.get_task(task_id)
+        if task.status in {"committed", "rolled_back"}:
+            raise ValueError("migration task cannot be rolled back")
+        if task.status != "rolling_back":
+            self.manager.transition_task(
+                task_id, "rolling_back", actor=actor, error_code=reason.strip()[:256]
             )
+        self.manager.transition_task(
+            task_id, "rolled_back", actor=actor, error_code=reason.strip()[:256]
+        )
         return {"task_id": task_id, "status": "rolled_back"}
+
+    def _source_epoch(self, task_id: str) -> str:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT source_epoch FROM migration_tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+        if row is None:
+            raise ValueError("migration task not found")
+        return str(row["source_epoch"])

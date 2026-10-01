@@ -32,17 +32,24 @@ class TransferSession:
     def send(
         self, source: Path | str, destination: Path | str, *, stop_after_chunks: int | None = None
     ) -> TransferReceipt:
-        source_path = Path(source).expanduser().resolve()
+        source_input = Path(source).expanduser()
         destination_input = Path(destination).expanduser()
         if ".." in destination_input.parts:
             raise ValueError("destination path cannot contain parent traversal")
+        self._reject_symlink(source_input, "source")
+        self._reject_symlink(destination_input, "destination")
+        source_path = source_input.resolve()
         destination_path = destination_input.resolve()
         self._validate_paths(source_path, destination_path)
-        if not source_path.is_file() or source_path.is_symlink():
+        if not source_path.is_file():
             raise ValueError("source must be a regular file")
         size = source_path.stat().st_size
         if size > MAX_ARTIFACT_BYTES:
             raise ValueError("artifact exceeds size limit")
+        if stop_after_chunks is not None and (
+            type(stop_after_chunks) is not int or stop_after_chunks < 1
+        ):
+            raise ValueError("stop chunk count is invalid")
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         if destination_path.exists() and destination_path.is_symlink():
             raise ValueError("destination cannot be a symlink")
@@ -59,6 +66,8 @@ class TransferSession:
                 artifact.update(chunk)
                 target_stream.write(chunk)
                 index += 1
+                if index > MAX_CHUNKS:
+                    raise ValueError("artifact has too many chunks")
                 if stop_after_chunks is not None and index >= stop_after_chunks:
                     target_stream.flush()
                     os.fsync(target_stream.fileno())
@@ -74,14 +83,36 @@ class TransferSession:
         )
 
     def resume(self, receipt: TransferReceipt) -> TransferReceipt:
-        source_path = Path(receipt.source).resolve()
-        destination_path = Path(receipt.destination).resolve()
+        source_input = Path(receipt.source).expanduser()
+        destination_input = Path(receipt.destination).expanduser()
+        self._reject_symlink(source_input, "source")
+        self._reject_symlink(destination_input, "destination")
+        source_path = source_input.resolve()
+        destination_path = destination_input.resolve()
         self._validate_paths(source_path, destination_path)
-        if not source_path.is_file() or receipt.next_chunk < 0:
+        if (
+            not source_path.is_file()
+            or type(receipt.next_chunk) is not int
+            or receipt.next_chunk < 0
+            or receipt.next_chunk != len(receipt.chunk_hashes)
+            or receipt.next_chunk > MAX_CHUNKS
+        ):
             raise ValueError("transfer source is unavailable")
+        if source_path.stat().st_size != receipt.byte_size:
+            raise ValueError("transfer resume prefix is invalid")
         expected_prefix = receipt.next_chunk * receipt.chunk_bytes
         if not destination_path.is_file() or destination_path.stat().st_size != expected_prefix:
             raise ValueError("transfer resume prefix is invalid")
+        with (
+            source_path.open("rb") as source_prefix,
+            destination_path.open("rb") as destination_prefix,
+        ):
+            for expected_hash in receipt.chunk_hashes:
+                chunk = source_prefix.read(receipt.chunk_bytes)
+                if hashlib.sha256(chunk).hexdigest() != expected_hash:
+                    raise ValueError("transfer resume prefix is invalid")
+                if destination_prefix.read(len(chunk)) != chunk:
+                    raise ValueError("transfer resume prefix is invalid")
         with source_path.open("rb") as source_stream:
             source_stream.seek(expected_prefix)
             with destination_path.open("ab") as target_stream:
@@ -91,6 +122,8 @@ class TransferSession:
                     while chunk := full_stream.read(receipt.chunk_bytes):
                         artifact.update(chunk)
                 while chunk := source_stream.read(receipt.chunk_bytes):
+                    if len(chunk_hashes) >= MAX_CHUNKS:
+                        raise ValueError("artifact has too many chunks")
                     chunk_hashes.append(hashlib.sha256(chunk).hexdigest())
                     target_stream.write(chunk)
                 target_stream.flush()
@@ -121,3 +154,11 @@ class TransferSession:
             raise ValueError("source and destination must differ")
         if destination.name in {"", ".", ".."}:
             raise ValueError("destination path is invalid")
+
+    @staticmethod
+    def _reject_symlink(path: Path, label: str) -> None:
+        current = path
+        while current != current.parent:
+            if current.is_symlink():
+                raise ValueError(f"{label} cannot be a symlink")
+            current = current.parent
