@@ -19,7 +19,10 @@ def test_cutover_can_prepare_commit_and_reject_post_commit_rollback(tmp_path) ->
     db = Database(tmp_path / "noyra.sqlite3")
     IdentityStore(db).ensure("Noyra-0001", "2" * 64)
     private = Ed25519PrivateKey.generate()
-    TargetRegistry(db, MigrationStore(db)).register("Noyra-0001", target_id="target-1", public_key=base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode(), endpoint="https://target.example", capabilities={}, region=None, provider=None, release_sha="a" * 40, os_arch="linux-amd64", encrypted_volume=True, actor="operator")
+    registry = TargetRegistry(db, MigrationStore(db))
+    registry.register("Noyra-0001", target_id="target-1", public_key=base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode(), endpoint="https://target.example", capabilities={}, region=None, provider=None, release_sha="a" * 40, os_arch="linux-amd64", encrypted_volume=True, actor="operator")
+    challenge = registry.issue_challenge("target-1", source_epoch="epoch-1")
+    registry.attest("target-1", challenge, base64.urlsafe_b64encode(private.sign(challenge.signing_bytes())).decode(), actor="operator")
     manager = MigrationManager(db, MigrationStore(db))
     proposal = manager.create_proposal(subject_id="Noyra-0001", target_id="target-1", policy_revision=1, reason_code="maintenance", reason="planned", expires_at="2099-01-01T00:00:00+00:00")
     task = manager.approve(proposal.proposal_id, actor="operator", idempotency_key="cutover-1")
@@ -38,6 +41,9 @@ def test_cutover_fences_epoch_and_source_admission(tmp_path) -> None:
         endpoint="https://target.example", capabilities={}, region=None, provider=None,
         release_sha="a" * 40, os_arch="linux-amd64", encrypted_volume=True, actor="operator",
     )
+    registry = TargetRegistry(db, MigrationStore(db))
+    challenge = registry.issue_challenge("target-1", source_epoch="epoch-1")
+    registry.attest("target-1", challenge, base64.urlsafe_b64encode(private.sign(challenge.signing_bytes())).decode(), actor="operator")
     manager = MigrationManager(db, MigrationStore(db))
     proposal = manager.create_proposal(
         subject_id="Noyra-0001", target_id="target-1", policy_revision=1,

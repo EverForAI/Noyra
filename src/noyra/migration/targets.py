@@ -39,6 +39,8 @@ class TargetRegistration:
     os_arch: str
     encrypted_volume: bool
     status: str
+    attested_at: str | None
+    attestation_epoch: str | None
     created_at: str
     updated_at: str
 
@@ -102,7 +104,7 @@ class TargetRegistry:
                    target_id, subject_id, public_key, key_fingerprint, enrollment_generation,
                    endpoint, capabilities_json, region, provider, release_sha, os_arch,
                    encrypted_volume, status, created_at, updated_at, state_hash
-                ) VALUES (?,?,?,?,1,?,?,?,?,?,?,1,'active',?,?,?)""",
+                ) VALUES (?,?,?,?,1,?,?,?,?,?,?,1,'pending',?,?,?)""",
                 (
                     target_id,
                     subject_id,
@@ -129,7 +131,7 @@ class TargetRegistry:
                             "release_sha": release_sha.lower(),
                             "os_arch": os_arch,
                             "encrypted_volume": True,
-                            "status": "active",
+                            "status": "pending",
                             "created_at": now,
                             "updated_at": now,
                         }
@@ -156,7 +158,7 @@ class TargetRegistry:
             ).fetchone()
             if row is None:
                 raise NotFoundError(f"migration target not found: {target_id}")
-            if row["status"] != "active":
+            if row["status"] not in {"pending", "active"}:
                 raise ValueError("target is revoked or quarantined")
             connection.execute(
                 "INSERT INTO migration_target_challenges(nonce,target_id,source_epoch,expires_at,issued_at) VALUES (?,?,?,?,?)",
@@ -185,7 +187,7 @@ class TargetRegistry:
             ).fetchone()
             if row is None:
                 raise NotFoundError(f"migration target not found: {target_id}")
-            if row["status"] != "active":
+            if row["status"] not in {"pending", "active"}:
                 raise ValueError("target is revoked or quarantined")
             stored = connection.execute(
                 "SELECT * FROM migration_target_challenges WHERE nonce=? AND target_id=?",
@@ -204,6 +206,11 @@ class TargetRegistry:
             connection.execute(
                 "UPDATE migration_target_challenges SET consumed_at=? WHERE nonce=? AND consumed_at IS NULL",
                 (utc_now(), challenge.nonce),
+            )
+            attested_at = evidence.verified_at
+            connection.execute(
+                "UPDATE migration_targets SET status='active',attested_at=?,attestation_epoch=?,updated_at=? WHERE target_id=? AND status='pending'",
+                (attested_at, challenge.source_epoch, attested_at, target_id),
             )
             MigrationStore._append_audit(
                 connection,
@@ -268,5 +275,7 @@ class TargetRegistry:
             key_fingerprint=row["key_fingerprint"], enrollment_generation=int(row["enrollment_generation"]),
             endpoint=row["endpoint"], capabilities=json.loads(row["capabilities_json"]), region=row["region"],
             provider=row["provider"], release_sha=row["release_sha"], os_arch=row["os_arch"],
-            encrypted_volume=bool(row["encrypted_volume"]), status=row["status"], created_at=row["created_at"], updated_at=row["updated_at"],
+            encrypted_volume=bool(row["encrypted_volume"]), status=row["status"],
+            attested_at=row["attested_at"], attestation_epoch=row["attestation_epoch"],
+            created_at=row["created_at"], updated_at=row["updated_at"],
         )

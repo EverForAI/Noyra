@@ -17,6 +17,13 @@ def _manager(tmp_path):
     IdentityStore(db).ensure("Noyra-0001", "f" * 64)
     private = Ed25519PrivateKey.generate()
     TargetRegistry(db, MigrationStore(db)).register("Noyra-0001", target_id="target-1", public_key=base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode(), endpoint="https://target.example", capabilities={}, region=None, provider=None, release_sha="a" * 40, os_arch="linux-amd64", encrypted_volume=True, actor="operator")
+    registry = TargetRegistry(db, MigrationStore(db))
+    challenge = registry.issue_challenge("target-1", source_epoch="epoch-1")
+    registry.attest(
+        "target-1", challenge,
+        base64.urlsafe_b64encode(private.sign(challenge.signing_bytes())).decode(),
+        actor="operator",
+    )
     return db, MigrationManager(db, MigrationStore(db))
 
 

@@ -18,7 +18,8 @@ def _manager(tmp_path):
     db = Database(tmp_path / "noyra.sqlite3")
     IdentityStore(db).ensure("Noyra-0001", "f" * 64)
     private = Ed25519PrivateKey.generate()
-    TargetRegistry(db, MigrationStore(db)).register(
+    registry = TargetRegistry(db, MigrationStore(db))
+    registry.register(
         "Noyra-0001",
         target_id="target-1",
         public_key=base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode(),
@@ -29,6 +30,12 @@ def _manager(tmp_path):
         release_sha="a" * 40,
         os_arch="linux-amd64",
         encrypted_volume=True,
+        actor="operator",
+    )
+    challenge = registry.issue_challenge("target-1", source_epoch="epoch-1")
+    registry.attest(
+        "target-1", challenge,
+        base64.urlsafe_b64encode(private.sign(challenge.signing_bytes())).decode(),
         actor="operator",
     )
     return db, MigrationManager(db, MigrationStore(db))

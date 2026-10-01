@@ -351,13 +351,16 @@ class MigrationManager:
     @staticmethod
     def _ensure_target(connection: Any, subject_id: str, target_id: str) -> None:
         subject = connection.execute("SELECT 1 FROM subject_identity WHERE subject_id=?", (subject_id,)).fetchone()
-        target = connection.execute("SELECT subject_id,status FROM migration_targets WHERE target_id=?", (target_id,)).fetchone()
+        target = connection.execute(
+            "SELECT subject_id,status,attested_at FROM migration_targets WHERE target_id=?",
+            (target_id,),
+        ).fetchone()
         if subject is None:
             raise NotFoundError(f"subject not found: {subject_id}")
         if target is None or target["subject_id"] != subject_id:
             raise NotFoundError(f"migration target not found: {target_id}")
-        if target["status"] != "active":
-            raise ValueError("migration target is not active")
+        if target["status"] != "active" or not target["attested_at"]:
+            raise ValueError("migration target has not completed trust attestation")
 
     @staticmethod
     def _policy_revision(connection: Any, subject_id: str) -> int | None:
