@@ -17,7 +17,7 @@ Implemented Task 3 and committed the public HTTPS setup changes.
 
 ## Validation
 
-- `python -m pytest tests/test_deployment_setup.py tests/test_deployment_contract.py -q`: 19 passed.
+- `python -m pytest tests/test_deployment_setup.py tests/test_deployment_contract.py -q`: 26 passed.
 - `python -m ruff check src/noyra/deployment_setup.py tests/test_deployment_setup.py`: passed.
 - `git diff --check`: passed.
 
@@ -32,8 +32,8 @@ Implemented Task 3 and committed the public HTTPS setup changes.
 - Normalized command invocation errors and guaranteed rollback after mutation; rollback failures now return `NOYRA_SETUP_ROLLBACK_FAILED`.
 - Added focused tests for DNS pending, root/listener/port guards, command errors, rollback errors, and custom Caddy path rejection.
 
-Updated validation: `python -m pytest tests/test_deployment_setup.py tests/test_deployment_contract.py -q` (25 passed) and Ruff passed.
+Updated validation: `python -m pytest tests/test_deployment_setup.py tests/test_deployment_contract.py -q` (26 passed) and Ruff passed.
 
-Compatibility follow-up: omitted `NOYRA_HOST` and `NOYRA_PORT` now use the service defaults (`127.0.0.1` and `8765`), while explicit unsafe values remain rejected. Focused validation now reports 26 passed.
+Compatibility follow-up: omitted `NOYRA_HOST` and `NOYRA_PORT` now use the service defaults (`127.0.0.1` and `8765`), while explicit unsafe values remain rejected.
 
 CI follow-up: root enforcement is enabled only for the real `SubprocessRunner`; injected test runners can exercise public mutations on non-root CI hosts. The real-runner non-root guard has a focused test. Current validation: `26 passed`; Ruff passed.
