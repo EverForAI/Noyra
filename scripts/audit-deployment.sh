@@ -4,6 +4,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/env.sh"
 
+# These checks intentionally inspect repository sources and templates only. They
+# must remain usable before a release virtualenv has been created.
+grep -q 'from noyra.deployment_setup import' src/noyra/__main__.py
+grep -q '^noyra = "noyra.__main__:main"' pyproject.toml
+grep -q 'LoadCredential=tunnel-token:/etc/noyra/credentials/cloudflare-tunnel-token' \
+  deploy/systemd/cloudflared-noyra.service.example
+grep -q 'reverse_proxy 127.0.0.1:8765' deploy/caddy/noyra.Caddyfile.example
+
 python="${NOYRA_PYTHON:-$NOYRA_PROJECT_ROOT/.venv/bin/python}"
 
 echo "Running Ubuntu service and deployment audit on $(uname -s)..."

@@ -2,6 +2,7 @@
 # Caddy obtains and renews the HTTPS certificates automatically. The public and
 # management origins are separate hostnames, while Noyra still listens only on
 # the loopback interface.
+# Generated setup path: noyra setup --mode public --public-domain <domain> --admin-domain admin.<domain>
 #
 # Set these values in /etc/noyra/noyra.env before starting the service:
 # NOYRA_PUBLIC_SITE_URL=https://archive.example.com
@@ -14,6 +15,7 @@ archive.example.com {
         header_up Host {host}
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}
+        header_up X-Real-IP {remote_host}
     }
 }
 
@@ -23,5 +25,6 @@ admin.example.com {
         header_up Host {host}
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}
+        header_up X-Real-IP {remote_host}
     }
 }

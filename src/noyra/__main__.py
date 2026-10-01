@@ -9,6 +9,71 @@ from typing import NoReturn
 from noyra import __version__
 
 
+def _setup_command(arguments: list[str]) -> None:
+    """Run deployment setup while keeping failures machine-readable."""
+    from noyra.deployment_setup import SetupError, SetupOptions, SetupRunner
+
+    parser = argparse.ArgumentParser(prog="noyra setup")
+    parser.add_argument("--mode", choices=("local", "public", "cloudflare"), default="local")
+    parser.add_argument("--public-domain")
+    parser.add_argument("--admin-domain")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--non-interactive", action="store_true")
+    parser.add_argument("--replace", action="store_true")
+    parser.add_argument(
+        "--env-file", dest="env_path", type=Path, default=Path("/etc/noyra/noyra.env")
+    )
+    parser.add_argument(
+        "--caddyfile", dest="caddy_path", type=Path, default=Path("/etc/caddy/Caddyfile")
+    )
+    parser.add_argument("--backup-root", type=Path, default=Path("/var/backups/noyra"))
+    parser.add_argument("--tunnel-token-file", type=Path)
+    parser.add_argument("--server", default=os.getenv("NOYRA_SERVER", "server"))
+    options = parser.parse_args(arguments)
+    try:
+        prompted_tunnel_token = None
+        if (
+            options.mode in ("public", "cloudflare")
+            and options.non_interactive
+            and (not options.public_domain or not options.admin_domain)
+        ):
+            raise SetupError(
+                "DOMAINS_REQUIRED",
+                "--public-domain and --admin-domain are required in non-interactive mode",
+            )
+        if (
+            options.mode == "cloudflare"
+            and options.tunnel_token_file is None
+            and not options.non_interactive
+        ):
+            prompted_tunnel_token = getpass.getpass("Cloudflare tunnel token: ")
+        setup_options = SetupOptions(
+            mode=options.mode,
+            public_domain=options.public_domain,
+            admin_domain=options.admin_domain,
+            env_path=options.env_path,
+            caddy_path=options.caddy_path,
+            tunnel_token_path=options.tunnel_token_file,
+            tunnel_token=prompted_tunnel_token,
+            dry_run=options.dry_run,
+            non_interactive=options.non_interactive,
+            replace=options.replace,
+            backup_root=options.backup_root,
+            server=options.server,
+        )
+        result = SetupRunner(setup_options).run()
+    except SetupError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(2) from None
+    if not result.ok:
+        print(result.stderr or "NOYRA_SETUP_FAILED: setup failed", file=sys.stderr)
+        raise SystemExit(2)
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+    elif result.actions:
+        print("\n".join(result.actions))
+
+
 def _backup_key_command(arguments: list[str]) -> None:
     from noyra.core.at_rest import BackupKeyring
 
@@ -109,6 +174,9 @@ def _wallet_command(arguments: list[str]) -> None:
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "setup":
+        _setup_command(sys.argv[2:])
+        return
     if len(sys.argv) > 1 and sys.argv[1] == "serve":
         del sys.argv[1]
         from noyra.service import main as service_main

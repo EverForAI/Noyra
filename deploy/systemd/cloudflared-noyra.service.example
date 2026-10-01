@@ -1,0 +1,17 @@
+[Unit]
+Description=Noyra Cloudflare Tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+LoadCredential=tunnel-token:/etc/noyra/credentials/cloudflare-tunnel-token
+ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate run --token-file %d/tunnel-token
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

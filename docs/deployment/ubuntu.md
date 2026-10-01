@@ -83,6 +83,52 @@ choose a custom `NOYRA_PUBLIC_HASH_KEY_FILE`, provision a private file containin
 before running the production preflight. Replacing the key deliberately invalidates old client
 buckets and outstanding CAPTCHA ownership; do not rotate it as routine maintenance.
 
+## Unified setup command
+
+After the release is installed, use the setup command for a supported local,
+public HTTPS, or Cloudflare Tunnel entry point. It keeps Noyra on
+`127.0.0.1:8765` and validates the requested host settings before changing the
+machine. Run the matching dry run first:
+
+```bash
+sudo noyra setup --mode local --dry-run
+sudo noyra setup --mode local
+
+sudo noyra setup --mode public \
+  --public-domain archive.example.com \
+  --admin-domain admin.example.com \
+  --dry-run
+sudo noyra setup --mode public \
+  --public-domain archive.example.com \
+  --admin-domain admin.example.com
+
+sudo noyra setup --mode cloudflare \
+  --public-domain archive.example.com \
+  --admin-domain admin.example.com \
+  --tunnel-token-file /etc/noyra/credentials/cloudflare-tunnel-token \
+  --dry-run
+sudo noyra setup --mode cloudflare \
+  --public-domain archive.example.com \
+  --admin-domain admin.example.com \
+  --tunnel-token-file /etc/noyra/credentials/cloudflare-tunnel-token
+```
+
+Public mode requires DNS A/AAAA records for both names and ports 80/443 open to
+Caddy. Cloudflare mode requires the same hostnames to be configured as Tunnel
+Public Hostnames in the Cloudflare dashboard, targeting
+`http://127.0.0.1:8765`. Enter credentials through root-owned protected files or
+the command's hidden prompt; never place tokens in command history or
+`noyra.env`. The setup flow writes a rollback backup and restores prior service
+state if readiness checks fail. Use an SSH loopback tunnel as a fallback while
+repairing DNS or the proxy:
+
+```bash
+ssh -N -L 8765:127.0.0.1:8765 operator@server.example.com
+```
+
+See [`setup-modes.md`](setup-modes.md) for prerequisites, Cloudflare token
+handling, rollback details, and the manual Nginx/Caddy path.
+
 ## Single-disk encrypted storage
 
 When a second data disk is not practical, the supported personal-deployment option is a LUKS2
