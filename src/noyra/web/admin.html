@@ -36,6 +36,7 @@
         <button class="nav-item" data-section="capabilities" type="button">能力授权</button>
         <button class="nav-item" data-section="channels" type="button">通讯渠道</button>
         <button class="nav-item" data-section="wallet" type="button">钱包采集</button>
+        <button class="nav-item" data-section="migration" type="button">迁移与庇护所</button>
         <button class="nav-item" data-section="runtime" type="button">运行防护</button>
       </nav>
       <div class="sidebar-footer">
@@ -96,6 +97,13 @@
           <div id="retention-summary" class="summary-list"><div class="muted">正在读取保留设置…</div></div>
           <p class="form-status" id="retention-status" role="status"></p>
         </article>
+      </section>
+      <section class="admin-section" data-section-panel="migration" hidden>
+        <div class="section-intro"><div><p class="eyebrow">TRUSTED MIGRATION</p><h2>迁移与庇护所</h2><p>迁移默认关闭。开启后默认需要人工审批；目标必须注册、完成签名挑战并通过加密存储与版本检查。</p></div></div>
+        <article class="surface-card"><div class="card-heading"><div><h2>迁移策略</h2><p class="muted">本地钱包迁移需要单独开启和二次批准，外部 signer 只重新绑定身份。</p></div><button class="text-button" id="refresh-migration" type="button">更新</button></div>
+          <form id="migration-policy-form" class="model-grid"><label><span>开启迁移</span><input id="migration-enabled" type="checkbox"></label><label for="migration-approval-mode"><span>审批模式</span><select id="migration-approval-mode"><option value="manual">人工审批</option><option value="policy_auto">策略自动</option><option value="emergency_recovery">紧急恢复</option><option value="disabled">关闭</option></select></label><label for="migration-cooldown"><span>拒绝后冷却天数</span><input id="migration-cooldown" type="number" min="0" max="365"></label><label for="migration-wallet-mode"><span>钱包模式</span><select id="migration-wallet-mode"><option value="external_signer_rebind">外部 signer 重新绑定</option><option value="local_wallet_transfer">本地钱包迁移</option><option value="disabled">不迁移钱包</option></select></label><label><span>允许本地钱包迁移</span><input id="migration-local-wallet" type="checkbox"></label><button type="submit">保存迁移策略</button></form><p class="form-status" id="migration-status" role="status"></p><div id="migration-policy-summary" class="summary-list"></div></article>
+        <article class="surface-card"><div class="card-heading"><h2>已注册目标</h2></div><div id="migration-target-list" class="resource-list"></div></article>
+        <article class="surface-card"><div class="card-heading"><h2>迁移提案</h2></div><div id="migration-proposal-list" class="resource-list"></div></article>
       </section>
       <section class="admin-section" data-section-panel="conversation" hidden>
         <div class="section-intro"><div><p class="eyebrow">PRIVATE CHANNEL</p><h2>与主体交流</h2><p>消息会进入认知流程，回复、沉默、延迟和失败都会保留明确状态。</p></div></div>

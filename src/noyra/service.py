@@ -107,7 +107,7 @@ from noyra.knowledge import (
     CommonKnowledgeStore,
     CommonKnowledgeSyncError,
 )
-from noyra.migration import MigrationStore, TargetRegistry
+from noyra.migration import MigrationManager, MigrationProposalStore, MigrationStore, TargetRegistry
 from noyra.model import (
     CognitiveResourceGroupInput,
     CognitiveResourceGroupRecord,
@@ -1470,6 +1470,8 @@ class NoyraHTTPServer:
         )
         self.migration_store = MigrationStore(kernel.database)
         self.migration_targets = TargetRegistry(kernel.database, self.migration_store)
+        self.migration_proposals = MigrationProposalStore(kernel.database)
+        self.migration_manager = MigrationManager(kernel.database, self.migration_store)
         handler = self._handler_type()
         self._rate_lock = threading.Lock()
         self._request_times: dict[str, deque[float]] = defaultdict(deque)
@@ -2378,6 +2380,26 @@ class NoyraHTTPServer:
                         item["capabilities"] = json.loads(item.pop("capabilities_json"))
                         output.append(item)
                     self._json(HTTPStatus.OK, output)
+                    return
+                if parsed.path == "/api/admin/migration/proposals":
+                    if not self._authorized("operator"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    with owner.kernel.database.connection() as connection:
+                        rows = connection.execute(
+                            "SELECT proposal_id,subject_id,target_id,policy_revision,status,"
+                            "reason_code,reason,evidence_json,benefit_score,risk_score,"
+                            "expires_at,created_at,decided_at,decision_reason FROM "
+                            "migration_proposals WHERE subject_id=? "
+                            "ORDER BY created_at DESC LIMIT ?",
+                            (owner.kernel.subject_id, limit),
+                        ).fetchall()
+                    items = []
+                    for row in rows:
+                        item = dict(row)
+                        item["evidence"] = json.loads(item.pop("evidence_json"))
+                        items.append(item)
+                    self._json(HTTPStatus.OK, items)
                     return
                 if (
                     parsed.path != "/health"
@@ -3879,6 +3901,87 @@ class NoyraHTTPServer:
                         )
                         return
                     self._json(HTTPStatus.OK, {"target_id": target_id, "status": "revoked"})
+                    return
+                if self.path.startswith("/api/admin/migration/proposals/") and self.path.endswith(
+                    "/approve"
+                ):
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    proposal_id = (
+                        self.path.removeprefix("/api/admin/migration/proposals/")
+                        .removesuffix("/approve")
+                        .strip("/")
+                    )
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    try:
+                        task = owner.migration_manager.approve(
+                            proposal_id,
+                            actor=self._actor(),
+                            idempotency_key=str(payload.get("idempotency_key", proposal_id)),
+                        )
+                    except Exception as error:
+                        status = (
+                            HTTPStatus.NOT_FOUND
+                            if isinstance(error, NotFoundError)
+                            else HTTPStatus.CONFLICT
+                        )
+                        self._json(status, {"error": "migration_proposal_approval_failed"})
+                        return
+                    self._json(HTTPStatus.ACCEPTED, task.__dict__)
+                    return
+                if self.path.startswith("/api/admin/migration/proposals/") and self.path.endswith(
+                    "/reject"
+                ):
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    proposal_id = (
+                        self.path.removeprefix("/api/admin/migration/proposals/")
+                        .removesuffix("/reject")
+                        .strip("/")
+                    )
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    with owner.kernel.database.transaction() as connection:
+                        row = connection.execute(
+                            "SELECT target_id,reason_code,policy_revision FROM migration_proposals "
+                            "WHERE proposal_id=? AND subject_id=?",
+                            (proposal_id, owner.kernel.subject_id),
+                        ).fetchone()
+                        if row is None:
+                            self._json(
+                                HTTPStatus.NOT_FOUND,
+                                {"error": "migration_proposal_not_found"},
+                            )
+                            return
+                        reason = str(payload.get("reason", "rejected by operator"))
+                        now = utc_now()
+                        connection.execute(
+                            "UPDATE migration_proposals SET status='rejected', "
+                            "decided_at=?, decision_reason=? WHERE proposal_id=?",
+                            (now, reason[:512], proposal_id),
+                        )
+                    rejection_id = owner.migration_proposals.record_rejection(
+                        subject_id=owner.kernel.subject_id,
+                        target_id=str(row["target_id"]),
+                        reason_code=str(row["reason_code"]),
+                        reason=reason,
+                        policy_revision=int(row["policy_revision"]),
+                        cooldown_seconds=owner.migration_store.read_policy(
+                            owner.kernel.subject_id
+                        ).rejection_cooldown_seconds,
+                        actor=self._actor(),
+                    )
+                    self._json(
+                        HTTPStatus.OK,
+                        {"proposal_id": proposal_id, "rejection_id": rejection_id},
+                    )
                     return
                 if self.path == "/api/admin/upgrade":
                     self._start_upgrade()

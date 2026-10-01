@@ -47,7 +47,13 @@ async function request(path, options = {}) {
 }
 
 function setStatus(target, message, error = false) { const node = $(target); node.textContent = message || ""; node.classList.toggle("error", error); }
-function showSection(section) { activeSection = section; document.querySelectorAll("[data-section-panel]").forEach((panel) => { panel.hidden = panel.dataset.sectionPanel !== section; }); document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.section === section)); $("#page-title").textContent = { overview: "总览", conversation: "私密交流", "public-posts": "内容审核", models: "认知资源", search: "搜索配置", capabilities: "能力授权", channels: "通讯渠道", wallet: "钱包采集", runtime: "运行防护" }[section]; }
+function showSection(section) { activeSection = section; document.querySelectorAll("[data-section-panel]").forEach((panel) => { panel.hidden = panel.dataset.sectionPanel !== section; }); document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.section === section)); $("#page-title").textContent = { overview: "总览", conversation: "私密交流", "public-posts": "内容审核", models: "认知资源", search: "搜索配置", capabilities: "能力授权", channels: "通讯渠道", wallet: "钱包采集", migration: "迁移与庇护所", runtime: "运行防护" }[section]; }
+async function loadMigration() {
+  const [policy, targets, proposals] = await Promise.all([request("/api/v1/admin/migration/policy"), request("/api/v1/admin/migration/targets"), request("/api/v1/admin/migration/proposals")]);
+  $("#migration-enabled").checked = Boolean(policy.enabled); $("#migration-approval-mode").value = policy.approval_mode; $("#migration-cooldown").value = Math.round((policy.rejection_cooldown_seconds || 0) / 86400); $("#migration-wallet-mode").value = policy.wallet_mode; $("#migration-local-wallet").checked = Boolean(policy.local_wallet_transfer_enabled); $("#migration-policy-summary").innerHTML = summaryRows([["当前状态", policy.enabled ? "已开启" : "已关闭"], ["策略版本", policy.revision], ["审批模式", policy.approval_mode], ["钱包模式", policy.wallet_mode]]);
+  $("#migration-target-list").innerHTML = targets.length ? targets.map((item) => `<article class="resource-item"><div><h3>${esc(item.target_id)}</h3><p>${esc(item.status)} · ${esc(item.region || "未设置区域")}</p><small>${esc(item.endpoint)} · ${esc(item.key_fingerprint)}</small></div></article>`).join("") : '<div class="muted">尚未注册迁移目标</div>';
+  $("#migration-proposal-list").innerHTML = proposals.length ? proposals.map((item) => `<article class="resource-item"><div><h3>${esc(item.reason_code)}</h3><p>${esc(item.status)} · 目标 ${esc(item.target_id)}</p><small>${esc(item.reason)}</small></div></article>`).join("") : '<div class="muted">暂无迁移提案</div>';
+}
 function summaryRows(items) { return items.map(([label, value]) => `<div class="summary-row"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join(""); }
 const integerFormatter = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 });
 const modelResourceStatusLabels = { active: "可用", disabled: "已停用", revoked: "已撤销" };
@@ -1068,7 +1074,7 @@ async function loadAll() {
   const tasks = [
     ["总览", loadOverview], ["版本升级", loadUpgradePanel], ["供应商健康", loadProviderHealth], ["数据保留", loadRetention], ["私密交流", loadMailbox], ["内容审核", loadPublicPosts],
     ["认知资源", loadModels], ["搜索配置", loadSearchProviders], ["能力授权", loadCapabilities],
-    ["通讯渠道", loadChannels], ["钱包与转账", loadWallet], ["运行防护", loadRuntime],
+    ["通讯渠道", loadChannels], ["钱包与转账", loadWallet], ["迁移与庇护所", loadMigration], ["运行防护", loadRuntime],
   ];
   const results = await Promise.allSettled(tasks.map(([, load]) => load()));
   const failures = [];
@@ -1094,6 +1100,23 @@ async function restoreSession() { try { const result = await request("/admin/ses
 $("#login-form").addEventListener("submit", login); $("#logout").addEventListener("click", logout); $("#refresh-admin").addEventListener("click", loadAll); $("#check-upgrade-version").addEventListener("click", checkUpgradeVersion); $("#start-upgrade").addEventListener("click", requestUpgradeConfirmation); $("#confirm-upgrade").addEventListener("click", confirmUpgrade); $("#refresh-observability").addEventListener("click", () => { void loadOverview().catch((error) => setStatus("#global-status", errorText(error), true)); }); $("#refresh-provider-health").addEventListener("click", () => { void loadProviderHealth().catch((error) => setStatus("#provider-health-status", errorText(error), true)); }); $("#refresh-retention").addEventListener("click", () => { void loadRetention().catch((error) => setStatus("#retention-status", errorText(error), true)); }); $("#run-retention").addEventListener("click", () => { void runRetention(); }); $("#refresh-mailbox").addEventListener("click", loadMailbox); $("#refresh-models").addEventListener("click", loadModels); $("#refresh-search-providers").addEventListener("click", loadSearchProviders); $("#refresh-capabilities").addEventListener("click", loadCapabilities); $("#refresh-runtime").addEventListener("click", loadRuntime); document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => showSection(button.dataset.section)));
 $("#setup-guide-list").addEventListener("click", (event) => { const button = event.target.closest("[data-setup-go]"); if (button) showSection(button.dataset.setupGo); });
 $("#refresh-wallet-audits").addEventListener("click", () => { void loadWalletAudits().catch(() => {}); });
+$("#refresh-migration").addEventListener("click", () => { void loadMigration().catch((error) => setStatus("#migration-status", errorText(error), true)); });
+$("#migration-policy-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const current = await request("/api/v1/admin/migration/policy");
+    await request("/api/v1/admin/migration/policy", { method: "PUT", body: JSON.stringify({
+      expected_revision: current.revision,
+      enabled: $("#migration-enabled").checked,
+      approval_mode: $("#migration-approval-mode").value,
+      rejection_cooldown_seconds: Number($("#migration-cooldown").value) * 86400,
+      wallet_mode: $("#migration-wallet-mode").value,
+      local_wallet_transfer_enabled: $("#migration-local-wallet").checked,
+    }) });
+    setStatus("#migration-status", "迁移策略已保存");
+    await loadMigration();
+  } catch (error) { setStatus("#migration-status", errorText(error), true); }
+});
 $("#admin-message-form").addEventListener("submit", async (event) => { event.preventDefault(); const form = event.currentTarget; const button = submitButton(form, event); if (button) button.disabled = true; try { await request("/api/interactions", { method: "POST", body: JSON.stringify({ channel: "web", counterparty: "web-user", content: $("#admin-message").value.trim(), idempotency_key: crypto.randomUUID() }) }); $("#admin-message").value = ""; setStatus("#message-status", "消息已记录，正在等待认知处理"); await Promise.all([loadMailbox(), loadOverview()]); } catch (error) { setStatus("#message-status", errorText(error), true); } finally { if (button) button.disabled = false; } });
 
 $("#wallet-enqueue-asset").addEventListener("change", updateWalletAddressOptions);
