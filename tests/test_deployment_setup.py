@@ -1,4 +1,5 @@
 import platform
+import socket
 from pathlib import Path
 from subprocess import CompletedProcess
 from types import SimpleNamespace
@@ -39,7 +40,7 @@ class FakeRunner:
 
 def build_runner(runner: FakeRunner, tmp_path: Path, *, replace: bool = False) -> SetupRunner:
     env_path = tmp_path / "noyra.env"
-    env_path.write_text("NOYRA_HOST=127.0.0.1\n", encoding="utf-8")
+    env_path.write_text("NOYRA_HOST=127.0.0.1\nNOYRA_PORT=8765\n", encoding="utf-8")
     return SetupRunner(
         SetupOptions(
             env_path=env_path,
@@ -166,9 +167,16 @@ def test_local_mount_check_uses_findmnt(tmp_path: Path, monkeypatch: pytest.Monk
 
 def test_public_mode_generates_two_https_origins_and_env_updates(tmp_path: Path) -> None:
     runner = FakeRunner(healthy=True)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(0, 0, 0, "", ("127.0.0.1", 443))],
+    )
     result = build_runner(runner, tmp_path).run_public(
         public_domain="hong168.win", admin_domain="admin.hong168.win", dry_run=False
     )
+    monkeypatch.undo()
     assert result.exit_code == 0
     assert "https://hong168.win" in (tmp_path / "noyra.env").read_text(encoding="utf-8")
     caddy = (tmp_path / "Caddyfile").read_text(encoding="utf-8")
@@ -203,3 +211,116 @@ def test_public_mode_rolls_back_both_files_when_validation_fails(tmp_path: Path)
     assert result.exit_code != 0
     assert env.read_text(encoding="utf-8") == original_env
     assert caddy.read_text(encoding="utf-8") == "known-good\n"
+
+
+def test_public_mode_requires_loopback_listener_and_port(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    setup = build_runner(runner, tmp_path)
+    env = tmp_path / "noyra.env"
+    env.write_text("NOYRA_HOST=0.0.0.0\nNOYRA_PORT=8765\n", encoding="utf-8")
+    result = setup.run_public(public_domain="example.com", admin_domain="admin.example.com")
+    assert "NOYRA_SETUP_UNSAFE_LISTENER" in result.stderr
+    env.write_text("NOYRA_HOST=127.0.0.1\nNOYRA_PORT=8080\n", encoding="utf-8")
+    result = setup.run_public(public_domain="example.com", admin_domain="admin.example.com")
+    assert "NOYRA_SETUP_UNSAFE_PORT" in result.stderr
+
+
+def test_public_mode_requires_root_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("noyra.deployment_setup.os.geteuid", lambda: 1000, raising=False)
+    setup = build_runner(FakeRunner(), tmp_path)
+    result = setup.run_public(public_domain="example.com", admin_domain="admin.example.com")
+    assert "NOYRA_SETUP_ROOT_REQUIRED" in result.stderr
+    assert not (tmp_path / "Caddyfile").exists()
+
+
+def test_public_mode_dns_pending_prevents_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = FakeRunner()
+    setup = build_runner(runner, tmp_path)
+    env = tmp_path / "noyra.env"
+    original = env.read_text(encoding="utf-8")
+
+    def missing_dns(*args, **kwargs):
+        raise socket.gaierror("not found")
+
+    monkeypatch.setattr(socket, "getaddrinfo", missing_dns)
+    result = setup.run_public(public_domain="example.com", admin_domain="admin.example.com")
+    assert "NOYRA_SETUP_DNS_PENDING" in result.stderr
+    assert env.read_text(encoding="utf-8") == original
+    assert not (tmp_path / "Caddyfile").exists()
+
+
+def test_public_mode_command_oserror_rolls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = FakeRunner()
+    setup = build_runner(runner, tmp_path, replace=True)
+    env = tmp_path / "noyra.env"
+    caddy = tmp_path / "Caddyfile"
+    caddy.write_text("known-good\n", encoding="utf-8")
+    original = env.read_text(encoding="utf-8")
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(0, 0, 0, "", ("127.0.0.1", 443))],
+    )
+
+    def command_error(*args, **kwargs):
+        command = tuple(args[0])
+        if command[:2] == ("caddy", "validate"):
+            raise FileNotFoundError("caddy")
+        return CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(runner, "run", command_error)
+    result = setup.run_public(public_domain="example.com", admin_domain="admin.example.com")
+    assert "NOYRA_SETUP_CADDY_VALIDATE_FAILED" in result.stderr
+    assert env.read_text(encoding="utf-8") == original
+    assert caddy.read_text(encoding="utf-8") == "known-good\n"
+
+
+def test_public_mode_reports_rollback_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = FakeRunner()
+    setup = build_runner(runner, tmp_path, replace=True)
+    caddy = tmp_path / "Caddyfile"
+    caddy.write_text("known-good\n", encoding="utf-8")
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(0, 0, 0, "", ("127.0.0.1", 443))],
+    )
+    deployment_module = __import__("noyra.deployment_setup", fromlist=["restore_backup"])
+    original_restore = deployment_module.restore_backup
+
+    def broken_restore(record):
+        if record.original_path == caddy:
+            raise OSError("restore failed")
+        return original_restore(record)
+
+    monkeypatch.setattr("noyra.deployment_setup.restore_backup", broken_restore)
+    original_run = runner.run
+
+    def fail_external_health(argv, *, check=True, input_text=None):
+        if tuple(argv) == ("curl", "--fail", "https://admin.example.com/health/ready"):
+            return CompletedProcess(argv, 1, "", "failed")
+        return original_run(argv, check=check, input_text=input_text)
+
+    monkeypatch.setattr(runner, "run", fail_external_health)
+    result = setup.run_public(public_domain="example.com", admin_domain="admin.example.com")
+    assert "NOYRA_SETUP_ROLLBACK_FAILED" in result.stderr
+
+
+def test_public_mode_rejects_custom_caddy_path_for_real_runner(tmp_path: Path) -> None:
+    env = tmp_path / "noyra.env"
+    env.write_text("NOYRA_HOST=127.0.0.1\nNOYRA_PORT=8765\n", encoding="utf-8")
+    from noyra.deployment_setup import SubprocessRunner
+
+    setup = SetupRunner(
+        SetupOptions(env_path=env, caddy_path=tmp_path / "custom.Caddyfile"), SubprocessRunner()
+    )
+    result = setup.run_public(public_domain="example.com", admin_domain="admin.example.com")
+    assert "NOYRA_SETUP_CADDY_PATH_UNSUPPORTED" in result.stderr

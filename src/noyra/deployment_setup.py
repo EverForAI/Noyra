@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import shutil
+import socket
 import stat as stat_module
 import subprocess
 import tempfile
@@ -411,6 +412,21 @@ class SetupRunner:
 
             env_path = self.options.env_path
             caddy_path = self.options.caddy_path
+            if (
+                not selected_dry_run
+                and isinstance(self.runner, SubprocessRunner)
+                and caddy_path != Path("/etc/caddy/Caddyfile")
+            ):
+                raise SetupError(
+                    "CADDY_PATH_UNSUPPORTED",
+                    "real public setup requires the default /etc/caddy/Caddyfile path",
+                )
+            if (
+                not selected_dry_run
+                and hasattr(os, "geteuid")
+                and os.geteuid() != 0
+            ):
+                raise SetupError("ROOT_REQUIRED", "public setup requires root")
             if env_path.is_symlink():
                 raise SetupError("ENV_SYMLINK", "environment path must not be a symlink")
             if not env_path.exists() or not env_path.is_file():
@@ -428,6 +444,16 @@ class SetupRunner:
             )
 
             env_text = env_path.read_text(encoding="utf-8")
+            assignments = {
+                key: value
+                for key, value in parse_env_file(env_text)
+                if value is not None and key and not key.startswith("#")
+            }
+            if assignments.get("NOYRA_HOST") != "127.0.0.1":
+                raise SetupError("UNSAFE_LISTENER", "public mode requires NOYRA_HOST=127.0.0.1")
+            if assignments.get("NOYRA_PORT") != "8765":
+                raise SetupError("UNSAFE_PORT", "public mode requires NOYRA_PORT=8765")
+            actions.extend(["validate NOYRA_HOST=127.0.0.1", "validate NOYRA_PORT=8765"])
             updated_env = update_env_text(
                 env_text,
                 {
@@ -449,6 +475,9 @@ class SetupRunner:
                     ]
                 )
                 return SetupResult(actions=actions, stdout="\n".join(actions) + "\n")
+
+            self._require_dns_ready(public, admin)
+            actions.append("validate DNS readiness for both HTTPS origins")
 
             env_backup = create_backup(env_path, self.options.backup_root, "public-env")
             caddy_backup = (
@@ -473,10 +502,15 @@ class SetupRunner:
                 self._run_checked(("systemctl", "restart", "noyra"), "SERVICE_RESTART_FAILED")
                 actions.append("restart noyra")
                 self._run_health_checks(public, admin, actions)
-            except SetupError:
-                self._rollback_public(
-                    env_backup, caddy_backup, caddy_path if replaced_caddy else None
-                )
+            except (SetupError, OSError, UnicodeError) as exc:
+                try:
+                    self._rollback_public(
+                        env_backup, caddy_backup, caddy_path if replaced_caddy else None
+                    )
+                except SetupError as rollback_error:
+                    raise rollback_error from exc
+                if not isinstance(exc, SetupError):
+                    raise SetupError("PUBLIC_SETUP_FAILED", str(exc)) from exc
                 raise
             return SetupResult(actions=actions, stdout="\n".join(actions) + "\n")
         except (SetupError, OSError, UnicodeError) as exc:
@@ -508,11 +542,24 @@ class SetupRunner:
                 temp.unlink()
 
     def _run_checked(self, argv: Sequence[str], code: str) -> CompletedProcess[str]:
-        result = self.runner.run(argv, check=False)
+        try:
+            result = self.runner.run(argv, check=False)
+        except OSError as exc:
+            raise SetupError(code, f"command could not run: {argv[0]}") from exc
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "command failed").strip()
             raise SetupError(code, detail)
         return result
+
+    def _require_dns_ready(self, public: str, admin: str) -> None:
+        for domain in (public, admin):
+            try:
+                socket.getaddrinfo(domain, 443)
+            except OSError as exc:
+                raise SetupError(
+                    "DNS_PENDING",
+                    f"DNS is not ready for {domain}; create A/AAAA records before setup",
+                ) from exc
 
     def _run_health_checks(self, public: str, admin: str, actions: list[str]) -> None:
         for endpoint in ("live", "ready"):
@@ -534,18 +581,33 @@ class SetupRunner:
         caddy_backup: BackupRecord | None,
         new_caddy_path: Path | None,
     ) -> None:
-        with suppress(SetupError):
+        failures: list[str] = []
+        try:
             restore_backup(env_backup)
+        except Exception as exc:
+            failures.append(f"environment restoration failed ({type(exc).__name__})")
         if caddy_backup is not None:
-            with suppress(SetupError):
+            try:
                 restore_backup(caddy_backup)
+            except Exception as exc:
+                failures.append(f"Caddy restoration failed ({type(exc).__name__})")
         elif new_caddy_path is not None:
-            with suppress(OSError):
+            try:
                 new_caddy_path.unlink()
-        with suppress(Exception):
-            self.runner.run(("systemctl", "restart", "noyra"), check=False)
-        with suppress(Exception):
-            self.runner.run(("systemctl", "reload", "caddy"), check=False)
+            except OSError as exc:
+                failures.append(f"Caddy removal failed ({type(exc).__name__})")
+        for command, label in (
+            (("systemctl", "restart", "noyra"), "Noyra service restoration failed"),
+            (("systemctl", "reload", "caddy"), "Caddy service restoration failed"),
+        ):
+            try:
+                result = self.runner.run(command, check=False)
+                if result.returncode != 0:
+                    failures.append(label)
+            except Exception:
+                failures.append(label)
+        if failures:
+            raise SetupError("ROLLBACK_FAILED", "environment/Caddy/service restoration failed")
 
     def run_cloudflare(self) -> SetupResult:
         raise SetupError(

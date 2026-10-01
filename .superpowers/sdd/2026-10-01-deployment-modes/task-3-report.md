@@ -24,4 +24,12 @@ Implemented Task 3 and committed the public HTTPS setup changes.
 ## Limits
 
 - HTTPS checks run during non-dry setup and therefore require both DNS names and the public proxy to be reachable before setup can complete.
-- Rollback errors are suppressed after the original setup failure so the stable setup error remains the reported failure; operators should inspect service logs if the recovery restart itself fails.
+- Rollback failures are reported with a stable recovery error that identifies environment, Caddy, or service restoration failure.
+
+## Review Fixes
+
+- Added pre-mutation root, loopback listener, port, DNS readiness, and real-run Caddy path checks with stable setup error codes.
+- Normalized command invocation errors and guaranteed rollback after mutation; rollback failures now return `NOYRA_SETUP_ROLLBACK_FAILED`.
+- Added focused tests for DNS pending, root/listener/port guards, command errors, rollback errors, and custom Caddy path rejection.
+
+Updated validation: `python -m pytest tests/test_deployment_setup.py tests/test_deployment_contract.py -q` (25 passed) and Ruff passed.
