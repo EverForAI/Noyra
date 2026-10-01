@@ -231,7 +231,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 72
+CURRENT_SCHEMA_VERSION = 73
 
 MIGRATIONS: dict[int, str] = {
     2: """
@@ -6653,6 +6653,18 @@ CREATE TABLE IF NOT EXISTS migration_audit_events (
 CREATE INDEX IF NOT EXISTS idx_migration_audit_subject_time ON migration_audit_events(subject_id, occurred_at DESC, audit_id DESC);
 CREATE TRIGGER IF NOT EXISTS prevent_migration_audit_update BEFORE UPDATE ON migration_audit_events BEGIN SELECT RAISE(ABORT, 'migration audit events are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS prevent_migration_audit_delete BEFORE DELETE ON migration_audit_events BEGIN SELECT RAISE(ABORT, 'migration audit events cannot be deleted'); END;
+""",
+    73: """
+CREATE TABLE IF NOT EXISTS migration_target_challenges (
+    nonce TEXT PRIMARY KEY,
+    target_id TEXT NOT NULL REFERENCES migration_targets(target_id),
+    source_epoch TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    consumed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_migration_target_challenges_target
+    ON migration_target_challenges(target_id, expires_at);
 """,
 }
 
