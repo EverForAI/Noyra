@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any, cast
 
 from noyra.core.database import Database
 from noyra.core.types import content_hash, new_id, utc_now
@@ -231,7 +232,7 @@ class EpochLease:
 
     @staticmethod
     def _state_hash(row: object) -> str:
-        values = row if isinstance(row, dict) else dict(row)
+        values = row if isinstance(row, Mapping) else dict(cast(Any, row))
         return content_hash(
             {
                 "epoch_id": values["epoch_id"],

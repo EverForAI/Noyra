@@ -281,13 +281,16 @@ class RecoveryCoordinator:
             evidence = json.loads(row["evidence_json"])
         except (TypeError, ValueError):
             return False
-        return evidence == {
-            "source_failure_evidence_hash": content_hash(request.source_failure_evidence),
-            "backup_id": request.verified_backup_id,
-            "manifest_digest": request.manifest_digest,
-            "restore_report_digest": request.restore_report_digest,
-            "health_report_digest": request.health_report_digest,
-        }
+        return bool(
+            evidence
+            == {
+                "source_failure_evidence_hash": content_hash(request.source_failure_evidence),
+                "backup_id": request.verified_backup_id,
+                "manifest_digest": request.manifest_digest,
+                "restore_report_digest": request.restore_report_digest,
+                "health_report_digest": request.health_report_digest,
+            }
+        )
 
     def _mark_task_failed(self, task_id: str, error_code: str) -> None:
         if self.database is None:

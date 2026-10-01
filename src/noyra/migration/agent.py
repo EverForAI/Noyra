@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -274,7 +274,7 @@ class MigrationAgent:
             raise ValueError("migration manifest cannot be read") from error
         if not isinstance(values, dict):
             raise ValueError("migration manifest is invalid")
-        return values
+        return cast(dict[str, Any], values)
 
     @classmethod
     def _validate_manifest(cls, manifest: Mapping[str, Any]) -> dict[str, Any]:
@@ -286,6 +286,8 @@ class MigrationAgent:
             values = json.loads(canonical_json(dict(manifest)))
         except (TypeError, ValueError, OverflowError) as error:
             raise ValueError("migration manifest contains unsupported data") from error
+        if not isinstance(values, dict):
+            raise ValueError("migration manifest is invalid")
         if len(canonical_json(values).encode()) > 1_000_000:
             raise ValueError("migration manifest is too large")
         artifact_id = values.get("artifact_id", "")
@@ -294,7 +296,7 @@ class MigrationAgent:
             raise ValueError("migration artifact path or id is invalid")
         if type(byte_size) is not int or not 0 <= byte_size <= 10 * 1024 * 1024 * 1024:
             raise ValueError("migration artifact metadata is invalid")
-        return values
+        return cast(dict[str, Any], values)
 
     @staticmethod
     def _contains_forbidden_key(key: Any, value: Any) -> bool:

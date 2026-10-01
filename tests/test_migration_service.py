@@ -67,6 +67,21 @@ def _json_mutation(
         return error.code, json.loads(error.read())
 
 
+def _json_post(
+    url: str, payload: dict[str, object], *, authenticated: bool = True
+) -> tuple[int, object]:
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {ADMIN_TOKEN}" if authenticated else "",
+    }
+    request = Request(url, headers=headers, method="POST", data=json.dumps(payload).encode())
+    try:
+        with urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read())
+    except HTTPError as error:
+        return error.code, json.loads(error.read())
+
+
 def _add_attested_target(server: NoyraHTTPServer) -> None:
     private = Ed25519PrivateKey.generate()
     public = base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode()
@@ -205,6 +220,27 @@ def test_policy_projection_exposes_active_epoch_without_secrets(
     assert status == 200
     assert payload["active_epoch"]["epoch_id"] == "migrationepoch-test"
     assert "private_key" not in json.dumps(payload)
+
+
+def test_migration_rollback_route_uses_server_coordinator(
+    migration_http: tuple[NoyraHTTPServer, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server, base_url = migration_http
+
+    def rollback(task_id: str, reason: str, *, actor: str) -> dict[str, str]:
+        return {"task_id": task_id, "reason": reason, "actor": actor}
+
+    monkeypatch.setattr(server.migration_cutover, "rollback", rollback)
+    status, payload = _json_post(
+        f"{base_url}/api/v1/admin/migration/tasks/task-1/rollback",
+        {"reason": "health proof failed"},
+    )
+    assert status == 200
+    assert payload == {
+        "task_id": "task-1",
+        "reason": "health proof failed",
+        "actor": "web-admin",
+    }
 
 
 def test_migration_proposal_detail_is_subject_scoped_and_integrity_checked(

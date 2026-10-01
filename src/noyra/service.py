@@ -4285,7 +4285,7 @@ class NoyraHTTPServer:
                     if payload is None:
                         return
                     try:
-                        result = self.migration_cutover.rollback(
+                        result = owner.migration_cutover.rollback(
                             task_id,
                             str(payload.get("reason", "operator rollback")),
                             actor=self._actor(),
