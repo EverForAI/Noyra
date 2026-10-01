@@ -2063,6 +2063,7 @@ class ServiceTestCase(unittest.TestCase):
     def test_operator_token_file_overrides_inline_environment_token(self) -> None:
         token_path = self.data_dir / "operator.token"
         token_path.write_text("file-operator-token-with-sufficient-entropy\n", encoding="ascii")
+        token_path.chmod(0o600)
         environment = {
             "NOYRA_DATA_DIR": str(self.data_dir / "from-env-token-file"),
             "NOYRA_SUBJECT_ID": "Noyra-operator-token-file",
