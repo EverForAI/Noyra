@@ -213,7 +213,19 @@ def create_backup(path: str | Path, backup_root: str | Path, mode: str = "defaul
 
 def restore_backup(record: BackupRecord) -> None:
     euid = os.geteuid() if hasattr(os, "geteuid") else None
-    if record.backup_path.is_symlink() or record.original_path.is_symlink():
+
+    def has_symlink_component(path: Path) -> bool:
+        current = path
+        while current != current.parent:
+            try:
+                if current.is_symlink():
+                    return True
+            except OSError as exc:
+                raise SetupError("BACKUP_PATH", "cannot inspect restore path") from exc
+            current = current.parent
+        return False
+
+    if has_symlink_component(record.backup_path) or has_symlink_component(record.original_path):
         raise SetupError("SYMLINK_PATH", "refusing to restore through a symlink")
     if euid is not None and euid != 0 and record.uid is not None and record.uid != euid:
         raise SetupError("BACKUP_PERMISSION", "recorded owner requires root")
@@ -295,6 +307,10 @@ class SetupRunner:
         if not self.options.env_path.exists():
             raise SetupError(
                 "ENV_MISSING", f"environment file does not exist: {self.options.env_path}"
+            )
+        if not self.options.env_path.is_file():
+            raise SetupError(
+                "ENV_NOT_FILE", f"environment path is not a file: {self.options.env_path}"
             )
         actions.append(f"validate environment file {self.options.env_path}")
         return SetupResult(actions=actions)
