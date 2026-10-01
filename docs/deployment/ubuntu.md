@@ -61,6 +61,43 @@ environment file. Rotate it on the server with `sudo scripts/rotate-operator-tok
 atomically replaces the token, updates the environment file, restarts Noyra, and verifies that the
 service is active. Store the new token in a password manager before closing the current session.
 
+### Migration target and recovery checklist
+
+The Ubuntu installer publishes the migration agent and root runner as a single
+rollbackable component set. A fresh host keeps the agent disabled because no
+`/etc/noyra/migration/identity.json` exists. Upgrades preserve the agent's
+enabled and active state and restore the previous files if readiness fails.
+
+Before registering a standby target, verify all of the following:
+
+1. The standby uses an encrypted volume and the same compatible release.
+2. Its identity file is a root-owned regular file with mode `0600`; the private
+   Ed25519 key is never placed in the source database or ordinary environment
+   file.
+3. The target agent is reachable only through its authenticated loopback or
+   mutually authenticated proxy channel and has a private data root.
+4. The target is enrolled, challenge-attested, and added to the subject's
+   migration allowlist. Revoke it immediately if its generation, release, or
+   health report changes.
+5. A verified encrypted backup and the backup key generation needed to restore
+   it are available on the target before emergency recovery is enabled.
+
+Use manual approval for the first rehearsal. The recovery request must carry
+the task id, standby target, backup id, source failure evidence, manifest,
+restore, and health digests, plus the target's signature over all of them. A
+repeated signed request is idempotent. The source will not acquire a second
+active epoch, and a stale source remains fenced after restart. If target health
+or integrity validation fails, leave migration disabled, revoke the target,
+and use the normal encrypted backup restore and rollback procedure.
+
+External signer/KMS rebinding is the production wallet default. Local-wallet
+transfer is available only after the migration policy's separate high-risk
+confirmation and a one-time approval bound to the exact wallet address and
+task. Never copy `noyra.env`, wallet keystores, provider API keys, or operator
+tokens into migration artifacts. A disposable two-host encrypted restore and
+rollback rehearsal with recorded epoch and health evidence is required before
+changing approval mode to `policy_auto`.
+
 If a reverse proxy fronts the public site, set `NOYRA_TRUSTED_PROXY_CIDRS` to the smallest network
 that contains only that proxy (for a same-host proxy, normally `127.0.0.1/32` and/or `::1/128`).
 Noyra ignores `X-Forwarded-For` from every other peer. Leaving this setting empty is safe for an

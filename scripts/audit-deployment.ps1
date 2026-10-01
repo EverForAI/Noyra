@@ -7,6 +7,8 @@ $python = Join-Path $env:NOYRA_PROJECT_ROOT '.venv\Scripts\python.exe'
 Write-Host 'Running Ubuntu service and deployment audit...'
 & $python -m pytest tests/test_service.py tests/test_interaction.py tests/test_capability.py tests/test_m42_p1_01_sleep_deadlock.py tests/test_m42_p1_02_integrity_runtime.py tests/test_m42_p2_14_at_rest.py tests/test_m42_p3_06_operator_controls.py -q
 if ($LASTEXITCODE -ne 0) { throw 'Service tests failed.' }
+& $python -m pytest tests/test_migration_recovery.py tests/test_migration_providers.py tests/test_migration_end_to_end.py -q
+if ($LASTEXITCODE -ne 0) { throw 'Migration recovery tests failed.' }
 # The service intentionally keeps a broad defensive HTTP surface. The full
 # repository gate remains the primary quality signal; this focused deployment
 # suite enforces a 70% integration floor while the route matrix is expanded.
@@ -52,6 +54,12 @@ if ($compose -notmatch 'NOYRA_VOLUME_ENCRYPTION_BACKEND: attestation' -or $compo
 }
 if (-not (Test-Path -LiteralPath (Join-Path $env:NOYRA_PROJECT_ROOT 'requirements-cloud.lock'))) {
     throw 'Cloud dependency lock is missing.'
+}
+if (-not (Test-Path -LiteralPath (Join-Path $env:NOYRA_PROJECT_ROOT 'tests\test_migration_end_to_end.py'))) {
+    throw 'Migration end-to-end safety tests are missing.'
+}
+if (-not (Test-Path -LiteralPath (Join-Path $env:NOYRA_PROJECT_ROOT 'tests\shell\test-migration-install.sh'))) {
+    throw 'Migration install contract is missing.'
 }
 
 $temporaryEnv = $false

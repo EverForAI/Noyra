@@ -17,6 +17,8 @@ grep -q 'REMOTE_URL=https://github.com/EverForAI/Noyra.git' scripts/upgrade-ubun
 ! grep -Eq 'EnvironmentFile=.*noyra\.env' deploy/systemd/noyra-upgrade.service
 test -f scripts/noyra-migration-agent.py
 test -f scripts/noyra-migration-runner.sh
+test -f tests/test_migration_end_to_end.py
+test -f tests/shell/test-migration-install.sh
 test -f deploy/systemd/noyra-migration-agent.service
 test -f deploy/systemd/noyra-migration-runner.service
 grep -q '^set -euo pipefail$' scripts/noyra-migration-runner.sh
@@ -33,10 +35,12 @@ python="${NOYRA_PYTHON:-$NOYRA_PROJECT_ROOT/.venv/bin/python}"
 echo "Running Ubuntu service and deployment audit on $(uname -s)..."
 "$python" -m pytest tests/test_upgrade_manager.py tests/test_upgrade_deployment.py tests/test_web_contract.py -q
 "$python" -m pytest tests/test_migration_agent.py tests/test_migration_agent_cli.py tests/test_migration_discovery.py tests/test_migration_assessment.py tests/test_migration_proposals.py -q
+"$python" -m pytest tests/test_migration_recovery.py tests/test_migration_providers.py tests/test_migration_end_to_end.py -q
 "$python" -m ruff check src/noyra/core/upgrade.py tests/test_upgrade_manager.py tests/test_upgrade_deployment.py
 bash -n scripts/install-ubuntu.sh scripts/upgrade-ubuntu-runner.sh scripts/audit-deployment.sh
 bash -n scripts/noyra-migration-runner.sh
 bash tests/shell/test-migration-runner.sh
+bash tests/shell/test-migration-install.sh
 bash tests/shell/test-migration-components-rollback.sh
 bash tests/shell/test-upgrade-runner.sh
 bash tests/shell/test-upgrade-components-rollback.sh

@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+INSTALLER="$ROOT_DIR/scripts/install-ubuntu.sh"
+
+test -f "$INSTALLER"
+bash -n "$INSTALLER"
+
+# Migration files are published as root-owned regular files and are included
+# in the same release transaction as the service. The agent is only enabled if
+# the operator had already enabled it; fresh installs stay disabled.
+grep -q 'noyra_migration_components_snapshot' "$INSTALLER"
+grep -q 'noyra_migration_components_restore' "$INSTALLER"
+grep -q 'install -o root -g root -m 0750.*noyra-migration-runner.sh' "$INSTALLER"
+grep -q 'install -o root -g root -m 0644.*noyra-migration-agent.service' "$INSTALLER"
+grep -q 'install -o root -g root -m 0644.*noyra-migration-runner.service' "$INSTALLER"
+grep -q 'MIGRATION_AGENT_WAS_ENABLED' "$INSTALLER"
+grep -q 'if \[\[ "\$MIGRATION_AGENT_WAS_ENABLED" == true \]\]' "$INSTALLER"
+grep -q 'Migration system file must be regular and not a symlink' "$INSTALLER"
+
+# The systemd units must not inherit the ordinary environment file or expose
+# the loopback agent beyond the local host.
+agent_unit="$ROOT_DIR/deploy/systemd/noyra-migration-agent.service"
+runner_unit="$ROOT_DIR/deploy/systemd/noyra-migration-runner.service"
+grep -q 'User=noyra' "$agent_unit"
+grep -q 'NoNewPrivileges=true' "$agent_unit"
+grep -q 'ReadOnlyPaths=/etc/noyra/migration/identity.json' "$agent_unit"
+grep -q -- '--listen 127.0.0.1:8876' "$agent_unit"
+! grep -Eq 'EnvironmentFile=.*noyra\.env' "$agent_unit"
+grep -q 'User=root' "$runner_unit"
+grep -q 'NoNewPrivileges=true' "$runner_unit"
+grep -q 'ReadWritePaths=/var/lib/noyra/migration' "$runner_unit"
+
+echo 'migration install contract passed'
