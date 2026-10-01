@@ -118,23 +118,26 @@ class TargetRegistry:
                     os_arch,
                     now,
                     now,
-                    content_hash(
-                        {
-                            "target_id": target_id,
-                            "subject_id": subject_id,
-                            "key_fingerprint": fingerprint,
-                            "enrollment_generation": 1,
-                            "endpoint": endpoint,
-                            "capabilities_json": capabilities_json,
-                            "region": region,
-                            "provider": provider,
-                            "release_sha": release_sha.lower(),
-                            "os_arch": os_arch,
-                            "encrypted_volume": True,
-                            "status": "pending",
-                            "created_at": now,
-                            "updated_at": now,
-                        }
+                    self._state_hash(
+                        target_id=target_id,
+                        subject_id=subject_id,
+                        public_key=public_key,
+                        key_fingerprint=fingerprint,
+                        enrollment_generation=1,
+                        endpoint=endpoint,
+                        capabilities_json=capabilities_json,
+                        region=region,
+                        provider=provider,
+                        release_sha=release_sha.lower(),
+                        os_arch=os_arch,
+                        encrypted_volume=True,
+                        status="pending",
+                        created_at=now,
+                        updated_at=now,
+                        attested_at=None,
+                        attestation_epoch=None,
+                        revoked_at=None,
+                        revoke_reason=None,
                     ),
                 ),
             )
@@ -154,10 +157,11 @@ class TargetRegistry:
         nonce = secrets.token_urlsafe(32)
         with self.database.transaction() as connection:
             row = connection.execute(
-                "SELECT status,subject_id FROM migration_targets WHERE target_id=?", (target_id,)
+                "SELECT * FROM migration_targets WHERE target_id=?", (target_id,)
             ).fetchone()
             if row is None:
                 raise NotFoundError(f"migration target not found: {target_id}")
+            self._assert_row_integrity(row)
             if row["status"] not in {"pending", "active"}:
                 raise ValueError("target is revoked or quarantined")
             connection.execute(
@@ -187,6 +191,7 @@ class TargetRegistry:
             ).fetchone()
             if row is None:
                 raise NotFoundError(f"migration target not found: {target_id}")
+            self._assert_row_integrity(row)
             if row["status"] not in {"pending", "active"}:
                 raise ValueError("target is revoked or quarantined")
             stored = connection.execute(
@@ -209,8 +214,26 @@ class TargetRegistry:
             )
             attested_at = evidence.verified_at
             connection.execute(
-                "UPDATE migration_targets SET status='active',attested_at=?,attestation_epoch=?,updated_at=? WHERE target_id=? AND status='pending'",
-                (attested_at, challenge.source_epoch, attested_at, target_id),
+                "UPDATE migration_targets SET status='active',attested_at=?,attestation_epoch=?,updated_at=?,state_hash=? WHERE target_id=? AND status IN ('pending','active')",
+                (
+                    attested_at,
+                    challenge.source_epoch,
+                    attested_at,
+                    self._state_hash(
+                        target_id=row["target_id"], subject_id=row["subject_id"],
+                        public_key=row["public_key"],
+                        key_fingerprint=row["key_fingerprint"],
+                        enrollment_generation=int(row["enrollment_generation"]),
+                        endpoint=row["endpoint"], capabilities_json=row["capabilities_json"],
+                        region=row["region"], provider=row["provider"],
+                        release_sha=row["release_sha"], os_arch=row["os_arch"],
+                        encrypted_volume=bool(row["encrypted_volume"]), status="active",
+                        created_at=row["created_at"], updated_at=attested_at,
+                        attested_at=attested_at, attestation_epoch=challenge.source_epoch,
+                        revoked_at=row["revoked_at"], revoke_reason=row["revoke_reason"],
+                    ),
+                    target_id,
+                ),
             )
             MigrationStore._append_audit(
                 connection,
@@ -228,16 +251,35 @@ class TargetRegistry:
             raise ValueError("target revoke actor is invalid")
         with self.database.transaction() as connection:
             row = connection.execute(
-                "SELECT status,subject_id FROM migration_targets WHERE target_id=?", (target_id,)
+                "SELECT * FROM migration_targets WHERE target_id=?", (target_id,)
             ).fetchone()
             if row is None:
                 raise NotFoundError(f"migration target not found: {target_id}")
+            self._assert_row_integrity(row)
             if row["status"] == "revoked":
                 return
             now = utc_now()
             connection.execute(
-                "UPDATE migration_targets SET status='revoked', revoked_at=?, revoke_reason=?, updated_at=? WHERE target_id=?",
-                (now, reason.strip(), now, target_id),
+                "UPDATE migration_targets SET status='revoked', revoked_at=?, revoke_reason=?, updated_at=?,state_hash=? WHERE target_id=?",
+                (
+                    now,
+                    reason.strip(),
+                    now,
+                    self._state_hash(
+                        target_id=row["target_id"], subject_id=row["subject_id"],
+                        public_key=row["public_key"],
+                        key_fingerprint=row["key_fingerprint"],
+                        enrollment_generation=int(row["enrollment_generation"]),
+                        endpoint=row["endpoint"], capabilities_json=row["capabilities_json"],
+                        region=row["region"], provider=row["provider"],
+                        release_sha=row["release_sha"], os_arch=row["os_arch"],
+                        encrypted_volume=bool(row["encrypted_volume"]), status="revoked",
+                        created_at=row["created_at"], updated_at=now,
+                        attested_at=row["attested_at"], attestation_epoch=row["attestation_epoch"],
+                        revoked_at=now, revoke_reason=reason.strip(),
+                    ),
+                    target_id,
+                ),
             )
             MigrationStore._append_audit(
                 connection,
@@ -254,6 +296,15 @@ class TargetRegistry:
             for character in target_id
         ):
             raise ValueError("target id is invalid")
+
+    def assert_integrity(self, target_id: str) -> None:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM migration_targets WHERE target_id=?", (target_id,)
+            ).fetchone()
+        if row is None:
+            raise NotFoundError(f"migration target not found: {target_id}")
+        self._assert_row_integrity(row)
 
     @staticmethod
     def _decode_public_key(public_key: str) -> bytes:
@@ -279,3 +330,85 @@ class TargetRegistry:
             attested_at=row["attested_at"], attestation_epoch=row["attestation_epoch"],
             created_at=row["created_at"], updated_at=row["updated_at"],
         )
+
+    @staticmethod
+    def _state_hash(**values: Any) -> str:
+        return content_hash(
+            {
+                "target_id": values["target_id"],
+                "subject_id": values["subject_id"],
+                "public_key": values["public_key"],
+                "key_fingerprint": values["key_fingerprint"],
+                "enrollment_generation": int(values["enrollment_generation"]),
+                "endpoint": values["endpoint"],
+                "capabilities_json": values["capabilities_json"],
+                "region": values["region"],
+                "provider": values["provider"],
+                "release_sha": values["release_sha"],
+                "os_arch": values["os_arch"],
+                "encrypted_volume": bool(values["encrypted_volume"]),
+                "status": values["status"],
+                "created_at": values["created_at"],
+                "updated_at": values["updated_at"],
+                "attested_at": values["attested_at"],
+                "attestation_epoch": values["attestation_epoch"],
+                "revoked_at": values["revoked_at"],
+                "revoke_reason": values["revoke_reason"],
+            }
+        )
+
+    @classmethod
+    def _state_hash_from_row(cls, row: Any) -> str:
+        return cls._state_hash(
+            target_id=row["target_id"], subject_id=row["subject_id"],
+            public_key=row["public_key"], key_fingerprint=row["key_fingerprint"],
+            enrollment_generation=int(row["enrollment_generation"]), endpoint=row["endpoint"],
+            capabilities_json=row["capabilities_json"], region=row["region"],
+            provider=row["provider"], release_sha=row["release_sha"], os_arch=row["os_arch"],
+            encrypted_volume=bool(row["encrypted_volume"]), status=row["status"],
+            created_at=row["created_at"], updated_at=row["updated_at"],
+            attested_at=row["attested_at"], attestation_epoch=row["attestation_epoch"],
+            revoked_at=row["revoked_at"], revoke_reason=row["revoke_reason"],
+        )
+
+    @classmethod
+    def _legacy_state_hash_from_row(cls, row: Any) -> str:
+        return content_hash(
+            {
+                "target_id": row["target_id"],
+                "subject_id": row["subject_id"],
+                "key_fingerprint": row["key_fingerprint"],
+                "enrollment_generation": int(row["enrollment_generation"]),
+                "endpoint": row["endpoint"],
+                "capabilities_json": row["capabilities_json"],
+                "region": row["region"],
+                "provider": row["provider"],
+                "release_sha": row["release_sha"],
+                "os_arch": row["os_arch"],
+                "encrypted_volume": bool(row["encrypted_volume"]),
+                "status": row["status"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "attested_at": row["attested_at"],
+                "attestation_epoch": row["attestation_epoch"],
+            }
+        )
+
+    @classmethod
+    def _assert_row_integrity(cls, row: Any) -> None:
+        public_key = str(row["public_key"])
+        try:
+            decoded = base64.urlsafe_b64decode(public_key + "=" * (-len(public_key) % 4))
+        except (ValueError, TypeError) as error:
+            raise ValueError("migration target integrity check failed") from error
+        if hashlib.sha256(decoded).hexdigest() != row["key_fingerprint"]:
+            raise ValueError("migration target integrity check failed")
+        expected = cls._state_hash_from_row(row)
+        if row["state_hash"] == expected:
+            return
+        # Schema 74 target rows predate the expanded hash envelope. Accept a
+        # legacy row only when its public-key fingerprint still matches; the
+        # next durable target mutation writes the expanded envelope.
+        if row["state_hash"] == cls._legacy_state_hash_from_row(row):
+            return
+        raise ValueError("migration target integrity check failed")

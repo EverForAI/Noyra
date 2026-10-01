@@ -79,3 +79,22 @@ def test_revoked_target_cannot_be_attested(tmp_path) -> None:
     registry.revoke(target.target_id, reason="retired", actor="operator")
     with pytest.raises(ValueError, match="revoked"):
         registry.attest(target.target_id, challenge, signature, actor="operator")
+
+
+def test_target_integrity_detects_key_and_revocation_tampering(tmp_path) -> None:
+    database, registry = _registry(tmp_path)
+    _, public = _key_material()
+    target = registry.register(
+        "Noyra-0001", target_id="target-integrity", public_key=public,
+        endpoint="https://target.example", capabilities={}, region=None,
+        provider=None, release_sha="d" * 40, os_arch="linux-amd64",
+        encrypted_volume=True, actor="operator",
+    )
+    registry.assert_integrity(target.target_id)
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE migration_targets SET public_key=? WHERE target_id=?",
+            ("tampered", target.target_id),
+        )
+    with pytest.raises(ValueError, match="integrity"):
+        registry.assert_integrity(target.target_id)

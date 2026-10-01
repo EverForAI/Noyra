@@ -46,3 +46,44 @@ def test_expired_proposal_cannot_be_approved(tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="expired"):
         manager.approve(proposal.proposal_id, actor="operator", idempotency_key="k1")
+
+
+def test_cancel_task_requires_reason_and_is_audited(tmp_path) -> None:
+    db, manager = _manager(tmp_path)
+    proposal = manager.create_proposal(
+        subject_id="Noyra-0001", target_id="target-1", policy_revision=1,
+        reason_code="maintenance", reason="planned", expires_at="2099-01-01T00:00:00+00:00",
+    )
+    task = manager.approve(proposal.proposal_id, actor="operator", idempotency_key="cancel-1")
+    with pytest.raises(ValueError, match="reason"):
+        manager.cancel(task.task_id, actor="operator", reason="")
+    cancelled = manager.cancel(task.task_id, actor="operator", reason="operator stopped")
+    assert cancelled.status == "cancelled"
+    with db.connection() as connection:
+        action = connection.execute(
+            "SELECT action FROM migration_audit_events WHERE action='migration_task_cancelled'"
+        ).fetchone()
+    assert action is not None
+
+
+def test_cancel_reason_is_redacted_before_audit_persistence(tmp_path) -> None:
+    db, manager = _manager(tmp_path)
+    proposal = manager.create_proposal(
+        subject_id="Noyra-0001", target_id="target-1", policy_revision=1,
+        reason_code="maintenance", reason="planned", expires_at="2099-01-01T00:00:00+00:00",
+    )
+    task = manager.approve(proposal.proposal_id, actor="operator", idempotency_key="cancel-secret")
+    manager.cancel(
+        task.task_id,
+        actor="operator",
+        reason="operator stopped; bearer token=super-secret-value",
+    )
+    with db.connection() as connection:
+        task_row = connection.execute(
+            "SELECT error_code FROM migration_tasks WHERE task_id=?", (task.task_id,)
+        ).fetchone()
+        audit_row = connection.execute(
+            "SELECT payload_json FROM migration_audit_events WHERE action='migration_task_cancelled'"
+        ).fetchone()
+    assert "super-secret-value" not in task_row["error_code"]
+    assert "super-secret-value" not in audit_row["payload_json"]

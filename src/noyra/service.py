@@ -2379,15 +2379,30 @@ class NoyraHTTPServer:
                         return
                     with owner.kernel.database.connection() as connection:
                         rows = connection.execute(
-                            "SELECT target_id,subject_id,key_fingerprint,enrollment_generation,"
-                            "endpoint,capabilities_json,region,provider,release_sha,os_arch,"
-                            "encrypted_volume,status,created_at,updated_at FROM migration_targets "
+                            "SELECT * FROM migration_targets "
                             "WHERE subject_id=? ORDER BY created_at DESC LIMIT ?",
                             (owner.kernel.subject_id, limit),
                         ).fetchall()
                     output = []
                     for row in rows:
-                        item = dict(row)
+                        try:
+                            owner.migration_targets._assert_row_integrity(row)
+                        except ValueError:
+                            self._json(
+                                HTTPStatus.SERVICE_UNAVAILABLE,
+                                {"error": "migration_target_integrity_unavailable"},
+                            )
+                            return
+                        item = {
+                            key: row[key]
+                            for key in (
+                                "target_id", "subject_id", "key_fingerprint",
+                                "enrollment_generation", "endpoint", "region", "provider",
+                                "release_sha", "os_arch", "encrypted_volume", "status",
+                                "attested_at", "attestation_epoch", "created_at", "updated_at",
+                            )
+                        }
+                        item["capabilities_json"] = row["capabilities_json"]
                         item["capabilities"] = json.loads(item.pop("capabilities_json"))
                         output.append(item)
                     self._json(HTTPStatus.OK, output)
@@ -4069,6 +4084,35 @@ class NoyraHTTPServer:
                         )
                         return
                     self._json(HTTPStatus.OK, rejected.__dict__)
+                    return
+                if self.path.startswith("/api/admin/migration/tasks/") and self.path.endswith(
+                    "/cancel"
+                ):
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    task_id = (
+                        self.path.removeprefix("/api/admin/migration/tasks/")
+                        .removesuffix("/cancel")
+                        .strip("/")
+                    )
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    try:
+                        cancelled = owner.migration_manager.cancel(
+                            task_id,
+                            actor=self._actor(),
+                            reason=str(payload.get("reason", "")),
+                        )
+                    except NotFoundError:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "migration_task_not_found"})
+                        return
+                    except ValueError:
+                        self._json(HTTPStatus.CONFLICT, {"error": "migration_task_cancel_failed"})
+                        return
+                    self._json(HTTPStatus.OK, cancelled.__dict__)
                     return
                 if self.path.startswith("/api/admin/migration/tasks/") and self.path.endswith(
                     "/cutover"

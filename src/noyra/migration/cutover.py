@@ -38,6 +38,7 @@ class CutoverCoordinator:
                 task.subject_id,
                 task.target_id,
                 expected_source_epoch=task.source_epoch,
+                actor=actor,
             )
             try:
                 with self.database.transaction() as connection:

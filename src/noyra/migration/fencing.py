@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from noyra.core.database import Database
 from noyra.core.types import content_hash, new_id, utc_now
 
+from .policy import MigrationStore
+
 
 @dataclass(frozen=True)
 class EpochLease:
@@ -19,7 +21,17 @@ class EpochLease:
     epoch_number: int
 
     @classmethod
-    def acquire(cls, database: Database, subject_id: str, target_id: str, *, expected_source_epoch: str | None) -> EpochLease:
+    def acquire(
+        cls,
+        database: Database,
+        subject_id: str,
+        target_id: str,
+        *,
+        expected_source_epoch: str | None,
+        actor: str = "system",
+    ) -> EpochLease:
+        if not actor.strip():
+            raise ValueError("epoch acquisition actor is required")
         with database.transaction() as c:
             active = c.execute("SELECT * FROM migration_epochs WHERE subject_id=? AND status='active'", (subject_id,)).fetchone()
             if active is not None:
@@ -37,6 +49,13 @@ class EpochLease:
             number = int(latest) + 1
             now = utc_now()
             c.execute("INSERT INTO migration_epochs(epoch_id,subject_id,target_id,epoch_number,status,acquired_at,state_hash) VALUES (?,?,?,?,?,?,?)", (epoch_id, subject_id, target_id, number, "active", now, content_hash({"epoch_id": epoch_id, "subject_id": subject_id, "target_id": target_id, "epoch_number": number, "status": "active", "acquired_at": now, "revoked_at": None})))
+            MigrationStore._append_audit(
+                c,
+                subject_id,
+                "migration_epoch_acquired",
+                actor.strip(),
+                {"epoch_id": epoch_id, "target_id": target_id, "epoch_number": number},
+            )
             return cls(database, subject_id, target_id, epoch_id, number)
 
     def assert_current(self) -> None:
@@ -54,6 +73,7 @@ class EpochLease:
     def revoke(self, reason: str, actor: str) -> None:
         if not reason.strip() or not actor.strip():
             raise ValueError("epoch revoke metadata is required")
+        self.assert_current()
         with self.database.transaction() as c:
             revoked_at = utc_now()
             row = c.execute(
@@ -67,10 +87,18 @@ class EpochLease:
             )
             if updated.rowcount != 1:
                 raise ValueError("migration epoch is already inactive")
+            MigrationStore._append_audit(
+                c,
+                self.subject_id,
+                "migration_epoch_revoked",
+                actor.strip(),
+                {"epoch_id": self.epoch_id, "reason": reason.strip()},
+            )
 
     def complete(self, actor: str) -> None:
         if not actor.strip():
             raise ValueError("epoch completion actor is required")
+        self.assert_current()
         with self.database.transaction() as c:
             completed_at = utc_now()
             row = c.execute(
@@ -84,6 +112,13 @@ class EpochLease:
             )
             if updated.rowcount != 1:
                 raise ValueError("migration epoch is already inactive")
+            MigrationStore._append_audit(
+                c,
+                self.subject_id,
+                "migration_epoch_completed",
+                actor.strip(),
+                {"epoch_id": self.epoch_id},
+            )
 
     @staticmethod
     def _state_hash(row: object) -> str:

@@ -12,9 +12,11 @@ from typing import Any
 from noyra.core.admission import assert_current_lease
 from noyra.core.database import Database
 from noyra.core.errors import NotFoundError
+from noyra.core.redaction import redact_secret_text
 from noyra.core.types import content_hash, new_id, utc_now
 
 from .policy import MigrationStore
+from .targets import TargetRegistry
 
 _TASK_TRANSITIONS: dict[str, frozenset[str]] = {
     "planned": frozenset({"preflight", "awaiting_approval", "cancelled", "failed"}),
@@ -321,12 +323,20 @@ class MigrationManager:
             )
             if result.rowcount != 1:
                 raise ValueError("migration task status changed")
+            audit_action = (
+                "migration_task_cancelled"
+                if status == "cancelled"
+                else "migration_task_transitioned"
+            )
+            audit_payload = {"task_id": task_id, "from": row["status"], "to": status}
+            if status == "cancelled":
+                audit_payload["reason"] = values["error_code"]
             MigrationStore._append_audit(
                 connection,
                 row["subject_id"],
-                "migration_task_transitioned",
+                audit_action,
                 actor.strip(),
-                {"task_id": task_id, "from": row["status"], "to": status},
+                audit_payload,
             )
             return self._task(connection.execute("SELECT * FROM migration_tasks WHERE task_id=?", (task_id,)).fetchone())
 
@@ -336,6 +346,24 @@ class MigrationManager:
         if row is None:
             raise NotFoundError(f"migration task not found: {task_id}")
         return self._task(row)
+
+    def cancel(self, task_id: str, *, actor: str, reason: str) -> MigrationTask:
+        """Cancel a task before cutover, retaining an auditable reason."""
+        self._validate_actor(actor)
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 512:
+            raise ValueError("migration cancellation reason is required")
+        safe_reason = redact_secret_text(reason.strip())[:256]
+        task = self.get_task(task_id)
+        if task.status in {"committed", "rolled_back", "cancelled", "failed"}:
+            raise ValueError("migration task cannot be cancelled")
+        if "cancelled" not in _TASK_TRANSITIONS.get(task.status, frozenset()):
+            raise ValueError("migration task cannot be cancelled after transfer begins")
+        return self.transition_task(
+            task_id,
+            "cancelled",
+            actor=actor,
+            error_code=safe_reason,
+        )
 
     def _set_proposal_status(self, connection: Any, row: Any, status: str, actor: str, reason: str) -> None:
         now = utc_now()
@@ -352,13 +380,14 @@ class MigrationManager:
     def _ensure_target(connection: Any, subject_id: str, target_id: str) -> None:
         subject = connection.execute("SELECT 1 FROM subject_identity WHERE subject_id=?", (subject_id,)).fetchone()
         target = connection.execute(
-            "SELECT subject_id,status,attested_at FROM migration_targets WHERE target_id=?",
+            "SELECT * FROM migration_targets WHERE target_id=?",
             (target_id,),
         ).fetchone()
         if subject is None:
             raise NotFoundError(f"subject not found: {subject_id}")
         if target is None or target["subject_id"] != subject_id:
             raise NotFoundError(f"migration target not found: {target_id}")
+        TargetRegistry._assert_row_integrity(target)
         if target["status"] != "active" or not target["attested_at"]:
             raise ValueError("migration target has not completed trust attestation")
 

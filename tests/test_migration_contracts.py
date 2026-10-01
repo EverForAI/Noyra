@@ -14,6 +14,8 @@ MIGRATION_OPERATIONS = {
     ("GET", "/api/v1/admin/migration/targets"),
     ("POST", "/api/v1/admin/migration/targets"),
     ("POST", "/api/v1/admin/migration/targets/{targetId}/revoke"),
+    ("POST", "/api/v1/admin/migration/targets/{targetId}/challenge"),
+    ("POST", "/api/v1/admin/migration/targets/{targetId}/attest"),
     ("GET", "/api/v1/admin/migration/candidates"),
     ("GET", "/api/v1/admin/migration/proposals"),
     ("GET", "/api/v1/admin/migration/proposals/{proposalId}"),
