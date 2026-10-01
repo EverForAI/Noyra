@@ -2,6 +2,13 @@
 
 from .credentials import CredentialBindingPlan, CredentialRebinder
 from .cutover import CutoverCoordinator, CutoverPlan
+from .discovery import (
+    DiscoveryResult,
+    MigrationDiscovery,
+    MigrationNeed,
+    NeedAssessment,
+    ResourceObservation,
+)
 from .manager import MigrationManager
 from .policy import MigrationPolicy, MigrationPolicyConflictError, MigrationStore
 from .proposals import MigrationProposalStore
@@ -22,16 +29,21 @@ __all__ = [
     "CredentialRebinder",
     "CutoverCoordinator",
     "CutoverPlan",
+    "DiscoveryResult",
     "EncryptedTransferReceipt",
     "EncryptedTransferSession",
+    "MigrationDiscovery",
     "MigrationManager",
+    "MigrationNeed",
     "MigrationPolicy",
     "MigrationPolicyConflictError",
     "MigrationProposalStore",
     "MigrationStore",
+    "NeedAssessment",
     "RecoveryCoordinator",
     "RecoveryRequest",
     "RegisteredTargetProvider",
+    "ResourceObservation",
     "TargetAttestation",
     "TargetCandidate",
     "TargetChallenge",
