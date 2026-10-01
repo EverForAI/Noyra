@@ -33,3 +33,5 @@ Implemented Task 3 and committed the public HTTPS setup changes.
 - Added focused tests for DNS pending, root/listener/port guards, command errors, rollback errors, and custom Caddy path rejection.
 
 Updated validation: `python -m pytest tests/test_deployment_setup.py tests/test_deployment_contract.py -q` (25 passed) and Ruff passed.
+
+Compatibility follow-up: omitted `NOYRA_HOST` and `NOYRA_PORT` now use the service defaults (`127.0.0.1` and `8765`), while explicit unsafe values remain rejected. Focused validation now reports 26 passed.

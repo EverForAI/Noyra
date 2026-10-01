@@ -225,6 +225,22 @@ def test_public_mode_requires_loopback_listener_and_port(tmp_path: Path) -> None
     assert "NOYRA_SETUP_UNSAFE_PORT" in result.stderr
 
 
+def test_public_mode_accepts_native_listener_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(0, 0, 0, "", ("127.0.0.1", 443))],
+    )
+    runner = FakeRunner()
+    setup = build_runner(runner, tmp_path)
+    env = tmp_path / "noyra.env"
+    env.write_text("OTHER=value\n", encoding="utf-8")
+    result = setup.run_public(public_domain="example.com", admin_domain="admin.example.com")
+    assert result.exit_code == 0
+
+
 def test_public_mode_requires_root_before_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

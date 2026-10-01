@@ -449,9 +449,11 @@ class SetupRunner:
                 for key, value in parse_env_file(env_text)
                 if value is not None and key and not key.startswith("#")
             }
-            if assignments.get("NOYRA_HOST") != "127.0.0.1":
+            effective_host = assignments.get("NOYRA_HOST", "127.0.0.1")
+            effective_port = assignments.get("NOYRA_PORT", "8765")
+            if effective_host != "127.0.0.1":
                 raise SetupError("UNSAFE_LISTENER", "public mode requires NOYRA_HOST=127.0.0.1")
-            if assignments.get("NOYRA_PORT") != "8765":
+            if effective_port != "8765":
                 raise SetupError("UNSAFE_PORT", "public mode requires NOYRA_PORT=8765")
             actions.extend(["validate NOYRA_HOST=127.0.0.1", "validate NOYRA_PORT=8765"])
             updated_env = update_env_text(
