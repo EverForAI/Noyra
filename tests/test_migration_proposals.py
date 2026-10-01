@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 import base64
 
-import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from noyra.migration.proposals import MigrationProposalBuilder, MigrationProposalStore
 from noyra.migration.policy import MigrationPolicy, MigrationStore
+from noyra.migration.proposals import MigrationProposalBuilder, MigrationProposalStore
 from noyra.migration.targets import TargetRegistry
 from noyra.migration.trust import TrustDecision
 
