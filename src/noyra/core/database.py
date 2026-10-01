@@ -6667,13 +6667,15 @@ CREATE INDEX IF NOT EXISTS idx_migration_target_challenges_target
     ON migration_target_challenges(target_id, expires_at);
 """,
     74: """
-ALTER TABLE migration_targets ADD COLUMN attested_at TEXT;
-ALTER TABLE migration_targets ADD COLUMN attestation_epoch TEXT;
+-- Attestation columns are added by the idempotent migration hook.  Keeping
+-- this marker replay-safe matters for databases whose schema marker is
+-- deliberately rewound during migration verification.
+SELECT 1;
 """,
     75: """
-ALTER TABLE migration_tasks ADD COLUMN target_epoch_id TEXT REFERENCES migration_epochs(epoch_id);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_migration_tasks_target_epoch
-    ON migration_tasks(target_epoch_id) WHERE target_epoch_id IS NOT NULL;
+-- The target epoch column and index are installed by the idempotent migration
+-- hook so migration verification can safely replay this marker.
+SELECT 1;
 """,
 }
 
@@ -9620,6 +9622,43 @@ END;
                 "ADD COLUMN latency_samples_json TEXT NOT NULL DEFAULT '[]'"
             )
 
+    @staticmethod
+    def _ensure_migration_target_attestation_columns(connection: sqlite3.Connection) -> None:
+        """Add target attestation columns without making migration replay unsafe."""
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='migration_targets'"
+        ).fetchone()
+        if table is None:
+            raise RuntimeError("migration targets table is missing")
+        columns = {
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(migration_targets)")
+        }
+        if "attested_at" not in columns:
+            connection.execute("ALTER TABLE migration_targets ADD COLUMN attested_at TEXT")
+        if "attestation_epoch" not in columns:
+            connection.execute("ALTER TABLE migration_targets ADD COLUMN attestation_epoch TEXT")
+
+    @staticmethod
+    def _ensure_migration_task_epoch_column(connection: sqlite3.Connection) -> None:
+        """Add the target epoch fence without making migration replay unsafe."""
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='migration_tasks'"
+        ).fetchone()
+        if table is None:
+            raise RuntimeError("migration tasks table is missing")
+        columns = {
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(migration_tasks)")
+        }
+        if "target_epoch_id" not in columns:
+            connection.execute(
+                "ALTER TABLE migration_tasks ADD COLUMN target_epoch_id "
+                "TEXT REFERENCES migration_epochs(epoch_id)"
+            )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_migration_tasks_target_epoch "
+            "ON migration_tasks(target_epoch_id) WHERE target_epoch_id IS NOT NULL"
+        )
+
     def _migrate(self, *, wallet_legacy_approval: WalletLegacyApproval | None = None) -> None:
         with self.connection() as connection:
             row = connection.execute(
@@ -9808,6 +9847,34 @@ END;
                     try:
                         connection.execute("BEGIN IMMEDIATE")
                         self._upgrade_provider_health_metrics(connection)
+                        connection.execute(
+                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                            (str(target_version),),
+                        )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
+                if target_version == 74:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._ensure_migration_target_attestation_columns(connection)
+                        self._execute_sql_script(connection, migration)
+                        connection.execute(
+                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                            (str(target_version),),
+                        )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
+                if target_version == 75:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._ensure_migration_task_epoch_column(connection)
+                        self._execute_sql_script(connection, migration)
                         connection.execute(
                             "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                             (str(target_version),),
