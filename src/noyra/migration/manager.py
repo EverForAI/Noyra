@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -12,10 +13,11 @@ from typing import Any
 from noyra.core.admission import assert_current_lease
 from noyra.core.database import Database
 from noyra.core.errors import NotFoundError
-from noyra.core.redaction import redact_secret_text
+from noyra.core.identity import validate_subject_id
+from noyra.core.redaction import redact_secret_text, redact_secrets
 from noyra.core.types import content_hash, new_id, utc_now
 
-from .policy import MigrationStore
+from .policy import MigrationPolicy, MigrationStore
 from .targets import TargetRegistry
 
 _TASK_TRANSITIONS: dict[str, frozenset[str]] = {
@@ -24,7 +26,15 @@ _TASK_TRANSITIONS: dict[str, frozenset[str]] = {
     "awaiting_approval": frozenset({"approved", "rejected", "expired", "cancelled"}),
     "approved": frozenset({"preparing", "rolling_back", "cancelled", "failed"}),
     "preparing": frozenset(
-        {"transferring", "restoring", "validating", "cutover", "committed", "rolling_back", "failed"}
+        {
+            "transferring",
+            "restoring",
+            "validating",
+            "cutover",
+            "committed",
+            "rolling_back",
+            "failed",
+        }
     ),
     "transferring": frozenset({"restoring", "validating", "rolling_back", "failed"}),
     "restoring": frozenset({"validating", "rolling_back", "failed"}),
@@ -65,6 +75,9 @@ class MigrationTask:
     manifest_digest: str | None = None
     artifact_id: str | None = None
     error_code: str | None = None
+    target_epoch_id: str | None = None
+    created_at: str = ""
+    updated_at: str = ""
 
 
 class MigrationManager:
@@ -86,8 +99,12 @@ class MigrationManager:
         risk_score: float = 0.5,
     ) -> MigrationProposalRecord:
         assert_current_lease()
-        if not reason.strip() or len(reason) > 2048 or not reason_code.strip():
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 2048:
             raise ValueError("migration proposal reason is invalid")
+        if not isinstance(reason_code, str) or not re.fullmatch(
+            r"[a-z][a-z0-9_]{0,63}", reason_code.strip()
+        ):
+            raise ValueError("migration proposal reason code is invalid")
         if type(policy_revision) is not int or policy_revision < 1:
             raise ValueError("migration policy revision is invalid")
         self._parse_timestamp(expires_at)
@@ -96,9 +113,20 @@ class MigrationManager:
         if type(risk_score) is not float or not 0.0 <= risk_score <= 1.0:
             raise ValueError("migration risk score is invalid")
         evidence = {} if evidence is None else dict(evidence)
+        evidence = redact_secrets(evidence)
+        safe_reason = redact_secret_text(reason.strip())
         if len(evidence) > 64 or len(self._json(evidence).encode()) > 16_384:
             raise ValueError("migration proposal evidence is too large")
         with self.database.transaction() as connection:
+            MigrationStore._ensure_policy(connection, subject_id)
+            policy_row = connection.execute(
+                "SELECT * FROM migration_policies WHERE subject_id=?", (subject_id,)
+            ).fetchone()
+            policy = MigrationPolicy.from_record(policy_row)
+            if not policy.enabled or policy.approval_mode == "disabled":
+                raise ValueError("migration is disabled")
+            if policy.revision != policy_revision:
+                raise ValueError("migration policy revision is stale")
             self._ensure_target(connection, subject_id, target_id)
             proposal_id = new_id("migrationproposal")
             created_at = utc_now()
@@ -109,7 +137,7 @@ class MigrationManager:
                 "policy_revision": policy_revision,
                 "status": "awaiting_approval",
                 "reason_code": reason_code.strip(),
-                "reason": reason.strip(),
+                "reason": safe_reason,
                 "evidence_json": self._json(evidence),
                 "benefit_score": benefit_score,
                 "risk_score": risk_score,
@@ -125,7 +153,11 @@ class MigrationManager:
                 subject_id,
                 "migration_proposal_created",
                 "planner",
-                {"proposal_id": proposal_id, "target_id": target_id, "policy_revision": policy_revision},
+                {
+                    "proposal_id": proposal_id,
+                    "target_id": target_id,
+                    "policy_revision": policy_revision,
+                },
             )
             return MigrationProposalRecord(
                 proposal_id,
@@ -134,7 +166,7 @@ class MigrationManager:
                 policy_revision,
                 "awaiting_approval",
                 reason_code.strip(),
-                reason.strip(),
+                safe_reason,
                 expires_at,
             )
 
@@ -149,11 +181,13 @@ class MigrationManager:
             ).fetchone()
             if row is None:
                 raise NotFoundError(f"migration proposal not found: {proposal_id}")
+            self._assert_proposal_integrity(row)
             existing = connection.execute(
                 "SELECT * FROM migration_tasks WHERE subject_id=? AND idempotency_key=?",
                 (row["subject_id"], idempotency_key),
             ).fetchone()
             if existing is not None:
+                self._assert_task_integrity(existing)
                 if existing["proposal_id"] != proposal_id:
                     raise ValueError("idempotency key belongs to another migration proposal")
                 return self._task(existing)
@@ -171,7 +205,9 @@ class MigrationManager:
                 "SELECT version FROM runtime_state WHERE subject_id=?", (row["subject_id"],)
             ).fetchone()
             source_epoch = (
-                f"runtime-{int(epoch_row['version'])}" if epoch_row is not None else "source-epoch-1"
+                f"runtime-{int(epoch_row['version'])}"
+                if epoch_row is not None
+                else "source-epoch-1"
             )
             task_id = new_id("migrationtask")
             task_values = {
@@ -186,12 +222,13 @@ class MigrationManager:
                 "manifest_digest": None,
                 "artifact_id": None,
                 "error_code": None,
+                "target_epoch_id": None,
                 "expires_at": row["expires_at"],
                 "created_at": now,
                 "updated_at": now,
             }
             connection.execute(
-                "INSERT INTO migration_tasks(task_id,proposal_id,subject_id,target_id,idempotency_key,source_epoch,policy_revision,status,manifest_digest,artifact_id,error_code,expires_at,created_at,updated_at,state_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO migration_tasks(task_id,proposal_id,subject_id,target_id,idempotency_key,source_epoch,policy_revision,status,manifest_digest,artifact_id,error_code,target_epoch_id,expires_at,created_at,updated_at,state_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (*task_values.values(), self._task_hash(task_values)),
             )
             self._set_proposal_status(connection, row, "approved", actor, actor.strip())
@@ -203,7 +240,9 @@ class MigrationManager:
                 {"task_id": task_id, "proposal_id": proposal_id, "source_epoch": source_epoch},
             )
             return self._task(
-                connection.execute("SELECT * FROM migration_tasks WHERE task_id=?", (task_id,)).fetchone()
+                connection.execute(
+                    "SELECT * FROM migration_tasks WHERE task_id=?", (task_id,)
+                ).fetchone()
             )
 
     def reject(self, proposal_id: str, *, actor: str, reason: str) -> MigrationProposalRecord:
@@ -217,6 +256,7 @@ class MigrationManager:
             ).fetchone()
             if row is None:
                 raise NotFoundError(f"migration proposal not found: {proposal_id}")
+            self._assert_proposal_integrity(row)
             if row["status"] not in _PROPOSAL_ACTIVE:
                 raise ValueError("migration proposal is not awaiting approval")
             policy_row = connection.execute(
@@ -263,10 +303,16 @@ class MigrationManager:
                 row["subject_id"],
                 "migration_proposal_rejected",
                 actor.strip(),
-                {"proposal_id": proposal_id, "rejection_id": rejection_id, "cooldown_until": cooldown_text},
+                {
+                    "proposal_id": proposal_id,
+                    "rejection_id": rejection_id,
+                    "cooldown_until": cooldown_text,
+                },
             )
             return self._proposal(
-                connection.execute("SELECT * FROM migration_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
+                connection.execute(
+                    "SELECT * FROM migration_proposals WHERE proposal_id=?", (proposal_id,)
+                ).fetchone()
             )
 
     def transition_task(
@@ -279,15 +325,19 @@ class MigrationManager:
         manifest_digest: str | None = None,
         artifact_id: str | None = None,
         error_code: str | None = None,
+        target_epoch_id: str | None = None,
     ) -> MigrationTask:
         assert_current_lease()
         self._validate_actor(actor)
         if status not in _TASK_TRANSITIONS:
             raise ValueError("migration task status is invalid")
         with self.database.transaction() as connection:
-            row = connection.execute("SELECT * FROM migration_tasks WHERE task_id=?", (task_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM migration_tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
             if row is None:
                 raise NotFoundError(f"migration task not found: {task_id}")
+            self._assert_task_integrity(row)
             if expected_status is not None and row["status"] != expected_status:
                 raise ValueError("migration task status changed")
             if row["status"] == status:
@@ -299,22 +349,42 @@ class MigrationManager:
                 raise ValueError("migration policy revision is stale")
             now = utc_now()
             values = dict(row)
+            if target_epoch_id is not None:
+                epoch = connection.execute(
+                    "SELECT subject_id,target_id,status FROM migration_epochs WHERE epoch_id=?",
+                    (target_epoch_id,),
+                ).fetchone()
+                if epoch is None:
+                    raise ValueError("migration target epoch not found")
+                if (
+                    epoch["subject_id"] != row["subject_id"]
+                    or epoch["target_id"] != row["target_id"]
+                ):
+                    raise ValueError("migration target epoch does not match task")
+                if epoch["status"] != "active":
+                    raise ValueError("migration target epoch is not active")
             values.update(
                 {
                     "status": status,
-                    "manifest_digest": manifest_digest if manifest_digest is not None else row["manifest_digest"],
+                    "manifest_digest": manifest_digest
+                    if manifest_digest is not None
+                    else row["manifest_digest"],
                     "artifact_id": artifact_id if artifact_id is not None else row["artifact_id"],
                     "error_code": error_code if error_code is not None else row["error_code"],
+                    "target_epoch_id": (
+                        target_epoch_id if target_epoch_id is not None else row["target_epoch_id"]
+                    ),
                     "updated_at": now,
                 }
             )
             result = connection.execute(
-                "UPDATE migration_tasks SET status=?,manifest_digest=?,artifact_id=?,error_code=?,updated_at=?,state_hash=? WHERE task_id=? AND status=?",
+                "UPDATE migration_tasks SET status=?,manifest_digest=?,artifact_id=?,error_code=?,target_epoch_id=?,updated_at=?,state_hash=? WHERE task_id=? AND status=?",
                 (
                     values["status"],
                     values["manifest_digest"],
                     values["artifact_id"],
                     values["error_code"],
+                    values["target_epoch_id"],
                     values["updated_at"],
                     self._task_hash(values),
                     task_id,
@@ -338,14 +408,66 @@ class MigrationManager:
                 actor.strip(),
                 audit_payload,
             )
-            return self._task(connection.execute("SELECT * FROM migration_tasks WHERE task_id=?", (task_id,)).fetchone())
+            return self._task(
+                connection.execute(
+                    "SELECT * FROM migration_tasks WHERE task_id=?", (task_id,)
+                ).fetchone()
+            )
 
-    def get_task(self, task_id: str) -> MigrationTask:
+    def get_proposal(self, subject_id: str, proposal_id: str) -> dict[str, Any]:
+        validate_subject_id(subject_id)
         with self.database.connection() as connection:
-            row = connection.execute("SELECT * FROM migration_tasks WHERE task_id=?", (task_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM migration_proposals WHERE proposal_id=? AND subject_id=?",
+                (proposal_id, subject_id),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError(f"migration proposal not found: {proposal_id}")
+        self._assert_proposal_integrity(row)
+        return self._proposal_projection(row)
+
+    def list_proposals(self, subject_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        validate_subject_id(subject_id)
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("migration proposal limit is invalid")
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM migration_proposals WHERE subject_id=? "
+                "ORDER BY created_at DESC,proposal_id DESC LIMIT ?",
+                (subject_id, limit),
+            ).fetchall()
+        return [self._proposal_projection(row) for row in rows]
+
+    def get_task(self, task_id: str, *, subject_id: str | None = None) -> MigrationTask:
+        with self.database.connection() as connection:
+            if subject_id is None:
+                row = connection.execute(
+                    "SELECT * FROM migration_tasks WHERE task_id=?", (task_id,)
+                ).fetchone()
+            else:
+                validate_subject_id(subject_id)
+                row = connection.execute(
+                    "SELECT * FROM migration_tasks WHERE task_id=? AND subject_id=?",
+                    (task_id, subject_id),
+                ).fetchone()
         if row is None:
             raise NotFoundError(f"migration task not found: {task_id}")
+        self._assert_task_integrity(row)
         return self._task(row)
+
+    def list_tasks(self, subject_id: str, *, limit: int = 50) -> list[MigrationTask]:
+        validate_subject_id(subject_id)
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("migration task limit is invalid")
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM migration_tasks WHERE subject_id=? "
+                "ORDER BY updated_at DESC,task_id DESC LIMIT ?",
+                (subject_id, limit),
+            ).fetchall()
+        for row in rows:
+            self._assert_task_integrity(row)
+        return [self._task(row) for row in rows]
 
     def cancel(self, task_id: str, *, actor: str, reason: str) -> MigrationTask:
         """Cancel a task before cutover, retaining an auditable reason."""
@@ -365,20 +487,31 @@ class MigrationManager:
             error_code=safe_reason,
         )
 
-    def _set_proposal_status(self, connection: Any, row: Any, status: str, actor: str, reason: str) -> None:
+    def _set_proposal_status(
+        self, connection: Any, row: Any, status: str, actor: str, reason: str
+    ) -> None:
         now = utc_now()
         values = dict(row)
         values.update({"status": status, "decided_at": now, "decision_reason": reason[:512]})
         result = connection.execute(
             "UPDATE migration_proposals SET status=?,decided_at=?,decision_reason=?,state_hash=? WHERE proposal_id=? AND status=?",
-            (status, now, reason[:512], self._proposal_hash(values), row["proposal_id"], row["status"]),
+            (
+                status,
+                now,
+                reason[:512],
+                self._proposal_hash(values),
+                row["proposal_id"],
+                row["status"],
+            ),
         )
         if result.rowcount != 1:
             raise ValueError("migration proposal status changed")
 
     @staticmethod
     def _ensure_target(connection: Any, subject_id: str, target_id: str) -> None:
-        subject = connection.execute("SELECT 1 FROM subject_identity WHERE subject_id=?", (subject_id,)).fetchone()
+        subject = connection.execute(
+            "SELECT 1 FROM subject_identity WHERE subject_id=?", (subject_id,)
+        ).fetchone()
         target = connection.execute(
             "SELECT * FROM migration_targets WHERE target_id=?",
             (target_id,),
@@ -393,7 +526,9 @@ class MigrationManager:
 
     @staticmethod
     def _policy_revision(connection: Any, subject_id: str) -> int | None:
-        row = connection.execute("SELECT revision FROM migration_policies WHERE subject_id=?", (subject_id,)).fetchone()
+        row = connection.execute(
+            "SELECT revision FROM migration_policies WHERE subject_id=?", (subject_id,)
+        ).fetchone()
         return None if row is None else int(row["revision"])
 
     @staticmethod
@@ -453,6 +588,7 @@ class MigrationManager:
                 "manifest_digest": values.get("manifest_digest"),
                 "artifact_id": values.get("artifact_id"),
                 "error_code": values.get("error_code"),
+                "target_epoch_id": values.get("target_epoch_id"),
                 "expires_at": values["expires_at"],
                 "created_at": values["created_at"],
                 "updated_at": values["updated_at"],
@@ -462,15 +598,108 @@ class MigrationManager:
     @staticmethod
     def _proposal(row: Any) -> MigrationProposalRecord:
         return MigrationProposalRecord(
-            row["proposal_id"], row["subject_id"], row["target_id"], int(row["policy_revision"]),
-            row["status"], row["reason_code"], row["reason"], row["expires_at"],
+            row["proposal_id"],
+            row["subject_id"],
+            row["target_id"],
+            int(row["policy_revision"]),
+            row["status"],
+            row["reason_code"],
+            row["reason"],
+            row["expires_at"],
+        )
+
+    @classmethod
+    def _proposal_projection(cls, row: Any) -> dict[str, Any]:
+        import json
+
+        cls._assert_proposal_integrity(row)
+        values = dict(row)
+        try:
+            evidence = json.loads(values["evidence_json"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("migration proposal evidence is invalid") from error
+        if not isinstance(evidence, dict):
+            raise ValueError("migration proposal evidence is invalid")
+        return {
+            key: values[key]
+            for key in (
+                "proposal_id",
+                "subject_id",
+                "target_id",
+                "policy_revision",
+                "status",
+                "reason_code",
+                "expires_at",
+                "created_at",
+                "decided_at",
+            )
+        } | {
+            "reason": redact_secret_text(str(values["reason"])),
+            "evidence": redact_secrets(evidence),
+            "benefit_score": float(values["benefit_score"]),
+            "risk_score": float(values["risk_score"]),
+            "decision_reason": (
+                None
+                if values.get("decision_reason") is None
+                else redact_secret_text(str(values["decision_reason"]))
+            ),
+        }
+
+    @classmethod
+    def _assert_proposal_integrity(cls, row: Any) -> None:
+        values = dict(row)
+        if values.get("state_hash") != cls._proposal_hash(values):
+            raise ValueError("migration proposal integrity check failed")
+
+    @classmethod
+    def _assert_task_integrity(cls, row: Any) -> None:
+        values = dict(row)
+        if values.get("state_hash") == cls._task_hash(values):
+            return
+        if values.get("target_epoch_id") is None and values.get(
+            "state_hash"
+        ) == cls._legacy_task_hash(values):
+            return
+        else:
+            raise ValueError("migration task integrity check failed")
+
+    @staticmethod
+    def _legacy_task_hash(values: Any) -> str:
+        return content_hash(
+            {
+                "task_id": values["task_id"],
+                "proposal_id": values["proposal_id"],
+                "subject_id": values["subject_id"],
+                "target_id": values["target_id"],
+                "idempotency_key": values["idempotency_key"],
+                "source_epoch": values["source_epoch"],
+                "policy_revision": int(values["policy_revision"]),
+                "status": values["status"],
+                "manifest_digest": values.get("manifest_digest"),
+                "artifact_id": values.get("artifact_id"),
+                "error_code": values.get("error_code"),
+                "expires_at": values["expires_at"],
+                "created_at": values["created_at"],
+                "updated_at": values["updated_at"],
+            }
         )
 
     @staticmethod
     def _task(row: Any) -> MigrationTask:
         return MigrationTask(
-            row["task_id"], row["proposal_id"], row["subject_id"], row["target_id"],
-            row["idempotency_key"], row["source_epoch"], row["status"],
-            int(row["policy_revision"]), row["expires_at"],
-            row["manifest_digest"], row["artifact_id"], row["error_code"],
+            row["task_id"],
+            row["proposal_id"],
+            row["subject_id"],
+            row["target_id"],
+            row["idempotency_key"],
+            row["source_epoch"],
+            row["status"],
+            int(row["policy_revision"]),
+            row["expires_at"],
+            row["manifest_digest"],
+            row["artifact_id"],
+            row["error_code"],
+            row["target_epoch_id"],
+            row["created_at"],
+            row["updated_at"],
         )

@@ -31,12 +31,15 @@ def test_migration_schema_is_current_and_append_only(tmp_path) -> None:
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
             ).fetchone()
 
+        task_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(migration_tasks)")
+        }
+        assert "target_epoch_id" in task_columns
+
     store = MigrationStore(database)
     store.read_policy("Noyra-0001")
     with database.transaction() as connection:
-        row = connection.execute(
-            "SELECT audit_id FROM migration_audit_events LIMIT 1"
-        ).fetchone()
+        row = connection.execute("SELECT audit_id FROM migration_audit_events LIMIT 1").fetchone()
         assert row is None
 
 

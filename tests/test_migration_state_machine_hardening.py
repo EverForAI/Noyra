@@ -34,18 +34,22 @@ def _manager(tmp_path):
     )
     challenge = registry.issue_challenge("target-1", source_epoch="epoch-1")
     registry.attest(
-        "target-1", challenge,
+        "target-1",
+        challenge,
         base64.urlsafe_b64encode(private.sign(challenge.signing_bytes())).decode(),
         actor="operator",
     )
-    return db, MigrationManager(db, MigrationStore(db))
+    store = MigrationStore(db)
+    policy = store.read_policy("Noyra-0001")
+    store.update_policy("Noyra-0001", policy.revision, {"enabled": True}, "operator")
+    return db, MigrationManager(db, store)
 
 
 def _proposal(manager: MigrationManager):
     return manager.create_proposal(
         subject_id="Noyra-0001",
         target_id="target-1",
-        policy_revision=1,
+        policy_revision=manager.policy_store.read_policy("Noyra-0001").revision,
         reason_code="maintenance",
         reason="planned maintenance",
         expires_at="2099-01-01T00:00:00+00:00",
@@ -97,6 +101,11 @@ def test_task_transition_rejects_stale_policy_revision(tmp_path) -> None:
     task = manager.approve(proposal.proposal_id, actor="operator", idempotency_key="task-1")
     store = MigrationStore(db)
     store.read_policy("Noyra-0001")
-    store.update_policy("Noyra-0001", 1, {"enabled": True}, "operator")
+    store.update_policy(
+        "Noyra-0001",
+        manager.policy_store.read_policy("Noyra-0001").revision,
+        {"rejection_cooldown_seconds": 3600},
+        "operator",
+    )
     with pytest.raises(ValueError, match="policy"):
         manager.transition_task(task.task_id, "preparing", actor="operator")

@@ -822,9 +822,9 @@ class ServiceSettings(BaseModel):
     admin_session_max_count: int = Field(default=256, ge=8, le=10_000)
     admin_session_cookie_secure: bool = False
     migration_enabled: bool = False
-    migration_approval_mode: Literal[
-        "disabled", "manual", "policy_auto", "emergency_recovery"
-    ] = "disabled"
+    migration_approval_mode: Literal["disabled", "manual", "policy_auto", "emergency_recovery"] = (
+        "disabled"
+    )
     migration_rejection_cooldown_days: int = Field(default=7, ge=0, le=365)
     migration_proposal_expiry_seconds: int = Field(default=86400, ge=300, le=604800)
     migration_wallet_mode: Literal[
@@ -2396,10 +2396,21 @@ class NoyraHTTPServer:
                         item = {
                             key: row[key]
                             for key in (
-                                "target_id", "subject_id", "key_fingerprint",
-                                "enrollment_generation", "endpoint", "region", "provider",
-                                "release_sha", "os_arch", "encrypted_volume", "status",
-                                "attested_at", "attestation_epoch", "created_at", "updated_at",
+                                "target_id",
+                                "subject_id",
+                                "key_fingerprint",
+                                "enrollment_generation",
+                                "endpoint",
+                                "region",
+                                "provider",
+                                "release_sha",
+                                "os_arch",
+                                "encrypted_volume",
+                                "status",
+                                "attested_at",
+                                "attestation_epoch",
+                                "created_at",
+                                "updated_at",
                             )
                         }
                         item["capabilities_json"] = row["capabilities_json"]
@@ -2407,52 +2418,128 @@ class NoyraHTTPServer:
                         output.append(item)
                     self._json(HTTPStatus.OK, output)
                     return
+                if parsed.path == "/api/admin/migration/candidates":
+                    if not self._authorized("operator"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    policy = owner.migration_store.read_policy(owner.kernel.subject_id)
+                    if not policy.enabled or policy.approval_mode == "disabled":
+                        self._json(HTTPStatus.OK, [])
+                        return
+                    with owner.kernel.database.connection() as connection:
+                        rows = connection.execute(
+                            "SELECT * FROM migration_targets WHERE subject_id=? "
+                            "AND status='active' AND attested_at IS NOT NULL "
+                            "ORDER BY updated_at DESC LIMIT ?",
+                            (owner.kernel.subject_id, limit),
+                        ).fetchall()
+                    candidates = []
+                    for row in rows:
+                        try:
+                            owner.migration_targets._assert_row_integrity(row)
+                        except ValueError:
+                            self._json(
+                                HTTPStatus.SERVICE_UNAVAILABLE,
+                                {"error": "migration_target_integrity_unavailable"},
+                            )
+                            return
+                        reasons = ["resource_observation_unavailable"]
+                        if (
+                            policy.allowed_target_ids
+                            and row["target_id"] not in policy.allowed_target_ids
+                        ):
+                            reasons.insert(0, "target_not_allowlisted")
+                        candidates.append(
+                            {
+                                "target_id": row["target_id"],
+                                "status": row["status"],
+                                "trusted": True,
+                                "resources_verified": False,
+                                "eligible": False,
+                                "reasons": reasons,
+                            }
+                        )
+                    self._json(HTTPStatus.OK, candidates)
+                    return
                 if parsed.path == "/api/admin/migration/proposals":
                     if not self._authorized("operator"):
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
-                    with owner.kernel.database.connection() as connection:
-                        rows = connection.execute(
-                            "SELECT proposal_id,subject_id,target_id,policy_revision,status,"
-                            "reason_code,reason,evidence_json,benefit_score,risk_score,"
-                            "expires_at,created_at,decided_at,decision_reason FROM "
-                            "migration_proposals WHERE subject_id=? "
-                            "ORDER BY created_at DESC LIMIT ?",
-                            (owner.kernel.subject_id, limit),
-                        ).fetchall()
-                    items = []
-                    for row in rows:
-                        item = dict(row)
-                        item["evidence"] = json.loads(item.pop("evidence_json"))
-                        items.append(item)
+                    try:
+                        items = owner.migration_manager.list_proposals(
+                            owner.kernel.subject_id, limit=limit
+                        )
+                    except ValueError:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "migration_proposal_integrity_unavailable"},
+                        )
+                        return
                     self._json(HTTPStatus.OK, items)
+                    return
+                if parsed.path.startswith("/api/admin/migration/proposals/"):
+                    if not self._authorized("operator"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    proposal_id = parsed.path.removeprefix("/api/admin/migration/proposals/").strip(
+                        "/"
+                    )
+                    if not proposal_id or "/" in proposal_id:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "migration_proposal_not_found"})
+                        return
+                    try:
+                        proposal = owner.migration_manager.get_proposal(
+                            owner.kernel.subject_id, proposal_id
+                        )
+                    except NotFoundError:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "migration_proposal_not_found"})
+                        return
+                    except ValueError:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "migration_proposal_integrity_unavailable"},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, proposal)
                     return
                 if parsed.path == "/api/admin/migration/tasks":
                     if not self._authorized("operator"):
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
-                    with owner.kernel.database.connection() as connection:
-                        rows = connection.execute(
-                            "SELECT * FROM migration_tasks WHERE subject_id=? "
-                            "ORDER BY updated_at DESC LIMIT ?",
-                            (owner.kernel.subject_id, limit),
-                        ).fetchall()
-                    self._json(HTTPStatus.OK, [dict(row) for row in rows])
+                    try:
+                        tasks = owner.migration_manager.list_tasks(
+                            owner.kernel.subject_id, limit=limit
+                        )
+                    except ValueError:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "migration_task_integrity_unavailable"},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, [task.__dict__ for task in tasks])
                     return
                 if parsed.path.startswith("/api/admin/migration/tasks/"):
                     if not self._authorized("operator"):
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
                     task_id = parsed.path.removeprefix("/api/admin/migration/tasks/").strip("/")
-                    with owner.kernel.database.connection() as connection:
-                        row = connection.execute(
-                            "SELECT * FROM migration_tasks WHERE task_id=? AND subject_id=?",
-                            (task_id, owner.kernel.subject_id),
-                        ).fetchone()
-                    if row is None:
+                    if not task_id or "/" in task_id:
                         self._json(HTTPStatus.NOT_FOUND, {"error": "migration_task_not_found"})
-                    else:
-                        self._json(HTTPStatus.OK, dict(row))
+                        return
+                    try:
+                        task = owner.migration_manager.get_task(
+                            task_id, subject_id=owner.kernel.subject_id
+                        )
+                    except NotFoundError:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "migration_task_not_found"})
+                        return
+                    except ValueError:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "migration_task_integrity_unavailable"},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, task.__dict__)
                     return
                 if (
                     parsed.path != "/health"
@@ -4121,18 +4208,11 @@ class NoyraHTTPServer:
                         self._discard_small_request_body()
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
-                    task_id = (
-                        self.path.removeprefix("/api/admin/migration/tasks/")
-                        .removesuffix("/cutover")
-                        .strip("/")
+                    self._discard_small_request_body()
+                    self._json(
+                        HTTPStatus.CONFLICT,
+                        {"error": "verified_target_restore_and_health_proof_required"},
                     )
-                    try:
-                        result = self.migration_cutover.prepare(task_id, actor=self._actor())
-                        committed = self.migration_cutover.commit(task_id, actor=self._actor())
-                    except ValueError:
-                        self._json(HTTPStatus.CONFLICT, {"error": "migration_cutover_rejected"})
-                        return
-                    self._json(HTTPStatus.OK, {**result.__dict__, **committed})
                     return
                 if self.path.startswith("/api/admin/migration/tasks/") and self.path.endswith(
                     "/rollback"

@@ -231,7 +231,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 74
+CURRENT_SCHEMA_VERSION = 75
 
 MIGRATIONS: dict[int, str] = {
     2: """
@@ -6669,6 +6669,11 @@ CREATE INDEX IF NOT EXISTS idx_migration_target_challenges_target
     74: """
 ALTER TABLE migration_targets ADD COLUMN attested_at TEXT;
 ALTER TABLE migration_targets ADD COLUMN attestation_epoch TEXT;
+""",
+    75: """
+ALTER TABLE migration_tasks ADD COLUMN target_epoch_id TEXT REFERENCES migration_epochs(epoch_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_migration_tasks_target_epoch
+    ON migration_tasks(target_epoch_id) WHERE target_epoch_id IS NOT NULL;
 """,
 }
 

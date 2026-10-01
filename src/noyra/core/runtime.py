@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,43 @@ from .lifecycle import LifecycleManager
 from .locking import ProcessLock
 from .snapshots import SnapshotStore
 from .types import ActionRecord, RuntimeState, SnapshotRecord, SubjectIdentity, utc_now
+
+
+def _migration_epoch_guard(connection: Any, subject_id: str) -> None:
+    """Reject a source mutation while a target or completed epoch owns it.
+
+    The check runs inside the caller's ``BEGIN IMMEDIATE`` transaction.  This
+    makes epoch acquisition and source writes serialize at the SQLite writer
+    boundary instead of relying on a check performed before the write.
+    """
+    row = connection.execute(
+        "SELECT 1 FROM migration_epochs WHERE subject_id=? "
+        "AND status IN ('active','completed') LIMIT 1",
+        (subject_id,),
+    ).fetchone()
+    if row is not None:
+        raise RuntimeOwnershipError("runtime ownership is fenced by a migration epoch")
+
+
+def _no_active_migration_epoch(database: Database, subject_id: str) -> bool:
+    """Fail closed when a durable target epoch owns this subject."""
+    try:
+        with database.connection() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM migration_epochs WHERE subject_id=? "
+                "AND status IN ('active','completed') LIMIT 1",
+                (subject_id,),
+            ).fetchone()
+            if row is None:
+                row = connection.execute(
+                    "SELECT 1 FROM migration_tasks t JOIN migration_epochs e "
+                    "ON t.target_epoch_id=e.epoch_id WHERE t.subject_id=? "
+                    "AND t.status='rolling_back' AND e.status='revoked' LIMIT 1",
+                    (subject_id,),
+                ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is None
 
 
 class SubjectKernel:
@@ -64,16 +102,24 @@ class SubjectKernel:
             # the kernel would create a reference cycle (kernel -> admission
             # -> callback -> kernel), which can leak the lock on Windows.
             process_lock_ref = self.process_lock
+            database_ref = self.database
             self.admission = RuntimeAdmissionGate(
                 subject_id,
                 initially_accepting=False,
-                ownership_check=lambda: process_lock_ref.held,
+                ownership_check=lambda: (
+                    process_lock_ref.held and _no_active_migration_epoch(database_ref, subject_id)
+                ),
             )
             self.identity_store = IdentityStore(self.database)
             self.event_store = EventStore(self.database)
             self.snapshot_store = SnapshotStore(self.database)
             self.action_ledger = ActionLedger(self.database)
-            self.lifecycle = LifecycleManager(self.database, self.event_store, subject_id)
+            self.lifecycle = LifecycleManager(
+                self.database,
+                self.event_store,
+                subject_id,
+                mutation_guard=lambda connection: _migration_epoch_guard(connection, subject_id),
+            )
             self.identity: SubjectIdentity | None
             if allow_subject_creation and not self._preflight_only:
                 self.identity = self.identity_store.ensure(subject_id, genesis_hash)
@@ -133,8 +179,7 @@ class SubjectKernel:
 
     def recover_after_integrity(self) -> RuntimeState:
         """Perform restart recovery only after the caller's startup integrity gate passes."""
-        if not self.process_lock.held:
-            raise RuntimeOwnershipError("this kernel does not own the subject runtime")
+        self._require_ownership()
         self._runtime_ready = True
         self.verify_continuity()
         self.identity = self.identity_store.load(self.subject_id)
@@ -206,6 +251,8 @@ class SubjectKernel:
     def _require_ownership(self) -> None:
         if not self.process_lock.held:
             raise RuntimeOwnershipError("this kernel does not own the subject runtime")
+        if not _no_active_migration_epoch(self.database, self.subject_id):
+            raise RuntimeOwnershipError("runtime ownership is fenced by a migration epoch")
 
     def __del__(self) -> None:
         with suppress(Exception):
@@ -220,6 +267,7 @@ class SubjectKernel:
         if not reason.strip():
             raise ValueError("checkpoint reason is required")
         with self.database.transaction() as connection:
+            _migration_epoch_guard(connection, self.subject_id)
             row = connection.execute(
                 "SELECT state_version FROM subject_identity WHERE subject_id = ?",
                 (self.subject_id,),
