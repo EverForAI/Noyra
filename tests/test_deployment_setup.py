@@ -1,4 +1,6 @@
+import platform
 from pathlib import Path
+from subprocess import CompletedProcess
 from types import SimpleNamespace
 
 import pytest
@@ -6,6 +8,8 @@ import pytest
 from noyra.__main__ import _setup_command
 from noyra.deployment_setup import (
     SetupError,
+    SetupOptions,
+    SetupRunner,
     create_backup,
     parse_env_file,
     redact_token,
@@ -73,10 +77,14 @@ def test_backup_restore(tmp_path: Path) -> None:
 
 def test_setup_local_dry_run_does_not_mutate(tmp_path: Path) -> None:
     env_path = tmp_path / "noyra.env"
-    env_path.write_text("NOYRA_HOST=127.0.0.1\n", encoding="utf-8")
+    env_path.write_text(
+        "NOYRA_HOST=127.0.0.1\nNOYRA_OPERATOR_TOKEN=test-token\n", encoding="utf-8"
+    )
     result = invoke_setup(["--mode", "local", "--dry-run", "--env-file", str(env_path)])
     assert result.exit_code == 0
-    assert env_path.read_text(encoding="utf-8") == "NOYRA_HOST=127.0.0.1\n"
+    assert env_path.read_text(encoding="utf-8") == (
+        "NOYRA_HOST=127.0.0.1\nNOYRA_OPERATOR_TOKEN=test-token\n"
+    )
     assert "SSH" in result.stdout
 
 
@@ -86,3 +94,40 @@ def test_setup_local_rejects_public_listener(tmp_path: Path) -> None:
     result = invoke_setup(["--mode", "local", "--env-file", str(env_path)])
     assert result.exit_code != 0
     assert "NOYRA_SETUP_UNSAFE_LISTENER" in result.stderr
+
+
+def test_setup_local_requires_explicit_host_and_token(tmp_path: Path) -> None:
+    env_path = tmp_path / "noyra.env"
+    env_path.write_text("NOYRA_HOST=127.0.0.1\n", encoding="utf-8")
+    result = invoke_setup(["--mode", "local", "--dry-run", "--env-file", str(env_path)])
+    assert result.exit_code != 0
+    assert "NOYRA_SETUP_OPERATOR_TOKEN_MISSING" in result.stderr
+
+    env_path.write_text("NOYRA_OPERATOR_TOKEN=test-token\n", encoding="utf-8")
+    result = invoke_setup(["--mode", "local", "--dry-run", "--env-file", str(env_path)])
+    assert result.exit_code != 0
+    assert "NOYRA_SETUP_UNSAFE_LISTENER" in result.stderr
+
+
+def test_setup_requires_domains_with_stable_error(tmp_path: Path) -> None:
+    result = invoke_setup(
+        ["--mode", "public", "--non-interactive", "--env-file", str(tmp_path / "env")]
+    )
+    assert result.exit_code != 0
+    assert "NOYRA_SETUP_DOMAINS_REQUIRED" in result.stderr
+
+
+def test_local_mount_check_uses_findmnt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    env_path = tmp_path / "noyra.env"
+    env_path.write_text("NOYRA_HOST=127.0.0.1\nNOYRA_OPERATOR_TOKEN=test-token\n", encoding="utf-8")
+
+    class Runner:
+        def run(self, argv, *, check=True, input_text=None):
+            del check, input_text
+            assert argv[:1] == ("findmnt",)
+            return CompletedProcess(argv, 1, "", "")
+
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr("os.geteuid", lambda: 0, raising=False)
+    with pytest.raises(SetupError, match="NOYRA_SETUP_DATA_MOUNT_MISSING"):
+        SetupRunner(SetupOptions(env_path=env_path), Runner()).run_local()

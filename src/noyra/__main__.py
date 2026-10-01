@@ -30,32 +30,35 @@ def _setup_command(arguments: list[str]) -> None:
     parser.add_argument("--tunnel-token-file", type=Path)
     parser.add_argument("--server", default=os.getenv("NOYRA_SERVER", "server"))
     options = parser.parse_args(arguments)
-    if (
-        options.mode in ("public", "cloudflare")
-        and options.non_interactive
-        and (not options.public_domain or not options.admin_domain)
-    ):
-        parser.error("--public-domain and --admin-domain are required in non-interactive mode")
-    if (
-        options.mode == "cloudflare"
-        and options.tunnel_token_file is None
-        and not options.non_interactive
-    ):
-        getpass.getpass("Cloudflare tunnel token: ")
-    setup_options = SetupOptions(
-        mode=options.mode,
-        public_domain=options.public_domain,
-        admin_domain=options.admin_domain,
-        env_path=options.env_path,
-        caddy_path=options.caddy_path,
-        tunnel_token_path=options.tunnel_token_file,
-        dry_run=options.dry_run,
-        non_interactive=options.non_interactive,
-        replace=options.replace,
-        backup_root=options.backup_root,
-        server=options.server,
-    )
     try:
+        if (
+            options.mode in ("public", "cloudflare")
+            and options.non_interactive
+            and (not options.public_domain or not options.admin_domain)
+        ):
+            raise SetupError(
+                "DOMAINS_REQUIRED",
+                "--public-domain and --admin-domain are required in non-interactive mode",
+            )
+        if (
+            options.mode == "cloudflare"
+            and options.tunnel_token_file is None
+            and not options.non_interactive
+        ):
+            getpass.getpass("Cloudflare tunnel token: ")
+        setup_options = SetupOptions(
+            mode=options.mode,
+            public_domain=options.public_domain,
+            admin_domain=options.admin_domain,
+            env_path=options.env_path,
+            caddy_path=options.caddy_path,
+            tunnel_token_path=options.tunnel_token_file,
+            dry_run=options.dry_run,
+            non_interactive=options.non_interactive,
+            replace=options.replace,
+            backup_root=options.backup_root,
+            server=options.server,
+        )
         result = SetupRunner(setup_options).run()
     except SetupError as exc:
         print(str(exc), file=sys.stderr)

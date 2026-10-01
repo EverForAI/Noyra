@@ -326,7 +326,7 @@ class SetupRunner:
             )
             if value is not None and key and not key.startswith("#")
         }
-        if assignments.get("NOYRA_HOST", "127.0.0.1") != "127.0.0.1":
+        if assignments.get("NOYRA_HOST") != "127.0.0.1":
             raise SetupError("UNSAFE_LISTENER", "local mode requires NOYRA_HOST=127.0.0.1")
         actions.append("validate NOYRA_HOST=127.0.0.1")
 
@@ -337,7 +337,7 @@ class SetupRunner:
             token_path = Path(token_file)
             with suppress(OSError):
                 has_token = has_token or bool(token_path.read_text(encoding="utf-8").strip())
-        if not has_token and not self.options.dry_run:
+        if not has_token:
             raise SetupError("OPERATOR_TOKEN_MISSING", "an operator token source is required")
         actions.append("validate operator token source")
 
@@ -356,7 +356,11 @@ class SetupRunner:
         if platform.system().lower() == "linux":
             if hasattr(os, "geteuid") and os.geteuid() != 0:
                 raise SetupError("ROOT_REQUIRED", "local checks require root")
-            if not Path("/var/lib/noyra").exists():
+            mount = self.runner.run(
+                ("findmnt", "-n", "-o", "SOURCE", "--target", "/var/lib/noyra"),
+                check=False,
+            )
+            if mount.returncode != 0 or not mount.stdout.strip():
                 raise SetupError("DATA_MOUNT_MISSING", "/var/lib/noyra is not visible")
             actions.append("validate /var/lib/noyra mount visibility")
             active = self.runner.run(("systemctl", "is-active", "noyra"), check=False)
