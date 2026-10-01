@@ -1,5 +1,12 @@
 """Policy and state boundaries for trusted subject migration."""
 
+from .agent import (
+    EnrollmentReceipt,
+    MigrationAgent,
+    ReceiveReceipt,
+    RestoreReport,
+    TargetHealthReport,
+)
 from .credentials import CredentialBindingPlan, CredentialRebinder
 from .cutover import CutoverCoordinator, CutoverPlan
 from .discovery import (
@@ -32,6 +39,8 @@ __all__ = [
     "DiscoveryResult",
     "EncryptedTransferReceipt",
     "EncryptedTransferSession",
+    "EnrollmentReceipt",
+    "MigrationAgent",
     "MigrationDiscovery",
     "MigrationManager",
     "MigrationNeed",
@@ -40,13 +49,16 @@ __all__ = [
     "MigrationProposalStore",
     "MigrationStore",
     "NeedAssessment",
+    "ReceiveReceipt",
     "RecoveryCoordinator",
     "RecoveryRequest",
     "RegisteredTargetProvider",
     "ResourceObservation",
+    "RestoreReport",
     "TargetAttestation",
     "TargetCandidate",
     "TargetChallenge",
+    "TargetHealthReport",
     "TargetRegistration",
     "TargetRegistry",
     "TransferReceipt",
