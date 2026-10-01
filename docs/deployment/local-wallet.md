@@ -6,6 +6,12 @@ HTTPS signer）。旧部署若只设置 `NOYRA_WALLET_SIGNER_ENDPOINT` 和
 `NOYRA_WALLET_SIGNER_ID`，仍按 external 兼容处理；显式 `disabled` 会覆盖
 遗留变量。
 
+迁移优先使用 `external` signer。可以同时设置
+`NOYRA_WALLET_SIGNER_ADDRESS`，让进程在签名前拒绝与 signer 绑定地址不一致的
+交易；该变量只保存公开地址，不是密钥。迁移不会把 signer bearer token、私钥或
+密码写入迁移清单。`local` 钱包迁移必须在策略中显式开启，并使用绑定到任务和
+钱包地址的一次性审批；源密钥在迁移提交前保留，失败时可回滚。
+
 ## 创建 keystore
 
 请在受保护的运维主机上运行交互式命令。密码不会出现在命令行、环境变量或
@@ -31,4 +37,3 @@ keystore 的离线备份并演练恢复；密码丢失无法恢复私钥。
 必须已注册且有效；金额、余额、nonce、Gas、单笔/日/月限额、频率、审计、账本
 幂等和紧急暂停继续生效。数据库中的旧 allowlist 字段保留用于兼容和审计，
 不会单独拒绝合法收款人。
-

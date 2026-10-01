@@ -7,7 +7,7 @@ from .agent import (
     RestoreReport,
     TargetHealthReport,
 )
-from .credentials import CredentialBindingPlan, CredentialRebinder
+from .credentials import CredentialBindingPlan, CredentialBindingReceipt, CredentialRebinder
 from .cutover import CutoverCoordinator, CutoverPlan
 from .discovery import (
     DiscoveryResult,
@@ -29,10 +29,11 @@ from .transfer import (
     TransferSession,
 )
 from .trust import TargetAttestation, TargetChallenge, TrustDecision, TrustEvidence
-from .wallet import WalletMigration, WalletMigrationPlan
+from .wallet import WalletBindingReceipt, WalletMigration, WalletMigrationPlan
 
 __all__ = [
     "CredentialBindingPlan",
+    "CredentialBindingReceipt",
     "CredentialRebinder",
     "CutoverCoordinator",
     "CutoverPlan",
@@ -65,6 +66,7 @@ __all__ = [
     "TransferSession",
     "TrustDecision",
     "TrustEvidence",
+    "WalletBindingReceipt",
     "WalletMigration",
     "WalletMigrationPlan",
 ]

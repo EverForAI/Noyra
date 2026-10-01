@@ -16,6 +16,7 @@ def test_wallet_mode_defaults_to_disabled(monkeypatch: pytest.MonkeyPatch) -> No
         "NOYRA_WALLET_SIGNER_ENDPOINT",
         "NOYRA_WALLET_SIGNER_ID",
         "NOYRA_WALLET_SIGNER_BEARER_TOKEN",
+        "NOYRA_WALLET_SIGNER_ADDRESS",
     ):
         monkeypatch.delenv(name, raising=False)
     assert configured_wallet_signer_from_env() is None
@@ -35,6 +36,17 @@ def test_external_legacy_endpoint_is_preserved(monkeypatch: pytest.MonkeyPatch) 
     signer = configured_wallet_signer_from_env()
     assert signer is not None
     assert signer.signer_id == "legacy"
+    cast(Any, signer).close()
+
+
+def test_external_signer_can_bind_a_wallet_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NOYRA_WALLET_MODE", "external")
+    monkeypatch.setenv("NOYRA_WALLET_SIGNER_ENDPOINT", "https://signer.example")
+    monkeypatch.setenv("NOYRA_WALLET_SIGNER_ID", "external")
+    monkeypatch.setenv("NOYRA_WALLET_SIGNER_ADDRESS", "0xA111111111111111111111111111111111111111")
+    signer = configured_wallet_signer_from_env()
+    assert signer is not None
+    assert cast(Any, signer).address == "0xa111111111111111111111111111111111111111"
     cast(Any, signer).close()
 
 

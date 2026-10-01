@@ -264,6 +264,7 @@ class HTTPSWalletSigner:
         endpoint: str,
         *,
         signer_id: str,
+        wallet_address: str | None = None,
         client: httpx.Client | None = None,
         timeout_seconds: float = 15.0,
         bearer_token: str | None = None,
@@ -290,6 +291,13 @@ class HTTPSWalletSigner:
             raise ValueError("wallet signer timeout is invalid")
         self.endpoint = parsed.geturl()
         self.signer_id = signer_id.strip()
+        if wallet_address is not None:
+            try:
+                self.address = canonical_evm_address(wallet_address)
+            except ValueError:
+                raise ValueError("wallet signer address is invalid") from None
+        else:
+            self.address = None
         self.timeout_seconds = timeout_seconds
         if bearer_token is not None and (
             not isinstance(bearer_token, str) or not 1 <= len(bearer_token.strip()) <= 4096
@@ -375,6 +383,8 @@ class HTTPSWalletSigner:
     ) -> WalletBroadcastResult:
         if not isinstance(transfer, WalletUnsignedTransfer):
             raise WalletSignerError("wallet signer transfer is invalid")
+        if self.address is not None and transfer.source_address != self.address:
+            raise WalletSignerError("wallet signer source address mismatch")
         if type(request_id) is not str or not 1 <= len(request_id) <= 256:
             raise WalletSignerError("wallet signer request identity is invalid")
         try:
@@ -498,6 +508,8 @@ class HTTPSWalletSigner:
         """Read the chain pending nonce from the isolated signer service."""
         try:
             canonical_address = canonical_evm_address(address)
+            if self.address is not None and canonical_address != self.address:
+                raise WalletSignerError("wallet signer source address mismatch")
             if type(chain_id) is not int or not 1 <= chain_id <= SQLITE_INT64_MAX:
                 raise ValueError("wallet signer nonce chain id is invalid")
             status_code, response_body = self._request(

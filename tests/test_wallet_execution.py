@@ -202,6 +202,36 @@ def test_https_signer_uses_only_fixed_transfer_and_receipt_routes() -> None:
     assert "private_key" not in json.dumps(calls)
 
 
+def test_https_signer_rejects_transfer_from_a_different_bound_address() -> None:
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200)))
+    signer = HTTPSWalletSigner(
+        "https://signer.example",
+        signer_id="signer",
+        wallet_address="0xA111111111111111111111111111111111111111",
+        client=client,
+    )
+    transfer = EVMTransferAdapter().build(
+        WalletTransferIntent(
+            order_id="order",
+            subject_id="subject",
+            network_id="network",
+            asset_id="asset",
+            asset_type="native",
+            source_address="0xB111111111111111111111111111111111111111",
+            recipient_address="0xC111111111111111111111111111111111111111",
+            amount="1",
+            chain_id=1,
+            nonce=0,
+            gas_limit=21_000,
+            max_fee_per_gas="1",
+        )
+    )
+    from noyra.wallet.execution import WalletSignerError
+
+    with pytest.raises(WalletSignerError, match="source address"):
+        signer.sign_and_broadcast(transfer, request_id="order:attempt:1")
+
+
 def test_https_signer_rejects_insecure_or_credentialed_endpoint() -> None:
     client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
     for endpoint in (
