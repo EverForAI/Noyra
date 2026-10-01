@@ -1482,7 +1482,7 @@ class NoyraHTTPServer:
         self.migration_proposals = MigrationProposalStore(kernel.database)
         self.migration_manager = MigrationManager(kernel.database, self.migration_store)
         self.migration_cutover = CutoverCoordinator(kernel.database, admission=kernel.admission)
-        self.migration_recovery = RecoveryCoordinator()
+        self.migration_recovery = RecoveryCoordinator(kernel.database)
         handler = self._handler_type()
         self._rate_lock = threading.Lock()
         self._request_times: dict[str, deque[float]] = defaultdict(deque)
