@@ -231,7 +231,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 71
+CURRENT_SCHEMA_VERSION = 72
 
 MIGRATIONS: dict[int, str] = {
     2: """
@@ -6533,6 +6533,126 @@ WHEN NOT (
     OR OLD.status = 'failed' AND NEW.status = 'refunded'
 )
 BEGIN SELECT RAISE(ABORT,'wallet payment order transition is invalid'); END;
+""",
+    72: """
+CREATE TABLE IF NOT EXISTS migration_policies (
+    subject_id TEXT PRIMARY KEY REFERENCES subject_identity(subject_id),
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+    approval_mode TEXT NOT NULL DEFAULT 'disabled' CHECK (approval_mode IN ('disabled', 'manual', 'policy_auto', 'emergency_recovery')),
+    emergency_recovery_enabled INTEGER NOT NULL DEFAULT 0 CHECK (emergency_recovery_enabled IN (0, 1)),
+    local_wallet_transfer_enabled INTEGER NOT NULL DEFAULT 0 CHECK (local_wallet_transfer_enabled IN (0, 1)),
+    wallet_mode TEXT NOT NULL DEFAULT 'external_signer_rebind' CHECK (wallet_mode IN ('external_signer_rebind', 'local_wallet_transfer', 'disabled')),
+    allowed_target_ids_json TEXT NOT NULL DEFAULT '[]',
+    allowed_regions_json TEXT NOT NULL DEFAULT '[]',
+    min_free_bytes INTEGER NOT NULL DEFAULT 0 CHECK (min_free_bytes >= 0),
+    max_cost_microusd INTEGER NOT NULL DEFAULT 0 CHECK (max_cost_microusd >= 0),
+    max_downtime_seconds INTEGER NOT NULL DEFAULT 3600 CHECK (max_downtime_seconds BETWEEN 0 AND 604800),
+    maintenance_window_start_minute INTEGER NOT NULL DEFAULT 0 CHECK (maintenance_window_start_minute BETWEEN 0 AND 1439),
+    maintenance_window_duration_minutes INTEGER NOT NULL DEFAULT 1440 CHECK (maintenance_window_duration_minutes BETWEEN 1 AND 1440),
+    trust_level INTEGER NOT NULL DEFAULT 3 CHECK (trust_level BETWEEN 1 AND 5),
+    rejection_cooldown_seconds INTEGER NOT NULL DEFAULT 604800 CHECK (rejection_cooldown_seconds BETWEEN 0 AND 31536000),
+    proposal_expiry_seconds INTEGER NOT NULL DEFAULT 86400 CHECK (proposal_expiry_seconds BETWEEN 300 AND 604800),
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+    updated_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL CHECK (length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*')
+);
+CREATE TABLE IF NOT EXISTS migration_targets (
+    target_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    public_key TEXT NOT NULL,
+    key_fingerprint TEXT NOT NULL,
+    enrollment_generation INTEGER NOT NULL CHECK (enrollment_generation >= 1),
+    endpoint TEXT NOT NULL,
+    capabilities_json TEXT NOT NULL DEFAULT '{}',
+    region TEXT,
+    provider TEXT,
+    release_sha TEXT NOT NULL,
+    os_arch TEXT NOT NULL,
+    encrypted_volume INTEGER NOT NULL CHECK (encrypted_volume IN (0, 1)),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'revoked', 'quarantined')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    revoked_at TEXT,
+    revoke_reason TEXT,
+    state_hash TEXT NOT NULL CHECK (length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'),
+    UNIQUE(subject_id, key_fingerprint, enrollment_generation)
+);
+CREATE INDEX IF NOT EXISTS idx_migration_targets_subject_status ON migration_targets(subject_id, status, updated_at DESC);
+CREATE TABLE IF NOT EXISTS migration_proposals (
+    proposal_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    target_id TEXT NOT NULL REFERENCES migration_targets(target_id),
+    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 1),
+    status TEXT NOT NULL CHECK (status IN ('planned', 'awaiting_approval', 'approved', 'rejected', 'expired', 'cancelled', 'executing')),
+    reason_code TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    benefit_score REAL NOT NULL CHECK (benefit_score BETWEEN 0 AND 1),
+    risk_score REAL NOT NULL CHECK (risk_score BETWEEN 0 AND 1),
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    decision_reason TEXT,
+    state_hash TEXT NOT NULL CHECK (length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*')
+);
+CREATE INDEX IF NOT EXISTS idx_migration_proposals_subject_status ON migration_proposals(subject_id, status, created_at DESC);
+CREATE TABLE IF NOT EXISTS migration_tasks (
+    task_id TEXT PRIMARY KEY,
+    proposal_id TEXT NOT NULL REFERENCES migration_proposals(proposal_id),
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    target_id TEXT NOT NULL REFERENCES migration_targets(target_id),
+    idempotency_key TEXT NOT NULL,
+    source_epoch TEXT NOT NULL,
+    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 1),
+    status TEXT NOT NULL CHECK (status IN ('planned', 'preflight', 'awaiting_approval', 'approved', 'preparing', 'transferring', 'restoring', 'validating', 'cutover', 'committed', 'rolling_back', 'rolled_back', 'cancelled', 'failed')),
+    manifest_digest TEXT,
+    artifact_id TEXT,
+    error_code TEXT,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL CHECK (length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'),
+    UNIQUE(subject_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_migration_tasks_subject_status ON migration_tasks(subject_id, status, updated_at DESC);
+CREATE TABLE IF NOT EXISTS migration_epochs (
+    epoch_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    target_id TEXT NOT NULL REFERENCES migration_targets(target_id),
+    epoch_number INTEGER NOT NULL CHECK (epoch_number >= 1),
+    status TEXT NOT NULL CHECK (status IN ('active', 'revoked', 'completed')),
+    acquired_at TEXT NOT NULL,
+    revoked_at TEXT,
+    state_hash TEXT NOT NULL CHECK (length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'),
+    UNIQUE(subject_id, epoch_number)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_migration_epochs_active_subject ON migration_epochs(subject_id) WHERE status = 'active';
+CREATE TABLE IF NOT EXISTS migration_rejections (
+    rejection_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    proposal_id TEXT NOT NULL REFERENCES migration_proposals(proposal_id),
+    target_id TEXT NOT NULL REFERENCES migration_targets(target_id),
+    reason_code TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    cooldown_until TEXT NOT NULL,
+    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 1),
+    actor TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL CHECK (length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*')
+);
+CREATE INDEX IF NOT EXISTS idx_migration_rejections_cooldown ON migration_rejections(subject_id, target_id, reason_code, cooldown_until);
+CREATE TABLE IF NOT EXISTS migration_audit_events (
+    audit_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    action TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL CHECK (length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*')
+);
+CREATE INDEX IF NOT EXISTS idx_migration_audit_subject_time ON migration_audit_events(subject_id, occurred_at DESC, audit_id DESC);
+CREATE TRIGGER IF NOT EXISTS prevent_migration_audit_update BEFORE UPDATE ON migration_audit_events BEGIN SELECT RAISE(ABORT, 'migration audit events are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS prevent_migration_audit_delete BEFORE DELETE ON migration_audit_events BEGIN SELECT RAISE(ABORT, 'migration audit events cannot be deleted'); END;
 """,
 }
 

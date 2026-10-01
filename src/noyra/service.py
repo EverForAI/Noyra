@@ -811,6 +811,16 @@ class ServiceSettings(BaseModel):
     admin_session_ttl_seconds: int = Field(default=43_200, ge=300, le=604_800)
     admin_session_max_count: int = Field(default=256, ge=8, le=10_000)
     admin_session_cookie_secure: bool = False
+    migration_enabled: bool = False
+    migration_approval_mode: Literal[
+        "disabled", "manual", "policy_auto", "emergency_recovery"
+    ] = "disabled"
+    migration_rejection_cooldown_days: int = Field(default=7, ge=0, le=365)
+    migration_proposal_expiry_seconds: int = Field(default=86400, ge=300, le=604800)
+    migration_wallet_mode: Literal[
+        "external_signer_rebind", "local_wallet_transfer", "disabled"
+    ] = "external_signer_rebind"
+    migration_local_wallet_transfer_enabled: bool = False
 
     @field_validator("trusted_proxy_cidrs", mode="before")
     @classmethod
@@ -1205,6 +1215,24 @@ class ServiceSettings(BaseModel):
             admin_session_cookie_secure=cls._environment_flag(
                 "NOYRA_ADMIN_SESSION_COOKIE_SECURE",
                 "true" if profile == "production" else "false",
+            ),
+            migration_enabled=cls._environment_flag("NOYRA_MIGRATION_ENABLED", "false"),
+            migration_approval_mode=cast(
+                Literal["disabled", "manual", "policy_auto", "emergency_recovery"],
+                os.getenv("NOYRA_MIGRATION_APPROVAL_MODE", "disabled").strip().lower(),
+            ),
+            migration_rejection_cooldown_days=int(
+                os.getenv("NOYRA_MIGRATION_REJECTION_COOLDOWN_DAYS", "7")
+            ),
+            migration_proposal_expiry_seconds=int(
+                os.getenv("NOYRA_MIGRATION_PROPOSAL_EXPIRY_SECONDS", "86400")
+            ),
+            migration_wallet_mode=cast(
+                Literal["external_signer_rebind", "local_wallet_transfer", "disabled"],
+                os.getenv("NOYRA_MIGRATION_WALLET_MODE", "external_signer_rebind").strip().lower(),
+            ),
+            migration_local_wallet_transfer_enabled=cls._environment_flag(
+                "NOYRA_MIGRATION_LOCAL_WALLET_TRANSFER_ENABLED", "false"
             ),
         )
 
