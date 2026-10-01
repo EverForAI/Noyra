@@ -72,6 +72,13 @@ from noyra.core.storage import StorageLayout, TrainingStore
 from noyra.core.storage_lifecycle import StorageLifecycleManager
 from noyra.core.training_export import TrainingDatasetExporter, TrainingExportLimits
 from noyra.core.types import content_hash, strict_json_loads, utc_now
+from noyra.core.upgrade import (
+    UPGRADE_REQUEST_PATH,
+    UPGRADE_ROOT,
+    UPGRADE_RUNNER_TRIGGER_PATH,
+    UpgradeError,
+    UpgradeManager,
+)
 from noyra.interaction import (
     ADAPTERS,
     REPLAY_WINDOW_SECONDS,
@@ -1302,10 +1309,21 @@ class NoyraHTTPServer:
         repair_secrets_on_init: bool = True,
         wallet_signer: WalletSigner | None = None,
         close_wallet_signer: bool = False,
+        upgrade_manager: UpgradeManager | None = None,
     ):
         public_hash_key = _load_public_post_hash_key(settings)
         self.kernel = kernel
         self.settings = settings
+        self.upgrade_manager = upgrade_manager or UpgradeManager(
+            repo_path=os.getenv("NOYRA_UPGRADE_REPO", str(Path(__file__).resolve().parents[2])),
+            state_dir=Path(os.getenv("NOYRA_UPGRADE_STATE_DIR", str(UPGRADE_ROOT))),
+            request_path=Path(os.getenv("NOYRA_UPGRADE_REQUEST_PATH", str(UPGRADE_REQUEST_PATH))),
+            runner_trigger_path=Path(
+                os.getenv("NOYRA_UPGRADE_TRIGGER_PATH", str(UPGRADE_RUNNER_TRIGGER_PATH))
+            ),
+            github_owner=os.getenv("NOYRA_UPGRADE_GITHUB_OWNER", "noyra"),
+            github_repo=os.getenv("NOYRA_UPGRADE_GITHUB_REPO", "noyra"),
+        )
         self.admission = kernel.admission
         self.quarantine_checker: Any = None
         self.event_loop: asyncio.AbstractEventLoop | None = None
@@ -2465,6 +2483,26 @@ class NoyraHTTPServer:
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
                     self._json(HTTPStatus.OK, owner.diagnostics())
+                elif parsed.path in {
+                    "/api/admin/upgrade/check",
+                    "/api/admin/upgrade/status",
+                }:
+                    if not self._authorized():
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    try:
+                        payload = (
+                            owner.upgrade_manager.check_version()
+                            if parsed.path.endswith("/check")
+                            else owner.upgrade_manager.status()
+                        )
+                    except UpgradeError as error:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": error.code},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, payload)
                 elif parsed.path == "/api/admin/health":
                     if not self._authorized():
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -3687,6 +3725,9 @@ class NoyraHTTPServer:
                     owner.admission.finish(lease)
 
             def _dispatch_post(self) -> None:
+                if self.path == "/api/admin/upgrade":
+                    self._start_upgrade()
+                    return
                 if self.path in {
                     "/api/admin/lifecycle/pause",
                     "/api/admin/lifecycle/resume",
@@ -6962,6 +7003,63 @@ class NoyraHTTPServer:
                     self._json(HTTPStatus.NOT_FOUND, {"error": "search_provider_not_found"})
                     return
                 self._json(HTTPStatus.OK, {"config_id": record.config_id, "status": record.status})
+
+            def _start_upgrade(self) -> None:
+                if not self._authorized():
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+                    return
+                payload = self._request_json()
+                if payload is None:
+                    return
+                if set(payload) - {"target_sha", "reason", "idempotency_key"}:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "upgrade_target_invalid"})
+                    return
+                reason = payload.get("reason")
+                idempotency_key = payload.get("idempotency_key")
+                target_sha = payload.get("target_sha")
+                if (
+                    not isinstance(reason, str)
+                    or not isinstance(idempotency_key, str)
+                    or (target_sha is not None and not isinstance(target_sha, str))
+                ):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "upgrade_target_invalid"})
+                    return
+                try:
+                    started = owner.upgrade_manager.start(
+                        target_sha=target_sha,
+                        reason=reason,
+                        idempotency_key=idempotency_key,
+                    )
+                except UpgradeError as error:
+                    status = {
+                        "upgrade_target_invalid": HTTPStatus.BAD_REQUEST,
+                        "upgrade_source_dirty": HTTPStatus.CONFLICT,
+                        "upgrade_in_progress": HTTPStatus.CONFLICT,
+                        "upgrade_unavailable": HTTPStatus.SERVICE_UNAVAILABLE,
+                        "upgrade_start_failed": HTTPStatus.SERVICE_UNAVAILABLE,
+                        "upgrade_interrupted": HTTPStatus.CONFLICT,
+                    }.get(error.code, HTTPStatus.SERVICE_UNAVAILABLE)
+                    owner.audit_admin_event(
+                        "admin_upgrade_rejected",
+                        self._actor(),
+                        {"error_code": error.code},
+                    )
+                    self._json(status, {"error": error.code})
+                    return
+                owner.audit_admin_event(
+                    "admin_upgrade_started",
+                    self._actor(),
+                    {
+                        "task_id": started["task_id"],
+                        "target_short_sha": str(started["target_sha"])[:12],
+                    },
+                )
+                self._json(HTTPStatus.ACCEPTED, started)
 
             def _authorized(self, required_role: str = "operator") -> bool:
                 allowed: dict[str, tuple[SecretStr | None, ...]] = {
