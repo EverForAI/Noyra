@@ -24,14 +24,23 @@ class UpgradeManagerTestCase(unittest.TestCase):
         (self.repo / "tracked.txt").write_text("clean\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(self.repo), "add", "tracked.txt"], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "current"], check=True)
-        self.state = self.root / "state"
+        self.status_path = self.root / "root-owned" / "status.json"
         self.request = self.root / "requests" / "pending.json"
+        self.current = self.root / "opt" / "current"
+        release = self.root / "opt" / "releases" / ("d" * 40)
+        release.mkdir(parents=True)
+        self.current.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.current.symlink_to(release, target_is_directory=True)
+        except OSError:
+            self.current = release
         self.trigger = self.root / "noyra-upgrade.path"
         self.trigger.write_text("installed", encoding="utf-8")
         self.latest_sha = "a" * 40
         self.manager = UpgradeManager(
-            repo_path=self.repo,
-            state_dir=self.state,
+            source_path=self.repo,
+            current_release_path=self.current,
+            status_path=self.status_path,
             request_path=self.request,
             runner_trigger_path=self.trigger,
             github_owner="example",
@@ -63,17 +72,31 @@ class UpgradeManagerTestCase(unittest.TestCase):
 
     def test_status_is_persisted_and_reloaded(self) -> None:
         self.manager.check_version()
-        started = self.manager.start(reason="routine update", idempotency_key="request-1")
+        self.manager.start(reason="routine update", idempotency_key="request-1")
+        self.status_path.parent.mkdir(parents=True, exist_ok=True)
+        expected = {
+            "task_id": "from-runner",
+            "status": "completed",
+            "phase": "complete",
+            "started_at": "2026-10-01T00:00:00Z",
+            "ended_at": "2026-10-01T00:01:00Z",
+            "target_sha": self.latest_sha,
+            "release": "e" * 40,
+            "logs": [],
+            "error_code": None,
+        }
+        self.status_path.write_text(json.dumps(expected), encoding="utf-8")
         status = UpgradeManager(
-            repo_path=self.repo,
-            state_dir=self.state,
+            source_path=self.repo,
+            current_release_path=self.current,
+            status_path=self.status_path,
             request_path=self.request,
             runner_trigger_path=self.trigger,
             github_owner="example",
             github_repo="noyra",
         ).status()
-        self.assertEqual(status["task_id"], started["task_id"])
-        self.assertEqual(status["target_sha"], self.latest_sha)
+        self.assertEqual(status["task_id"], "from-runner")
+        self.assertEqual(status["status"], "completed")
 
     def test_start_is_idempotent_for_the_same_request(self) -> None:
         self.manager.check_version()
@@ -103,12 +126,60 @@ class UpgradeManagerTestCase(unittest.TestCase):
             reason="token=super-secret " + "x" * 100,
             idempotency_key="request-1",
         )
-        persisted = self.state.joinpath("status.json").read_text(encoding="utf-8")
+        self.assertFalse(self.status_path.exists())
         request = self.request.read_text(encoding="utf-8")
-        self.assertNotIn("super-secret", persisted + request)
-        self.assertNotIn("ghp_12345678901234567890", persisted)
-        self.assertLess(len(persisted), 8192)
+        self.assertNotIn("super-secret", request)
+        self.assertNotIn("ghp_12345678901234567890", json.dumps(self.manager.check_version()))
         self.assertLess(len(request), 4096)
+
+    def test_start_writes_only_request_and_leaves_root_status_untouched(self) -> None:
+        self.manager.check_version()
+        self.status_path.parent.mkdir(parents=True, exist_ok=True)
+        original = b'{"status":"runner-owned"}'
+        self.status_path.write_bytes(original)
+        self.manager.start(reason="routine update", idempotency_key="request-1")
+        self.assertEqual(self.status_path.read_bytes(), original)
+        self.assertEqual(
+            {path.name for path in self.status_path.parent.iterdir()}, {"status.json"}
+        )
+        self.assertEqual(
+            {path.name for path in self.request.parent.iterdir()},
+            {"pending.json", "manager.lock"},
+        )
+
+    def test_release_projection_uses_current_symlink_target_without_git_metadata(self) -> None:
+        if not self.current.is_symlink():
+            self.skipTest("symlink creation is unavailable on this Windows host")
+        response = self.manager.check_version()
+        self.assertEqual(response["current_release"], "d" * 40)
+        self.assertFalse((self.current.resolve() / ".git").exists())
+
+    def test_different_pending_request_is_rejected_until_runner_consumes_it(self) -> None:
+        self.manager.check_version()
+        self.manager.start(reason="routine update", idempotency_key="request-1")
+        with self.assertRaises(UpgradeError) as error:
+            self.manager.start(reason="routine update", idempotency_key="request-2")
+        self.assertEqual(error.exception.code, "upgrade_in_progress")
+
+    def test_idempotent_status_projection_redacts_root_runner_log_text(self) -> None:
+        self.manager.check_version()
+        started = self.manager.start(reason="routine update", idempotency_key="request-1")
+        self.status_path.parent.mkdir(parents=True, exist_ok=True)
+        self.status_path.write_text(
+            json.dumps(
+                {
+                    "task_id": started["task_id"],
+                    "status": "running",
+                    "phase": "install",
+                    "target_sha": self.latest_sha,
+                    "logs": ["token=super-secret"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        repeated = self.manager.start(reason="routine update", idempotency_key="request-1")
+        self.assertNotIn("super-secret", json.dumps(repeated))
+        self.assertEqual(repeated["logs"], ["token=[REDACTED]"])
 
     def test_manager_is_unavailable_without_installed_runner_trigger(self) -> None:
         self.trigger.unlink()

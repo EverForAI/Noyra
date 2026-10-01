@@ -73,9 +73,11 @@ from noyra.core.storage_lifecycle import StorageLifecycleManager
 from noyra.core.training_export import TrainingDatasetExporter, TrainingExportLimits
 from noyra.core.types import content_hash, strict_json_loads, utc_now
 from noyra.core.upgrade import (
+    UPGRADE_CURRENT_RELEASE_PATH,
     UPGRADE_REQUEST_PATH,
-    UPGRADE_ROOT,
     UPGRADE_RUNNER_TRIGGER_PATH,
+    UPGRADE_SOURCE_PATH,
+    UPGRADE_STATUS_PATH,
     UpgradeError,
     UpgradeManager,
 )
@@ -1315,8 +1317,11 @@ class NoyraHTTPServer:
         self.kernel = kernel
         self.settings = settings
         self.upgrade_manager = upgrade_manager or UpgradeManager(
-            repo_path=os.getenv("NOYRA_UPGRADE_REPO", str(Path(__file__).resolve().parents[2])),
-            state_dir=Path(os.getenv("NOYRA_UPGRADE_STATE_DIR", str(UPGRADE_ROOT))),
+            source_path=Path(os.getenv("NOYRA_UPGRADE_SOURCE", str(UPGRADE_SOURCE_PATH))),
+            current_release_path=Path(
+                os.getenv("NOYRA_UPGRADE_CURRENT_RELEASE", str(UPGRADE_CURRENT_RELEASE_PATH))
+            ),
+            status_path=Path(os.getenv("NOYRA_UPGRADE_STATUS", str(UPGRADE_STATUS_PATH))),
             request_path=Path(os.getenv("NOYRA_UPGRADE_REQUEST_PATH", str(UPGRADE_REQUEST_PATH))),
             runner_trigger_path=Path(
                 os.getenv("NOYRA_UPGRADE_TRIGGER_PATH", str(UPGRADE_RUNNER_TRIGGER_PATH))

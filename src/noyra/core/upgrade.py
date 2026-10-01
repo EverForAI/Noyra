@@ -22,6 +22,9 @@ from noyra.core.redaction import redact_text
 
 UPGRADE_ROOT = Path("/var/lib/noyra/upgrade")
 UPGRADE_REQUEST_PATH = UPGRADE_ROOT / "requests" / "pending.json"
+UPGRADE_SOURCE_PATH = Path("/opt/noyra/upgrade/source")
+UPGRADE_CURRENT_RELEASE_PATH = Path("/opt/noyra/current")
+UPGRADE_STATUS_PATH = UPGRADE_ROOT / "status.json"
 UPGRADE_RUNNER_TRIGGER_PATH = Path("/etc/systemd/system/noyra-upgrade.path")
 _SHA = re.compile(r"[0-9a-f]{40,64}\Z")
 _IDEMPOTENCY_KEY = re.compile(r"[A-Za-z0-9._:-]{8,128}\Z")
@@ -42,8 +45,9 @@ class UpgradeManager:
     def __init__(
         self,
         *,
-        repo_path: Path | str,
-        state_dir: Path | str = UPGRADE_ROOT,
+        source_path: Path | str = UPGRADE_SOURCE_PATH,
+        current_release_path: Path | str = UPGRADE_CURRENT_RELEASE_PATH,
+        status_path: Path | str = UPGRADE_STATUS_PATH,
         request_path: Path | str = UPGRADE_REQUEST_PATH,
         runner_trigger_path: Path | str = UPGRADE_RUNNER_TRIGGER_PATH,
         github_owner: str,
@@ -52,8 +56,9 @@ class UpgradeManager:
         github_fetcher: Callable[[], Any] | None = None,
         check_ttl_seconds: int = 900,
     ):
-        self.repo_path = Path(repo_path)
-        self.state_dir = Path(state_dir)
+        self.source_path = Path(source_path)
+        self.current_release_path = Path(current_release_path)
+        self.status_path = Path(status_path)
         self.request_path = Path(request_path)
         self.runner_trigger_path = Path(runner_trigger_path)
         self.github_owner = self._bounded_name(github_owner)
@@ -61,7 +66,7 @@ class UpgradeManager:
         self.github_branch = self._bounded_name(github_branch)
         self.github_fetcher = github_fetcher or self._fetch_github_metadata
         self.check_ttl = timedelta(seconds=max(30, min(int(check_ttl_seconds), 3600)))
-        self._lock = ProcessLock(self.state_dir / "manager.lock")
+        self._lock = ProcessLock(self.request_path.parent / "manager.lock")
         self._thread_lock = threading.RLock()
         self._checked: tuple[str, datetime] | None = None
 
@@ -87,10 +92,10 @@ class UpgradeManager:
             finally:
                 self._lock.release()
 
-    def _git(self, *args: str) -> str:
+    def _git(self, *args: str, cwd: Path | None = None) -> str:
         try:
             result = subprocess.run(
-                ["git", "-C", str(self.repo_path), *args],
+                ["git", "-C", str(cwd or self.source_path), *args],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -101,13 +106,16 @@ class UpgradeManager:
         return result.stdout.strip()
 
     def _current_release(self) -> str:
-        value = self._git("rev-parse", "HEAD")
+        try:
+            value = self.current_release_path.resolve(strict=True).name
+        except OSError:
+            raise UpgradeError("upgrade_start_failed") from None
         if not _SHA.fullmatch(value):
             raise UpgradeError("upgrade_start_failed")
         return value
 
     def _require_clean_source(self) -> None:
-        if not self.repo_path.is_dir():
+        if not self.source_path.is_dir():
             raise UpgradeError("upgrade_start_failed")
         if self._git("status", "--porcelain", "--untracked-files=all"):
             raise UpgradeError("upgrade_source_dirty")
@@ -175,9 +183,8 @@ class UpgradeManager:
 
     def status(self) -> dict[str, Any]:
         self._require_available()
-        status_path = self.state_dir / "status.json"
         try:
-            with status_path.open("rb") as stream:
+            with self.status_path.open("rb") as stream:
                 raw = stream.read(8193)
             if len(raw) > 8192:
                 raise ValueError("status is too large")
@@ -226,7 +233,7 @@ class UpgradeManager:
             result[field] = redact_text(value[:40]) if isinstance(value, str) else None
         for field in ("target_sha", "release"):
             value = result[field]
-            result[field] = value[:64] if isinstance(value, str) else None
+            result[field] = value if isinstance(value, str) and _SHA.fullmatch(value) else None
         return result
 
     def start(
@@ -257,56 +264,87 @@ class UpgradeManager:
             raise UpgradeError("upgrade_target_invalid")
         self._require_clean_source()
         with self._process_guard():
-            current = self._read_status_unlocked()
             key_hash = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
-            if current and current.get("idempotency_hash") == key_hash:
+            task_id = hashlib.sha256(f"{requested_sha}:{key_hash}".encode()).hexdigest()[:32]
+            current = self._read_status_unlocked()
+            if current and current.get("task_id") == task_id:
                 return self._public_status(current)
+            pending = self._read_pending_unlocked()
+            if pending and pending.get("task_id") == task_id:
+                return self._public_status(
+                    {
+                        "task_id": task_id,
+                        "status": "queued",
+                        "phase": "queued",
+                        "started_at": pending.get("requested_at"),
+                        "target_sha": pending.get("target_sha"),
+                    }
+                )
+            if pending:
+                raise UpgradeError("upgrade_in_progress")
             if current and current.get("status") in _ACTIVE_STATES:
                 raise UpgradeError("upgrade_in_progress")
-            task_id = hashlib.sha256(
-                f"{requested_sha}:{key_hash}:{datetime.now(UTC).isoformat()}".encode()
-            ).hexdigest()[:32]
             now = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
-            request = {"task_id": task_id, "target_sha": requested_sha, "requested_at": now}
-            status: dict[str, Any] = {
+            request: dict[str, Any] = {
                 "task_id": task_id,
-                "status": "queued",
-                "phase": "queued",
-                "started_at": now,
-                "ended_at": None,
                 "target_sha": requested_sha,
-                "release": None,
-                "logs": [],
-                "error_code": None,
-                "idempotency_hash": key_hash,
+                "requested_at": now,
             }
             try:
-                self._atomic_json(self.state_dir / "status.json", status)
                 self._atomic_json(self.request_path, request)
             except OSError:
-                try:
-                    if current is None:
-                        (self.state_dir / "status.json").unlink(missing_ok=True)
-                    else:
-                        self._atomic_json(self.state_dir / "status.json", current)
-                except OSError:
-                    pass
                 raise UpgradeError("upgrade_start_failed") from None
-            return self._public_status(status)
+            return self._public_status(
+                {
+                    "task_id": task_id,
+                    "status": "queued",
+                    "phase": "queued",
+                    "started_at": now,
+                    "ended_at": None,
+                    "target_sha": requested_sha,
+                    "release": None,
+                    "logs": [],
+                    "error_code": None,
+                }
+            )
 
     def _read_status_unlocked(self) -> dict[str, Any] | None:
         try:
-            raw = (self.state_dir / "status.json").read_bytes()
+            with self.status_path.open("rb") as stream:
+                raw = stream.read(8193)
             if len(raw) > 8192:
-                return None
+                raise UpgradeError("upgrade_unavailable")
             value = json.loads(raw)
-        except (OSError, ValueError):
+        except FileNotFoundError:
             return None
-        return value if isinstance(value, dict) else None
+        except UpgradeError:
+            raise
+        except (OSError, ValueError):
+            raise UpgradeError("upgrade_unavailable") from None
+        if not isinstance(value, dict):
+            raise UpgradeError("upgrade_unavailable")
+        return value
+
+    def _read_pending_unlocked(self) -> dict[str, Any] | None:
+        try:
+            with self.request_path.open("rb") as stream:
+                raw = stream.read(4097)
+            if len(raw) > 4096:
+                raise UpgradeError("upgrade_unavailable")
+            value = json.loads(raw)
+        except FileNotFoundError:
+            return None
+        except UpgradeError:
+            raise
+        except (OSError, ValueError):
+            raise UpgradeError("upgrade_unavailable") from None
+        if not isinstance(value, dict):
+            raise UpgradeError("upgrade_unavailable")
+        return value
 
     @staticmethod
     def _public_status(value: dict[str, Any]) -> dict[str, Any]:
-        return {
+        result = {
             key: value.get(key)
             for key in (
                 "task_id",
@@ -320,6 +358,26 @@ class UpgradeManager:
                 "error_code",
             )
         }
+        for field, maximum in (
+            ("task_id", 64),
+            ("status", 32),
+            ("phase", 32),
+            ("error_code", 64),
+            ("started_at", 40),
+            ("ended_at", 40),
+        ):
+            item = result[field]
+            result[field] = redact_text(item[:maximum]) if isinstance(item, str) else None
+        for field in ("target_sha", "release"):
+            item = result[field]
+            result[field] = item if isinstance(item, str) and _SHA.fullmatch(item) else None
+        logs = result["logs"]
+        result["logs"] = (
+            [redact_text(line[:240]) for line in logs[:20] if isinstance(line, str)]
+            if isinstance(logs, list)
+            else []
+        )
+        return result
 
     @staticmethod
     def _atomic_json(path: Path, payload: dict[str, Any]) -> None:

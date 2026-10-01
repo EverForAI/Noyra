@@ -123,13 +123,16 @@ class ServiceTestCase(unittest.TestCase):
         (repo / "tracked.txt").write_text("clean\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
         subprocess.run(["git", "-C", str(repo), "commit", "-qm", "current"], check=True)
+        current_release = self.data_dir / "releases" / ("d" * 40)
+        current_release.mkdir(parents=True)
         trigger = self.data_dir / "noyra-upgrade.path"
         trigger.parent.mkdir(parents=True, exist_ok=True)
         trigger.write_text("installed", encoding="utf-8")
         latest_sha = "b" * 40
         self.http.upgrade_manager = UpgradeManager(
-            repo_path=repo,
-            state_dir=self.data_dir / "upgrade-state",
+            source_path=repo,
+            current_release_path=current_release,
+            status_path=self.data_dir / "root-upgrade" / "status.json",
             request_path=self.data_dir / "upgrade-requests" / "pending.json",
             runner_trigger_path=trigger,
             github_owner="example",
@@ -178,11 +181,14 @@ class ServiceTestCase(unittest.TestCase):
         (repo / "tracked.txt").write_text("clean\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
         subprocess.run(["git", "-C", str(repo), "commit", "-qm", "current"], check=True)
+        current_release = self.data_dir / "releases" / ("d" * 40)
+        current_release.mkdir(parents=True)
         trigger = self.data_dir / "noyra-upgrade.path"
         trigger.write_text("installed", encoding="utf-8")
         self.http.upgrade_manager = UpgradeManager(
-            repo_path=repo,
-            state_dir=self.data_dir / "upgrade-state",
+            source_path=repo,
+            current_release_path=current_release,
+            status_path=self.data_dir / "root-upgrade" / "status.json",
             request_path=self.data_dir / "upgrade-requests" / "pending.json",
             runner_trigger_path=trigger,
             github_owner="example",
