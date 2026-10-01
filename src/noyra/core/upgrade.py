@@ -27,6 +27,7 @@ UPGRADE_CURRENT_RELEASE_PATH = Path("/opt/noyra/current")
 UPGRADE_STATUS_PATH = UPGRADE_ROOT / "status.json"
 UPGRADE_RUNNER_TRIGGER_PATH = Path("/etc/systemd/system/noyra-upgrade.path")
 _SHA = re.compile(r"[0-9a-f]{40,64}\Z")
+_RELEASE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _IDEMPOTENCY_KEY = re.compile(r"[A-Za-z0-9._:-]{8,128}\Z")
 _ACTIVE_STATES = frozenset({"queued", "running", "rolling_back"})
 
@@ -107,11 +108,35 @@ class UpgradeManager:
 
     def _current_release(self) -> str:
         try:
-            value = self.current_release_path.resolve(strict=True).name
+            release_path = self.current_release_path.resolve(strict=True)
         except OSError:
             raise UpgradeError("upgrade_start_failed") from None
-        if not _SHA.fullmatch(value):
+        if not release_path.is_dir():
             raise UpgradeError("upgrade_start_failed")
+        value = release_path.name
+        if not _RELEASE_ID.fullmatch(value) or value in {".", ".."}:
+            raise UpgradeError("upgrade_start_failed")
+        return value
+
+    def _current_sha(self) -> str | None:
+        try:
+            release_path = self.current_release_path.resolve(strict=True)
+            with (release_path / ".noyra-source-sha").open("rb") as stream:
+                raw = stream.read(66)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise UpgradeError("upgrade_unavailable") from None
+        if len(raw) > 65:
+            raise UpgradeError("upgrade_unavailable")
+        try:
+            value = raw.decode("ascii")
+        except UnicodeDecodeError:
+            raise UpgradeError("upgrade_unavailable") from None
+        if value.endswith("\n"):
+            value = value[:-1]
+        if not _SHA.fullmatch(value):
+            raise UpgradeError("upgrade_unavailable")
         return value
 
     def _require_clean_source(self) -> None:
@@ -168,17 +193,19 @@ class UpgradeManager:
     def check_version(self) -> dict[str, Any]:
         self._require_available()
         current = self._current_release()
+        current_sha = self._current_sha()
         latest = self._parse_metadata(self.github_fetcher())
         checked_at = datetime.now(UTC)
         self._checked = (latest["sha"], checked_at)
         return {
             "current_release": current,
+            "current_sha": current_sha,
             "latest": {
                 **latest,
                 "short_sha": latest["sha"][:12],
             },
             "checked_at": checked_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
-            "update_available": latest["sha"] != current,
+            "update_available": current_sha is None or latest["sha"] != current_sha,
         }
 
     def status(self) -> dict[str, Any]:

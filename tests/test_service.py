@@ -219,6 +219,10 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(error.exception.code, 400)
         self.assertEqual(json.loads(error.exception.read())["error"], "upgrade_target_invalid")
 
+    def test_upgrade_manager_defaults_to_official_github_repository(self) -> None:
+        self.assertEqual(self.http.upgrade_manager.github_owner, "EverForAI")
+        self.assertEqual(self.http.upgrade_manager.github_repo, "Noyra")
+
     def test_dashboard_and_read_only_public_endpoints(self) -> None:
         with urlopen(f"{self.base_url}/", timeout=5) as response:
             html = response.read().decode()

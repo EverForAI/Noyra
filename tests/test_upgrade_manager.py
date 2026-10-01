@@ -27,7 +27,7 @@ class UpgradeManagerTestCase(unittest.TestCase):
         self.status_path = self.root / "root-owned" / "status.json"
         self.request = self.root / "requests" / "pending.json"
         self.current = self.root / "opt" / "current"
-        release = self.root / "opt" / "releases" / ("d" * 40)
+        release = self.root / "opt" / "releases" / "github-4d988c5-20261001022257"
         release.mkdir(parents=True)
         self.current.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -151,8 +151,18 @@ class UpgradeManagerTestCase(unittest.TestCase):
         if not self.current.is_symlink():
             self.skipTest("symlink creation is unavailable on this Windows host")
         response = self.manager.check_version()
-        self.assertEqual(response["current_release"], "d" * 40)
+        self.assertEqual(response["current_release"], "github-4d988c5-20261001022257")
+        self.assertIsNone(response["current_sha"])
+        self.assertTrue(response["update_available"])
         self.assertFalse((self.current.resolve() / ".git").exists())
+
+    def test_release_projection_reads_source_sha_marker_when_present(self) -> None:
+        marker = self.current.resolve() / ".noyra-source-sha"
+        marker.write_bytes((self.latest_sha + "\n").encode("ascii"))
+        response = self.manager.check_version()
+        self.assertEqual(response["current_release"], "github-4d988c5-20261001022257")
+        self.assertEqual(response["current_sha"], self.latest_sha)
+        self.assertFalse(response["update_available"])
 
     def test_different_pending_request_is_rejected_until_runner_consumes_it(self) -> None:
         self.manager.check_version()

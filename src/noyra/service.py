@@ -1326,8 +1326,8 @@ class NoyraHTTPServer:
             runner_trigger_path=Path(
                 os.getenv("NOYRA_UPGRADE_TRIGGER_PATH", str(UPGRADE_RUNNER_TRIGGER_PATH))
             ),
-            github_owner=os.getenv("NOYRA_UPGRADE_GITHUB_OWNER", "noyra"),
-            github_repo=os.getenv("NOYRA_UPGRADE_GITHUB_REPO", "noyra"),
+            github_owner=os.getenv("NOYRA_UPGRADE_GITHUB_OWNER", "EverForAI"),
+            github_repo=os.getenv("NOYRA_UPGRADE_GITHUB_REPO", "Noyra"),
         )
         self.admission = kernel.admission
         self.quarantine_checker: Any = None

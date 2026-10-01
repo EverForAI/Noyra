@@ -37,3 +37,11 @@ TDD RED: updated tests first to construct the manager with separate source/curre
 RED/GREEN follow-up: an additional test first failed because an idempotent POST projected root status logs without redaction (`token=super-secret` escaped). The status projection was centralized and bounded; final relevant selection passes `14 passed, 53 deselected`, including HTTP authentication/CSRF and the filesystem-boundary cases.
 
 Self-review: `UpgradeManager.start()` no longer creates or updates the status file. It only performs atomic replacement of the request file while the lock is held in that service-writable request directory. A different request is rejected while a pending request remains; repeated submissions resolve by deterministic task ID from the root status or pending request. Service defaults now point at the deployment source checkout and current symlink instead of deriving a Git root from installed package files.
+
+## Release-name projection follow-up
+
+The deployed `current` symlink points to release directories named like `github-4d988c5-20261001022257`, so the API now validates and returns that safe release identifier separately from the source commit. It reads an optional plain-text commit marker at `<resolved release>/.noyra-source-sha`; the marker format is exactly 40–64 lowercase hex characters with an optional trailing LF. Missing marker means `current_sha: null` and `update_available: true`, while an invalid marker fails closed. The runner/installer can establish this marker using the resolved source commit SHA followed by a newline.
+
+TDD RED: the new version projection tests first failed because `_current_release()` only accepted SHA-named directories and raised `upgrade_start_failed` for the production-style release identifier. GREEN: the follow-up selection passes `14 passed, 54 deselected`, including both missing-marker and valid-marker cases. Ruff, mypy, and `git diff --check` pass.
+
+The service's default upstream now matches the official `EverForAI/Noyra` remote. A default-configuration service test first failed with the old `noyra/noyra` value, then passed after correction.
