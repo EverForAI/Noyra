@@ -176,13 +176,16 @@ class BackupRecord:
 
 def create_backup(path: str | Path, backup_root: str | Path, mode: str = "default") -> BackupRecord:
     source = Path(path)
-    if source.is_symlink():
+    if source.is_symlink() or source.parent.is_symlink():
         raise SetupError("SYMLINK_PATH", "refusing to back up a symlink")
     if not source.exists() or not source.is_file():
         raise SetupError("BACKUP_SOURCE_MISSING", f"file does not exist: {source}")
     root = Path(backup_root)
     root.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    try:
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise SetupError("BACKUP_UNREADABLE", f"cannot read source: {source}") from exc
     target = root / f"{source.name}.{digest[:12]}.bak"
     shutil.copy2(source, target)
     stat = source.stat()
@@ -209,10 +212,15 @@ def create_backup(path: str | Path, backup_root: str | Path, mode: str = "defaul
 
 
 def restore_backup(record: BackupRecord) -> None:
-    if hasattr(os, "geteuid") and os.geteuid() != 0:
-        raise SetupError("BACKUP_PERMISSION", "restoring deployment backups requires root")
+    euid = os.geteuid() if hasattr(os, "geteuid") else None
+    if record.backup_path.is_symlink() or record.original_path.is_symlink():
+        raise SetupError("SYMLINK_PATH", "refusing to restore through a symlink")
+    if euid is not None and euid != 0 and record.uid is not None and record.uid != euid:
+        raise SetupError("BACKUP_PERMISSION", "recorded owner requires root")
     try:
         backup_stat = record.backup_path.stat()
+        if euid is not None and euid != 0 and getattr(backup_stat, "st_uid", None) == 0:
+            raise SetupError("BACKUP_PERMISSION", "root-owned backup requires root")
         if (
             record.uid is not None
             and hasattr(backup_stat, "st_uid")
@@ -229,7 +237,14 @@ def restore_backup(record: BackupRecord) -> None:
     if record.original_path.exists() and record.uid is not None:
         try:
             target_stat = record.original_path.stat()
-            if hasattr(target_stat, "st_uid") and target_stat.st_uid != record.uid:
+            if euid is not None and euid != 0 and getattr(target_stat, "st_uid", None) != euid:
+                raise SetupError("BACKUP_PERMISSION", "target ownership requires root")
+            if (
+                euid is not None
+                and euid != 0
+                and hasattr(target_stat, "st_uid")
+                and target_stat.st_uid != record.uid
+            ):
                 raise SetupError("BACKUP_OWNERSHIP", "target ownership does not match metadata")
         except SetupError:
             raise
@@ -250,8 +265,13 @@ def restore_backup(record: BackupRecord) -> None:
         if record.uid is not None and hasattr(os, "chown"):
             os.chown(temp, record.uid, record.gid if record.gid is not None else -1)
         os.replace(temp, record.original_path)
+    except OSError as exc:
+        raise SetupError("BACKUP_RESTORE", "atomic restore failed") from exc
     finally:
-        temp.unlink(missing_ok=True)
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError as exc:
+            raise SetupError("BACKUP_CLEANUP", "cannot remove temporary restore file") from exc
 
 
 class SetupRunner:
