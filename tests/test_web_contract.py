@@ -196,6 +196,31 @@ def test_admin_setup_guide_and_observability_are_present_and_localized() -> None
     assert "管理台暂时无法连接服务" in ADMIN_JS
 
 
+def test_admin_upgrade_panel_has_confirmed_upgrade_and_session_bound_polling() -> None:
+    for marker in (
+        'id="admin-upgrade"',
+        'id="check-upgrade-version"',
+        'id="start-upgrade"',
+        'id="upgrade-confirmation"',
+        'id="upgrade-status"',
+        'id="upgrade-latest-version"',
+    ):
+        assert marker in ADMIN_HTML
+    for marker in (
+        "/api/v1/admin/upgrade/check",
+        "/api/v1/admin/upgrade/status",
+        "/api/v1/admin/upgrade",
+        "AbortController",
+        "stopUpgradePolling",
+        "startUpgradePolling",
+        "crypto.randomUUID()",
+    ):
+        assert marker in ADMIN_JS
+    assert "管理员已确认升级" in ADMIN_JS
+    assert 'role="status"' in ADMIN_HTML
+    assert "upgrade-panel" in ADMIN_CSS
+
+
 def test_public_page_has_search_metadata_crawler_rules_and_versioned_assets() -> None:
     for marker in (
         "<!-- NOYRA_SEO_METADATA -->",

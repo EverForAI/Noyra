@@ -65,6 +65,13 @@ after saving a reviewable backup. Nginx remains supported through
 `deploy/nginx/noyra.conf.example`; adapt that template manually when Nginx is
 the selected proxy.
 
+With a native Ubuntu/systemd install that has the upgrade runner, open the
+admin HTTPS hostname and use the **版本与升级** card on the overview page to
+check and start an upgrade. The page displays task progress after the browser
+closes and reopens. This control is not installed by Docker deployments; see
+[`ubuntu.md`](ubuntu.md#upgrade-from-the-management-page) for its setup and
+recovery behavior.
+
 ## Cloudflare Tunnel mode
 
 Create the Tunnel and its public hostnames in the Cloudflare dashboard first.

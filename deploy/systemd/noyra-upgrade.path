@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch for an administrator-approved Noyra upgrade
+After=noyra-upgrade-recover.service
+
+[Path]
+PathExists=/var/lib/noyra/upgrade/requests/pending.json
+Unit=noyra-upgrade.service
+
+[Install]
+WantedBy=multi-user.target

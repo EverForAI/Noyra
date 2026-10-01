@@ -1,0 +1,20 @@
+[Unit]
+Description=Mark an interrupted Noyra upgrade after system startup
+Before=noyra-upgrade.path
+RequiresMountsFor=/var/lib/noyra
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/
+ExecStart=/usr/local/libexec/noyra-upgrade-runner.sh --recover-only
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

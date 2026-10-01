@@ -258,6 +258,54 @@ paths:
         '200': { $ref: '#/components/responses/JsonObject' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/upgrade/check:
+    get:
+      tags: [configuration]
+      operationId: checkAdminUpgrade
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200':
+          description: Current release and latest available GitHub revision
+          content: { application/json: { schema: { type: object, additionalProperties: true } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/upgrade/status:
+    get:
+      tags: [observation]
+      operationId: adminUpgradeStatus
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200':
+          description: Current or most recent upgrade task status
+          content: { application/json: { schema: { type: object, additionalProperties: true } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/upgrade:
+    post:
+      tags: [configuration]
+      operationId: startAdminUpgrade
+      security: [{ operatorBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason, idempotency_key]
+              properties:
+                reason: { type: string, minLength: 1, maxLength: 512 }
+                idempotency_key: { type: string, minLength: 8, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$' }
+                target_sha: { type: string, pattern: '^[0-9a-f]{40,64}$' }
+      responses:
+        '202':
+          description: Upgrade request queued for the privileged systemd runner
+          content: { application/json: { schema: { type: object, additionalProperties: true } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/v1/admin/recoverable-work:
     get:
       tags: [observation]

@@ -6,6 +6,7 @@ import http.client
 import json
 import os
 import re
+import subprocess
 import tempfile
 import threading
 import time
@@ -27,6 +28,7 @@ from noyra.core import EventStore, OperationInvalidated, SubjectKernel
 from noyra.core.database import CURRENT_SCHEMA_VERSION
 from noyra.core.errors import IntegrityError
 from noyra.core.types import content_hash, utc_now
+from noyra.core.upgrade import UpgradeManager
 from noyra.interaction import InteractionStore, PublicProjection
 from noyra.mind import GoalCandidate, GoalStore
 from noyra.model import (
@@ -108,6 +110,128 @@ class ServiceTestCase(unittest.TestCase):
             time.sleep(0.05)
         self.assertEqual(job.get("status"), "completed", job)
         return job
+
+    def test_admin_upgrade_routes_require_operator_and_use_runner_request_protocol(self) -> None:
+        repo = self.data_dir / "upgrade-source"
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+            check=True,
+        )
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+        (repo / "tracked.txt").write_text("clean\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "current"], check=True)
+        current_release = self.data_dir / "releases" / ("d" * 40)
+        current_release.mkdir(parents=True)
+        trigger = self.data_dir / "noyra-upgrade.path"
+        trigger.parent.mkdir(parents=True, exist_ok=True)
+        trigger.write_text("installed", encoding="utf-8")
+        latest_sha = "b" * 40
+        self.http.upgrade_manager = UpgradeManager(
+            source_path=repo,
+            current_release_path=current_release,
+            status_path=self.data_dir / "root-upgrade" / "status.json",
+            request_path=self.data_dir / "upgrade-requests" / "pending.json",
+            runner_trigger_path=trigger,
+            github_owner="example",
+            github_repo="noyra",
+            github_fetcher=lambda: {
+                "sha": latest_sha,
+                "committed_at": "2026-10-01T00:00:00Z",
+                "title": "safe test update",
+            },
+        )
+        for path in (
+            "/api/v1/admin/upgrade/check",
+            "/api/v1/admin/upgrade/status",
+        ):
+            with self.assertRaises(HTTPError) as error:
+                urlopen(f"{self.base_url}{path}", timeout=5)
+            self.assertEqual(error.exception.code, 401)
+
+        check_status, check = self.authorized_json("/api/v1/admin/upgrade/check")
+        self.assertEqual(check_status, 200)
+        self.assertEqual(check["latest"]["sha"], latest_sha)
+        start_status, started = self.authorized_json(
+            "/api/v1/admin/upgrade",
+            payload={
+                "reason": "routine update; token=do-not-record",
+                "idempotency_key": "admin-upgrade-test-1",
+                "target_sha": latest_sha,
+            },
+        )
+        self.assertEqual(start_status, 202)
+        self.assertEqual(started["target_sha"], latest_sha)
+        request = json.loads(
+            (self.data_dir / "upgrade-requests" / "pending.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(request["target_sha"], latest_sha)
+        self.assertNotIn("reason", request)
+        with self.kernel.database.connection() as connection:
+            audit = connection.execute(
+                "SELECT payload_json FROM audit_records WHERE action = ? "
+                "ORDER BY occurred_at DESC LIMIT 1",
+                ("admin_upgrade_started",),
+            ).fetchone()
+        self.assertIsNotNone(audit)
+        audit_payload = json.loads(audit["payload_json"])
+        self.assertEqual(audit_payload["reason"], "routine update; token=[REDACTED]")
+
+    def test_admin_upgrade_post_rejects_unchecked_sha_with_stable_error(self) -> None:
+        repo = self.data_dir / "upgrade-source"
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+            check=True,
+        )
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+        (repo / "tracked.txt").write_text("clean\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "current"], check=True)
+        current_release = self.data_dir / "releases" / ("d" * 40)
+        current_release.mkdir(parents=True)
+        trigger = self.data_dir / "noyra-upgrade.path"
+        trigger.write_text("installed", encoding="utf-8")
+        self.http.upgrade_manager = UpgradeManager(
+            source_path=repo,
+            current_release_path=current_release,
+            status_path=self.data_dir / "root-upgrade" / "status.json",
+            request_path=self.data_dir / "upgrade-requests" / "pending.json",
+            runner_trigger_path=trigger,
+            github_owner="example",
+            github_repo="noyra",
+            github_fetcher=lambda: {
+                "sha": "b" * 40,
+                "committed_at": "2026-10-01T00:00:00Z",
+                "title": "safe test update",
+            },
+        )
+        request = Request(
+            f"{self.base_url}/api/v1/admin/upgrade",
+            data=json.dumps(
+                {
+                    "reason": "routine update",
+                    "idempotency_key": "admin-upgrade-test-2",
+                    "target_sha": "c" * 40,
+                }
+            ).encode(),
+            method="POST",
+            headers={
+                "Authorization": "Bearer test-admin-token-with-sufficient-entropy",
+                "Content-Type": "application/json",
+            },
+        )
+        with self.assertRaises(HTTPError) as error:
+            urlopen(request, timeout=5)
+        self.assertEqual(error.exception.code, 400)
+        self.assertEqual(json.loads(error.exception.read())["error"], "upgrade_target_invalid")
+
+    def test_upgrade_manager_defaults_to_official_github_repository(self) -> None:
+        self.assertEqual(self.http.upgrade_manager.github_owner, "EverForAI")
+        self.assertEqual(self.http.upgrade_manager.github_repo, "Noyra")
 
     def test_dashboard_and_read_only_public_endpoints(self) -> None:
         with urlopen(f"{self.base_url}/", timeout=5) as response:
@@ -1939,6 +2063,7 @@ class ServiceTestCase(unittest.TestCase):
     def test_operator_token_file_overrides_inline_environment_token(self) -> None:
         token_path = self.data_dir / "operator.token"
         token_path.write_text("file-operator-token-with-sufficient-entropy\n", encoding="ascii")
+        token_path.chmod(0o600)
         environment = {
             "NOYRA_DATA_DIR": str(self.data_dir / "from-env-token-file"),
             "NOYRA_SUBJECT_ID": "Noyra-operator-token-file",

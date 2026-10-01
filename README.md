@@ -317,8 +317,9 @@ python -m noyra serve
 ```
 
 公开面板默认位于 `http://127.0.0.1:8765`，创建者管理台位于 `/admin`。管理台使用操作令牌登录，登录后通过
-HttpOnly 会话 Cookie 保持状态，写操作由 CSRF 令牌保护；路径本身不是安全边界，生产环境仍应只通过 SSH
-隧道或已认证的 TLS 反向代理访问。完整 Ubuntu 部署说明位于 `docs/deployment/ubuntu.md`。
+HttpOnly 会话 Cookie 保持状态，写操作由 CSRF 令牌保护；公网部署应通过 HTTPS 反向代理或 Cloudflare Tunnel
+访问，勿直接暴露 Noyra 本机服务端口。原生 Ubuntu/systemd 部署安装网页升级组件后，可在管理台“总览 →
+版本与升级”中检查新版本并确认一键升级；升级在服务器后台执行，关闭浏览器不会取消。Docker 部署仍使用对应的镜像更新方式。
 反向代理部署必须把仅包含受信代理的网段写入 `NOYRA_TRUSTED_PROXY_CIDRS`；留空时 Noyra
 会安全地忽略 `X-Forwarded-For`，但所有公网访客会共享代理本身的限流桶。
 公开帖子默认进入待审核队列，不会直接发布；公共页使用图片验证码，同一来源默认每小时最多提交 10 条，

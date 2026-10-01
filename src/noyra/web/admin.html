@@ -58,6 +58,25 @@
           <div class="card-heading"><div><h2 id="setup-guide-title">首次配置向导</h2><p class="muted">先配置认知模型，搜索、通讯与付款都可以按需启用。</p></div><span class="card-state" id="setup-guide-state">正在检查</span></div>
           <ol id="setup-guide-list" class="setup-guide-list" aria-live="polite"><li class="setup-guide-loading">正在读取配置状态…</li></ol>
         </article>
+        <article class="surface-card upgrade-panel" id="admin-upgrade" aria-labelledby="upgrade-title">
+          <div class="card-heading">
+            <div><p class="eyebrow">版本维护</p><h2 id="upgrade-title">Noyra 版本与升级</h2><p class="muted">检查 GitHub 上的正式版本；确认后由服务器在后台升级，即使关闭浏览器也会继续。</p></div>
+            <span class="card-state" id="upgrade-status-label">尚未检查</span>
+          </div>
+          <dl class="upgrade-version-grid">
+            <div><dt>当前版本</dt><dd id="upgrade-current-version">读取中…</dd></div>
+            <div><dt>最新版本</dt><dd id="upgrade-latest-version">尚未检查</dd></div>
+            <div><dt>提交时间</dt><dd id="upgrade-commit-time">-</dd></div>
+            <div><dt>上次检查</dt><dd id="upgrade-checked-time">-</dd></div>
+          </dl>
+          <p class="upgrade-commit-title" id="upgrade-commit-title">点击“检查最新版本”读取版本信息。</p>
+          <div class="resource-actions upgrade-actions">
+            <button id="check-upgrade-version" type="button">检查最新版本</button>
+            <button class="primary" id="start-upgrade" type="button" disabled>升级到最新版</button>
+          </div>
+          <p class="form-status" id="upgrade-status" role="status" aria-live="polite">升级状态尚未读取。</p>
+          <ul class="upgrade-log-summary" id="upgrade-log-summary" aria-label="升级进度"></ul>
+        </article>
         <div class="metric-grid" id="overview-metrics"></div>
         <div class="two-column"><article class="surface-card"><div class="card-heading"><div><p class="eyebrow">COGNITION</p><h2>认知诊断</h2></div><span class="card-state" id="cognition-state">-</span></div><div id="cognition-summary" class="summary-list"></div></article><article class="surface-card"><div class="card-heading"><div><p class="eyebrow">STORAGE</p><h2>运行环境</h2></div></div><div id="storage-summary" class="summary-list"></div></article></div>
         <article class="surface-card observability-card" id="model-observability">
@@ -181,6 +200,18 @@
       </section>
     </main>
   </div>
+  <dialog class="upgrade-confirmation" id="upgrade-confirmation" aria-labelledby="upgrade-confirmation-title" aria-describedby="upgrade-confirmation-copy">
+    <form method="dialog">
+      <p class="eyebrow">管理员确认</p>
+      <h2 id="upgrade-confirmation-title">确认升级 Noyra？</h2>
+      <p id="upgrade-confirmation-copy">服务器将安装已检查的最新版，并执行现有备份、健康检查和失败回滚流程。升级期间管理页面可能短暂无法连接。</p>
+      <p class="upgrade-confirm-sha">目标版本：<code id="upgrade-confirmation-sha">-</code></p>
+      <div class="resource-actions">
+        <button value="cancel">取消</button>
+        <button class="primary" id="confirm-upgrade" type="button">确认升级</button>
+      </div>
+    </form>
+  </dialog>
   <script src="/admin.js" defer></script>
 </body>
 </html>
