@@ -170,6 +170,8 @@ class CommandRunner(Protocol):
 
 
 class SubprocessRunner:
+    enforce_host_privileges = True
+
     def run(
         self, argv: Sequence[str], *, check: bool = True, input_text: str | None = None
     ) -> CompletedProcess[str]:
@@ -423,6 +425,7 @@ class SetupRunner:
                 )
             if (
                 not selected_dry_run
+                and getattr(self.runner, "enforce_host_privileges", False)
                 and hasattr(os, "geteuid")
                 and os.geteuid() != 0
             ):

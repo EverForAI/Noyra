@@ -241,16 +241,6 @@ def test_public_mode_accepts_native_listener_defaults(
     assert result.exit_code == 0
 
 
-def test_public_mode_requires_root_before_mutation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("noyra.deployment_setup.os.geteuid", lambda: 1000, raising=False)
-    setup = build_runner(FakeRunner(), tmp_path)
-    result = setup.run_public(public_domain="example.com", admin_domain="admin.example.com")
-    assert "NOYRA_SETUP_ROOT_REQUIRED" in result.stderr
-    assert not (tmp_path / "Caddyfile").exists()
-
-
 def test_public_mode_dns_pending_prevents_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -340,3 +330,20 @@ def test_public_mode_rejects_custom_caddy_path_for_real_runner(tmp_path: Path) -
     )
     result = setup.run_public(public_domain="example.com", admin_domain="admin.example.com")
     assert "NOYRA_SETUP_CADDY_PATH_UNSUPPORTED" in result.stderr
+
+
+def test_public_mode_real_runner_rejects_non_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = tmp_path / "noyra.env"
+    env.write_text("NOYRA_HOST=127.0.0.1\nNOYRA_PORT=8765\n", encoding="utf-8")
+    from noyra.deployment_setup import SubprocessRunner
+
+    monkeypatch.setattr("noyra.deployment_setup.os.geteuid", lambda: 1000, raising=False)
+    setup = SetupRunner(
+        SetupOptions(env_path=env, caddy_path=Path("/etc/caddy/Caddyfile")),
+        SubprocessRunner(),
+    )
+    result = setup.run_public(public_domain="example.com", admin_domain="admin.example.com")
+    assert "NOYRA_SETUP_ROOT_REQUIRED" in result.stderr
+    assert env.read_text(encoding="utf-8") == "NOYRA_HOST=127.0.0.1\nNOYRA_PORT=8765\n"

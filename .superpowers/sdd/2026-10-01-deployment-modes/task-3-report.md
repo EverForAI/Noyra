@@ -35,3 +35,5 @@ Implemented Task 3 and committed the public HTTPS setup changes.
 Updated validation: `python -m pytest tests/test_deployment_setup.py tests/test_deployment_contract.py -q` (25 passed) and Ruff passed.
 
 Compatibility follow-up: omitted `NOYRA_HOST` and `NOYRA_PORT` now use the service defaults (`127.0.0.1` and `8765`), while explicit unsafe values remain rejected. Focused validation now reports 26 passed.
+
+CI follow-up: root enforcement is enabled only for the real `SubprocessRunner`; injected test runners can exercise public mutations on non-root CI hosts. The real-runner non-root guard has a focused test. Current validation: `26 passed`; Ruff passed.
