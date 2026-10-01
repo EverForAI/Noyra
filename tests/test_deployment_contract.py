@@ -37,3 +37,15 @@ def test_deployment_docs_match_proxy_and_session_contract() -> None:
     ):
         assert marker in DEPLOYMENT
     assert "NOYRA_ADMIN_SESSION_TTL_SECONDS=43200" in ENV
+
+
+def test_setup_modes_document_all_three_entry_points() -> None:
+    text = (ROOT / "docs" / "deployment" / "setup-modes.md").read_text(encoding="utf-8")
+    for marker in (
+        "noyra setup --mode local",
+        "noyra setup --mode public",
+        "noyra setup --mode cloudflare",
+    ):
+        assert marker in text
+    assert "127.0.0.1:8765" in text
+    assert "cloudflare-tunnel-token" in text
