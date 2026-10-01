@@ -25,6 +25,8 @@ class EpochLease:
             if active is not None:
                 raise ValueError("subject already has an active migration epoch")
             latest = c.execute("SELECT COALESCE(MAX(epoch_number),0) FROM migration_epochs WHERE subject_id=?", (subject_id,)).fetchone()[0]
+            if expected_source_epoch is not None and not expected_source_epoch.strip():
+                raise ValueError("expected source epoch is invalid")
             epoch_id = new_id("migrationepoch")
             number = int(latest) + 1
             now = utc_now()
@@ -42,5 +44,16 @@ class EpochLease:
             raise ValueError("epoch revoke metadata is required")
         with self.database.transaction() as c:
             updated = c.execute("UPDATE migration_epochs SET status='revoked', revoked_at=? WHERE epoch_id=? AND status='active'", (utc_now(), self.epoch_id))
+            if updated.rowcount != 1:
+                raise ValueError("migration epoch is already inactive")
+
+    def complete(self, actor: str) -> None:
+        if not actor.strip():
+            raise ValueError("epoch completion actor is required")
+        with self.database.transaction() as c:
+            updated = c.execute(
+                "UPDATE migration_epochs SET status='completed', revoked_at=? WHERE epoch_id=? AND status='active'",
+                (utc_now(), self.epoch_id),
+            )
             if updated.rowcount != 1:
                 raise ValueError("migration epoch is already inactive")

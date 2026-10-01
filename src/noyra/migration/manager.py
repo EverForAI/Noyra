@@ -56,6 +56,7 @@ class MigrationTask:
     subject_id: str
     target_id: str
     idempotency_key: str
+    source_epoch: str
     status: str
     policy_revision: int
     expires_at: str
@@ -437,6 +438,7 @@ class MigrationManager:
     def _task(row: Any) -> MigrationTask:
         return MigrationTask(
             row["task_id"], row["proposal_id"], row["subject_id"], row["target_id"],
-            row["idempotency_key"], row["status"], int(row["policy_revision"]), row["expires_at"],
+            row["idempotency_key"], row["source_epoch"], row["status"],
+            int(row["policy_revision"]), row["expires_at"],
             row["manifest_digest"], row["artifact_id"], row["error_code"],
         )
