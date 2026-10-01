@@ -27,7 +27,8 @@ class RegisteredTargetProvider:
         if not policy.enabled:
             return []
         return [
-            target for target in self.targets
+            target
+            for target in self.targets
             if target.status == "active"
             and (not policy.allowed_target_ids or target.target_id in policy.allowed_target_ids)
         ]

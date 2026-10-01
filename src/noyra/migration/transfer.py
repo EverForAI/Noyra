@@ -92,14 +92,26 @@ class TransferSession:
                     target_stream.flush()
                     os.fsync(target_stream.fileno())
                     return TransferReceipt(
-                        str(source_path), str(destination_path), size, self.chunk_bytes,
-                        index, tuple(chunk_hashes), "", False,
+                        str(source_path),
+                        str(destination_path),
+                        size,
+                        self.chunk_bytes,
+                        index,
+                        tuple(chunk_hashes),
+                        "",
+                        False,
                     )
             target_stream.flush()
             os.fsync(target_stream.fileno())
         return TransferReceipt(
-            str(source_path), str(destination_path), size, self.chunk_bytes,
-            index, tuple(chunk_hashes), artifact.hexdigest(), True,
+            str(source_path),
+            str(destination_path),
+            size,
+            self.chunk_bytes,
+            index,
+            tuple(chunk_hashes),
+            artifact.hexdigest(),
+            True,
         )
 
     def resume(self, receipt: TransferReceipt) -> TransferReceipt:
@@ -234,8 +246,15 @@ class EncryptedTransferSession:
             target.flush()
             os.fsync(target.fileno())
         return EncryptedTransferReceipt(
-            str(source_path), str(destination_path), size, self.chunk_bytes, index,
-            tuple(hashes), artifact.hexdigest(), manifest_digest, nonce_prefix,
+            str(source_path),
+            str(destination_path),
+            size,
+            self.chunk_bytes,
+            index,
+            tuple(hashes),
+            artifact.hexdigest(),
+            manifest_digest,
+            nonce_prefix,
         )
 
     def receive(
@@ -305,7 +324,9 @@ class EncryptedTransferSession:
 
     @staticmethod
     def _validate_digest(value: str) -> None:
-        if not isinstance(value, str) or len(value) != 64 or any(
-            character not in "0123456789abcdef" for character in value
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
         ):
             raise ValueError("manifest digest is invalid")

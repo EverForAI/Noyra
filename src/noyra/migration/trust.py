@@ -77,9 +77,7 @@ class TargetAttestation:
             raise ValueError("target id is invalid")
         public_bytes = _decode(self.public_key, "target public key")
         try:
-            signature = base64.urlsafe_b64decode(
-                self.signature + "=" * (-len(self.signature) % 4)
-            )
+            signature = base64.urlsafe_b64decode(self.signature + "=" * (-len(self.signature) % 4))
             Ed25519PublicKey.from_public_bytes(public_bytes).verify(
                 signature, self.challenge.signing_bytes()
             )

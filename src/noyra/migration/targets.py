@@ -70,15 +70,22 @@ class TargetRegistry:
         if not isinstance(actor, str) or not actor.strip() or len(actor) > 128:
             raise ValueError("target actor is invalid")
         parsed = urlsplit(endpoint)
-        if parsed.scheme.lower() != "https" or not parsed.hostname or parsed.username or parsed.password:
+        if (
+            parsed.scheme.lower() != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+        ):
             raise ValueError("target endpoint must be HTTPS")
         if len(parsed.path) > 256 or parsed.query or parsed.fragment:
             raise ValueError("target endpoint must be an HTTPS origin or fixed agent path")
         public_bytes = self._decode_public_key(public_key)
         if type(encrypted_volume) is not bool or not encrypted_volume:
             raise ValueError("target volume must be encrypted")
-        if not isinstance(release_sha, str) or len(release_sha) not in {40, 64} or any(
-            character not in "0123456789abcdefABCDEF" for character in release_sha
+        if (
+            not isinstance(release_sha, str)
+            or len(release_sha) not in {40, 64}
+            or any(character not in "0123456789abcdefABCDEF" for character in release_sha)
         ):
             raise ValueError("target release SHA is invalid")
         if not isinstance(os_arch, str) or not 1 <= len(os_arch) <= 64:
@@ -91,13 +98,19 @@ class TargetRegistry:
         fingerprint = hashlib.sha256(public_bytes).hexdigest()
         now = utc_now()
         with self.database.transaction() as connection:
-            if connection.execute(
-                "SELECT 1 FROM subject_identity WHERE subject_id=?", (subject_id,)
-            ).fetchone() is None:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM subject_identity WHERE subject_id=?", (subject_id,)
+                ).fetchone()
+                is None
+            ):
                 raise NotFoundError(f"subject not found: {subject_id}")
-            if connection.execute(
-                "SELECT 1 FROM migration_targets WHERE target_id=?", (target_id,)
-            ).fetchone() is not None:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM migration_targets WHERE target_id=?", (target_id,)
+                ).fetchone()
+                is not None
+            ):
                 raise ValueError("target id is already registered")
             connection.execute(
                 """INSERT INTO migration_targets(
@@ -200,7 +213,10 @@ class TargetRegistry:
             ).fetchone()
             if stored is None or stored["consumed_at"] is not None:
                 raise ValueError("challenge nonce was already consumed or is unknown")
-            if stored["expires_at"] != challenge.expires_at or stored["source_epoch"] != challenge.source_epoch:
+            if (
+                stored["expires_at"] != challenge.expires_at
+                or stored["source_epoch"] != challenge.source_epoch
+            ):
                 raise ValueError("challenge does not match issued nonce")
             evidence = TargetAttestation(
                 target_id=target_id,
@@ -220,17 +236,25 @@ class TargetRegistry:
                     challenge.source_epoch,
                     attested_at,
                     self._state_hash(
-                        target_id=row["target_id"], subject_id=row["subject_id"],
+                        target_id=row["target_id"],
+                        subject_id=row["subject_id"],
                         public_key=row["public_key"],
                         key_fingerprint=row["key_fingerprint"],
                         enrollment_generation=int(row["enrollment_generation"]),
-                        endpoint=row["endpoint"], capabilities_json=row["capabilities_json"],
-                        region=row["region"], provider=row["provider"],
-                        release_sha=row["release_sha"], os_arch=row["os_arch"],
-                        encrypted_volume=bool(row["encrypted_volume"]), status="active",
-                        created_at=row["created_at"], updated_at=attested_at,
-                        attested_at=attested_at, attestation_epoch=challenge.source_epoch,
-                        revoked_at=row["revoked_at"], revoke_reason=row["revoke_reason"],
+                        endpoint=row["endpoint"],
+                        capabilities_json=row["capabilities_json"],
+                        region=row["region"],
+                        provider=row["provider"],
+                        release_sha=row["release_sha"],
+                        os_arch=row["os_arch"],
+                        encrypted_volume=bool(row["encrypted_volume"]),
+                        status="active",
+                        created_at=row["created_at"],
+                        updated_at=attested_at,
+                        attested_at=attested_at,
+                        attestation_epoch=challenge.source_epoch,
+                        revoked_at=row["revoked_at"],
+                        revoke_reason=row["revoke_reason"],
                     ),
                     target_id,
                 ),
@@ -240,7 +264,11 @@ class TargetRegistry:
                 row["subject_id"],
                 "migration_target_attested",
                 actor.strip(),
-                {"target_id": target_id, "key_fingerprint": evidence.key_fingerprint, "source_epoch": challenge.source_epoch},
+                {
+                    "target_id": target_id,
+                    "key_fingerprint": evidence.key_fingerprint,
+                    "source_epoch": challenge.source_epoch,
+                },
             )
             return evidence
 
@@ -266,17 +294,25 @@ class TargetRegistry:
                     reason.strip(),
                     now,
                     self._state_hash(
-                        target_id=row["target_id"], subject_id=row["subject_id"],
+                        target_id=row["target_id"],
+                        subject_id=row["subject_id"],
                         public_key=row["public_key"],
                         key_fingerprint=row["key_fingerprint"],
                         enrollment_generation=int(row["enrollment_generation"]),
-                        endpoint=row["endpoint"], capabilities_json=row["capabilities_json"],
-                        region=row["region"], provider=row["provider"],
-                        release_sha=row["release_sha"], os_arch=row["os_arch"],
-                        encrypted_volume=bool(row["encrypted_volume"]), status="revoked",
-                        created_at=row["created_at"], updated_at=now,
-                        attested_at=row["attested_at"], attestation_epoch=row["attestation_epoch"],
-                        revoked_at=now, revoke_reason=reason.strip(),
+                        endpoint=row["endpoint"],
+                        capabilities_json=row["capabilities_json"],
+                        region=row["region"],
+                        provider=row["provider"],
+                        release_sha=row["release_sha"],
+                        os_arch=row["os_arch"],
+                        encrypted_volume=bool(row["encrypted_volume"]),
+                        status="revoked",
+                        created_at=row["created_at"],
+                        updated_at=now,
+                        attested_at=row["attested_at"],
+                        attestation_epoch=row["attestation_epoch"],
+                        revoked_at=now,
+                        revoke_reason=reason.strip(),
                     ),
                     target_id,
                 ),
@@ -291,9 +327,13 @@ class TargetRegistry:
 
     @staticmethod
     def _validate_id(target_id: str) -> None:
-        if not isinstance(target_id, str) or not 3 <= len(target_id) <= 128 or any(
-            character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
-            for character in target_id
+        if (
+            not isinstance(target_id, str)
+            or not 3 <= len(target_id) <= 128
+            or any(
+                character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+                for character in target_id
+            )
         ):
             raise ValueError("target id is invalid")
 
@@ -318,17 +358,29 @@ class TargetRegistry:
 
     @staticmethod
     def _load(connection: Any, target_id: str) -> TargetRegistration:
-        row = connection.execute("SELECT * FROM migration_targets WHERE target_id=?", (target_id,)).fetchone()
+        row = connection.execute(
+            "SELECT * FROM migration_targets WHERE target_id=?", (target_id,)
+        ).fetchone()
         if row is None:
             raise NotFoundError(f"migration target not found: {target_id}")
         return TargetRegistration(
-            target_id=row["target_id"], subject_id=row["subject_id"], public_key=row["public_key"],
-            key_fingerprint=row["key_fingerprint"], enrollment_generation=int(row["enrollment_generation"]),
-            endpoint=row["endpoint"], capabilities=json.loads(row["capabilities_json"]), region=row["region"],
-            provider=row["provider"], release_sha=row["release_sha"], os_arch=row["os_arch"],
-            encrypted_volume=bool(row["encrypted_volume"]), status=row["status"],
-            attested_at=row["attested_at"], attestation_epoch=row["attestation_epoch"],
-            created_at=row["created_at"], updated_at=row["updated_at"],
+            target_id=row["target_id"],
+            subject_id=row["subject_id"],
+            public_key=row["public_key"],
+            key_fingerprint=row["key_fingerprint"],
+            enrollment_generation=int(row["enrollment_generation"]),
+            endpoint=row["endpoint"],
+            capabilities=json.loads(row["capabilities_json"]),
+            region=row["region"],
+            provider=row["provider"],
+            release_sha=row["release_sha"],
+            os_arch=row["os_arch"],
+            encrypted_volume=bool(row["encrypted_volume"]),
+            status=row["status"],
+            attested_at=row["attested_at"],
+            attestation_epoch=row["attestation_epoch"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
         )
 
     @staticmethod
@@ -360,15 +412,25 @@ class TargetRegistry:
     @classmethod
     def _state_hash_from_row(cls, row: Any) -> str:
         return cls._state_hash(
-            target_id=row["target_id"], subject_id=row["subject_id"],
-            public_key=row["public_key"], key_fingerprint=row["key_fingerprint"],
-            enrollment_generation=int(row["enrollment_generation"]), endpoint=row["endpoint"],
-            capabilities_json=row["capabilities_json"], region=row["region"],
-            provider=row["provider"], release_sha=row["release_sha"], os_arch=row["os_arch"],
-            encrypted_volume=bool(row["encrypted_volume"]), status=row["status"],
-            created_at=row["created_at"], updated_at=row["updated_at"],
-            attested_at=row["attested_at"], attestation_epoch=row["attestation_epoch"],
-            revoked_at=row["revoked_at"], revoke_reason=row["revoke_reason"],
+            target_id=row["target_id"],
+            subject_id=row["subject_id"],
+            public_key=row["public_key"],
+            key_fingerprint=row["key_fingerprint"],
+            enrollment_generation=int(row["enrollment_generation"]),
+            endpoint=row["endpoint"],
+            capabilities_json=row["capabilities_json"],
+            region=row["region"],
+            provider=row["provider"],
+            release_sha=row["release_sha"],
+            os_arch=row["os_arch"],
+            encrypted_volume=bool(row["encrypted_volume"]),
+            status=row["status"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            attested_at=row["attested_at"],
+            attestation_epoch=row["attestation_epoch"],
+            revoked_at=row["revoked_at"],
+            revoke_reason=row["revoke_reason"],
         )
 
     @classmethod

@@ -79,10 +79,17 @@ def test_rejection_cooldown_is_keyed_to_target_and_reason(tmp_path) -> None:
     IdentityStore(database).ensure("Noyra-0001", "e" * 64)
     private = Ed25519PrivateKey.generate()
     TargetRegistry(database, MigrationStore(database)).register(
-        "Noyra-0001", target_id="target-1",
+        "Noyra-0001",
+        target_id="target-1",
         public_key=base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode(),
-        endpoint="https://target.example", capabilities={}, region=None, provider=None,
-        release_sha="a" * 40, os_arch="linux-amd64", encrypted_volume=True, actor="operator",
+        endpoint="https://target.example",
+        capabilities={},
+        region=None,
+        provider=None,
+        release_sha="a" * 40,
+        os_arch="linux-amd64",
+        encrypted_volume=True,
+        actor="operator",
     )
     store = MigrationProposalStore(database)
     proposal_id = store.record_rejection(

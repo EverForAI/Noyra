@@ -17,9 +17,9 @@ def test_attestation_accepts_signature_for_fresh_challenge() -> None:
         expires_at=(datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
         source_epoch="epoch-1",
     )
-    signature = base64.urlsafe_b64encode(
-        private_key.sign(challenge.signing_bytes())
-    ).decode("ascii")
+    signature = base64.urlsafe_b64encode(private_key.sign(challenge.signing_bytes())).decode(
+        "ascii"
+    )
 
     evidence = TargetAttestation(
         target_id="target-1",

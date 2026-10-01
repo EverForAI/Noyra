@@ -51,17 +51,31 @@ def test_unencrypted_or_non_https_target_is_rejected(tmp_path) -> None:
     _, public = _key_material()
     with pytest.raises(ValueError, match="HTTPS"):
         registry.register(
-            "Noyra-0001", target_id="bad", public_key=public,
-            endpoint="http://target.example", capabilities={}, region=None,
-            provider=None, release_sha="b" * 40, os_arch="linux-amd64",
-            encrypted_volume=True, actor="operator",
+            "Noyra-0001",
+            target_id="bad",
+            public_key=public,
+            endpoint="http://target.example",
+            capabilities={},
+            region=None,
+            provider=None,
+            release_sha="b" * 40,
+            os_arch="linux-amd64",
+            encrypted_volume=True,
+            actor="operator",
         )
     with pytest.raises(ValueError, match="encrypted"):
         registry.register(
-            "Noyra-0001", target_id="bad2", public_key=public,
-            endpoint="https://target.example", capabilities={}, region=None,
-            provider=None, release_sha="b" * 40, os_arch="linux-amd64",
-            encrypted_volume=False, actor="operator",
+            "Noyra-0001",
+            target_id="bad2",
+            public_key=public,
+            endpoint="https://target.example",
+            capabilities={},
+            region=None,
+            provider=None,
+            release_sha="b" * 40,
+            os_arch="linux-amd64",
+            encrypted_volume=False,
+            actor="operator",
         )
 
 
@@ -69,10 +83,17 @@ def test_revoked_target_cannot_be_attested(tmp_path) -> None:
     _, registry = _registry(tmp_path)
     private, public = _key_material()
     target = registry.register(
-        "Noyra-0001", target_id="target-1", public_key=public,
-        endpoint="https://target.example", capabilities={}, region=None,
-        provider=None, release_sha="c" * 40, os_arch="linux-amd64",
-        encrypted_volume=True, actor="operator",
+        "Noyra-0001",
+        target_id="target-1",
+        public_key=public,
+        endpoint="https://target.example",
+        capabilities={},
+        region=None,
+        provider=None,
+        release_sha="c" * 40,
+        os_arch="linux-amd64",
+        encrypted_volume=True,
+        actor="operator",
     )
     challenge = registry.issue_challenge(target.target_id, source_epoch="epoch-1")
     signature = base64.urlsafe_b64encode(private.sign(challenge.signing_bytes())).decode("ascii")
@@ -85,10 +106,17 @@ def test_target_integrity_detects_key_and_revocation_tampering(tmp_path) -> None
     database, registry = _registry(tmp_path)
     _, public = _key_material()
     target = registry.register(
-        "Noyra-0001", target_id="target-integrity", public_key=public,
-        endpoint="https://target.example", capabilities={}, region=None,
-        provider=None, release_sha="d" * 40, os_arch="linux-amd64",
-        encrypted_volume=True, actor="operator",
+        "Noyra-0001",
+        target_id="target-integrity",
+        public_key=public,
+        endpoint="https://target.example",
+        capabilities={},
+        region=None,
+        provider=None,
+        release_sha="d" * 40,
+        os_arch="linux-amd64",
+        encrypted_volume=True,
+        actor="operator",
     )
     registry.assert_integrity(target.target_id)
     with database.transaction() as connection:
