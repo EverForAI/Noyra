@@ -23,7 +23,7 @@ class APIRouteContract:
     request_json: bool = False
 
     def __post_init__(self) -> None:
-        if self.method not in {"GET", "POST"} or (
+        if self.method not in {"GET", "POST", "PUT"} or (
             not self.path.startswith("/health") and not self.path.startswith("/api/v1/")
         ):
             raise ValueError("invalid API route contract")
@@ -36,7 +36,7 @@ class APIRouteContract:
         if not self.path.startswith("/api/v1/"):
             return ()
         inherited = list(GLOBAL_API_ERROR_RESPONSES)
-        if self.method == "POST" and self.request_json:
+        if self.method in {"POST", "PUT"} and self.request_json:
             inherited.extend(JSON_REQUEST_ERROR_RESPONSES)
         return tuple(inherited)
 
@@ -59,6 +59,15 @@ def _post(
     return APIRouteContract("POST", path, role, responses or (200,), request_json)
 
 
+def _put(
+    path: str,
+    role: RouteRole = "operator",
+    *responses: int,
+    request_json: bool = True,
+) -> APIRouteContract:
+    return APIRouteContract("PUT", path, role, responses or (200,), request_json)
+
+
 # Dynamic path parameters use the OpenAPI spelling and are normalized aliases of
 # the unversioned /api paths handled by NoyraHTTPServer.
 API_ROUTE_CONTRACTS: tuple[APIRouteContract, ...] = (
@@ -75,6 +84,97 @@ API_ROUTE_CONTRACTS: tuple[APIRouteContract, ...] = (
     _get("/api/v1/runtime-logs", "read", 200, 400, 401),
     _get("/api/v1/diagnostics", "read", 200, 401),
     _get("/api/v1/admin/health", "operator", 200, 401, 503),
+    _get("/api/v1/admin/migration/policy", "operator", 200, 401, 503),
+    _put("/api/v1/admin/migration/policy", "operator", 200, 400, 401, 409, 415, 503),
+    _get("/api/v1/admin/migration/targets", "operator", 200, 400, 401, 503),
+    _post("/api/v1/admin/migration/targets", "operator", 201, 400, 401, 409, 415, 503),
+    _post(
+        "/api/v1/admin/migration/targets/{targetId}/revoke",
+        "operator",
+        200,
+        400,
+        401,
+        404,
+        409,
+        415,
+        503,
+    ),
+    _get("/api/v1/admin/migration/candidates", "operator", 200, 401, 503),
+    _get("/api/v1/admin/migration/proposals", "operator", 200, 400, 401, 503),
+    _get(
+        "/api/v1/admin/migration/proposals/{proposalId}",
+        "operator",
+        200,
+        401,
+        404,
+        503,
+    ),
+    _post(
+        "/api/v1/admin/migration/proposals/{proposalId}/approve",
+        "operator",
+        202,
+        400,
+        401,
+        404,
+        409,
+        415,
+        503,
+    ),
+    _post(
+        "/api/v1/admin/migration/proposals/{proposalId}/reject",
+        "operator",
+        200,
+        400,
+        401,
+        404,
+        409,
+        415,
+        503,
+    ),
+    _post(
+        "/api/v1/admin/migration/tasks/{taskId}/cancel",
+        "operator",
+        200,
+        400,
+        401,
+        404,
+        409,
+        415,
+        503,
+    ),
+    _get("/api/v1/admin/migration/tasks/{taskId}", "operator", 200, 401, 404, 503),
+    _post(
+        "/api/v1/admin/migration/tasks/{taskId}/cutover",
+        "operator",
+        200,
+        400,
+        401,
+        404,
+        409,
+        415,
+        503,
+    ),
+    _post(
+        "/api/v1/admin/migration/tasks/{taskId}/rollback",
+        "operator",
+        200,
+        400,
+        401,
+        404,
+        409,
+        415,
+        503,
+    ),
+    _post(
+        "/api/v1/admin/migration/recovery",
+        "operator",
+        202,
+        400,
+        401,
+        409,
+        415,
+        503,
+    ),
     _get("/api/v1/admin/upgrade/check", "operator", 200, 401, 503),
     _get("/api/v1/admin/upgrade/status", "operator", 200, 401, 503),
     _post(

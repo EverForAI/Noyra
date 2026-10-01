@@ -41,7 +41,7 @@ def _openapi_method_blocks() -> dict[tuple[str, str], str]:
             method = None
             body = []
             continue
-        method_match = re.fullmatch(r"    (get|post):", line)
+        method_match = re.fullmatch(r"    (get|post|put):", line)
         if method_match and current is not None:
             flush()
             method = method_match.group(1).upper()
