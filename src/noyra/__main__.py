@@ -31,6 +31,7 @@ def _setup_command(arguments: list[str]) -> None:
     parser.add_argument("--server", default=os.getenv("NOYRA_SERVER", "server"))
     options = parser.parse_args(arguments)
     try:
+        prompted_tunnel_token = None
         if (
             options.mode in ("public", "cloudflare")
             and options.non_interactive
@@ -45,7 +46,7 @@ def _setup_command(arguments: list[str]) -> None:
             and options.tunnel_token_file is None
             and not options.non_interactive
         ):
-            getpass.getpass("Cloudflare tunnel token: ")
+            prompted_tunnel_token = getpass.getpass("Cloudflare tunnel token: ")
         setup_options = SetupOptions(
             mode=options.mode,
             public_domain=options.public_domain,
@@ -53,6 +54,7 @@ def _setup_command(arguments: list[str]) -> None:
             env_path=options.env_path,
             caddy_path=options.caddy_path,
             tunnel_token_path=options.tunnel_token_file,
+            tunnel_token=prompted_tunnel_token,
             dry_run=options.dry_run,
             non_interactive=options.non_interactive,
             replace=options.replace,

@@ -35,6 +35,9 @@ class SetupOptions:
     env_path: Path = Path("/etc/noyra/noyra.env")
     caddy_path: Path = Path("/etc/caddy/Caddyfile")
     tunnel_token_path: Path | None = None
+    # A token collected through the CLI's hidden prompt.  It is intentionally
+    # kept out of command output and is never persisted in the environment.
+    tunnel_token: str | None = None
     dry_run: bool = False
     non_interactive: bool = False
     replace: bool = False
@@ -161,6 +164,12 @@ def render_caddyfile(public_domain: str, admin_domain: str) -> str:
 
 def redact_token(value: str | None) -> str | None:
     return "<redacted>" if value else value
+
+
+def _redact_secret(text: str, secret: str | None) -> str:
+    if secret:
+        return text.replace(secret, "<redacted>")
+    return text
 
 
 class CommandRunner(Protocol):
@@ -330,9 +339,7 @@ class SetupRunner:
         actions.append(f"validate environment file {self.options.env_path}")
         assignments = {
             key: value
-            for key, value in parse_env_file(
-                self.options.env_path.read_text(encoding="utf-8")
-            )
+            for key, value in parse_env_file(self.options.env_path.read_text(encoding="utf-8"))
             if value is not None and key and not key.startswith("#")
         }
         if assignments.get("NOYRA_HOST") != "127.0.0.1":
@@ -520,9 +527,7 @@ class SetupRunner:
             return SetupResult(actions=actions, stdout="\n".join(actions) + "\n")
         except (SetupError, OSError, UnicodeError) as exc:
             error = (
-                exc
-                if isinstance(exc, SetupError)
-                else SetupError("PUBLIC_SETUP_FAILED", str(exc))
+                exc if isinstance(exc, SetupError) else SetupError("PUBLIC_SETUP_FAILED", str(exc))
             )
             return failure(error)
 
@@ -546,13 +551,39 @@ class SetupRunner:
             with suppress(OSError):
                 temp.unlink()
 
-    def _run_checked(self, argv: Sequence[str], code: str) -> CompletedProcess[str]:
+    def _atomic_write_protected(self, path: Path, content: str) -> None:
+        """Publish a credential with mode 0600 without exposing its value."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        temp = Path(temp_name)
+        try:
+            os.chmod(temp, 0o600)
+            if hasattr(os, "geteuid") and os.geteuid() == 0 and hasattr(os, "chown"):
+                os.chown(temp, 0, -1)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
+                stream.write(content)
+            os.replace(temp, path)
+        except OSError as exc:
+            with suppress(OSError):
+                os.close(fd)
+            raise SetupError(
+                "TOKEN_WRITE_FAILED", "cannot publish Cloudflare tunnel credential"
+            ) from exc
+        finally:
+            with suppress(OSError):
+                temp.unlink()
+
+    def _run_checked(
+        self, argv: Sequence[str], code: str, *, secret: str | None = None
+    ) -> CompletedProcess[str]:
         try:
             result = self.runner.run(argv, check=False)
         except OSError as exc:
             raise SetupError(code, f"command could not run: {argv[0]}") from exc
         if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "command failed").strip()
+            detail = _redact_secret(
+                (result.stderr or result.stdout or "command failed").strip(), secret
+            )
             raise SetupError(code, detail)
         return result
 
@@ -566,17 +597,21 @@ class SetupRunner:
                     f"DNS is not ready for {domain}; create A/AAAA records before setup",
                 ) from exc
 
-    def _run_health_checks(self, public: str, admin: str, actions: list[str]) -> None:
+    def _run_health_checks(
+        self, public: str, admin: str, actions: list[str], *, secret: str | None = None
+    ) -> None:
         for endpoint in ("live", "ready"):
             self._run_checked(
                 ("curl", "--fail", f"http://127.0.0.1:8765/health/{endpoint}"),
                 "HEALTHCHECK_FAILED",
+                secret=secret,
             )
             actions.append(f"validate local /health/{endpoint}")
         for domain in (public, admin):
             self._run_checked(
                 ("curl", "--fail", f"https://{domain}/health/ready"),
                 "HTTPS_CHECK_FAILED",
+                secret=secret,
             )
             actions.append(f"validate HTTPS health for {domain}")
 
@@ -614,7 +649,337 @@ class SetupRunner:
         if failures:
             raise SetupError("ROLLBACK_FAILED", "environment/Caddy/service restoration failed")
 
-    def run_cloudflare(self) -> SetupResult:
-        raise SetupError(
-            "NOT_IMPLEMENTED", "cloudflare deployment mode is implemented in a later task"
+    def _rollback_cloudflare(
+        self,
+        env_backup: BackupRecord,
+        token_backup: BackupRecord | None,
+        unit_backup: BackupRecord | None,
+        new_token_path: Path | None,
+        new_unit_path: Path | None,
+        *,
+        service_mutated: bool,
+        enabled_state: str,
+        was_active: bool,
+    ) -> None:
+        failures: list[str] = []
+        try:
+            restore_backup(env_backup)
+        except Exception:
+            failures.append("environment restoration failed")
+        if token_backup is not None:
+            try:
+                restore_backup(token_backup)
+            except Exception:
+                failures.append("credential restoration failed")
+        elif new_token_path is not None:
+            try:
+                new_token_path.unlink(missing_ok=True)
+            except OSError:
+                failures.append("credential removal failed")
+        if unit_backup is not None:
+            try:
+                restore_backup(unit_backup)
+            except Exception:
+                failures.append("unit restoration failed")
+        elif new_unit_path is not None:
+            try:
+                new_unit_path.unlink(missing_ok=True)
+            except OSError:
+                failures.append("unit removal failed")
+        if service_mutated:
+            restore_commands: list[tuple[str, ...]] = [("systemctl", "daemon-reload")]
+            if enabled_state == "enabled":
+                if was_active:
+                    restore_commands.append(("systemctl", "enable", "--now", "cloudflared-noyra"))
+                else:
+                    restore_commands.extend(
+                        [
+                            ("systemctl", "stop", "cloudflared-noyra"),
+                            ("systemctl", "enable", "cloudflared-noyra"),
+                        ]
+                    )
+            elif enabled_state == "enabled-runtime":
+                # Setup starts the unit with persistent enablement. Remove that
+                # accidental persistent state before restoring runtime-only.
+                restore_commands.append(("systemctl", "disable", "cloudflared-noyra"))
+                if was_active:
+                    restore_commands.append(
+                        ("systemctl", "enable", "--runtime", "--now", "cloudflared-noyra")
+                    )
+                else:
+                    restore_commands.extend(
+                        [
+                            ("systemctl", "stop", "cloudflared-noyra"),
+                            ("systemctl", "enable", "--runtime", "cloudflared-noyra"),
+                        ]
+                    )
+            elif enabled_state == "disabled":
+                restore_commands.append(
+                    ("systemctl", "start" if was_active else "stop", "cloudflared-noyra")
+                )
+                restore_commands.append(("systemctl", "disable", "cloudflared-noyra"))
+            else:
+                # Static, indirect, generated and alias units have no mutable
+                # enablement to restore; preserve only their active state.
+                restore_commands.append(
+                    ("systemctl", "start" if was_active else "stop", "cloudflared-noyra")
+                )
+            for command in restore_commands:
+                try:
+                    result = self.runner.run(command, check=False)
+                    if result.returncode != 0:
+                        failures.append("service restoration failed")
+                except Exception:
+                    failures.append("service restoration failed")
+        if failures:
+            raise SetupError(
+                "ROLLBACK_FAILED", "Cloudflare environment/credential/unit restoration failed"
+            )
+
+    def run_cloudflare(
+        self,
+        *,
+        public_domain: str | None = None,
+        admin_domain: str | None = None,
+        tunnel_token: str | None = None,
+        token_path: Path | None = None,
+        dry_run: bool | None = None,
+    ) -> SetupResult:
+        """Configure a Cloudflare connector using a systemd credential.
+
+        The token is deliberately handled separately from the environment file
+        and unit arguments.  This keeps it out of logs, command output, and
+        exception text while still making setup usable from both the CLI and
+        tests with an injected destination path.
+        """
+        actions: list[str] = ["validate mode cloudflare"]
+        selected_public = public_domain if public_domain is not None else self.options.public_domain
+        selected_admin = admin_domain if admin_domain is not None else self.options.admin_domain
+        selected_dry_run = self.options.dry_run if dry_run is None else dry_run
+        env_path = self.options.env_path
+        credential_path = token_path or Path("/etc/noyra/credentials/cloudflare-tunnel-token")
+        # A custom credential path is useful for an injected runner and keeps
+        # tests from touching /etc.  Real deployments always use /etc paths.
+        unit_path = (
+            credential_path.parent / "cloudflared-noyra.service"
+            if token_path is not None and credential_path.parent != Path("/etc/noyra/credentials")
+            else Path("/etc/systemd/system/cloudflared-noyra.service")
         )
+
+        def failure(error: SetupError) -> SetupResult:
+            return SetupResult(ok=False, stderr=str(error), actions=actions)
+
+        env_backup: BackupRecord | None = None
+        token_backup: BackupRecord | None = None
+        unit_backup: BackupRecord | None = None
+        token_created = False
+        unit_created = False
+        service_mutated = False
+        service_enabled_state = "disabled"
+        service_was_active = False
+
+        def has_symlink_component(path: Path) -> bool:
+            current = path
+            while current != current.parent:
+                if current.is_symlink():
+                    return True
+                current = current.parent
+            return path.is_symlink()
+
+        try:
+            if not selected_public or not selected_admin:
+                raise SetupError(
+                    "DOMAINS_REQUIRED",
+                    "public and admin domains are required for cloudflare mode",
+                )
+            public = validate_hostname(selected_public)
+            admin = validate_hostname(selected_admin)
+            actions.extend([f"validate public domain {public}", f"validate admin domain {admin}"])
+
+            if env_path.is_symlink():
+                raise SetupError("ENV_SYMLINK", "environment path must not be a symlink")
+            if not env_path.exists() or not env_path.is_file():
+                raise SetupError("ENV_MISSING", f"environment file does not exist: {env_path}")
+            if has_symlink_component(credential_path):
+                raise SetupError("TOKEN_SYMLINK", "Cloudflare token path must not be a symlink")
+            if has_symlink_component(unit_path):
+                raise SetupError("UNIT_SYMLINK", "Cloudflare unit path must not be a symlink")
+            env_text = env_path.read_text(encoding="utf-8")
+            assignments = {
+                key: value
+                for key, value in parse_env_file(env_text)
+                if value is not None and key and not key.startswith("#")
+            }
+            if assignments.get("NOYRA_HOST", "127.0.0.1") != "127.0.0.1":
+                raise SetupError("UNSAFE_LISTENER", "cloudflare mode requires NOYRA_HOST=127.0.0.1")
+            if assignments.get("NOYRA_PORT", "8765") != "8765":
+                raise SetupError("UNSAFE_PORT", "cloudflare mode requires NOYRA_PORT=8765")
+            actions.extend(["validate NOYRA_HOST=127.0.0.1", "validate NOYRA_PORT=8765"])
+
+            selected_token = tunnel_token if tunnel_token is not None else self.options.tunnel_token
+            source_path = self.options.tunnel_token_path
+            if selected_token is None and source_path is not None:
+                if (
+                    has_symlink_component(source_path)
+                    or not source_path.exists()
+                    or not source_path.is_file()
+                ):
+                    raise SetupError("TOKEN_SOURCE_INVALID", "Cloudflare token source is invalid")
+                try:
+                    source_mode = stat_module.S_IMODE(source_path.stat().st_mode)
+                except OSError as exc:
+                    raise SetupError(
+                        "TOKEN_SOURCE_INVALID", "cannot inspect Cloudflare token source"
+                    ) from exc
+                if os.name != "nt" and source_mode & 0o077:
+                    raise SetupError("TOKEN_PERMISSIONS", "Cloudflare token source must be private")
+                try:
+                    selected_token = source_path.read_text(encoding="utf-8").strip()
+                except (OSError, UnicodeError) as exc:
+                    raise SetupError(
+                        "TOKEN_SOURCE_INVALID", "cannot read Cloudflare token source"
+                    ) from exc
+            if selected_token is None:
+                raise SetupError("TUNNEL_TOKEN_REQUIRED", "a Cloudflare tunnel token is required")
+            selected_token = selected_token.strip()
+            if not selected_token:
+                raise SetupError("TUNNEL_TOKEN_EMPTY", "Cloudflare tunnel token cannot be empty")
+            actions.append("validate protected Cloudflare tunnel token")
+            actions.append("validate origin http://127.0.0.1:8765")
+
+            updated_env = update_env_text(
+                env_text,
+                {
+                    "NOYRA_PUBLIC_SITE_URL": f"https://{public}",
+                    "NOYRA_TRUSTED_PROXY_CIDRS": "127.0.0.1/32,::1/128",
+                    "NOYRA_ADMIN_SESSION_COOKIE_SECURE": "true",
+                },
+            )
+            template_path = (
+                Path(__file__).resolve().parents[2]
+                / "deploy"
+                / "systemd"
+                / "cloudflared-noyra.service.example"
+            )
+            try:
+                unit_text = template_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise SetupError(
+                    "UNIT_TEMPLATE_MISSING", "Cloudflare systemd unit template is unavailable"
+                ) from exc
+
+            self._require_dns_ready(public, admin)
+            actions.append("validate DNS readiness for both HTTPS origins")
+            version = self.runner.run(("cloudflared", "--version"), check=False)
+            if version.returncode != 0 and selected_dry_run:
+                raise SetupError("CLOUDFLARED_UNAVAILABLE", "cloudflared is not installed")
+            if version.returncode != 0:
+                try:
+                    installed = self.runner.run(
+                        ("apt-get", "install", "-y", "cloudflared"), check=False
+                    )
+                except OSError as exc:
+                    raise SetupError(
+                        "CLOUDFLARED_UNAVAILABLE", "cloudflared is not installed"
+                    ) from exc
+                if installed.returncode != 0:
+                    raise SetupError("CLOUDFLARED_UNAVAILABLE", "cloudflared is not installed")
+                version = self.runner.run(("cloudflared", "--version"), check=False)
+                if version.returncode != 0:
+                    raise SetupError("CLOUDFLARED_UNAVAILABLE", "cloudflared is not installed")
+            self._run_checked(
+                ("cloudflared", "tunnel", "--help"),
+                "CLOUDFLARED_CONFIG_FAILED",
+                secret=selected_token,
+            )
+            actions.append("validate cloudflared installation and tunnel configuration")
+            if selected_dry_run:
+                actions.extend(
+                    [
+                        (
+                            f"write protected tunnel credential {credential_path} "
+                            "(deferred in dry-run)"
+                        ),
+                        f"publish systemd unit {unit_path} (deferred in dry-run)",
+                        "reload systemd and enable cloudflared-noyra (deferred in dry-run)",
+                        "validate local and HTTPS health endpoints (deferred in dry-run)",
+                    ]
+                )
+                return SetupResult(actions=actions, stdout="\n".join(actions) + "\n")
+
+            if (
+                getattr(self.runner, "enforce_host_privileges", False)
+                and hasattr(os, "geteuid")
+                and os.geteuid() != 0
+            ):
+                raise SetupError("ROOT_REQUIRED", "cloudflare setup requires root")
+
+            for command, state_name in (
+                (("systemctl", "is-enabled", "cloudflared-noyra"), "enabled"),
+                (("systemctl", "is-active", "cloudflared-noyra"), "active"),
+            ):
+                try:
+                    state = self.runner.run(command, check=False)
+                    value = state.stdout.strip()
+                except OSError:
+                    value = ""
+                if state_name == "enabled":
+                    service_enabled_state = value or "disabled"
+                else:
+                    service_was_active = value == "active"
+
+            env_backup = create_backup(env_path, self.options.backup_root, "cloudflare-env")
+            if credential_path.exists():
+                if not credential_path.is_file():
+                    raise SetupError("TOKEN_PATH_INVALID", "Cloudflare token path is not a file")
+                token_backup = create_backup(
+                    credential_path, self.options.backup_root, "cloudflare-token"
+                )
+            if unit_path.exists():
+                if not unit_path.is_file():
+                    raise SetupError("UNIT_PATH_INVALID", "Cloudflare unit path is not a file")
+                unit_backup = create_backup(unit_path, self.options.backup_root, "cloudflare-unit")
+
+            self._atomic_write(env_path, updated_env)
+            self._atomic_write_protected(credential_path, selected_token + "\n")
+            token_created = True
+            self._atomic_write(unit_path, unit_text)
+            unit_created = True
+            actions.extend(
+                [
+                    "publish environment file",
+                    "publish protected tunnel credential",
+                    "publish cloudflared systemd unit",
+                ]
+            )
+            self._run_checked(("systemctl", "daemon-reload"), "SYSTEMD_RELOAD_FAILED")
+            service_mutated = True
+            self._run_checked(
+                ("systemctl", "enable", "--now", "cloudflared-noyra"), "CLOUDFLARED_SERVICE_FAILED"
+            )
+            actions.append("enable and start cloudflared-noyra")
+            self._run_health_checks(public, admin, actions, secret=selected_token)
+        except (SetupError, OSError, UnicodeError) as exc:
+            if env_backup is not None:
+                try:
+                    self._rollback_cloudflare(
+                        env_backup,
+                        token_backup,
+                        unit_backup,
+                        credential_path if token_created else None,
+                        unit_path if unit_created else None,
+                        service_mutated=service_mutated,
+                        enabled_state=service_enabled_state,
+                        was_active=service_was_active,
+                    )
+                except SetupError as rollback_error:
+                    return failure(rollback_error)
+            error = (
+                exc
+                if isinstance(exc, SetupError)
+                else SetupError("CLOUDFLARE_SETUP_FAILED", "Cloudflare setup failed")
+            )
+            if selected_token:
+                error = SetupError(error.code, _redact_secret(error.message, selected_token))
+            return failure(error)
+        return SetupResult(actions=actions, stdout="\n".join(actions) + "\n")

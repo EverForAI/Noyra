@@ -1,3 +1,4 @@
+import os
 import platform
 import socket
 from pathlib import Path
@@ -109,9 +110,7 @@ def test_backup_restore(tmp_path: Path) -> None:
 
 def test_setup_local_dry_run_does_not_mutate(tmp_path: Path) -> None:
     env_path = tmp_path / "noyra.env"
-    env_path.write_text(
-        "NOYRA_HOST=127.0.0.1\nNOYRA_OPERATOR_TOKEN=test-token\n", encoding="utf-8"
-    )
+    env_path.write_text("NOYRA_HOST=127.0.0.1\nNOYRA_OPERATOR_TOKEN=test-token\n", encoding="utf-8")
     result = invoke_setup(["--mode", "local", "--dry-run", "--env-file", str(env_path)])
     assert result.exit_code == 0
     assert env_path.read_text(encoding="utf-8") == (
@@ -182,12 +181,12 @@ def test_public_mode_generates_two_https_origins_and_env_updates(tmp_path: Path)
     caddy = (tmp_path / "Caddyfile").read_text(encoding="utf-8")
     assert "hong168.win" in caddy and "admin.hong168.win" in caddy
     assert "127.0.0.1:8765" in caddy
-    assert "NOYRA_TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128" in (
-        tmp_path / "noyra.env"
-    ).read_text(encoding="utf-8")
-    assert "NOYRA_ADMIN_SESSION_COOKIE_SECURE=true" in (
-        tmp_path / "noyra.env"
-    ).read_text(encoding="utf-8")
+    assert "NOYRA_TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128" in (tmp_path / "noyra.env").read_text(
+        encoding="utf-8"
+    )
+    assert "NOYRA_ADMIN_SESSION_COOKIE_SECURE=true" in (tmp_path / "noyra.env").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_public_mode_refuses_existing_proxy_without_replace(tmp_path: Path) -> None:
@@ -347,3 +346,231 @@ def test_public_mode_real_runner_rejects_non_root(
     result = setup.run_public(public_domain="example.com", admin_domain="admin.example.com")
     assert "NOYRA_SETUP_ROOT_REQUIRED" in result.stderr
     assert env.read_text(encoding="utf-8") == "NOYRA_HOST=127.0.0.1\nNOYRA_PORT=8765\n"
+
+
+def test_cloudflare_mode_writes_protected_token_file_without_logging_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "cf-secret-token-value"
+    token_path = tmp_path / "cloudflare-tunnel-token"
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(0, 0, 0, "", ("127.0.0.1", 443))],
+    )
+    result = build_runner(FakeRunner(), tmp_path).run_cloudflare(
+        public_domain="hong168.win",
+        admin_domain="admin.hong168.win",
+        tunnel_token=secret,
+        token_path=token_path,
+        dry_run=False,
+    )
+    assert result.exit_code == 0
+    assert token_path.read_text(encoding="utf-8") == secret + "\n"
+    assert secret not in result.stdout
+    if os.name != "nt":
+        assert token_path.stat().st_mode & 0o077 == 0
+
+
+def test_cloudflare_dry_run_does_not_write_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token_path = tmp_path / "cloudflare-tunnel-token"
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(0, 0, 0, "", ("127.0.0.1", 443))],
+    )
+    result = build_runner(FakeRunner(), tmp_path).run_cloudflare(
+        public_domain="example.com",
+        admin_domain="admin.example.com",
+        tunnel_token="secret",
+        token_path=token_path,
+        dry_run=True,
+    )
+    assert result.exit_code == 0
+    assert not token_path.exists()
+
+
+def test_cloudflare_dns_preflight_and_connector_validation_happen_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        socket, "getaddrinfo", lambda *args, **kwargs: (_ for _ in ()).throw(socket.gaierror())
+    )
+    runner = FakeRunner()
+    token_path = tmp_path / "cloudflare-tunnel-token"
+    result = build_runner(runner, tmp_path).run_cloudflare(
+        public_domain="example.com",
+        admin_domain="admin.example.com",
+        tunnel_token="secret",
+        token_path=token_path,
+        dry_run=False,
+    )
+    assert "NOYRA_SETUP_DNS_PENDING" in result.stderr
+    assert not token_path.exists()
+    assert ("cloudflared", "--version") not in runner.calls
+    assert all(call[:2] != ("systemctl", "enable") for call in runner.calls)
+
+
+def test_cloudflare_redacts_token_from_health_error_and_restores_service_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(0, 0, 0, "", ("127.0.0.1", 443))],
+    )
+    secret = "secret-token"
+
+    class Runner(FakeRunner):
+        def run(self, argv, *, check=True, input_text=None):
+            command = tuple(argv)
+            self.calls.append(command)
+            if command[:2] == ("systemctl", "is-enabled"):
+                return CompletedProcess(command, 0, "enabled\n", "")
+            if command[:2] == ("systemctl", "is-active"):
+                return CompletedProcess(command, 0, "active\n", "")
+            if command == ("curl", "--fail", "https://admin.example.com/health/ready"):
+                return CompletedProcess(command, 1, "", secret)
+            return CompletedProcess(command, 0, "", "")
+
+    runner = Runner()
+    token_path = tmp_path / "cloudflare-tunnel-token"
+    result = build_runner(runner, tmp_path).run_cloudflare(
+        public_domain="example.com",
+        admin_domain="admin.example.com",
+        tunnel_token=secret,
+        token_path=token_path,
+    )
+    assert result.exit_code != 0
+    assert secret not in result.stderr
+    assert not token_path.exists()
+    assert not (tmp_path / "cloudflared-noyra.service").exists()
+    assert ("systemctl", "enable", "--now", "cloudflared-noyra") in runner.calls
+    assert ("systemctl", "enable", "--now", "cloudflared-noyra") in runner.calls[-3:]
+
+
+def test_cloudflare_rollback_preserves_static_service_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(0, 0, 0, "", ("127.0.0.1", 443))],
+    )
+
+    class Runner(FakeRunner):
+        def run(self, argv, *, check=True, input_text=None):
+            command = tuple(argv)
+            self.calls.append(command)
+            if command[:2] == ("systemctl", "is-enabled"):
+                return CompletedProcess(command, 0, "static\n", "")
+            if command[:2] == ("systemctl", "is-active"):
+                return CompletedProcess(command, 0, "inactive\n", "")
+            if command == ("curl", "--fail", "https://admin.example.com/health/ready"):
+                return CompletedProcess(command, 1, "", "failed")
+            return CompletedProcess(command, 0, "", "")
+
+    runner = Runner()
+    result = build_runner(runner, tmp_path).run_cloudflare(
+        public_domain="example.com",
+        admin_domain="admin.example.com",
+        tunnel_token="secret",
+        token_path=tmp_path / "cloudflare-tunnel-token",
+    )
+    assert result.exit_code != 0
+    assert ("systemctl", "stop", "cloudflared-noyra") in runner.calls
+    assert ("systemctl", "start", "cloudflared-noyra") not in runner.calls
+    assert ("systemctl", "enable", "cloudflared-noyra") not in runner.calls
+
+
+@pytest.mark.parametrize(
+    ("enabled_state", "was_active", "expected"),
+    [
+        ("enabled", True, [("systemctl", "enable", "--now", "cloudflared-noyra")]),
+        (
+            "enabled",
+            False,
+            [
+                ("systemctl", "stop", "cloudflared-noyra"),
+                ("systemctl", "enable", "cloudflared-noyra"),
+            ],
+        ),
+        (
+            "enabled-runtime",
+            True,
+            [
+                ("systemctl", "disable", "cloudflared-noyra"),
+                ("systemctl", "enable", "--runtime", "--now", "cloudflared-noyra"),
+            ],
+        ),
+        (
+            "enabled-runtime",
+            False,
+            [
+                ("systemctl", "disable", "cloudflared-noyra"),
+                ("systemctl", "stop", "cloudflared-noyra"),
+                ("systemctl", "enable", "--runtime", "cloudflared-noyra"),
+            ],
+        ),
+        (
+            "disabled",
+            True,
+            [
+                ("systemctl", "start", "cloudflared-noyra"),
+                ("systemctl", "disable", "cloudflared-noyra"),
+            ],
+        ),
+        (
+            "disabled",
+            False,
+            [
+                ("systemctl", "stop", "cloudflared-noyra"),
+                ("systemctl", "disable", "cloudflared-noyra"),
+            ],
+        ),
+        ("static", True, [("systemctl", "start", "cloudflared-noyra")]),
+        ("static", False, [("systemctl", "stop", "cloudflared-noyra")]),
+        ("indirect", True, [("systemctl", "start", "cloudflared-noyra")]),
+        ("indirect", False, [("systemctl", "stop", "cloudflared-noyra")]),
+        ("generated", True, [("systemctl", "start", "cloudflared-noyra")]),
+        ("generated", False, [("systemctl", "stop", "cloudflared-noyra")]),
+        ("alias", True, [("systemctl", "start", "cloudflared-noyra")]),
+        ("alias", False, [("systemctl", "stop", "cloudflared-noyra")]),
+    ],
+)
+def test_cloudflare_rollback_restores_systemd_state_matrix(
+    tmp_path: Path,
+    enabled_state: str,
+    was_active: bool,
+    expected: list[tuple[str, ...]],
+) -> None:
+    class Runner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        def run(self, argv, *, check=True, input_text=None):
+            del check, input_text
+            command = tuple(argv)
+            self.calls.append(command)
+            return CompletedProcess(command, 0, "", "")
+
+    source = tmp_path / "env"
+    source.write_text("known-good\n", encoding="utf-8")
+    backup = create_backup(source, tmp_path / "backups", "cloudflare-env")
+    runner = Runner()
+    SetupRunner(SetupOptions(), runner)._rollback_cloudflare(
+        backup,
+        None,
+        None,
+        None,
+        None,
+        service_mutated=True,
+        enabled_state=enabled_state,
+        was_active=was_active,
+    )
+    service_calls = [
+        call for call in runner.calls if call[:1] == ("systemctl",) and call[1] != "daemon-reload"
+    ]
+    assert service_calls == expected
