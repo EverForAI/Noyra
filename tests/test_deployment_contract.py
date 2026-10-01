@@ -22,6 +22,8 @@ def test_reverse_proxy_examples_publish_the_complete_https_security_contract() -
             assert marker in template, marker
     assert "admin.example.com" in CADDY
     assert "admin.example.com" in NGINX
+    assert "header_up X-Real-IP {remote_host}" in CADDY
+    assert "Generated setup path: noyra setup --mode public" in CADDY
 
 
 def test_deployment_docs_match_proxy_and_session_contract() -> None:

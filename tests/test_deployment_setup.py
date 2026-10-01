@@ -20,6 +20,37 @@ from noyra.deployment_setup import (
 )
 
 
+class FakeRunner:
+    def __init__(self, healthy: bool = True):
+        self.healthy = healthy
+        self.calls: list[tuple[str, ...]] = []
+
+    def run(self, argv, *, check=True, input_text=None):
+        del check, input_text
+        command = tuple(argv)
+        self.calls.append(command)
+        return CompletedProcess(
+            command,
+            0 if self.healthy else 1,
+            "active\n" if command[:2] == ("systemctl", "is-active") else "",
+            "" if self.healthy else "failed",
+        )
+
+
+def build_runner(runner: FakeRunner, tmp_path: Path, *, replace: bool = False) -> SetupRunner:
+    env_path = tmp_path / "noyra.env"
+    env_path.write_text("NOYRA_HOST=127.0.0.1\n", encoding="utf-8")
+    return SetupRunner(
+        SetupOptions(
+            env_path=env_path,
+            caddy_path=tmp_path / "Caddyfile",
+            backup_root=tmp_path / "backups",
+            replace=replace,
+        ),
+        runner,
+    )
+
+
 def invoke_setup(arguments: list[str]) -> SimpleNamespace:
     from contextlib import redirect_stderr, redirect_stdout
     from io import StringIO
@@ -131,3 +162,44 @@ def test_local_mount_check_uses_findmnt(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setattr("os.geteuid", lambda: 0, raising=False)
     with pytest.raises(SetupError, match="NOYRA_SETUP_DATA_MOUNT_MISSING"):
         SetupRunner(SetupOptions(env_path=env_path), Runner()).run_local()
+
+
+def test_public_mode_generates_two_https_origins_and_env_updates(tmp_path: Path) -> None:
+    runner = FakeRunner(healthy=True)
+    result = build_runner(runner, tmp_path).run_public(
+        public_domain="hong168.win", admin_domain="admin.hong168.win", dry_run=False
+    )
+    assert result.exit_code == 0
+    assert "https://hong168.win" in (tmp_path / "noyra.env").read_text(encoding="utf-8")
+    caddy = (tmp_path / "Caddyfile").read_text(encoding="utf-8")
+    assert "hong168.win" in caddy and "admin.hong168.win" in caddy
+    assert "127.0.0.1:8765" in caddy
+    assert "NOYRA_TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128" in (
+        tmp_path / "noyra.env"
+    ).read_text(encoding="utf-8")
+    assert "NOYRA_ADMIN_SESSION_COOKIE_SECURE=true" in (
+        tmp_path / "noyra.env"
+    ).read_text(encoding="utf-8")
+
+
+def test_public_mode_refuses_existing_proxy_without_replace(tmp_path: Path) -> None:
+    caddy = tmp_path / "Caddyfile"
+    caddy.write_text("existing\n", encoding="utf-8")
+    result = build_runner(FakeRunner(), tmp_path).run_public(
+        public_domain="example.com", admin_domain="admin.example.com", dry_run=False
+    )
+    assert result.exit_code != 0
+    assert "NOYRA_SETUP_PROXY_EXISTS" in result.stderr
+
+
+def test_public_mode_rolls_back_both_files_when_validation_fails(tmp_path: Path) -> None:
+    runner = FakeRunner(healthy=False)
+    setup = build_runner(runner, tmp_path, replace=True)
+    caddy = tmp_path / "Caddyfile"
+    caddy.write_text("known-good\n", encoding="utf-8")
+    env = tmp_path / "noyra.env"
+    original_env = env.read_text(encoding="utf-8")
+    result = setup.run_public(public_domain="example.com", admin_domain="admin.example.com")
+    assert result.exit_code != 0
+    assert env.read_text(encoding="utf-8") == original_env
+    assert caddy.read_text(encoding="utf-8") == "known-good\n"

@@ -48,6 +48,11 @@ class SetupResult:
     stderr: str = ""
     actions: list[str] = field(default_factory=list)
 
+    @property
+    def exit_code(self) -> int:
+        """CLI-compatible status while retaining the structured result."""
+        return 0 if self.ok else 1
+
 
 def validate_hostname(value: str) -> str:
     if not isinstance(value, str) or not value or any(ord(c) < 32 or ord(c) == 127 for c in value):
@@ -143,6 +148,7 @@ def render_caddyfile(public_domain: str, admin_domain: str) -> str:
                 "        header_up Host {host}",
                 "        header_up X-Forwarded-Proto {scheme}",
                 "        header_up X-Forwarded-For {remote_host}",
+                "        header_up X-Real-IP {remote_host}",
                 "    }",
                 "}",
                 "",
@@ -378,8 +384,168 @@ class SetupRunner:
                 actions.append(f"validate /health/{endpoint}")
         return SetupResult(actions=actions, stdout="\n".join(actions) + "\n")
 
-    def run_public(self) -> SetupResult:
-        raise SetupError("NOT_IMPLEMENTED", "public deployment mode is implemented in a later task")
+    def run_public(
+        self,
+        *,
+        public_domain: str | None = None,
+        admin_domain: str | None = None,
+        dry_run: bool | None = None,
+    ) -> SetupResult:
+        """Publish the public HTTPS proxy and roll back both files on failure."""
+        actions: list[str] = ["validate mode public"]
+        selected_public = public_domain if public_domain is not None else self.options.public_domain
+        selected_admin = admin_domain if admin_domain is not None else self.options.admin_domain
+        selected_dry_run = self.options.dry_run if dry_run is None else dry_run
+
+        def failure(error: SetupError) -> SetupResult:
+            return SetupResult(ok=False, stderr=str(error), actions=actions)
+
+        try:
+            if not selected_public or not selected_admin:
+                raise SetupError(
+                    "DOMAINS_REQUIRED", "public and admin domains are required for public mode"
+                )
+            public = validate_hostname(selected_public)
+            admin = validate_hostname(selected_admin)
+            actions.extend([f"validate public domain {public}", f"validate admin domain {admin}"])
+
+            env_path = self.options.env_path
+            caddy_path = self.options.caddy_path
+            if env_path.is_symlink():
+                raise SetupError("ENV_SYMLINK", "environment path must not be a symlink")
+            if not env_path.exists() or not env_path.is_file():
+                raise SetupError("ENV_MISSING", f"environment file does not exist: {env_path}")
+            if caddy_path.is_symlink():
+                raise SetupError("CADDY_SYMLINK", "Caddyfile path must not be a symlink")
+            if caddy_path.exists() and not caddy_path.is_file():
+                raise SetupError("CADDY_NOT_FILE", f"Caddy path is not a file: {caddy_path}")
+            if caddy_path.exists() and not self.options.replace:
+                raise SetupError(
+                    "PROXY_EXISTS", f"refusing to replace existing Caddyfile: {caddy_path}"
+                )
+            actions.extend(
+                [f"validate environment file {env_path}", f"validate Caddy path {caddy_path}"]
+            )
+
+            env_text = env_path.read_text(encoding="utf-8")
+            updated_env = update_env_text(
+                env_text,
+                {
+                    "NOYRA_PUBLIC_SITE_URL": f"https://{public}",
+                    "NOYRA_TRUSTED_PROXY_CIDRS": "127.0.0.1/32,::1/128",
+                    "NOYRA_ADMIN_SESSION_COOKIE_SECURE": "true",
+                },
+            )
+            rendered_caddy = render_caddyfile(public, admin)
+            actions.append("render HTTPS public and admin proxy blocks")
+            if selected_dry_run:
+                actions.extend(
+                    [
+                        "write environment file atomically (deferred in dry-run)",
+                        "write Caddyfile atomically (deferred in dry-run)",
+                        "validate Caddy configuration (deferred in dry-run)",
+                        "reload caddy and restart noyra (deferred in dry-run)",
+                        "validate local and HTTPS health endpoints (deferred in dry-run)",
+                    ]
+                )
+                return SetupResult(actions=actions, stdout="\n".join(actions) + "\n")
+
+            env_backup = create_backup(env_path, self.options.backup_root, "public-env")
+            caddy_backup = (
+                create_backup(caddy_path, self.options.backup_root, "public-caddy")
+                if caddy_path.exists()
+                else None
+            )
+            replaced_caddy = False
+
+            try:
+                self._atomic_write(env_path, updated_env)
+                self._atomic_write(caddy_path, rendered_caddy)
+                replaced_caddy = True
+                actions.extend(["publish environment file", "publish Caddyfile"])
+                self._run_checked(
+                    ("caddy", "validate", "--config", str(caddy_path)),
+                    "CADDY_VALIDATE_FAILED",
+                )
+                actions.append("validate Caddy configuration")
+                self._run_checked(("systemctl", "reload", "caddy"), "CADDY_RELOAD_FAILED")
+                actions.append("reload caddy")
+                self._run_checked(("systemctl", "restart", "noyra"), "SERVICE_RESTART_FAILED")
+                actions.append("restart noyra")
+                self._run_health_checks(public, admin, actions)
+            except SetupError:
+                self._rollback_public(
+                    env_backup, caddy_backup, caddy_path if replaced_caddy else None
+                )
+                raise
+            return SetupResult(actions=actions, stdout="\n".join(actions) + "\n")
+        except (SetupError, OSError, UnicodeError) as exc:
+            error = (
+                exc
+                if isinstance(exc, SetupError)
+                else SetupError("PUBLIC_SETUP_FAILED", str(exc))
+            )
+            return failure(error)
+
+    def _atomic_write(self, path: Path, content: str) -> None:
+        """Write a root-readable temporary file and atomically publish it."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        temp = Path(temp_name)
+        try:
+            os.chmod(temp, 0o640)
+            if hasattr(os, "geteuid") and os.geteuid() == 0 and hasattr(os, "chown"):
+                os.chown(temp, 0, -1)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
+                stream.write(content)
+            os.replace(temp, path)
+        except OSError as exc:
+            with suppress(OSError):
+                os.close(fd)
+            raise SetupError("ATOMIC_WRITE_FAILED", f"cannot publish {path}") from exc
+        finally:
+            with suppress(OSError):
+                temp.unlink()
+
+    def _run_checked(self, argv: Sequence[str], code: str) -> CompletedProcess[str]:
+        result = self.runner.run(argv, check=False)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "command failed").strip()
+            raise SetupError(code, detail)
+        return result
+
+    def _run_health_checks(self, public: str, admin: str, actions: list[str]) -> None:
+        for endpoint in ("live", "ready"):
+            self._run_checked(
+                ("curl", "--fail", f"http://127.0.0.1:8765/health/{endpoint}"),
+                "HEALTHCHECK_FAILED",
+            )
+            actions.append(f"validate local /health/{endpoint}")
+        for domain in (public, admin):
+            self._run_checked(
+                ("curl", "--fail", f"https://{domain}/health/ready"),
+                "HTTPS_CHECK_FAILED",
+            )
+            actions.append(f"validate HTTPS health for {domain}")
+
+    def _rollback_public(
+        self,
+        env_backup: BackupRecord,
+        caddy_backup: BackupRecord | None,
+        new_caddy_path: Path | None,
+    ) -> None:
+        with suppress(SetupError):
+            restore_backup(env_backup)
+        if caddy_backup is not None:
+            with suppress(SetupError):
+                restore_backup(caddy_backup)
+        elif new_caddy_path is not None:
+            with suppress(OSError):
+                new_caddy_path.unlink()
+        with suppress(Exception):
+            self.runner.run(("systemctl", "restart", "noyra"), check=False)
+        with suppress(Exception):
+            self.runner.run(("systemctl", "reload", "caddy"), check=False)
 
     def run_cloudflare(self) -> SetupResult:
         raise SetupError(

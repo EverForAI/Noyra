@@ -63,6 +63,9 @@ def _setup_command(arguments: list[str]) -> None:
     except SetupError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(2) from None
+    if not result.ok:
+        print(result.stderr or "NOYRA_SETUP_FAILED: setup failed", file=sys.stderr)
+        raise SystemExit(2)
     if result.stdout:
         print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
     elif result.actions:
