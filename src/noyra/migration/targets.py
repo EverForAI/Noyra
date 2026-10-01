@@ -136,6 +136,13 @@ class TargetRegistry:
                     ),
                 ),
             )
+            MigrationStore._append_audit(
+                connection,
+                subject_id,
+                "migration_target_registered",
+                actor.strip(),
+                {"target_id": target_id, "key_fingerprint": fingerprint, "endpoint": endpoint},
+            )
             return self._load(connection, target_id)
 
     def issue_challenge(self, target_id: str, *, source_epoch: str) -> TargetChallenge:
@@ -145,7 +152,7 @@ class TargetRegistry:
         nonce = secrets.token_urlsafe(32)
         with self.database.transaction() as connection:
             row = connection.execute(
-                "SELECT status FROM migration_targets WHERE target_id=?", (target_id,)
+                "SELECT status,subject_id FROM migration_targets WHERE target_id=?", (target_id,)
             ).fetchone()
             if row is None:
                 raise NotFoundError(f"migration target not found: {target_id}")
@@ -155,11 +162,23 @@ class TargetRegistry:
                 "INSERT INTO migration_target_challenges(nonce,target_id,source_epoch,expires_at,issued_at) VALUES (?,?,?,?,?)",
                 (nonce, target_id, source_epoch, expires, utc_now()),
             )
+            target_subject = connection.execute(
+                "SELECT subject_id FROM migration_targets WHERE target_id=?", (target_id,)
+            ).fetchone()["subject_id"]
+            MigrationStore._append_audit(
+                connection,
+                target_subject,
+                "migration_target_challenge_issued",
+                "system",
+                {"target_id": target_id, "source_epoch": source_epoch, "expires_at": expires},
+            )
         return TargetChallenge(nonce=nonce, expires_at=expires, source_epoch=source_epoch)
 
     def attest(
         self, target_id: str, challenge: TargetChallenge, signature: str, *, actor: str
     ) -> TrustEvidence:
+        if not isinstance(actor, str) or not actor.strip() or len(actor) > 128:
+            raise ValueError("target attestation actor is invalid")
         with self.database.transaction() as connection:
             row = connection.execute(
                 "SELECT * FROM migration_targets WHERE target_id=?", (target_id,)
@@ -186,14 +205,23 @@ class TargetRegistry:
                 "UPDATE migration_target_challenges SET consumed_at=? WHERE nonce=? AND consumed_at IS NULL",
                 (utc_now(), challenge.nonce),
             )
+            MigrationStore._append_audit(
+                connection,
+                row["subject_id"],
+                "migration_target_attested",
+                actor.strip(),
+                {"target_id": target_id, "key_fingerprint": evidence.key_fingerprint, "source_epoch": challenge.source_epoch},
+            )
             return evidence
 
     def revoke(self, target_id: str, *, reason: str, actor: str) -> None:
         if not reason.strip() or len(reason) > 512:
             raise ValueError("target revoke reason is invalid")
+        if not isinstance(actor, str) or not actor.strip() or len(actor) > 128:
+            raise ValueError("target revoke actor is invalid")
         with self.database.transaction() as connection:
             row = connection.execute(
-                "SELECT status FROM migration_targets WHERE target_id=?", (target_id,)
+                "SELECT status,subject_id FROM migration_targets WHERE target_id=?", (target_id,)
             ).fetchone()
             if row is None:
                 raise NotFoundError(f"migration target not found: {target_id}")
@@ -203,6 +231,13 @@ class TargetRegistry:
             connection.execute(
                 "UPDATE migration_targets SET status='revoked', revoked_at=?, revoke_reason=?, updated_at=? WHERE target_id=?",
                 (now, reason.strip(), now, target_id),
+            )
+            MigrationStore._append_audit(
+                connection,
+                row["subject_id"],
+                "migration_target_revoked",
+                actor.strip(),
+                {"target_id": target_id, "reason": reason.strip()},
             )
 
     @staticmethod

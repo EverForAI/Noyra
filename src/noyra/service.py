@@ -114,6 +114,7 @@ from noyra.migration import (
     MigrationStore,
     RecoveryCoordinator,
     RecoveryRequest,
+    TargetChallenge,
     TargetRegistry,
 )
 from noyra.model import (
@@ -2411,6 +2412,18 @@ class NoyraHTTPServer:
                         items.append(item)
                     self._json(HTTPStatus.OK, items)
                     return
+                if parsed.path == "/api/admin/migration/tasks":
+                    if not self._authorized("operator"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    with owner.kernel.database.connection() as connection:
+                        rows = connection.execute(
+                            "SELECT * FROM migration_tasks WHERE subject_id=? "
+                            "ORDER BY updated_at DESC LIMIT ?",
+                            (owner.kernel.subject_id, limit),
+                        ).fetchall()
+                    self._json(HTTPStatus.OK, [dict(row) for row in rows])
+                    return
                 if parsed.path.startswith("/api/admin/migration/tasks/"):
                     if not self._authorized("operator"):
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -3897,6 +3910,73 @@ class NoyraHTTPServer:
                         self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_migration_target"})
                         return
                     self._json(HTTPStatus.CREATED, target.__dict__)
+                    return
+                if self.path.startswith("/api/admin/migration/targets/") and self.path.endswith(
+                    "/challenge"
+                ):
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    target_id = (
+                        self.path.removeprefix("/api/admin/migration/targets/")
+                        .removesuffix("/challenge")
+                        .strip("/")
+                    )
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    try:
+                        challenge = owner.migration_targets.issue_challenge(
+                            target_id,
+                            source_epoch=str(
+                                payload.get(
+                                    "source_epoch",
+                                    f"runtime-{owner.kernel.lifecycle.current().version}",
+                                )
+                            ),
+                        )
+                    except (NotFoundError, ValueError):
+                        self._json(
+                            HTTPStatus.CONFLICT,
+                            {"error": "migration_target_challenge_failed"},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, challenge.__dict__)
+                    return
+                if self.path.startswith("/api/admin/migration/targets/") and self.path.endswith(
+                    "/attest"
+                ):
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    target_id = (
+                        self.path.removeprefix("/api/admin/migration/targets/")
+                        .removesuffix("/attest")
+                        .strip("/")
+                    )
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    try:
+                        evidence = owner.migration_targets.attest(
+                            target_id,
+                            TargetChallenge(
+                                nonce=str(payload["nonce"]),
+                                expires_at=str(payload["expires_at"]),
+                                source_epoch=str(payload["source_epoch"]),
+                            ),
+                            str(payload["signature"]),
+                            actor=self._actor(),
+                        )
+                    except (KeyError, NotFoundError, ValueError):
+                        self._json(
+                            HTTPStatus.CONFLICT,
+                            {"error": "migration_target_attestation_failed"},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, evidence.__dict__)
                     return
                 if self.path.startswith("/api/admin/migration/targets/") and self.path.endswith(
                     "/revoke"
