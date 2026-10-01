@@ -1,11 +1,14 @@
 """Deterministic proposal construction and rejection cooldowns."""
 
+# Proposal SQL and hash envelopes stay adjacent for auditability.
+# ruff: noqa: E501
+
 from __future__ import annotations
 
-import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Mapping
+from typing import Any
 
 from noyra.core.database import Database
 from noyra.core.errors import NotFoundError
