@@ -119,6 +119,23 @@
         <article class="surface-card"><div class="card-heading"><div><h2>已注册目标</h2><p class="muted">注册后先发起一次挑战，再把目标 agent 返回的签名提交回来。</p></div></div><div id="migration-target-list" class="resource-list"></div></article>
         <article class="surface-card"><div class="card-heading"><h2>迁移提案</h2></div><div id="migration-proposal-list" class="resource-list"></div></article>
         <article class="surface-card"><div class="card-heading"><h2>迁移任务</h2><button class="text-button" id="refresh-migration-tasks" type="button">更新</button></div><div id="migration-task-list" class="resource-list"></div></article>
+        <article class="surface-card" id="migration-recovery-panel" aria-labelledby="migration-recovery-title">
+          <div class="card-heading">
+            <div><h2 id="migration-recovery-title">紧急恢复</h2><p class="muted">仅在源主机故障且 standby 已完成验证时使用。所有摘要、证据和目标签名都会由服务器重新核验。</p></div>
+          </div>
+          <form id="migration-recovery-form" class="model-grid">
+            <label for="migration-recovery-task-id"><span>恢复任务 ID</span><input id="migration-recovery-task-id" name="task_id" required maxlength="128" autocomplete="off"></label>
+            <label for="migration-recovery-standby-target-id"><span>standby 目标 ID</span><input id="migration-recovery-standby-target-id" name="standby_target_id" required maxlength="128" autocomplete="off"></label>
+            <label for="migration-recovery-backup-id"><span>已验证备份 ID</span><input id="migration-recovery-backup-id" name="verified_backup_id" required maxlength="256" autocomplete="off"></label>
+            <label for="migration-recovery-manifest-digest"><span>清单摘要</span><input id="migration-recovery-manifest-digest" name="manifest_digest" required maxlength="64" pattern="[0-9a-fA-F]{64}" autocomplete="off" spellcheck="false"></label>
+            <label for="migration-recovery-restore-report-digest"><span>恢复报告摘要</span><input id="migration-recovery-restore-report-digest" name="restore_report_digest" required maxlength="64" pattern="[0-9a-fA-F]{64}" autocomplete="off" spellcheck="false"></label>
+            <label for="migration-recovery-health-report-digest"><span>健康报告摘要</span><input id="migration-recovery-health-report-digest" name="health_report_digest" required maxlength="64" pattern="[0-9a-fA-F]{64}" autocomplete="off" spellcheck="false"></label>
+            <label for="migration-recovery-target-signature"><span>目标签名（Base64url）</span><textarea id="migration-recovery-target-signature" name="target_signature" required maxlength="256" rows="2" autocomplete="off" spellcheck="false"></textarea></label>
+            <label for="migration-recovery-source-failure-evidence"><span>源主机故障证据</span><textarea id="migration-recovery-source-failure-evidence" name="source_failure_evidence" required maxlength="4000" rows="4" placeholder="填写可核验的故障时间、监控事件或工单引用"></textarea></label>
+            <div class="resource-actions"><button type="submit">提交紧急恢复</button></div>
+          </form>
+          <p class="form-status" id="migration-recovery-status" role="status" aria-live="polite"></p>
+        </article>
       </section>
       <section class="admin-section" data-section-panel="conversation" hidden>
         <div class="section-intro"><div><p class="eyebrow">PRIVATE CHANNEL</p><h2>与主体交流</h2><p>消息会进入认知流程，回复、沉默、延迟和失败都会保留明确状态。</p></div></div>

@@ -25,3 +25,19 @@ def test_migration_console_confirms_high_risk_modes_and_shows_evidence() -> None
     assert "item.evidence" in ADMIN_JS
     assert "policy_revision" in ADMIN_JS
     assert "active_epoch" in ADMIN_JS
+
+
+def test_migration_console_exposes_emergency_recovery_proof_form() -> None:
+    assert 'id="migration-recovery-form"' in ADMIN_HTML
+    assert 'id="migration-recovery-task-id"' in ADMIN_HTML
+    assert 'id="migration-recovery-standby-target-id"' in ADMIN_HTML
+    assert 'id="migration-recovery-backup-id"' in ADMIN_HTML
+    assert 'id="migration-recovery-manifest-digest"' in ADMIN_HTML
+    assert 'id="migration-recovery-restore-report-digest"' in ADMIN_HTML
+    assert 'id="migration-recovery-health-report-digest"' in ADMIN_HTML
+    assert 'id="migration-recovery-target-signature"' in ADMIN_HTML
+    assert 'id="migration-recovery-source-failure-evidence"' in ADMIN_HTML
+    assert 'id="migration-recovery-status"' in ADMIN_HTML
+    assert "/api/v1/admin/migration/recovery" in ADMIN_JS
+    assert "migration_recovery_rejected" in ADMIN_JS
+    assert "紧急恢复已提交" in ADMIN_JS
