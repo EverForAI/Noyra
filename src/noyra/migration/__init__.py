@@ -8,6 +8,12 @@ from .proposals import MigrationProposalStore
 from .providers import RegisteredTargetProvider, TargetCandidate
 from .recovery import RecoveryCoordinator, RecoveryRequest
 from .targets import TargetRegistration, TargetRegistry
+from .transfer import (
+    EncryptedTransferReceipt,
+    EncryptedTransferSession,
+    TransferReceipt,
+    TransferSession,
+)
 from .trust import TargetAttestation, TargetChallenge, TrustDecision, TrustEvidence
 from .wallet import WalletMigration, WalletMigrationPlan
 
@@ -16,6 +22,8 @@ __all__ = [
     "CredentialRebinder",
     "CutoverCoordinator",
     "CutoverPlan",
+    "EncryptedTransferReceipt",
+    "EncryptedTransferSession",
     "MigrationManager",
     "MigrationPolicy",
     "MigrationPolicyConflictError",
@@ -29,6 +37,8 @@ __all__ = [
     "TargetChallenge",
     "TargetRegistration",
     "TargetRegistry",
+    "TransferReceipt",
+    "TransferSession",
     "TrustDecision",
     "TrustEvidence",
     "WalletMigration",

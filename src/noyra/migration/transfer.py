@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import os
+import secrets
+import struct
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
 MAX_ARTIFACT_BYTES = 10 * 1024 * 1024 * 1024
 MAX_CHUNKS = 2_000_000
+_ENCRYPTED_MAGIC = b"NOYRA-ENC1"
 
 
 @dataclass(frozen=True)
@@ -21,6 +27,20 @@ class TransferReceipt:
     chunk_hashes: tuple[str, ...]
     artifact_hash: str
     complete: bool
+
+
+@dataclass(frozen=True)
+class EncryptedTransferReceipt:
+    source: str
+    destination: str
+    byte_size: int
+    chunk_bytes: int
+    chunk_count: int
+    chunk_hashes: tuple[str, ...]
+    artifact_hash: str
+    manifest_digest: str
+    nonce_prefix: bytes
+    complete: bool = True
 
 
 class TransferSession:
@@ -162,3 +182,130 @@ class TransferSession:
             if current.is_symlink():
                 raise ValueError(f"{label} cannot be a symlink")
             current = current.parent
+
+
+class EncryptedTransferSession:
+    """Encrypt each bounded artifact chunk with an in-memory AEAD key."""
+
+    def __init__(self, key: bytes, *, chunk_bytes: int = 1024 * 1024):
+        if not isinstance(key, bytes) or len(key) != 32:
+            raise ValueError("encrypted transfer key must be 32 bytes")
+        if not 4096 <= chunk_bytes <= 64 * 1024 * 1024:
+            raise ValueError("chunk size is outside safety bounds")
+        self._cipher = ChaCha20Poly1305(key)
+        self.chunk_bytes = chunk_bytes
+
+    def send(
+        self, source: Path | str, destination: Path | str, *, manifest_digest: str
+    ) -> EncryptedTransferReceipt:
+        self._validate_digest(manifest_digest)
+        source_input = Path(source).expanduser()
+        destination_input = Path(destination).expanduser()
+        TransferSession._reject_symlink(source_input, "source")
+        TransferSession._reject_symlink(destination_input, "destination")
+        source_path = source_input.resolve()
+        destination_path = destination_input.resolve()
+        TransferSession._validate_paths(source_path, destination_path)
+        if not source_path.is_file():
+            raise ValueError("source must be a regular file")
+        size = source_path.stat().st_size
+        if size > MAX_ARTIFACT_BYTES:
+            raise ValueError("artifact exceeds size limit")
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        nonce_prefix = secrets.token_bytes(8)
+        hashes: list[str] = []
+        artifact = hashlib.sha256()
+        with source_path.open("rb") as source_stream, destination_path.open("wb") as target:
+            target.write(_ENCRYPTED_MAGIC)
+            target.write(struct.pack(">I", self.chunk_bytes))
+            target.write(nonce_prefix)
+            index = 0
+            while chunk := source_stream.read(self.chunk_bytes):
+                if index >= MAX_CHUNKS:
+                    raise ValueError("artifact has too many chunks")
+                hashes.append(hashlib.sha256(chunk).hexdigest())
+                artifact.update(chunk)
+                nonce = nonce_prefix + index.to_bytes(4, "big")
+                aad = f"{manifest_digest}:{index}".encode()
+                encrypted = self._cipher.encrypt(nonce, chunk, aad)
+                target.write(struct.pack(">I", len(encrypted)))
+                target.write(encrypted)
+                index += 1
+            target.flush()
+            os.fsync(target.fileno())
+        return EncryptedTransferReceipt(
+            str(source_path), str(destination_path), size, self.chunk_bytes, index,
+            tuple(hashes), artifact.hexdigest(), manifest_digest, nonce_prefix,
+        )
+
+    def receive(
+        self,
+        receipt: EncryptedTransferReceipt,
+        destination: Path | str,
+        *,
+        manifest_digest: str,
+    ) -> None:
+        self._validate_digest(manifest_digest)
+        if not receipt.complete or receipt.manifest_digest != manifest_digest:
+            raise ValueError("encrypted transfer manifest mismatch")
+        if receipt.chunk_count != len(receipt.chunk_hashes) or receipt.chunk_count > MAX_CHUNKS:
+            raise ValueError("encrypted transfer receipt is invalid")
+        encrypted_path = Path(receipt.destination).expanduser()
+        destination_input = Path(destination).expanduser()
+        TransferSession._reject_symlink(encrypted_path, "encrypted source")
+        TransferSession._reject_symlink(destination_input, "destination")
+        encrypted_path = encrypted_path.resolve()
+        destination_path = destination_input.resolve()
+        if not encrypted_path.is_file() or encrypted_path.stat().st_size > MAX_ARTIFACT_BYTES * 2:
+            raise ValueError("encrypted transfer source is unavailable")
+        TransferSession._validate_paths(encrypted_path, destination_path)
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact = hashlib.sha256()
+        count = 0
+        try:
+            with encrypted_path.open("rb") as source, destination_path.open("wb") as target:
+                if source.read(len(_ENCRYPTED_MAGIC)) != _ENCRYPTED_MAGIC:
+                    raise ValueError("encrypted transfer header is invalid")
+                chunk_bytes = struct.unpack(">I", source.read(4))[0]
+                if chunk_bytes != receipt.chunk_bytes:
+                    raise ValueError("encrypted transfer chunk size mismatch")
+                if source.read(8) != receipt.nonce_prefix:
+                    raise ValueError("encrypted transfer nonce mismatch")
+                while count < receipt.chunk_count:
+                    raw_length = source.read(4)
+                    if len(raw_length) != 4:
+                        raise ValueError("encrypted transfer is truncated")
+                    length = struct.unpack(">I", raw_length)[0]
+                    if length < 16 or length > chunk_bytes + 16:
+                        raise ValueError("encrypted transfer chunk length is invalid")
+                    encrypted = source.read(length)
+                    nonce = receipt.nonce_prefix + count.to_bytes(4, "big")
+                    chunk = self._cipher.decrypt(
+                        nonce, encrypted, f"{manifest_digest}:{count}".encode()
+                    )
+                    if hashlib.sha256(chunk).hexdigest() != receipt.chunk_hashes[count]:
+                        raise ValueError("encrypted transfer chunk hash mismatch")
+                    artifact.update(chunk)
+                    target.write(chunk)
+                    count += 1
+                if source.read(1):
+                    raise ValueError("encrypted transfer has trailing data")
+                target.flush()
+                os.fsync(target.fileno())
+        except Exception as error:
+            with suppress(OSError):
+                destination_path.unlink()
+            if isinstance(error, ValueError) and "manifest" in str(error):
+                raise
+            raise ValueError("encrypted transfer decrypt failed") from error
+        if count != receipt.chunk_count or destination_path.stat().st_size != receipt.byte_size:
+            raise ValueError("encrypted transfer byte size mismatch")
+        if artifact.hexdigest() != receipt.artifact_hash:
+            raise ValueError("encrypted transfer artifact hash mismatch")
+
+    @staticmethod
+    def _validate_digest(value: str) -> None:
+        if not isinstance(value, str) or len(value) != 64 or any(
+            character not in "0123456789abcdef" for character in value
+        ):
+            raise ValueError("manifest digest is invalid")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from noyra.migration.transfer import TransferSession
+from noyra.migration.transfer import EncryptedTransferSession, TransferSession
 
 
 def test_transfer_can_resume_and_verify_chunks(tmp_path) -> None:
@@ -56,3 +56,34 @@ def test_transfer_rejects_symlink_source_and_destination(tmp_path) -> None:
         session.send(source_link, tmp_path / "received.bin")
     with pytest.raises(ValueError, match="symlink"):
         session.send(source, destination_link)
+
+
+def test_encrypted_transfer_binds_manifest_and_round_trips(tmp_path) -> None:
+    source = tmp_path / "artifact.bin"
+    source.write_bytes(b"private migration payload" * 1000)
+    encrypted = tmp_path / "artifact.enc"
+    restored = tmp_path / "restored.bin"
+    key = b"k" * 32
+    session = EncryptedTransferSession(key, chunk_bytes=4096)
+    receipt = session.send(source, encrypted, manifest_digest="a" * 64)
+    assert encrypted.read_bytes() != source.read_bytes()
+    session.receive(receipt, restored, manifest_digest="a" * 64)
+    assert restored.read_bytes() == source.read_bytes()
+
+
+def test_encrypted_transfer_rejects_wrong_key_or_manifest(tmp_path) -> None:
+    source = tmp_path / "artifact.bin"
+    source.write_bytes(b"payload")
+    encrypted = tmp_path / "artifact.enc"
+    restored = tmp_path / "restored.bin"
+    receipt = EncryptedTransferSession(b"k" * 32, chunk_bytes=4096).send(
+        source, encrypted, manifest_digest="b" * 64
+    )
+    with pytest.raises(ValueError, match="manifest"):
+        EncryptedTransferSession(b"k" * 32, chunk_bytes=4096).receive(
+            receipt, restored, manifest_digest="c" * 64
+        )
+    with pytest.raises(ValueError, match="decrypt"):
+        EncryptedTransferSession(b"x" * 32, chunk_bytes=4096).receive(
+            receipt, restored, manifest_digest="b" * 64
+        )

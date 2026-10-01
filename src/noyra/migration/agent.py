@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -28,7 +29,12 @@ class MigrationAgent:
     """Pure protocol boundary; privileged restore is supplied by the runner."""
 
     def __init__(self, *, target_id: str, key_fingerprint: str, generation: int = 1):
-        if not target_id or not key_fingerprint or generation < 1:
+        if (
+            not re.fullmatch(r"[A-Za-z0-9_-]{3,128}", target_id)
+            or not re.fullmatch(r"[0-9a-f]{64}", key_fingerprint)
+            or type(generation) is not int
+            or generation < 1
+        ):
             raise ValueError("agent identity is invalid")
         self.target_id = target_id
         self.key_fingerprint = key_fingerprint
