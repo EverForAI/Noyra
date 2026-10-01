@@ -153,6 +153,14 @@ class MigrationAgent:
         ).decode()
         return TargetAttestation(self.target_id, self.public_key, request, signature)
 
+    def sign_recovery_proof(self, signing_bytes: bytes) -> str:
+        """Sign a source-provided recovery proof without exposing the key."""
+        if self._signing_key is None:
+            raise ValueError("target signing identity is not configured")
+        if not isinstance(signing_bytes, bytes) or not signing_bytes:
+            raise ValueError("recovery proof bytes are required")
+        return base64.urlsafe_b64encode(self._signing_key.sign(signing_bytes)).decode()
+
     def receive(self, manifest: Mapping[str, Any]) -> ReceiveReceipt:
         values = self._validate_manifest(manifest)
         artifact_id = values["artifact_id"]

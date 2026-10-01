@@ -10,6 +10,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from noyra.migration.agent import MigrationAgent, RestoreReport, TargetHealthReport
+from noyra.migration.recovery import RecoveryCoordinator, RecoveryRequest
 from noyra.migration.trust import TargetChallenge
 
 
@@ -53,6 +54,36 @@ def test_agent_challenge_is_signed_by_host_bound_target_key(tmp_path) -> None:
     assert attestation.public_key == public
     assert agent.enroll({"subject_id": "Noyra-0001"}).host_identity
     assert attestation.verify().target_id == "target-1"
+
+
+def test_agent_signs_recovery_proof_without_exposing_private_key() -> None:
+    private = Ed25519PrivateKey.generate()
+    public_bytes = private.public_key().public_bytes_raw()
+    agent = MigrationAgent(
+        target_id="target-1",
+        key_fingerprint=hashlib.sha256(public_bytes).hexdigest(),
+        signing_key=private,
+    )
+    request = RecoveryRequest(
+        task_id="recovery-task-1",
+        standby_target_id="target-1",
+        verified_backup_id="backup-1",
+        source_failure_evidence="source unavailable",
+        manifest_digest="a" * 64,
+        restore_report_digest="b" * 64,
+        health_report_digest="c" * 64,
+    )
+
+    encoded = agent.sign_recovery_proof(RecoveryCoordinator.signing_bytes(request))
+    signature = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+    private.public_key().verify(signature, RecoveryCoordinator.signing_bytes(request))
+    assert "private" not in encoded.casefold()
+
+
+def test_agent_rejects_recovery_signing_without_key() -> None:
+    agent = MigrationAgent(target_id="target-1", key_fingerprint="a" * 64)
+    with pytest.raises(ValueError, match="signing identity"):
+        agent.sign_recovery_proof(b"proof")
 
 
 def test_agent_persists_manifest_inside_private_root_and_restores_it(tmp_path) -> None:

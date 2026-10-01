@@ -125,3 +125,43 @@ the schema, stop the service and restore the pre-update encrypted backup before
 starting the previous release. When the network path is unavailable, use the
 SSH tunnel above to reach the loopback health endpoint and admin surface while
 you repair DNS, Caddy, or the Cloudflare connector.
+
+## Subject migration and emergency recovery
+
+Migration is disabled on a new installation. Enabling it in the management
+page first selects manual approval; the subject must never migrate merely
+because a provider reports spare capacity. Only targets registered for this
+subject, attested with the target's Ed25519 enrollment key, and present in the
+policy allowlist can be considered. The built-in provider adapter lists these
+registered targets only and does not scan the public Internet or provision a
+machine with arbitrary SSH credentials.
+
+Keep the following safety boundaries when configuring a target:
+
+- The target must use an encrypted data volume, the expected release, and a
+  private target-agent data root.
+- The source sends an encrypted backup manifest and content digests. It never
+  puts operator tokens, API keys, wallet private keys, or ordinary environment
+  files in the migration artifact, task status, or audit projection.
+- The target signs the manifest, restore report, and health report as one
+  task-bound recovery proof. The source verifies that signature before it
+  acquires the target epoch.
+- The target epoch is fenced by the source database. Only one active epoch may
+  accept mutations; a stale source must be read-only.
+
+Emergency recovery is a separate, disabled-by-default policy mode. Enable it
+only after a standby target is registered and attested and a verified encrypted
+backup is available. A recovery request must include the task identifier,
+standby target, backup identifier, source failure evidence, three report
+digests, and the target signature. Failure evidence is stored only as a hash;
+secret-looking values are rejected. Repeating the same signed request is
+idempotent and returns the original task and epoch rather than creating a
+second active writer.
+
+External signer/KMS rebinding remains the preferred wallet mode. Local-wallet
+transfer requires both the policy opt-in and the separate high-risk
+confirmation in the management page. Keep migration disabled, revoke the
+target, or use the emergency pause control if the target health report,
+integrity check, or epoch state is unexpected. A real two-host encrypted
+restore and rollback rehearsal is still required before enabling automatic
+approval in production.

@@ -4311,6 +4311,10 @@ class NoyraHTTPServer:
                                 standby_target_id=str(payload["standby_target_id"]),
                                 verified_backup_id=str(payload["verified_backup_id"]),
                                 source_failure_evidence=str(payload["source_failure_evidence"]),
+                                manifest_digest=str(payload["manifest_digest"]),
+                                restore_report_digest=str(payload["restore_report_digest"]),
+                                health_report_digest=str(payload["health_report_digest"]),
+                                target_signature=str(payload["target_signature"]),
                             ),
                             policy,
                         )
