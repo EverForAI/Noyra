@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from scripts.verify_external_gates import main as verify_external_gates_main
 from scripts.verify_external_gates import validate_external_gates
 
 from noyra.service import _wallet_automation_from_env
@@ -68,6 +70,29 @@ def test_external_gate_signature_is_required_when_verification_key_is_supplied()
         public_key="not-a-key",
     )
     assert "signature" in errors
+
+
+def test_external_gate_cli_distinguishes_missing_and_invalid_artifacts(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    missing = tmp_path / "missing.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["verify_external_gates.py", "--path", str(missing), "--expected-sha", "a" * 40],
+    )
+    assert verify_external_gates_main() == 1
+    assert "missing_artifact" in capsys.readouterr().out
+
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text("not-json", encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["verify_external_gates.py", "--path", str(invalid), "--expected-sha", "a" * 40],
+    )
+    assert verify_external_gates_main() == 1
+    assert "invalid_json" in capsys.readouterr().out
 
 
 def test_production_wallet_automation_requires_explicit_external_gate(

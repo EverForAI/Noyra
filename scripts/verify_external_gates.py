@@ -114,7 +114,16 @@ def main() -> int:
         raise SystemExit("external gate freshness is fixed at 72 hours")
     try:
         record = json.loads(args.path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
+    except FileNotFoundError:
+        print(json.dumps({"status": "fail", "errors": ["missing_artifact"]}))
+        return 1
+    except IsADirectoryError:
+        print(json.dumps({"status": "fail", "errors": ["artifact_not_file"]}))
+        return 1
+    except json.JSONDecodeError:
+        print(json.dumps({"status": "fail", "errors": ["invalid_json"]}))
+        return 1
+    except OSError as error:
         print(json.dumps({"status": "fail", "errors": [type(error).__name__]}))
         return 1
     if not isinstance(record, dict):
