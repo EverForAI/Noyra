@@ -498,6 +498,23 @@ _OWNERSHIP_GRAPH_V72 = {
 _OWNERSHIP_GRAPH_V73 = _OWNERSHIP_GRAPH_V72
 _OWNERSHIP_GRAPH_V74 = _OWNERSHIP_GRAPH_V73
 _OWNERSHIP_GRAPH_V75 = _OWNERSHIP_GRAPH_V74
+# Schema 76 adds operator-control state.  Session identifiers are stored only
+# as hashes and the rate/session records are deliberately excluded from
+# subject runtime exports; they are control-plane state rather than subject
+# cognition or evidence.
+_OWNERSHIP_GRAPH_V76 = {
+    **_OWNERSHIP_GRAPH_V75,
+    "admin_login_rate_events": _ExportOwnershipRule(
+        "skipped",
+        "global operator control state",
+        reason="durable login rate state is not subject runtime data",
+    ),
+    "admin_sessions": _ExportOwnershipRule(
+        "skipped",
+        "global operator control state",
+        reason="durable admin sessions are not subject runtime data",
+    ),
+}
 
 _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     33: _OWNERSHIP_GRAPH_V33,
@@ -543,6 +560,7 @@ _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     73: _OWNERSHIP_GRAPH_V73,
     74: _OWNERSHIP_GRAPH_V74,
     75: _OWNERSHIP_GRAPH_V75,
+    76: _OWNERSHIP_GRAPH_V76,
 }
 
 

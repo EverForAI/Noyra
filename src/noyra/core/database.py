@@ -231,7 +231,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 75
+CURRENT_SCHEMA_VERSION = 76
 
 MIGRATIONS: dict[int, str] = {
     2: """
@@ -6677,6 +6677,35 @@ SELECT 1;
 -- hook so migration verification can safely replay this marker.
 SELECT 1;
 """,
+    76: """
+CREATE TABLE IF NOT EXISTS admin_login_rate_events (
+    event_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    client_key_hash TEXT NOT NULL CHECK (
+        length(client_key_hash) = 64 AND client_key_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    occurred_at REAL NOT NULL CHECK (occurred_at >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_admin_login_rate_events_subject_client_time
+    ON admin_login_rate_events(subject_id, client_key_hash, occurred_at);
+CREATE TABLE IF NOT EXISTS admin_sessions (
+    session_hash TEXT PRIMARY KEY CHECK (
+        length(session_hash) = 64 AND session_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    role TEXT NOT NULL CHECK (role IN ('operator', 'admin', 'break_glass')),
+    actor TEXT NOT NULL,
+    expires_at REAL NOT NULL CHECK (expires_at >= 0),
+    created_at REAL NOT NULL CHECK (created_at >= 0),
+    revoked_at REAL,
+    state_hash TEXT NOT NULL CHECK (
+        length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    CHECK (revoked_at IS NULL OR revoked_at >= created_at)
+);
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_subject_active
+    ON admin_sessions(subject_id, revoked_at, expires_at, created_at);
+""",
 }
 
 
@@ -7773,6 +7802,8 @@ END;
             }
             if schema_version >= 71:
                 required_tables.add("wallet_payment_reconciliation_events")
+            if schema_version >= 76:
+                required_tables.update({"admin_login_rate_events", "admin_sessions"})
             installed_tables = {
                 str(row[0])
                 for row in connection.execute(

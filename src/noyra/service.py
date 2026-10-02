@@ -15,7 +15,7 @@ import secrets
 import signal
 import threading
 import time
-from collections import OrderedDict, defaultdict, deque
+from collections import defaultdict, deque
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future as ConcurrentFuture
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -1493,12 +1493,9 @@ class NoyraHTTPServer:
         handler = self._handler_type()
         self._rate_lock = threading.Lock()
         self._request_times: dict[str, deque[float]] = defaultdict(deque)
-        self._admin_login_failures: dict[str, deque[float]] = defaultdict(deque)
         self._health_cache_lock = threading.Lock()
         self._health_cache_at = 0.0
         self._health_cache: tuple[HTTPStatus, dict[str, Any]] | None = None
-        self._session_lock = threading.RLock()
-        self._admin_sessions: OrderedDict[str, _AdminSession] = OrderedDict()
         self.server = BoundedThreadingHTTPServer(
             (settings.host, settings.port), handler, settings.max_http_threads
         )
@@ -1773,31 +1770,89 @@ class NoyraHTTPServer:
             return True
 
     def allow_admin_login(self, client_ip: str) -> bool:
-        """Apply a separate failure budget to the public admin login endpoint."""
-        now = time.monotonic()
-        cutoff = now - 60
-        bucket_key = self._rate_limit_bucket_key(client_ip)
-        with self._rate_lock:
-            bucket = self._admin_login_failures[bucket_key]
-            while bucket and bucket[0] <= cutoff:
-                bucket.popleft()
-            if len(bucket) >= self.settings.admin_login_rate_limit_per_minute:
+        """Apply the failure budget through a durable SQLite bucket.
+
+        Login requests may be handled by several workers or across a restart.
+        The cleanup, count and reservation are one transaction so every worker
+        observes the same budget.
+        """
+        now = time.time()
+        cutoff = now - 60.0
+        client_key_hash = self._admin_client_key_hash(client_ip)
+        with self.kernel.database.transaction() as connection:
+            connection.execute(
+                "DELETE FROM admin_login_rate_events WHERE subject_id=? AND occurred_at <= ?",
+                (self.kernel.subject_id, cutoff),
+            )
+            count = connection.execute(
+                "SELECT COUNT(*) FROM admin_login_rate_events "
+                "WHERE subject_id=? AND client_key_hash=? AND occurred_at > ?",
+                (self.kernel.subject_id, client_key_hash, cutoff),
+            ).fetchone()[0]
+            if int(count) >= self.settings.admin_login_rate_limit_per_minute:
                 return False
-            bucket.append(now)
-            if len(self._admin_login_failures) > 10_000:
-                self._admin_login_failures = defaultdict(
-                    deque,
-                    {
-                        key: values
-                        for key, values in self._admin_login_failures.items()
-                        if values and values[-1] > cutoff
-                    },
-                )
+            connection.execute(
+                "INSERT INTO admin_login_rate_events("
+                "event_id, subject_id, client_key_hash, occurred_at) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    f"admin_rate_{secrets.token_hex(16)}",
+                    self.kernel.subject_id,
+                    client_key_hash,
+                    now,
+                ),
+            )
             return True
 
     def clear_admin_login_failures(self, client_ip: str) -> None:
-        with self._rate_lock:
-            self._admin_login_failures.pop(self._rate_limit_bucket_key(client_ip), None)
+        with self.kernel.database.transaction() as connection:
+            connection.execute(
+                "DELETE FROM admin_login_rate_events WHERE subject_id=? AND client_key_hash=?",
+                (self.kernel.subject_id, self._admin_client_key_hash(client_ip)),
+            )
+
+    @staticmethod
+    def _admin_client_key_hash(client_ip: str) -> str:
+        return hashlib.sha256(f"noyra-admin-client:{client_ip}".encode()).hexdigest()
+
+    @staticmethod
+    def _admin_session_hash(session_id: str) -> str:
+        return hashlib.sha256(f"noyra-admin-session:{session_id}".encode()).hexdigest()
+
+    def _admin_session_csrf(self, session_id: str, role: str) -> str:
+        secret_value = {
+            "admin": self.settings.admin_token,
+            "operator": self.settings.operator_token,
+            "break_glass": self.settings.break_glass_token,
+        }.get(role)
+        secret = None if secret_value is None else secret_value.get_secret_value()
+        if secret is None:
+            raise RuntimeError("admin session signing secret is unavailable")
+        return hmac.new(
+            secret.encode("ascii"),
+            f"{self.kernel.subject_id}:{session_id}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _admin_session_state_hash(
+        self,
+        *,
+        session_hash: str,
+        role: str,
+        actor: str,
+        expires_at: float,
+        created_at: float,
+    ) -> str:
+        return content_hash(
+            {
+                "session_hash": session_hash,
+                "subject_id": self.kernel.subject_id,
+                "role": role,
+                "actor": actor,
+                "expires_at": expires_at,
+                "created_at": created_at,
+            }
+        )
 
     def client_ip(self, peer: str, forwarded_for: str | None = None) -> str:
         """Resolve a rate-limit identity without trusting spoofable headers.
@@ -1845,32 +1900,98 @@ class NoyraHTTPServer:
         if role not in {"operator", "admin", "break_glass"} or not actor.strip():
             raise ValueError("invalid admin session identity")
         now = time.time()
+        session_id = secrets.token_urlsafe(32)
+        session_hash = self._admin_session_hash(session_id)
+        expires_at = now + self.settings.admin_session_ttl_seconds
         session = _AdminSession(
             role=role,
             actor=actor,
-            csrf_token=secrets.token_urlsafe(32),
-            expires_at=now + self.settings.admin_session_ttl_seconds,
+            csrf_token=self._admin_session_csrf(session_id, role),
+            expires_at=expires_at,
         )
-        session_id = secrets.token_urlsafe(32)
-        with self._session_lock:
-            self._purge_sessions_locked(now)
-            while len(self._admin_sessions) >= self.settings.admin_session_max_count:
-                self._admin_sessions.popitem(last=False)
-            self._admin_sessions[session_id] = session
+        state_hash = self._admin_session_state_hash(
+            session_hash=session_hash,
+            role=role,
+            actor=actor,
+            expires_at=expires_at,
+            created_at=now,
+        )
+        with self.kernel.database.transaction() as connection:
+            connection.execute(
+                "DELETE FROM admin_sessions WHERE subject_id=? AND "
+                "(revoked_at IS NOT NULL OR expires_at <= ?)",
+                (self.kernel.subject_id, now),
+            )
+            oldest = connection.execute(
+                "SELECT session_hash FROM admin_sessions WHERE subject_id=? "
+                "AND revoked_at IS NULL AND expires_at > ? "
+                "ORDER BY created_at ASC LIMIT 1 OFFSET ?",
+                (self.kernel.subject_id, now, self.settings.admin_session_max_count - 1),
+            ).fetchone()
+            if oldest is not None:
+                connection.execute(
+                    "UPDATE admin_sessions SET revoked_at=? WHERE session_hash=?",
+                    (now, oldest["session_hash"]),
+                )
+            connection.execute(
+                "INSERT INTO admin_sessions("
+                "session_hash, subject_id, role, actor, expires_at, created_at, "
+                "revoked_at, state_hash) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)",
+                (
+                    session_hash,
+                    self.kernel.subject_id,
+                    role,
+                    actor,
+                    expires_at,
+                    now,
+                    state_hash,
+                ),
+            )
         return session_id, session
 
     def admin_session(self, session_id: str) -> _AdminSession | None:
         if not session_id:
             return None
         now = time.time()
-        with self._session_lock:
-            self._purge_sessions_locked(now)
-            session = self._admin_sessions.get(session_id)
-            return session if session is not None and session.expires_at > now else None
+        session_hash = self._admin_session_hash(session_id)
+        with self.kernel.database.connection() as connection:
+            row = connection.execute(
+                "SELECT role, actor, expires_at, created_at, revoked_at, state_hash "
+                "FROM admin_sessions WHERE session_hash=? AND subject_id=?",
+                (session_hash, self.kernel.subject_id),
+            ).fetchone()
+        if row is None or row["revoked_at"] is not None:
+            return None
+        expires_at = float(row["expires_at"])
+        created_at = float(row["created_at"])
+        if expires_at <= now:
+            self.revoke_admin_session(session_id)
+            return None
+        expected_hash = self._admin_session_state_hash(
+            session_hash=session_hash,
+            role=str(row["role"]),
+            actor=str(row["actor"]),
+            expires_at=expires_at,
+            created_at=created_at,
+        )
+        if not hmac.compare_digest(str(row["state_hash"]), expected_hash):
+            return None
+        return _AdminSession(
+            role=str(row["role"]),
+            actor=str(row["actor"]),
+            csrf_token=self._admin_session_csrf(session_id, str(row["role"])),
+            expires_at=expires_at,
+        )
 
     def revoke_admin_session(self, session_id: str) -> None:
-        with self._session_lock:
-            self._admin_sessions.pop(session_id, None)
+        if not session_id:
+            return
+        with self.kernel.database.transaction() as connection:
+            connection.execute(
+                "UPDATE admin_sessions SET revoked_at=? WHERE session_hash=? "
+                "AND subject_id=? AND revoked_at IS NULL",
+                (time.time(), self._admin_session_hash(session_id), self.kernel.subject_id),
+            )
 
     def audit_admin_event(self, action: str, actor: str, payload: dict[str, Any]) -> None:
         """Append a redacted authentication/management audit event."""
@@ -1891,11 +2012,6 @@ class NoyraHTTPServer:
                     utc_now(),
                 ),
             )
-
-    def _purge_sessions_locked(self, now: float) -> None:
-        for session_id, session in tuple(self._admin_sessions.items()):
-            if session.expires_at <= now:
-                self._admin_sessions.pop(session_id, None)
 
     def diagnostics(self) -> dict[str, Any]:
         """Return bounded operational diagnostics for the read-only panel."""
