@@ -8,6 +8,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from noyra.core import Database, IdentityStore, SubjectKernel
 from noyra.core.errors import RuntimeOwnershipError
+from noyra.core.types import canonical_json, content_hash
 from noyra.migration.cutover import CutoverCoordinator
 from noyra.migration.fencing import EpochLease
 from noyra.migration.manager import MigrationManager
@@ -189,3 +190,60 @@ def test_source_restart_remains_fenced_and_local_wallet_needs_approval(tmp_path)
     )
     with pytest.raises(ValueError, match="second approval"):
         WalletMigration.apply_local_transfer(plan, approval=None)
+
+
+def test_cutover_accepts_task_bound_signed_restore_and_health_proof(tmp_path) -> None:
+    database, store, registry, private = _target_context(tmp_path)
+    policy = store.read_policy("Noyra-0001")
+    manager = MigrationManager(database, store)
+    proposal = manager.create_proposal(
+        subject_id="Noyra-0001",
+        target_id="standby-1",
+        policy_revision=policy.revision,
+        reason_code="maintenance",
+        reason="planned maintenance",
+        expires_at="2099-01-01T00:00:00+00:00",
+    )
+    task = manager.approve(proposal.proposal_id, actor="operator", idempotency_key="cutover-e2e")
+    challenge = registry.issue_challenge("standby-1", source_epoch=task.source_epoch)
+    registry.attest(
+        "standby-1",
+        challenge,
+        base64.urlsafe_b64encode(private.sign(challenge.signing_bytes())).decode("ascii"),
+        actor="operator",
+    )
+    restore = {
+        "target_id": "standby-1",
+        "artifact_id": "artifact-1",
+        "manifest_digest": "b" * 64,
+        "status": "restored",
+    }
+    health = {
+        **restore,
+        "status": "healthy",
+        "host_identity": "host-1",
+        "checks": {"database": True, "runtime": True},
+    }
+    signing_payload = {
+        "task_id": task.task_id,
+        "subject_id": task.subject_id,
+        "target_id": task.target_id,
+        "source_epoch": task.source_epoch,
+        "manifest_digest": "b" * 64,
+        "artifact_id": "artifact-1",
+        "restore_report_digest": content_hash(restore),
+        "health_report_digest": content_hash(health),
+    }
+    proof = {
+        "manifest_digest": "b" * 64,
+        "artifact_id": "artifact-1",
+        "restore_report": restore,
+        "health_report": health,
+        "target_signature": base64.urlsafe_b64encode(
+            private.sign(canonical_json(signing_payload).encode())
+        ).decode("ascii"),
+    }
+    cutover = CutoverCoordinator(database)
+    prepared = cutover.prepare(task.task_id, proof=proof)
+    assert prepared.status == "validating"
+    assert cutover.commit(task.task_id) == {"task_id": task.task_id, "status": "committed"}

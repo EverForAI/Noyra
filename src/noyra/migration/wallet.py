@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, ClassVar, Literal
+from typing import Any, Literal
 
+from noyra.core.database import Database
 from noyra.core.types import content_hash, new_id
 
 WalletMode = Literal["external_signer_rebind", "local_wallet_transfer", "disabled"]
@@ -70,8 +72,6 @@ class WalletBindingReceipt:
 
 
 class WalletMigration:
-    _used_approval_ids: ClassVar[set[tuple[str, str]]] = set()
-
     @staticmethod
     def plan(
         *,
@@ -140,7 +140,11 @@ class WalletMigration:
 
     @staticmethod
     def apply_local_transfer(
-        plan: WalletMigrationPlan, *, approval: dict[str, Any] | None
+        plan: WalletMigrationPlan,
+        *,
+        approval: dict[str, Any] | None,
+        database: Database | None = None,
+        subject_id: str | None = None,
     ) -> WalletBindingReceipt:
         if plan.mode != "local_wallet_transfer" or not plan.local_transfer_enabled:
             raise ValueError("local wallet transfer is not enabled")
@@ -165,13 +169,56 @@ class WalletMigration:
             raise ValueError("local wallet approval has expired")
         if any(key in approval for key in ("private_key", "seed", "mnemonic", "password")):
             raise ValueError("local wallet approval must not contain key material")
-        approval_key = (plan.task_id, approval_id)
-        if approval_key in WalletMigration._used_approval_ids:
-            raise ValueError("local wallet approval was already consumed")
-        WalletMigration._used_approval_ids.add(approval_key)
+        if database is None:
+            raise ValueError("local wallet approval requires a durable database")
         fingerprint = content_hash(
             {"approval_id": approval_id, "task_id": plan.task_id, "address": plan.source_address}
         )
+        with database.transaction() as connection:
+            resolved_subject = subject_id
+            if resolved_subject is None:
+                task = connection.execute(
+                    "SELECT subject_id FROM migration_tasks WHERE task_id=?", (plan.task_id,)
+                ).fetchone()
+                if task is None:
+                    raise ValueError("migration task subject is required for wallet approval")
+                resolved_subject = str(task["subject_id"])
+            consumed = connection.execute(
+                "SELECT payload_json FROM migration_audit_events "
+                "WHERE subject_id=? AND action='wallet_local_approval_consumed'",
+                (resolved_subject,),
+            ).fetchall()
+            for row in consumed:
+                try:
+                    payload = json.loads(str(row["payload_json"]))
+                except (TypeError, ValueError) as error:
+                    raise ValueError("wallet approval audit record is invalid") from error
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("task_id") == plan.task_id
+                    and payload.get("approval_id") == approval_id
+                ):
+                    raise ValueError("local wallet approval was already consumed")
+            now = datetime.now(UTC).isoformat()
+            payload = {
+                "task_id": plan.task_id,
+                "approval_id": approval_id,
+                "address": plan.source_address,
+                "channel_id": channel_id,
+                "expires_at": expires_at,
+            }
+            connection.execute(
+                "INSERT INTO migration_audit_events("
+                "audit_id, subject_id, action, actor, payload_json, occurred_at, state_hash) "
+                "VALUES (?, ?, 'wallet_local_approval_consumed', 'operator', ?, ?, ?)",
+                (
+                    new_id("migration-audit"),
+                    resolved_subject,
+                    json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                    now,
+                    content_hash(payload),
+                ),
+            )
         return WalletBindingReceipt(
             binding_id=new_id("wallet-binding"),
             status="approved_once",
