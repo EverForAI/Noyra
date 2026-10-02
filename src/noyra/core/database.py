@@ -7579,6 +7579,14 @@ END;
                     "validate_secret_file_intent_operation_state",
                 ),
             }
+            schema_version = int(
+                connection.execute(
+                    "SELECT value FROM schema_meta WHERE key='schema_version'"
+                ).fetchone()[0]
+            )
+            feature_min_schema = {
+                "provider_health_metrics": 68,
+            }
             now = utc_now()
             for feature_id, object_names in feature_objects.items():
                 definitions = []
@@ -7588,12 +7596,21 @@ END;
                         (object_name,),
                     ).fetchone()
                     if row is None or not row["sql"]:
+                        if schema_version < feature_min_schema.get(feature_id, 0):
+                            # A migration test (or an intentionally pinned
+                            # older runtime) may stop before an additive
+                            # feature's introduction.  Do not register or
+                            # require a feature whose schema cannot contain it.
+                            definitions = []
+                            break
                         raise RuntimeError(
                             f"optional feature {feature_id} is missing database object {object_name}"
                         )
                     definitions.append(
                         {"type": str(row["type"]), "name": str(row["name"]), "sql": str(row["sql"])}
                     )
+                if not definitions:
+                    continue
                 fingerprint = content_hash(definitions)
                 existing = connection.execute(
                     "SELECT feature_version, ddl_fingerprint, installed_at "

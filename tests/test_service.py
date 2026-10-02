@@ -242,9 +242,7 @@ class ServiceTestCase(unittest.TestCase):
         with urlopen(f"{self.base_url}/favicon.ico", timeout=5) as response:
             self.assertEqual(response.status, 204)
         with urlopen(f"{self.base_url}/api/state", timeout=5) as response:
-            self.assertEqual(
-                response.headers["X-Noyra-Public-Contract"], "public-contract-v1"
-            )
+            self.assertEqual(response.headers["X-Noyra-Public-Contract"], "public-contract-v1")
             self.assertEqual(response.headers["Cache-Control"], "no-store")
         state = self.get_json("/api/state")
         assert isinstance(state, dict)

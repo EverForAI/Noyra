@@ -647,9 +647,7 @@ class ProviderHealthStore:
                 return RoutePermit(subject_id, provider_kind, provider_id, "")
             self._verify_state(row)
             if row["state"] in {"healthy", "degraded"}:
-                return RoutePermit(
-                    subject_id, provider_kind, provider_id, str(row["state_hash"])
-                )
+                return RoutePermit(subject_id, provider_kind, provider_id, str(row["state_hash"]))
             if row["probe_token"]:
                 started = _parse_time(row["probe_started_at"])
                 if started and started + timedelta(minutes=2) > now:

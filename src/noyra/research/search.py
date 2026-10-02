@@ -326,12 +326,8 @@ class SearchExecutor:
         )
         last_failure: SearchExecution | None = None
         for config in candidates:
-            route_permit = (
-                self.provider_health.claim_route(subject_id, "search", config.config_id)
-                if self.provider_health is not None
-                else None
-            )
-            if self.provider_health is not None and route_permit is None:
+            route_permit = self._claim_route(subject_id, config.config_id)
+            if self.provider_health is not None and not route_permit:
                 continue
             try:
                 execution = await self.search(
@@ -357,6 +353,25 @@ class SearchExecutor:
                 return execution
             last_failure = execution
         return last_failure
+
+    def _claim_route(self, subject_id: str, provider_id: str) -> RoutePermit | bool | None:
+        """Claim a provider route while tolerating legacy health adapters.
+
+        Durable provider health stores expose ``claim_route`` so a half-open
+        recovery probe can be fenced.  Lightweight integrations that only
+        implement the historical ``route_available`` predicate remain valid;
+        they receive a boolean permit and therefore cannot accidentally skip
+        a route because they do not know about the newer permit type.
+        """
+        if self.provider_health is None:
+            return None
+        claim_route = getattr(self.provider_health, "claim_route", None)
+        if callable(claim_route):
+            return claim_route(subject_id, "search", provider_id)
+        route_available = getattr(self.provider_health, "route_available", None)
+        if callable(route_available):
+            return bool(route_available(subject_id, "search", provider_id))
+        raise TypeError("provider health adapter does not expose a route claim method")
 
     @staticmethod
     def _route_order(

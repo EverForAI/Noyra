@@ -310,9 +310,7 @@ class MigrationAgent:
             self._cleanup_nonces(replay_root, current)
             nonce_path = replay_root / f"{hashlib.sha256(nonce.encode()).hexdigest()}.nonce"
             try:
-                descriptor = os.open(
-                    nonce_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
-                )
+                descriptor = os.open(nonce_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             except FileExistsError as error:
                 raise AgentAuthenticationError(
                     "migration request nonce was already used"
