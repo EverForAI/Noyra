@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ from noyra.core.retention import (
     RetentionManager,
     RetentionSettings,
     retention_registry_diagnostics,
+    validate_retention_run_row,
 )
 from noyra.core.types import content_hash
 from noyra.research.provider import SearchProviderStore
@@ -275,3 +277,27 @@ def test_retention_projection_uses_registry_cutoff_metadata(tmp_path):
         "provider_health_attempts",
         "retention_runs",
     }
+
+
+def test_retention_registry_reports_runtime_table_added_after_schema_baseline(tmp_path):
+    db = Database(tmp_path / "noyra.sqlite3")
+    with db.transaction() as connection:
+        connection.execute(
+            "CREATE TABLE unregistered_history(subject_id TEXT NOT NULL, entry_id TEXT PRIMARY KEY)"
+        )
+        diagnostics = retention_registry_diagnostics(connection)
+    assert "unregistered_history" in diagnostics["unclassified"]
+
+
+def test_retention_run_return_and_persisted_hash_match(tmp_path):
+    db = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-retention-hash"
+    IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
+    result = RetentionManager(db, RetentionSettings(run_history=2)).run_batch(subject)
+    with db.connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM retention_runs WHERE run_id=?", (result["run_id"],)
+        ).fetchone()
+    validate_retention_run_row(row)
+    assert result["protected_rows"] == row["protected_rows"]
+    assert result["deleted_by_table"] == json.loads(row["deleted_by_table_json"])

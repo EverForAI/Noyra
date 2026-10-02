@@ -68,7 +68,7 @@ class IntegrityHardeningTestCase(unittest.TestCase):
             ).fetchall()
         self.assertEqual(
             {str(row["feature_id"]) for row in rows},
-            {"secret_cleanup", "secret_file_intents"},
+            {"provider_health_metrics", "secret_cleanup", "secret_file_intents"},
         )
         self.assertTrue(all(int(row["feature_version"]) >= 1 for row in rows))
         self.assertTrue(all(len(str(row["ddl_fingerprint"])) == 64 for row in rows))

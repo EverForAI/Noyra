@@ -1553,7 +1553,14 @@ def _check_provider_health(context: IntegrityContext) -> IntegrityCheckOutcome:
 
 
 def _check_retention_runs(context: IntegrityContext) -> IntegrityCheckOutcome:
-    from .retention import validate_retention_run_row
+    from .retention import retention_registry_diagnostics, validate_retention_run_row
+
+    registry = retention_registry_diagnostics(context.connection)
+    if registry["unclassified"] or registry.get("missing"):
+        raise IntegrityError(
+            "retention registry does not match schema inventory: "
+            + ", ".join(registry["unclassified"] or registry.get("missing", ()))
+        )
 
     rows = context.connection.execute(
         "SELECT * FROM retention_runs WHERE subject_id=? ORDER BY started_at, rowid",
@@ -1564,7 +1571,7 @@ def _check_retention_runs(context: IntegrityContext) -> IntegrityCheckOutcome:
             validate_retention_run_row(row)
         except (TypeError, ValueError) as error:
             raise IntegrityError(f"retention run provenance is invalid: {error}") from error
-    return IntegrityCheckOutcome(details={"runs": len(rows)})
+    return IntegrityCheckOutcome(details={"runs": len(rows), "retention_registry": registry})
 
 
 def _check_foreign_keys(context: IntegrityContext) -> IntegrityCheckOutcome:

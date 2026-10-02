@@ -7537,6 +7537,7 @@ END;
             )
             feature_objects = {
                 "secret_cleanup": ("secret_cleanup_queue", "idx_secret_cleanup_subject_status"),
+                "provider_health_metrics": ("provider_health_buckets",),
                 "secret_file_intents": (
                     "secret_file_intents",
                     "idx_secret_file_intents_subject_state",
@@ -7822,6 +7823,40 @@ END;
             self._ensure_wallet_reward_triggers(connection)
             self._ensure_inbound_triggers(connection)
             self._ensure_public_post_triggers(connection)
+            # Retention diagnostics need a durable baseline of the tables
+            # produced by this schema version.  A table added at runtime (or
+            # by an incomplete migration) is then visible as unclassified
+            # instead of silently inheriting a delete policy.
+            inventory = sorted(
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type IN ('table', 'virtual table')"
+                ).fetchall()
+                if str(row[0]) != "sqlite_sequence"
+            )
+            inventory_json = canonical_json(inventory)
+            baseline_version = connection.execute(
+                "SELECT value FROM schema_meta WHERE key='retention_contract_schema_version'"
+            ).fetchone()
+            baseline_inventory = connection.execute(
+                "SELECT value FROM schema_meta WHERE key='retention_contract_inventory'"
+            ).fetchone()
+            if baseline_version is None or str(baseline_version[0]) != str(schema_version):
+                connection.execute(
+                    "INSERT INTO schema_meta(key, value) VALUES ('retention_contract_schema_version', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (str(schema_version),),
+                )
+                connection.execute(
+                    "INSERT INTO schema_meta(key, value) VALUES ('retention_contract_inventory', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (inventory_json,),
+                )
+            elif baseline_inventory is None:
+                connection.execute(
+                    "INSERT INTO schema_meta(key, value) VALUES ('retention_contract_inventory', ?) ",
+                    (inventory_json,),
+                )
 
     @staticmethod
     def _ensure_subject_scoped_triggers(connection: sqlite3.Connection) -> None:
