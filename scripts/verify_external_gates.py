@@ -7,6 +7,8 @@ import argparse
 import base64
 import json
 import os
+import re
+import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -14,14 +16,36 @@ from typing import Any
 from cryptography.exceptions import InvalidSignature
 
 EXPECTED_GATE_IDS = (
-    "testnet_transfer",
-    "signer_faults",
-    "signer_isolation",
-    "soak",
+    "ubuntu_systemd",
+    "encrypted_volume",
     "backup_restore",
-    "operator_approval",
+    "migration_fence",
+    "signer_kms",
+    "reorg_nonce",
+    "https_proxy",
+    "soak",
 )
 MAX_AGE = timedelta(hours=72)
+MAX_ARTIFACT_BYTES = 256 * 1024
+COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+SENSITIVE_FIELD_NAMES = frozenset(
+    {
+        "api_key",
+        "api_keys",
+        "authorization",
+        "bearer_token",
+        "client_secret",
+        "credential",
+        "credentials",
+        "mnemonic",
+        "password",
+        "private_key",
+        "secret",
+        "secret_key",
+        "seed",
+        "token",
+    }
+)
 
 
 def _time(value: Any) -> datetime | None:
@@ -59,6 +83,34 @@ def _verify_signature(record: dict[str, Any], public_key: str) -> bool:
         return False
 
 
+def _secret_field_errors(record: dict[str, Any]) -> tuple[str, ...]:
+    """Reject secret-shaped fields before an evidence record is persisted."""
+    errors: list[str] = []
+    stack: list[tuple[str, Any]] = [("", record)]
+    visited = 0
+    while stack:
+        path, value = stack.pop()
+        visited += 1
+        if visited > 4096:
+            errors.append("secret_scan_limit")
+            break
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if not isinstance(key, str):
+                    continue
+                normalized = key.strip().lower().replace("-", "_")
+                child_path = f"{path}.{key}" if path else key
+                if normalized in SENSITIVE_FIELD_NAMES:
+                    errors.append(f"secret_field:{child_path}")
+                elif isinstance(child, (dict, list)):
+                    stack.append((child_path, child))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                if isinstance(child, (dict, list)):
+                    stack.append((f"{path}[{index}]", child))
+    return tuple(dict.fromkeys(errors))
+
+
 def validate_external_gates(
     record: dict[str, Any],
     *,
@@ -68,6 +120,7 @@ def validate_external_gates(
 ) -> tuple[str, ...]:
     """Return stable field-level errors; an empty tuple means valid."""
     errors: list[str] = []
+    errors.extend(_secret_field_errors(record))
     if (
         record.get("format") != "noyra-external-gates/v1"
         or type(record.get("schema_version")) is not int
@@ -75,7 +128,13 @@ def validate_external_gates(
     ):
         errors.append("schema")
     commit = record.get("commit_sha")
-    if not isinstance(commit, str) or commit != expected_sha:
+    if (
+        not isinstance(expected_sha, str)
+        or not COMMIT_SHA_RE.fullmatch(expected_sha)
+        or not isinstance(commit, str)
+        or not COMMIT_SHA_RE.fullmatch(commit)
+        or commit != expected_sha
+    ):
         errors.append("commit_sha")
     if record.get("status") != "passed":
         errors.append("status")
@@ -154,6 +213,13 @@ def main() -> int:
     if args.max_age_hours != 72:
         raise SystemExit("external gate freshness is fixed at 72 hours")
     try:
+        metadata = args.path.lstat()
+        if not stat.S_ISREG(metadata.st_mode):
+            print(json.dumps({"status": "fail", "errors": ["artifact_not_file"]}))
+            return 1
+        if metadata.st_size > MAX_ARTIFACT_BYTES:
+            print(json.dumps({"status": "fail", "errors": ["artifact_too_large"]}))
+            return 1
         record = json.loads(args.path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         print(json.dumps({"status": "fail", "errors": ["missing_artifact"]}))

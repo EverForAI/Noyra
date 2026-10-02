@@ -24,12 +24,14 @@ _PUBLIC_KEY = base64.b64encode(
     )
 ).decode("ascii")
 _GATE_IDS = (
-    "testnet_transfer",
-    "signer_faults",
-    "signer_isolation",
-    "soak",
+    "ubuntu_systemd",
+    "encrypted_volume",
     "backup_restore",
-    "operator_approval",
+    "migration_fence",
+    "signer_kms",
+    "reorg_nonce",
+    "https_proxy",
+    "soak",
 )
 
 
@@ -121,7 +123,7 @@ def test_external_gate_rejects_wrong_sha_and_wrong_gate_reviewer() -> None:
     )
 
     assert "commit_sha" in errors
-    assert "gate_reviewer:testnet_transfer" in errors
+    assert "gate_reviewer:ubuntu_systemd" in errors
 
 
 def test_external_gate_rejects_invalid_time_ordering() -> None:
@@ -136,7 +138,7 @@ def test_external_gate_rejects_invalid_time_ordering() -> None:
         public_key=_PUBLIC_KEY,
     )
 
-    assert "gate_window:testnet_transfer" in errors
+    assert "gate_window:ubuntu_systemd" in errors
 
 
 def test_external_gate_invalid_signature_is_a_validation_error() -> None:
@@ -151,6 +153,21 @@ def test_external_gate_invalid_signature_is_a_validation_error() -> None:
     )
 
     assert "signature" in errors
+
+
+def test_external_gate_rejects_secret_shaped_fields() -> None:
+    record = _record()
+    record["gates"][0]["api_key"] = "do-not-persist"
+    _sign(record)
+
+    errors = validate_external_gates(
+        record,
+        expected_sha="a" * 40,
+        now=datetime.now(UTC),
+        public_key=_PUBLIC_KEY,
+    )
+
+    assert "secret_field:gates[0].api_key" in errors
 
 
 def test_external_gate_bundle_preparation_checks_sha_and_signature() -> None:
@@ -228,7 +245,11 @@ def test_external_gate_workflow_is_separate_protected_and_sha_bound() -> None:
     assert "environment: external-gates" in evidence_workflow
     assert "scripts.prepare_external_gates" in evidence_workflow
     assert "actions/upload-artifact" in evidence_workflow
-    assert "external-gates-${{ github.sha }}" in evidence_workflow
+    assert "release_sha:" in evidence_workflow
+    assert "ref: ${{ inputs.release_sha }}" in evidence_workflow
+    assert 'test "${GITHUB_SHA}" = "${EXPECTED_SHA}"' in evidence_workflow
+    assert "external-gates-${{ inputs.release_sha }}" in evidence_workflow
+    assert '"${EXPECTED_SHA}"' in evidence_workflow
     assert "gh run list" in release_workflow
     assert '--commit "$EXPECTED_SHA"' in release_workflow
     assert "actions/download-artifact" in release_workflow

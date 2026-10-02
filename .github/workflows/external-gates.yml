@@ -7,6 +7,10 @@ on:
         description: Base64 of the independently reviewed and signed external-gates.json (must contain no secrets)
         required: true
         type: string
+      release_sha:
+        description: Exact 40-character commit SHA this evidence covers
+        required: true
+        type: string
 
 permissions: {}
 
@@ -19,8 +23,17 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.release_sha }}
           persist-credentials: false
+      - name: Verify dispatch ref matches the evidence commit
+        env:
+          EXPECTED_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_SHA}" = "${EXPECTED_SHA}" || {
+            echo "external gate workflow must be dispatched from the exact release commit" >&2
+            exit 1
+          }
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
@@ -31,14 +44,15 @@ jobs:
         env:
           EXTERNAL_GATES_BUNDLE_BASE64: ${{ inputs.external_gates_json_base64 }}
           EXTERNAL_GATES_PUBLIC_KEY: ${{ secrets.EXTERNAL_GATES_PUBLIC_KEY }}
+          EXPECTED_SHA: ${{ inputs.release_sha }}
         run: >-
           python -m scripts.prepare_external_gates
-          --expected-sha "${GITHUB_SHA}"
+          --expected-sha "${EXPECTED_SHA}"
           --output artifacts/external-gates.json
       - name: Upload verified external gate evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: external-gates-${{ github.sha }}
+          name: external-gates-${{ inputs.release_sha }}
           path: artifacts/external-gates.json
           if-no-files-found: error
           retention-days: 90
