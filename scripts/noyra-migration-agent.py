@@ -11,15 +11,22 @@ import sys
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from noyra.migration.agent import MigrationAgent
+from noyra.migration.agent import AgentAuthenticationError, MigrationAgent
 
 MAX_BODY = 1_000_000
 IDENTITY_KEYS = frozenset(
-    {"target_id", "key_fingerprint", "generation", "public_key", "private_key"}
+    {
+        "target_id",
+        "key_fingerprint",
+        "generation",
+        "public_key",
+        "private_key",
+        "session_token",
+    }
 )
 
 
@@ -33,10 +40,17 @@ def _read_json(path: Path, *, limit: int = MAX_BODY) -> dict[str, Any]:
     return value
 
 
-def _read_body(stream: Any, length: int) -> dict[str, Any]:
+def _read_body(stream: Any, length: int) -> bytes:
     if length < 0 or length > MAX_BODY:
         raise ValueError("request body is too large")
-    value = json.loads(stream.read(length).decode("utf-8"))
+    value = stream.read(length)
+    if len(value) != length:
+        raise ValueError("request body is incomplete")
+    return cast(bytes, value)
+
+
+def _decode_body(raw: bytes) -> dict[str, Any]:
+    value = json.loads(raw.decode("utf-8"))
     if not isinstance(value, dict):
         raise ValueError("JSON object is required")
     return value
@@ -85,6 +99,7 @@ def load_agent(identity_file: Path, data_root: Path) -> MigrationAgent:
         public_key=identity.get("public_key"),
         signing_key=_private_key(identity.get("private_key")),
         data_root=data_root,
+        session_token=identity.get("session_token"),
     )
 
 
@@ -138,8 +153,13 @@ class Handler(BaseHTTPRequestHandler):
             if self.headers.get_content_type() != "application/json":
                 raise ValueError("content type must be application/json")
             length = int(self.headers.get("Content-Length", "-1"))
-            payload = _read_body(self.rfile, length)
+            raw_body = _read_body(self.rfile, length)
+            self.server.agent.authenticate_request(self.headers, raw_body)  # type: ignore[attr-defined]
+            payload = _decode_body(raw_body)
             result = dispatch(self.server.agent, operation, payload)  # type: ignore[attr-defined]
+        except AgentAuthenticationError:
+            self._reply(401, {"error": "unauthorized"})
+            return
         except (ValueError, KeyError, TypeError) as error:
             self._reply(400, {"error": str(error)})
             return
@@ -150,6 +170,11 @@ class Handler(BaseHTTPRequestHandler):
             self._reply(404, {"error": "unknown migration endpoint"})
             return
         agent = self.server.agent  # type: ignore[attr-defined]
+        try:
+            agent.authenticate_request(self.headers, b"")
+        except AgentAuthenticationError:
+            self._reply(401, {"error": "unauthorized"})
+            return
         self._reply(200, {"status": "ready", "target_id": agent.target_id})
 
     def log_message(self, *_args: Any) -> None:

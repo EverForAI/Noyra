@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
+import hmac
 import json
 import os
 import re
+import threading
+import time
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
@@ -23,6 +27,15 @@ _ARTIFACT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _FORBIDDEN = frozenset(
     {"secret", "token", "password", "private_key", "api_key", "bearer", "credential"}
 )
+_AUTH_SCHEME = "Noyra-HMAC"
+_AUTH_CLOCK_SKEW_SECONDS = 300
+_AUTH_NONCE_TTL_SECONDS = 600
+_AUTH_NONCE_LIMIT = 4096
+_NONCE = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
+
+
+class AgentAuthenticationError(ValueError):
+    """Raised when an HTTP caller cannot prove possession of the session token."""
 
 
 @dataclass(frozen=True)
@@ -91,6 +104,10 @@ class MigrationAgent:
         public_key: str | None = None,
         data_root: Path | str | None = None,
         require_encrypted_storage: bool = True,
+        session_token: str | None = None,
+        max_incoming_bytes: int = 64 * 1024 * 1024,
+        max_incoming_files: int = 128,
+        artifact_ttl_seconds: int = 7 * 24 * 60 * 60,
     ) -> None:
         if (
             not re.fullmatch(r"[A-Za-z0-9_-]{3,128}", target_id)
@@ -109,12 +126,29 @@ class MigrationAgent:
             public_bytes = self._decode_public_key(public_key)
             if hashlib.sha256(public_bytes).hexdigest() != key_fingerprint:
                 raise ValueError("agent key fingerprint does not match public key")
+        if session_token is not None and (
+            not isinstance(session_token, str)
+            or not 32 <= len(session_token) <= 256
+            or any(character.isspace() for character in session_token)
+        ):
+            raise ValueError("agent session token is invalid")
+        if type(max_incoming_bytes) is not int or not 1 <= max_incoming_bytes <= 1 << 30:
+            raise ValueError("incoming byte quota is invalid")
+        if type(max_incoming_files) is not int or not 1 <= max_incoming_files <= 100_000:
+            raise ValueError("incoming file quota is invalid")
+        if type(artifact_ttl_seconds) is not int or not 60 <= artifact_ttl_seconds <= 90 * 86400:
+            raise ValueError("artifact TTL is invalid")
         self.target_id = target_id
         self.key_fingerprint = key_fingerprint
         self.generation = generation
         self.public_key = public_key
         self._signing_key = signing_key
         self.require_encrypted_storage = require_encrypted_storage
+        self._session_token = session_token
+        self.max_incoming_bytes = max_incoming_bytes
+        self.max_incoming_files = max_incoming_files
+        self.artifact_ttl_seconds = artifact_ttl_seconds
+        self._io_lock = threading.RLock()
         self.data_root = self._prepare_root(data_root)
         self.host_identity = hashlib.sha256(
             f"noyra-target-host-v1\n{target_id}\n{key_fingerprint}\n{generation}".encode()
@@ -167,31 +201,162 @@ class MigrationAgent:
         digest = content_hash(values)
         manifest_path: str | None = None
         if self.data_root is not None:
-            incoming = self.data_root / "incoming"
-            incoming.mkdir(mode=0o700, parents=True, exist_ok=True)
-            self._assert_private_directory(incoming)
-            path = incoming / f"{artifact_id}.json"
-            if path.exists() or path.is_symlink():
-                raise ValueError("migration artifact already exists")
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            encoded = canonical_json(values).encode("utf-8")
+            with self._io_lock:
+                self.cleanup_expired()
+                incoming = self.data_root / "incoming"
+                incoming.mkdir(mode=0o700, parents=True, exist_ok=True)
+                self._assert_private_directory(incoming)
+                file_count, byte_count = self._incoming_usage(incoming)
+                if file_count >= self.max_incoming_files or (
+                    byte_count + len(encoded) > self.max_incoming_bytes
+                ):
+                    raise ValueError("migration incoming quota exceeded")
+                path = incoming / f"{artifact_id}.json"
+                if path.exists() or path.is_symlink():
+                    raise ValueError("migration artifact already exists")
+                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                try:
+                    with os.fdopen(descriptor, "wb") as stream:
+                        stream.write(encoded)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                except Exception:
+                    with suppress(OSError):
+                        os.close(descriptor)
+                    path.unlink(missing_ok=True)
+                    raise
+                manifest_path = str(path)
+        return ReceiveReceipt(artifact_id, digest, values["byte_size"], "received", manifest_path)
+
+    def cleanup_expired(self, *, now: float | None = None) -> int:
+        """Delete only expired JSON manifests from the private incoming directory."""
+        if self.data_root is None:
+            return 0
+        incoming = self.data_root / "incoming"
+        if not incoming.exists():
+            return 0
+        self._assert_private_directory(incoming)
+        current = time.time() if now is None else now
+        removed = 0
+        for path in incoming.iterdir():
+            if path.suffix != ".json":
+                continue
             try:
-                with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                    json.dump(
-                        values,
-                        stream,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
+                modified = path.stat().st_mtime
+            except OSError:
+                continue
+            if current - modified <= self.artifact_ttl_seconds:
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed += 1
+        return removed
+
+    def authenticate_request(
+        self,
+        headers: Mapping[str, str],
+        body: bytes,
+        *,
+        now: float | None = None,
+    ) -> None:
+        """Verify a task-independent HMAC request and persist its nonce atomically."""
+        if self._session_token is None or self.data_root is None:
+            raise AgentAuthenticationError("migration agent HTTP authentication is unavailable")
+        if not isinstance(body, bytes) or len(body) > 1_000_000:
+            raise AgentAuthenticationError("migration request body is invalid")
+        authorization = headers.get("Authorization", "")
+        scheme, separator, encoded_signature = authorization.partition(" ")
+        timestamp_text = headers.get("X-Noyra-Timestamp", "")
+        nonce = headers.get("X-Noyra-Nonce", "")
+        body_digest = headers.get("X-Noyra-Body-SHA256", "")
+        if (
+            scheme != _AUTH_SCHEME
+            or not separator
+            or not encoded_signature
+            or not re.fullmatch(r"[0-9]{1,20}", timestamp_text)
+            or not _NONCE.fullmatch(nonce)
+            or not re.fullmatch(r"[0-9a-f]{64}", body_digest)
+        ):
+            raise AgentAuthenticationError("migration request authentication failed")
+        try:
+            timestamp = int(timestamp_text)
+            provided_signature = base64.urlsafe_b64decode(
+                encoded_signature + "=" * (-len(encoded_signature) % 4)
+            )
+        except (TypeError, ValueError, binascii.Error) as error:
+            raise AgentAuthenticationError("migration request authentication failed") from error
+        current = time.time() if now is None else now
+        if abs(current - timestamp) > _AUTH_CLOCK_SKEW_SECONDS:
+            raise AgentAuthenticationError("migration request timestamp is stale")
+        if not hmac.compare_digest(body_digest, hashlib.sha256(body).hexdigest()):
+            raise AgentAuthenticationError("migration request body digest is invalid")
+        signing_bytes = (
+            f"noyra-migration-agent-v1\n{timestamp_text}\n{nonce}\n{body_digest}".encode()
+        )
+        expected_signature = hmac.new(
+            self._session_token.encode("utf-8"), signing_bytes, hashlib.sha256
+        ).digest()
+        if len(provided_signature) != len(expected_signature) or not hmac.compare_digest(
+            provided_signature, expected_signature
+        ):
+            raise AgentAuthenticationError("migration request authentication failed")
+        with self._io_lock:
+            replay_root = self.data_root / "auth-nonces"
+            replay_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self._assert_private_directory(replay_root)
+            self._cleanup_nonces(replay_root, current)
+            nonce_path = replay_root / f"{hashlib.sha256(nonce.encode()).hexdigest()}.nonce"
+            try:
+                descriptor = os.open(
+                    nonce_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+                )
+            except FileExistsError as error:
+                raise AgentAuthenticationError(
+                    "migration request nonce was already used"
+                ) from error
+            try:
+                with os.fdopen(descriptor, "w", encoding="ascii") as stream:
+                    stream.write(timestamp_text)
                     stream.flush()
                     os.fsync(stream.fileno())
             except Exception:
                 with suppress(OSError):
                     os.close(descriptor)
-                path.unlink(missing_ok=True)
+                nonce_path.unlink(missing_ok=True)
                 raise
-            manifest_path = str(path)
-        return ReceiveReceipt(artifact_id, digest, values["byte_size"], "received", manifest_path)
+
+    @staticmethod
+    def _incoming_usage(incoming: Path) -> tuple[int, int]:
+        file_count = 0
+        byte_count = 0
+        for path in incoming.iterdir():
+            if path.is_symlink():
+                raise ValueError("migration incoming directory contains a symlink")
+            if not path.is_file():
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError as error:
+                raise ValueError("migration incoming directory cannot be inspected") from error
+            file_count += 1
+            byte_count += size
+        return file_count, byte_count
+
+    @staticmethod
+    def _cleanup_nonces(replay_root: Path, now: float) -> None:
+        paths = list(replay_root.glob("*.nonce"))
+        for path in paths:
+            try:
+                if now - path.stat().st_mtime > _AUTH_NONCE_TTL_SECONDS:
+                    path.unlink()
+            except OSError:
+                continue
+        paths = list(replay_root.glob("*.nonce"))
+        if len(paths) >= _AUTH_NONCE_LIMIT:
+            raise AgentAuthenticationError("migration request replay store is full")
 
     def restore(
         self, receipt: ReceiveReceipt, *, expected_digest: str | None = None

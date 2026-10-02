@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
+import os
 import stat
 from datetime import UTC, datetime, timedelta
 
@@ -12,6 +14,20 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from noyra.migration.agent import MigrationAgent, RestoreReport, TargetHealthReport
 from noyra.migration.recovery import RecoveryCoordinator, RecoveryRequest
 from noyra.migration.trust import TargetChallenge
+
+
+def _auth_headers(token: str, body: bytes, *, timestamp: int, nonce: str) -> dict[str, str]:
+    digest = hashlib.sha256(body).hexdigest()
+    signing_bytes = f"noyra-migration-agent-v1\n{timestamp}\n{nonce}\n{digest}".encode()
+    signature = base64.urlsafe_b64encode(
+        hmac.new(token.encode(), signing_bytes, hashlib.sha256).digest()
+    ).decode()
+    return {
+        "Authorization": f"Noyra-HMAC {signature}",
+        "X-Noyra-Timestamp": str(timestamp),
+        "X-Noyra-Nonce": nonce,
+        "X-Noyra-Body-SHA256": digest,
+    }
 
 
 def test_agent_accepts_bounded_secret_free_manifest() -> None:
@@ -134,3 +150,47 @@ def test_agent_rejects_receipt_path_for_another_artifact(tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="path"):
         agent.restore(forged)
+
+
+def test_agent_http_authentication_is_signed_and_replay_safe(tmp_path) -> None:
+    token = "session-" + "a" * 32
+    agent = MigrationAgent(
+        target_id="target-1",
+        key_fingerprint="a" * 64,
+        data_root=tmp_path,
+        session_token=token,
+    )
+    body = b'{"operation":"enroll"}'
+    headers = _auth_headers(token, body, timestamp=1_000, nonce="nonce-000000000001")
+    agent.authenticate_request(headers, body, now=1_000)
+    with pytest.raises(ValueError, match="already used"):
+        agent.authenticate_request(headers, body, now=1_000)
+    tampered_headers = _auth_headers(
+        token, b"tampered", timestamp=1_001, nonce="nonce-000000000002"
+    )
+    with pytest.raises(ValueError, match="body digest"):
+        agent.authenticate_request(tampered_headers, body, now=1_001)
+    with pytest.raises(ValueError, match="stale"):
+        agent.authenticate_request(
+            _auth_headers(token, body, timestamp=1_000, nonce="nonce-000000000003"),
+            body,
+            now=1_400,
+        )
+
+
+def test_agent_incoming_quota_and_ttl_cleanup_are_durable(tmp_path) -> None:
+    agent = MigrationAgent(
+        target_id="target-1",
+        key_fingerprint="a" * 64,
+        data_root=tmp_path,
+        max_incoming_bytes=200,
+        max_incoming_files=1,
+        artifact_ttl_seconds=60,
+    )
+    first = agent.receive({"artifact_id": "artifact-1", "byte_size": 1})
+    with pytest.raises(ValueError, match="quota"):
+        agent.receive({"artifact_id": "artifact-2", "byte_size": 1})
+    assert first.manifest_path is not None
+    os.utime(first.manifest_path, (0, 0))
+    assert agent.cleanup_expired(now=100) == 1
+    agent.receive({"artifact_id": "artifact-2", "byte_size": 1})
