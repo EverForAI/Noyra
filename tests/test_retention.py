@@ -189,6 +189,7 @@ def test_retention_resumes_from_previous_keyset_cursor(tmp_path: Any) -> Any:
     manager = RetentionManager(db, RetentionSettings(batch_size=1))
     observed: list[object] = []
     original = manager._delete_table
+    stable_now = datetime.now(UTC).replace(second=0, microsecond=0)
 
     def wrapped(
         connection: Any, table: Any, subject_id: Any, cutoff: Any, limit: Any, cursor: Any
@@ -198,12 +199,53 @@ def test_retention_resumes_from_previous_keyset_cursor(tmp_path: Any) -> Any:
         return original(connection, table, subject_id, cutoff, limit, cursor)
 
     with patch.object(manager, "_delete_table", side_effect=wrapped):
-        assert manager.run_batch(subject, batch_size=1)["failed_reason"] is None
-        assert manager.run_batch(subject, batch_size=1)["failed_reason"] is None
+        assert manager.run_batch(subject, now=stable_now, batch_size=1)["failed_reason"] is None
+        assert manager.run_batch(subject, now=stable_now, batch_size=1)["failed_reason"] is None
 
     assert observed[0] is None
     assert isinstance(observed[1], dict)
     assert observed[1]["bucket_start"] == old
+
+
+def test_retention_resets_cursor_when_cutoff_advances_and_new_old_row_precedes_cursor(
+    tmp_path: Any,
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-retention-cutoff-reset"
+    IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
+    health = ProviderHealthStore(db, failure_threshold=1)
+    for provider in ("a", "b"):
+        health.record_attempt(subject, "model", provider, f"attempt-{provider}", True, 10, None)
+    old_bucket = "2025-01-01T00:00:00+00:00"
+    with db.transaction() as connection:
+        connection.execute(
+            "UPDATE provider_health_buckets SET bucket_start=?, state_hash=? WHERE subject_id=?",
+            (old_bucket, content_hash({"legacy": True}), subject),
+        )
+
+    manager = RetentionManager(db, RetentionSettings(batch_size=1, health_days=30))
+    first_now = datetime(2026, 1, 1, tzinfo=UTC)
+    second_now = first_now + timedelta(days=1)
+    first = manager.run_batch(subject, now=first_now, batch_size=1)
+    assert first["failed_reason"] is None
+
+    health.record_attempt(subject, "model", "0", "attempt-0", True, 10, None)
+    with db.transaction() as connection:
+        connection.execute(
+            "UPDATE provider_health_buckets SET bucket_start=?, state_hash=? "
+            "WHERE subject_id=? AND provider_id=?",
+            (old_bucket, content_hash({"legacy": True, "provider": "0"}), subject, "0"),
+        )
+
+    second = manager.run_batch(subject, now=second_now, batch_size=1)
+    assert second["failed_reason"] is None
+    with db.connection() as connection:
+        remaining = connection.execute(
+            "SELECT provider_id FROM provider_health_buckets WHERE subject_id=? "
+            "ORDER BY provider_id",
+            (subject,),
+        ).fetchall()
+    assert [row["provider_id"] for row in remaining] == ["b"]
 
 
 def test_retention_never_schedules_append_only_route_history(tmp_path: Any) -> Any:

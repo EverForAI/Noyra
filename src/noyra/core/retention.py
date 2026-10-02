@@ -198,6 +198,7 @@ DERIVED_RUNTIME_TABLES: dict[str, tuple[str, str]] = {
     if item.table not in {"provider_health_buckets", "search_provider_uses", "retention_runs"}
 }
 _LEGACY_RETENTION_TABLES = {"cognitive_route_attempts", "cognitive_route_outcomes"}
+_CURSOR_SORT_KEY_VERSION = "v1"
 
 
 def retention_registry_diagnostics(connection: Any | None = None) -> dict[str, tuple[str, ...]]:
@@ -261,10 +262,26 @@ def _valid_cursor(cursor: Any, *, allow_legacy: bool = True) -> bool:
     metadata = cursor.get(_CURSOR_META_KEY)
     if metadata is not None and (
         not isinstance(metadata, dict)
-        or set(metadata) != {"registry_version", "data_epoch", "cutoff_policy"}
-        or not all(isinstance(value, str) and value for value in metadata.values())
+        or set(metadata)
+        != {
+            "registry_version",
+            "data_epoch",
+            "cutoff_policy",
+            "cutoffs",
+            "sort_key_version",
+        }
+        or not all(
+            isinstance(metadata.get(key), str) and metadata[key]
+            for key in ("registry_version", "data_epoch", "cutoff_policy", "sort_key_version")
+        )
     ):
         return False
+    if metadata is not None:
+        cutoffs = metadata.get("cutoffs")
+        if not isinstance(cutoffs, dict) or set(cutoffs) != set(RETENTION_TABLES):
+            return False
+        if not all(_valid_iso(value) for value in cutoffs.values()):
+            return False
     for _table, entry in cursor.items():
         if _table == _CURSOR_META_KEY:
             continue
@@ -399,14 +416,16 @@ class RetentionManager:
 
     def _cutoff_for(self, spec: RetentionTableSpec, moment: datetime) -> str:
         if spec.cutoff_setting == "health_days":
-            return (moment - timedelta(days=self.settings.health_days)).isoformat()
-        if spec.cutoff_setting == "search_use_hours":
-            return (moment - timedelta(hours=self.settings.search_use_hours)).isoformat()
-        if spec.cutoff_setting == "runtime_days":
-            return (moment - timedelta(days=self.settings.runtime_days)).isoformat()
-        if spec.cutoff_setting == "run_history":
-            return moment.isoformat()
-        raise ValueError(f"unknown retention cutoff setting for {spec.table}")
+            cutoff = moment - timedelta(days=self.settings.health_days)
+        elif spec.cutoff_setting == "search_use_hours":
+            cutoff = moment - timedelta(hours=self.settings.search_use_hours)
+        elif spec.cutoff_setting == "runtime_days":
+            cutoff = moment - timedelta(days=self.settings.runtime_days)
+        elif spec.cutoff_setting == "run_history":
+            cutoff = moment
+        else:
+            raise ValueError(f"unknown retention cutoff setting for {spec.table}")
+        return cutoff.isoformat()
 
     def run_batch(
         self,
@@ -426,10 +445,11 @@ class RetentionManager:
         deleted: dict[str, int] = {spec.table: 0 for spec in _DELETE_SPECS}
         protected = 0
         failed_reason: str | None = None
+        cutoffs = {spec.table: self._cutoff_for(spec, moment) for spec in _DELETE_SPECS}
         cursor: dict[str, dict[str, Any]] = {
             spec.table: {
                 "cursor": None,
-                "cutoff": self._cutoff_for(spec, moment),
+                "cutoff": cutoffs[spec.table],
                 "deleted": 0,
                 "protected": None,
             }
@@ -450,6 +470,8 @@ class RetentionManager:
                     "runtime_days": self.settings.runtime_days,
                 }
             ),
+            "cutoffs": cutoffs,
+            "sort_key_version": _CURSOR_SORT_KEY_VERSION,
         }
         # Continue a prior bounded batch when its cutoff is still applicable.
         # A malformed/legacy cursor is ignored and safely starts a fresh pass.
@@ -469,7 +491,6 @@ class RetentionManager:
                     entry = previous_cursor.get(table)
                     if isinstance(entry, dict):
                         cursor[table]["cursor"] = entry.get("cursor")
-                        cursor[table]["cutoff"] = entry.get("cutoff", cursor[table]["cutoff"])
         pruned_run_history = 0
         failure_stage: str | None = None
         try:
@@ -486,7 +507,7 @@ class RetentionManager:
                         connection,
                         table,
                         subject_id,
-                        self._cutoff_for(spec, moment),
+                        cursor[table]["cutoff"],
                         remaining,
                         cursor[table]["cursor"],
                     )
