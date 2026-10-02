@@ -9,6 +9,8 @@ import hmac
 import json
 import os
 import re
+import shutil
+import sqlite3
 import threading
 import time
 from collections.abc import Mapping
@@ -53,6 +55,8 @@ class ReceiveReceipt:
     byte_size: int
     status: str
     manifest_path: str | None = None
+    artifact_path: str | None = None
+    artifact_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +68,8 @@ class RestoreReport:
     status: str
     subject_id: str | None = None
     event_chain_tip: str | None = None
+    artifact_sha256: str | None = None
+    restore_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +114,8 @@ class MigrationAgent:
         max_incoming_bytes: int = 64 * 1024 * 1024,
         max_incoming_files: int = 128,
         artifact_ttl_seconds: int = 7 * 24 * 60 * 60,
+        backup_manager: Any | None = None,
+        restore_root: Path | str | None = None,
     ) -> None:
         if (
             not re.fullmatch(r"[A-Za-z0-9_-]{3,128}", target_id)
@@ -148,6 +156,15 @@ class MigrationAgent:
         self.max_incoming_bytes = max_incoming_bytes
         self.max_incoming_files = max_incoming_files
         self.artifact_ttl_seconds = artifact_ttl_seconds
+        self.backup_manager = backup_manager
+        self.restore_root = (
+            Path(restore_root).expanduser().resolve() if restore_root is not None else None
+        )
+        if self.restore_root is not None:
+            if self.restore_root.exists() and self.restore_root.is_symlink():
+                raise ValueError("migration restore root cannot be a symlink")
+            self.restore_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self._assert_private_directory(self.restore_root)
         self._io_lock = threading.RLock()
         self.data_root = self._prepare_root(data_root)
         self.host_identity = hashlib.sha256(
@@ -195,11 +212,31 @@ class MigrationAgent:
             raise ValueError("recovery proof bytes are required")
         return base64.urlsafe_b64encode(self._signing_key.sign(signing_bytes)).decode()
 
-    def receive(self, manifest: Mapping[str, Any]) -> ReceiveReceipt:
+    def receive(
+        self,
+        manifest: Mapping[str, Any],
+        *,
+        artifact: bytes | None = None,
+    ) -> ReceiveReceipt:
+        if not isinstance(manifest, Mapping):
+            raise ValueError("migration manifest is invalid")
         values = self._validate_manifest(manifest)
         artifact_id = values["artifact_id"]
         digest = content_hash(values)
         manifest_path: str | None = None
+        artifact_path: str | None = None
+        artifact_sha256: str | None = None
+        if artifact is not None:
+            if not isinstance(artifact, bytes):
+                raise ValueError("migration artifact bytes are invalid")
+            if len(artifact) != values["byte_size"]:
+                raise ValueError("migration artifact byte size mismatch")
+            artifact_sha256 = hashlib.sha256(artifact).hexdigest()
+            expected_artifact_sha256 = values.get("artifact_sha256")
+            if expected_artifact_sha256 is not None and artifact_sha256 != expected_artifact_sha256:
+                raise ValueError("migration artifact digest mismatch")
+        elif self.data_root is not None:
+            raise ValueError("migration artifact bytes are required")
         if self.data_root is not None:
             encoded = canonical_json(values).encode("utf-8")
             with self._io_lock:
@@ -209,11 +246,18 @@ class MigrationAgent:
                 self._assert_private_directory(incoming)
                 file_count, byte_count = self._incoming_usage(incoming)
                 if file_count >= self.max_incoming_files or (
-                    byte_count + len(encoded) > self.max_incoming_bytes
+                    byte_count + len(encoded) + (len(artifact) if artifact is not None else 0)
+                    > self.max_incoming_bytes
                 ):
                     raise ValueError("migration incoming quota exceeded")
                 path = incoming / f"{artifact_id}.json"
-                if path.exists() or path.is_symlink():
+                binary_path = incoming / f"{artifact_id}.artifact"
+                if (
+                    path.exists()
+                    or path.is_symlink()
+                    or binary_path.exists()
+                    or binary_path.is_symlink()
+                ):
                     raise ValueError("migration artifact already exists")
                 descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 try:
@@ -227,7 +271,31 @@ class MigrationAgent:
                     path.unlink(missing_ok=True)
                     raise
                 manifest_path = str(path)
-        return ReceiveReceipt(artifact_id, digest, values["byte_size"], "received", manifest_path)
+                if artifact is not None:
+                    binary_descriptor = os.open(
+                        binary_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+                    )
+                    try:
+                        with os.fdopen(binary_descriptor, "wb") as stream:
+                            stream.write(artifact)
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                    except Exception:
+                        with suppress(OSError):
+                            os.close(binary_descriptor)
+                        path.unlink(missing_ok=True)
+                        binary_path.unlink(missing_ok=True)
+                        raise
+                    artifact_path = str(binary_path)
+        return ReceiveReceipt(
+            artifact_id,
+            digest,
+            values["byte_size"],
+            "received",
+            manifest_path,
+            artifact_path,
+            artifact_sha256,
+        )
 
     def cleanup_expired(self, *, now: float | None = None) -> int:
         """Delete only expired JSON manifests from the private incoming directory."""
@@ -252,6 +320,9 @@ class MigrationAgent:
                 path.unlink()
             except OSError:
                 continue
+            if path.suffix == ".json":
+                with suppress(OSError):
+                    (path.with_suffix(".artifact")).unlink()
             removed += 1
         return removed
 
@@ -366,6 +437,8 @@ class MigrationAgent:
         values = self._read_manifest(receipt)
         if content_hash(values) != receipt.manifest_digest:
             raise ValueError("migration manifest digest mismatch")
+        artifact_path = self._artifact_path(receipt, values)
+        artifact_sha256 = self._verify_artifact(artifact_path, values)
         subject_id = values.get("subject_id")
         tip = values.get("event_chain_tip")
         if subject_id is not None and (
@@ -375,6 +448,7 @@ class MigrationAgent:
             raise ValueError("migration subject identity is invalid")
         if tip is not None and (not isinstance(tip, str) or not re.fullmatch(r"[0-9a-f]{64}", tip)):
             raise ValueError("migration event-chain tip is invalid")
+        restore_path = self._restore_artifact(artifact_path, values)
         return RestoreReport(
             self.target_id,
             self.generation,
@@ -383,6 +457,8 @@ class MigrationAgent:
             "restored",
             subject_id,
             tip,
+            artifact_sha256,
+            str(restore_path) if restore_path is not None else None,
         )
 
     def validate(
@@ -397,6 +473,8 @@ class MigrationAgent:
                 report.artifact_id,
                 report.manifest_digest,
                 "restored",
+                artifact_sha256=report.artifact_sha256,
+                restore_path=report.artifact_path,
             )
         if not isinstance(report, RestoreReport) or report.status != "restored":
             raise ValueError("migration restore report is invalid")
@@ -404,12 +482,24 @@ class MigrationAgent:
             raise ValueError("migration restore target identity mismatch")
         if expected_digest is not None and report.manifest_digest != expected_digest:
             raise ValueError("migration manifest digest mismatch")
+        if self.data_root is not None and not report.artifact_sha256:
+            raise ValueError("migration restore report is missing artifact verification")
         checks = {
             "target_identity": report.target_id == self.target_id,
             "generation": report.generation == self.generation,
             "manifest": bool(re.fullmatch(r"[0-9a-f]{64}", report.manifest_digest)),
-            "host_binding": True,
+            "artifact_bytes": bool(report.artifact_sha256) or self.data_root is None,
+            "host_binding": (
+                self.data_root is None
+                or bool(report.restore_path and self._restore_host_bound(report))
+            ),
         }
+        if report.restore_path:
+            checks["database_quick_check"] = self._database_quick_check(Path(report.restore_path))
+            if report.subject_id is not None:
+                checks["subject_identity"] = self._database_subject_matches(
+                    Path(report.restore_path), report.subject_id
+                )
         if not all(checks.values()):
             raise ValueError("target health validation failed")
         return TargetHealthReport(
@@ -439,6 +529,89 @@ class MigrationAgent:
             raise ValueError("migration manifest is invalid")
         return cast(dict[str, Any], values)
 
+    def _artifact_path(self, receipt: ReceiveReceipt, values: Mapping[str, Any]) -> Path:
+        if self.data_root is None or receipt.artifact_path is None:
+            raise ValueError("migration artifact is not persisted")
+        path = Path(receipt.artifact_path)
+        incoming = (self.data_root / "incoming").resolve()
+        if path.is_symlink() or path.resolve().parent != incoming:
+            raise ValueError("migration artifact path is outside the private root")
+        if path.name != f"{receipt.artifact_id}.artifact":
+            raise ValueError("migration artifact path does not match receipt")
+        return path
+
+    @staticmethod
+    def _verify_artifact(path: Path, values: Mapping[str, Any]) -> str:
+        try:
+            stat_result = path.stat()
+            if not path.is_file() or stat_result.st_size != values["byte_size"]:
+                raise ValueError("migration artifact byte size mismatch")
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except (OSError, ValueError) as error:
+            raise ValueError("migration artifact cannot be read") from error
+        expected = values.get("artifact_sha256")
+        if expected is not None and digest != expected:
+            raise ValueError("migration artifact digest mismatch")
+        return digest
+
+    def _restore_artifact(self, path: Path, values: Mapping[str, Any]) -> Path | None:
+        if self.restore_root is None:
+            return None
+        artifact_format = values.get("artifact_format", "noyra-encrypted-backup")
+        if artifact_format == "noyra-encrypted-backup":
+            if self.backup_manager is None:
+                raise ValueError("encrypted backup restore is not configured")
+            try:
+                return Path(self.backup_manager.restore(path, self.restore_root))
+            except Exception as error:
+                raise ValueError("encrypted backup restore failed") from error
+        if artifact_format != "sqlite":
+            raise ValueError("migration artifact format is unsupported")
+        target = self.restore_root / "noyra.sqlite3"
+        temporary = self.restore_root / ".noyra.sqlite3.restore"
+        if target.exists() or target.is_symlink():
+            raise ValueError("migration restore target is not empty")
+        try:
+            shutil.copyfile(path, temporary)
+            connection = sqlite3.connect(temporary)
+            try:
+                result = connection.execute("PRAGMA quick_check").fetchone()
+                if result is None or result[0] != "ok":
+                    raise ValueError("restored database failed SQLite quick_check")
+            finally:
+                connection.close()
+            temporary.replace(target)
+            os.chmod(target, 0o600)
+            return target
+        except (OSError, sqlite3.DatabaseError, ValueError) as error:
+            temporary.unlink(missing_ok=True)
+            raise ValueError("SQLite restore failed") from error
+
+    def _restore_host_bound(self, report: RestoreReport) -> bool:
+        return report.restore_path is not None and self.restore_root is not None and Path(
+            report.restore_path
+        ).resolve().is_relative_to(self.restore_root)
+
+    @staticmethod
+    def _database_quick_check(path: Path) -> bool:
+        try:
+            with sqlite3.connect(path) as connection:
+                result = connection.execute("PRAGMA quick_check").fetchone()
+            return result is not None and result[0] == "ok"
+        except (OSError, sqlite3.DatabaseError):
+            return False
+
+    @staticmethod
+    def _database_subject_matches(path: Path, subject_id: str) -> bool:
+        try:
+            with sqlite3.connect(path) as connection:
+                row = connection.execute(
+                    "SELECT subject_id FROM runtime_state LIMIT 1"
+                ).fetchone()
+            return row is not None and row[0] == subject_id
+        except (OSError, sqlite3.DatabaseError):
+            return False
+
     @classmethod
     def _validate_manifest(cls, manifest: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(manifest, Mapping) or len(manifest) > 32:
@@ -459,6 +632,15 @@ class MigrationAgent:
             raise ValueError("migration artifact path or id is invalid")
         if type(byte_size) is not int or not 0 <= byte_size <= 10 * 1024 * 1024 * 1024:
             raise ValueError("migration artifact metadata is invalid")
+        artifact_sha256 = values.get("artifact_sha256")
+        if artifact_sha256 is not None and (
+            not isinstance(artifact_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", artifact_sha256)
+        ):
+            raise ValueError("migration artifact digest is invalid")
+        artifact_format = values.get("artifact_format", "noyra-encrypted-backup")
+        if artifact_format not in {"noyra-encrypted-backup", "sqlite"}:
+            raise ValueError("migration artifact format is unsupported")
         return cast(dict[str, Any], values)
 
     @staticmethod

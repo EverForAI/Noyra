@@ -116,7 +116,16 @@ def dispatch(agent: MigrationAgent, operation: str, payload: dict[str, Any]) -> 
         result["challenge"] = asdict(attestation.challenge)
         return result
     if operation == "receive":
-        return asdict(agent.receive(payload))
+        encoded_artifact = payload.pop("artifact_b64", None)
+        artifact = None
+        if encoded_artifact is not None:
+            if not isinstance(encoded_artifact, str):
+                raise ValueError("artifact_b64 must be a string")
+            try:
+                artifact = base64.b64decode(encoded_artifact, validate=True)
+            except (ValueError, TypeError) as error:
+                raise ValueError("artifact_b64 is invalid") from error
+        return asdict(agent.receive(payload, artifact=artifact))
     if operation == "restore":
         from noyra.migration.agent import ReceiveReceipt
 

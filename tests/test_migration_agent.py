@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import sqlite3
 import stat
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -105,15 +106,25 @@ def test_agent_rejects_recovery_signing_without_key() -> None:
 
 def test_agent_persists_manifest_inside_private_root_and_restores_it(tmp_path: Any) -> None:
     agent = MigrationAgent(target_id="target-1", key_fingerprint="a" * 64, data_root=tmp_path)
+    database_path = tmp_path / "fixture.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("CREATE TABLE runtime_state(subject_id TEXT NOT NULL)")
+        connection.execute("INSERT INTO runtime_state(subject_id) VALUES (?)", ("Noyra-0001",))
+    artifact = database_path.read_bytes()
     manifest = {
         "artifact_id": "artifact-1",
-        "byte_size": 12,
+        "byte_size": len(artifact),
+        "artifact_sha256": hashlib.sha256(artifact).hexdigest(),
+        "artifact_format": "sqlite",
         "schema_version": 75,
         "subject_id": "Noyra-0001",
         "event_chain_tip": "b" * 64,
     }
 
-    receipt = agent.receive(manifest)
+    receipt = agent.receive(manifest, artifact=artifact)
+    agent.restore_root = (tmp_path / "restored").resolve()
+    agent.restore_root.mkdir(mode=0o700)
+    agent._assert_private_directory(agent.restore_root)
     report = agent.restore(receipt)
     health = agent.validate(report)
 
@@ -133,15 +144,21 @@ def test_agent_rejects_manifest_path_traversal_and_restore_digest_mismatch(tmp_p
     agent = MigrationAgent(target_id="target-1", key_fingerprint="a" * 64, data_root=tmp_path)
     with pytest.raises(ValueError, match="path"):
         agent.receive({"artifact_id": "../escape", "byte_size": 1})
-    receipt = agent.receive({"artifact_id": "artifact-1", "byte_size": 1})
+    receipt = agent.receive(
+        {"artifact_id": "artifact-1", "byte_size": 1, "artifact_format": "sqlite"}, artifact=b"x"
+    )
     with pytest.raises(ValueError, match="digest"):
         agent.restore(receipt, expected_digest="0" * 64)
 
 
 def test_agent_rejects_receipt_path_for_another_artifact(tmp_path: Any) -> None:
     agent = MigrationAgent(target_id="target-1", key_fingerprint="a" * 64, data_root=tmp_path)
-    first = agent.receive({"artifact_id": "artifact-1", "byte_size": 1})
-    second = agent.receive({"artifact_id": "artifact-2", "byte_size": 1})
+    first = agent.receive(
+        {"artifact_id": "artifact-1", "byte_size": 1, "artifact_format": "sqlite"}, artifact=b"x"
+    )
+    second = agent.receive(
+        {"artifact_id": "artifact-2", "byte_size": 1, "artifact_format": "sqlite"}, artifact=b"x"
+    )
     forged = type(first)(
         second.artifact_id,
         first.manifest_digest,
@@ -188,10 +205,17 @@ def test_agent_incoming_quota_and_ttl_cleanup_are_durable(tmp_path: Any) -> None
         max_incoming_files=1,
         artifact_ttl_seconds=60,
     )
-    first = agent.receive({"artifact_id": "artifact-1", "byte_size": 1})
+    first = agent.receive(
+        {"artifact_id": "artifact-1", "byte_size": 1, "artifact_format": "sqlite"}, artifact=b"x"
+    )
     with pytest.raises(ValueError, match="quota"):
-        agent.receive({"artifact_id": "artifact-2", "byte_size": 1})
+        agent.receive(
+            {"artifact_id": "artifact-2", "byte_size": 1, "artifact_format": "sqlite"},
+            artifact=b"x",
+        )
     assert first.manifest_path is not None
     os.utime(first.manifest_path, (0, 0))
     assert agent.cleanup_expired(now=100) == 1
-    agent.receive({"artifact_id": "artifact-2", "byte_size": 1})
+    agent.receive(
+        {"artifact_id": "artifact-2", "byte_size": 1, "artifact_format": "sqlite"}, artifact=b"x"
+    )
