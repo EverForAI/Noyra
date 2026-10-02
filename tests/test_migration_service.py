@@ -244,6 +244,37 @@ def test_migration_rollback_route_uses_server_coordinator(
     }
 
 
+def test_migration_cutover_route_executes_verified_prepare_and_commit(
+    migration_http: tuple[NoyraHTTPServer, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server, base_url = migration_http
+    calls: list[tuple[str, object]] = []
+
+    def prepare(task_id: str, *, actor: str, proof: dict[str, object]) -> object:
+        calls.append(("prepare", (task_id, actor, proof)))
+        return type("Plan", (), {"__dict__": {"task_id": task_id, "status": "validating"}})()
+
+    def commit(task_id: str, *, actor: str) -> dict[str, str]:
+        calls.append(("commit", (task_id, actor)))
+        return {"task_id": task_id, "status": "committed"}
+
+    monkeypatch.setattr(server.migration_cutover, "prepare", prepare)
+    monkeypatch.setattr(server.migration_cutover, "commit", commit)
+    proof = {"manifest_digest": "a" * 64, "artifact_id": "artifact-1"}
+
+    status, payload = _json_post(
+        f"{base_url}/api/v1/admin/migration/tasks/task-1/cutover",
+        {"proof": proof},
+    )
+
+    assert status == 200
+    assert payload == {"task_id": "task-1", "status": "committed"}
+    assert calls == [
+        ("prepare", ("task-1", "web-admin", proof)),
+        ("commit", ("task-1", "web-admin")),
+    ]
+
+
 def test_migration_proposal_detail_is_subject_scoped_and_integrity_checked(
     migration_http: tuple[NoyraHTTPServer, str],
 ) -> None:

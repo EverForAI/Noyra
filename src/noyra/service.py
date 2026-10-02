@@ -4398,11 +4398,39 @@ class NoyraHTTPServer:
                         self._discard_small_request_body()
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
-                    self._discard_small_request_body()
-                    self._json(
-                        HTTPStatus.CONFLICT,
-                        {"error": "verified_target_restore_and_health_proof_required"},
+                    if self.headers.get_content_type() != "application/json":
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+                        return
+                    task_id = (
+                        self.path.removeprefix("/api/admin/migration/tasks/")
+                        .removesuffix("/cutover")
+                        .strip("/")
                     )
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    proof = payload.get("proof")
+                    if not isinstance(proof, dict):
+                        self._json(
+                            HTTPStatus.BAD_REQUEST,
+                            {"error": "verified_target_restore_and_health_proof_required"},
+                        )
+                        return
+                    try:
+                        owner.migration_cutover.prepare(
+                            task_id,
+                            actor=self._actor(),
+                            proof=proof,
+                        )
+                        result = owner.migration_cutover.commit(task_id, actor=self._actor())
+                    except ValueError:
+                        self._json(
+                            HTTPStatus.CONFLICT,
+                            {"error": "migration_cutover_rejected"},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, result)
                     return
                 if self.path.startswith("/api/admin/migration/tasks/") and self.path.endswith(
                     "/rollback"
