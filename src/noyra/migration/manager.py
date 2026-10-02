@@ -333,91 +333,113 @@ class MigrationManager:
         target_epoch_id: str | None = None,
     ) -> MigrationTask:
         assert_current_lease()
+        with self.database.transaction() as connection:
+            return self.transition_task_in_transaction(
+                connection,
+                task_id,
+                status,
+                actor=actor,
+                expected_status=expected_status,
+                manifest_digest=manifest_digest,
+                artifact_id=artifact_id,
+                error_code=error_code,
+                target_epoch_id=target_epoch_id,
+            )
+
+    def transition_task_in_transaction(
+        self,
+        connection: Any,
+        task_id: str,
+        status: str,
+        *,
+        actor: str,
+        expected_status: str | None = None,
+        manifest_digest: str | None = None,
+        artifact_id: str | None = None,
+        error_code: str | None = None,
+        target_epoch_id: str | None = None,
+    ) -> MigrationTask:
+        """Transition a task without committing the caller's transaction."""
+        assert_current_lease()
         self._validate_actor(actor)
         if status not in _TASK_TRANSITIONS:
             raise ValueError("migration task status is invalid")
-        with self.database.transaction() as connection:
-            row = connection.execute(
+        row = connection.execute(
+            "SELECT * FROM migration_tasks WHERE task_id=?", (task_id,)
+        ).fetchone()
+        if row is None:
+            raise NotFoundError(f"migration task not found: {task_id}")
+        self._assert_task_integrity(row)
+        if expected_status is not None and row["status"] != expected_status:
+            raise ValueError("migration task status changed")
+        if row["status"] == status:
+            return self._task(row)
+        if status not in _TASK_TRANSITIONS[row["status"]]:
+            raise ValueError("migration task transition is invalid")
+        current_revision = self._policy_revision(connection, row["subject_id"])
+        if current_revision is not None and current_revision != int(row["policy_revision"]):
+            raise ValueError("migration policy revision is stale")
+        now = utc_now()
+        values = dict(row)
+        if target_epoch_id is not None:
+            epoch = connection.execute(
+                "SELECT subject_id,target_id,status FROM migration_epochs WHERE epoch_id=?",
+                (target_epoch_id,),
+            ).fetchone()
+            if epoch is None:
+                raise ValueError("migration target epoch not found")
+            if epoch["subject_id"] != row["subject_id"] or epoch["target_id"] != row["target_id"]:
+                raise ValueError("migration target epoch does not match task")
+            if epoch["status"] != "active":
+                raise ValueError("migration target epoch is not active")
+        values.update(
+            {
+                "status": status,
+                "manifest_digest": manifest_digest
+                if manifest_digest is not None
+                else row["manifest_digest"],
+                "artifact_id": artifact_id if artifact_id is not None else row["artifact_id"],
+                "error_code": error_code if error_code is not None else row["error_code"],
+                "target_epoch_id": (
+                    target_epoch_id if target_epoch_id is not None else row["target_epoch_id"]
+                ),
+                "updated_at": now,
+            }
+        )
+        result = connection.execute(
+            "UPDATE migration_tasks SET status=?,manifest_digest=?,artifact_id=?,error_code=?,target_epoch_id=?,updated_at=?,state_hash=? WHERE task_id=? AND status=?",
+            (
+                values["status"],
+                values["manifest_digest"],
+                values["artifact_id"],
+                values["error_code"],
+                values["target_epoch_id"],
+                values["updated_at"],
+                self._task_hash(values),
+                task_id,
+                row["status"],
+            ),
+        )
+        if result.rowcount != 1:
+            raise ValueError("migration task status changed")
+        audit_action = (
+            "migration_task_cancelled" if status == "cancelled" else "migration_task_transitioned"
+        )
+        audit_payload = {"task_id": task_id, "from": row["status"], "to": status}
+        if status == "cancelled":
+            audit_payload["reason"] = values["error_code"]
+        MigrationStore._append_audit(
+            connection,
+            row["subject_id"],
+            audit_action,
+            actor.strip(),
+            audit_payload,
+        )
+        return self._task(
+            connection.execute(
                 "SELECT * FROM migration_tasks WHERE task_id=?", (task_id,)
             ).fetchone()
-            if row is None:
-                raise NotFoundError(f"migration task not found: {task_id}")
-            self._assert_task_integrity(row)
-            if expected_status is not None and row["status"] != expected_status:
-                raise ValueError("migration task status changed")
-            if row["status"] == status:
-                return self._task(row)
-            if status not in _TASK_TRANSITIONS[row["status"]]:
-                raise ValueError("migration task transition is invalid")
-            current_revision = self._policy_revision(connection, row["subject_id"])
-            if current_revision is not None and current_revision != int(row["policy_revision"]):
-                raise ValueError("migration policy revision is stale")
-            now = utc_now()
-            values = dict(row)
-            if target_epoch_id is not None:
-                epoch = connection.execute(
-                    "SELECT subject_id,target_id,status FROM migration_epochs WHERE epoch_id=?",
-                    (target_epoch_id,),
-                ).fetchone()
-                if epoch is None:
-                    raise ValueError("migration target epoch not found")
-                if (
-                    epoch["subject_id"] != row["subject_id"]
-                    or epoch["target_id"] != row["target_id"]
-                ):
-                    raise ValueError("migration target epoch does not match task")
-                if epoch["status"] != "active":
-                    raise ValueError("migration target epoch is not active")
-            values.update(
-                {
-                    "status": status,
-                    "manifest_digest": manifest_digest
-                    if manifest_digest is not None
-                    else row["manifest_digest"],
-                    "artifact_id": artifact_id if artifact_id is not None else row["artifact_id"],
-                    "error_code": error_code if error_code is not None else row["error_code"],
-                    "target_epoch_id": (
-                        target_epoch_id if target_epoch_id is not None else row["target_epoch_id"]
-                    ),
-                    "updated_at": now,
-                }
-            )
-            result = connection.execute(
-                "UPDATE migration_tasks SET status=?,manifest_digest=?,artifact_id=?,error_code=?,target_epoch_id=?,updated_at=?,state_hash=? WHERE task_id=? AND status=?",
-                (
-                    values["status"],
-                    values["manifest_digest"],
-                    values["artifact_id"],
-                    values["error_code"],
-                    values["target_epoch_id"],
-                    values["updated_at"],
-                    self._task_hash(values),
-                    task_id,
-                    row["status"],
-                ),
-            )
-            if result.rowcount != 1:
-                raise ValueError("migration task status changed")
-            audit_action = (
-                "migration_task_cancelled"
-                if status == "cancelled"
-                else "migration_task_transitioned"
-            )
-            audit_payload = {"task_id": task_id, "from": row["status"], "to": status}
-            if status == "cancelled":
-                audit_payload["reason"] = values["error_code"]
-            MigrationStore._append_audit(
-                connection,
-                row["subject_id"],
-                audit_action,
-                actor.strip(),
-                audit_payload,
-            )
-            return self._task(
-                connection.execute(
-                    "SELECT * FROM migration_tasks WHERE task_id=?", (task_id,)
-                ).fetchone()
-            )
+        )
 
     def get_proposal(self, subject_id: str, proposal_id: str) -> dict[str, Any]:
         validate_subject_id(subject_id)

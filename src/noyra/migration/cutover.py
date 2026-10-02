@@ -111,9 +111,16 @@ class CutoverCoordinator:
         try:
             if task.status == "validating":
                 task = self.manager.transition_task(task_id, "cutover", actor=actor)
-            epoch.assert_current()
-            task = self.manager.transition_task(task_id, "committed", actor=actor)
-            epoch.complete(actor)
+            with self.database.transaction() as connection:
+                epoch.assert_current_in_transaction(connection)
+                task = self.manager.transition_task_in_transaction(
+                    connection,
+                    task_id,
+                    "committed",
+                    actor=actor,
+                    expected_status="cutover",
+                )
+                epoch.complete_in_transaction(connection, actor)
             return {"task_id": task_id, "status": task.status}
         finally:
             if lease is not None and admission is not None:

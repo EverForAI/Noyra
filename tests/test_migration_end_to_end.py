@@ -271,3 +271,82 @@ def test_cutover_accepts_task_bound_signed_restore_and_health_proof(tmp_path: An
     prepared = cutover.prepare(task.task_id, proof=proof)
     assert prepared.status == "validating"
     assert cutover.commit(task.task_id) == {"task_id": task.task_id, "status": "committed"}
+
+
+def test_cutover_commit_rolls_back_task_when_epoch_completion_fails(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database, store, registry, private = _target_context(tmp_path)
+    policy = store.read_policy("Noyra-0001")
+    manager = MigrationManager(database, store)
+    proposal = manager.create_proposal(
+        subject_id="Noyra-0001",
+        target_id="standby-1",
+        policy_revision=policy.revision,
+        reason_code="maintenance",
+        reason="planned maintenance",
+        expires_at="2099-01-01T00:00:00+00:00",
+    )
+    task = manager.approve(proposal.proposal_id, actor="operator", idempotency_key="cutover-atomic")
+    challenge = registry.issue_challenge("standby-1", source_epoch=task.source_epoch)
+    registry.attest(
+        "standby-1",
+        challenge,
+        base64.urlsafe_b64encode(private.sign(challenge.signing_bytes())).decode("ascii"),
+        actor="operator",
+    )
+    restore = {
+        "target_id": "standby-1",
+        "artifact_id": "artifact-atomic",
+        "manifest_digest": "c" * 64,
+        "status": "restored",
+    }
+    health = {
+        **restore,
+        "status": "healthy",
+        "host_identity": "host-atomic",
+        "checks": {"database": True, "runtime": True},
+    }
+    signing_payload = {
+        "task_id": task.task_id,
+        "subject_id": task.subject_id,
+        "target_id": task.target_id,
+        "source_epoch": task.source_epoch,
+        "manifest_digest": restore["manifest_digest"],
+        "artifact_id": restore["artifact_id"],
+        "restore_report_digest": content_hash(restore),
+        "health_report_digest": content_hash(health),
+    }
+    proof: dict[str, object] = {
+        "manifest_digest": restore["manifest_digest"],
+        "artifact_id": restore["artifact_id"],
+        "restore_report": restore,
+        "health_report": health,
+        "target_signature": base64.urlsafe_b64encode(
+            private.sign(canonical_json(signing_payload).encode())
+        ).decode("ascii"),
+    }
+    cutover = CutoverCoordinator(database)
+    cutover.prepare(task.task_id, proof=proof)
+
+    def fail_completion(self: EpochLease, connection: Any, actor: str) -> None:
+        del self, actor
+        connection.execute(
+            "UPDATE migration_epochs SET status='completed' "
+            "WHERE epoch_id=(SELECT target_epoch_id FROM migration_tasks WHERE task_id=?)",
+            (task.task_id,),
+        )
+        raise RuntimeError("injected epoch completion failure")
+
+    monkeypatch.setattr(EpochLease, "complete_in_transaction", fail_completion)
+    with pytest.raises(RuntimeError, match="injected epoch completion failure"):
+        cutover.commit(task.task_id)
+
+    assert manager.get_task(task.task_id).status == "cutover"
+    with database.connection() as connection:
+        epoch = connection.execute(
+            "SELECT status FROM migration_epochs "
+            "WHERE epoch_id=(SELECT target_epoch_id FROM migration_tasks WHERE task_id=?)",
+            (task.task_id,),
+        ).fetchone()
+    assert epoch["status"] == "active"
