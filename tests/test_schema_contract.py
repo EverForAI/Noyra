@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from noyra.core import IdentityStore, IntegrityRegistry
 from noyra.core.database import CURRENT_SCHEMA_VERSION, Database, _canonical_schema_sql
+from noyra.core.types import content_hash
 
 
 def test_search_routing_schema_is_installed_and_registered_by_database(
@@ -48,6 +50,34 @@ def test_missing_additive_index_fails_closed_on_database_reopen(tmp_path: Path) 
 
     with pytest.raises(RuntimeError, match="schema contract"):
         Database(database.path)
+
+
+def test_trigger_contract_drift_reopens_for_integrity_quarantine(tmp_path: Path) -> None:
+    database = Database(tmp_path / "noyra.sqlite3")
+    subject_id = "Noyra-schema-trigger-contract"
+    IdentityStore(database).ensure(subject_id, content_hash({"subject": subject_id}))
+
+    with database.transaction() as connection:
+        connection.execute("DROP TRIGGER prevent_training_record_delete")
+        connection.execute(
+            """CREATE TRIGGER prevent_training_record_delete
+               BEFORE DELETE ON training_records BEGIN
+                   SELECT 1;
+               END"""
+        )
+
+    reopened = Database(database.path)
+    report = IntegrityRegistry().run(
+        reopened,
+        subject_id,
+        tmp_path,
+        profile="manual",
+        policy_mode="alert",
+        deadline_seconds=5,
+        check_ids=("core.schema_contract",),
+    )
+
+    assert report.p0 == ("core.schema_contract:schema_trigger_contract_mismatch",)
 
 
 def test_schema_contract_rejects_modified_persistent_feature_ddl(tmp_path: Path) -> None:

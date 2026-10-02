@@ -292,8 +292,19 @@ CURRENT_SCHEMA_VERSION = 77
 
 # The schema DDL fingerprint is checked after every successful initialization.
 # Update this value only alongside a reviewed schema migration and its tests.
+# This is the complete contract, including security triggers.  Existing v77
+# installations persist this value in ``schema_meta`` and therefore require
+# the value to remain stable across compatible runtime fixes.
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
     77: "2487f1a2703fc940178b2c77f2b3982a37b4a526de37b9b253204be71f4a6d1f",
+}
+
+# Structural objects are checked independently so a trigger-only integrity
+# defect can reach the startup integrity gate and be quarantined with an
+# auditable P0 finding.  Tables, indexes, and views still fail closed during
+# database construction because they define the storage contract itself.
+_SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
+    77: "03eae2bf8cdb2379f5a7271801044ce1920e0805018827d3661184b2a9fca896",
 }
 
 _PERSISTENT_FEATURE_OBJECTS: dict[str, tuple[str, ...]] = {
@@ -7312,7 +7323,16 @@ class Database:
 
     @staticmethod
     def schema_ddl_fingerprint(connection: sqlite3.Connection) -> str:
-        """Fingerprint persistent DDL, excluding SQLite-owned virtual-table shadows."""
+        """Fingerprint the complete persistent DDL inventory."""
+        return Database._schema_fingerprint(connection, include_triggers=True)
+
+    @staticmethod
+    def schema_structure_fingerprint(connection: sqlite3.Connection) -> str:
+        """Fingerprint tables, indexes, and views without trigger definitions."""
+        return Database._schema_fingerprint(connection, include_triggers=False)
+
+    @staticmethod
+    def _schema_fingerprint(connection: sqlite3.Connection, *, include_triggers: bool) -> str:
         shadow_tables = {
             str(row["name"])
             for row in connection.execute("PRAGMA table_list").fetchall()
@@ -7330,6 +7350,7 @@ class Database:
                    ORDER BY type, name"""
             ).fetchall()
             if str(row["name"]) not in shadow_tables
+            and (include_triggers or str(row["type"]) != "trigger")
         ]
         return content_hash(definitions)
 
@@ -7378,15 +7399,30 @@ class Database:
                 raise RuntimeError("database schema contract has no schema version")
             version = int(version_row[0])
             expected = _SCHEMA_DDL_FINGERPRINTS.get(version)
+            latest_contract_version = max(_SCHEMA_DDL_FINGERPRINTS)
+            if expected is None and version < latest_contract_version:
+                # Historical-version test fixtures and migration handoff
+                # images are validated after they reach the current runtime
+                # schema.  The current schema itself must always have a
+                # reviewed fingerprint.
+                return
             if expected is None or len(expected) != 64 or set(expected) - set("0123456789abcdef"):
                 raise RuntimeError(f"database schema contract is unavailable for schema {version}")
-            actual = self.schema_ddl_fingerprint(connection)
-            if actual != expected:
+            structure_expected = _SCHEMA_STRUCTURE_FINGERPRINTS.get(version)
+            if (
+                structure_expected is None
+                or len(structure_expected) != 64
+                or set(structure_expected) - set("0123456789abcdef")
+            ):
                 raise RuntimeError(
-                    f"database schema contract mismatch for schema {version}: "
-                    f"expected {expected}, found {actual}"
+                    f"database schema structural contract is unavailable for schema {version}"
                 )
-
+            structure_actual = self.schema_structure_fingerprint(connection)
+            if structure_actual != structure_expected:
+                raise RuntimeError(
+                    f"database schema contract structural mismatch for schema {version}: "
+                    f"expected {structure_expected}, found {structure_actual}"
+                )
             previous = connection.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_ddl_contract'"
             ).fetchone()
@@ -7398,7 +7434,7 @@ class Database:
                     raise RuntimeError("database schema contract marker is invalid") from error
                 if previous_version > version:
                     raise RuntimeError("database schema contract marker is newer than runtime")
-                if previous_version == version and previous_fingerprint != actual:
+                if previous_version == version and previous_fingerprint != expected:
                     raise RuntimeError(
                         "database schema contract marker does not match installed DDL"
                     )
@@ -7406,7 +7442,7 @@ class Database:
             connection.execute(
                 "INSERT INTO schema_meta(key, value) VALUES ('schema_ddl_contract', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (f"{version}:{actual}",),
+                (f"{version}:{expected}",),
             )
 
     @staticmethod

@@ -28,7 +28,11 @@ from .archive import (
     ArchiveKeyring,
     ArchiveReplicaLedger,
 )
-from .database import Database
+from .database import (
+    _SCHEMA_DDL_FINGERPRINTS,
+    _SCHEMA_STRUCTURE_FINGERPRINTS,
+    Database,
+)
 from .errors import (
     ArchiveKeyUnavailableError,
     ArchiveUnavailableError,
@@ -1267,6 +1271,14 @@ _INITIAL_TRAINING_POLICY = {
 def _default_checks() -> tuple[IntegrityCheckSpec, ...]:
     return (
         IntegrityCheckSpec(
+            "core.schema_contract",
+            1,
+            "core",
+            _STARTUP_PROFILES,
+            _check_schema_contract,
+            "light",
+        ),
+        IntegrityCheckSpec(
             "core.sqlite_quick_check", 1, "core", _STARTUP_PROFILES, _check_sqlite, "light"
         ),
         IntegrityCheckSpec(
@@ -1501,6 +1513,46 @@ def _check_sqlite(context: IntegrityContext) -> IntegrityCheckOutcome:
     if result != "ok":
         return IntegrityCheckOutcome("corrupt", "p0", "sqlite_quick_check", {"result": result})
     return IntegrityCheckOutcome(details={"result": "ok"})
+
+
+def _check_schema_contract(context: IntegrityContext) -> IntegrityCheckOutcome:
+    """Detect trigger-only DDL drift after the database can be opened safely."""
+    row = context.connection.execute(
+        "SELECT value FROM schema_meta WHERE key='schema_version'"
+    ).fetchone()
+    if row is None:
+        raise IntegrityError("schema version marker is missing")
+    version = int(row[0])
+    expected = _SCHEMA_DDL_FINGERPRINTS.get(version)
+    structure_expected = _SCHEMA_STRUCTURE_FINGERPRINTS.get(version)
+    if expected is None or structure_expected is None:
+        if version < max(_SCHEMA_DDL_FINGERPRINTS):
+            return IntegrityCheckOutcome(details={"schema_version": version, "historical": True})
+        return IntegrityCheckOutcome(
+            "corrupt", "p0", "schema_contract_unavailable", {"schema_version": version}
+        )
+    connection = cast(sqlite3.Connection, context.connection)
+    structure_actual = Database.schema_structure_fingerprint(connection)
+    if structure_actual != structure_expected:
+        return IntegrityCheckOutcome(
+            "corrupt",
+            "p0",
+            "schema_structure_contract_mismatch",
+            {
+                "schema_version": version,
+                "expected": structure_expected,
+                "found": structure_actual,
+            },
+        )
+    actual = Database.schema_ddl_fingerprint(connection)
+    if actual != expected:
+        return IntegrityCheckOutcome(
+            "corrupt",
+            "p0",
+            "schema_trigger_contract_mismatch",
+            {"schema_version": version, "expected": expected, "found": actual},
+        )
+    return IntegrityCheckOutcome(details={"schema_version": version, "status": "ok"})
 
 
 def _check_provider_health(context: IntegrityContext) -> IntegrityCheckOutcome:
