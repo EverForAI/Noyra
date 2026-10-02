@@ -976,6 +976,8 @@ class ServiceSettings(BaseModel):
             object.__setattr__(self, "admin_session_cookie_secure", True)
             if self.at_rest_mode != "required":
                 raise ValueError("production profile requires at-rest protection")
+            if self.integrity_mode == "off":
+                raise ValueError("production profile requires integrity monitoring")
             if self.developer_log_export_enabled:
                 # The field default is intentionally development-friendly for
                 # direct construction in tests and libraries.  Production
