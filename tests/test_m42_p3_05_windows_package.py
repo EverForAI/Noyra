@@ -133,3 +133,31 @@ def test_windows_package_hash_tampering_is_rejected(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert not (install / "current.txt").exists()
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is unavailable")
+def test_windows_package_missing_management_module_has_actionable_diagnostic(
+    tmp_path: Path,
+) -> None:
+    assert POWERSHELL is not None
+    script = str(ROOT / "scripts" / "build-windows-package.ps1").replace("'", "''")
+    output = str(tmp_path / "packages").replace("'", "''")
+    source = str(ROOT).replace(chr(39), chr(39) * 2)
+    command = (
+        "$env:PSModulePath = ''; "
+        f"& '{script}' -Version probe -OutputRoot '{output}' -SourceRoot '{source}'; "
+        "exit $LASTEXITCODE"
+    )
+    result = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert result.returncode == 78
+    assert "NOYRA-WINDOWS-PACKAGE-PREREQUISITE[PS-MANAGEMENT-MODULE]:" in (
+        result.stdout + result.stderr
+    )
+    assert not (tmp_path / "packages").exists()
