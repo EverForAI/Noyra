@@ -9,6 +9,7 @@ run as local evidence.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
 import time
 import tracemalloc
@@ -16,9 +17,15 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, TypeVar
-from urllib.error import URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
 
+import httpx
+
+from noyra.core.http import (
+    DEFAULT_MAX_HEADER_BYTES,
+    PublicDNSHTTPTransport,
+    read_bounded_sync_response,
+)
 from noyra.core.types import canonical_json, content_hash, strict_json_loads
 
 T = TypeVar("T")
@@ -112,10 +119,25 @@ class PinnedMemoryBenchmark(Generic[T]):
         expected_sha256: str,
         timeout_seconds: float = 20.0,
         max_bytes: int = MAX_BENCHMARK_BYTES,
+        _client: httpx.Client | None = None,
     ) -> PinnedMemoryBenchmark[Any]:
         """Fetch a pinned benchmark without treating network availability as evidence."""
-        if not url.startswith("https://") or len(url) > 2_048:
-            raise ValueError("benchmark URL must be bounded HTTPS")
+        parsed = urlsplit(url)
+        if (
+            len(url) > 2_048
+            or parsed.scheme.lower() != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            raise ValueError("benchmark URL must be bounded public HTTPS")
+        try:
+            literal = ipaddress.ip_address(parsed.hostname)
+        except ValueError:
+            literal = None
+        if literal is not None and not literal.is_global:
+            raise ValueError("benchmark URL must be bounded public HTTPS")
         if (
             type(timeout_seconds) not in {int, float}
             or not 0 < float(timeout_seconds) <= 300
@@ -126,14 +148,38 @@ class PinnedMemoryBenchmark(Generic[T]):
             or any(character not in "0123456789abcdef" for character in expected_sha256)
         ):
             raise ValueError("benchmark fetch pin or limit is invalid")
-        request = Request(url, headers={"Accept": "application/json"}, method="GET")
+        client = _client or httpx.Client(
+            timeout=httpx.Timeout(
+                float(timeout_seconds), connect=min(10.0, float(timeout_seconds))
+            ),
+            follow_redirects=False,
+            trust_env=False,
+            transport=PublicDNSHTTPTransport(max_connections=2),
+        )
+        owns_client = _client is None
         try:
-            with urlopen(request, timeout=float(timeout_seconds)) as response:
-                payload = response.read(max_bytes + 1)
-        except (OSError, URLError) as error:
+            with client.stream(
+                "GET",
+                url,
+                headers={"Accept": "application/json", "Accept-Encoding": "identity"},
+                follow_redirects=False,
+            ) as response:
+                if 300 <= response.status_code < 400:
+                    raise ValueError("benchmark download redirects are not allowed")
+                response.raise_for_status()
+                payload = read_bounded_sync_response(
+                    response,
+                    max_body_bytes=max_bytes,
+                    max_header_bytes=DEFAULT_MAX_HEADER_BYTES,
+                    total_timeout_seconds=float(timeout_seconds),
+                )
+        except ValueError:
+            raise
+        except (OSError, TimeoutError, httpx.HTTPError) as error:
             raise RuntimeError("benchmark download is unavailable") from error
-        if len(payload) > max_bytes:
-            raise ValueError("benchmark download exceeds its byte limit")
+        finally:
+            if owns_client:
+                client.close()
         actual = hashlib.sha256(payload).hexdigest()
         if actual != expected_sha256:
             raise ValueError("benchmark download hash does not match its pin")
