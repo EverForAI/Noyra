@@ -164,6 +164,7 @@ API_ROUTE_CONTRACTS: tuple[APIRouteContract, ...] = (
         415,
         503,
     ),
+    _get("/api/v1/admin/migration/tasks", "operator", 200, 400, 401, 503),
     _get("/api/v1/admin/migration/tasks/{taskId}", "operator", 200, 401, 404, 503),
     _post(
         "/api/v1/admin/migration/tasks/{taskId}/cutover",

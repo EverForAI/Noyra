@@ -192,8 +192,11 @@ def test_cloudflare_mode_writes_protected_token_file_without_logging_token(tmp_p
     secret = "cf-secret-token-value"
     token_path = tmp_path / "cloudflare-tunnel-token"
     result = build_runner(FakeRunner(cloudflared=True), tmp_path).run_cloudflare(
-        public_domain="hong168.win", admin_domain="admin.hong168.win",
-        tunnel_token=secret, token_path=token_path, dry_run=False
+        public_domain="hong168.win",
+        admin_domain="admin.hong168.win",
+        tunnel_token=secret,
+        token_path=token_path,
+        dry_run=False,
     )
     assert result.exit_code == 0
     assert token_path.read_text(encoding="utf-8") == secret + "\n"
@@ -204,8 +207,11 @@ def test_cloudflare_mode_writes_protected_token_file_without_logging_token(tmp_p
 def test_cloudflare_dry_run_does_not_write_token(tmp_path: Path) -> None:
     token_path = tmp_path / "cloudflare-tunnel-token"
     result = build_runner(FakeRunner(cloudflared=True), tmp_path).run_cloudflare(
-        public_domain="example.com", admin_domain="admin.example.com",
-        tunnel_token="secret", token_path=token_path, dry_run=True
+        public_domain="example.com",
+        admin_domain="admin.example.com",
+        tunnel_token="secret",
+        token_path=token_path,
+        dry_run=True,
     )
     assert result.exit_code == 0
     assert not token_path.exists()
@@ -248,7 +254,11 @@ Commit: `git add src/noyra/deployment_setup.py deploy/systemd/cloudflared-noyra.
 ```python
 def test_setup_modes_document_all_three_entry_points() -> None:
     text = (ROOT / "docs/deployment/setup-modes.md").read_text(encoding="utf-8")
-    for marker in ("noyra setup --mode local", "noyra setup --mode public", "noyra setup --mode cloudflare"):
+    for marker in (
+        "noyra setup --mode local",
+        "noyra setup --mode public",
+        "noyra setup --mode cloudflare",
+    ):
         assert marker in text
     assert "127.0.0.1:8765" in text
     assert "cloudflare-tunnel-token" in text

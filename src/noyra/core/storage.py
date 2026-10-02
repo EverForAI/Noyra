@@ -244,7 +244,10 @@ class StorageUsage:
         # the physical value remains available for diagnostics and disk-floor
         # protection.  Treating physical bytes as quota usage made a database
         # with reclaimable pages permanently block its own cleanup path.
-        if self.effective_subject_bytes > quota.subject_bytes:
+        effective_subject_bytes = self.effective_subject_bytes
+        if effective_subject_bytes is None:
+            effective_subject_bytes = self.subject_bytes
+        if effective_subject_bytes > quota.subject_bytes:
             over.append("subject")
         if self.training_bytes > quota.training_bytes:
             over.append("training")
@@ -254,8 +257,11 @@ class StorageUsage:
 
     def warnings(self, quota: StorageQuotaLike) -> tuple[str, ...]:
         warnings: list[str] = []
+        effective_subject_bytes = self.effective_subject_bytes
+        if effective_subject_bytes is None:
+            effective_subject_bytes = self.subject_bytes
         for name, value, limit in (
-            ("subject", self.effective_subject_bytes, quota.subject_bytes),
+            ("subject", effective_subject_bytes, quota.subject_bytes),
             ("training", self.training_bytes, quota.training_bytes),
             ("workspace", self.workspace_bytes, quota.workspace_bytes),
         ):

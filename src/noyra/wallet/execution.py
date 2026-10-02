@@ -11,6 +11,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from types import TracebackType
@@ -291,6 +292,7 @@ class HTTPSWalletSigner:
             raise ValueError("wallet signer timeout is invalid")
         self.endpoint = parsed.geturl()
         self.signer_id = signer_id.strip()
+        self.address: str | None
         if wallet_address is not None:
             try:
                 self.address = canonical_evm_address(wallet_address)
@@ -839,7 +841,9 @@ class WalletPaymentExecutionEngine:
         return "unknown" if value else "none"
 
     @classmethod
-    def reason_projection(cls, execution: WalletExecutionRecord | Any) -> dict[str, str | None]:
+    def reason_projection(
+        cls, execution: WalletExecutionRecord | Mapping[str, Any]
+    ) -> dict[str, str | None]:
         raw = execution.error_code if hasattr(execution, "error_code") else execution["error_code"]
         return {"reason_code": cls.normalize_reason_code(raw), "legacy_error_code": raw}
 

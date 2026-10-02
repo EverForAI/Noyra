@@ -472,6 +472,32 @@ _OWNERSHIP_GRAPH_V71 = {
     **_OWNERSHIP_GRAPH_V70,
     **{table: _subject_rule() for table in _SUBJECT_TABLES_V71},
 }
+# Schema 72 introduced no ownership changes beyond the migration control
+# tables created by the current schema contract.  They are subject-scoped and
+# are added here explicitly so a current database cannot silently fall back to
+# an older graph.
+_SUBJECT_TABLES_V72 = frozenset(
+    {
+        "migration_audit_events",
+        "migration_epochs",
+        "migration_policies",
+        "migration_proposals",
+        "migration_rejections",
+        "migration_target_challenges",
+        "migration_targets",
+        "migration_tasks",
+    }
+)
+_OWNERSHIP_GRAPH_V72 = {
+    **_OWNERSHIP_GRAPH_V71,
+    **{table: _subject_rule() for table in _SUBJECT_TABLES_V72},
+    "migration_target_challenges": _parent_rule("migration_targets", "target_id", "target_id"),
+}
+# Schemas 73-75 add migration evidence columns and durable epoch metadata;
+# ownership remains subject-scoped.
+_OWNERSHIP_GRAPH_V73 = _OWNERSHIP_GRAPH_V72
+_OWNERSHIP_GRAPH_V74 = _OWNERSHIP_GRAPH_V73
+_OWNERSHIP_GRAPH_V75 = _OWNERSHIP_GRAPH_V74
 
 _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     33: _OWNERSHIP_GRAPH_V33,
@@ -513,6 +539,10 @@ _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     69: _OWNERSHIP_GRAPH_V69,
     70: _OWNERSHIP_GRAPH_V70,
     71: _OWNERSHIP_GRAPH_V71,
+    72: _OWNERSHIP_GRAPH_V72,
+    73: _OWNERSHIP_GRAPH_V73,
+    74: _OWNERSHIP_GRAPH_V74,
+    75: _OWNERSHIP_GRAPH_V75,
 }
 
 

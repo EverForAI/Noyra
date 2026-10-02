@@ -433,6 +433,17 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/migration/tasks:
+    get:
+      tags: [observation]
+      operationId: listMigrationTasks
+      security: [{ operatorBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/v1/admin/migration/tasks/{taskId}/cancel:
     post:
       tags: [configuration]

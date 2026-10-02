@@ -583,16 +583,16 @@ class RetentionManager:
             return len(rows), last
         if table == "search_provider_uses":
             keyset = ""
-            params: list[Any] = [subject_id, cutoff]
+            use_params: list[Any] = [subject_id, cutoff]
             if isinstance(cursor, dict) and {"created_at", "use_id"} <= set(cursor):
                 keyset = " AND (created_at > ? OR (created_at = ? AND use_id > ?))"
-                params.extend([cursor["created_at"], cursor["created_at"], cursor["use_id"]])
-            params.append(limit)
+                use_params.extend([cursor["created_at"], cursor["created_at"], cursor["use_id"]])
+            use_params.append(limit)
             rows = connection.execute(
                 f"""SELECT use_id, created_at FROM search_provider_uses
                    WHERE subject_id=? AND created_at < ?{keyset}
                    ORDER BY created_at, use_id LIMIT ?""",
-                tuple(params),
+                tuple(use_params),
             ).fetchall()
             for row in rows:
                 connection.execute(

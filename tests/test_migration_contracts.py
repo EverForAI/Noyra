@@ -22,6 +22,7 @@ MIGRATION_OPERATIONS = {
     ("POST", "/api/v1/admin/migration/proposals/{proposalId}/approve"),
     ("POST", "/api/v1/admin/migration/proposals/{proposalId}/reject"),
     ("POST", "/api/v1/admin/migration/tasks/{taskId}/cancel"),
+    ("GET", "/api/v1/admin/migration/tasks"),
     ("GET", "/api/v1/admin/migration/tasks/{taskId}"),
     ("POST", "/api/v1/admin/migration/tasks/{taskId}/cutover"),
     ("POST", "/api/v1/admin/migration/tasks/{taskId}/rollback"),
