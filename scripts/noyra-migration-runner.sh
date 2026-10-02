@@ -3,9 +3,10 @@ set -euo pipefail
 
 # Root-owned runner boundary. No arbitrary command execution: the request id is
 # only a safe filename segment and every action maps to a fixed operation.
-DATA_ROOT="/var/lib/noyra/migration"
+DATA_ROOT="${NOYRA_MIGRATION_DATA_ROOT:-/var/lib/noyra/migration}"
 REQUEST_DIR="$DATA_ROOT/requests"
 STATUS_DIR="$DATA_ROOT/status"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REQUEST_ID=""
 ACTION=""
 
@@ -44,6 +45,19 @@ safe_segment "$REQUEST_ID" || { echo 'unsafe migration request id' >&2; exit 2; 
 [[ -n "$ACTION" ]] || { usage; exit 2; }
 [[ "$(id -u)" -eq 0 ]] || { echo 'migration runner must run as root' >&2; exit 1; }
 
+if [[ "$ACTION" != status ]]; then
+  runner_python="${NOYRA_MIGRATION_RUNNER_PY:-$SCRIPT_DIR/noyra-migration-runner.py}"
+  if [[ ! -f "$runner_python" ]]; then
+    runner_python="/opt/noyra/current/scripts/noyra-migration-runner.py"
+  fi
+  [[ -f "$runner_python" && ! -L "$runner_python" ]] || {
+    echo 'migration runner implementation is unavailable' >&2
+    exit 1
+  }
+  python_bin="${NOYRA_PYTHON:-python3}"
+  NOYRA_MIGRATION_DATA_ROOT="$DATA_ROOT" exec "$python_bin" "$runner_python" --request-id "$REQUEST_ID" "$ACTION"
+fi
+
 case "$ACTION" in
   status)
     status_file="$STATUS_DIR/$REQUEST_ID.json"
@@ -52,18 +66,5 @@ case "$ACTION" in
       exit 0
     }
     cat -- "$status_file"
-    ;;
-  restore)
-    request_file="$REQUEST_DIR/$REQUEST_ID.json"
-    [[ -f "$request_file" && ! -L "$request_file" ]] || {
-      echo 'migration restore request is unavailable' >&2
-      exit 1
-    }
-    echo 'migration restore requires a verified target-agent receipt' >&2
-    exit 78
-    ;;
-  health|fence)
-    echo "migration $ACTION requires an authenticated agent receipt" >&2
-    exit 78
     ;;
 esac
