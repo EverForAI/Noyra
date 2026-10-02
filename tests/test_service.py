@@ -241,6 +241,11 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn('href="/admin"', html)
         with urlopen(f"{self.base_url}/favicon.ico", timeout=5) as response:
             self.assertEqual(response.status, 204)
+        with urlopen(f"{self.base_url}/api/state", timeout=5) as response:
+            self.assertEqual(
+                response.headers["X-Noyra-Public-Contract"], "public-contract-v1"
+            )
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
         state = self.get_json("/api/state")
         assert isinstance(state, dict)
         self.assertEqual(state["subject_id"], self.settings.subject_id)
@@ -279,6 +284,20 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(health["status"], "ok")
         self.assertEqual(self.get_json("/api/interactions"), [])
         self.assertEqual(self.get_json("/api/behavior"), [])
+        original_diary = self.http.projection.diary
+        self.http.projection.diary = cast(
+            Any,
+            lambda *_args, **_kwargs: [{"body": "x" * 2_100_000}],
+        )
+        try:
+            with self.assertRaises(HTTPError) as error:
+                urlopen(f"{self.base_url}/api/diary", timeout=5)
+            self.assertEqual(error.exception.code, 413)
+            self.assertEqual(
+                json.loads(error.exception.read())["error"], "public_response_too_large"
+            )
+        finally:
+            self.http.projection.diary = original_diary
         for private_view in ("/api/goals", "/api/projects", "/api/outcomes"):
             with self.assertRaises(HTTPError) as error:
                 urlopen(f"{self.base_url}{private_view}", timeout=5)

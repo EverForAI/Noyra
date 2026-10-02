@@ -102,6 +102,11 @@ from noyra.interaction import (
     TransportStore,
     WeChatInboundAdapter,
 )
+from noyra.interaction.public_contract import (
+    PUBLIC_CACHE_CONTROL,
+    PUBLIC_CONTRACT_ID,
+    PUBLIC_MAX_RESPONSE_BYTES,
+)
 from noyra.knowledge import (
     CommonKnowledgePeerInput,
     CommonKnowledgeStore,
@@ -2775,7 +2780,7 @@ class NoyraHTTPServer:
                     self._json(health_status, health_payload)
                 elif parsed.path == "/api/state":
                     state = owner.projection.state(owner.kernel.subject_id)
-                    self._json(HTTPStatus.OK, state)
+                    self._json(HTTPStatus.OK, state, public_contract=True)
                 elif parsed.path == "/api/state/details":
                     if not self._authorized("read"):
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -2786,12 +2791,15 @@ class NoyraHTTPServer:
                     self._json(HTTPStatus.OK, state)
                 elif parsed.path == "/api/diary":
                     self._json(
-                        HTTPStatus.OK, owner.projection.diary(owner.kernel.subject_id, limit=limit)
+                        HTTPStatus.OK,
+                        owner.projection.diary(owner.kernel.subject_id, limit=limit),
+                        public_contract=True,
                     )
                 elif parsed.path == "/api/behavior":
                     self._json(
                         HTTPStatus.OK,
                         owner.projection.behavior_logs(owner.kernel.subject_id, limit=limit),
+                        public_contract=True,
                     )
                 elif parsed.path == "/api/goals":
                     if not self._authorized("read"):
@@ -2899,6 +2907,7 @@ class NoyraHTTPServer:
                     self._json(
                         HTTPStatus.OK,
                         owner.projection.interactions_view(owner.kernel.subject_id, limit=limit),
+                        public_contract=True,
                     )
                 elif parsed.path == "/api/public-posts":
                     try:
@@ -2910,9 +2919,10 @@ class NoyraHTTPServer:
                             HTTPStatus.SERVICE_UNAVAILABLE,
                             {"error": "public_post_integrity_unavailable"},
                             retry_after=60,
+                            public_contract=True,
                         )
                         return
-                    self._json(HTTPStatus.OK, posts)
+                    self._json(HTTPStatus.OK, posts, public_contract=True)
                 elif parsed.path == "/api/admin/public-posts":
                     if not self._authorized():
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -8696,20 +8706,45 @@ class NoyraHTTPServer:
                 self._json(HTTPStatus.OK, payload)
 
             def _json(
-                self, status: HTTPStatus, payload: Any, *, retry_after: int | None = None
+                self,
+                status: HTTPStatus,
+                payload: Any,
+                *,
+                retry_after: int | None = None,
+                public_contract: bool = False,
             ) -> None:
                 body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+                if public_contract and len(body) > PUBLIC_MAX_RESPONSE_BYTES:
+                    status = HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+                    body = json.dumps(
+                        {
+                            "error": "public_response_too_large",
+                            "contract": PUBLIC_CONTRACT_ID,
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode()
                 self.send_response(status)
                 if status == HTTPStatus.TOO_MANY_REQUESTS:
                     self.send_header("Retry-After", str(60 if retry_after is None else retry_after))
                 elif status == HTTPStatus.SERVICE_UNAVAILABLE:
                     self.send_header("Retry-After", str(5 if retry_after is None else retry_after))
-                self._headers("application/json; charset=utf-8", len(body))
+                self._headers(
+                    "application/json; charset=utf-8",
+                    len(body),
+                    cache_control=PUBLIC_CACHE_CONTROL if public_contract else "no-store",
+                    public_contract=public_contract,
+                )
                 self.end_headers()
                 self.wfile.write(body)
 
             def _headers(
-                self, content_type: str, length: int, *, cache_control: str = "no-store"
+                self,
+                content_type: str,
+                length: int,
+                *,
+                cache_control: str = "no-store",
+                public_contract: bool = False,
             ) -> None:
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(length))
@@ -8721,6 +8756,8 @@ class NoyraHTTPServer:
                 self.send_header("Cross-Origin-Opener-Policy", "same-origin")
                 self.send_header("Cross-Origin-Resource-Policy", "same-origin")
                 self.send_header("X-Permitted-Cross-Domain-Policies", "none")
+                if public_contract:
+                    self.send_header("X-Noyra-Public-Contract", PUBLIC_CONTRACT_ID)
                 if owner.settings.public_site_url or owner.settings.admin_session_cookie_secure:
                     self.send_header(
                         "Strict-Transport-Security",
