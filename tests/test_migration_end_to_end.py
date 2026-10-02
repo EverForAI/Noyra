@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from dataclasses import replace
 from typing import Any
 
@@ -8,6 +9,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from noyra.core import Database, IdentityStore, SubjectKernel
+from noyra.core.database import CURRENT_SCHEMA_VERSION
 from noyra.core.errors import RuntimeOwnershipError
 from noyra.core.types import canonical_json, content_hash
 from noyra.migration.cutover import CutoverCoordinator
@@ -24,6 +26,12 @@ def _target_context(tmp_path: Any, *, emergency: bool = False) -> Any:
     database = Database(tmp_path / "noyra.sqlite3")
     subject_id = "Noyra-0001"
     IdentityStore(database).ensure(subject_id, "d" * 64)
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO runtime_state(subject_id,state,reason,version,changed_at) "
+            "VALUES (?,?,?,?,?)",
+            (subject_id, "active", "test", 1, "2026-01-01T00:00:00+00:00"),
+        )
     store = MigrationStore(database)
     patch = {"enabled": True, "allowed_target_ids": ("standby-1",)}
     if emergency:
@@ -46,12 +54,25 @@ def _target_context(tmp_path: Any, *, emergency: bool = False) -> Any:
         encrypted_volume=True,
         actor="operator",
     )
-    challenge = registry.issue_challenge("standby-1", source_epoch="source-1")
+    challenge = registry.issue_challenge("standby-1", source_epoch="runtime-1")
     registry.attest(
         "standby-1",
         challenge,
         base64.urlsafe_b64encode(private.sign(challenge.signing_bytes())).decode("ascii"),
         actor="operator",
+    )
+    backup_path = tmp_path / "backup.bin"
+    backup_path.write_bytes(b"verified recovery backup")
+    RecoveryCoordinator(database).register_backup(
+        subject_id=subject_id,
+        backup_id="backup-1",
+        backup_path=str(backup_path),
+        content_hash_value=hashlib.sha256(backup_path.read_bytes()).hexdigest(),
+        byte_size=backup_path.stat().st_size,
+        schema_version=CURRENT_SCHEMA_VERSION,
+        genesis_hash="d" * 64,
+        key_id="backup-key-1",
+        keyring_generation=1,
     )
     return database, store, registry, private
 
@@ -177,8 +198,10 @@ def test_source_restart_remains_fenced_and_local_wallet_needs_approval(tmp_path:
     )
     database_path = tmp_path / "noyra.sqlite3"
     lease.assert_current()
+    kernel = SubjectKernel(database_path, "Noyra-0001", "d" * 64)
     with pytest.raises(RuntimeOwnershipError, match="fenced"):
-        SubjectKernel(database_path, "Noyra-0001", "d" * 64)
+        kernel.boot()
+    kernel.close()
     lease.revoke("test cleanup", "operator")
 
     plan = WalletMigration.plan(

@@ -288,7 +288,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 77
+CURRENT_SCHEMA_VERSION = 78
 
 # The schema DDL fingerprint is checked after every successful initialization.
 # Update this value only alongside a reviewed schema migration and its tests.
@@ -297,6 +297,7 @@ CURRENT_SCHEMA_VERSION = 77
 # the value to remain stable across compatible runtime fixes.
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
     77: "2487f1a2703fc940178b2c77f2b3982a37b4a526de37b9b253204be71f4a6d1f",
+    78: "895ea957c9befde841e2c665c1cae4d47d9f90c9b37a9f6341e2cea339bbd5d5",
 }
 
 # Structural objects are checked independently so a trigger-only integrity
@@ -305,6 +306,7 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 # database construction because they define the storage contract itself.
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
     77: "03eae2bf8cdb2379f5a7271801044ce1920e0805018827d3661184b2a9fca896",
+    78: "d8cc66309f41f32f3c7a7f05954ac237ad3826cfcdf6cf178c07538aa30fe828",
 }
 
 _PERSISTENT_FEATURE_OBJECTS: dict[str, tuple[str, ...]] = {
@@ -6815,6 +6817,24 @@ CREATE TABLE IF NOT EXISTS search_provider_routing (
 );
 CREATE INDEX IF NOT EXISTS idx_search_provider_routing_order
     ON search_provider_routing(priority, config_id);
+""",
+    78: """
+CREATE TABLE IF NOT EXISTS migration_backup_registry (
+    backup_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    backup_path TEXT NOT NULL,
+    content_hash TEXT NOT NULL CHECK(length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'),
+    byte_size INTEGER NOT NULL CHECK(byte_size > 0),
+    schema_version INTEGER NOT NULL CHECK(schema_version >= 1),
+    genesis_hash TEXT NOT NULL CHECK(length(genesis_hash) = 64 AND genesis_hash NOT GLOB '*[^0-9a-f]*'),
+    key_id TEXT NOT NULL,
+    keyring_generation INTEGER NOT NULL CHECK(keyring_generation >= 1),
+    status TEXT NOT NULL CHECK(status IN ('registered', 'verified', 'revoked', 'expired')),
+    verified_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL CHECK(length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*')
+);
+CREATE INDEX IF NOT EXISTS idx_migration_backup_registry_subject_status
+    ON migration_backup_registry(subject_id, status, verified_at DESC);
 """,
 }
 

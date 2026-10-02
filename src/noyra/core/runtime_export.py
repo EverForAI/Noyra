@@ -516,6 +516,11 @@ _OWNERSHIP_GRAPH_V76 = {
     ),
 }
 _OWNERSHIP_GRAPH_V77 = _OWNERSHIP_GRAPH_V76
+_SUBJECT_TABLES_V78 = frozenset({"migration_backup_registry"})
+_OWNERSHIP_GRAPH_V78 = {
+    **_OWNERSHIP_GRAPH_V77,
+    **{table: _subject_rule() for table in _SUBJECT_TABLES_V78},
+}
 
 _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     33: _OWNERSHIP_GRAPH_V33,
@@ -563,6 +568,7 @@ _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     75: _OWNERSHIP_GRAPH_V75,
     76: _OWNERSHIP_GRAPH_V76,
     77: _OWNERSHIP_GRAPH_V77,
+    78: _OWNERSHIP_GRAPH_V78,
 }
 
 

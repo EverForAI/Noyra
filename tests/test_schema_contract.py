@@ -144,8 +144,8 @@ def test_schema_76_marker_migrates_to_the_reviewed_schema_77_contract(tmp_path: 
             ).fetchone()[0]
         )
 
-    assert schema_version == 77
-    assert contract.startswith("77:")
+    assert schema_version == CURRENT_SCHEMA_VERSION
+    assert contract.startswith(f"{CURRENT_SCHEMA_VERSION}:")
 
 
 def test_missing_persistent_feature_marker_fails_closed(tmp_path: Path) -> None:

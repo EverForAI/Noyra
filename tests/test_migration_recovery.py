@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from dataclasses import replace
 from typing import Any
 
@@ -8,6 +9,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from noyra.core import Database, IdentityStore
+from noyra.core.database import CURRENT_SCHEMA_VERSION
 from noyra.migration.policy import MigrationStore
 from noyra.migration.recovery import RecoveryCoordinator, RecoveryRequest
 from noyra.migration.targets import TargetRegistry
@@ -17,6 +19,12 @@ def _setup(tmp_path: Any) -> Any:
     database = Database(tmp_path / "noyra.sqlite3")
     subject_id = "Noyra-0001"
     IdentityStore(database).ensure(subject_id, "d" * 64)
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO runtime_state(subject_id,state,reason,version,changed_at) "
+            "VALUES (?,?,?,?,?)",
+            (subject_id, "active", "test", 1, "2026-01-01T00:00:00+00:00"),
+        )
     store = MigrationStore(database)
     policy = store.read_policy(subject_id).with_updates(
         enabled=True,
@@ -52,9 +60,23 @@ def _setup(tmp_path: Any) -> Any:
         encrypted_volume=True,
         actor="operator",
     )
-    challenge = registry.issue_challenge(target.target_id, source_epoch="source-1")
+    challenge = registry.issue_challenge(target.target_id, source_epoch="runtime-1")
     signature = base64.urlsafe_b64encode(private.sign(challenge.signing_bytes())).decode("ascii")
     registry.attest(target.target_id, challenge, signature, actor="operator")
+    backup_path = tmp_path / "backup.bin"
+    backup_path.write_bytes(b"verified recovery backup")
+    backup_hash = hashlib.sha256(backup_path.read_bytes()).hexdigest()
+    RecoveryCoordinator(database).register_backup(
+        subject_id=subject_id,
+        backup_id="backup-1",
+        backup_path=str(backup_path),
+        content_hash_value=backup_hash,
+        byte_size=backup_path.stat().st_size,
+        schema_version=CURRENT_SCHEMA_VERSION,
+        genesis_hash="d" * 64,
+        key_id="backup-key-1",
+        keyring_generation=1,
+    )
     return database, store.read_policy(subject_id), private, registry
 
 
