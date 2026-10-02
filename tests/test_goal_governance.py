@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Self
 from unittest.mock import patch
 
 from noyra.cognition import CognitionSettings, GoalGovernance
@@ -26,7 +27,7 @@ from noyra.model import (
 
 
 class GoalGovernanceTestCase(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.subject_id = "Noyra-goal-governance-test"
         self.kernel = SubjectKernel(
@@ -77,11 +78,11 @@ class GoalGovernanceTestCase(unittest.IsolatedAsyncioTestCase):
             idempotency_key="human-governance-injection",
         )
 
-    async def asyncTearDown(self) -> None:
+    async def asyncTearDown(self: Self) -> None:
         self.kernel.close()
         self.temp_dir.cleanup()
 
-    def test_parser_rejects_blob_durable_json(self) -> None:
+    def test_parser_rejects_blob_durable_json(self: Self) -> None:
         with self.assertRaises(IntegrityError):
             GoalGovernance._from_row(
                 {"governance_id": "governance-corrupt", "proposal_json": b"{}"}
@@ -98,7 +99,7 @@ class GoalGovernanceTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
     def governance(
-        self,
+        self: Self,
         provider: FakeProvider,
         *,
         max_calls: int = 4,
@@ -121,7 +122,7 @@ class GoalGovernanceTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
     def proposal(
-        self,
+        self: Self,
         *,
         goal_id: str | None = None,
         priority: float = 0.75,
@@ -151,7 +152,7 @@ class GoalGovernanceTestCase(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-    async def test_autonomous_goal_becomes_focus_without_creating_an_action(self) -> None:
+    async def test_autonomous_goal_becomes_focus_without_creating_an_action(self: Self) -> None:
         provider = FakeProvider(
             [ProviderResponse(content=self.proposal(), usage=ModelUsage(700, 250))]
         )
@@ -192,7 +193,7 @@ class GoalGovernanceTestCase(unittest.IsolatedAsyncioTestCase):
                 1,
             )
 
-    async def test_accepted_human_proposal_stays_out_of_autonomous_governance(self) -> None:
+    async def test_accepted_human_proposal_stays_out_of_autonomous_governance(self: Self) -> None:
         GoalStore(self.kernel.database).accept_human_proposal(
             self.human_goal.goal_id,
             rationale="The subject has recorded the invitation without delegating its governance.",
@@ -204,7 +205,7 @@ class GoalGovernanceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn(self.goal.goal_id, {goal.goal_id for goal in eligible})
         self.assertNotIn(self.human_goal.goal_id, {goal.goal_id for goal in eligible})
 
-    async def test_successful_model_call_is_reused_after_a_commit_crash(self) -> None:
+    async def test_successful_model_call_is_reused_after_a_commit_crash(self: Self) -> None:
         provider = FakeProvider(
             [ProviderResponse(content=self.proposal(), usage=ModelUsage(700, 250))]
         )
@@ -220,7 +221,7 @@ class GoalGovernanceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recovered.verify_integrity(), 1)
 
     async def test_invalid_goal_and_abrupt_weight_change_are_rejected_without_partial_state(
-        self,
+        self: Self,
     ) -> None:
         provider = FakeProvider(
             [
@@ -244,7 +245,7 @@ class GoalGovernanceTestCase(unittest.IsolatedAsyncioTestCase):
         with self.kernel.database.connection() as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM actions").fetchone()[0], 0)
 
-    async def test_daily_call_cap_and_budget_exhaustion_are_bounded(self) -> None:
+    async def test_daily_call_cap_and_budget_exhaustion_are_bounded(self: Self) -> None:
         invalid = FakeProvider(
             [
                 ProviderResponse(
@@ -264,7 +265,7 @@ class GoalGovernanceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await exhausted.run_due(), "goal_governance_budget_exhausted")
         self.assertEqual(exhausted.fatigue.get(self.subject_id).resource_pressure, 1)
 
-    async def test_supervisor_enforces_active_goal_limit(self) -> None:
+    async def test_supervisor_enforces_active_goal_limit(self: Self) -> None:
         second = GoalStore(self.kernel.database).create_candidate(
             self.subject_id,
             GoalCandidate(
@@ -297,7 +298,7 @@ class GoalGovernanceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(GoalStore(self.kernel.database).get(self.goal.goal_id).status, "candidate")
         self.assertEqual(GoalStore(self.kernel.database).get(second.goal_id).status, "candidate")
 
-    async def test_governance_records_are_append_only_and_hash_checked(self) -> None:
+    async def test_governance_records_are_append_only_and_hash_checked(self: Self) -> None:
         provider = FakeProvider(
             [ProviderResponse(content=self.proposal(), usage=ModelUsage(700, 250))]
         )

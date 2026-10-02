@@ -4,6 +4,7 @@ import socket
 from pathlib import Path
 from subprocess import CompletedProcess
 from types import SimpleNamespace
+from typing import Any, Self
 
 import pytest
 
@@ -23,11 +24,11 @@ from noyra.deployment_setup import (
 
 
 class FakeRunner:
-    def __init__(self, healthy: bool = True):
+    def __init__(self: Self, healthy: bool = True) -> None:
         self.healthy = healthy
         self.calls: list[tuple[str, ...]] = []
 
-    def run(self, argv, *, check=True, input_text=None):
+    def run(self: Self, argv: Any, *, check: Any = True, input_text: Any = None) -> Any:
         del check, input_text
         command = tuple(argv)
         self.calls.append(command)
@@ -153,7 +154,7 @@ def test_local_mount_check_uses_findmnt(tmp_path: Path, monkeypatch: pytest.Monk
     env_path.write_text("NOYRA_HOST=127.0.0.1\nNOYRA_OPERATOR_TOKEN=test-token\n", encoding="utf-8")
 
     class Runner:
-        def run(self, argv, *, check=True, input_text=None):
+        def run(self: Self, argv: Any, *, check: Any = True, input_text: Any = None) -> Any:
             del check, input_text
             assert argv[:1] == ("findmnt",)
             return CompletedProcess(argv, 1, "", "")
@@ -248,7 +249,7 @@ def test_public_mode_dns_pending_prevents_mutation(
     env = tmp_path / "noyra.env"
     original = env.read_text(encoding="utf-8")
 
-    def missing_dns(*args, **kwargs):
+    def missing_dns(*args: Any, **kwargs: Any) -> None:
         raise socket.gaierror("not found")
 
     monkeypatch.setattr(socket, "getaddrinfo", missing_dns)
@@ -273,7 +274,7 @@ def test_public_mode_command_oserror_rolls_back(
         lambda *args, **kwargs: [(0, 0, 0, "", ("127.0.0.1", 443))],
     )
 
-    def command_error(*args, **kwargs):
+    def command_error(*args: Any, **kwargs: Any) -> Any:
         command = tuple(args[0])
         if command[:2] == ("caddy", "validate"):
             raise FileNotFoundError("caddy")
@@ -301,7 +302,7 @@ def test_public_mode_reports_rollback_failure(
     deployment_module = __import__("noyra.deployment_setup", fromlist=["restore_backup"])
     original_restore = deployment_module.restore_backup
 
-    def broken_restore(record):
+    def broken_restore(record: Any) -> Any:
         if record.original_path == caddy:
             raise OSError("restore failed")
         return original_restore(record)
@@ -309,7 +310,7 @@ def test_public_mode_reports_rollback_failure(
     monkeypatch.setattr("noyra.deployment_setup.restore_backup", broken_restore)
     original_run = runner.run
 
-    def fail_external_health(argv, *, check=True, input_text=None):
+    def fail_external_health(argv: Any, *, check: Any = True, input_text: Any = None) -> Any:
         if tuple(argv) == ("curl", "--fail", "https://admin.example.com/health/ready"):
             return CompletedProcess(argv, 1, "", "failed")
         return original_run(argv, check=check, input_text=input_text)
@@ -424,7 +425,7 @@ def test_cloudflare_redacts_token_from_health_error_and_restores_service_state(
     secret = "secret-token"
 
     class Runner(FakeRunner):
-        def run(self, argv, *, check=True, input_text=None):
+        def run(self: Self, argv: Any, *, check: Any = True, input_text: Any = None) -> Any:
             command = tuple(argv)
             self.calls.append(command)
             if command[:2] == ("systemctl", "is-enabled"):
@@ -461,7 +462,7 @@ def test_cloudflare_rollback_preserves_static_service_state(
     )
 
     class Runner(FakeRunner):
-        def run(self, argv, *, check=True, input_text=None):
+        def run(self: Self, argv: Any, *, check: Any = True, input_text: Any = None) -> Any:
             command = tuple(argv)
             self.calls.append(command)
             if command[:2] == ("systemctl", "is-enabled"):
@@ -547,10 +548,10 @@ def test_cloudflare_rollback_restores_systemd_state_matrix(
     expected: list[tuple[str, ...]],
 ) -> None:
     class Runner:
-        def __init__(self) -> None:
+        def __init__(self: Self) -> None:
             self.calls: list[tuple[str, ...]] = []
 
-        def run(self, argv, *, check=True, input_text=None):
+        def run(self: Self, argv: Any, *, check: Any = True, input_text: Any = None) -> Any:
             del check, input_text
             command = tuple(argv)
             self.calls.append(command)

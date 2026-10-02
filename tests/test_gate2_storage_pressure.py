@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Self, cast
 from unittest.mock import Mock
 
 import pytest
@@ -495,20 +495,20 @@ def test_cloud_archive_no_staging_mode_does_not_copy_snapshot_payloads() -> None
         class MemoryProvider:
             name = "memory"
 
-            def __init__(self) -> None:
+            def __init__(self: Self) -> None:
                 self.objects: dict[str, bytes] = {}
 
-            def put(self, object_key: str, payload: bytes) -> str:
+            def put(self: Self, object_key: str, payload: bytes) -> str:
                 self.objects[object_key] = payload
                 return hashlib.sha256(payload).hexdigest()
 
-            def get(self, object_key: str, *, max_bytes: int | None = None) -> bytes:
+            def get(self: Self, object_key: str, *, max_bytes: int | None = None) -> bytes:
                 payload = self.objects[object_key]
                 if max_bytes is not None and len(payload) > max_bytes:
                     raise OSError("payload exceeds test limit")
                 return payload
 
-            def exists(self, object_key: str) -> bool:
+            def exists(self: Self, object_key: str) -> bool:
                 return object_key in self.objects
 
         provider = MemoryProvider()
@@ -589,7 +589,9 @@ def test_snapshot_compaction_cas_does_not_duplicate_under_concurrent_compactors(
         release = Event()
 
         class PausingStore(SnapshotStore):
-            def _build_archive_payload(self, rows: list[dict[str, Any]], checkpoint: Any) -> Any:
+            def _build_archive_payload(
+                self: Self, rows: list[dict[str, Any]], checkpoint: Any
+            ) -> Any:
                 started.set()
                 assert release.wait(5)
                 return super()._build_archive_payload(rows, checkpoint)

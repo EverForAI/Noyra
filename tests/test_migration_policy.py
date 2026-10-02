@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from noyra.core import Database, IdentityStore
@@ -10,13 +12,13 @@ from noyra.migration.policy import (
 )
 
 
-def _store(tmp_path):
+def _store(tmp_path: Any) -> Any:
     database = Database(tmp_path / "noyra.sqlite3")
     IdentityStore(database).ensure("Noyra-0001", "a" * 64)
     return database, MigrationStore(database)
 
 
-def test_fresh_policy_is_disabled_and_safe(tmp_path) -> None:
+def test_fresh_policy_is_disabled_and_safe(tmp_path: Any) -> None:
     _, store = _store(tmp_path)
 
     policy = store.read_policy("Noyra-0001")
@@ -30,7 +32,7 @@ def test_fresh_policy_is_disabled_and_safe(tmp_path) -> None:
     assert policy.allowed_target_ids == ()
 
 
-def test_enabling_without_mode_selects_manual(tmp_path) -> None:
+def test_enabling_without_mode_selects_manual(tmp_path: Any) -> None:
     _, store = _store(tmp_path)
 
     policy = store.update_policy(
@@ -45,7 +47,7 @@ def test_enabling_without_mode_selects_manual(tmp_path) -> None:
     assert policy.revision == 2
 
 
-def test_policy_auto_requires_non_empty_allowlist(tmp_path) -> None:
+def test_policy_auto_requires_non_empty_allowlist(tmp_path: Any) -> None:
     _, store = _store(tmp_path)
 
     with pytest.raises(ValueError, match="target"):
@@ -57,7 +59,7 @@ def test_policy_auto_requires_non_empty_allowlist(tmp_path) -> None:
         )
 
 
-def test_local_wallet_requires_explicit_opt_in(tmp_path) -> None:
+def test_local_wallet_requires_explicit_opt_in(tmp_path: Any) -> None:
     _, store = _store(tmp_path)
 
     with pytest.raises(ValueError, match="local wallet"):
@@ -69,7 +71,7 @@ def test_local_wallet_requires_explicit_opt_in(tmp_path) -> None:
         )
 
 
-def test_stale_revision_is_rejected_without_mutation(tmp_path) -> None:
+def test_stale_revision_is_rejected_without_mutation(tmp_path: Any) -> None:
     _, store = _store(tmp_path)
     store.update_policy(
         "Noyra-0001",

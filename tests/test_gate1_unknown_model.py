@@ -4,7 +4,7 @@ import asyncio
 import errno
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Self
 
 import pytest
 from pydantic import BaseModel, SecretStr
@@ -86,12 +86,12 @@ async def test_concurrent_logical_request_has_single_provider_owner(tmp_path: Pa
     class BlockingProvider:
         name = "blocking"
 
-        def __init__(self) -> None:
+        def __init__(self: Self) -> None:
             self.entered = asyncio.Event()
             self.release = asyncio.Event()
             self.requests: list[Any] = []
 
-        async def complete(self, request: Any) -> ProviderResponse:
+        async def complete(self: Self, request: Any) -> ProviderResponse:
             self.requests.append(request)
             self.entered.set()
             await self.release.wait()

@@ -6,7 +6,7 @@ import sqlite3
 import time
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import httpx
 import pytest
@@ -23,51 +23,51 @@ from noyra.knowledge.sync import CommonKnowledgeHTTPClient, CommonKnowledgeSyncE
 
 
 class _PublisherClient:
-    def __init__(self, publisher: CommonKnowledgeStore):
+    def __init__(self: Self, publisher: CommonKnowledgeStore) -> None:
         self.publisher = publisher
 
-    def __enter__(self) -> _PublisherClient:
+    def __enter__(self: Self) -> _PublisherClient:
         return self
 
-    def __exit__(self, *_args: object) -> None:
+    def __exit__(self: Self, *_args: object) -> None:
         return None
 
-    def discovery(self, *, etag: str | None = None) -> dict[str, Any] | None:
+    def discovery(self: Self, *, etag: str | None = None) -> dict[str, Any] | None:
         document = self.publisher.discovery_document()
         return None if etag is not None and etag == document["etag"] else document
 
-    def feed(self, *, cursor: int, limit: int) -> dict[str, Any]:
+    def feed(self: Self, *, cursor: int, limit: int) -> dict[str, Any]:
         return self.publisher.feed_document(cursor=cursor, limit=limit)
 
 
 class _OfflineClient:
-    def __enter__(self) -> _OfflineClient:
+    def __enter__(self: Self) -> _OfflineClient:
         return self
 
-    def __exit__(self, *_args: object) -> None:
+    def __exit__(self: Self, *_args: object) -> None:
         return None
 
-    def discovery(self, *, etag: str | None = None) -> None:
+    def discovery(self: Self, *, etag: str | None = None) -> None:
         del etag
         raise CommonKnowledgeSyncError("offline")
 
-    def feed(self, *, cursor: int, limit: int) -> dict[str, Any]:
+    def feed(self: Self, *, cursor: int, limit: int) -> dict[str, Any]:
         del cursor, limit
         raise CommonKnowledgeSyncError("offline")
 
 
 class _TamperedClient(_PublisherClient):
-    def __init__(self, publisher: CommonKnowledgeStore, *, tamper: str):
+    def __init__(self: Self, publisher: CommonKnowledgeStore, *, tamper: str) -> None:
         super().__init__(publisher)
         self.tamper = tamper
 
-    def discovery(self, *, etag: str | None = None) -> dict[str, Any] | None:
+    def discovery(self: Self, *, etag: str | None = None) -> dict[str, Any] | None:
         document = super().discovery(etag=etag)
         if document is not None and self.tamper == "discovery":
             document["latest_sequence"] = int(document["latest_sequence"]) + 1
         return document
 
-    def feed(self, *, cursor: int, limit: int) -> dict[str, Any]:
+    def feed(self: Self, *, cursor: int, limit: int) -> dict[str, Any]:
         document = super().feed(cursor=cursor, limit=limit)
         if self.tamper == "event" and document["events"]:
             document["events"][0]["event_hash"] = "tampered"

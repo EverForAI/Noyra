@@ -6,6 +6,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Self
 
 import pytest
 
@@ -48,15 +49,15 @@ class _MemoryCloud:
     provider_id: str = "memory-cloud-p111"
     read_mode: str = "good"
 
-    def __post_init__(self) -> None:
+    def __post_init__(self: Self) -> None:
         self.name = "memory-cloud"
         self.objects: dict[str, bytes] = {}
 
-    def put(self, object_key: str, payload: bytes) -> str:
+    def put(self: Self, object_key: str, payload: bytes) -> str:
         self.objects[object_key] = payload
         return hashlib.sha256(payload).hexdigest()
 
-    def get(self, object_key: str, *, max_bytes: int | None = None) -> bytes:
+    def get(self: Self, object_key: str, *, max_bytes: int | None = None) -> bytes:
         if self.read_mode == "timeout":
             raise TimeoutError("cloud read timed out")
         if self.read_mode == "missing" or object_key not in self.objects:
@@ -68,7 +69,7 @@ class _MemoryCloud:
             raise PayloadLimitError("cloud object exceeds its read limit")
         return payload
 
-    def exists(self, object_key: str) -> bool:
+    def exists(self: Self, object_key: str) -> bool:
         return object_key in self.objects
 
 

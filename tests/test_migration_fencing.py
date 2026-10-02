@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -12,7 +13,7 @@ from noyra.migration.policy import MigrationStore
 from noyra.migration.targets import TargetRegistry
 
 
-def test_only_one_active_epoch_and_old_epoch_is_stale(tmp_path) -> None:
+def test_only_one_active_epoch_and_old_epoch_is_stale(tmp_path: Any) -> None:
     db = Database(tmp_path / "noyra.sqlite3")
     IdentityStore(db).ensure("Noyra-0001", "1" * 64)
     private = Ed25519PrivateKey.generate()
@@ -55,7 +56,7 @@ def test_only_one_active_epoch_and_old_epoch_is_stale(tmp_path) -> None:
         first.assert_current()
 
 
-def test_active_target_epoch_fences_source_admission_across_restart(tmp_path) -> None:
+def test_active_target_epoch_fences_source_admission_across_restart(tmp_path: Any) -> None:
     database_path = tmp_path / "noyra.sqlite3"
     subject_id = "Noyra-0001"
     kernel = SubjectKernel(database_path, subject_id, "5" * 64)
@@ -94,7 +95,7 @@ def test_active_target_epoch_fences_source_admission_across_restart(tmp_path) ->
     assert not restarted.process_lock.held
 
 
-def test_active_target_epoch_rejects_direct_checkpoint_mutation(tmp_path) -> None:
+def test_active_target_epoch_rejects_direct_checkpoint_mutation(tmp_path: Any) -> None:
     kernel = SubjectKernel(tmp_path / "checkpoint.sqlite3", "Noyra-0001", "6" * 64)
     kernel.boot()
     kernel.orient()
@@ -134,7 +135,7 @@ def test_active_target_epoch_rejects_direct_checkpoint_mutation(tmp_path) -> Non
     kernel.close()
 
 
-def test_completed_epoch_does_not_restore_source_authority_after_restart(tmp_path) -> None:
+def test_completed_epoch_does_not_restore_source_authority_after_restart(tmp_path: Any) -> None:
     database_path = tmp_path / "completed-epoch.sqlite3"
     subject_id = "Noyra-0001"
     kernel = SubjectKernel(database_path, subject_id, "7" * 64)
@@ -171,7 +172,7 @@ def test_completed_epoch_does_not_restore_source_authority_after_restart(tmp_pat
     assert not restarted.process_lock.held
 
 
-def test_epoch_acquisition_rejects_missing_target_validation_proof(tmp_path) -> None:
+def test_epoch_acquisition_rejects_missing_target_validation_proof(tmp_path: Any) -> None:
     db = Database(tmp_path / "proof.sqlite3")
     IdentityStore(db).ensure("Noyra-0001", "9" * 64)
     with pytest.raises(ValueError, match="verified target restore and health proof"):

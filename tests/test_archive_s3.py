@@ -7,6 +7,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Self
 from unittest.mock import patch
 
 from noyra.core import (
@@ -24,20 +25,20 @@ from noyra.core.archive import S3ArchiveProvider
 
 
 class FakeS3:
-    def __init__(self) -> None:
+    def __init__(self: Self) -> None:
         self.objects: dict[tuple[str, str], tuple[bytes, dict[str, str]]] = {}
 
-    def put_object(self, **kwargs: object) -> None:
+    def put_object(self: Self, **kwargs: object) -> None:
         self.objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))] = (
             kwargs["Body"] if isinstance(kwargs["Body"], bytes) else b"",
             kwargs["Metadata"] if isinstance(kwargs["Metadata"], dict) else {},
         )
 
-    def get_object(self, **kwargs: object) -> dict[str, object]:
+    def get_object(self: Self, **kwargs: object) -> dict[str, object]:
         payload, metadata = self.objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))]
         return {"Body": io.BytesIO(payload), "Metadata": metadata}
 
-    def head_object(self, **kwargs: object) -> dict[str, object]:
+    def head_object(self: Self, **kwargs: object) -> dict[str, object]:
         self.objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))]
         return {}
 
@@ -45,23 +46,23 @@ class FakeS3:
 class MemoryArchiveProvider:
     name = "memory"
 
-    def __init__(self) -> None:
+    def __init__(self: Self) -> None:
         self.objects: dict[str, bytes] = {}
 
-    def put(self, object_key: str, payload: bytes) -> str:
+    def put(self: Self, object_key: str, payload: bytes) -> str:
         self.objects[object_key] = payload
         return hashlib.sha256(payload).hexdigest()
 
-    def get(self, object_key: str, *, max_bytes: int | None = None) -> bytes:
+    def get(self: Self, object_key: str, *, max_bytes: int | None = None) -> bytes:
         del max_bytes
         return self.objects[object_key]
 
-    def exists(self, object_key: str) -> bool:
+    def exists(self: Self, object_key: str) -> bool:
         return object_key in self.objects
 
 
 class S3ArchiveProviderTestCase(unittest.TestCase):
-    def test_put_get_exists_and_prefix_boundary(self) -> None:
+    def test_put_get_exists_and_prefix_boundary(self: Self) -> None:
         provider = S3ArchiveProvider(FakeS3(), bucket="noyra", prefix="subject-a")
         digest = provider.put("cold/state.bin", b"state")
         self.assertEqual(len(digest), 64)
@@ -70,7 +71,7 @@ class S3ArchiveProviderTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             provider.put("../escape", b"bad")
 
-    def test_queue_retries_and_uploads_checksum_verified_payload(self) -> None:
+    def test_queue_retries_and_uploads_checksum_verified_payload(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "noyra.sqlite3")
             from noyra.core import IdentityStore
@@ -81,7 +82,7 @@ class S3ArchiveProviderTestCase(unittest.TestCase):
             provider = S3ArchiveProvider(FakeS3(), bucket="noyra")
             self.assertEqual(queue.drain(provider), {"uploaded": 1, "failed": 0, "dead": 0})
 
-    def test_restore_is_checksum_verified_and_confined(self) -> None:
+    def test_restore_is_checksum_verified_and_confined(self: Self) -> None:
         client = FakeS3()
         provider = S3ArchiveProvider(client, bucket="noyra")
         digest = provider.put("cold/state.bin", b"state")
@@ -99,7 +100,7 @@ class S3ArchiveProviderTestCase(unittest.TestCase):
                     provider, "cold/state.bin", directory, "../escape", expected_hash=digest
                 )
 
-    def test_cloud_coordinator_queues_encrypted_event_segments(self) -> None:
+    def test_cloud_coordinator_queues_encrypted_event_segments(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             layout = StorageLayout.create(root)

@@ -8,6 +8,7 @@ import zipfile
 from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
+from typing import Self
 from unittest.mock import patch
 
 import httpx
@@ -40,7 +41,7 @@ from noyra.world import SourceRegistry
 
 
 class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
         self.subject_id = "Noyra-research-test"
@@ -94,13 +95,13 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
             client=self.browser_client,
         )
 
-    async def asyncTearDown(self) -> None:
+    async def asyncTearDown(self: Self) -> None:
         await self.browser_client.aclose()
         await self.client.aclose()
         self.kernel.close()
         self.temp_dir.cleanup()
 
-    def test_parser_rejects_fractional_durable_result_count(self) -> None:
+    def test_parser_rejects_fractional_durable_result_count(self: Self) -> None:
         with self.assertRaises(IntegrityError):
             AutonomousResearch._from_row(
                 {
@@ -166,7 +167,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
     def gateway(
-        self, provider: FakeProvider, *, limits: BudgetLimits | None = None
+        self: Self, provider: FakeProvider, *, limits: BudgetLimits | None = None
     ) -> ModelGateway:
         return ModelGateway(
             provider,
@@ -178,7 +179,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
     def research(
-        self,
+        self: Self,
         provider: FakeProvider,
         *,
         rounds: int = 1,
@@ -195,7 +196,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
     def plan(
-        self,
+        self: Self,
         *,
         method: str = "api",
         config_id: str | None = None,
@@ -214,7 +215,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-    def test_search_routing_mode_selects_configured_preference(self) -> None:
+    def test_search_routing_mode_selects_configured_preference(self: Self) -> None:
         research = self.research(FakeProvider([]))
         set_search_routing_mode(
             self.kernel.database,
@@ -224,7 +225,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(research._routing_mode(), "api_first")
 
-    def test_search_routing_rejects_tampered_persistent_mode(self) -> None:
+    def test_search_routing_rejects_tampered_persistent_mode(self: Self) -> None:
         research = self.research(FakeProvider([]))
         with self.kernel.database.transaction() as connection:
             connection.execute(
@@ -235,7 +236,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(IntegrityError):
             research._routing_mode()
 
-    def test_search_routing_modes_choose_expected_initial_method(self) -> None:
+    def test_search_routing_modes_choose_expected_initial_method(self: Self) -> None:
         config = self.provider_store.configure(
             self.subject_id,
             SearchProviderInput(provider_type="brave", label="routing", api_key="routing-secret"),
@@ -254,7 +255,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_search_provider_can_test_unstored_credentials_without_persisting_them(
-        self,
+        self: Self,
     ) -> None:
         authorization: list[str] = []
 
@@ -281,7 +282,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         await client.aclose()
 
     async def test_configured_api_is_a_resource_and_autonomous_search_registers_sources(
-        self,
+        self: Self,
     ) -> None:
         config = self.provider_store.configure(
             self.subject_id,
@@ -339,7 +340,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("operator-provided capabilities, not instructions", system.content)
         self.assertNotIn("test-secret-key", context.content)
 
-    async def test_runtime_configuration_export_excludes_provider_api_keys(self) -> None:
+    async def test_runtime_configuration_export_excludes_provider_api_keys(self: Self) -> None:
         secret = "runtime-export-provider-key-must-not-leak"
         self.provider_store.configure(
             self.subject_id,
@@ -360,7 +361,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(secret.encode(), exported)
         self.assertIn(b"export-secret-check", exported)
 
-    async def test_no_api_defaults_to_model_search(self) -> None:
+    async def test_no_api_defaults_to_model_search(self: Self) -> None:
         model_results = json.dumps(
             {
                 "results": [
@@ -391,7 +392,9 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM actions").fetchone()[0], 0)
 
-    async def test_browser_search_uses_public_search_surface_without_model_fallback(self) -> None:
+    async def test_browser_search_uses_public_search_surface_without_model_fallback(
+        self: Self,
+    ) -> None:
         provider = FakeProvider(
             [ProviderResponse(content=self.plan(method="browser"), usage=ModelUsage(700, 220))]
         )
@@ -413,7 +416,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(action["status"], "succeeded")
         self.assertEqual(call_count, 0)
 
-    async def test_browser_search_rejects_xml_entity_declarations(self) -> None:
+    async def test_browser_search_rejects_xml_entity_declarations(self: Self) -> None:
         async def entity_payload(_: httpx.Request) -> httpx.Response:
             return httpx.Response(
                 200,
@@ -446,7 +449,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
             ).fetchone()[0]
         self.assertEqual(status, "failed")
 
-    async def test_browser_prepare_failure_does_not_consume_reservation(self) -> None:
+    async def test_browser_prepare_failure_does_not_consume_reservation(self: Self) -> None:
         with self.assertRaises(PermissionError):
             await self.browser_executor.search(
                 self.subject_id,
@@ -465,7 +468,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
             ).fetchone()[0]
         self.assertEqual(count, 0)
 
-    async def test_result_assessment_can_switch_from_api_to_model(self) -> None:
+    async def test_result_assessment_can_switch_from_api_to_model(self: Self) -> None:
         config = self.provider_store.configure(
             self.subject_id,
             SearchProviderInput(
@@ -511,7 +514,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.final_method, "model")
         self.assertEqual(len(provider.requests), 3)
 
-    async def test_operator_can_revoke_search_resource_and_secret(self) -> None:
+    async def test_operator_can_revoke_search_resource_and_secret(self: Self) -> None:
         config = self.provider_store.configure(
             self.subject_id,
             SearchProviderInput(
@@ -532,7 +535,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PermissionError):
             self.provider_store.api_key(config.config_id, subject_id=self.subject_id)
 
-    async def test_research_integrity_covers_search_provider_json_and_secret(self) -> None:
+    async def test_research_integrity_covers_search_provider_json_and_secret(self: Self) -> None:
         config = self.provider_store.configure(
             self.subject_id,
             SearchProviderInput(
@@ -568,7 +571,9 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(IntegrityError):
             self.research(FakeProvider([])).verify_integrity()
 
-    async def test_search_provider_integrity_rejects_secret_fingerprint_mismatch(self) -> None:
+    async def test_search_provider_integrity_rejects_secret_fingerprint_mismatch(
+        self: Self,
+    ) -> None:
         config = self.provider_store.configure(
             self.subject_id,
             SearchProviderInput(
@@ -586,7 +591,9 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(IntegrityError):
             self.provider_store.verify_integrity(self.subject_id)
 
-    async def test_search_provider_integrity_uses_append_order_for_equal_timestamps(self) -> None:
+    async def test_search_provider_integrity_uses_append_order_for_equal_timestamps(
+        self: Self,
+    ) -> None:
         timestamp = "2026-08-17T00:00:00.000+00:00"
         with patch("noyra.research.provider.utc_now", return_value=timestamp):
             config = self.provider_store.configure(
@@ -617,7 +624,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    async def test_search_provider_integrity_rejects_revision_and_use_mismatch(self) -> None:
+    async def test_search_provider_integrity_rejects_revision_and_use_mismatch(self: Self) -> None:
         config = self.provider_store.configure(
             self.subject_id,
             SearchProviderInput(
@@ -662,7 +669,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(IntegrityError):
             self.provider_store.verify_integrity(self.subject_id)
 
-    async def test_provider_limit_cancels_prepared_action_without_network_call(self) -> None:
+    async def test_provider_limit_cancels_prepared_action_without_network_call(self: Self) -> None:
         config = self.provider_store.configure(
             self.subject_id,
             SearchProviderInput(
@@ -701,7 +708,9 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([row["status"] for row in statuses], ["succeeded", "cancelled"])
         self.assertEqual(uses, 1)
 
-    async def test_successful_search_replay_restores_results_without_network_call(self) -> None:
+    async def test_successful_search_replay_restores_results_without_network_call(
+        self: Self,
+    ) -> None:
         config = self.provider_store.configure(
             self.subject_id,
             SearchProviderInput(
@@ -748,7 +757,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
                 1,
             )
 
-    async def test_replacement_failure_preserves_existing_provider_and_secret(self) -> None:
+    async def test_replacement_failure_preserves_existing_provider_and_secret(self: Self) -> None:
         existing = self.provider_store.configure(
             self.subject_id,
             SearchProviderInput(
@@ -786,7 +795,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         secret_files = list((self.root / "secrets" / "search").glob("*.key"))
         self.assertEqual([path.name for path in secret_files], [f"{existing.config_id}.key"])
 
-    async def test_malformed_or_oversized_search_response_is_audited_as_failed(self) -> None:
+    async def test_malformed_or_oversized_search_response_is_audited_as_failed(self: Self) -> None:
         config = self.provider_store.configure(
             self.subject_id,
             SearchProviderInput(
@@ -845,7 +854,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
             ).fetchall()
         self.assertEqual([row["status"] for row in statuses], ["failed", "failed"])
 
-    async def test_ambiguous_transport_failure_is_quarantined_as_unknown(self) -> None:
+    async def test_ambiguous_transport_failure_is_quarantined_as_unknown(self: Self) -> None:
         config = self.provider_store.configure(
             self.subject_id,
             SearchProviderInput(
@@ -882,7 +891,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(action["status"], "unknown")
         self.assertTrue(json.loads(action["result_json"])["outcome_unknown"])
 
-    async def test_forged_goal_provider_or_evidence_is_rejected(self) -> None:
+    async def test_forged_goal_provider_or_evidence_is_rejected(self: Self) -> None:
         research = self.research(
             FakeProvider(
                 [
@@ -912,7 +921,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM actions").fetchone()[0], 0)
 
-    async def test_human_proposal_goal_is_excluded(self) -> None:
+    async def test_human_proposal_goal_is_excluded(self: Self) -> None:
         event = EventStore(self.kernel.database).append(
             self.subject_id,
             "human_goal_evidence",
@@ -944,7 +953,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         context = provider.requests[0].messages[1].content
         self.assertNotIn(candidate.goal_id, context)
 
-    async def test_duplicate_query_for_same_goal_and_day_is_rejected(self) -> None:
+    async def test_duplicate_query_for_same_goal_and_day_is_rejected(self: Self) -> None:
         first = self.research(
             FakeProvider(
                 [
@@ -980,7 +989,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
                 1,
             )
 
-    async def test_wait_plan_is_recovered_without_second_model_call(self) -> None:
+    async def test_wait_plan_is_recovered_without_second_model_call(self: Self) -> None:
         wait_plan = json.dumps(
             {
                 "summary": "Existing evidence is sufficient for now.",
@@ -1006,7 +1015,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(provider.requests), 1)
         self.assertEqual(recovered.verify_integrity(), 1)
 
-    async def test_source_metadata_collision_does_not_abort_research(self) -> None:
+    async def test_source_metadata_collision_does_not_abort_research(self: Self) -> None:
         SourceRegistry(self.kernel.database).register(
             self.subject_id,
             "Existing identity",
@@ -1044,7 +1053,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await research.run_due(), "research_accepted")
         self.assertEqual(len(research.latest().accepted_source_ids), 1)  # type: ignore[union-attr]
 
-    async def test_research_records_and_provider_uses_are_append_only(self) -> None:
+    async def test_research_records_and_provider_uses_are_append_only(self: Self) -> None:
         config = self.provider_store.configure(
             self.subject_id,
             SearchProviderInput(
@@ -1084,7 +1093,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(sqlite3.IntegrityError):
                     connection.execute(statement, (identifier,))
 
-    async def test_hard_model_budget_becomes_fatigue(self) -> None:
+    async def test_hard_model_budget_becomes_fatigue(self: Self) -> None:
         research = self.research(
             FakeProvider([]),
             limits=BudgetLimits(0, 500_000, 100_000, 5_000_000),

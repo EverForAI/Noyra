@@ -5,13 +5,14 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Self
 from unittest.mock import patch
 
 from noyra.core.upgrade import UpgradeError, UpgradeManager
 
 
 class UpgradeManagerTestCase(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.repo = self.root / "repo"
@@ -53,10 +54,10 @@ class UpgradeManagerTestCase(unittest.TestCase):
             },
         )
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.temp.cleanup()
 
-    def test_start_rejects_dirty_source_tree(self) -> None:
+    def test_start_rejects_dirty_source_tree(self: Self) -> None:
         self.manager.check_version()
         (self.repo / "tracked.txt").write_text("modified\n", encoding="utf-8")
         with self.assertRaises(UpgradeError) as error:
@@ -64,7 +65,7 @@ class UpgradeManagerTestCase(unittest.TestCase):
         self.assertEqual(error.exception.code, "upgrade_source_dirty")
         self.assertFalse(self.request.exists())
 
-    def test_start_allows_the_runner_to_create_its_first_source_checkout(self) -> None:
+    def test_start_allows_the_runner_to_create_its_first_source_checkout(self: Self) -> None:
         self.manager.source_path = self.root / "not-yet-cloned-source"
         self.manager.check_version()
 
@@ -73,7 +74,7 @@ class UpgradeManagerTestCase(unittest.TestCase):
         self.assertEqual(started["status"], "queued")
         self.assertTrue(self.request.is_file())
 
-    def test_git_commands_explicitly_trust_the_root_owned_upgrade_source(self) -> None:
+    def test_git_commands_explicitly_trust_the_root_owned_upgrade_source(self: Self) -> None:
         completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
         with patch("noyra.core.upgrade.subprocess.run", return_value=completed) as run:
             self.manager._git("status", "--porcelain", "--untracked-files=all")
@@ -81,14 +82,14 @@ class UpgradeManagerTestCase(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertIn(f"safe.directory={self.repo.resolve()}", command)
 
-    def test_version_check_returns_bounded_safe_projection(self) -> None:
+    def test_version_check_returns_bounded_safe_projection(self: Self) -> None:
         result = self.manager.check_version()
         self.assertEqual(result["latest"]["sha"], self.latest_sha)
         self.assertEqual(result["latest"]["short_sha"], self.latest_sha[:12])
         self.assertTrue(result["update_available"])
         self.assertNotIn("token", json.dumps(result).lower())
 
-    def test_status_is_persisted_and_reloaded(self) -> None:
+    def test_status_is_persisted_and_reloaded(self: Self) -> None:
         self.manager.check_version()
         self.manager.start(reason="routine update", idempotency_key="request-1")
         self.request.unlink()
@@ -117,7 +118,7 @@ class UpgradeManagerTestCase(unittest.TestCase):
         self.assertEqual(status["task_id"], "from-runner")
         self.assertEqual(status["status"], "completed")
 
-    def test_start_is_idempotent_for_the_same_request(self) -> None:
+    def test_start_is_idempotent_for_the_same_request(self: Self) -> None:
         self.manager.check_version()
         first = self.manager.start(reason="routine update", idempotency_key="request-1")
         second = self.manager.start(reason="routine update", idempotency_key="request-1")
@@ -125,7 +126,7 @@ class UpgradeManagerTestCase(unittest.TestCase):
         request = json.loads(self.request.read_text(encoding="utf-8"))
         self.assertEqual(request["target_sha"], self.latest_sha)
 
-    def test_status_reports_queued_request_before_root_runner_starts(self) -> None:
+    def test_status_reports_queued_request_before_root_runner_starts(self: Self) -> None:
         self.manager.check_version()
         started = self.manager.start(reason="routine update", idempotency_key="request-1")
         status = self.manager.status()
@@ -133,7 +134,7 @@ class UpgradeManagerTestCase(unittest.TestCase):
         self.assertEqual(status["status"], "queued")
         self.assertEqual(status["target_sha"], self.latest_sha)
 
-    def test_target_must_be_from_a_recent_successful_check(self) -> None:
+    def test_target_must_be_from_a_recent_successful_check(self: Self) -> None:
         with self.assertRaises(UpgradeError) as error:
             self.manager.start(
                 target_sha=self.latest_sha,
@@ -142,7 +143,7 @@ class UpgradeManagerTestCase(unittest.TestCase):
             )
         self.assertEqual(error.exception.code, "upgrade_target_invalid")
 
-    def test_status_and_request_redact_secrets_and_bound_free_text(self) -> None:
+    def test_status_and_request_redact_secrets_and_bound_free_text(self: Self) -> None:
         self.manager.github_fetcher = lambda: {
             "sha": self.latest_sha,
             "committed_at": "2026-10-01T00:00:00Z",
@@ -159,7 +160,7 @@ class UpgradeManagerTestCase(unittest.TestCase):
         self.assertNotIn("ghp_12345678901234567890", json.dumps(self.manager.check_version()))
         self.assertLess(len(request), 4096)
 
-    def test_start_writes_only_request_and_leaves_root_status_untouched(self) -> None:
+    def test_start_writes_only_request_and_leaves_root_status_untouched(self: Self) -> None:
         self.manager.check_version()
         self.status_path.parent.mkdir(parents=True, exist_ok=True)
         original = b'{"status":"runner-owned"}'
@@ -175,7 +176,9 @@ class UpgradeManagerTestCase(unittest.TestCase):
             {"pending.json"},
         )
 
-    def test_release_projection_uses_current_symlink_target_without_git_metadata(self) -> None:
+    def test_release_projection_uses_current_symlink_target_without_git_metadata(
+        self: Self,
+    ) -> None:
         if not self.current.is_symlink():
             self.skipTest("symlink creation is unavailable on this Windows host")
         response = self.manager.check_version()
@@ -184,7 +187,7 @@ class UpgradeManagerTestCase(unittest.TestCase):
         self.assertTrue(response["update_available"])
         self.assertFalse((self.current.resolve() / ".git").exists())
 
-    def test_release_projection_reads_source_sha_marker_when_present(self) -> None:
+    def test_release_projection_reads_source_sha_marker_when_present(self: Self) -> None:
         marker = self.current.resolve() / ".noyra-source-sha"
         marker.write_bytes((self.latest_sha + "\n").encode("ascii"))
         response = self.manager.check_version()
@@ -192,14 +195,14 @@ class UpgradeManagerTestCase(unittest.TestCase):
         self.assertEqual(response["current_sha"], self.latest_sha)
         self.assertFalse(response["update_available"])
 
-    def test_different_pending_request_is_rejected_until_runner_consumes_it(self) -> None:
+    def test_different_pending_request_is_rejected_until_runner_consumes_it(self: Self) -> None:
         self.manager.check_version()
         self.manager.start(reason="routine update", idempotency_key="request-1")
         with self.assertRaises(UpgradeError) as error:
             self.manager.start(reason="routine update", idempotency_key="request-2")
         self.assertEqual(error.exception.code, "upgrade_in_progress")
 
-    def test_idempotent_status_projection_redacts_root_runner_log_text(self) -> None:
+    def test_idempotent_status_projection_redacts_root_runner_log_text(self: Self) -> None:
         self.manager.check_version()
         started = self.manager.start(reason="routine update", idempotency_key="request-1")
         self.status_path.parent.mkdir(parents=True, exist_ok=True)
@@ -219,7 +222,7 @@ class UpgradeManagerTestCase(unittest.TestCase):
         self.assertNotIn("super-secret", json.dumps(repeated))
         self.assertEqual(repeated["logs"], ["token=[REDACTED]"])
 
-    def test_manager_is_unavailable_without_installed_runner_trigger(self) -> None:
+    def test_manager_is_unavailable_without_installed_runner_trigger(self: Self) -> None:
         self.trigger.unlink()
         with self.assertRaises(UpgradeError) as error:
             self.manager.check_version()

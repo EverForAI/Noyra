@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from noyra.core import Database, EventStore, IdentityStore
 from noyra.core.types import canonical_json, content_hash
@@ -20,7 +20,7 @@ class SyntheticProfile:
     payload_bytes: int
     batch_size: int
 
-    def __post_init__(self) -> None:
+    def __post_init__(self: Self) -> None:
         if self.event_count < 1:
             raise ValueError("synthetic event_count must be positive")
         if self.memory_count < 1:

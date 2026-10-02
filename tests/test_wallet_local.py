@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, cast
+from typing import Any, Self, cast
 
 import httpx
 import pytest
@@ -48,7 +48,7 @@ def transfer(*, token: bool = False) -> WalletUnsignedTransfer:
 
 
 class Chain:
-    def __init__(self) -> None:
+    def __init__(self: Self) -> None:
         self.sent: list[str] = []
         self.overrides: dict[str, Any] = {}
         self.errors: dict[str, str] = {}
@@ -56,7 +56,7 @@ class Chain:
         self.receipt: dict[str, Any] | None = None
         self.transaction: dict[str, Any] | None = None
 
-    def handle(self, request: httpx.Request) -> httpx.Response:
+    def handle(self: Self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         method, params = body["method"], body["params"]
         if method in self.errors:

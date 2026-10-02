@@ -8,7 +8,7 @@ import threading
 import time
 from collections.abc import AsyncIterator
 from types import ModuleType
-from typing import Any, cast
+from typing import Any, Self, cast
 
 import httpcore
 import httpx
@@ -32,40 +32,40 @@ from noyra.world.types import SourceRecord
 
 
 class _AsyncConnector:
-    def __init__(self) -> None:
+    def __init__(self: Self) -> None:
         self.addresses: list[str] = []
 
-    async def connect_tcp(self, host: str, port: int, **_: Any) -> Any:
+    async def connect_tcp(self: Self, host: str, port: int, **_: Any) -> Any:
         del port
         self.addresses.append(host)
         return _NetworkStream()
 
 
 class _NetworkStream:
-    def get_extra_info(self, _: str) -> None:
+    def get_extra_info(self: Self, _: str) -> None:
         return None
 
 
 class _SlowAsyncStream(httpx.AsyncByteStream):
-    def __init__(self, chunks: tuple[bytes, ...], delay: float) -> None:
+    def __init__(self: Self, chunks: tuple[bytes, ...], delay: float) -> None:
         self.chunks = chunks
         self.delay = delay
         self.closed = False
 
-    async def __aiter__(self) -> AsyncIterator[bytes]:
+    async def __aiter__(self: Self) -> AsyncIterator[bytes]:
         for chunk in self.chunks:
             await asyncio.sleep(self.delay)
             yield chunk
 
-    async def aclose(self) -> None:
+    async def aclose(self: Self) -> None:
         self.closed = True
 
 
 class _CloseProbe:
-    def __init__(self) -> None:
+    def __init__(self: Self) -> None:
         self.closed = False
 
-    def close(self) -> None:
+    def close(self: Self) -> None:
         self.closed = True
 
 
@@ -415,7 +415,7 @@ async def test_world_deadline_includes_headers_and_closes_slow_stream() -> None:
 
 class _S3Client:
     def __init__(
-        self,
+        self: Self,
         *,
         ready: bool = True,
         delay: float = 0.0,
@@ -429,79 +429,79 @@ class _S3Client:
         self.objects: dict[tuple[str, str], bytes] = {}
         self.last_kwargs: dict[str, Any] = {}
 
-    def _check_owner(self, kwargs: dict[str, Any]) -> None:
+    def _check_owner(self: Self, kwargs: dict[str, Any]) -> None:
         self.last_kwargs = dict(kwargs)
         if self.bucket_owner is not None and kwargs.get("ExpectedBucketOwner") != self.bucket_owner:
             raise OSError("bucket owner mismatch")
 
-    def head_bucket(self, **kwargs: Any) -> None:
+    def head_bucket(self: Self, **kwargs: Any) -> None:
         self._check_owner(kwargs)
         self.head_bucket_calls += 1
         if not self.ready:
             raise OSError("offline")
 
-    def put_object(self, **kwargs: Any) -> None:
+    def put_object(self: Self, **kwargs: Any) -> None:
         self._check_owner(kwargs)
         self.put_object_calls += 1
         if self.delay:
             time.sleep(self.delay)
         self.objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))] = bytes(kwargs["Body"])
 
-    def get_object(self, **kwargs: Any) -> dict[str, Any]:
+    def get_object(self: Self, **kwargs: Any) -> dict[str, Any]:
         self._check_owner(kwargs)
         payload = self.objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))]
         return {"Body": io.BytesIO(payload), "Metadata": {}}
 
-    def head_object(self, **kwargs: Any) -> None:
+    def head_object(self: Self, **kwargs: Any) -> None:
         self._check_owner(kwargs)
         self.objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))]
 
 
 class _BlockingS3Body:
-    def __init__(self) -> None:
+    def __init__(self: Self) -> None:
         self.read_started = threading.Event()
         self.closed = threading.Event()
 
-    def read(self, *_: Any) -> bytes:
+    def read(self: Self, *_: Any) -> bytes:
         self.read_started.set()
         self.closed.wait(5)
         return b""
 
-    def close(self) -> None:
+    def close(self: Self) -> None:
         self.closed.set()
 
 
 class _OversizedS3Body:
-    def __init__(self) -> None:
+    def __init__(self: Self) -> None:
         self.closed = False
 
-    def read(self, _: int) -> bytes:
+    def read(self: Self, _: int) -> bytes:
         return b"x" * 10_000
 
-    def close(self) -> None:
+    def close(self: Self) -> None:
         self.closed = True
 
 
 class _BlockingBodyS3Client(_S3Client):
-    def __init__(self, body: _BlockingS3Body) -> None:
+    def __init__(self: Self, body: _BlockingS3Body) -> None:
         super().__init__()
         self.body = body
 
-    def get_object(self, **_: Any) -> dict[str, Any]:
+    def get_object(self: Self, **_: Any) -> dict[str, Any]:
         return {"Body": self.body, "Metadata": {}}
 
 
 class _OversizedBodyS3Client(_S3Client):
-    def __init__(self, body: _OversizedS3Body) -> None:
+    def __init__(self: Self, body: _OversizedS3Body) -> None:
         super().__init__()
         self.body = body
 
-    def get_object(self, **_: Any) -> dict[str, Any]:
+    def get_object(self: Self, **_: Any) -> dict[str, Any]:
         return {"Body": self.body, "Metadata": {}}
 
 
 class _TransferThreadTrapS3Client(_S3Client):
-    def upload_fileobj(self, **_: Any) -> None:
+    def upload_fileobj(self: Self, **_: Any) -> None:
         raise AssertionError("s3transfer must not run outside Noyra's bounded SDK worker")
 
 
@@ -568,7 +568,7 @@ def test_s3_from_env_wires_botocore_timeouts_retries_pool_and_identity(
     client = _S3Client(bucket_owner="123456789012")
 
     class FakeConfig:
-        def __init__(self, **kwargs: Any) -> None:
+        def __init__(self: Self, **kwargs: Any) -> None:
             captured["config"] = kwargs
 
     boto3_module = ModuleType("boto3")

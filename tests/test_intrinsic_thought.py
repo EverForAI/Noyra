@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Self
 from unittest.mock import patch
 
 from noyra.cognition import CognitionSettings, IntrinsicThought, WorldSourceConfig
@@ -27,7 +28,7 @@ from noyra.sleep import SleepEngine, SleepReflectionPlan
 
 
 class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.subject_id = "Noyra-thought-test"
         self.kernel = SubjectKernel(
@@ -41,17 +42,17 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
         self.clock_value = "2026-08-13T12:00:00.000+00:00"
         self.events = EventStore(self.kernel.database)
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.kernel.close()
         self.temp_dir.cleanup()
 
-    def test_agenda_parser_rejects_non_finite_durable_number(self) -> None:
+    def test_agenda_parser_rejects_non_finite_durable_number(self: Self) -> None:
         with self.assertRaises(IntegrityError):
             IntrinsicThought._agenda_from_row(
                 {"agenda_id": "agenda-corrupt", "urgency": "Infinity"}
             )
 
-    def settings(self, **updates: object) -> CognitionSettings:
+    def settings(self: Self, **updates: object) -> CognitionSettings:
         base = CognitionSettings(
             enabled=True,
             sources=(
@@ -70,7 +71,9 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
         )
         return base.model_copy(update=updates)
 
-    def gateway(self, payloads: list[Mapping[str, object]]) -> tuple[ModelGateway, FakeProvider]:
+    def gateway(
+        self: Self, payloads: list[Mapping[str, object]]
+    ) -> tuple[ModelGateway, FakeProvider]:
         provider = FakeProvider(
             [
                 ProviderResponse(content=json.dumps(payload), usage=ModelUsage(300, 150))
@@ -87,7 +90,7 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
             provider,
         )
 
-    def establish_goal_and_affect(self) -> dict[str, str]:
+    def establish_goal_and_affect(self: Self) -> dict[str, str]:
         event = self.events.append(self.subject_id, "experience", "test", {"topic": "continuity"})
         goal = GoalStore(self.kernel.database).create_candidate(
             self.subject_id,
@@ -152,7 +155,7 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
             "goal_candidate": goal_candidate,
         }
 
-    async def test_selects_internal_goal_and_commits_private_thought(self) -> None:
+    async def test_selects_internal_goal_and_commits_private_thought(self: Self) -> None:
         ids = self.establish_goal_and_affect()
         gateway, provider = self.gateway([self.proposal(ids)])
         cognition = IntrinsicThought(
@@ -176,7 +179,7 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("insight", public["thought_summary"])
         self.assertEqual(cognition.verify_integrity()["thought_episodes"], 1)
 
-    async def test_repeated_no_change_enters_cooldown_and_stops_token_use(self) -> None:
+    async def test_repeated_no_change_enters_cooldown_and_stops_token_use(self: Self) -> None:
         ids = self.establish_goal_and_affect()
         second = self.proposal(
             ids,
@@ -205,7 +208,7 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await cognition.run_due())
         self.assertEqual(len(provider.requests), 2)
 
-    async def test_duplicate_result_is_rejected_and_not_retried_forever(self) -> None:
+    async def test_duplicate_result_is_rejected_and_not_retried_forever(self: Self) -> None:
         ids = self.establish_goal_and_affect()
         duplicate = self.proposal(ids)
         gateway, provider = self.gateway([duplicate, duplicate])
@@ -226,7 +229,7 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await cognition.run_due())
         self.assertEqual(len(provider.requests), 2)
 
-    async def test_supported_thought_may_create_one_candidate_goal(self) -> None:
+    async def test_supported_thought_may_create_one_candidate_goal(self: Self) -> None:
         ids = self.establish_goal_and_affect()
         goal_candidate = {
             "title": "Compare identity transitions",
@@ -252,7 +255,7 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(created.origin, "self")
         self.assertEqual(created.status, "candidate")
 
-    async def test_unsupported_goal_and_unknown_evidence_are_rejected(self) -> None:
+    async def test_unsupported_goal_and_unknown_evidence_are_rejected(self: Self) -> None:
         ids = self.establish_goal_and_affect()
         invalid = self.proposal(
             ids,
@@ -278,7 +281,7 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await cognition.run_due(), "intrinsic_thought_rejected")
         self.assertIsNone(cognition.latest())
 
-    async def test_resolve_closes_agenda(self) -> None:
+    async def test_resolve_closes_agenda(self: Self) -> None:
         ids = self.establish_goal_and_affect()
         proposal = self.proposal(
             ids,
@@ -300,7 +303,7 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
         resolved = next(item for item in cognition.agenda() if item.agenda_id == latest.agenda_id)
         self.assertEqual(resolved.status, "resolved")
 
-    async def test_daily_limit_prevents_model_call(self) -> None:
+    async def test_daily_limit_prevents_model_call(self: Self) -> None:
         self.establish_goal_and_affect()
         with self.kernel.database.transaction() as connection:
             for index in range(8):
@@ -332,7 +335,7 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await cognition.run_due())
         self.assertEqual(provider.requests, [])
 
-    async def test_integrity_and_append_only_episode(self) -> None:
+    async def test_integrity_and_append_only_episode(self: Self) -> None:
         ids = self.establish_goal_and_affect()
         gateway, _ = self.gateway([self.proposal(ids)])
         cognition = IntrinsicThought(
@@ -358,7 +361,7 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(IntegrityError):
             cognition.verify_integrity()
 
-    def test_unresolved_sleep_question_becomes_agenda(self) -> None:
+    def test_unresolved_sleep_question_becomes_agenda(self: Self) -> None:
         event = self.events.append(self.subject_id, "experience", "test", {"question": True})
         sleep = SleepEngine(self.kernel.database, self.subject_id)
         run = sleep.start("subject_choice", "retain an unresolved question")
@@ -382,7 +385,7 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(item.source_type == "question" for item in agenda))
         self.assertIsNotNone(event.event_id)
 
-    def test_schema_version_sixteen(self) -> None:
+    def test_schema_version_sixteen(self: Self) -> None:
         with self.kernel.database.connection() as connection:
             version = connection.execute(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"

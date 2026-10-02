@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Self
 
 from noyra.core import Database, EventStore, IdentityStore
 from noyra.core.database import CURRENT_SCHEMA_VERSION
@@ -15,7 +16,7 @@ from noyra.mind.types import MemoryRecord, MemoryType
 
 
 class MemoryLifecycleTestCase(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.database = Database(Path(self.temp_dir.name) / "noyra.sqlite3")
         self.subject_id = "Noyra-memory-lifecycle"
@@ -25,11 +26,11 @@ class MemoryLifecycleTestCase(unittest.TestCase):
         self.clock_value = "2026-08-12T00:00:00.000+00:00"
         self.events = EventStore(self.database)
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.temp_dir.cleanup()
 
     def create_memory(
-        self,
+        self: Self,
         content: str,
         *,
         memory_type: MemoryType = "semantic",
@@ -54,7 +55,7 @@ class MemoryLifecycleTestCase(unittest.TestCase):
             source_event_ids=(event.event_id,),
         )
 
-    def test_contextual_recall_ranks_matches_and_records_access(self) -> None:
+    def test_contextual_recall_ranks_matches_and_records_access(self: Self) -> None:
         store = MemoryStore(self.database, clock=lambda: self.clock_value)
         related = self.create_memory(
             "Renewable storage evidence changed the energy forecast.", salience=0.55
@@ -80,7 +81,7 @@ class MemoryLifecycleTestCase(unittest.TestCase):
         self.assertEqual(history[0]["access_count"], 2)
         self.assertEqual(len(history[0]["query_hash"]), 64)
 
-    def test_repeated_recall_strengthens_memory_during_consolidation(self) -> None:
+    def test_repeated_recall_strengthens_memory_during_consolidation(self: Self) -> None:
         store = MemoryStore(self.database, clock=lambda: self.clock_value)
         memory = self.create_memory("A repeatedly useful procedural clue.", salience=0.4)
         for index in range(3):
@@ -107,7 +108,7 @@ class MemoryLifecycleTestCase(unittest.TestCase):
         assert latest is not None
         self.assertEqual(latest.strengthened_memory_ids, (memory.memory_id,))
 
-    def test_duplicate_and_stale_weak_memory_are_archived_without_deletion(self) -> None:
+    def test_duplicate_and_stale_weak_memory_are_archived_without_deletion(self: Self) -> None:
         old = (datetime.fromisoformat(self.clock_value) - timedelta(days=365)).isoformat(
             timespec="milliseconds"
         )
@@ -149,7 +150,7 @@ class MemoryLifecycleTestCase(unittest.TestCase):
         archived = MemoryStore(self.database).search(self.subject_id, query="weak old")
         self.assertEqual(archived, [])
 
-    def test_memory_lifecycle_integrity_detects_access_tampering(self) -> None:
+    def test_memory_lifecycle_integrity_detects_access_tampering(self: Self) -> None:
         store = MemoryStore(self.database, clock=lambda: self.clock_value)
         memory = self.create_memory("Integrity relevant memory.")
         store.recall(
@@ -166,7 +167,7 @@ class MemoryLifecycleTestCase(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             store.verify_lifecycle_integrity(self.subject_id)
 
-    def test_memory_lifecycle_integrity_rejects_corrupt_access_numbers(self) -> None:
+    def test_memory_lifecycle_integrity_rejects_corrupt_access_numbers(self: Self) -> None:
         store = MemoryStore(self.database, clock=lambda: self.clock_value)
         memory = self.create_memory("Persisted access parser fixture.")
         store.recall(
@@ -197,7 +198,7 @@ class MemoryLifecycleTestCase(unittest.TestCase):
                         (original[column], memory.memory_id),
                     )
 
-    def test_memory_lifecycle_integrity_rejects_corrupt_consolidation_fields(self) -> None:
+    def test_memory_lifecycle_integrity_rejects_corrupt_consolidation_fields(self: Self) -> None:
         self.create_memory("Consolidation parser fixture.")
         consolidator = MemoryConsolidator(
             self.database,
@@ -238,7 +239,7 @@ class MemoryLifecycleTestCase(unittest.TestCase):
                         (row[column], row["consolidation_id"]),
                     )
 
-    def test_schema_version_sixteen_and_append_only_consolidation(self) -> None:
+    def test_schema_version_sixteen_and_append_only_consolidation(self: Self) -> None:
         with self.database.connection() as connection:
             version = connection.execute(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"

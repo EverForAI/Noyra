@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Self
 
 from noyra.core import EventStore, SubjectKernel
 from noyra.core.errors import IntegrityError
@@ -11,7 +12,7 @@ from noyra.mind import MemoryIntegrationSupervisor, MemoryStore
 
 
 class MemoryIntegrationTestCase(unittest.TestCase):
-    def test_merge_preserves_sources_and_can_rollback(self) -> None:
+    def test_merge_preserves_sources_and_can_rollback(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             kernel = SubjectKernel(
                 Path(directory) / "noyra.sqlite3",
@@ -59,7 +60,7 @@ class MemoryIntegrationTestCase(unittest.TestCase):
             self.assertEqual(counts["memory_integration_revisions"], 2)
 
     def test_lifecycle_integrity_rejects_integration_storage_and_ownership_damage(
-        self,
+        self: Self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             kernel = SubjectKernel(
@@ -140,7 +141,7 @@ class MemoryIntegrationTestCase(unittest.TestCase):
             with self.assertRaises(IntegrityError):
                 memories.verify_lifecycle_integrity(kernel.subject_id)
 
-    def test_lifecycle_integrity_rejects_integration_revision_state_mismatch(self) -> None:
+    def test_lifecycle_integrity_rejects_integration_revision_state_mismatch(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             kernel = SubjectKernel(
                 Path(directory) / "noyra.sqlite3",

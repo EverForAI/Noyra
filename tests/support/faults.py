@@ -7,7 +7,7 @@ from collections.abc import Iterator, Mapping, Set
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 
 class InjectedFault(RuntimeError):
@@ -20,7 +20,7 @@ class FaultRule:
     occurrence: int = 1
     reason: str = "injected failure"
 
-    def __post_init__(self) -> None:
+    def __post_init__(self: Self) -> None:
         if not self.point:
             raise ValueError("fault point is required")
         if self.occurrence < 1:
@@ -28,7 +28,7 @@ class FaultRule:
 
 
 class FaultInjector:
-    def __init__(self, rules: tuple[FaultRule, ...] = ()):
+    def __init__(self: Self, rules: tuple[FaultRule, ...] = ()) -> None:
         keys = [(rule.point, rule.occurrence) for rule in rules]
         if len(keys) != len(set(keys)):
             raise ValueError("fault rules must have unique point/occurrence pairs")
@@ -37,10 +37,10 @@ class FaultInjector:
         self._trace: list[str] = []
 
     @property
-    def trace(self) -> tuple[str, ...]:
+    def trace(self: Self) -> tuple[str, ...]:
         return tuple(self._trace)
 
-    def checkpoint(self, point: str) -> None:
+    def checkpoint(self: Self, point: str) -> None:
         if not point:
             raise ValueError("fault point is required")
         self._calls[point] += 1
@@ -61,7 +61,7 @@ class StateTransition:
 class StateMachineProbe:
     """Records transitions and rejects edges outside an explicit contract."""
 
-    def __init__(self, initial: str, allowed: Mapping[str, Set[str]]):
+    def __init__(self: Self, initial: str, allowed: Mapping[str, Set[str]]) -> None:
         if initial not in allowed:
             raise ValueError("initial state is absent from the transition contract")
         self._state = initial
@@ -69,14 +69,14 @@ class StateMachineProbe:
         self._transitions: list[StateTransition] = []
 
     @property
-    def state(self) -> str:
+    def state(self: Self) -> str:
         return self._state
 
     @property
-    def transitions(self) -> tuple[StateTransition, ...]:
+    def transitions(self: Self) -> tuple[StateTransition, ...]:
         return tuple(self._transitions)
 
-    def move(self, target: str, *, evidence: str) -> None:
+    def move(self: Self, target: str, *, evidence: str) -> None:
         if target not in self._allowed.get(self._state, frozenset()):
             raise AssertionError(f"forbidden state transition: {self._state} -> {target}")
         if not evidence:
@@ -88,11 +88,11 @@ class StateMachineProbe:
 class DeterministicGate:
     """Coordinates concurrent tests without timing sleeps."""
 
-    def __init__(self) -> None:
+    def __init__(self: Self) -> None:
         self.reached = threading.Event()
         self.release = threading.Event()
 
-    def pause(self, *, timeout: float = 5.0) -> None:
+    def pause(self: Self, *, timeout: float = 5.0) -> None:
         self.reached.set()
         if not self.release.wait(timeout):
             raise TimeoutError("deterministic test gate was not released")

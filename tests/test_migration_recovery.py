@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import replace
+from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -12,7 +13,7 @@ from noyra.migration.recovery import RecoveryCoordinator, RecoveryRequest
 from noyra.migration.targets import TargetRegistry
 
 
-def _setup(tmp_path):
+def _setup(tmp_path: Any) -> Any:
     database = Database(tmp_path / "noyra.sqlite3")
     subject_id = "Noyra-0001"
     IdentityStore(database).ensure(subject_id, "d" * 64)
@@ -74,7 +75,9 @@ def _request(private: Ed25519PrivateKey) -> RecoveryRequest:
     return replace(request, target_signature=signature)
 
 
-def test_emergency_recovery_requires_verified_target_proof_and_acquires_epoch(tmp_path) -> None:
+def test_emergency_recovery_requires_verified_target_proof_and_acquires_epoch(
+    tmp_path: Any,
+) -> None:
     database, policy, private, _ = _setup(tmp_path)
     result = RecoveryCoordinator(database).restore_standby(_request(private), policy)
 
@@ -98,7 +101,7 @@ def test_emergency_recovery_requires_verified_target_proof_and_acquires_epoch(tm
     assert epoch["target_id"] == "standby-1"
 
 
-def test_emergency_recovery_rejects_invalid_signature_without_creating_task(tmp_path) -> None:
+def test_emergency_recovery_rejects_invalid_signature_without_creating_task(tmp_path: Any) -> None:
     database, policy, _, _ = _setup(tmp_path)
     request = _request(Ed25519PrivateKey.generate())
     with pytest.raises(ValueError, match="signature"):
@@ -108,14 +111,14 @@ def test_emergency_recovery_rejects_invalid_signature_without_creating_task(tmp_
         assert connection.execute("SELECT COUNT(*) FROM migration_epochs").fetchone()[0] == 0
 
 
-def test_emergency_recovery_rejects_secret_failure_evidence(tmp_path) -> None:
+def test_emergency_recovery_rejects_secret_failure_evidence(tmp_path: Any) -> None:
     database, policy, private, _ = _setup(tmp_path)
     request = replace(_request(private), source_failure_evidence="token=secret")
     with pytest.raises(ValueError, match="secret"):
         RecoveryCoordinator(database).restore_standby(request, policy)
 
 
-def test_emergency_recovery_is_idempotent_for_same_task_and_proof(tmp_path) -> None:
+def test_emergency_recovery_is_idempotent_for_same_task_and_proof(tmp_path: Any) -> None:
     database, policy, private, _ = _setup(tmp_path)
     coordinator = RecoveryCoordinator(database)
     request = _request(private)
@@ -128,7 +131,7 @@ def test_emergency_recovery_is_idempotent_for_same_task_and_proof(tmp_path) -> N
         assert connection.execute("SELECT COUNT(*) FROM migration_epochs").fetchone()[0] == 1
 
 
-def test_emergency_recovery_rejects_active_epoch_before_new_task(tmp_path) -> None:
+def test_emergency_recovery_rejects_active_epoch_before_new_task(tmp_path: Any) -> None:
     database, policy, private, _ = _setup(tmp_path)
     coordinator = RecoveryCoordinator(database)
     request = _request(private)
@@ -146,7 +149,7 @@ def test_emergency_recovery_rejects_active_epoch_before_new_task(tmp_path) -> No
         assert connection.execute("SELECT COUNT(*) FROM migration_tasks").fetchone()[0] == 1
 
 
-def test_recovery_proof_rejects_changed_digest(tmp_path) -> None:
+def test_recovery_proof_rejects_changed_digest(tmp_path: Any) -> None:
     database, policy, private, _ = _setup(tmp_path)
     request = _request(private)
     changed = replace(request, health_report_digest="d" * 64)

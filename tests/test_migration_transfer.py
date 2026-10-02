@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from noyra.migration.transfer import EncryptedTransferSession, TransferSession
 
 
-def test_transfer_can_resume_and_verify_chunks(tmp_path) -> None:
+def test_transfer_can_resume_and_verify_chunks(tmp_path: Any) -> None:
     source = tmp_path / "artifact.bin"
     source.write_bytes(b"noyra" * 100_000)
     destination = tmp_path / "received.bin"
@@ -17,7 +19,7 @@ def test_transfer_can_resume_and_verify_chunks(tmp_path) -> None:
     assert destination.read_bytes() == source.read_bytes()
 
 
-def test_transfer_rejects_corrupt_chunk_and_unsafe_paths(tmp_path) -> None:
+def test_transfer_rejects_corrupt_chunk_and_unsafe_paths(tmp_path: Any) -> None:
     source = tmp_path / "artifact.bin"
     source.write_bytes(b"safe payload")
     destination = tmp_path / "received.bin"
@@ -30,7 +32,7 @@ def test_transfer_rejects_corrupt_chunk_and_unsafe_paths(tmp_path) -> None:
         session.send(source, tmp_path / ".." / "outside.bin")
 
 
-def test_resume_rejects_changed_source_or_destination_prefix(tmp_path) -> None:
+def test_resume_rejects_changed_source_or_destination_prefix(tmp_path: Any) -> None:
     source = tmp_path / "artifact.bin"
     source.write_bytes(b"noyra" * 100_000)
     destination = tmp_path / "received.bin"
@@ -41,7 +43,7 @@ def test_resume_rejects_changed_source_or_destination_prefix(tmp_path) -> None:
         session.resume(receipt)
 
 
-def test_transfer_rejects_symlink_source_and_destination(tmp_path) -> None:
+def test_transfer_rejects_symlink_source_and_destination(tmp_path: Any) -> None:
     source = tmp_path / "artifact.bin"
     source.write_bytes(b"safe")
     source_link = tmp_path / "source-link"
@@ -58,7 +60,7 @@ def test_transfer_rejects_symlink_source_and_destination(tmp_path) -> None:
         session.send(source, destination_link)
 
 
-def test_encrypted_transfer_binds_manifest_and_round_trips(tmp_path) -> None:
+def test_encrypted_transfer_binds_manifest_and_round_trips(tmp_path: Any) -> None:
     source = tmp_path / "artifact.bin"
     source.write_bytes(b"private migration payload" * 1000)
     encrypted = tmp_path / "artifact.enc"
@@ -71,7 +73,7 @@ def test_encrypted_transfer_binds_manifest_and_round_trips(tmp_path) -> None:
     assert restored.read_bytes() == source.read_bytes()
 
 
-def test_encrypted_transfer_rejects_wrong_key_or_manifest(tmp_path) -> None:
+def test_encrypted_transfer_rejects_wrong_key_or_manifest(tmp_path: Any) -> None:
     source = tmp_path / "artifact.bin"
     source.write_bytes(b"payload")
     encrypted = tmp_path / "artifact.enc"

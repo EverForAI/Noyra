@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -10,12 +11,12 @@ from noyra.migration.targets import TargetRegistry
 from noyra.migration.trust import TrustDecision
 
 
-def _policy(**changes):
+def _policy(**changes: Any) -> Any:
     policy = MigrationPolicy.default("Noyra-0001").with_updates(enabled=True)
     return policy.with_updates(**changes) if changes else policy
 
 
-def _candidate(**changes):
+def _candidate(**changes: Any) -> Any:
     values = {
         "target_id": "target-1",
         "status": "active",
@@ -72,7 +73,7 @@ def test_proposal_contains_reason_evidence_and_expiry() -> None:
     assert proposal.expires_at > proposal.created_at
 
 
-def test_rejection_cooldown_is_keyed_to_target_and_reason(tmp_path) -> None:
+def test_rejection_cooldown_is_keyed_to_target_and_reason(tmp_path: Any) -> None:
     from noyra.core import Database, IdentityStore
 
     database = Database(tmp_path / "noyra.sqlite3")

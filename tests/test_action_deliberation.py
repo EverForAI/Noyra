@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Self
 from unittest.mock import patch
 
 import httpx
@@ -29,7 +30,7 @@ from noyra.world import SafeWebReader, SourceRegistry
 
 
 class ActionDeliberationTestCase(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.subject_id = "Noyra-action-deliberation-test"
         self.kernel = SubjectKernel(
@@ -104,12 +105,12 @@ class ActionDeliberationTestCase(unittest.IsolatedAsyncioTestCase):
             verify_peer_address=False,
         )
 
-    async def asyncTearDown(self) -> None:
+    async def asyncTearDown(self: Self) -> None:
         await self.client.aclose()
         self.kernel.close()
         self.temp_dir.cleanup()
 
-    def test_parser_rejects_blob_durable_json(self) -> None:
+    def test_parser_rejects_blob_durable_json(self: Self) -> None:
         with self.assertRaises(IntegrityError):
             ActionDeliberation._from_row(
                 {"deliberation_id": "deliberation-corrupt", "proposal_json": b"{}"}
@@ -139,7 +140,7 @@ class ActionDeliberationTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
     def deliberation(
-        self,
+        self: Self,
         provider: FakeProvider,
         *,
         max_calls: int = 4,
@@ -162,7 +163,7 @@ class ActionDeliberationTestCase(unittest.IsolatedAsyncioTestCase):
             self.reader,
         )
 
-    def proposal(self, *, goal_id: str | None = None, source_id: str | None = None) -> str:
+    def proposal(self: Self, *, goal_id: str | None = None, source_id: str | None = None) -> str:
         return json.dumps(
             {
                 "summary": "One read-only source can provide relevant independent evidence.",
@@ -176,7 +177,7 @@ class ActionDeliberationTestCase(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-    async def test_successful_model_call_is_reused_after_action_dispatch_crash(self) -> None:
+    async def test_successful_model_call_is_reused_after_action_dispatch_crash(self: Self) -> None:
         provider = FakeProvider(
             [ProviderResponse(content=self.proposal(), usage=ModelUsage(650, 220))]
         )
@@ -191,7 +192,7 @@ class ActionDeliberationTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(provider.requests), 1)
         self.assertEqual(recovered.verify_integrity(), 1)
 
-    async def test_recovery_does_not_repeat_a_completed_read_after_record_crash(self) -> None:
+    async def test_recovery_does_not_repeat_a_completed_read_after_record_crash(self: Self) -> None:
         provider = FakeProvider(
             [ProviderResponse(content=self.proposal(), usage=ModelUsage(650, 220))]
         )
@@ -215,7 +216,7 @@ class ActionDeliberationTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(provider.requests), 1)
         self.assertEqual(recovered.verify_integrity(), 1)
 
-    async def test_active_goal_drives_one_audited_read_only_action(self) -> None:
+    async def test_active_goal_drives_one_audited_read_only_action(self: Self) -> None:
         provider = FakeProvider(
             [ProviderResponse(content=self.proposal(), usage=ModelUsage(650, 220))]
         )
@@ -254,7 +255,7 @@ class ActionDeliberationTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("read-only evidence-gathering", system.content)
         self.assertNotIn(self.human_goal.goal_id, context.content)
 
-    async def test_subject_can_deliberately_wait_without_creating_an_action(self) -> None:
+    async def test_subject_can_deliberately_wait_without_creating_an_action(self: Self) -> None:
         payload = {
             "summary": "No available read is presently worth the resource cost.",
             "disposition": "wait",
@@ -279,7 +280,7 @@ class ActionDeliberationTestCase(unittest.IsolatedAsyncioTestCase):
         with self.kernel.database.connection() as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM actions").fetchone()[0], 0)
 
-    async def test_forged_goal_or_source_is_rejected_without_tool_execution(self) -> None:
+    async def test_forged_goal_or_source_is_rejected_without_tool_execution(self: Self) -> None:
         provider = FakeProvider(
             [
                 ProviderResponse(
@@ -302,7 +303,7 @@ class ActionDeliberationTestCase(unittest.IsolatedAsyncioTestCase):
                 0,
             )
 
-    async def test_revoked_capability_blocks_deliberation_before_model_call(self) -> None:
+    async def test_revoked_capability_blocks_deliberation_before_model_call(self: Self) -> None:
         CapabilityStore(self.kernel.database).revoke(
             self.grant.grant_id,
             reason="operator withdrew access",
@@ -313,7 +314,7 @@ class ActionDeliberationTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.deliberation(provider).run_due())
         self.assertEqual(provider.requests, [])
 
-    async def test_daily_call_budget_and_hard_budget_are_bounded(self) -> None:
+    async def test_daily_call_budget_and_hard_budget_are_bounded(self: Self) -> None:
         provider = FakeProvider(
             [
                 ProviderResponse(
@@ -332,7 +333,7 @@ class ActionDeliberationTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await exhausted.run_due(), "action_deliberation_budget_exhausted")
         self.assertEqual(exhausted.fatigue.get(self.subject_id).resource_pressure, 1)
 
-    async def test_per_goal_daily_action_limit_prevents_repeated_read(self) -> None:
+    async def test_per_goal_daily_action_limit_prevents_repeated_read(self: Self) -> None:
         first = self.deliberation(
             FakeProvider([ProviderResponse(content=self.proposal(), usage=ModelUsage(650, 220))]),
             max_goal_actions=1,
@@ -351,7 +352,7 @@ class ActionDeliberationTestCase(unittest.IsolatedAsyncioTestCase):
                 "call_test",
             )
 
-    async def test_records_are_append_only(self) -> None:
+    async def test_records_are_append_only(self: Self) -> None:
         deliberation = self.deliberation(
             FakeProvider([ProviderResponse(content=self.proposal(), usage=ModelUsage(650, 220))])
         )

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 from unittest import mock
 
 import httpx
@@ -69,7 +69,7 @@ def insight_response(
 
 
 class ModelTestCase(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "noyra.sqlite3"
         self.database = Database(self.db_path)
@@ -84,11 +84,11 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.messages = [ModelMessage(role="user", content="Observe the world.")]
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.temp_dir.cleanup()
 
     def gateway(
-        self,
+        self: Self,
         provider: FakeProvider,
         *,
         limits: BudgetLimits | None = None,
@@ -115,7 +115,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
             **kwargs,
         )
 
-    def routing_fixture(self, *, include_live_state: bool = False) -> dict[str, Any]:
+    def routing_fixture(self: Self, *, include_live_state: bool = False) -> dict[str, Any]:
         store = CognitiveResourceStore(self.database, Path(self.temp_dir.name) / "routing-secrets")
         group = store.configure(
             self.subject_id,
@@ -197,7 +197,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
             "live_decision": live_decision,
         }
 
-    def test_schema_migrates_from_version_one(self) -> None:
+    def test_schema_migrates_from_version_one(self: Self) -> None:
         with self.database.transaction() as connection:
             connection.execute("DROP TABLE model_attempts")
             connection.execute("DROP TABLE model_calls")
@@ -216,7 +216,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(int(version), CURRENT_SCHEMA_VERSION)
         self.assertTrue({"model_calls", "model_attempts"}.issubset(tables))
 
-    def test_ledger_idempotency_conflicts_are_rejected(self) -> None:
+    def test_ledger_idempotency_conflicts_are_rejected(self: Self) -> None:
         first, created = self.ledger.prepare_call(
             self.subject_id, "fake", "model", "reflection", "hash-one", "same-key"
         )
@@ -236,7 +236,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
                 "same-key",
             )
 
-    def test_model_call_rejects_invalid_usage_estimated_storage(self) -> None:
+    def test_model_call_rejects_invalid_usage_estimated_storage(self: Self) -> None:
         call, _ = self.ledger.prepare_call(
             self.subject_id,
             "fake",
@@ -261,7 +261,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
                         (call.call_id,),
                     )
 
-    def test_model_call_rejects_invalid_durable_metadata(self) -> None:
+    def test_model_call_rejects_invalid_durable_metadata(self: Self) -> None:
         call, _ = self.ledger.prepare_call(
             self.subject_id,
             "fake",
@@ -299,7 +299,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
                         (original[column], call.call_id),
                     )
 
-    def test_model_attempt_rejects_invalid_durable_counters(self) -> None:
+    def test_model_attempt_rejects_invalid_durable_counters(self: Self) -> None:
         call, _ = self.ledger.prepare_call(
             self.subject_id,
             "fake",
@@ -348,7 +348,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
                             (original[column], attempt.attempt_id),
                         )
 
-    def test_model_ledger_rejects_invalid_single_row_lifecycle_state(self) -> None:
+    def test_model_ledger_rejects_invalid_single_row_lifecycle_state(self: Self) -> None:
         call, _ = self.ledger.prepare_call(
             self.subject_id,
             "fake",
@@ -384,7 +384,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(IntegrityError):
             self.ledger.attempts(call.call_id)
 
-    async def test_structured_success_is_persisted_and_cached(self) -> None:
+    async def test_structured_success_is_persisted_and_cached(self: Self) -> None:
         provider = FakeProvider([insight_response()])
         gateway = self.gateway(provider)
         first = await gateway.complete_structured(
@@ -408,7 +408,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(provider.requests), 1)
         self.assertEqual(self.ledger.get_call(first.call_id).status, "succeeded")
 
-    async def test_model_io_capture_reads_live_consent_and_fails_closed(self) -> None:
+    async def test_model_io_capture_reads_live_consent_and_fails_closed(self: Self) -> None:
         state = {"enabled": False}
         provider = FakeProvider(
             [
@@ -456,7 +456,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(rows[1]["request_json"])
         self.assertIsNone(rows[2]["request_json"])
 
-    async def test_cold_model_payload_compression_preserves_cached_response(self) -> None:
+    async def test_cold_model_payload_compression_preserves_cached_response(self: Self) -> None:
         provider = FakeProvider([insight_response(summary="x" * 2_000)])
         gateway = self.gateway(provider)
         result = await gateway.complete_structured(
@@ -490,7 +490,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
             0,
         )
 
-    def test_ledger_rechecks_training_policy_inside_prepare_transaction(self) -> None:
+    def test_ledger_rechecks_training_policy_inside_prepare_transaction(self: Self) -> None:
         store = TrainingStore(self.database)
         first, _ = self.ledger.prepare_call(
             self.subject_id,
@@ -525,7 +525,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(by_id[second.call_id]["request_json"])
         self.assertEqual(by_id[second.call_id]["capture_policy_version"], 2)
 
-    async def test_known_retryable_failure_retries_with_accounting(self) -> None:
+    async def test_known_retryable_failure_retries_with_accounting(self: Self) -> None:
         delays: list[float] = []
 
         async def record_delay(delay: float) -> None:
@@ -551,7 +551,9 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(delays), 1)
         self.assertEqual(self.ledger.budget_status(self.subject_id, self.limits).attempts, 2)
 
-    async def test_retry_with_unknown_usage_keeps_the_failed_attempt_reservation(self) -> None:
+    async def test_retry_with_unknown_usage_keeps_the_failed_attempt_reservation(
+        self: Self,
+    ) -> None:
         provider = FakeProvider(
             [
                 ProviderCallError(
@@ -576,7 +578,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(budget.input_tokens, result.usage.input_tokens)
         self.assertGreater(budget.output_tokens, result.usage.output_tokens)
 
-    async def test_ambiguous_failure_never_retries_and_holds_reservation(self) -> None:
+    async def test_ambiguous_failure_never_retries_and_holds_reservation(self: Self) -> None:
         provider = FakeProvider(
             [
                 ProviderCallError(
@@ -604,7 +606,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
             ).fetchone()[0]
         self.assertEqual(state, "unknown")
 
-    async def test_unknown_call_requires_explicit_retry_authorization(self) -> None:
+    async def test_unknown_call_requires_explicit_retry_authorization(self: Self) -> None:
         first_provider = FakeProvider(
             [ProviderCallError("provider_outcome_unknown", retryable=False, outcome_unknown=True)]
         )
@@ -634,7 +636,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.output.summary, "reconciled retry")
         self.assertEqual(len(self.ledger.attempts(call.call_id)), 2)
 
-    async def test_hard_budget_blocks_before_provider_request(self) -> None:
+    async def test_hard_budget_blocks_before_provider_request(self: Self) -> None:
         provider = FakeProvider([insight_response()])
         blocked_limits = BudgetLimits(0, 10_000, 10_000, 1_000_000)
         gateway = self.gateway(provider, limits=blocked_limits)
@@ -652,7 +654,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
             1.0,
         )
 
-    async def test_invalid_structured_output_is_bounded(self) -> None:
+    async def test_invalid_structured_output_is_bounded(self: Self) -> None:
         invalid = ProviderResponse("not-json", ModelUsage(3, 2))
         provider = FakeProvider([invalid, invalid])
         gateway = self.gateway(
@@ -674,7 +676,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(len(provider.requests), 2)
 
-    async def test_missing_usage_is_conservatively_estimated(self) -> None:
+    async def test_missing_usage_is_conservatively_estimated(self: Self) -> None:
         response = ProviderResponse(
             content=json.dumps({"summary": "estimated", "confidence": 0.5}),
             usage=None,
@@ -690,7 +692,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.usage_estimated)
         self.assertEqual(result.usage.output_tokens, 50)
 
-    def test_restart_recovery_distinguishes_unsent_and_ambiguous_attempts(self) -> None:
+    def test_restart_recovery_distinguishes_unsent_and_ambiguous_attempts(self: Self) -> None:
         unsent_call, _ = self.ledger.prepare_call(
             self.subject_id, "fake", "model", "one", "hash-one", "unsent"
         )
@@ -725,7 +727,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
             "unknown",
         )
 
-    def test_routing_integrity_accepts_completed_and_live_states(self) -> None:
+    def test_routing_integrity_accepts_completed_and_live_states(self: Self) -> None:
         fixture = self.routing_fixture(include_live_state=True)
 
         report = fixture["store"].verify_routing_integrity(self.subject_id)
@@ -741,7 +743,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    def test_revoked_key_ignores_late_provider_outcomes(self) -> None:
+    def test_revoked_key_ignores_late_provider_outcomes(self: Self) -> None:
         store = CognitiveResourceStore(
             self.database, Path(self.temp_dir.name) / "revocation-secrets"
         )
@@ -791,7 +793,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
             ]
         self.assertEqual(events, ["configured", "revoked"])
 
-    def test_cognitive_resource_views_are_page_bounded_and_ordered(self) -> None:
+    def test_cognitive_resource_views_are_page_bounded_and_ordered(self: Self) -> None:
         store = CognitiveResourceStore(
             self.database, Path(self.temp_dir.name) / "paged-resource-secrets"
         )
@@ -817,7 +819,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(store.list(self.subject_id, limit=1)), 1)
 
-    def test_cognitive_resource_add_keys_rejects_unbounded_batches(self) -> None:
+    def test_cognitive_resource_add_keys_rejects_unbounded_batches(self: Self) -> None:
         store = CognitiveResourceStore(
             self.database, Path(self.temp_dir.name) / "bounded-resource-secrets"
         )
@@ -840,7 +842,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
                 subject_id=self.subject_id,
             )
 
-    def test_cognitive_resource_budget_boundary_round_trip(self) -> None:
+    def test_cognitive_resource_budget_boundary_round_trip(self: Self) -> None:
         secret_dir = Path(self.temp_dir.name) / "boundary-secrets"
         store = CognitiveResourceStore(self.database, secret_dir)
         group = store.configure(
@@ -892,7 +894,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(maximum.max_attempts, 10)
         self.assertEqual(store.get(group.group_id, subject_id=self.subject_id), maximum)
 
-    def test_cognitive_resource_public_budget_validation_is_strict(self) -> None:
+    def test_cognitive_resource_public_budget_validation_is_strict(self: Self) -> None:
         input_base: dict[str, Any] = {
             "pool": "economy",
             "label": "strict-budget",
@@ -952,7 +954,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
                         with self.assertRaises(ValidationError):
                             model_type(**kwargs)
 
-    def test_configure_rejects_model_copy_bypass_before_secret_write(self) -> None:
+    def test_configure_rejects_model_copy_bypass_before_secret_write(self: Self) -> None:
         secret_dir = Path(self.temp_dir.name) / "copy-bypass-secrets"
         store = CognitiveResourceStore(self.database, secret_dir)
         valid = CognitiveResourceGroupInput(
@@ -983,7 +985,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(secret_dir.exists())
         self.assertEqual(list(secret_dir.iterdir()), [])
 
-    def test_update_model_construct_bypass_is_atomic(self) -> None:
+    def test_update_model_construct_bypass_is_atomic(self: Self) -> None:
         fixture = self.routing_fixture()
         store: CognitiveResourceStore = fixture["store"]
         group_id = fixture["group"].group_id
@@ -1025,7 +1027,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after, before)
         self.assertEqual(revision_count_after, revision_count_before)
 
-    def test_persistent_numeric_corruption_rejected_by_get_and_integrity(self) -> None:
+    def test_persistent_numeric_corruption_rejected_by_get_and_integrity(self: Self) -> None:
         fixture = self.routing_fixture()
         store: CognitiveResourceStore = fixture["store"]
         group_id = fixture["group"].group_id
@@ -1057,7 +1059,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
                             (original, group_id),
                         )
 
-    def test_model_resource_url_validation_is_strict_for_input_and_persistence(self) -> None:
+    def test_model_resource_url_validation_is_strict_for_input_and_persistence(self: Self) -> None:
         input_base: dict[str, Any] = {
             "pool": "economy",
             "label": "strict-url",
@@ -1108,7 +1110,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
         valid[4] = "https://public-model.example/v1"
         store._validate_group_values(tuple(valid), row["status"])
 
-    def test_row_values_preserve_raw_sqlite_numeric_types(self) -> None:
+    def test_row_values_preserve_raw_sqlite_numeric_types(self: Self) -> None:
         fixture = self.routing_fixture()
         store: CognitiveResourceStore = fixture["store"]
         group_id = fixture["group"].group_id
@@ -1125,7 +1127,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(IntegrityError):
             store._validate_group_values(values, row["status"])
 
-    def test_routing_integrity_rejects_storage_numbers_and_hashes(self) -> None:
+    def test_routing_integrity_rejects_storage_numbers_and_hashes(self: Self) -> None:
         fixture = self.routing_fixture()
         store: CognitiveResourceStore = fixture["store"]
         decision_id = fixture["decision"].decision_id
@@ -1245,7 +1247,7 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
                         (original, key),
                     )
 
-    def test_routing_integrity_rejects_ownership_sequence_and_wait_chain(self) -> None:
+    def test_routing_integrity_rejects_ownership_sequence_and_wait_chain(self: Self) -> None:
         fixture = self.routing_fixture()
         store: CognitiveResourceStore = fixture["store"]
         decision_id = fixture["decision"].decision_id
@@ -1524,14 +1526,16 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
 
 
 class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
-    def settings(self, base_url: str = "https://models.example/v1") -> OpenAICompatibleSettings:
+    def settings(
+        self: Self, base_url: str = "https://models.example/v1"
+    ) -> OpenAICompatibleSettings:
         return OpenAICompatibleSettings(
             base_url=base_url,
             model="remote-model",
             api_key=SecretStr("super-secret-key"),
         )
 
-    def request(self) -> CompletionRequest:
+    def request(self: Self) -> CompletionRequest:
         return CompletionRequest(
             model="remote-model",
             messages=(ModelMessage(role="user", content="Return one insight."),),
@@ -1541,7 +1545,7 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
             output_schema=Insight.model_json_schema(),
         )
 
-    async def test_provider_sends_schema_and_parses_usage_without_leaking_key(self) -> None:
+    async def test_provider_sends_schema_and_parses_usage_without_leaking_key(self: Self) -> None:
         captured: dict[str, Any] = {}
 
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -1573,7 +1577,7 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.provider_request_id, "response-id")
         self.assertNotIn("super-secret-key", repr(provider.settings))
 
-    async def test_provider_classifies_http_and_transport_failures(self) -> None:
+    async def test_provider_classifies_http_and_transport_failures(self: Self) -> None:
         async def rate_limited(_: httpx.Request) -> httpx.Response:
             return httpx.Response(429, text="sensitive provider body")
 
@@ -1597,7 +1601,7 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(connect_caught.exception.retryable)
         self.assertFalse(connect_caught.exception.outcome_unknown)
 
-    async def test_provider_rejects_oversized_response_without_buffering_it_all(self) -> None:
+    async def test_provider_rejects_oversized_response_without_buffering_it_all(self: Self) -> None:
         async def oversized(_: httpx.Request) -> httpx.Response:
             return httpx.Response(200, content=b"x" * 2_048)
 
@@ -1610,7 +1614,7 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.code, "provider_response_too_large")
         self.assertTrue(caught.exception.usage_unknown)
 
-    def test_remote_plaintext_url_and_missing_environment_are_rejected(self) -> None:
+    def test_remote_plaintext_url_and_missing_environment_are_rejected(self: Self) -> None:
         with self.assertRaises(ValueError):
             self.settings("http://models.example/v1")
         with (
@@ -1619,7 +1623,7 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
         ):
             OpenAICompatibleSettings.from_env()
 
-    def test_model_api_key_can_be_loaded_from_a_private_file(self) -> None:
+    def test_model_api_key_can_be_loaded_from_a_private_file(self: Self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             key_path = Path(temporary_directory) / "model.key"
             key_path.write_text("file-model-secret\n", encoding="utf-8")
@@ -1635,7 +1639,7 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
                 settings = OpenAICompatibleSettings.from_env()
             self.assertEqual(settings.api_key.get_secret_value(), "file-model-secret")
 
-    def test_runtime_budget_settings_convert_usd_without_float_rounding(self) -> None:
+    def test_runtime_budget_settings_convert_usd_without_float_rounding(self: Self) -> None:
         environment = {
             "NOYRA_DAILY_MODEL_CALLS": "12",
             "NOYRA_DAILY_INPUT_TOKENS": "1000",
@@ -1650,7 +1654,7 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settings.pricing().input_microusd_per_million, 2_500_000)
         self.assertEqual(settings.retry_policy().max_attempts, 3)
 
-    async def test_provider_rejects_model_mismatch_before_http(self) -> None:
+    async def test_provider_rejects_model_mismatch_before_http(self: Self) -> None:
         requests: list[httpx.Request] = []
 
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -1666,7 +1670,9 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.code, "provider_model_mismatch")
         self.assertEqual(requests, [])
 
-    async def test_provider_can_probe_unstored_configuration_without_resource_state(self) -> None:
+    async def test_provider_can_probe_unstored_configuration_without_resource_state(
+        self: Self,
+    ) -> None:
         captured: dict[str, Any] = {}
 
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -1689,7 +1695,7 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["authorization"], "Bearer unstored-secret")
         self.assertNotIn("unstored-secret", repr(result))
 
-    async def test_provider_lists_models_from_openai_compatible_endpoint(self) -> None:
+    async def test_provider_lists_models_from_openai_compatible_endpoint(self: Self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
             self.assertEqual(request.url.path, "/v1/models")
             return httpx.Response(
@@ -1706,7 +1712,7 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
         await client.aclose()
         self.assertEqual(models, ["model-a", "model-b"])
 
-    async def test_probe_reports_elapsed_and_rejects_empty_choice_content(self) -> None:
+    async def test_probe_reports_elapsed_and_rejects_empty_choice_content(self: Self) -> None:
         async def handler(_: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"choices": [{"message": {"content": ""}}]})
 
@@ -1721,7 +1727,7 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
         await client.aclose()
         self.assertEqual(caught.exception.code, "provider_response_empty")
 
-    async def test_list_models_rejects_malformed_items_without_secret(self) -> None:
+    async def test_list_models_rejects_malformed_items_without_secret(self: Self) -> None:
         async def handler(_: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"data": [{"id": "ok"}, {"id": 3}]})
 

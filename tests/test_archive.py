@@ -3,12 +3,13 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Self
 
 from noyra.core.archive import LocalArchiveProvider, StorageQuota, StorageUsageScanner
 
 
 class ArchiveTestCase(unittest.TestCase):
-    def test_local_provider_is_atomic_and_confined(self) -> None:
+    def test_local_provider_is_atomic_and_confined(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             provider = LocalArchiveProvider(directory, encryption_key=b"k" * 32)
             digest = provider.put("2026/events.bin", b"events")
@@ -19,7 +20,7 @@ class ArchiveTestCase(unittest.TestCase):
             with self.assertRaises(ValueError):
                 provider.put("../escape", b"bad")
 
-    def test_usage_scanner_separates_workspace_from_subject(self) -> None:
+    def test_usage_scanner_separates_workspace_from_subject(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "subject").mkdir()

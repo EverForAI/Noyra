@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import pytest
 from pydantic import SecretStr
@@ -700,11 +700,11 @@ def test_status_summary_keeps_history_and_health_on_one_sqlite_snapshot(
     writer.start()
 
     class InterleavingConnection:
-        def __init__(self, connection: Any) -> None:
+        def __init__(self: Self, connection: Any) -> None:
             self._connection = connection
             self._writer_triggered = False
 
-        def execute(self, sql: str, *args: Any, **kwargs: Any) -> Any:
+        def execute(self: Self, sql: str, *args: Any, **kwargs: Any) -> Any:
             result = self._connection.execute(sql, *args, **kwargs)
             normalized = " ".join(sql.lower().split())
             if (
@@ -719,7 +719,7 @@ def test_status_summary_keeps_history_and_health_on_one_sqlite_snapshot(
 
     class InterleavingDatabase(Database):
         @contextmanager
-        def read_transaction(self) -> Iterator[Any]:
+        def read_transaction(self: Self) -> Iterator[Any]:
             with super().read_transaction() as connection:
                 yield InterleavingConnection(connection)
 
@@ -761,28 +761,28 @@ def test_observation_health_consumes_history_incrementally_without_fetchall(
         )
 
     class NoFetchallCursor:
-        def __init__(self, cursor: Any) -> None:
+        def __init__(self: Self, cursor: Any) -> None:
             self._cursor = cursor
 
-        def __iter__(self) -> Iterator[Any]:
+        def __iter__(self: Self) -> Iterator[Any]:
             return iter(self._cursor)
 
-        def fetchone(self) -> Any:
+        def fetchone(self: Self) -> Any:
             return self._cursor.fetchone()
 
-        def fetchall(self) -> list[Any]:
+        def fetchall(self: Self) -> list[Any]:
             raise AssertionError("observation health must consume cursors incrementally")
 
     class NoFetchallConnection:
-        def __init__(self, connection: Any) -> None:
+        def __init__(self: Self, connection: Any) -> None:
             self._connection = connection
 
-        def execute(self, *args: Any, **kwargs: Any) -> NoFetchallCursor:
+        def execute(self: Self, *args: Any, **kwargs: Any) -> NoFetchallCursor:
             return NoFetchallCursor(self._connection.execute(*args, **kwargs))
 
     class NoFetchallDatabase(Database):
         @contextmanager
-        def read_transaction(self) -> Iterator[Any]:
+        def read_transaction(self: Self) -> Iterator[Any]:
             with super().read_transaction() as connection:
                 yield NoFetchallConnection(connection)
 
@@ -819,10 +819,10 @@ def test_observation_health_history_query_uses_bounded_subject_index_plan(
     plan_details: list[str] = []
 
     class PlanConnection:
-        def __init__(self, connection: Any) -> None:
+        def __init__(self: Self, connection: Any) -> None:
             self._connection = connection
 
-        def execute(self, sql: str, parameters: tuple[object, ...] = ()) -> Any:
+        def execute(self: Self, sql: str, parameters: tuple[object, ...] = ()) -> Any:
             normalized = " ".join(sql.lower().split())
             if (
                 "from wallet_balance_snapshots s" in normalized
@@ -836,7 +836,7 @@ def test_observation_health_history_query_uses_bounded_subject_index_plan(
 
     class PlanDatabase(Database):
         @contextmanager
-        def read_transaction(self) -> Iterator[Any]:
+        def read_transaction(self: Self) -> Iterator[Any]:
             with super().read_transaction() as connection:
                 yield PlanConnection(connection)
 

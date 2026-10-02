@@ -7,6 +7,7 @@ import json
 import os
 import stat
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -48,7 +49,7 @@ def test_agent_rejects_nested_secret_fields() -> None:
         agent.receive({"artifact_id": "artifact-1", "byte_size": 1, "credentials": {"token": "x"}})
 
 
-def test_agent_challenge_is_signed_by_host_bound_target_key(tmp_path) -> None:
+def test_agent_challenge_is_signed_by_host_bound_target_key(tmp_path: Any) -> None:
     private = Ed25519PrivateKey.generate()
     public = base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode()
     agent = MigrationAgent(
@@ -102,7 +103,7 @@ def test_agent_rejects_recovery_signing_without_key() -> None:
         agent.sign_recovery_proof(b"proof")
 
 
-def test_agent_persists_manifest_inside_private_root_and_restores_it(tmp_path) -> None:
+def test_agent_persists_manifest_inside_private_root_and_restores_it(tmp_path: Any) -> None:
     agent = MigrationAgent(target_id="target-1", key_fingerprint="a" * 64, data_root=tmp_path)
     manifest = {
         "artifact_id": "artifact-1",
@@ -128,7 +129,7 @@ def test_agent_persists_manifest_inside_private_root_and_restores_it(tmp_path) -
     assert health["manifest_digest"] == receipt.manifest_digest
 
 
-def test_agent_rejects_manifest_path_traversal_and_restore_digest_mismatch(tmp_path) -> None:
+def test_agent_rejects_manifest_path_traversal_and_restore_digest_mismatch(tmp_path: Any) -> None:
     agent = MigrationAgent(target_id="target-1", key_fingerprint="a" * 64, data_root=tmp_path)
     with pytest.raises(ValueError, match="path"):
         agent.receive({"artifact_id": "../escape", "byte_size": 1})
@@ -137,7 +138,7 @@ def test_agent_rejects_manifest_path_traversal_and_restore_digest_mismatch(tmp_p
         agent.restore(receipt, expected_digest="0" * 64)
 
 
-def test_agent_rejects_receipt_path_for_another_artifact(tmp_path) -> None:
+def test_agent_rejects_receipt_path_for_another_artifact(tmp_path: Any) -> None:
     agent = MigrationAgent(target_id="target-1", key_fingerprint="a" * 64, data_root=tmp_path)
     first = agent.receive({"artifact_id": "artifact-1", "byte_size": 1})
     second = agent.receive({"artifact_id": "artifact-2", "byte_size": 1})
@@ -152,7 +153,7 @@ def test_agent_rejects_receipt_path_for_another_artifact(tmp_path) -> None:
         agent.restore(forged)
 
 
-def test_agent_http_authentication_is_signed_and_replay_safe(tmp_path) -> None:
+def test_agent_http_authentication_is_signed_and_replay_safe(tmp_path: Any) -> None:
     token = "session-" + "a" * 32
     agent = MigrationAgent(
         target_id="target-1",
@@ -178,7 +179,7 @@ def test_agent_http_authentication_is_signed_and_replay_safe(tmp_path) -> None:
         )
 
 
-def test_agent_incoming_quota_and_ttl_cleanup_are_durable(tmp_path) -> None:
+def test_agent_incoming_quota_and_ttl_cleanup_are_durable(tmp_path: Any) -> None:
     agent = MigrationAgent(
         target_id="target-1",
         key_fingerprint="a" * 64,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Self
 
 from noyra.core import Database, EventStore, IdentityStore
 from noyra.core.types import content_hash
@@ -10,7 +11,7 @@ from noyra.mind import EntityStore
 
 
 class EntityStoreTestCase(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.database = Database(Path(self.temp_dir.name) / "noyra.sqlite3")
         self.subject_id = "Noyra-entity-test"
@@ -22,10 +23,10 @@ class EntityStoreTestCase(unittest.TestCase):
         )
         self.store = EntityStore(self.database)
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.temp_dir.cleanup()
 
-    def test_temporal_relation_keeps_sources_and_supports_as_of(self) -> None:
+    def test_temporal_relation_keeps_sources_and_supports_as_of(self: Self) -> None:
         source = self.store.upsert(self.subject_id, "project", "noyra", "Noyra")
         target = self.store.upsert(self.subject_id, "concept", "continuity", "Continuity")
         relation = self.store.relation(
@@ -48,7 +49,7 @@ class EntityStoreTestCase(unittest.TestCase):
             {"entities": 2, "relations": 1, "links": 0},
         )
 
-    def test_entity_links_memory_belief_or_event_without_copying_source(self) -> None:
+    def test_entity_links_memory_belief_or_event_without_copying_source(self: Self) -> None:
         entity = self.store.upsert(self.subject_id, "concept", "continuity", "Continuity")
         link = self.store.link_evidence(
             self.subject_id,
@@ -60,7 +61,7 @@ class EntityStoreTestCase(unittest.TestCase):
         )
         self.assertEqual(self.store.evidence_links(self.subject_id, entity.entity_id), [link])
 
-    def test_cross_subject_relation_is_rejected(self) -> None:
+    def test_cross_subject_relation_is_rejected(self: Self) -> None:
         other = "Noyra-other-entity"
         IdentityStore(self.database).ensure(other, content_hash({"seed": other}))
         first = self.store.upsert(self.subject_id, "person", "alice", "Alice")

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import sqlite3
+from typing import Any
 
 from noyra.core import Database, IdentityStore
 from noyra.core.database import CURRENT_SCHEMA_VERSION
 from noyra.migration.policy import MigrationStore
 
 
-def test_migration_schema_is_current_and_append_only(tmp_path) -> None:
+def test_migration_schema_is_current_and_append_only(tmp_path: Any) -> None:
     database = Database(tmp_path / "noyra.sqlite3")
     IdentityStore(database).ensure("Noyra-0001", "b" * 64)
 
@@ -43,7 +44,7 @@ def test_migration_schema_is_current_and_append_only(tmp_path) -> None:
         assert row is None
 
 
-def test_migration_audit_events_cannot_be_updated_or_deleted(tmp_path) -> None:
+def test_migration_audit_events_cannot_be_updated_or_deleted(tmp_path: Any) -> None:
     database = Database(tmp_path / "noyra.sqlite3")
     IdentityStore(database).ensure("Noyra-0001", "c" * 64)
     store = MigrationStore(database)

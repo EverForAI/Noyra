@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Self
 
 from noyra.cognition import CognitionSettings, OperationalSelfModel, WorldSourceConfig
 from noyra.core import EventStore, SubjectKernel
@@ -26,7 +27,7 @@ from noyra.sleep import PersonalityCandidateInput, SleepEngine, SleepReflectionP
 
 
 class SelfModelTestCase(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.subject_id = "Noyra-self-model-test"
         self.kernel = SubjectKernel(
@@ -40,11 +41,11 @@ class SelfModelTestCase(unittest.IsolatedAsyncioTestCase):
         self.clock_value = "2026-08-13T12:00:00.000+00:00"
         self.events = EventStore(self.kernel.database)
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.kernel.close()
         self.temp_dir.cleanup()
 
-    def test_parser_rejects_non_finite_durable_json(self) -> None:
+    def test_parser_rejects_non_finite_durable_json(self: Self) -> None:
         with self.assertRaises(IntegrityError):
             OperationalSelfModel._from_row(
                 {
@@ -53,7 +54,7 @@ class SelfModelTestCase(unittest.IsolatedAsyncioTestCase):
                 }
             )
 
-    def settings(self) -> CognitionSettings:
+    def settings(self: Self) -> CognitionSettings:
         return CognitionSettings(
             enabled=True,
             sources=(
@@ -68,7 +69,9 @@ class SelfModelTestCase(unittest.IsolatedAsyncioTestCase):
             max_self_model_context_chars=48_000,
         )
 
-    def gateway(self, payloads: list[Mapping[str, object]]) -> tuple[ModelGateway, FakeProvider]:
+    def gateway(
+        self: Self, payloads: list[Mapping[str, object]]
+    ) -> tuple[ModelGateway, FakeProvider]:
         provider = FakeProvider(
             [
                 ProviderResponse(content=json.dumps(payload), usage=ModelUsage(400, 200))
@@ -85,7 +88,7 @@ class SelfModelTestCase(unittest.IsolatedAsyncioTestCase):
             provider,
         )
 
-    def establish_state(self) -> dict[str, str]:
+    def establish_state(self: Self) -> dict[str, str]:
         evidence = tuple(
             self.events.append(self.subject_id, "experience", "test", {"index": index}).event_id
             for index in range(3)
@@ -185,7 +188,7 @@ class SelfModelTestCase(unittest.IsolatedAsyncioTestCase):
             "source_relationship_ids": [ids["relationship_id"]],
         }
 
-    async def test_forms_revisioned_self_model_after_sleep(self) -> None:
+    async def test_forms_revisioned_self_model_after_sleep(self: Self) -> None:
         ids = self.establish_state()
         gateway, _ = self.gateway([self.proposal(ids)])
         cognition = OperationalSelfModel(
@@ -206,7 +209,7 @@ class SelfModelTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(public["self_model_summary"]["version"], 1)
         self.assertNotIn("identity_narrative", public["self_model_summary"])
 
-    async def test_revision_preserves_history_and_uses_previous_model_context(self) -> None:
+    async def test_revision_preserves_history_and_uses_previous_model_context(self: Self) -> None:
         ids = self.establish_state()
         new_event = self.events.append(
             self.subject_id, "new_experience", "test", {"revision": True}
@@ -231,7 +234,7 @@ class SelfModelTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("previous_self_model", provider.requests[-1].messages[1].content)
         self.assertEqual(cognition.verify_integrity(), 2)
 
-    async def test_rejects_unknown_sources_without_partial_self_model(self) -> None:
+    async def test_rejects_unknown_sources_without_partial_self_model(self: Self) -> None:
         ids = self.establish_state()
         invalid = self.proposal(ids)
         invalid["source_memory_ids"] = ["memory_forged"]
@@ -247,7 +250,7 @@ class SelfModelTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(cognition.latest())
         self.assertIsNone(await cognition.run_due())
 
-    async def test_rejects_trait_that_does_not_match_candidate(self) -> None:
+    async def test_rejects_trait_that_does_not_match_candidate(self: Self) -> None:
         ids = self.establish_state()
         invalid = self.proposal(ids)
         invalid["traits"] = [
@@ -269,7 +272,7 @@ class SelfModelTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await cognition.run_due(), "self_model_rejected")
         self.assertIsNone(cognition.latest())
 
-    async def test_model_name_change_does_not_replace_identity(self) -> None:
+    async def test_model_name_change_does_not_replace_identity(self: Self) -> None:
         ids = self.establish_state()
         gateway, _ = self.gateway([self.proposal(ids)])
         cognition = OperationalSelfModel(
@@ -289,7 +292,7 @@ class SelfModelTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cognition.latest().subject_id, self.subject_id)  # type: ignore[union-attr]
         self.assertEqual(cognition.verify_integrity(), 1)
 
-    async def test_daily_limit_prevents_self_model_call(self) -> None:
+    async def test_daily_limit_prevents_self_model_call(self: Self) -> None:
         self.establish_state()
         with self.kernel.database.transaction() as connection:
             for index in range(2):
@@ -321,7 +324,7 @@ class SelfModelTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await cognition.run_due())
         self.assertEqual(provider.requests, [])
 
-    async def test_integrity_detects_tampering_and_table_is_append_only(self) -> None:
+    async def test_integrity_detects_tampering_and_table_is_append_only(self: Self) -> None:
         ids = self.establish_state()
         gateway, _ = self.gateway([self.proposal(ids)])
         cognition = OperationalSelfModel(
@@ -347,7 +350,7 @@ class SelfModelTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(IntegrityError):
             cognition.verify_integrity()
 
-    def test_schema_version_sixteen(self) -> None:
+    def test_schema_version_sixteen(self: Self) -> None:
         with self.kernel.database.connection() as connection:
             version = connection.execute(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"

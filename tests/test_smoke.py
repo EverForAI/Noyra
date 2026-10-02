@@ -1,10 +1,11 @@
 import unittest
+from typing import Self
 
 from noyra import __version__
 
 
 class FoundationSmokeTest(unittest.TestCase):
-    def test_version_is_defined(self) -> None:
+    def test_version_is_defined(self: Self) -> None:
         self.assertEqual(__version__, "0.1.0")
 
 

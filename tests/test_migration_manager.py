@@ -3,6 +3,7 @@ from __future__ import annotations
 # ruff: noqa: E501
 import base64
 import json
+from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -14,7 +15,7 @@ from noyra.migration.policy import MigrationStore
 from noyra.migration.targets import TargetRegistry
 
 
-def _manager(tmp_path):
+def _manager(tmp_path: Any) -> Any:
     db = Database(tmp_path / "noyra.sqlite3")
     IdentityStore(db).ensure("Noyra-0001", "f" * 64)
     private = Ed25519PrivateKey.generate()
@@ -45,7 +46,7 @@ def _manager(tmp_path):
     return db, MigrationManager(db, store)
 
 
-def test_manual_task_requires_approval_and_is_idempotent(tmp_path) -> None:
+def test_manual_task_requires_approval_and_is_idempotent(tmp_path: Any) -> None:
     _, manager = _manager(tmp_path)
     proposal = manager.create_proposal(
         subject_id="Noyra-0001",
@@ -63,7 +64,7 @@ def test_manual_task_requires_approval_and_is_idempotent(tmp_path) -> None:
     )
 
 
-def test_expired_proposal_cannot_be_approved(tmp_path) -> None:
+def test_expired_proposal_cannot_be_approved(tmp_path: Any) -> None:
     _, manager = _manager(tmp_path)
     proposal = manager.create_proposal(
         subject_id="Noyra-0001",
@@ -77,7 +78,7 @@ def test_expired_proposal_cannot_be_approved(tmp_path) -> None:
         manager.approve(proposal.proposal_id, actor="operator", idempotency_key="k1")
 
 
-def test_cancel_task_requires_reason_and_is_audited(tmp_path) -> None:
+def test_cancel_task_requires_reason_and_is_audited(tmp_path: Any) -> None:
     db, manager = _manager(tmp_path)
     proposal = manager.create_proposal(
         subject_id="Noyra-0001",
@@ -99,7 +100,7 @@ def test_cancel_task_requires_reason_and_is_audited(tmp_path) -> None:
     assert action is not None
 
 
-def test_cancel_reason_is_redacted_before_audit_persistence(tmp_path) -> None:
+def test_cancel_reason_is_redacted_before_audit_persistence(tmp_path: Any) -> None:
     db, manager = _manager(tmp_path)
     proposal = manager.create_proposal(
         subject_id="Noyra-0001",
@@ -126,7 +127,7 @@ def test_cancel_reason_is_redacted_before_audit_persistence(tmp_path) -> None:
     assert "super-secret-value" not in audit_row["payload_json"]
 
 
-def test_proposal_creation_is_disabled_by_default(tmp_path) -> None:
+def test_proposal_creation_is_disabled_by_default(tmp_path: Any) -> None:
     db = Database(tmp_path / "disabled.sqlite3")
     IdentityStore(db).ensure("Noyra-0001", "f" * 64)
     store = MigrationStore(db)
@@ -143,7 +144,7 @@ def test_proposal_creation_is_disabled_by_default(tmp_path) -> None:
         )
 
 
-def test_proposal_reason_and_evidence_are_redacted_before_storage(tmp_path) -> None:
+def test_proposal_reason_and_evidence_are_redacted_before_storage(tmp_path: Any) -> None:
     db, manager = _manager(tmp_path)
     proposal = manager.create_proposal(
         subject_id="Noyra-0001",
@@ -165,7 +166,7 @@ def test_proposal_reason_and_evidence_are_redacted_before_storage(tmp_path) -> N
     assert "hunter2" not in stored
 
 
-def test_tampered_proposal_cannot_be_approved(tmp_path) -> None:
+def test_tampered_proposal_cannot_be_approved(tmp_path: Any) -> None:
     db, manager = _manager(tmp_path)
     proposal = manager.create_proposal(
         subject_id="Noyra-0001",
@@ -184,7 +185,7 @@ def test_tampered_proposal_cannot_be_approved(tmp_path) -> None:
         manager.approve(proposal.proposal_id, actor="operator", idempotency_key="tampered")
 
 
-def test_task_cannot_attach_epoch_for_another_target(tmp_path) -> None:
+def test_task_cannot_attach_epoch_for_another_target(tmp_path: Any) -> None:
     db, manager = _manager(tmp_path)
     private = Ed25519PrivateKey.generate()
     TargetRegistry(db, MigrationStore(db)).register(

@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Self, cast
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -52,11 +52,11 @@ class _Gate0Output(BaseModel):
 class _BlockingProvider:
     name = "gate0-blocking-provider"
 
-    def __init__(self) -> None:
+    def __init__(self: Self) -> None:
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def complete(self, request: CompletionRequest) -> ProviderResponse:
+    async def complete(self: Self, request: CompletionRequest) -> ProviderResponse:
         del request
         self.entered.set()
         await self.release.wait()
@@ -69,7 +69,7 @@ class _BlockingProvider:
 
 
 class _BlockingInvalidOutputProvider(_BlockingProvider):
-    async def complete(self, request: CompletionRequest) -> ProviderResponse:
+    async def complete(self: Self, request: CompletionRequest) -> ProviderResponse:
         del request
         self.entered.set()
         await self.release.wait()

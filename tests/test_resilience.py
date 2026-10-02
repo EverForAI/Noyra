@@ -4,12 +4,13 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Self
 
 from noyra.core import Database, IdentityStore, LongRunResilience
 
 
 class LongRunResilienceTestCase(unittest.TestCase):
-    def test_audit_and_recovery_are_bounded(self) -> None:
+    def test_audit_and_recovery_are_bounded(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "noyra.sqlite3")
             subject_id = "Noyra-resilience-test"
@@ -31,7 +32,7 @@ class LongRunResilienceTestCase(unittest.TestCase):
             self.assertEqual(report.checks["identity_continuity"], "ok")
             self.assertTrue(harness.write_report(report).exists())
 
-    def test_tampered_event_is_a_p0_finding(self) -> None:
+    def test_tampered_event_is_a_p0_finding(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "noyra.sqlite3")
             subject_id = "Noyra-resilience-tamper"

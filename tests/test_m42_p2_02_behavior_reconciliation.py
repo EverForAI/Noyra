@@ -7,6 +7,7 @@ import unittest
 import zipfile
 from io import BytesIO
 from pathlib import Path
+from typing import Self
 
 from noyra.core import ActionLedger, Database, IdentityStore
 from noyra.core.database import CURRENT_SCHEMA_VERSION, behavior_log_state_hash
@@ -16,7 +17,7 @@ from noyra.core.types import content_hash, utc_now
 
 
 class BehaviorReconciliationTestCase(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.database = Database(self.root / "noyra.sqlite3")
@@ -26,10 +27,10 @@ class BehaviorReconciliationTestCase(unittest.TestCase):
         )
         self.ledger = ActionLedger(self.database)
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.temporary.cleanup()
 
-    def _unknown_action(self) -> str:
+    def _unknown_action(self: Self) -> str:
         action = self.ledger.prepare(
             self.subject_id,
             "publish",
@@ -82,7 +83,7 @@ class BehaviorReconciliationTestCase(unittest.TestCase):
             ),
         )
 
-    def test_reconciliation_preserves_original_and_appends_hashed_revision(self) -> None:
+    def test_reconciliation_preserves_original_and_appends_hashed_revision(self: Self) -> None:
         action_id = self._unknown_action()
         with self.database.connection() as connection:
             original_log = connection.execute(
@@ -151,7 +152,7 @@ class BehaviorReconciliationTestCase(unittest.TestCase):
                 (action_id,),
             )
 
-    def test_revision_contract_rejects_extra_or_mutated_rows_and_hash_tampering(self) -> None:
+    def test_revision_contract_rejects_extra_or_mutated_rows_and_hash_tampering(self: Self) -> None:
         action_id = self._unknown_action()
         with self.database.connection() as connection:
             first = connection.execute(
@@ -210,7 +211,9 @@ class BehaviorReconciliationTestCase(unittest.TestCase):
         with self.assertRaisesRegex(IntegrityError, "integrity mismatch"):
             self.ledger.verify_integrity(self.subject_id)
 
-    def test_schema_32_behavior_log_migration_creates_baseline_and_is_idempotent(self) -> None:
+    def test_schema_32_behavior_log_migration_creates_baseline_and_is_idempotent(
+        self: Self,
+    ) -> None:
         action_id = self._unknown_action()
         database_path = self.root / "noyra.sqlite3"
         with self.database.connection() as connection:
@@ -262,7 +265,7 @@ class BehaviorReconciliationTestCase(unittest.TestCase):
                 1,
             )
 
-    def test_current_schema_missing_revision_fails_closed_without_repair(self) -> None:
+    def test_current_schema_missing_revision_fails_closed_without_repair(self: Self) -> None:
         action_id = self._unknown_action()
         database_path = self.root / "noyra.sqlite3"
         with self.database.connection() as connection:
@@ -301,7 +304,7 @@ class BehaviorReconciliationTestCase(unittest.TestCase):
         self.assertEqual(restored, original)
         self.assertEqual(revision_count, 0)
 
-    def test_runtime_export_contains_original_and_reconciled_chain(self) -> None:
+    def test_runtime_export_contains_original_and_reconciled_chain(self: Self) -> None:
         action_id = self._unknown_action()
         self.ledger.reconcile_unknown(action_id, "failed", {"confirmed": False})
         artifact = RuntimeLogExporter(self.database).export(self.subject_id, actor="test")

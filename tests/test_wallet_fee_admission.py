@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Barrier
-from typing import Any
+from typing import Any, Self
 
 import pytest
 
@@ -194,7 +194,7 @@ def test_high_fee_quote_and_low_native_balance_fail_closed_before_signer_broadca
     native_balance(values, "0")
 
     class HighFeeQuoteSigner(MockSigner):
-        def get_fee_quote(self, transfer: Any) -> tuple[int, str]:
+        def get_fee_quote(self: Self, transfer: Any) -> tuple[int, str]:
             assert transfer.chain_id == network.chain_id
             return 100_000, "1000000000"
 
@@ -292,7 +292,7 @@ def test_token_uses_signer_quote_or_explicit_bounded_operator_override(
     native_balance(values, "360010")
 
     class QuotedSigner(MockSigner):
-        def get_fee_quote(self, transfer: Any) -> tuple[int, str]:
+        def get_fee_quote(self: Self, transfer: Any) -> tuple[int, str]:
             assert transfer.chain_id == network.chain_id
             assert transfer.source_address == source.address
             assert transfer.to_address == token.contract_address
@@ -324,7 +324,7 @@ def test_rejected_retry_retains_unresolved_payment_and_fee_reservation(
     native_balance(values, "100010")
 
     class RejectRetry(MockSigner):
-        def sign_and_broadcast(self, transfer: Any, *, request_id: str) -> Any:
+        def sign_and_broadcast(self: Self, transfer: Any, *, request_id: str) -> Any:
             if request_id.endswith(":attempt:2"):
                 raise WalletSignerError("retry rejected, initial transaction unresolved")
             result = super().sign_and_broadcast(transfer, request_id=request_id)
@@ -508,7 +508,7 @@ def test_retry_error_preserves_previous_transaction_for_receipt_only_recovery(
     native_balance(values, "100010")
 
     class BrokenRetry(MockSigner):
-        def sign_and_broadcast(self, transfer: Any, *, request_id: str) -> Any:
+        def sign_and_broadcast(self: Self, transfer: Any, *, request_id: str) -> Any:
             if request_id.endswith(":attempt:2"):
                 if fault == "transport":
                     raise RuntimeError("transport interrupted")

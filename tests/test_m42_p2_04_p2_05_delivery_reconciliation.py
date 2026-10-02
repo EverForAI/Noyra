@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from email.message import EmailMessage
 from io import BytesIO
 from pathlib import Path
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, Self, cast
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -38,10 +38,10 @@ from noyra.service import NoyraHTTPServer, ServiceSettings
 
 
 class _FakePeerSocket:
-    def __init__(self, address: str):
+    def __init__(self: Self, address: str) -> None:
         self.address = address
 
-    def getpeername(self) -> tuple[str, int]:
+    def getpeername(self: Self) -> tuple[str, int]:
         return self.address, 25
 
 
@@ -51,7 +51,7 @@ class _FakeSMTP:
     send_error: ClassVar[BaseException | None] = None
     quit_error: ClassVar[BaseException | None] = None
 
-    def __init__(self, *args: object, **kwargs: object):
+    def __init__(self: Self, *args: object, **kwargs: object) -> None:
         del args, kwargs
         self._host = ""
         self.sock: _FakePeerSocket | None = None
@@ -62,39 +62,39 @@ class _FakeSMTP:
         type(self).instances.append(self)
 
     @classmethod
-    def reset(cls) -> None:
+    def reset(cls: Any) -> None:
         cls.instances = []
         cls.peer_override = None
         cls.send_error = None
         cls.quit_error = None
 
-    def connect(self, host: str, port: int) -> tuple[int, bytes]:
+    def connect(self: Self, host: str, port: int) -> tuple[int, bytes]:
         self.connected_to = (host, port)
         self.sock = _FakePeerSocket(self.peer_override or host)
         return 220, b"ready"
 
-    def starttls(self, *, context: object) -> tuple[int, bytes]:
+    def starttls(self: Self, *, context: object) -> tuple[int, bytes]:
         del context
         self.started_tls = True
         return 220, b"tls"
 
-    def login(self, username: str, password: str) -> tuple[int, bytes]:
+    def login(self: Self, username: str, password: str) -> tuple[int, bytes]:
         del username, password
         return 235, b"ok"
 
-    def send_message(self, message: EmailMessage) -> dict[str, tuple[int, bytes]]:
+    def send_message(self: Self, message: EmailMessage) -> dict[str, tuple[int, bytes]]:
         self.message_ids.append(str(message["Message-ID"]))
         if self.send_error is not None:
             raise self.send_error
         return {}
 
-    def quit(self) -> tuple[int, bytes]:
+    def quit(self: Self) -> tuple[int, bytes]:
         if self.quit_error is not None:
             raise self.quit_error
         self.closed = True
         return 221, b"bye"
 
-    def close(self) -> None:
+    def close(self: Self) -> None:
         self.closed = True
 
 

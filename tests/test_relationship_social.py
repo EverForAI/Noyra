@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Self
 from unittest.mock import patch
 
 from noyra.cognition import (
@@ -30,7 +31,7 @@ from noyra.model import (
 
 
 class RelationshipSocialTestCase(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.subject_id = "Noyra-social-test"
         self.kernel = SubjectKernel(
@@ -46,11 +47,11 @@ class RelationshipSocialTestCase(unittest.IsolatedAsyncioTestCase):
         self.interactions = InteractionStore(self.kernel.database)
         self.relationships = RelationshipStore(self.kernel.database)
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.kernel.close()
         self.temp_dir.cleanup()
 
-    def settings(self) -> CognitionSettings:
+    def settings(self: Self) -> CognitionSettings:
         return CognitionSettings(
             enabled=True,
             sources=(
@@ -66,7 +67,7 @@ class RelationshipSocialTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
     def establish_relationship(
-        self, *, boundaries: dict[str, object] | None = None
+        self: Self, *, boundaries: dict[str, object] | None = None
     ) -> RelationshipRecord:
         invitation = self.interactions.receive(
             self.subject_id,
@@ -96,7 +97,7 @@ class RelationshipSocialTestCase(unittest.IsolatedAsyncioTestCase):
             )
         return relationship
 
-    def gateway(self, payload: Mapping[str, object]) -> ModelGateway:
+    def gateway(self: Self, payload: Mapping[str, object]) -> ModelGateway:
         return ModelGateway(
             FakeProvider(
                 [
@@ -111,7 +112,7 @@ class RelationshipSocialTestCase(unittest.IsolatedAsyncioTestCase):
             limits=BudgetLimits(20, 100_000, 100_000, 1_000_000),
         )
 
-    async def test_autonomous_contact_uses_known_relationship_and_channel(self) -> None:
+    async def test_autonomous_contact_uses_known_relationship_and_channel(self: Self) -> None:
         relationship = self.establish_relationship()
         evidence = self.events.append(
             self.subject_id, "goal_governance_committed", "test", {"topic": "continuity"}
@@ -142,7 +143,7 @@ class RelationshipSocialTestCase(unittest.IsolatedAsyncioTestCase):
             InteractionIntegrity(self.kernel.database).verify(self.subject_id)["interactions"], 2
         )
 
-    async def test_help_request_is_non_coercive_and_distinct(self) -> None:
+    async def test_help_request_is_non_coercive_and_distinct(self: Self) -> None:
         relationship = self.establish_relationship()
         evidence = self.events.append(
             self.subject_id, "outcome_evaluated", "test", {"result": "insufficient"}
@@ -167,7 +168,7 @@ class RelationshipSocialTestCase(unittest.IsolatedAsyncioTestCase):
         assert latest is not None and latest.interaction_id is not None
         self.assertEqual(self.interactions.get(latest.interaction_id).kind, "help_request")
 
-    async def test_no_contact_boundary_skips_model_and_preserves_distance(self) -> None:
+    async def test_no_contact_boundary_skips_model_and_preserves_distance(self: Self) -> None:
         self.establish_relationship(boundaries={"no_contact": True})
         provider = FakeProvider([])
         cognition = RelationshipSocialCognition(
@@ -189,7 +190,7 @@ class RelationshipSocialTestCase(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(outgoing, [])
 
-    async def test_social_cognition_waits_without_a_known_relationship(self) -> None:
+    async def test_social_cognition_waits_without_a_known_relationship(self: Self) -> None:
         cognition = RelationshipSocialCognition(
             self.kernel.database,
             self.subject_id,
@@ -199,7 +200,7 @@ class RelationshipSocialTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(await cognition.run_due())
 
-    async def test_social_context_isolated_to_one_correspondent(self) -> None:
+    async def test_social_context_isolated_to_one_correspondent(self: Self) -> None:
         founder = self.establish_relationship()
         other_invitation = self.interactions.receive(
             self.subject_id,
@@ -264,7 +265,7 @@ class RelationshipSocialTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("other-person", data_message)
         self.assertNotIn("private phrase", data_message.casefold())
 
-    async def test_social_daily_limit_prevents_model_call(self) -> None:
+    async def test_social_daily_limit_prevents_model_call(self: Self) -> None:
         self.establish_relationship()
         with self.kernel.database.transaction() as connection:
             for index in range(4):
@@ -301,7 +302,7 @@ class RelationshipSocialTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await cognition.run_due())
         self.assertEqual(provider.requests, [])
 
-    async def test_social_commit_recovers_without_duplicate_interaction(self) -> None:
+    async def test_social_commit_recovers_without_duplicate_interaction(self: Self) -> None:
         relationship = self.establish_relationship()
         evidence = self.events.append(
             self.subject_id, "goal_governance_committed", "test", {"topic": "recovery"}
@@ -343,7 +344,9 @@ class RelationshipSocialTestCase(unittest.IsolatedAsyncioTestCase):
             1,
         )
 
-    async def test_incoming_interaction_relationship_revision_is_recovery_idempotent(self) -> None:
+    async def test_incoming_interaction_relationship_revision_is_recovery_idempotent(
+        self: Self,
+    ) -> None:
         invitation = self.interactions.receive(
             self.subject_id,
             "web",
@@ -388,7 +391,7 @@ class RelationshipSocialTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recovered.current_revision, 2)
         self.assertEqual(self.interactions.get(invitation.interaction_id).status, "rejected")
 
-    async def test_social_integrity_detects_tampering(self) -> None:
+    async def test_social_integrity_detects_tampering(self: Self) -> None:
         relationship = self.establish_relationship()
         evidence = self.events.append(
             self.subject_id, "goal_governance_committed", "test", {"topic": "integrity"}
@@ -435,7 +438,7 @@ class RelationshipSocialTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(IntegrityError):
             InteractionIntegrity(self.kernel.database).verify(self.subject_id)
 
-    def test_social_schema_is_append_only(self) -> None:
+    def test_social_schema_is_append_only(self: Self) -> None:
         with self.kernel.database.connection() as connection:
             version = connection.execute(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
@@ -480,7 +483,7 @@ class RelationshipSocialTestCase(unittest.IsolatedAsyncioTestCase):
         ):
             connection.execute("DELETE FROM relationship_social_runs")
 
-    def _interaction_event(self, interaction_id: str) -> str:
+    def _interaction_event(self: Self, interaction_id: str) -> str:
         with self.kernel.database.connection() as connection:
             row = connection.execute(
                 "SELECT event_id FROM events WHERE event_type = 'interaction_received' "

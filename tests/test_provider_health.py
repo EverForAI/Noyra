@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -9,14 +10,14 @@ from noyra.core.provider_health import ProviderHealthStore, RoutePermit
 from noyra.core.types import content_hash
 
 
-def fixture(tmp_path: Path):
+def fixture(tmp_path: Path) -> Any:
     db = Database(tmp_path / "noyra.sqlite3")
     subject = "Noyra-provider-health"
     IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
     return db, subject
 
 
-def test_health_persists_only_hourly_aggregates_and_latency(tmp_path: Path):
+def test_health_persists_only_hourly_aggregates_and_latency(tmp_path: Path) -> None:
     db, subject = fixture(tmp_path)
     store = ProviderHealthStore(db)
     assert store.record_attempt(subject, "model", "provider-a", "attempt-1", True, 100, None)
@@ -40,7 +41,7 @@ def test_health_persists_only_hourly_aggregates_and_latency(tmp_path: Path):
         assert connection.execute("SELECT COUNT(*) FROM provider_health_buckets").fetchone()[0] == 1
 
 
-def test_projection_rejects_tampered_health_aggregate(tmp_path: Path):
+def test_projection_rejects_tampered_health_aggregate(tmp_path: Path) -> None:
     db, subject = fixture(tmp_path)
     store = ProviderHealthStore(db)
     store.record_attempt(subject, "model", "provider-a", "attempt-1", True, 100, None)
@@ -55,7 +56,7 @@ def test_projection_rejects_tampered_health_aggregate(tmp_path: Path):
         store.list_projection(subject, "model")
 
 
-def test_projection_includes_the_actual_metric_window(tmp_path: Path):
+def test_projection_includes_the_actual_metric_window(tmp_path: Path) -> None:
     db, subject = fixture(tmp_path)
     store = ProviderHealthStore(db)
     store.record_attempt(subject, "model", "provider-a", "attempt-1", True, 100, None)
@@ -66,7 +67,7 @@ def test_projection_includes_the_actual_metric_window(tmp_path: Path):
     assert row["window_start"] <= row["window_end"]
 
 
-def test_missing_state_for_recorded_provider_fails_closed(tmp_path: Path):
+def test_missing_state_for_recorded_provider_fails_closed(tmp_path: Path) -> None:
     db, subject = fixture(tmp_path)
     store = ProviderHealthStore(db)
     store.record_attempt(subject, "model", "provider-a", "attempt-1", False, 100, "timeout")
@@ -79,7 +80,7 @@ def test_missing_state_for_recorded_provider_fails_closed(tmp_path: Path):
         store.route_available(subject, "model", "provider-a")
 
 
-def test_probe_completion_requires_the_matching_probe_token(tmp_path: Path):
+def test_probe_completion_requires_the_matching_probe_token(tmp_path: Path) -> None:
     db, subject = fixture(tmp_path)
     store = ProviderHealthStore(db, failure_threshold=1)
     store.record_attempt(subject, "model", "provider-a", "attempt-1", False, 100, "timeout")
@@ -136,7 +137,7 @@ def test_probe_completion_requires_the_matching_probe_token(tmp_path: Path):
         )
 
 
-def test_health_cooldown_recovers_with_one_automatic_probe(tmp_path: Path):
+def test_health_cooldown_recovers_with_one_automatic_probe(tmp_path: Path) -> None:
     db, subject = fixture(tmp_path)
     store = ProviderHealthStore(db, failure_threshold=1)
     store.record_attempt(

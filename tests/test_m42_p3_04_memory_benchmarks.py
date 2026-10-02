@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Self, cast
 
 import httpx
 import pytest
@@ -94,22 +95,22 @@ def test_external_pin_and_report_persistence_are_bounded(tmp_path: Path, monkeyp
     )
 
     class Client:
-        def __init__(self) -> None:
+        def __init__(self: Self) -> None:
             self.calls: list[dict[str, Any]] = []
 
         @contextmanager
-        def stream(self, method: str, url: str, **kwargs: Any):
+        def stream(self: Self, method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
             self.calls.append({"method": method, "url": url, **kwargs})
             yield response
 
-        def close(self) -> None:
+        def close(self: Self) -> None:
             return None
 
     client = Client()
     benchmark = PinnedMemoryBenchmark.fetch(
         "https://example.test/locomo.json",
         expected_sha256=hashlib.sha256(payload).hexdigest(),
-        _client=client,
+        _client=cast(httpx.Client, client),
     )
     assert client.calls[0]["follow_redirects"] is False
     report = {"dataset": benchmark.metadata(), "passed": True}
@@ -128,17 +129,17 @@ def test_external_pin_rejects_redirects(tmp_path: Path) -> None:
 
     class Client:
         @contextmanager
-        def stream(self, *_args: Any, **_kwargs: Any):
+        def stream(self: Self, *_args: Any, **_kwargs: Any) -> Iterator[httpx.Response]:
             yield response
 
-        def close(self) -> None:
+        def close(self: Self) -> None:
             return None
 
     with pytest.raises(ValueError, match="redirect"):
         PinnedMemoryBenchmark.fetch(
             "https://example.test/locomo.json",
             expected_sha256="0" * 64,
-            _client=Client(),
+            _client=cast(httpx.Client, Client()),
         )
 
 

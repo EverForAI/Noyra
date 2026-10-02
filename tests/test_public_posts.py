@@ -9,6 +9,7 @@ import unittest
 import zlib
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Self
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -38,7 +39,7 @@ _REAL_CHOICE = secrets.choice
 
 
 class PublicPostAbuseTestCase(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.database = Database(Path(self.temp_dir.name) / "subject.sqlite3")
         self.subject_id = "Noyra-public-post-test"
@@ -47,7 +48,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
         )
         self.store = PublicPostStore(self.database)
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.temp_dir.cleanup()
 
     @staticmethod
@@ -58,7 +59,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
         return _REAL_CHOICE(sequence)
 
     def _challenge(
-        self,
+        self: Self,
         *,
         ip: str = "192.0.2.1",
         ttl_seconds: int = 300,
@@ -83,7 +84,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
             )
 
     def _submit(
-        self,
+        self: Self,
         title: str,
         challenge: dict[str, object],
         *,
@@ -97,7 +98,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
             captcha_answer="AAAAAA",
         )
 
-    def _downgrade_to_schema_51(self) -> None:
+    def _downgrade_to_schema_51(self: Self) -> None:
         """Build an exact schema-51 fixture, including its legacy hash contracts."""
         with self.database.transaction() as connection:
             for trigger in (
@@ -164,7 +165,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
                 connection.execute(f"ALTER TABLE public_post_controls DROP COLUMN {column}")
             connection.execute("UPDATE schema_meta SET value = '51' WHERE key = 'schema_version'")
 
-    def test_captcha_modes_and_png_do_not_expose_answer(self) -> None:
+    def test_captcha_modes_and_png_do_not_expose_answer(self: Self) -> None:
         for mode in ("letters", "digits", "alphanumeric"):
             challenge = self._challenge(mode=mode)
             image = str(challenge["image"])
@@ -173,7 +174,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
             self.assertTrue(payload.startswith(b"\x89PNG\r\n\x1a\n"))
             self.assertNotIn(b"AAAAAA", payload)
 
-    def test_captcha_breaks_the_legacy_fixed_grid_template(self) -> None:
+    def test_captcha_breaks_the_legacy_fixed_grid_template(self: Self) -> None:
         glyph = ("01110", "10001", "10001", "11111", "10001", "10001", "10001")
         for sample in range(12):
             image = str(self._challenge(ip=f"192.0.2.{sample + 40}")["image"])
@@ -210,7 +211,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
                     best = max(best, matches / total)
             self.assertLess(best, 0.95)
 
-    def test_captcha_is_one_time_and_failed_attempts_are_durable(self) -> None:
+    def test_captcha_is_one_time_and_failed_attempts_are_durable(self: Self) -> None:
         challenge = self._challenge(max_attempts=2)
         challenge_id = str(challenge["challenge_id"])
         with self.assertRaises(PublicPostCaptchaError):
@@ -242,7 +243,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
                 answer="AAAAAA",
             )
 
-    def test_captcha_binds_ip_and_expiry(self) -> None:
+    def test_captcha_binds_ip_and_expiry(self: Self) -> None:
         challenge = self._challenge(ip="192.0.2.2")
         with self.assertRaises(PublicPostCaptchaError):
             self.store.verify_captcha(
@@ -264,7 +265,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
                 answer="AAAAAA",
             )
 
-    def test_multiple_challenges_do_not_invalidate_an_existing_tab(self) -> None:
+    def test_multiple_challenges_do_not_invalidate_an_existing_tab(self: Self) -> None:
         first = self._challenge()
         second = self._challenge()
         self.store.verify_captcha(
@@ -280,7 +281,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
             answer="AAAAAA",
         )
 
-    def test_client_network_buckets_are_private_and_scoped_ipv6_is_rejected(self) -> None:
+    def test_client_network_buckets_are_private_and_scoped_ipv6_is_rejected(self: Self) -> None:
         challenge = self._challenge(ip="2001:db8:abcd:42::1")
         with self.database.connection() as connection:
             durable = connection.execute(
@@ -301,7 +302,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.issue_captcha(self.subject_id, "fe80::1%attacker-controlled-scope")
 
-    def test_rate_limit_is_per_ip_and_durable(self) -> None:
+    def test_rate_limit_is_per_ip_and_durable(self: Self) -> None:
         store = PublicPostStore(self.database, rate_limit_per_hour=1)
         first = self._challenge()
         store.create(
@@ -321,7 +322,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
                 captcha_answer="AAAAAA",
             )
 
-    def test_idempotent_retry_does_not_require_or_consume_captcha(self) -> None:
+    def test_idempotent_retry_does_not_require_or_consume_captcha(self: Self) -> None:
         challenge = self._challenge()
         first = self.store.create(
             self.subject_id,
@@ -345,7 +346,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
                 idempotency_key="stable-key",
             )
 
-    def test_legacy_implicit_idempotency_key_is_still_retryable(self) -> None:
+    def test_legacy_implicit_idempotency_key_is_still_retryable(self: Self) -> None:
         legacy_key = content_hash({"kind": "post", "title": "legacy", "content": "content"})
         challenge = self._challenge()
         first = self.store.create(
@@ -363,7 +364,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
         )
         self.assertEqual(retry.post_id, first.post_id)
 
-    def test_expired_challenges_are_garbage_collected_across_ips(self) -> None:
+    def test_expired_challenges_are_garbage_collected_across_ips(self: Self) -> None:
         first = self._challenge(ip="192.0.2.10")
         second = self._challenge(ip="192.0.2.11")
         with self.database.transaction() as connection:
@@ -386,7 +387,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
                 ).fetchone()
             )
 
-    def test_stale_rate_evidence_is_pruned_before_capacity_check(self) -> None:
+    def test_stale_rate_evidence_is_pruned_before_capacity_check(self: Self) -> None:
         store = PublicPostStore(self.database, rate_event_cap=1)
         first = self._challenge(ip="192.0.2.20")
         store.create(
@@ -410,7 +411,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
             captcha_answer="AAAAAA",
         )
 
-    def test_rate_evidence_capacity_fails_closed(self) -> None:
+    def test_rate_evidence_capacity_fails_closed(self: Self) -> None:
         store = PublicPostStore(self.database, rate_event_cap=1)
         first = self._challenge(ip="192.0.2.30")
         store.create(
@@ -431,7 +432,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
             )
 
     def test_pending_review_queue_has_backpressure_without_invalidating_other_challenges(
-        self,
+        self: Self,
     ) -> None:
         store = PublicPostStore(self.database, queue_cap=1)
         first = self._challenge()
@@ -467,7 +468,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
                 ).fetchone()
             )
 
-    def test_control_overrides_fail_closed_when_state_hash_is_tampered(self) -> None:
+    def test_control_overrides_fail_closed_when_state_hash_is_tampered(self: Self) -> None:
         self.store.configure_controls(
             self.subject_id,
             rate_limit_per_hour=10,
@@ -494,7 +495,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
                 },
             )
 
-    def test_content_hash_mismatch_is_an_integrity_failure(self) -> None:
+    def test_content_hash_mismatch_is_an_integrity_failure(self: Self) -> None:
         challenge = self._challenge()
         record = self._submit("tamper target", challenge)
         with self.database.transaction() as connection:
@@ -506,7 +507,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             self.store.get(record.post_id, subject_id=self.subject_id)
 
-    def test_reopen_does_not_launder_missing_moderation_history(self) -> None:
+    def test_reopen_does_not_launder_missing_moderation_history(self: Self) -> None:
         record = self._submit("missing history", self._challenge())
         self.store.moderate(
             record.post_id,
@@ -531,7 +532,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             InteractionIntegrity(reopened).verify(self.subject_id)
 
-    def test_schema_47_backfills_moderation_once_and_distinguishes_rejection(self) -> None:
+    def test_schema_47_backfills_moderation_once_and_distinguishes_rejection(self: Self) -> None:
         now = "2026-08-22T00:00:00.000+00:00"
         with self.database.transaction() as connection:
             for trigger in (
@@ -627,7 +628,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
                 3,
             )
 
-    def test_moderation_revision_orders_same_millisecond_actions(self) -> None:
+    def test_moderation_revision_orders_same_millisecond_actions(self: Self) -> None:
         record = self._submit("same millisecond", self._challenge())
         with patch("noyra.interaction.posts.utc_now", return_value="2026-08-22T00:00:00.000+00:00"):
             self.store.moderate(
@@ -657,7 +658,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
             InteractionIntegrity(self.database).verify(self.subject_id)["public_posts"], 1
         )
 
-    def test_schema_51_migrates_existing_moderation_chain_and_identity(self) -> None:
+    def test_schema_51_migrates_existing_moderation_chain_and_identity(self: Self) -> None:
         record = self._submit("schema migration", self._challenge())
         self.store.moderate(
             record.post_id,
@@ -706,7 +707,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
         self.assertEqual(history[1]["previous_event_id"], history[0]["event_id"])
         self.assertEqual(InteractionIntegrity(upgraded).verify(self.subject_id)["public_posts"], 1)
 
-    def test_schema_51_migration_rejects_tampered_moderation_hash(self) -> None:
+    def test_schema_51_migration_rejects_tampered_moderation_hash(self: Self) -> None:
         record = self._submit("tampered legacy moderation", self._challenge())
         self.store.moderate(
             record.post_id,
@@ -725,7 +726,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "moderation integrity mismatch"):
             Database(self.database.path)
 
-    def test_schema_51_migration_rejects_tampered_controls_hash(self) -> None:
+    def test_schema_51_migration_rejects_tampered_controls_hash(self: Self) -> None:
         self.store.configure_controls(
             self.subject_id,
             rate_limit_per_hour=10,
@@ -744,7 +745,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "controls integrity mismatch"):
             Database(self.database.path)
 
-    def test_moderation_is_idempotent_and_checks_expected_status(self) -> None:
+    def test_moderation_is_idempotent_and_checks_expected_status(self: Self) -> None:
         record = self._submit("idempotent moderation", self._challenge())
         first = self.store.moderate(
             record.post_id,
@@ -796,7 +797,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
                 idempotency_key="moderation-operation-2",
             )
 
-    def test_admin_status_filter_and_cursor_reach_the_next_page(self) -> None:
+    def test_admin_status_filter_and_cursor_reach_the_next_page(self: Self) -> None:
         records = []
         for index in range(3):
             client_ip = f"192.0.2.{index + 80}"
@@ -818,7 +819,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
             {record.post_id for record in records},
         )
 
-    def test_moderation_history_trigger_requires_the_previous_transition(self) -> None:
+    def test_moderation_history_trigger_requires_the_previous_transition(self: Self) -> None:
         challenge = self._challenge()
         record = self._submit("moderation chain", challenge)
         published = self.store.moderate(

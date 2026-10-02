@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -10,19 +11,19 @@ from noyra.migration.policy import MigrationStore
 from noyra.migration.targets import TargetRegistry
 
 
-def _registry(tmp_path):
+def _registry(tmp_path: Any) -> Any:
     database = Database(tmp_path / "noyra.sqlite3")
     IdentityStore(database).ensure("Noyra-0001", "d" * 64)
     return database, TargetRegistry(database, MigrationStore(database))
 
 
-def _key_material():
+def _key_material() -> Any:
     private = Ed25519PrivateKey.generate()
     public = base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode("ascii")
     return private, public
 
 
-def test_register_challenge_and_consume_target(tmp_path) -> None:
+def test_register_challenge_and_consume_target(tmp_path: Any) -> None:
     _, registry = _registry(tmp_path)
     private, public = _key_material()
     target = registry.register(
@@ -46,7 +47,7 @@ def test_register_challenge_and_consume_target(tmp_path) -> None:
         registry.attest(target.target_id, challenge, signature, actor="operator")
 
 
-def test_unencrypted_or_non_https_target_is_rejected(tmp_path) -> None:
+def test_unencrypted_or_non_https_target_is_rejected(tmp_path: Any) -> None:
     _, registry = _registry(tmp_path)
     _, public = _key_material()
     with pytest.raises(ValueError, match="HTTPS"):
@@ -79,7 +80,7 @@ def test_unencrypted_or_non_https_target_is_rejected(tmp_path) -> None:
         )
 
 
-def test_revoked_target_cannot_be_attested(tmp_path) -> None:
+def test_revoked_target_cannot_be_attested(tmp_path: Any) -> None:
     _, registry = _registry(tmp_path)
     private, public = _key_material()
     target = registry.register(
@@ -102,7 +103,7 @@ def test_revoked_target_cannot_be_attested(tmp_path) -> None:
         registry.attest(target.target_id, challenge, signature, actor="operator")
 
 
-def test_target_integrity_detects_key_and_revocation_tampering(tmp_path) -> None:
+def test_target_integrity_detects_key_and_revocation_tampering(tmp_path: Any) -> None:
     database, registry = _registry(tmp_path)
     _, public = _key_material()
     target = registry.register(

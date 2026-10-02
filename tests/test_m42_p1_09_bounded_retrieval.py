@@ -7,7 +7,7 @@ import tempfile
 import tracemalloc
 from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any, TypedDict, cast
+from typing import Any, Self, TypedDict, cast
 from unittest.mock import patch
 
 import noyra.mind.retrieval as retrieval_module
@@ -56,12 +56,12 @@ def _load_fixture() -> RetrievalFixture:
 
 
 class TrackingDatabase(Database):
-    def __init__(self, path: Path | str):
+    def __init__(self: Self, path: Path | str) -> None:
         self.capture_statements = False
         self.statements: list[str] = []
         super().__init__(path)
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self: Self) -> sqlite3.Connection:
         connection = super()._connect()
         if self.capture_statements:
             connection.set_trace_callback(self.statements.append)
@@ -71,11 +71,11 @@ class TrackingDatabase(Database):
 class TopicEmbedding:
     name = "p1-09-topic-embedding"
 
-    def __init__(self, topics: Sequence[TopicFixture]):
+    def __init__(self: Self, topics: Sequence[TopicFixture]) -> None:
         self.topics = tuple(topics)
         self.calls: list[tuple[str, ...]] = []
 
-    def embed(self, texts: Sequence[str]) -> list[list[float]]:
+    def embed(self: Self, texts: Sequence[str]) -> list[list[float]]:
         self.calls.append(tuple(texts))
         vectors: list[list[float]] = []
         for text in texts:
@@ -92,22 +92,22 @@ class TopicEmbedding:
 class ConstantEmbedding:
     name = "p1-09-large-embedding"
 
-    def __init__(self, dimensions: int = 64):
+    def __init__(self: Self, dimensions: int = 64) -> None:
         self.vector = [1.0, *([0.0] * (dimensions - 1))]
         self.calls: list[tuple[str, ...]] = []
 
-    def embed(self, texts: Sequence[str]) -> list[list[float]]:
+    def embed(self: Self, texts: Sequence[str]) -> list[list[float]]:
         self.calls.append(tuple(texts))
         return [list(self.vector) for _ in texts]
 
 
 class RecordingMemoryEmbeddingIndex(MemoryEmbeddingIndex):
-    def __init__(self, database: Database, provider: TopicEmbedding):
+    def __init__(self: Self, database: Database, provider: TopicEmbedding) -> None:
         super().__init__(database, provider)
         self.candidate_counts: list[int] = []
 
     def similarities(
-        self,
+        self: Self,
         subject_id: str,
         query: str,
         candidate_memory_ids: Iterable[str],

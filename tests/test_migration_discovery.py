@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from datetime import UTC, datetime, timedelta
+from typing import Any, Self
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -16,16 +17,16 @@ from noyra.migration.targets import TargetRegistry
 
 
 class StaticObservationProvider:
-    def __init__(self, observations: dict[str, ResourceObservation]):
+    def __init__(self: Self, observations: dict[str, ResourceObservation]) -> None:
         self.observations = observations
         self.requested: list[str] = []
 
-    def observe(self, target_id: str) -> ResourceObservation | None:
+    def observe(self: Self, target_id: str) -> ResourceObservation | None:
         self.requested.append(target_id)
         return self.observations.get(target_id)
 
 
-def _setup(tmp_path):
+def _setup(tmp_path: Any) -> Any:
     database = Database(tmp_path / "noyra.sqlite3")
     IdentityStore(database).ensure("Noyra-0001", "e" * 64)
     policy_store = MigrationStore(database)
@@ -57,7 +58,7 @@ def _setup(tmp_path):
     return database, policy, target, private
 
 
-def _observation(private, *, target_id="target-1", **changes):
+def _observation(private: Any, *, target_id: Any = "target-1", **changes: Any) -> Any:
     values = {
         "target_id": target_id,
         "observed_at": datetime.now(UTC).isoformat(),
@@ -77,7 +78,9 @@ def _observation(private, *, target_id="target-1", **changes):
     return unsigned.with_signature(values["signature"])
 
 
-def test_only_registered_targets_are_queried_and_signed_observation_is_returned(tmp_path):
+def test_only_registered_targets_are_queried_and_signed_observation_is_returned(
+    tmp_path: Any,
+) -> None:
     database, policy, _, private = _setup(tmp_path)
     provider = StaticObservationProvider({"target-1": _observation(private)})
 
@@ -86,10 +89,12 @@ def test_only_registered_targets_are_queried_and_signed_observation_is_returned(
     assert provider.requested == ["target-1"]
     assert len(results) == 1
     assert results[0].eligible is True
-    assert results[0].observation.free_bytes == 8_000_000_000
+    observation = results[0].observation
+    assert observation is not None
+    assert observation.free_bytes == 8_000_000_000
 
 
-def test_stale_observation_fails_closed(tmp_path):
+def test_stale_observation_fails_closed(tmp_path: Any) -> None:
     database, policy, _, private = _setup(tmp_path)
     stale = _observation(
         private,
@@ -105,7 +110,7 @@ def test_stale_observation_fails_closed(tmp_path):
     assert "resource_observation_stale" in result[0].reasons
 
 
-def test_unsigned_or_wrong_generation_observation_fails_closed(tmp_path):
+def test_unsigned_or_wrong_generation_observation_fails_closed(tmp_path: Any) -> None:
     database, policy, _, private = _setup(tmp_path)
     observation = _observation(private, enrollment_generation=2)
 
@@ -117,7 +122,7 @@ def test_unsigned_or_wrong_generation_observation_fails_closed(tmp_path):
     assert "resource_observation_invalid" in result[0].reasons
 
 
-def test_disabled_policy_never_contacts_provider(tmp_path):
+def test_disabled_policy_never_contacts_provider(tmp_path: Any) -> None:
     database, _policy, _, private = _setup(tmp_path)
     disabled = MigrationPolicy.default("Noyra-0001")
     provider = StaticObservationProvider({"target-1": _observation(private)})
@@ -128,7 +133,7 @@ def test_disabled_policy_never_contacts_provider(tmp_path):
     assert provider.requested == []
 
 
-def test_missing_observation_is_explicitly_unavailable(tmp_path):
+def test_missing_observation_is_explicitly_unavailable(tmp_path: Any) -> None:
     database, policy, _, _ = _setup(tmp_path)
 
     result = MigrationDiscovery(database, StaticObservationProvider({})).discover(
@@ -139,7 +144,7 @@ def test_missing_observation_is_explicitly_unavailable(tmp_path):
     assert result[0].reasons == ("resource_observation_unavailable",)
 
 
-def test_observation_payload_is_bounded_and_digest_bound():
+def test_observation_payload_is_bounded_and_digest_bound() -> None:
     with pytest.raises(ValueError, match="capacity"):
         ResourceObservation.create_signed_payload(
             target_id="target-1",

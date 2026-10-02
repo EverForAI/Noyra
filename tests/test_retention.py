@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -19,7 +20,7 @@ from noyra.research.provider import SearchProviderStore
 from noyra.research.types import SearchProviderInput
 
 
-def test_settings_defaults_and_bounds():
+def test_settings_defaults_and_bounds() -> None:
     settings = RetentionSettings.from_env({})
     assert settings.health_days == 30
     assert settings.batch_size == 500
@@ -32,7 +33,7 @@ def test_settings_defaults_and_bounds():
         RetentionSettings.from_env({"NOYRA_RETENTION_SEARCH_USE_HOURS": "1"})
 
 
-def test_retention_run_history_is_bounded(tmp_path):
+def test_retention_run_history_is_bounded(tmp_path: Any) -> None:
     db = Database(tmp_path / "noyra.sqlite3")
     subject = "Noyra-retention-history"
     IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
@@ -48,7 +49,7 @@ def test_retention_run_history_is_bounded(tmp_path):
     assert count == 2
 
 
-def test_run_batch_is_bounded_and_removes_old_health_rows(tmp_path):
+def test_run_batch_is_bounded_and_removes_old_health_rows(tmp_path: Any) -> None:
     db = Database(tmp_path / "noyra.sqlite3")
     subject = "Noyra-retention"
     IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
@@ -65,7 +66,7 @@ def test_run_batch_is_bounded_and_removes_old_health_rows(tmp_path):
     assert result["failed_reason"] is None
 
 
-def test_run_batch_prunes_only_expired_search_rate_limit_records(tmp_path):
+def test_run_batch_prunes_only_expired_search_rate_limit_records(tmp_path: Any) -> None:
     db = Database(tmp_path / "noyra.sqlite3")
     subject = "Noyra-search-retention"
     IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
@@ -127,7 +128,7 @@ def test_run_batch_prunes_only_expired_search_rate_limit_records(tmp_path):
     assert [row["use_id"] for row in remaining] == ["use-recent"]
 
 
-def test_retention_next_cursor_is_per_table_and_resumes_each_table(tmp_path):
+def test_retention_next_cursor_is_per_table_and_resumes_each_table(tmp_path: Any) -> None:
     db = Database(tmp_path / "noyra.sqlite3")
     subject = "Noyra-retention-cursors"
     IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
@@ -156,7 +157,7 @@ def test_retention_next_cursor_is_per_table_and_resumes_each_table(tmp_path):
     assert second["next_cursor"]["provider_health_buckets"]["deleted"] >= 0
 
 
-def test_retention_failure_is_persisted_for_diagnostics(tmp_path):
+def test_retention_failure_is_persisted_for_diagnostics(tmp_path: Any) -> None:
     db = Database(tmp_path / "noyra.sqlite3")
     subject = "Noyra-retention-failure"
     IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
@@ -172,7 +173,7 @@ def test_retention_failure_is_persisted_for_diagnostics(tmp_path):
     assert latest["failure_stage"] == "delete"
 
 
-def test_retention_resumes_from_previous_keyset_cursor(tmp_path):
+def test_retention_resumes_from_previous_keyset_cursor(tmp_path: Any) -> Any:
     db = Database(tmp_path / "noyra.sqlite3")
     subject = "Noyra-retention-resume"
     IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
@@ -189,7 +190,9 @@ def test_retention_resumes_from_previous_keyset_cursor(tmp_path):
     observed: list[object] = []
     original = manager._delete_table
 
-    def wrapped(connection, table, subject_id, cutoff, limit, cursor):
+    def wrapped(
+        connection: Any, table: Any, subject_id: Any, cutoff: Any, limit: Any, cursor: Any
+    ) -> Any:
         if table == "provider_health_buckets":
             observed.append(cursor)
         return original(connection, table, subject_id, cutoff, limit, cursor)
@@ -203,7 +206,7 @@ def test_retention_resumes_from_previous_keyset_cursor(tmp_path):
     assert observed[1]["bucket_start"] == old
 
 
-def test_retention_never_schedules_append_only_route_history(tmp_path):
+def test_retention_never_schedules_append_only_route_history(tmp_path: Any) -> Any:
     db = Database(tmp_path / "noyra.sqlite3")
     subject = "Noyra-retention-route-history"
     IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
@@ -211,7 +214,9 @@ def test_retention_never_schedules_append_only_route_history(tmp_path):
     calls: list[str] = []
     original = manager._delete_table
 
-    def wrapped(connection, table, subject_id, cutoff, limit, cursor):
+    def wrapped(
+        connection: Any, table: Any, subject_id: Any, cutoff: Any, limit: Any, cursor: Any
+    ) -> Any:
         calls.append(table)
         return original(connection, table, subject_id, cutoff, limit, cursor)
 
@@ -222,7 +227,7 @@ def test_retention_never_schedules_append_only_route_history(tmp_path):
     assert "cognitive_route_outcomes" not in calls
 
 
-def test_long_lived_tables_have_explicit_retention_classification():
+def test_long_lived_tables_have_explicit_retention_classification() -> None:
     expected = {
         "cognitive_route_decisions",
         "cognitive_route_attempts",
@@ -243,7 +248,7 @@ def test_long_lived_tables_have_explicit_retention_classification():
     assert all(item.retention_action in {"preserve", "delete"} for item in registry.values())
 
 
-def test_append_only_evidence_is_never_in_delete_registry():
+def test_append_only_evidence_is_never_in_delete_registry() -> None:
     diagnostics = retention_registry_diagnostics()
     assert diagnostics["unclassified"] == ()
     assert diagnostics["delete_tables"] == (
@@ -266,7 +271,7 @@ def test_append_only_evidence_is_never_in_delete_registry():
         assert registry[table].retention_action == "preserve"
 
 
-def test_retention_projection_uses_registry_cutoff_metadata(tmp_path):
+def test_retention_projection_uses_registry_cutoff_metadata(tmp_path: Any) -> None:
     db = Database(tmp_path / "noyra.sqlite3")
     subject = "Noyra-retention-registry"
     IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
@@ -279,7 +284,9 @@ def test_retention_projection_uses_registry_cutoff_metadata(tmp_path):
     }
 
 
-def test_retention_registry_reports_runtime_table_added_after_schema_baseline(tmp_path):
+def test_retention_registry_reports_runtime_table_added_after_schema_baseline(
+    tmp_path: Any,
+) -> None:
     db = Database(tmp_path / "noyra.sqlite3")
     with db.transaction() as connection:
         connection.execute(
@@ -289,7 +296,7 @@ def test_retention_registry_reports_runtime_table_added_after_schema_baseline(tm
     assert "unregistered_history" in diagnostics["unclassified"]
 
 
-def test_retention_run_return_and_persisted_hash_match(tmp_path):
+def test_retention_run_return_and_persisted_hash_match(tmp_path: Any) -> None:
     db = Database(tmp_path / "noyra.sqlite3")
     subject = "Noyra-retention-hash"
     IdentityStore(db).ensure(subject, content_hash({"subject": subject}))

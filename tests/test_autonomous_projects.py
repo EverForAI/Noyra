@@ -7,6 +7,7 @@ import unittest
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Self
 from unittest.mock import Mock
 
 from noyra.autonomy import DurableWorkflowStore
@@ -38,7 +39,7 @@ from noyra.world.types import FetchedDocument
 
 
 class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.subject_id = "Noyra-project-test"
         self.kernel = SubjectKernel(
@@ -76,11 +77,11 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
             causal_source_ids=(self.event.event_id,),
         )
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.kernel.close()
         self.temp_dir.cleanup()
 
-    def test_phase_parser_rejects_blob_durable_json(self) -> None:
+    def test_phase_parser_rejects_blob_durable_json(self: Self) -> None:
         with self.assertRaises(IntegrityError):
             AutonomousProjectManager._phase_from_row(
                 {
@@ -89,7 +90,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
                 }
             )
 
-    def settings(self, **updates: object) -> CognitionSettings:
+    def settings(self: Self, **updates: object) -> CognitionSettings:
         base = CognitionSettings(
             enabled=True,
             sources=(
@@ -107,7 +108,9 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
         )
         return base.model_copy(update=updates)
 
-    def gateway(self, payloads: list[Mapping[str, object]]) -> tuple[ModelGateway, FakeProvider]:
+    def gateway(
+        self: Self, payloads: list[Mapping[str, object]]
+    ) -> tuple[ModelGateway, FakeProvider]:
         provider = FakeProvider(
             [
                 ProviderResponse(content=json.dumps(payload), usage=ModelUsage(500, 250))
@@ -123,7 +126,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
         )
         return gateway, provider
 
-    def formation(self, *, goal_id: str | None = None) -> dict[str, object]:
+    def formation(self: Self, *, goal_id: str | None = None) -> dict[str, object]:
         return {
             "disposition": "form",
             "summary": "A short evidence-tracking project fits the present goal.",
@@ -168,7 +171,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
             "source_mission_id": None,
         }
 
-    async def form_project(self) -> tuple[AutonomousProjectManager, FakeProvider]:
+    async def form_project(self: Self) -> tuple[AutonomousProjectManager, FakeProvider]:
         gateway, provider = self.gateway([self.formation()])
         manager = AutonomousProjectManager(
             self.kernel.database,
@@ -180,7 +183,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await manager.run_due(), "autonomous_project_planned")
         return manager, provider
 
-    def record_analyzed_observation(self) -> None:
+    def record_analyzed_observation(self: Self) -> None:
         source = SourceRegistry(self.kernel.database).register(
             self.subject_id,
             "Project execution evidence",
@@ -210,7 +213,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
             observation.observation_id, "analyzed", subject_id=self.subject_id
         )
 
-    async def request_help(self, manager: AutonomousProjectManager) -> None:
+    async def request_help(self: Self, manager: AutonomousProjectManager) -> None:
         project = manager.projects()[0]
         phase = manager.phases(project.project_id)[0]
         self.clock_value = "2026-08-14T13:00:00.000+00:00"
@@ -232,7 +235,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
         )[0]
         self.assertEqual(await manager.run_due(), "autonomous_project_request_help")
 
-    def assert_project_registry_p0(self) -> None:
+    def assert_project_registry_p0(self: Self) -> None:
         report = IntegrityRegistry().run(
             self.kernel.database,
             self.subject_id,
@@ -246,7 +249,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.p0, ("cognition.autonomous_projects:integrity_error",))
         self.assertEqual(report.p1, ())
 
-    async def test_forms_bounded_project_and_exposes_safe_projection(self) -> None:
+    async def test_forms_bounded_project_and_exposes_safe_projection(self: Self) -> None:
         manager, provider = await self.form_project()
         project = manager.projects()[0]
         phases = manager.phases(project.project_id)
@@ -265,7 +268,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["project_summary"]["project_count"], 1)
         self.assertEqual(manager.verify_integrity()["autonomous_projects"], 1)
 
-    async def test_review_activates_and_completes_ordered_phases(self) -> None:
+    async def test_review_activates_and_completes_ordered_phases(self: Self) -> None:
         manager, _ = await self.form_project()
         project = manager.projects()[0]
         phase = manager.phases(project.project_id)[0]
@@ -352,7 +355,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated.current_phase_id, phases[1].phase_id)
         self.assertEqual([item.status for item in phases], ["completed", "active"])
 
-    async def test_rejects_forged_goal_and_oversized_budget(self) -> None:
+    async def test_rejects_forged_goal_and_oversized_budget(self: Self) -> None:
         invalid = self.formation(goal_id="goal_forged")
         budget = invalid["budget"]
         assert isinstance(budget, dict)
@@ -368,7 +371,9 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await manager.run_due(), "autonomous_project_rejected")
         self.assertEqual(manager.projects(), [])
 
-    async def test_active_duration_deadline_abandons_project_without_new_model_call(self) -> None:
+    async def test_active_duration_deadline_abandons_project_without_new_model_call(
+        self: Self,
+    ) -> None:
         manager, provider = await self.form_project()
         project = manager.projects()[0]
         manager._apply_local_transition(
@@ -398,7 +403,9 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
         assert event is not None
         self.assertIn("active_execution_deadline_reached", str(event["payload_json"]))
 
-    async def test_execution_clock_recovery_discards_offline_pause_and_sleep_time(self) -> None:
+    async def test_execution_clock_recovery_discards_offline_pause_and_sleep_time(
+        self: Self,
+    ) -> None:
         manager, _ = await self.form_project()
         project = manager.projects()[0]
         manager._apply_local_transition(
@@ -447,7 +454,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
             restarted.verify_integrity()["autonomous_project_execution_clock_events"], 4
         )
 
-    async def test_planned_blocked_and_paused_wall_time_do_not_consume_deadline(self) -> None:
+    async def test_planned_blocked_and_paused_wall_time_do_not_consume_deadline(self: Self) -> None:
         manager, _ = await self.form_project()
         project = manager.projects()[0]
         self.clock_value = "2026-09-14T12:00:00.000+00:00"
@@ -474,7 +481,9 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(manager._expire_overdue_projects())
         self.assertEqual(manager.active_execution_seconds(project.project_id), 0.0)
 
-    async def test_active_project_waiting_for_review_does_not_start_execution_clock(self) -> None:
+    async def test_active_project_waiting_for_review_does_not_start_execution_clock(
+        self: Self,
+    ) -> None:
         manager, _ = await self.form_project()
         project = manager.projects()[0]
         manager._apply_local_transition(
@@ -493,7 +502,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
             ).fetchone()[0]
         self.assertEqual(events, 0)
 
-    async def test_project_duration_rejects_sub_hour_active_budget(self) -> None:
+    async def test_project_duration_rejects_sub_hour_active_budget(self: Self) -> None:
         formation = self.formation()
         formation["estimated_duration_hours"] = 0.5
         gateway, _ = self.gateway([formation])
@@ -507,7 +516,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await manager.run_due(), "autonomous_project_rejected")
         self.assertEqual(manager.projects(), [])
 
-    async def test_local_no_progress_guard_pauses_without_another_model_call(self) -> None:
+    async def test_local_no_progress_guard_pauses_without_another_model_call(self: Self) -> None:
         manager, _ = await self.form_project()
         project = manager.projects()[0]
         phase = manager.phases(project.project_id)[0]
@@ -563,7 +572,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await manager.run_due(), "autonomous_project_paused")
         self.assertEqual(provider.requests, [])
 
-    async def test_sleep_records_project_review_and_histories_are_append_only(self) -> None:
+    async def test_sleep_records_project_review_and_histories_are_append_only(self: Self) -> None:
         manager, _ = await self.form_project()
         project = manager.projects()[0]
         sleep = SleepEngine(self.kernel.database, self.subject_id)
@@ -595,7 +604,9 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(IntegrityError):
             manager.verify_integrity()
 
-    async def test_integrity_covers_project_resource_assistance_and_sleep_domains(self) -> None:
+    async def test_integrity_covers_project_resource_assistance_and_sleep_domains(
+        self: Self,
+    ) -> None:
         manager, _ = await self.form_project()
         initial = manager.verify_integrity()
         self.assertEqual(initial["autonomous_project_resource_uses"], 1)
@@ -613,7 +624,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(verified["autonomous_project_assistance_requests"], 1)
         self.assertEqual(verified["autonomous_project_sleep_reflections"], 1)
 
-    async def test_fractional_project_resource_quantity_is_registry_p0(self) -> None:
+    async def test_fractional_project_resource_quantity_is_registry_p0(self: Self) -> None:
         manager, _ = await self.form_project()
         project = manager.projects()[0]
         with self.kernel.database.transaction() as connection:
@@ -641,7 +652,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assert_project_registry_p0()
 
-    async def test_orphan_project_storage_resource_is_registry_p0(self) -> None:
+    async def test_orphan_project_storage_resource_is_registry_p0(self: Self) -> None:
         manager, _ = await self.form_project()
         project = manager.projects()[0]
         created_at = "2026-08-14T13:00:00.000+00:00"
@@ -672,7 +683,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assert_project_registry_p0()
 
-    async def test_foreign_project_assistance_owner_is_registry_p0(self) -> None:
+    async def test_foreign_project_assistance_owner_is_registry_p0(self: Self) -> None:
         manager, _ = await self.form_project()
         project = manager.projects()[0]
         phase = manager.phases(project.project_id)[0]
@@ -725,7 +736,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assert_project_registry_p0()
 
-    async def test_noncanonical_project_sleep_risks_are_registry_p0(self) -> None:
+    async def test_noncanonical_project_sleep_risks_are_registry_p0(self: Self) -> None:
         manager, _ = await self.form_project()
         sleep = SleepEngine(self.kernel.database, self.subject_id).start(
             "subject_choice", "verify project reflection"
@@ -741,7 +752,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assert_project_registry_p0()
 
-    async def test_project_identity_and_phase_definition_are_immutable(self) -> None:
+    async def test_project_identity_and_phase_definition_are_immutable(self: Self) -> None:
         manager, _ = await self.form_project()
         project = manager.projects()[0]
         phase = manager.phases(project.project_id)[0]
@@ -762,7 +773,9 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
                 (phase.phase_id,),
             )
 
-    async def test_project_execution_is_idempotent_append_only_and_acceptance_bound(self) -> None:
+    async def test_project_execution_is_idempotent_append_only_and_acceptance_bound(
+        self: Self,
+    ) -> None:
         manager, _ = await self.form_project()
         project = manager.projects()[0]
         phase = manager.phases(project.project_id)[0]
@@ -803,7 +816,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["status"], "failed")
         self.assertEqual(json.loads(row["acceptance_json"])["evidence"]["result_count"], 0)
 
-    async def test_execution_integrity_parses_durable_acceptance_json(self) -> None:
+    async def test_execution_integrity_parses_durable_acceptance_json(self: Self) -> None:
         manager, _ = await self.form_project()
         project = manager.projects()[0]
         phase = manager.phases(project.project_id)[0]
@@ -818,7 +831,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(IntegrityError):
             ledger.verify_integrity()
 
-    async def test_execution_integrity_covers_strict_workflow_checkpoints(self) -> None:
+    async def test_execution_integrity_covers_strict_workflow_checkpoints(self: Self) -> None:
         workflows = DurableWorkflowStore(self.kernel.database)
         workflows.checkpoint(
             self.subject_id,
@@ -874,7 +887,7 @@ class AutonomousProjectsTestCase(unittest.IsolatedAsyncioTestCase):
             ledger.verify_integrity()
 
     async def test_execution_integrity_rejects_workflow_history_and_subject_damage(
-        self,
+        self: Self,
     ) -> None:
         workflows = DurableWorkflowStore(self.kernel.database)
         workflows.checkpoint(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -14,7 +15,7 @@ from noyra.migration.targets import TargetRegistry
 # ruff: noqa: E501
 
 
-def _manager(tmp_path):
+def _manager(tmp_path: Any) -> Any:
     db = Database(tmp_path / "noyra.sqlite3")
     IdentityStore(db).ensure("Noyra-0001", "f" * 64)
     private = Ed25519PrivateKey.generate()
@@ -45,7 +46,7 @@ def _manager(tmp_path):
     return db, MigrationManager(db, store)
 
 
-def _proposal(manager: MigrationManager):
+def _proposal(manager: MigrationManager) -> Any:
     return manager.create_proposal(
         subject_id="Noyra-0001",
         target_id="target-1",
@@ -56,7 +57,7 @@ def _proposal(manager: MigrationManager):
     )
 
 
-def test_rejection_is_atomic_and_audited(tmp_path) -> None:
+def test_rejection_is_atomic_and_audited(tmp_path: Any) -> None:
     db, manager = _manager(tmp_path)
     proposal = _proposal(manager)
     rejection = manager.reject(proposal.proposal_id, actor="operator", reason="risk too high")
@@ -79,7 +80,7 @@ def test_rejection_is_atomic_and_audited(tmp_path) -> None:
     ]
 
 
-def test_task_transitions_reject_skips_and_record_audit(tmp_path) -> None:
+def test_task_transitions_reject_skips_and_record_audit(tmp_path: Any) -> None:
     db, manager = _manager(tmp_path)
     proposal = _proposal(manager)
     task = manager.approve(proposal.proposal_id, actor="operator", idempotency_key="task-1")
@@ -95,7 +96,7 @@ def test_task_transitions_reject_skips_and_record_audit(tmp_path) -> None:
     assert actions[-1]["action"] == "migration_task_transitioned"
 
 
-def test_task_transition_rejects_stale_policy_revision(tmp_path) -> None:
+def test_task_transition_rejects_stale_policy_revision(tmp_path: Any) -> None:
     db, manager = _manager(tmp_path)
     proposal = _proposal(manager)
     task = manager.approve(proposal.proposal_id, actor="operator", idempotency_key="task-1")

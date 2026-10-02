@@ -9,6 +9,7 @@ import json
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -27,7 +28,7 @@ def _auth_headers(token: str, body: bytes, *, timestamp: int, nonce: str) -> dic
     }
 
 
-def _module():
+def _module() -> Any:
     path = Path(__file__).parents[1] / "scripts" / "noyra-migration-agent.py"
     spec = importlib.util.spec_from_file_location("noyra_migration_agent_cli", path)
     assert spec and spec.loader

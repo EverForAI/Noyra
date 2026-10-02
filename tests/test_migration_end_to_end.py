@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import replace
+from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -19,7 +20,7 @@ from noyra.migration.transfer import EncryptedTransferSession, TransferSession
 from noyra.migration.wallet import WalletMigration
 
 
-def _target_context(tmp_path, *, emergency: bool = False):
+def _target_context(tmp_path: Any, *, emergency: bool = False) -> Any:
     database = Database(tmp_path / "noyra.sqlite3")
     subject_id = "Noyra-0001"
     IdentityStore(database).ensure(subject_id, "d" * 64)
@@ -55,7 +56,7 @@ def _target_context(tmp_path, *, emergency: bool = False):
     return database, store, registry, private
 
 
-def _recovery_request(private: Ed25519PrivateKey, task_id: str = "recovery-task-1"):
+def _recovery_request(private: Ed25519PrivateKey, task_id: str = "recovery-task-1") -> Any:
     request = RecoveryRequest(
         task_id=task_id,
         standby_target_id="standby-1",
@@ -71,7 +72,7 @@ def _recovery_request(private: Ed25519PrivateKey, task_id: str = "recovery-task-
     return replace(request, target_signature=signature)
 
 
-def test_recovery_duplicate_request_and_double_active_fencing(tmp_path) -> None:
+def test_recovery_duplicate_request_and_double_active_fencing(tmp_path: Any) -> None:
     database, store, _, private = _target_context(tmp_path, emergency=True)
     policy = store.read_policy("Noyra-0001")
     coordinator = RecoveryCoordinator(database)
@@ -91,7 +92,7 @@ def test_recovery_duplicate_request_and_double_active_fencing(tmp_path) -> None:
         )
 
 
-def test_revoked_target_and_changed_health_proof_fail_closed(tmp_path) -> None:
+def test_revoked_target_and_changed_health_proof_fail_closed(tmp_path: Any) -> None:
     database, store, registry, private = _target_context(tmp_path, emergency=True)
     policy = store.read_policy("Noyra-0001")
     registry.revoke("standby-1", reason="target health failed", actor="operator")
@@ -108,7 +109,7 @@ def test_revoked_target_and_changed_health_proof_fail_closed(tmp_path) -> None:
         RecoveryCoordinator(database).restore_standby(changed, policy)
 
 
-def test_interrupted_and_corrupted_encrypted_transfer_are_rejected(tmp_path) -> None:
+def test_interrupted_and_corrupted_encrypted_transfer_are_rejected(tmp_path: Any) -> None:
     source = tmp_path / "source.bin"
     encrypted = tmp_path / "source.enc"
     restored = tmp_path / "restored.bin"
@@ -129,7 +130,7 @@ def test_interrupted_and_corrupted_encrypted_transfer_are_rejected(tmp_path) -> 
     assert not restored.exists()
 
 
-def test_stale_approval_changed_policy_cutover_failure_and_rollback(tmp_path) -> None:
+def test_stale_approval_changed_policy_cutover_failure_and_rollback(tmp_path: Any) -> None:
     database, store, _, _ = _target_context(tmp_path)
     manager = MigrationManager(database, store)
     policy = store.read_policy("Noyra-0001")
@@ -169,7 +170,7 @@ def test_stale_approval_changed_policy_cutover_failure_and_rollback(tmp_path) ->
     assert result == {"task_id": rollback_task.task_id, "status": "rolled_back"}
 
 
-def test_source_restart_remains_fenced_and_local_wallet_needs_approval(tmp_path) -> None:
+def test_source_restart_remains_fenced_and_local_wallet_needs_approval(tmp_path: Any) -> None:
     database, _, _, _ = _target_context(tmp_path)
     lease = EpochLease._acquire_unchecked(
         database, "Noyra-0001", "standby-1", expected_source_epoch=None, actor="operator"
@@ -192,7 +193,7 @@ def test_source_restart_remains_fenced_and_local_wallet_needs_approval(tmp_path)
         WalletMigration.apply_local_transfer(plan, approval=None)
 
 
-def test_cutover_accepts_task_bound_signed_restore_and_health_proof(tmp_path) -> None:
+def test_cutover_accepts_task_bound_signed_restore_and_health_proof(tmp_path: Any) -> None:
     database, store, registry, private = _target_context(tmp_path)
     policy = store.read_policy("Noyra-0001")
     manager = MigrationManager(database, store)
@@ -234,7 +235,7 @@ def test_cutover_accepts_task_bound_signed_restore_and_health_proof(tmp_path) ->
         "restore_report_digest": content_hash(restore),
         "health_report_digest": content_hash(health),
     }
-    proof = {
+    proof: dict[str, object] = {
         "manifest_digest": "b" * 64,
         "artifact_id": "artifact-1",
         "restore_report": restore,

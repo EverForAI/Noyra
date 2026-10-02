@@ -4,6 +4,7 @@ import base64
 import json
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -43,7 +44,7 @@ def migration_http(tmp_path: Path) -> Iterator[tuple[NoyraHTTPServer, str]]:
         kernel.close()
 
 
-def _json_request(url: str, *, authenticated: bool) -> tuple[int, object]:
+def _json_request(url: str, *, authenticated: bool) -> tuple[int, Any]:
     headers = {"Authorization": f"Bearer {ADMIN_TOKEN}"} if authenticated else {}
     try:
         with urlopen(Request(url, headers=headers), timeout=5) as response:
@@ -54,7 +55,7 @@ def _json_request(url: str, *, authenticated: bool) -> tuple[int, object]:
 
 def _json_mutation(
     url: str, payload: dict[str, object], *, authenticated: bool = True
-) -> tuple[int, object]:
+) -> tuple[int, Any]:
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {ADMIN_TOKEN}" if authenticated else "",
@@ -69,7 +70,7 @@ def _json_mutation(
 
 def _json_post(
     url: str, payload: dict[str, object], *, authenticated: bool = True
-) -> tuple[int, object]:
+) -> tuple[int, Any]:
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {ADMIN_TOKEN}" if authenticated else "",

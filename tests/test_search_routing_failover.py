@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any, Literal, Self, cast
 
 from noyra.research.search import SearchExecutor
 from noyra.research.types import SearchExecution, SearchProviderRecord
@@ -24,21 +25,21 @@ def provider(config_id: str, priority: int) -> SearchProviderRecord:
 
 
 class Health:
-    def __init__(self, unavailable: set[str] | None = None):
+    def __init__(self: Self, unavailable: set[str] | None = None) -> None:
         self.unavailable = unavailable or set()
         self.checked: list[str] = []
 
-    def route_available(self, subject_id: str, kind: str, provider_id: str) -> bool:
+    def route_available(self: Self, subject_id: str, kind: str, provider_id: str) -> bool:
         self.checked.append(provider_id)
         return provider_id not in self.unavailable
 
 
-def executor_with_results(results: dict[str, SearchExecution], health: Health):
-    executor = SearchExecutor.__new__(SearchExecutor)
-    executor.provider_health = health
+def executor_with_results(results: dict[str, SearchExecution], health: Health) -> Any:
+    executor: Any = SearchExecutor.__new__(SearchExecutor)
+    executor.provider_health = cast(Any, health)
     calls: list[str] = []
 
-    async def search(subject_id, config, query, **kwargs):
+    async def search(subject_id: Any, config: Any, query: Any, **kwargs: Any) -> Any:
         calls.append(config.config_id)
         return results[config.config_id]
 
@@ -47,11 +48,11 @@ def executor_with_results(results: dict[str, SearchExecution], health: Health):
     return executor
 
 
-def result(provider_id: str, status: str) -> SearchExecution:
+def result(provider_id: str, status: Literal["succeeded", "failed", "unknown"]) -> SearchExecution:
     return SearchExecution("action-" + provider_id, provider_id, "brave", "query", (), status)
 
 
-def test_search_uses_priority_order_and_fails_over_after_known_failure():
+def test_search_uses_priority_order_and_fails_over_after_known_failure() -> None:
     primary = provider("primary", 0)
     secondary = provider("secondary", 10)
     executor = executor_with_results(
@@ -77,7 +78,7 @@ def test_search_uses_priority_order_and_fails_over_after_known_failure():
     assert executor.calls == ["primary", "secondary"]
 
 
-def test_search_does_not_fail_over_when_first_result_is_unknown():
+def test_search_does_not_fail_over_when_first_result_is_unknown() -> None:
     primary = provider("primary", 0)
     secondary = provider("secondary", 10)
     executor = executor_with_results(
@@ -102,7 +103,7 @@ def test_search_does_not_fail_over_when_first_result_is_unknown():
     assert executor.calls == ["primary"]
 
 
-def test_search_skips_provider_still_in_cooldown():
+def test_search_skips_provider_still_in_cooldown() -> None:
     primary = provider("primary", 0)
     secondary = provider("secondary", 10)
     health = Health({"primary"})
@@ -126,7 +127,7 @@ def test_search_skips_provider_still_in_cooldown():
     assert health.checked == ["primary", "secondary"]
 
 
-def test_search_returns_none_when_every_provider_is_cooling_down():
+def test_search_returns_none_when_every_provider_is_cooling_down() -> None:
     primary = provider("primary", 0)
     health = Health({"primary"})
     executor = executor_with_results({}, health)
@@ -148,7 +149,7 @@ def test_search_returns_none_when_every_provider_is_cooling_down():
     assert executor.calls == []
 
 
-def test_search_weight_controls_selection_within_the_same_priority_tier():
+def test_search_weight_controls_selection_within_the_same_priority_tier() -> None:
     low_weight = provider("provider-a", 10)
     high_weight = provider("provider-b", 10)
     high_weight = SearchProviderRecord(**{**high_weight.__dict__, "weight": 3})
@@ -160,7 +161,7 @@ def test_search_weight_controls_selection_within_the_same_priority_tier():
         Health(),
     )
 
-    async def run_requests():
+    async def run_requests() -> None:
         for index in range(400):
             await executor.search_with_fallback(
                 "subject",

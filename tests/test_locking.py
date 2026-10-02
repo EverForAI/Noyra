@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Self
 
 import pytest
 
@@ -69,16 +69,16 @@ def test_process_lock_propagates_post_lock_read_errors(
     class FailingReadHandle:
         closed = False
 
-        def fileno(self) -> int:
+        def fileno(self: Self) -> int:
             return 1
 
-        def seek(self, _offset: int) -> int:
+        def seek(self: Self, _offset: int) -> int:
             return 0
 
-        def read(self, _size: int) -> bytes:
+        def read(self: Self, _size: int) -> bytes:
             raise failure
 
-        def close(self) -> None:
+        def close(self: Self) -> None:
             self.closed = True
 
     handle = FailingReadHandle()

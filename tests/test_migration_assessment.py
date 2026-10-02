@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from types import SimpleNamespace
+from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -13,7 +14,7 @@ from noyra.migration.targets import TargetRegistry
 from noyra.migration.trust import TrustDecision
 
 
-def _context(tmp_path):
+def _context(tmp_path: Any) -> Any:
     database = Database(tmp_path / "noyra.sqlite3")
     IdentityStore(database).ensure("Noyra-0001", "e" * 64)
     policy = MigrationPolicy.default("Noyra-0001").with_updates(
@@ -26,7 +27,7 @@ def _context(tmp_path):
     return database, policy, store
 
 
-def _candidate(**changes):
+def _candidate(**changes: Any) -> Any:
     return SimpleNamespace(
         target_id="target-1",
         status="active",
@@ -41,8 +42,8 @@ def _candidate(**changes):
     )
 
 
-def _need(**changes):
-    values = {
+def _need(**changes: Any) -> Any:
+    values: dict[str, Any] = {
         "source_health": 0.2,
         "workload": 0.6,
         "storage_pressure": 0.9,
@@ -55,7 +56,7 @@ def _need(**changes):
     return MigrationNeed.assess(**values)
 
 
-def test_resources_alone_or_need_alone_never_create_a_proposal(tmp_path):
+def test_resources_alone_or_need_alone_never_create_a_proposal(tmp_path: Any) -> None:
     _, policy, store = _context(tmp_path)
     builder = MigrationProposalBuilder(rejection_store=store)
 
@@ -81,7 +82,7 @@ def test_resources_alone_or_need_alone_never_create_a_proposal(tmp_path):
     )
 
 
-def test_payment_or_maintenance_conflicts_block_proposal(tmp_path):
+def test_payment_or_maintenance_conflicts_block_proposal(tmp_path: Any) -> None:
     _, policy, store = _context(tmp_path)
     builder = MigrationProposalBuilder(rejection_store=store)
 
@@ -98,7 +99,7 @@ def test_payment_or_maintenance_conflicts_block_proposal(tmp_path):
         )
 
 
-def test_proposal_records_hard_gates_scores_key_and_rollback_plans(tmp_path):
+def test_proposal_records_hard_gates_scores_key_and_rollback_plans(tmp_path: Any) -> None:
     _, policy, store = _context(tmp_path)
 
     proposal = MigrationProposalBuilder(rejection_store=store).build(
@@ -120,7 +121,7 @@ def test_proposal_records_hard_gates_scores_key_and_rollback_plans(tmp_path):
     assert proposal.benefit_score > proposal.risk_score
 
 
-def test_rejection_cooldown_cannot_be_bypassed_with_new_proposal_text(tmp_path):
+def test_rejection_cooldown_cannot_be_bypassed_with_new_proposal_text(tmp_path: Any) -> None:
     database, policy, store = _context(tmp_path)
     private = Ed25519PrivateKey.generate()
     TargetRegistry(database, MigrationStore(database)).register(

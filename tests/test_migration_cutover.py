@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -21,7 +22,9 @@ def _enabled_store(db: Database) -> tuple[MigrationStore, int]:
     return store, updated.revision
 
 
-def test_cutover_rejects_missing_target_proof_without_changing_source_authority(tmp_path) -> None:
+def test_cutover_rejects_missing_target_proof_without_changing_source_authority(
+    tmp_path: Any,
+) -> None:
     db = Database(tmp_path / "noyra.sqlite3")
     IdentityStore(db).ensure("Noyra-0001", "2" * 64)
     private = Ed25519PrivateKey.generate()
@@ -71,7 +74,7 @@ def test_cutover_rejects_missing_target_proof_without_changing_source_authority(
     assert epochs == 0
 
 
-def test_target_epoch_transition_preserves_source_provenance_and_task_hash(tmp_path) -> None:
+def test_target_epoch_transition_preserves_source_provenance_and_task_hash(tmp_path: Any) -> None:
     db = Database(tmp_path / "noyra.sqlite3")
     IdentityStore(db).ensure("Noyra-0001", "4" * 64)
     private = Ed25519PrivateKey.generate()
@@ -126,7 +129,7 @@ def test_target_epoch_transition_preserves_source_provenance_and_task_hash(tmp_p
     target_lease.revoke("test cleanup", "test")
 
 
-def test_cutover_fences_epoch_and_source_admission(tmp_path) -> None:
+def test_cutover_fences_epoch_and_source_admission(tmp_path: Any) -> None:
     db = Database(tmp_path / "noyra.sqlite3")
     IdentityStore(db).ensure("Noyra-0001", "3" * 64)
     private = Ed25519PrivateKey.generate()
@@ -170,7 +173,7 @@ def test_cutover_fences_epoch_and_source_admission(tmp_path) -> None:
     assert gate.begin("source-still-authoritative")
 
 
-def test_rollback_does_not_mark_task_rolled_back_before_epoch_revocation(tmp_path) -> None:
+def test_rollback_does_not_mark_task_rolled_back_before_epoch_revocation(tmp_path: Any) -> None:
     db = Database(tmp_path / "rollback.sqlite3")
     IdentityStore(db).ensure("Noyra-0001", "8" * 64)
     private = Ed25519PrivateKey.generate()

@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Self
 
 from noyra.core import ActionLedger, Database, EventStore, IdentityStore
 from noyra.core.database import CURRENT_SCHEMA_VERSION
@@ -12,17 +13,17 @@ from noyra.core.types import content_hash, new_id, utc_now
 
 
 class IntegrityHardeningTestCase(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.database = Database(Path(self.temp_dir.name) / "noyra.sqlite3")
         self.subject_id = "Noyra-integrity-hardening"
         IdentityStore(self.database).ensure(self.subject_id, "a" * 64)
         self.events = EventStore(self.database)
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.temp_dir.cleanup()
 
-    def test_schema_marker_matches_installed_optional_features(self) -> None:
+    def test_schema_marker_matches_installed_optional_features(self: Self) -> None:
         with self.database.connection() as connection:
             version = int(
                 connection.execute(
@@ -60,7 +61,7 @@ class IntegrityHardeningTestCase(unittest.TestCase):
         )
         self.assertTrue({"content_archive_key", "content_archived_at"} <= observation_columns)
 
-    def test_optional_features_have_versioned_ddl_fingerprints(self) -> None:
+    def test_optional_features_have_versioned_ddl_fingerprints(self: Self) -> None:
         with self.database.connection() as connection:
             rows = connection.execute(
                 "SELECT feature_id, feature_version, ddl_fingerprint "
@@ -68,12 +69,17 @@ class IntegrityHardeningTestCase(unittest.TestCase):
             ).fetchall()
         self.assertEqual(
             {str(row["feature_id"]) for row in rows},
-            {"provider_health_metrics", "secret_cleanup", "secret_file_intents"},
+            {
+                "provider_health_metrics",
+                "search_provider_routing",
+                "secret_cleanup",
+                "secret_file_intents",
+            },
         )
         self.assertTrue(all(int(row["feature_version"]) >= 1 for row in rows))
         self.assertTrue(all(len(str(row["ddl_fingerprint"])) == 64 for row in rows))
 
-    def test_optional_feature_registry_mismatch_fails_closed(self) -> None:
+    def test_optional_feature_registry_mismatch_fails_closed(self: Self) -> None:
         with self.database.transaction() as connection:
             connection.execute(
                 "UPDATE persistent_features SET ddl_fingerprint=? WHERE feature_id=?",
@@ -82,7 +88,7 @@ class IntegrityHardeningTestCase(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "registry fingerprint"):
             Database(self.database.path)
 
-    def test_event_chain_uses_append_sequence_for_late_events(self) -> None:
+    def test_event_chain_uses_append_sequence_for_late_events(self: Self) -> None:
         first = self.events.append(
             self.subject_id,
             "experience",
@@ -108,7 +114,7 @@ class IntegrityHardeningTestCase(unittest.TestCase):
             ).fetchall()
         self.assertEqual([row[0] for row in rows], [first.event_id, second.event_id])
 
-    def test_causal_parent_cannot_be_newer_than_child(self) -> None:
+    def test_causal_parent_cannot_be_newer_than_child(self: Self) -> None:
         parent = self.events.append(
             self.subject_id,
             "experience",
@@ -126,7 +132,7 @@ class IntegrityHardeningTestCase(unittest.TestCase):
                 causal_parent_ids=(parent.event_id,),
             )
 
-    def test_action_revisions_detect_state_tampering(self) -> None:
+    def test_action_revisions_detect_state_tampering(self: Self) -> None:
         ledger = ActionLedger(self.database)
         action = ledger.prepare(
             self.subject_id,
@@ -148,7 +154,7 @@ class IntegrityHardeningTestCase(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             ledger.verify_integrity(self.subject_id)
 
-    def test_action_integrity_rejects_blob_json_storage(self) -> None:
+    def test_action_integrity_rejects_blob_json_storage(self: Self) -> None:
         ledger = ActionLedger(self.database)
         action = ledger.prepare(
             self.subject_id,
@@ -185,7 +191,7 @@ class IntegrityHardeningTestCase(unittest.TestCase):
                         (value, action.action_id),
                     )
 
-    def test_database_rejects_cross_subject_action_goal(self) -> None:
+    def test_database_rejects_cross_subject_action_goal(self: Self) -> None:
         other_subject = "Noyra-integrity-other"
         IdentityStore(self.database).ensure(other_subject, "b" * 64)
         goal_id = new_id("goal")
