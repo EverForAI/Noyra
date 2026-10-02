@@ -5,7 +5,7 @@ import contextlib
 import hashlib
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote_plus
 
 import httpx
@@ -153,7 +153,7 @@ class SearchExecutor:
             raise RuntimeError(f"search action cannot resume from state {action.status}")
         action = self.actions.start(action.action_id)
         if self.provider_health is not None and route_permit is None:
-            route_permit = self.provider_health.claim_route(subject_id, "search", config.config_id)
+            route_permit = self._claim_route(subject_id, config.config_id)
             if route_permit is None:
                 self.actions.finish(
                     action.action_id,
@@ -354,7 +354,7 @@ class SearchExecutor:
             last_failure = execution
         return last_failure
 
-    def _claim_route(self, subject_id: str, provider_id: str) -> RoutePermit | bool | None:
+    def _claim_route(self, subject_id: str, provider_id: str) -> RoutePermit | None:
         """Claim a provider route while tolerating legacy health adapters.
 
         Durable provider health stores expose ``claim_route`` so a half-open
@@ -367,10 +367,12 @@ class SearchExecutor:
             return None
         claim_route = getattr(self.provider_health, "claim_route", None)
         if callable(claim_route):
-            return claim_route(subject_id, "search", provider_id)
+            return cast(RoutePermit | None, claim_route(subject_id, "search", provider_id))
         route_available = getattr(self.provider_health, "route_available", None)
         if callable(route_available):
-            return bool(route_available(subject_id, "search", provider_id))
+            if route_available(subject_id, "search", provider_id):
+                return RoutePermit(subject_id, "search", provider_id, "")
+            return None
         raise TypeError("provider health adapter does not expose a route claim method")
 
     @staticmethod

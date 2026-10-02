@@ -515,6 +515,7 @@ _OWNERSHIP_GRAPH_V76 = {
         reason="durable admin sessions are not subject runtime data",
     ),
 }
+_OWNERSHIP_GRAPH_V77 = _OWNERSHIP_GRAPH_V76
 
 _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     33: _OWNERSHIP_GRAPH_V33,
@@ -561,6 +562,7 @@ _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     74: _OWNERSHIP_GRAPH_V74,
     75: _OWNERSHIP_GRAPH_V75,
     76: _OWNERSHIP_GRAPH_V76,
+    77: _OWNERSHIP_GRAPH_V77,
 }
 
 

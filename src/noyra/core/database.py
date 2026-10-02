@@ -25,6 +25,63 @@ from .wallet_schema import (
     wallet_upgrade_fingerprint,
 )
 
+
+def _canonical_schema_sql(source: str) -> str:
+    """Normalize harmless DDL formatting while preserving quoted values."""
+    tokens: list[str] = []
+    punctuation = set("(),.;=<>+-*/%|&~!^:?{}").union({"[", "]"})
+    index = 0
+    while index < len(source):
+        character = source[index]
+        if character.isspace():
+            index += 1
+            continue
+        if source.startswith("--", index):
+            newline = source.find("\n", index + 2)
+            index = len(source) if newline < 0 else newline + 1
+            continue
+        if source.startswith("/*", index):
+            comment_end = source.find("*/", index + 2)
+            index = len(source) if comment_end < 0 else comment_end + 2
+            continue
+        if character in "'\"`[":
+            start = index
+            terminator = "]" if character == "[" else character
+            index += 1
+            while index < len(source):
+                if source[index] == terminator:
+                    if (
+                        terminator != "]"
+                        and index + 1 < len(source)
+                        and source[index + 1] == terminator
+                    ):
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                index += 1
+            tokens.append(source[start:index])
+            continue
+        if character in punctuation:
+            tokens.append(character)
+            index += 1
+            continue
+        start = index
+        while index < len(source):
+            character = source[index]
+            if (
+                character.isspace()
+                or character in punctuation
+                or character in "'\"`["
+                or source.startswith("--", index)
+                or source.startswith("/*", index)
+            ):
+                break
+            index += 1
+        tokens.append(source[start:index])
+    return "\x1f".join(tokens)
+
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
     key TEXT PRIMARY KEY,
@@ -231,7 +288,38 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 76
+CURRENT_SCHEMA_VERSION = 77
+
+# The schema DDL fingerprint is checked after every successful initialization.
+# Update this value only alongside a reviewed schema migration and its tests.
+_SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
+    77: "2487f1a2703fc940178b2c77f2b3982a37b4a526de37b9b253204be71f4a6d1f",
+}
+
+_PERSISTENT_FEATURE_OBJECTS: dict[str, tuple[str, ...]] = {
+    "secret_cleanup": ("secret_cleanup_queue", "idx_secret_cleanup_subject_status"),
+    "provider_health_metrics": ("provider_health_buckets",),
+    "secret_file_intents": (
+        "secret_file_intents",
+        "idx_secret_file_intents_subject_state",
+        "validate_secret_file_intent_reference_binding",
+        "validate_secret_file_intent_intent_binding",
+        "validate_secret_file_intent_reference_binding_update",
+        "validate_secret_file_intent_identity_immutable",
+        "prevent_secret_file_intent_delete",
+        "validate_secret_file_intent_transition",
+        "validate_secret_file_intent_operation_state",
+    ),
+    "search_provider_routing": (
+        "search_provider_routing",
+        "idx_search_provider_routing_order",
+    ),
+}
+
+_PERSISTENT_FEATURE_MIN_SCHEMA: dict[str, int] = {
+    "provider_health_metrics": 68,
+    "search_provider_routing": 77,
+}
 
 MIGRATIONS: dict[int, str] = {
     2: """
@@ -6706,6 +6794,17 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
 CREATE INDEX IF NOT EXISTS idx_admin_sessions_subject_active
     ON admin_sessions(subject_id, revoked_at, expires_at, created_at);
 """,
+    77: """
+CREATE TABLE IF NOT EXISTS search_provider_routing (
+    config_id TEXT PRIMARY KEY REFERENCES search_provider_configs(config_id),
+    priority INTEGER NOT NULL CHECK(priority BETWEEN 0 AND 1000),
+    weight INTEGER NOT NULL CHECK(weight BETWEEN 1 AND 1000),
+    updated_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_search_provider_routing_order
+    ON search_provider_routing(priority, config_id);
+""",
 }
 
 
@@ -7172,6 +7271,7 @@ class Database:
             with self.transaction() as connection:
                 self._upgrade_wallet_payment_policy_automation(connection)
             self._ensure_training_policies()
+            self._validate_schema_contract()
             with self.connection() as connection:
                 connection.execute("PRAGMA journal_mode = WAL")
                 connection.execute("PRAGMA synchronous = FULL")
@@ -7209,6 +7309,105 @@ class Database:
                 continue
             removed += 1
         return removed
+
+    @staticmethod
+    def schema_ddl_fingerprint(connection: sqlite3.Connection) -> str:
+        """Fingerprint persistent DDL, excluding SQLite-owned virtual-table shadows."""
+        shadow_tables = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_list").fetchall()
+            if str(row["type"]) == "shadow"
+        }
+        definitions = [
+            {
+                "type": str(row["type"]),
+                "name": str(row["name"]),
+                "sql": _canonical_schema_sql(str(row["sql"])),
+            }
+            for row in connection.execute(
+                """SELECT type, name, sql FROM sqlite_master
+                   WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'
+                   ORDER BY type, name"""
+            ).fetchall()
+            if str(row["name"]) not in shadow_tables
+        ]
+        return content_hash(definitions)
+
+    @staticmethod
+    def _persistent_feature_ddl_fingerprint(
+        connection: sqlite3.Connection, object_names: tuple[str, ...]
+    ) -> str:
+        definitions: list[dict[str, str]] = []
+        for object_name in object_names:
+            row = connection.execute(
+                "SELECT type, name, sql FROM sqlite_master WHERE name=?", (object_name,)
+            ).fetchone()
+            if row is None or not row["sql"]:
+                raise RuntimeError(
+                    f"persistent schema feature is missing database object {object_name}"
+                )
+            definitions.append(
+                {"type": str(row["type"]), "name": str(row["name"]), "sql": str(row["sql"])}
+            )
+        return content_hash(definitions)
+
+    def require_persistent_feature(self, connection: sqlite3.Connection, feature_id: str) -> None:
+        """Fail closed when a module's persistent schema feature has drifted."""
+        object_names = _PERSISTENT_FEATURE_OBJECTS.get(feature_id)
+        if object_names is None:
+            raise RuntimeError(f"unknown persistent schema feature {feature_id}")
+        fingerprint = self._persistent_feature_ddl_fingerprint(connection, object_names)
+        marker = connection.execute(
+            "SELECT feature_version, ddl_fingerprint FROM persistent_features WHERE feature_id=?",
+            (feature_id,),
+        ).fetchone()
+        if (
+            marker is None
+            or int(marker["feature_version"]) != 1
+            or str(marker["ddl_fingerprint"]) != fingerprint
+        ):
+            raise RuntimeError(f"persistent schema feature {feature_id} contract mismatch")
+
+    def _validate_schema_contract(self) -> None:
+        """Verify the complete versioned DDL inventory before opening service."""
+        with self.transaction() as connection:
+            version_row = connection.execute(
+                "SELECT value FROM schema_meta WHERE key='schema_version'"
+            ).fetchone()
+            if version_row is None:
+                raise RuntimeError("database schema contract has no schema version")
+            version = int(version_row[0])
+            expected = _SCHEMA_DDL_FINGERPRINTS.get(version)
+            if expected is None or len(expected) != 64 or set(expected) - set("0123456789abcdef"):
+                raise RuntimeError(f"database schema contract is unavailable for schema {version}")
+            actual = self.schema_ddl_fingerprint(connection)
+            if actual != expected:
+                raise RuntimeError(
+                    f"database schema contract mismatch for schema {version}: "
+                    f"expected {expected}, found {actual}"
+                )
+
+            previous = connection.execute(
+                "SELECT value FROM schema_meta WHERE key='schema_ddl_contract'"
+            ).fetchone()
+            if previous is not None:
+                try:
+                    previous_version_text, previous_fingerprint = str(previous[0]).split(":", 1)
+                    previous_version = int(previous_version_text)
+                except (ValueError, TypeError) as error:
+                    raise RuntimeError("database schema contract marker is invalid") from error
+                if previous_version > version:
+                    raise RuntimeError("database schema contract marker is newer than runtime")
+                if previous_version == version and previous_fingerprint != actual:
+                    raise RuntimeError(
+                        "database schema contract marker does not match installed DDL"
+                    )
+
+            connection.execute(
+                "INSERT INTO schema_meta(key, value) VALUES ('schema_ddl_contract', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (f"{version}:{actual}",),
+            )
 
     @staticmethod
     def _ensure_archive_transfer_claim_columns(connection: sqlite3.Connection) -> None:
@@ -7564,39 +7763,21 @@ BEGIN
 END;
 """,
             )
-            feature_objects = {
-                "secret_cleanup": ("secret_cleanup_queue", "idx_secret_cleanup_subject_status"),
-                "provider_health_metrics": ("provider_health_buckets",),
-                "secret_file_intents": (
-                    "secret_file_intents",
-                    "idx_secret_file_intents_subject_state",
-                    "validate_secret_file_intent_reference_binding",
-                    "validate_secret_file_intent_intent_binding",
-                    "validate_secret_file_intent_reference_binding_update",
-                    "validate_secret_file_intent_identity_immutable",
-                    "prevent_secret_file_intent_delete",
-                    "validate_secret_file_intent_transition",
-                    "validate_secret_file_intent_operation_state",
-                ),
-            }
             schema_version = int(
                 connection.execute(
                     "SELECT value FROM schema_meta WHERE key='schema_version'"
                 ).fetchone()[0]
             )
-            feature_min_schema = {
-                "provider_health_metrics": 68,
-            }
             now = utc_now()
-            for feature_id, object_names in feature_objects.items():
-                definitions = []
+            for feature_id, object_names in _PERSISTENT_FEATURE_OBJECTS.items():
+                definitions: list[dict[str, str]] = []
                 for object_name in object_names:
                     row = connection.execute(
                         "SELECT type, name, sql FROM sqlite_master WHERE name=?",
                         (object_name,),
                     ).fetchone()
                     if row is None or not row["sql"]:
-                        if schema_version < feature_min_schema.get(feature_id, 0):
+                        if schema_version < _PERSISTENT_FEATURE_MIN_SCHEMA.get(feature_id, 0):
                             # A migration test (or an intentionally pinned
                             # older runtime) may stop before an additive
                             # feature's introduction.  Do not register or
