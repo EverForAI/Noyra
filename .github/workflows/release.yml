@@ -43,6 +43,7 @@ jobs:
     permissions:
       contents: write
       actions: read
+      deployments: read
       id-token: write
       attestations: write
     steps:
@@ -63,36 +64,58 @@ jobs:
         with:
           name: wallet-gate-evidence-${{ github.sha }}
           path: artifacts/release/stage4b4/${{ github.sha }}
-      - name: Verify external gate run provenance
+      - name: Locate successful external gate run for this exact commit
+        id: external-gates-run
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
-          EXTERNAL_GATES_RUN_ID: ${{ vars.EXTERNAL_GATES_RUN_ID }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test -n "$EXTERNAL_GATES_RUN_ID" || {
-            echo "external gates run id is not configured" >&2
-            exit 1
-          }
-          run_json="$(gh run view "$EXTERNAL_GATES_RUN_ID" --json headSha,workflowName,status,conclusion)"
+          environment_json="$(gh api "repos/${GITHUB_REPOSITORY}/environments/external-gates")"
+          ENVIRONMENT_JSON="$environment_json" python - <<'PY'
+          import json, os
+          environment = json.loads(os.environ["ENVIRONMENT_JSON"])
+          rules = environment.get("protection_rules", [])
+          has_independent_approver = any(
+              rule.get("type") == "required_reviewers"
+              and bool(rule.get("reviewers"))
+              and rule.get("prevent_self_review") is True
+              for rule in rules
+          )
+          if not has_independent_approver:
+              raise SystemExit("external-gates environment requires a non-self required reviewer")
+          PY
+          run_json="$(gh run list \
+            --workflow external-gates.yml \
+            --commit "$EXPECTED_SHA" \
+            --json databaseId,headSha,workflowName,status,conclusion \
+            --limit 100)"
           RUN_JSON="$run_json" EXPECTED_SHA="$EXPECTED_SHA" python - <<'PY'
           import json, os
-          record = json.loads(os.environ["RUN_JSON"])
+          records = json.loads(os.environ["RUN_JSON"])
           expected = os.environ["EXPECTED_SHA"]
-          if record.get("workflowName") != "external-gates":
-              raise SystemExit("external gate run is not from the external-gates workflow")
-          if record.get("headSha") != expected:
-              raise SystemExit("external gate run SHA does not match release SHA")
-          if record.get("status") != "completed" or record.get("conclusion") != "success":
-              raise SystemExit("external gate run is not successful")
+          matching = [
+              record for record in records
+              if record.get("workflowName") == "external-gates"
+              and record.get("headSha") == expected
+          ]
+          if not matching:
+              raise SystemExit("no protected external-gates run exists for this SHA")
+          latest = max(matching, key=lambda item: int(item["databaseId"]))
+          if latest.get("status") != "completed" or latest.get("conclusion") != "success":
+              raise SystemExit("latest protected external-gates run for this SHA did not pass")
+          run_id = latest["databaseId"]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"run_id={run_id}", file=output)
           PY
       - name: Download independently produced external gate artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        continue-on-error: true
         with:
           name: external-gates-${{ github.sha }}
           path: artifacts/release/stage4b4/${{ github.sha }}
-          run-id: ${{ vars.EXTERNAL_GATES_RUN_ID }}
+          run-id: ${{ steps.external-gates-run.outputs.run_id }}
           github-token: ${{ github.token }}
       - name: Reject stale or failed gate evidence
         env:
@@ -102,6 +125,9 @@ jobs:
         run: |
           root="artifacts/release/stage4b4/${EXPECTED_SHA}"
           external="$root/external-gates.json"
+          python scripts/verify_external_gates.py \
+            --path "$external" \
+            --expected-sha "$EXPECTED_SHA"
           python - <<'PY'
           import json, os, tomllib
           from pathlib import Path
@@ -115,14 +141,11 @@ jobs:
           if record.get("error") or any(item.get("status") != "passed" for item in record.get("commands", [])):
               raise SystemExit("wallet gate evidence contains a failed command")
           external = root / "external-gates.json"
-          if not external.is_file():
-              raise SystemExit("external testnet/KMS/backup/soak gate evidence is required")
           if not os.environ.get("EXTERNAL_GATES_PUBLIC_KEY", "").strip():
               raise SystemExit("EXTERNAL_GATES_PUBLIC_KEY must be configured")
           PY
-          python scripts/verify_external_gates.py \
-            --path "$external" \
-            --expected-sha "$EXPECTED_SHA"
+          mkdir -p dist
+          cp "$external" dist/external-gates.json
           python - <<'PY'
           import os, tomllib
           from pathlib import Path

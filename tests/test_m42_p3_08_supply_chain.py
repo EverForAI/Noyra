@@ -44,6 +44,7 @@ def test_runtime_and_profile_locks_are_hash_pinned() -> None:
 def test_ci_and_release_actions_are_immutable_and_install_hashes() -> None:
     for path in (
         ROOT / ".github" / "workflows" / "ci.yml",
+        ROOT / ".github" / "workflows" / "external-gates.yml",
         ROOT / ".github" / "workflows" / "release.yml",
     ):
         content = path.read_text(encoding="utf-8")
