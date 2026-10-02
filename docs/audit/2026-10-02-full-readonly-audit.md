@@ -451,3 +451,24 @@ Noyra 已形成较完整的主体运行时、SQLite 持久化、加密存储、�
 ## 13. 审计声明
 
 本报告是基于提交 `abe54be` 的代码、配置、文档和本地验证的只读审计。风险等级表达工程后果，触发概率表达相对工程判断，不构成渗透测试、资金安全保证或第三方 SLA 结论。修复任何发现后必须重新运行针对性测试、迁移/恢复演练、故障注入和发布证据验证；在 F13、F15、F17 和 F11 未关闭前，不应把当前版本标记为全量通过、无人值守自动付款生产版或已完成真实自动迁移。
+
+## 14. 修复后复核（2026-10-02）
+
+本节记录审计完成后的代码修复结果；前述章节保留原始审计快照，不把修复后的证据倒填到当时的审计结论中。当前本地分支包含下表所列修复提交，未推送 GitHub，也未修改服务器。
+
+| 编号 | 修复后状态 | 依据 |
+|---|---|---|
+| F01/F02 | 已关闭（代码与测试） | `5d2db45`；生产 operator、模型组密钥只能来自受保护文件或 systemd credential。 |
+| F03/F04 | 已关闭（代码与测试） | `24e71aa`；provider permit、unknown 结果和故障切换状态绑定到持久尝试。 |
+| F05/F06/F07 | 已关闭（代码与测试） | `17c57a4`、`95a0b51`、`3a84af5`；retention inventory、cursor epoch/cutoff 和最终 payload/hash 已纳入合同。 |
+| F08 | 已关闭（代码与测试） | `1852993`、`92e23f2`、`2a6a96e`；v77 完整 DDL hash 保持兼容，结构 hash 在构造时 fail-closed，trigger-only drift 进入 `core.schema_contract` P0 完整性检查；production 禁止 `integrity_mode=off`。 |
+| F09 | 已关闭（代码与测试） | `e1991b0`；管理 session、失败限速和 TTL 状态已持久化。真实多实例/代理仍需外部验收。 |
+| F10 | 已关闭（代码与测试） | `f2ae57c`；external-gates 独立签名、同 SHA、受保护环境和稳定缺失错误已接入 release workflow。真实 GitHub environment 仍需验收。 |
+| F11 | 外部发布门禁仍开放 | 本地不能证明独立 signer/KMS、真实 RPC 断连/nonce/reorg、备份恢复或 24/72 小时 soak；自动付款必须继续等待绑定 SHA 的 external evidence。 |
+| F12 | 已关闭（代码与测试） | `b5a4725`；benchmark 下载复用安全 transport 和地址/重定向边界。 |
+| F13 | 已关闭（代码与测试） | `f90dd51`；schema 75 runtime export ownership graph 已补齐并通过 redaction/export 测试。 |
+| F14/F15/F16 | 已关闭（代码与测试） | `1a8e890`、`db35d75`、`10a0d50`；local approval durable CAS、target restore/health/fence proof、agent caller authentication、nonce replay protection、quota 和 TTL 已实现。真实跨主机迁移仍需 external evidence。 |
+| F17 | 已关闭（本地质量门禁） | `ffb7df0`；mypy、Ruff、format、compileall 和全量 pytest 已通过。 |
+| F18 | 已关闭（代码与测试） | `b9cbb43`；public projection 已绑定版本化字段、大小和分页合同。公开站点隐私/无障碍/性能仍需真实浏览器验收。 |
+
+最终本地验证结果：`1725 passed, 24 skipped, 259 subtests passed`；`ruff check .`、`ruff format --check .`、`mypy src tests`、`compileall -q src scripts tests` 和 `git diff --check` 均通过。跳过项仅为当前 Windows 环境不具备的 POSIX 权限、symlink 或 filesystem contract。F11 以及 HTTPS、Cloudflare/Caddy、多实例公网、真实 KMS、链重组、备份恢复和 soak 仍按第 10 节保留为不可由本地单测替代的发布门禁。

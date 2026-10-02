@@ -114,3 +114,19 @@
 
 Each task has its own commit. A task is incomplete until focused tests, broader regression, review and git diff --check pass. No task pushes to GitHub or changes a server.
 
+## Execution Record
+
+Tasks 1-8 local work was completed on the remediation branch. The final schema-contract follow-up preserved the existing v77 full DDL marker while adding a strict structural fingerprint and a startup `core.schema_contract` P0 check for trigger-only drift; production settings now reject `integrity_mode=off`. The quality-gate cleanup was committed separately.
+
+- F01/F02: `5d2db45`
+- F03/F04: `24e71aa`
+- F05-F08: `17c57a4`, `1852993`, `92e23f2`, `2a6a96e`
+- F09: `e1991b0`
+- F10: `f2ae57c`
+- F12: `b5a4725`
+- F13: `f90dd51`
+- F14-F16: `1a8e890`, `db35d75`, `10a0d50`
+- F18: `b9cbb43`
+- Quality gates: `ffb7df0`
+
+Local final verification passed: `1725 passed, 24 skipped, 259 subtests passed`, Ruff check/format, mypy, compileall and diff checks. F11 remains an external release gate requiring signed same-SHA evidence for real signer/KMS, chain reorg, backup/restore, HTTPS/proxy and soak environments.
