@@ -894,6 +894,14 @@ install -d -o noyra -g noyra -m 0700 "$DATA_DIR/migration-agent"
 install -d -o root -g noyra -m 0750 "$DATA_DIR/migration"
 install -d -o noyra -g noyra -m 0700 "$DATA_DIR/migration/requests"
 install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/status"
+if [[ -e "$CONFIG_DIR/migration/identity.json" || -L "$CONFIG_DIR/migration/identity.json" ]]; then
+  if [[ -L "$CONFIG_DIR/migration/identity.json" || ! -f "$CONFIG_DIR/migration/identity.json" ]]; then
+    echo 'Migration identity must be a regular file and not a symlink' >&2
+    exit 1
+  fi
+  chown root:noyra "$CONFIG_DIR/migration/identity.json"
+  chmod 0640 "$CONFIG_DIR/migration/identity.json"
+fi
 install -o root -g root -m 0750 "$SOURCE_DIR/scripts/noyra-migration-runner.sh" "$MIGRATION_RUNNER"
 install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-migration-agent.service" "$MIGRATION_AGENT_UNIT"
 install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-migration-runner.service" "$MIGRATION_RUNNER_UNIT"

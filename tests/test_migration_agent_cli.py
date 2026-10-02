@@ -6,11 +6,13 @@ import hmac
 import http.client
 import importlib.util
 import json
+import os
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
+import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
@@ -53,13 +55,34 @@ def test_cli_identity_and_dispatch_keep_secret_out_of_manifest(tmp_path: Path) -
             }
         )
     )
+    if os.name != "nt":
+        identity.chmod(0o600)
     agent = module.load_agent(identity, tmp_path / "data")
     receipt = module.dispatch(
-        agent, "receive", {"artifact_id": "artifact-1", "byte_size": 1, "schema_version": 1}
+        agent,
+        "receive",
+        {
+            "artifact_id": "artifact-1",
+            "byte_size": 1,
+            "schema_version": 1,
+            "artifact_b64": base64.b64encode(b"x").decode(),
+        },
     )
     assert receipt["status"] == "received"
     report = module.dispatch(agent, "restore", receipt)
     assert report["status"] == "restored"
+
+
+def test_identity_file_rejects_hardlinks(tmp_path: Path) -> None:
+    module = _module()
+    identity = tmp_path / "identity.json"
+    identity.write_text(json.dumps({"target_id": "target-1", "key_fingerprint": "a" * 64}))
+    identity.chmod(0o600)
+    hardlink = tmp_path / "identity-hardlink.json"
+    hardlink.hardlink_to(identity)
+
+    with pytest.raises(ValueError, match="hard link"):
+        module.load_agent(hardlink, tmp_path / "data")
 
 
 def test_http_handler_requires_signed_body_and_rejects_replay(tmp_path: Path) -> None:

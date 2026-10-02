@@ -7,6 +7,7 @@ import argparse
 import base64
 import json
 import os
+import stat
 import sys
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,8 +31,27 @@ IDENTITY_KEYS = frozenset(
 )
 
 
-def _read_json(path: Path, *, limit: int = MAX_BODY) -> dict[str, Any]:
-    raw = path.read_bytes()
+def _read_identity_json(path: Path, *, limit: int = MAX_BODY) -> dict[str, Any]:
+    if os.name == "nt" and path.is_symlink():
+        raise ValueError("identity file must not be a symlink")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if os.name != "nt":
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(os.fspath(path), flags)
+    except OSError as error:
+        raise ValueError("identity file cannot be opened safely") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("identity file must be a regular file")
+        if metadata.st_nlink != 1:
+            raise ValueError("identity file must not have hard links")
+        _validate_identity_metadata(metadata)
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            raw = stream.read(limit + 1)
+    finally:
+        os.close(descriptor)
     if len(raw) > limit:
         raise ValueError("identity or request is too large")
     value = json.loads(raw.decode("utf-8"))
@@ -83,13 +103,27 @@ def _private_key(value: str | None) -> Ed25519PrivateKey | None:
 def _assert_identity_file(path: Path) -> None:
     if path.is_symlink() or not path.is_file():
         raise ValueError("identity file must be a regular file")
-    if os.name != "nt" and path.stat().st_mode & 0o077:
+    metadata = path.stat()
+    if metadata.st_nlink != 1:
+        raise ValueError("identity file must not have hard links")
+    _validate_identity_metadata(metadata)
+
+
+def _validate_identity_metadata(metadata: os.stat_result) -> None:
+    if os.name == "nt":
+        return
+    mode = stat.S_IMODE(metadata.st_mode)
+    if mode & 0o037:
         raise ValueError("identity file must not be group or world accessible")
+    groups = {os.getegid(), *os.getgroups()}
+    if metadata.st_uid != os.geteuid() and not (
+        metadata.st_uid == 0 and metadata.st_gid in groups and mode & 0o040
+    ):
+        raise ValueError("identity file owner is invalid")
 
 
 def load_agent(identity_file: Path, data_root: Path) -> MigrationAgent:
-    _assert_identity_file(identity_file)
-    identity = _read_json(identity_file)
+    identity = _read_identity_json(identity_file)
     if set(identity) - IDENTITY_KEYS:
         raise ValueError("identity file contains unknown fields")
     return MigrationAgent(
