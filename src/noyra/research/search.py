@@ -21,7 +21,7 @@ from noyra.core.http import (
     read_bounded_response,
     validate_response_headers,
 )
-from noyra.core.provider_health import ProviderHealthStore
+from noyra.core.provider_health import ProviderHealthStore, RoutePermit
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.world import canonical_public_url
 
@@ -82,6 +82,7 @@ class SearchExecutor:
         expected_outcome: str,
         idempotency_key: str,
         limit: int = 8,
+        route_permit: RoutePermit | None = None,
     ) -> SearchExecution:
         normalized_query = " ".join(query.split())
         if not normalized_query or len(normalized_query) > 512:
@@ -151,6 +152,20 @@ class SearchExecutor:
         if action.status != "prepared":
             raise RuntimeError(f"search action cannot resume from state {action.status}")
         action = self.actions.start(action.action_id)
+        if self.provider_health is not None and route_permit is None:
+            route_permit = self.provider_health.claim_route(subject_id, "search", config.config_id)
+            if route_permit is None:
+                self.actions.finish(
+                    action.action_id,
+                    "failed",
+                    {"error": "search_provider_unavailable"},
+                    public_goal_reference=goal_id,
+                    public_explanation=(
+                        f"Configured {config.provider_type} search resource is cooling down."
+                    ),
+                    resource_summary="search provider unavailable",
+                )
+                raise PermissionError("search provider is unavailable")
         started = asyncio.get_running_loop().time()
         try:
             response = await self._request(config, normalized_query, limit)
@@ -166,6 +181,8 @@ class SearchExecutor:
                         False,
                         round((asyncio.get_running_loop().time() - started) * 1000),
                         "outcome_unknown",
+                        permit=route_permit,
+                        outcome_unknown=True,
                     )
             self.actions.finish(
                 action.action_id,
@@ -189,6 +206,8 @@ class SearchExecutor:
                         False,
                         round((asyncio.get_running_loop().time() - started) * 1000),
                         "outcome_unknown",
+                        permit=route_permit,
+                        outcome_unknown=True,
                     )
             self.actions.finish(
                 action.action_id,
@@ -219,6 +238,7 @@ class SearchExecutor:
                         False,
                         round((asyncio.get_running_loop().time() - started) * 1000),
                         type(error).__name__,
+                        permit=route_permit,
                     )
             self.actions.finish(
                 action.action_id,
@@ -248,6 +268,7 @@ class SearchExecutor:
                     True,
                     round((asyncio.get_running_loop().time() - started) * 1000),
                     None,
+                    permit=route_permit,
                 )
         self.actions.finish(
             action.action_id,
@@ -305,9 +326,12 @@ class SearchExecutor:
         )
         last_failure: SearchExecution | None = None
         for config in candidates:
-            if self.provider_health is not None and not self.provider_health.route_available(
-                subject_id, "search", config.config_id
-            ):
+            route_permit = (
+                self.provider_health.claim_route(subject_id, "search", config.config_id)
+                if self.provider_health is not None
+                else None
+            )
+            if self.provider_health is not None and route_permit is None:
                 continue
             try:
                 execution = await self.search(
@@ -321,6 +345,7 @@ class SearchExecutor:
                     expected_outcome=expected_outcome,
                     idempotency_key=f"{idempotency_key}:{config.config_id}",
                     limit=limit,
+                    route_permit=route_permit,
                 )
             except PermissionError:
                 # Local policy or a rate limit stopped the request before it

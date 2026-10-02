@@ -1530,6 +1530,7 @@ def _check_provider_health(context: IntegrityContext) -> IntegrityCheckOutcome:
             int(row["success_count"]),
             int(row["failure_count"]),
             int(row["latency_total_ms"]),
+            int(row["unknown_count"]),
             row["last_success_at"],
             row["last_failure_at"],
             json.loads(row["error_counts_json"] or "{}"),

@@ -2723,6 +2723,11 @@ class RoutedModelGateway(ModelGateway):
                 if key is None or key.key_id in tried_keys:
                     break
                 tried_keys.add(key.key_id)
+                route_permit = self.provider_health.claim_route(
+                    self.subject_id, "model", group.group_id
+                )
+                if route_permit is None:
+                    break
                 attempts += 1
                 routed_idempotency = (
                     forced_state.call.idempotency_key
@@ -2787,6 +2792,10 @@ class RoutedModelGateway(ModelGateway):
                                 else getattr(error, "code", type(error).__name__)
                             ),
                             cooldown_seconds=self.cooldown_seconds,
+                            permit=route_permit,
+                            outcome_unknown=(
+                                isinstance(error, ProviderCallError) and error.outcome_unknown
+                            ),
                         )
                     self.resources.record_failure(
                         key.key_id,
@@ -2808,7 +2817,7 @@ class RoutedModelGateway(ModelGateway):
                         latency,
                     )
                     terminal_error = error
-                    if forced_state is None and not self.provider_health.route_available(
+                    if forced_state is None and not self.provider_health.route_eligible(
                         self.subject_id, "model", group.group_id
                     ):
                         # A provider-level cooldown applies to the whole group,
@@ -2850,6 +2859,7 @@ class RoutedModelGateway(ModelGateway):
                             latency,
                             None,
                             cooldown_seconds=self.cooldown_seconds,
+                            permit=route_permit,
                         )
                     self.resources.record_success(key.key_id, subject_id=self.subject_id)
                     self._record_attempt(
@@ -3305,7 +3315,7 @@ class RoutedModelGateway(ModelGateway):
         groups = [
             group
             for group in groups
-            if self.provider_health.route_available(self.subject_id, "model", group.group_id)
+            if self.provider_health.route_eligible(self.subject_id, "model", group.group_id)
         ]
         if not groups:
             return []

@@ -9621,6 +9621,11 @@ END;
                 "ALTER TABLE provider_health_buckets "
                 "ADD COLUMN latency_samples_json TEXT NOT NULL DEFAULT '[]'"
             )
+        if "unknown_count" not in columns:
+            connection.execute(
+                "ALTER TABLE provider_health_buckets "
+                "ADD COLUMN unknown_count INTEGER NOT NULL DEFAULT 0"
+            )
 
     @staticmethod
     def _ensure_migration_target_attestation_columns(connection: sqlite3.Connection) -> None:
