@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from cryptography.exceptions import InvalidSignature
@@ -339,9 +340,7 @@ class RecoveryCoordinator:
         }
 
     @staticmethod
-    def _safe_backup_path(raw_path: str):
-        from pathlib import Path
-
+    def _safe_backup_path(raw_path: str) -> Path:
         path = Path(raw_path).expanduser()
         if path.is_symlink() or not path.is_file():
             raise ValueError("backup path must be a regular file")
