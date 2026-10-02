@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -22,6 +23,52 @@ from noyra.service import ServiceSettings  # noqa: E402
 
 def _check(check_id: str, passed: bool, reason: str) -> dict[str, str]:
     return {"id": check_id, "status": "pass" if passed else "fail", "reason": reason}
+
+
+def _model_group_secret_check(pool: str) -> tuple[bool, str]:
+    """Validate group JSON without ever including its values in diagnostics."""
+    prefix = f"NOYRA_{pool.upper()}_MODEL_GROUPS"
+    file_source = os.getenv(f"{prefix}_FILE", "").strip()
+    credential_source = os.getenv(f"{prefix}_CREDENTIAL", "").strip()
+    if file_source and credential_source:
+        return False, "group configuration must choose one managed source"
+    try:
+        if file_source:
+            raw = read_secret_file(
+                file_source,
+                label=f"{pool} model group configuration",
+                single_line=False,
+                max_bytes=1024 * 1024,
+            )
+        elif credential_source:
+            directory = os.getenv("CREDENTIALS_DIRECTORY", "").strip()
+            if (
+                not directory
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", credential_source) is None
+            ):
+                return False, "group credential source is invalid"
+            raw = read_secret_file(
+                Path(directory) / credential_source,
+                label=f"{pool} model group credential",
+                single_line=False,
+                max_bytes=1024 * 1024,
+            )
+        else:
+            raw = os.getenv(f"{prefix}_JSON", "[]")
+        payload = json.loads(raw)
+    except (CredentialError, OSError, ValueError, json.JSONDecodeError):
+        return False, "group configuration is unreadable or invalid JSON"
+    if not isinstance(payload, list):
+        return False, "group configuration must be a JSON array"
+    for item in payload:
+        if not isinstance(item, dict):
+            return False, "each model group must be an object"
+        keys = item.get("api_keys", [])
+        if not isinstance(keys, list) or any(type(value) is not str for value in keys):
+            return False, "model group api_keys must be a string array"
+        if keys:
+            return False, "inline model group api_keys are not allowed in production"
+    return True, "managed file/credential references only"
 
 
 def evaluate(settings: ServiceSettings | None, error: Exception | None = None) -> dict[str, Any]:
@@ -94,6 +141,15 @@ def evaluate(settings: ServiceSettings | None, error: Exception | None = None) -
                 "persistent private public anti-abuse hash key of at least 32 bytes is required",
             )
         )
+        for pool in ("economy", "deep"):
+            group_ready, group_reason = _model_group_secret_check(pool)
+            checks.append(
+                _check(
+                    f"{pool.lower()}_model_group_api_key_source",
+                    group_ready,
+                    group_reason,
+                )
+            )
         for kind in ("MODEL", "EMBEDDING"):
             configured = bool(
                 os.getenv(f"NOYRA_{kind}_BASE_URL", "").strip()
@@ -111,6 +167,15 @@ def evaluate(settings: ServiceSettings | None, error: Exception | None = None) -
                     "managed file/systemd credential required when the provider is configured",
                 )
             )
+    if os.getenv("NOYRA_PROFILE", "development").strip().lower() == "production":
+        inline_operator = bool(os.getenv("NOYRA_OPERATOR_TOKEN", "").strip())
+        checks.append(
+            _check(
+                "operator_token_source",
+                not inline_operator,
+                "production operator token must use a managed file/systemd credential source",
+            )
+        )
     return {
         "status": "pass" if checks and all(item["status"] == "pass" for item in checks) else "fail",
         "checks": checks,

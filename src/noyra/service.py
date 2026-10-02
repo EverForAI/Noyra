@@ -41,7 +41,7 @@ from noyra.cognition import (
 from noyra.core.admission import OperationInvalidated, bind_lease, current_lease
 from noyra.core.archive import CloudArchiveCoordinator, S3ArchiveProvider, StorageQuota
 from noyra.core.at_rest import AtRestConfig, AtRestError, AtRestGuard
-from noyra.core.credentials import CredentialError, read_secret_file
+from noyra.core.credentials import CredentialError, read_env_secret, read_secret_file
 from noyra.core.database import Database
 from noyra.core.errors import (
     IntegrityError,
@@ -1073,9 +1073,16 @@ class ServiceSettings(BaseModel):
             if operator_token_file_value
             else None
         )
-        operator_token = cls._read_operator_token_file(operator_token_file) or os.getenv(
-            "NOYRA_OPERATOR_TOKEN"
-        )
+        try:
+            operator_token = read_env_secret(
+                value_var="NOYRA_OPERATOR_TOKEN",
+                file_var="NOYRA_OPERATOR_TOKEN_FILE",
+                credential_var="NOYRA_OPERATOR_TOKEN_CREDENTIAL",
+                label="operator token",
+                allow_inline=profile != "production",
+            )
+        except CredentialError as error:
+            raise ValueError(str(error)) from error
         export_token = os.getenv("NOYRA_EXPORT_TOKEN")
         break_glass_token = os.getenv("NOYRA_BREAK_GLASS_TOKEN")
         return cls(

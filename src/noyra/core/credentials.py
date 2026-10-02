@@ -158,8 +158,12 @@ def read_env_secret(
 
     file_value = os.getenv(file_var, "").strip()
     credential_value = os.getenv(credential_var, "").strip()
+    inline_value = os.getenv(value_var, "").strip()
     if file_value and credential_value:
         raise CredentialError(f"choose one secret source for {label}")
+    profile = os.getenv("NOYRA_PROFILE", "development").strip().lower()
+    if allow_inline is False and inline_value:
+        raise CredentialError(f"inline secret is disabled for {label}")
     if file_value:
         return read_secret_file(file_value, label=label)
     if credential_value:
@@ -167,7 +171,6 @@ def read_env_secret(
             _systemd_credential_path(credential_value, label=label), label=label
         )
     if allow_inline is None:
-        profile = os.getenv("NOYRA_PROFILE", "development").strip().lower()
         if profile == "production":
             allow_inline = False
         else:
@@ -179,9 +182,9 @@ def read_env_secret(
                 if normalized not in {"0", "1", "false", "true", "no", "yes", "off", "on"}:
                     raise CredentialError("NOYRA_ALLOW_INLINE_SECRETS must be true or false")
                 allow_inline = normalized in {"1", "true", "yes", "on"}
-    if not allow_inline and os.getenv(value_var, "").strip():
+    if not allow_inline and inline_value:
         raise CredentialError(f"inline secret is disabled for {label}")
-    return os.getenv(value_var, "").strip()
+    return inline_value
 
 
 __all__ = ["CredentialError", "read_env_secret", "read_secret_file"]

@@ -3748,6 +3748,13 @@ def resource_groups_from_env(pool: CognitivePool) -> tuple[CognitiveResourceGrou
                 raise ValueError("model group api_keys must be a JSON array")
             if any(type(value) is not str for value in raw_keys):
                 raise ValueError("model group api_keys must contain only strings")
+            if (
+                os.getenv("NOYRA_PROFILE", "development").strip().lower() == "production"
+                and raw_keys
+            ):
+                raise ValueError(
+                    "model group api_keys must use a managed secret source in production"
+                )
             if not isinstance(raw_key_files, list) or any(
                 type(value) is not str for value in raw_key_files
             ):
@@ -3774,5 +3781,5 @@ def resource_groups_from_env(pool: CognitivePool) -> tuple[CognitiveResourceGrou
             normalized["api_keys"] = tuple(SecretStr(value) for value in resolved_keys)
             groups.append(CognitiveResourceGroupInput.model_validate(normalized))
     except (TypeError, ValueError) as error:
-        raise ConfigurationError(f"invalid {pool} model group configuration") from error
+        raise ConfigurationError(f"invalid {pool} model group configuration: {error}") from error
     return tuple(groups)
