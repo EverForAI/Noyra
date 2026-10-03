@@ -14,8 +14,20 @@ from noyra.migration.executor import MigrationExecutionError
 from noyra.migration.http_executor import (
     ArtifactBundle,
     HTTPMigrationExecutor,
+    _stream_digest,
 )
 from noyra.migration.manager import MigrationTask
+
+
+def test_stream_digest_does_not_use_read_bytes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path = tmp_path / "large-artifact"
+    path.write_bytes(b"chunk" * 4096)
+    monkeypatch.setattr(Path, "read_bytes", lambda self: (_ for _ in ()).throw(AssertionError()))
+    size, digest = _stream_digest(path, chunk_bytes=17)
+    assert size == path.stat().st_size
+    assert digest == hashlib.sha256(b"chunk" * 4096).hexdigest()
 
 
 class _Transport:

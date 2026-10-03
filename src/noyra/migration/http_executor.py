@@ -82,9 +82,8 @@ class SQLiteArtifactProvider:
         except (OSError, sqlite3.DatabaseError) as error:
             temporary.unlink(missing_ok=True)
             raise MigrationExecutionError("artifact_snapshot_failed") from error
-        actual = destination.read_bytes()
-        actual_digest = hashlib.sha256(actual).hexdigest()
-        if len(actual) != manifest.get("byte_size") or actual_digest != manifest.get(
+        actual_size, actual_digest = _stream_digest(destination)
+        if actual_size != manifest.get("byte_size") or actual_digest != manifest.get(
             "artifact_sha256"
         ):
             raise MigrationExecutionError("artifact_snapshot_mismatch")
@@ -404,12 +403,12 @@ class HTTPMigrationExecutor:
         manifest = dict(bundle.manifest)
         manifest.setdefault("artifact_id", proof.get("artifact_id"))
         manifest.setdefault("subject_id", task.subject_id)
-        manifest.setdefault("artifact_sha256", hashlib.sha256(bundle.path.read_bytes()).hexdigest())
+        _, digest = _stream_digest(bundle.path)
+        manifest.setdefault("artifact_sha256", digest)
         manifest.setdefault("byte_size", bundle.path.stat().st_size)
         if manifest.get("artifact_id") != proof.get("artifact_id"):
             raise MigrationExecutionError("artifact_id_mismatch")
         return manifest
-
     @staticmethod
     def _validate_health(value: Mapping[str, Any], task: MigrationTask, digest: str) -> None:
         if (
@@ -526,6 +525,19 @@ class HTTPMigrationExecutor:
             and len(value) == 64
             and all(character in "0123456789abcdef" for character in value)
         )
+
+
+def _stream_digest(path: Path, *, chunk_bytes: int = 1024 * 1024) -> tuple[int, str]:
+    """Hash a regular file with bounded memory and return size plus digest."""
+    if not path.is_file() or path.is_symlink():
+        raise MigrationExecutionError("artifact_output_invalid")
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        while chunk := stream.read(chunk_bytes):
+            digest.update(chunk)
+            size += len(chunk)
+    return size, digest.hexdigest()
 
 
 __all__ = [
