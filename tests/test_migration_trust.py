@@ -5,8 +5,16 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
-from noyra.migration.trust import TargetAttestation, TargetChallenge
+from noyra.migration.trust import (
+    RecipientPoPProof,
+    TargetAttestation,
+    TargetChallenge,
+    create_recipient_pop_challenge,
+    open_recipient_pop_challenge,
+    verify_recipient_pop,
+)
 
 
 def test_attestation_accepts_signature_for_fresh_challenge() -> None:
@@ -62,3 +70,37 @@ def test_attestation_rejects_bad_signature_and_expired_challenge() -> None:
             challenge=fresh,
             signature=base64.urlsafe_b64encode(b"bad").decode("ascii"),
         ).verify()
+
+
+def test_recipient_pop_is_encrypted_and_bound_to_recipient_key() -> None:
+    target_signer = Ed25519PrivateKey.generate()
+    recipient = X25519PrivateKey.generate()
+    challenge = create_recipient_pop_challenge(
+        "target-1", recipient.public_key(), source_epoch="epoch-1"
+    )
+    unsigned = open_recipient_pop_challenge(challenge, recipient)
+    signature = base64.urlsafe_b64encode(target_signer.sign(unsigned.signing_bytes())).decode(
+        "ascii"
+    )
+    proof = RecipientPoPProof(**{**unsigned.to_dict(), "signature": signature})
+    verify_recipient_pop(
+        challenge,
+        proof,
+        target_public_key=base64.urlsafe_b64encode(
+            target_signer.public_key().public_bytes_raw()
+        ).decode("ascii"),
+    )
+    with pytest.raises(ValueError, match="key fingerprint"):
+        open_recipient_pop_challenge(challenge, X25519PrivateKey.generate())
+
+
+def test_recipient_pop_rejects_tampered_ciphertext() -> None:
+    recipient = X25519PrivateKey.generate()
+    challenge = create_recipient_pop_challenge(
+        "target-1", recipient.public_key(), source_epoch="epoch-1"
+    )
+    tampered = type(challenge)(
+        **{**challenge.to_dict(), "ciphertext": challenge.ciphertext[:-1] + "A"}
+    )
+    with pytest.raises(ValueError, match="authentication"):
+        open_recipient_pop_challenge(tampered, recipient)

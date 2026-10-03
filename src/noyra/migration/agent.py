@@ -20,11 +20,18 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from noyra.core.at_rest import AtRestConfig, VolumeEncryptionProbe, VolumeEncryptionStatus
 from noyra.core.types import canonical_json, content_hash
 
-from .trust import TargetAttestation, TargetChallenge
+from .trust import (
+    RecipientPoPChallenge,
+    RecipientPoPProof,
+    TargetAttestation,
+    TargetChallenge,
+    open_recipient_pop_challenge,
+)
 
 
 def _file_digest(path: Path, *, chunk_bytes: int = 1024 * 1024) -> str:
@@ -45,6 +52,7 @@ def _files_equal(path: Path, expected: bytes, *, chunk_bytes: int = 1024 * 1024)
                 return False
             offset += len(chunk)
     return offset == len(expected)
+
 
 _ARTIFACT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _FORBIDDEN = frozenset(
@@ -156,6 +164,9 @@ class MigrationAgent:
         generation: int = 1,
         signing_key: Ed25519PrivateKey | None = None,
         public_key: str | None = None,
+        recipient_private_key: X25519PrivateKey | None = None,
+        recipient_public_key: str | None = None,
+        recipient_key_fingerprint: str | None = None,
         data_root: Path | str | None = None,
         require_encrypted_storage: bool = True,
         session_token: str | None = None,
@@ -176,6 +187,28 @@ class MigrationAgent:
             raise ValueError("agent identity is invalid")
         if signing_key is not None and not isinstance(signing_key, Ed25519PrivateKey):
             raise TypeError("agent signing key is invalid")
+        if recipient_private_key is not None and not isinstance(
+            recipient_private_key, X25519PrivateKey
+        ):
+            raise TypeError("agent recipient key is invalid")
+        if recipient_public_key is None and recipient_private_key is not None:
+            recipient_public_key = (
+                base64.urlsafe_b64encode(recipient_private_key.public_key().public_bytes_raw())
+                .decode("ascii")
+                .rstrip("=")
+            )
+        if recipient_public_key is not None:
+            recipient_bytes = self._decode_recipient_public_key(recipient_public_key)
+            calculated = hashlib.sha256(recipient_bytes).hexdigest()
+            if recipient_key_fingerprint not in {None, calculated}:
+                raise ValueError("agent recipient key fingerprint does not match public key")
+            recipient_key_fingerprint = calculated
+            if recipient_private_key is not None and (
+                recipient_private_key.public_key().public_bytes_raw() != recipient_bytes
+            ):
+                raise ValueError("agent recipient private key does not match public key")
+        elif recipient_key_fingerprint is not None or recipient_private_key is not None:
+            raise ValueError("agent recipient key identity is incomplete")
         if public_key is None and signing_key is not None:
             public_key = base64.urlsafe_b64encode(
                 signing_key.public_key().public_bytes_raw()
@@ -203,6 +236,10 @@ class MigrationAgent:
         self.generation = generation
         self.public_key = public_key
         self._signing_key = signing_key
+        self.recipient_public_key = recipient_public_key
+        self.recipient_key_fingerprint = recipient_key_fingerprint
+        self._recipient_private_key = recipient_private_key
+        self._recipient_pop_nonces: set[str] = set()
         self.require_encrypted_storage = True
         self._volume_probe = volume_probe or VolumeEncryptionProbe()
         self._session_token = session_token
@@ -257,6 +294,33 @@ class MigrationAgent:
             self._signing_key.sign(request.signing_bytes())
         ).decode()
         return TargetAttestation(self.target_id, self.public_key, request, signature)
+
+    def recipient_pop(
+        self, request: RecipientPoPChallenge | Mapping[str, Any]
+    ) -> RecipientPoPProof:
+        """Decrypt and sign a one-time recipient-key proof."""
+        if self._recipient_private_key is None or self.recipient_key_fingerprint is None:
+            raise ValueError("target recipient identity is not configured")
+        proof = open_recipient_pop_challenge(request, self._recipient_private_key)
+        with self._io_lock:
+            if proof.pop_nonce in self._recipient_pop_nonces:
+                raise ValueError("recipient proof challenge was already consumed")
+            self._recipient_pop_nonces.add(proof.pop_nonce)
+        if self._signing_key is None:
+            raise ValueError("target signing identity is not configured")
+        signature = (
+            base64.urlsafe_b64encode(self._signing_key.sign(proof.signing_bytes()))
+            .decode("ascii")
+            .rstrip("=")
+        )
+        return RecipientPoPProof(
+            proof.target_id,
+            proof.source_epoch,
+            proof.expires_at,
+            proof.pop_nonce,
+            proof.recipient_key_fingerprint,
+            signature,
+        )
 
     def sign_recovery_proof(self, signing_bytes: bytes) -> str:
         """Sign a source-provided recovery proof without exposing the key."""
@@ -965,9 +1029,11 @@ class MigrationAgent:
             raise ValueError("SQLite restore failed") from error
 
     def _restore_host_bound(self, report: RestoreReport) -> bool:
-        return report.restore_path is not None and self.restore_root is not None and Path(
-            report.restore_path
-        ).resolve().is_relative_to(self.restore_root)
+        return (
+            report.restore_path is not None
+            and self.restore_root is not None
+            and Path(report.restore_path).resolve().is_relative_to(self.restore_root)
+        )
 
     def _require_encrypted_volume(self, path: Path) -> None:
         config = AtRestConfig.from_env(path)
@@ -992,9 +1058,7 @@ class MigrationAgent:
     def _database_subject_matches(path: Path, subject_id: str) -> bool:
         try:
             with sqlite3.connect(path) as connection:
-                row = connection.execute(
-                    "SELECT subject_id FROM runtime_state LIMIT 1"
-                ).fetchone()
+                row = connection.execute("SELECT subject_id FROM runtime_state LIMIT 1").fetchone()
             return row is not None and row[0] == subject_id
         except (OSError, sqlite3.DatabaseError):
             return False
@@ -1053,6 +1117,25 @@ class MigrationAgent:
             raise ValueError("agent public key is invalid") from error
         if len(decoded) != 32:
             raise ValueError("agent public key is invalid")
+        return decoded
+
+    @staticmethod
+    def _decode_recipient_public_key(value: str) -> bytes:
+        if not isinstance(value, str) or not value or "=" in value:
+            raise ValueError("agent recipient public key is invalid")
+        try:
+            decoded = base64.b64decode(
+                value.encode("ascii") + b"=" * (-len(value) % 4),
+                altchars=b"-_",
+                validate=True,
+            )
+        except (ValueError, TypeError, UnicodeError, binascii.Error) as error:
+            raise ValueError("agent recipient public key is invalid") from error
+        if (
+            len(decoded) != 32
+            or base64.urlsafe_b64encode(decoded).decode("ascii").rstrip("=") != value
+        ):
+            raise ValueError("agent recipient public key is invalid")
         return decoded
 
     @staticmethod

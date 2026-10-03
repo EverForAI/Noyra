@@ -288,7 +288,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 78
+CURRENT_SCHEMA_VERSION = 79
 
 # The schema DDL fingerprint is checked after every successful initialization.
 # Update this value only alongside a reviewed schema migration and its tests.
@@ -298,6 +298,7 @@ CURRENT_SCHEMA_VERSION = 78
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
     77: "2487f1a2703fc940178b2c77f2b3982a37b4a526de37b9b253204be71f4a6d1f",
     78: "895ea957c9befde841e2c665c1cae4d47d9f90c9b37a9f6341e2cea339bbd5d5",
+    79: "af5da5087bbb8cac85b14699d10fa2e706d07b2eb225e3a22b19ed87ea08e7c6",
 }
 
 # Structural objects are checked independently so a trigger-only integrity
@@ -307,6 +308,7 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
     77: "03eae2bf8cdb2379f5a7271801044ce1920e0805018827d3661184b2a9fca896",
     78: "d8cc66309f41f32f3c7a7f05954ac237ad3826cfcdf6cf178c07538aa30fe828",
+    79: "d7b6e06f229327411a7862d6b65fd452a3cd88ab3f1034f6e3002d9f4d4e32d4",
 }
 
 _PERSISTENT_FEATURE_OBJECTS: dict[str, tuple[str, ...]] = {
@@ -6836,6 +6838,12 @@ CREATE TABLE IF NOT EXISTS migration_backup_registry (
 CREATE INDEX IF NOT EXISTS idx_migration_backup_registry_subject_status
     ON migration_backup_registry(subject_id, status, verified_at DESC);
 """,
+    79: """
+-- Recipient X25519 keys are installed by the idempotent migration hook.  The
+-- marker remains replay-safe for databases created before recipient-encrypted
+-- migration bundles were introduced.
+SELECT 1;
+""",
 }
 
 
@@ -9964,6 +9972,26 @@ END;
             connection.execute("ALTER TABLE migration_targets ADD COLUMN attestation_epoch TEXT")
 
     @staticmethod
+    def _ensure_migration_target_recipient_columns(connection: sqlite3.Connection) -> None:
+        """Install the recipient-encryption identity without fabricating keys."""
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='migration_targets'"
+        ).fetchone()
+        if table is None:
+            raise RuntimeError("migration targets table is missing")
+        columns = {
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(migration_targets)")
+        }
+        if "recipient_public_key" not in columns:
+            connection.execute(
+                "ALTER TABLE migration_targets ADD COLUMN recipient_public_key TEXT"
+            )
+        if "recipient_key_fingerprint" not in columns:
+            connection.execute(
+                "ALTER TABLE migration_targets ADD COLUMN recipient_key_fingerprint TEXT"
+            )
+
+    @staticmethod
     def _ensure_migration_task_epoch_column(connection: sqlite3.Connection) -> None:
         """Add the target epoch fence without making migration replay unsafe."""
         table = connection.execute(
@@ -10200,6 +10228,19 @@ END;
                         connection.execute("BEGIN IMMEDIATE")
                         self._ensure_migration_task_epoch_column(connection)
                         self._execute_sql_script(connection, migration)
+                        connection.execute(
+                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                            (str(target_version),),
+                        )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
+                if target_version == 79:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._ensure_migration_target_recipient_columns(connection)
                         connection.execute(
                             "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                             (str(target_version),),

@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from noyra.core import Database, IdentityStore
 from noyra.migration.policy import MigrationStore
@@ -19,17 +20,33 @@ def _registry(tmp_path: Any) -> Any:
 
 def _key_material() -> Any:
     private = Ed25519PrivateKey.generate()
-    public = base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode("ascii")
+    public = (
+        base64.urlsafe_b64encode(private.public_key().public_bytes_raw())
+        .decode("ascii")
+        .rstrip("=")
+    )
+    return private, public
+
+
+def _recipient_material() -> Any:
+    private = X25519PrivateKey.generate()
+    public = (
+        base64.urlsafe_b64encode(private.public_key().public_bytes_raw())
+        .decode("ascii")
+        .rstrip("=")
+    )
     return private, public
 
 
 def test_register_challenge_and_consume_target(tmp_path: Any) -> None:
     _, registry = _registry(tmp_path)
     private, public = _key_material()
+    _, recipient_public = _recipient_material()
     target = registry.register(
         "Noyra-0001",
         target_id="target-1",
         public_key=public,
+        recipient_public_key=recipient_public,
         endpoint="https://target.example/migration",
         capabilities={"encrypted_restore": True},
         region="us-east",
@@ -50,11 +67,13 @@ def test_register_challenge_and_consume_target(tmp_path: Any) -> None:
 def test_unencrypted_or_non_https_target_is_rejected(tmp_path: Any) -> None:
     _, registry = _registry(tmp_path)
     _, public = _key_material()
+    _, recipient_public = _recipient_material()
     with pytest.raises(ValueError, match="HTTPS"):
         registry.register(
             "Noyra-0001",
             target_id="bad",
             public_key=public,
+            recipient_public_key=recipient_public,
             endpoint="http://target.example",
             capabilities={},
             region=None,
@@ -69,6 +88,7 @@ def test_unencrypted_or_non_https_target_is_rejected(tmp_path: Any) -> None:
             "Noyra-0001",
             target_id="bad2",
             public_key=public,
+            recipient_public_key=recipient_public,
             endpoint="https://target.example",
             capabilities={},
             region=None,
@@ -83,10 +103,12 @@ def test_unencrypted_or_non_https_target_is_rejected(tmp_path: Any) -> None:
 def test_revoked_target_cannot_be_attested(tmp_path: Any) -> None:
     _, registry = _registry(tmp_path)
     private, public = _key_material()
+    _, recipient_public = _recipient_material()
     target = registry.register(
         "Noyra-0001",
         target_id="target-1",
         public_key=public,
+        recipient_public_key=recipient_public,
         endpoint="https://target.example",
         capabilities={},
         region=None,
@@ -106,10 +128,12 @@ def test_revoked_target_cannot_be_attested(tmp_path: Any) -> None:
 def test_target_integrity_detects_key_and_revocation_tampering(tmp_path: Any) -> None:
     database, registry = _registry(tmp_path)
     _, public = _key_material()
+    _, recipient_public = _recipient_material()
     target = registry.register(
         "Noyra-0001",
         target_id="target-integrity",
         public_key=public,
+        recipient_public_key=recipient_public,
         endpoint="https://target.example",
         capabilities={},
         region=None,
@@ -124,6 +148,58 @@ def test_target_integrity_detects_key_and_revocation_tampering(tmp_path: Any) ->
         connection.execute(
             "UPDATE migration_targets SET public_key=? WHERE target_id=?",
             ("tampered", target.target_id),
+        )
+    with pytest.raises(ValueError, match="integrity"):
+        registry.assert_integrity(target.target_id)
+
+
+def test_recipient_key_is_required_for_migration_registration(tmp_path: Any) -> None:
+    _, registry = _registry(tmp_path)
+    _, public = _key_material()
+    with pytest.raises(ValueError, match="recipient public key"):
+        registry.register(
+            "Noyra-0001",
+            target_id="target-without-recipient",
+            public_key=public,
+            recipient_public_key="",
+            endpoint="https://target.example",
+            capabilities={},
+            region=None,
+            provider=None,
+            release_sha="e" * 40,
+            os_arch="linux-amd64",
+            encrypted_volume=True,
+            actor="operator",
+        )
+
+
+def test_recipient_key_is_bound_to_target_integrity(tmp_path: Any) -> None:
+    database, registry = _registry(tmp_path)
+    _, public = _key_material()
+    _, recipient_public = _recipient_material()
+    target = registry.register(
+        "Noyra-0001",
+        target_id="target-recipient-integrity",
+        public_key=public,
+        recipient_public_key=recipient_public,
+        endpoint="https://target.example",
+        capabilities={},
+        region=None,
+        provider=None,
+        release_sha="f" * 40,
+        os_arch="linux-amd64",
+        encrypted_volume=True,
+        actor="operator",
+    )
+    assert target.recipient_public_key == recipient_public
+    assert len(target.recipient_key_fingerprint) == 64
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE migration_targets SET recipient_public_key=? WHERE target_id=?",
+            (
+                recipient_public[:-1] + ("A" if recipient_public[-1] != "A" else "B"),
+                target.target_id,
+            ),
         )
     with pytest.raises(ValueError, match="integrity"):
         registry.assert_integrity(target.target_id)

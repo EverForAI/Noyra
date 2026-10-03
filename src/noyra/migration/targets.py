@@ -30,6 +30,8 @@ class TargetRegistration:
     subject_id: str
     public_key: str
     key_fingerprint: str
+    recipient_public_key: str | None
+    recipient_key_fingerprint: str | None
     enrollment_generation: int
     endpoint: str
     capabilities: dict[str, Any]
@@ -56,6 +58,7 @@ class TargetRegistry:
         *,
         target_id: str,
         public_key: str,
+        recipient_public_key: str | None = None,
         endpoint: str,
         capabilities: Mapping[str, Any],
         region: str | None,
@@ -80,6 +83,7 @@ class TargetRegistry:
         if len(parsed.path) > 256 or parsed.query or parsed.fragment:
             raise ValueError("target endpoint must be an HTTPS origin or fixed agent path")
         public_bytes = self._decode_public_key(public_key)
+        recipient_bytes = self._decode_recipient_public_key(recipient_public_key)
         if type(encrypted_volume) is not bool or not encrypted_volume:
             raise ValueError("target volume must be encrypted")
         if (
@@ -96,6 +100,9 @@ class TargetRegistry:
         if len(capabilities_json.encode("utf-8")) > 16_384:
             raise ValueError("target capabilities are too large")
         fingerprint = hashlib.sha256(public_bytes).hexdigest()
+        recipient_fingerprint = (
+            hashlib.sha256(recipient_bytes).hexdigest() if recipient_bytes is not None else None
+        )
         now = utc_now()
         with self.database.transaction() as connection:
             if (
@@ -114,15 +121,18 @@ class TargetRegistry:
                 raise ValueError("target id is already registered")
             connection.execute(
                 """INSERT INTO migration_targets(
-                   target_id, subject_id, public_key, key_fingerprint, enrollment_generation,
+                   target_id, subject_id, public_key, key_fingerprint,
+                   recipient_public_key, recipient_key_fingerprint, enrollment_generation,
                    endpoint, capabilities_json, region, provider, release_sha, os_arch,
                    encrypted_volume, status, created_at, updated_at, state_hash
-                ) VALUES (?,?,?,?,1,?,?,?,?,?,?,1,'pending',?,?,?)""",
+                ) VALUES (?,?,?,?,?,?,1,?,?,?,?,?,?,1,'pending',?,?,?)""",
                 (
                     target_id,
                     subject_id,
                     public_key,
                     fingerprint,
+                    recipient_public_key,
+                    recipient_fingerprint,
                     endpoint,
                     capabilities_json,
                     region,
@@ -136,6 +146,8 @@ class TargetRegistry:
                         subject_id=subject_id,
                         public_key=public_key,
                         key_fingerprint=fingerprint,
+                        recipient_public_key=recipient_public_key,
+                        recipient_key_fingerprint=recipient_fingerprint,
                         enrollment_generation=1,
                         endpoint=endpoint,
                         capabilities_json=capabilities_json,
@@ -159,7 +171,12 @@ class TargetRegistry:
                 subject_id,
                 "migration_target_registered",
                 actor.strip(),
-                {"target_id": target_id, "key_fingerprint": fingerprint, "endpoint": endpoint},
+                {
+                    "target_id": target_id,
+                    "key_fingerprint": fingerprint,
+                    "recipient_key_fingerprint": recipient_fingerprint,
+                    "endpoint": endpoint,
+                },
             )
             return self._load(connection, target_id)
 
@@ -240,6 +257,8 @@ class TargetRegistry:
                         subject_id=row["subject_id"],
                         public_key=row["public_key"],
                         key_fingerprint=row["key_fingerprint"],
+                        recipient_public_key=row["recipient_public_key"],
+                        recipient_key_fingerprint=row["recipient_key_fingerprint"],
                         enrollment_generation=int(row["enrollment_generation"]),
                         endpoint=row["endpoint"],
                         capabilities_json=row["capabilities_json"],
@@ -298,6 +317,8 @@ class TargetRegistry:
                         subject_id=row["subject_id"],
                         public_key=row["public_key"],
                         key_fingerprint=row["key_fingerprint"],
+                        recipient_public_key=row["recipient_public_key"],
+                        recipient_key_fingerprint=row["recipient_key_fingerprint"],
                         enrollment_generation=int(row["enrollment_generation"]),
                         endpoint=row["endpoint"],
                         capabilities_json=row["capabilities_json"],
@@ -357,6 +378,25 @@ class TargetRegistry:
         return raw
 
     @staticmethod
+    def _decode_recipient_public_key(public_key: str | None) -> bytes | None:
+        # Pre-v79 rows may be read, but they cannot pass migration execution.
+        if public_key is None:
+            return None
+        if not isinstance(public_key, str) or not public_key:
+            raise ValueError("recipient public key is invalid")
+        try:
+            encoded = public_key.encode("ascii")
+            raw = base64.b64decode(
+                encoded + b"=" * (-len(encoded) % 4), altchars=b"-_", validate=True
+            )
+        except (ValueError, TypeError, UnicodeEncodeError, base64.binascii.Error) as error:
+            raise ValueError("recipient public key is invalid") from error
+        canonical = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+        if len(raw) != 32 or canonical != public_key:
+            raise ValueError("recipient public key must contain a canonical 32-byte X25519 key")
+        return raw
+
+    @staticmethod
     def _load(connection: Any, target_id: str) -> TargetRegistration:
         row = connection.execute(
             "SELECT * FROM migration_targets WHERE target_id=?", (target_id,)
@@ -368,6 +408,8 @@ class TargetRegistry:
             subject_id=row["subject_id"],
             public_key=row["public_key"],
             key_fingerprint=row["key_fingerprint"],
+            recipient_public_key=row["recipient_public_key"],
+            recipient_key_fingerprint=row["recipient_key_fingerprint"],
             enrollment_generation=int(row["enrollment_generation"]),
             endpoint=row["endpoint"],
             capabilities=json.loads(row["capabilities_json"]),
@@ -391,6 +433,8 @@ class TargetRegistry:
                 "subject_id": values["subject_id"],
                 "public_key": values["public_key"],
                 "key_fingerprint": values["key_fingerprint"],
+                "recipient_public_key": values["recipient_public_key"],
+                "recipient_key_fingerprint": values["recipient_key_fingerprint"],
                 "enrollment_generation": int(values["enrollment_generation"]),
                 "endpoint": values["endpoint"],
                 "capabilities_json": values["capabilities_json"],
@@ -416,6 +460,8 @@ class TargetRegistry:
             subject_id=row["subject_id"],
             public_key=row["public_key"],
             key_fingerprint=row["key_fingerprint"],
+            recipient_public_key=row["recipient_public_key"],
+            recipient_key_fingerprint=row["recipient_key_fingerprint"],
             enrollment_generation=int(row["enrollment_generation"]),
             endpoint=row["endpoint"],
             capabilities_json=row["capabilities_json"],
@@ -465,6 +511,18 @@ class TargetRegistry:
             raise ValueError("migration target integrity check failed") from error
         if hashlib.sha256(decoded).hexdigest() != row["key_fingerprint"]:
             raise ValueError("migration target integrity check failed")
+        recipient_public = row["recipient_public_key"]
+        recipient_fingerprint = row["recipient_key_fingerprint"]
+        if recipient_public is None or recipient_fingerprint is None:
+            if recipient_public is not None or recipient_fingerprint is not None:
+                raise ValueError("migration target integrity check failed")
+        else:
+            recipient_decoded = cls._decode_recipient_public_key(str(recipient_public))
+            if (
+                recipient_decoded is None
+                or hashlib.sha256(recipient_decoded).hexdigest() != recipient_fingerprint
+            ):
+                raise ValueError("migration target integrity check failed")
         expected = cls._state_hash_from_row(row)
         if row["state_hash"] == expected:
             return

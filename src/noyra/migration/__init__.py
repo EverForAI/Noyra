@@ -36,7 +36,16 @@ from .transfer import (
     TransferReceipt,
     TransferSession,
 )
-from .trust import TargetAttestation, TargetChallenge, TrustDecision, TrustEvidence
+from .trust import (
+    RecipientPoPChallenge,
+    RecipientPoPProof,
+    TargetAttestation,
+    TargetChallenge,
+    TrustDecision,
+    TrustEvidence,
+    create_recipient_pop_challenge,
+    verify_recipient_pop,
+)
 from .wallet import WalletBindingReceipt, WalletMigration, WalletMigrationPlan
 
 __all__ = [
@@ -64,6 +73,8 @@ __all__ = [
     "MigrationStore",
     "NeedAssessment",
     "ReceiveReceipt",
+    "RecipientPoPChallenge",
+    "RecipientPoPProof",
     "RecoveryCoordinator",
     "RecoveryRequest",
     "RegisteredTargetProvider",
@@ -84,4 +95,6 @@ __all__ = [
     "WalletBindingReceipt",
     "WalletMigration",
     "WalletMigrationPlan",
+    "create_recipient_pop_challenge",
+    "verify_recipient_pop",
 ]

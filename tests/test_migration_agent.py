@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from noyra.core.at_rest import VolumeEncryptionStatus
 from noyra.core.types import canonical_json
@@ -22,7 +23,11 @@ from noyra.migration.agent import (
     TargetHealthReport,
 )
 from noyra.migration.recovery import RecoveryCoordinator, RecoveryRequest
-from noyra.migration.trust import TargetChallenge
+from noyra.migration.trust import (
+    TargetChallenge,
+    create_recipient_pop_challenge,
+    verify_recipient_pop,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -89,6 +94,31 @@ def test_agent_challenge_is_signed_by_host_bound_target_key(tmp_path: Any) -> No
     assert attestation.public_key == public
     assert agent.enroll({"subject_id": "Noyra-0001"}).host_identity
     assert attestation.verify().target_id == "target-1"
+
+
+def test_agent_recipient_pop_requires_private_key_and_is_one_time(tmp_path: Any) -> None:
+    signing = Ed25519PrivateKey.generate()
+    recipient = X25519PrivateKey.generate()
+    agent = MigrationAgent(
+        target_id="target-1",
+        key_fingerprint=hashlib.sha256(signing.public_key().public_bytes_raw()).hexdigest(),
+        signing_key=signing,
+        recipient_private_key=recipient,
+        data_root=tmp_path,
+    )
+    challenge = create_recipient_pop_challenge(
+        "target-1", recipient.public_key(), source_epoch="source-1"
+    )
+    proof = agent.recipient_pop(challenge)
+    verify_recipient_pop(
+        challenge,
+        proof,
+        target_public_key=base64.urlsafe_b64encode(
+            signing.public_key().public_bytes_raw()
+        ).decode("ascii"),
+    )
+    with pytest.raises(ValueError, match="already consumed"):
+        agent.recipient_pop(challenge)
 
 
 def test_agent_signs_recovery_proof_without_exposing_private_key() -> None:

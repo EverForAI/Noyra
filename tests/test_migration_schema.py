@@ -36,6 +36,11 @@ def test_migration_schema_is_current_and_append_only(tmp_path: Any) -> None:
             row["name"] for row in connection.execute("PRAGMA table_info(migration_tasks)")
         }
         assert "target_epoch_id" in task_columns
+        target_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(migration_targets)")
+        }
+        assert "recipient_public_key" in target_columns
+        assert "recipient_key_fingerprint" in target_columns
 
     store = MigrationStore(database)
     store.read_policy("Noyra-0001")

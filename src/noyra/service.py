@@ -1545,10 +1545,15 @@ class NoyraHTTPServer:
         self.migration_targets._assert_row_integrity(row)
         if row["status"] != "active":
             raise MigrationExecutionError("migration_target_not_active")
+        if not row["recipient_public_key"] or not row["recipient_key_fingerprint"]:
+            raise MigrationExecutionError("migration_target_recipient_key_unavailable")
         return {
             "target_id": row["target_id"],
             "endpoint": row["endpoint"],
             "public_key": row["public_key"],
+            "recipient_public_key": row["recipient_public_key"],
+            "recipient_key_fingerprint": row["recipient_key_fingerprint"],
+            "enrollment_generation": int(row["enrollment_generation"]),
         }
 
     def _migration_http_token(self, task: Any) -> str:
@@ -2632,6 +2637,8 @@ class NoyraHTTPServer:
                                 "target_id",
                                 "subject_id",
                                 "key_fingerprint",
+                                "recipient_public_key",
+                                "recipient_key_fingerprint",
                                 "enrollment_generation",
                                 "endpoint",
                                 "region",
@@ -4302,6 +4309,11 @@ class NoyraHTTPServer:
                             owner.kernel.subject_id,
                             target_id=str(payload["target_id"]),
                             public_key=str(payload["public_key"]),
+                            recipient_public_key=(
+                                str(payload["recipient_public_key"])
+                                if payload.get("recipient_public_key") is not None
+                                else None
+                            ),
                             endpoint=str(payload["endpoint"]),
                             capabilities=payload.get("capabilities", {}),
                             region=payload.get("region"),
