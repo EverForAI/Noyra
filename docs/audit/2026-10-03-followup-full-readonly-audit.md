@@ -102,16 +102,16 @@
 - **修复风险**：高。需要启动时验证受信的 LUKS/volume attestation，且将证明摘要绑定 manifest/target proof；失败必须在 receive 前拒绝。
 - **时机**：立即修复。
 
-### A07：入站配额合同不一致
+### A07：入站配额合同不一致（目标侧 preflight 已增加，执行器接线仍阻断）
 
 - **证据**：`MigrationAgent` 默认 `max_incoming_bytes=64*1024*1024`（`agent.py:129-165`），同时允许最大 1 GiB；manifest/传输代码没有把生产数据容量、磁盘预留和目标配置统一起来。`receive_chunk()` 在达到 `max_incoming_bytes` 时拒绝。
-- **根因**：协议上限、默认 agent 配额和安装器/磁盘容量没有单一配置源；服务无法在 proposal 阶段根据实际 artifact 预留目标空间。
+- **根因**：协议上限、默认 agent 配额和安装器/磁盘容量没有单一配置源；此前服务无法在 fence 前根据实际 artifact 预留空间。当前 agent 增加了认证 `preflight`，会在接收前检查实际加密卷、文件/字节配额并返回所需空间，但 recipient bundle executor 尚未接线，因此不能宣称端到端解决。
 - **影响**：数据库或 encrypted backup 超过 64 MiB 时迁移失败；失败通常发生在已经 fence/传输了一部分之后，增加恢复窗口和残留清理压力。
 - **概率**：达到阈值后 100%；当前数据规模未知，增长是常见运维路径。
 - **修复风险**：中。采用显式 per-target quota、manifest preflight、磁盘可用空间与 reserved bytes 检查，并保证失败在 source fence 前可预测。
 - **时机**：迁移开启前立即修复或至少将配额写入目标注册合同。
 
-### A08：完整 artifact 哈希读入内存（资源切片已修复，目标 agent 仍有其他读入点）
+### A08：完整 artifact 哈希读入内存（代码路径已改为流式，容量证据仍待外部验证）
 
 - **证据**：`SQLiteArtifactProvider` 和 `_manifest()` 已改为固定块大小的 `_stream_digest()`，target agent 的 `_verify_artifact()` 与分块组装也已改为固定块读取（`fb197ae`、`aa49ae6`），并有回归测试覆盖 executor/provider。仍需在真实大 artifact、配额和并发条件下做资源压力证据，因此本项代码层已修复，生产容量门仍属于 A07/A09 外部验证。
 - **根因**：哈希实现使用一次性 bytes，而不是固定块大小的 streaming hash；同一文件还可能被重复读取。
