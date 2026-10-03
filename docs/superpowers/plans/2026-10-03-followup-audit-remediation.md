@@ -31,6 +31,24 @@ Root cause: target activation writes only `activations/{task}.json`; no service 
 
 Root causes: the service currently snapshots raw SQLite while proposals claim encrypted backup; `WalletMigration` is not in the executor receipt; `require_encrypted_storage` is metadata only. Define a manifest version that references encrypted backup/config bundles by digest, inject credentials through managed files/KMS, bind external signer rebind evidence, require a second approval for local wallet transfer, and require target volume attestation before receive/restore. Never include secret values in artifacts or audit rows. Test missing keyring, unencrypted target, secret omission, signer mismatch, local-wallet disabled/default, and rollback. Commit.
 
+#### Follow-up status (2026-10-03)
+
+The active HTTP/CLI target-agent dispatch now refuses persistent `receive` and
+`restore` operations with `recipient-encrypted migration bundle support is
+unavailable`. The source executor already refuses before target lookup or
+source fencing. Migration proposals now state that execution is blocked while
+recipient encryption and wallet/credential binding remain unverified. This
+closes the old raw-SQLite/legacy-backup remote path and the misleading
+"encrypted backup" claim; it is a fail-closed containment step, **not completion
+of A05/A06**. The standalone X25519/HKDF/AES-GCM file envelope helper is tested
+for round-trip, context binding, tamper rejection, and source mutation, but is
+not wired to an enrolled recipient key, allowlisted database/config package,
+target decryption, wallet/signer evidence, or the cutover receipt. The
+encrypted-volume checks remain mandatory and non-disableable; live LUKS
+validation remains an external gate. Keep this module open until those protocol
+contracts have end-to-end tests. Do not remove either source or target
+fail-closed barrier in an intermediate commit.
+
 ### 5. Repair management proof UX and capacity/resource behavior (A02/A07/A08)
 
 Root causes: the admin cutover button sends `{}` although the endpoint requires proof; quotas are not negotiated before transfer; hashing reads entire files into memory. Add a server-issued short-lived task-bound cutover ticket and have the UI submit only that ticket, with evidence summaries and stable error states. Add manifest preflight for target quota/free space and stream SHA-256 over bounded chunks, reusing the digest. Test UI request shape, expiry/replay, quota rejection before fencing, large artifacts, and bounded memory behavior. Commit.

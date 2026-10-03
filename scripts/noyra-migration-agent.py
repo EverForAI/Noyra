@@ -176,6 +176,13 @@ def _json(value: Any) -> bytes:
 
 
 def dispatch(agent: MigrationAgent, operation: str, payload: dict[str, Any]) -> Any:
+    if operation in {"receive", "restore"} and (
+        agent.data_root is not None or agent.restore_root is not None
+    ):
+        raise ValueError(
+            "recipient-encrypted migration bundle support is unavailable; "
+            "persistent receive and restore are disabled"
+        )
     if operation == "enroll":
         return asdict(agent.enroll(payload or None))
     if operation == "challenge":

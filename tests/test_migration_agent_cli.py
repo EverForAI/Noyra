@@ -71,19 +71,62 @@ def test_cli_identity_and_dispatch_keep_secret_out_of_manifest(tmp_path: Path) -
     if os.name != "nt":
         identity.chmod(0o600)
     agent = module.load_agent(identity, tmp_path / "data")
-    receipt = module.dispatch(
-        agent,
-        "receive",
-        {
-            "artifact_id": "artifact-1",
-            "byte_size": 1,
-            "schema_version": 1,
-            "artifact_b64": base64.b64encode(b"x").decode(),
-        },
+    with pytest.raises(ValueError, match="recipient-encrypted migration bundle"):
+        module.dispatch(
+            agent,
+            "receive",
+            {
+                "artifact_id": "artifact-1",
+                "byte_size": 1,
+                "schema_version": 1,
+                "artifact_format": "sqlite",
+                "artifact_b64": base64.b64encode(b"x").decode(),
+            },
+        )
+    assert not (tmp_path / "data" / "incoming").exists()
+
+
+@pytest.mark.parametrize(
+    "artifact_format", ["sqlite", "noyra-encrypted-backup", "noyra-migration-bundle/v1"]
+)
+def test_cli_dispatch_fails_closed_until_recipient_decryption_is_integrated(
+    tmp_path: Path, artifact_format: str
+) -> None:
+    module = _module()
+    agent = module.MigrationAgent(
+        target_id="target-1", key_fingerprint="a" * 64, data_root=tmp_path / "data"
     )
-    assert receipt["status"] == "received"
-    report = module.dispatch(agent, "restore", receipt)
-    assert report["status"] == "restored"
+
+    with pytest.raises(ValueError, match="recipient-encrypted migration bundle"):
+        module.dispatch(
+            agent,
+            "receive",
+            {
+                "manifest": {
+                    "artifact_id": "artifact-1",
+                    "byte_size": 1,
+                    "artifact_format": artifact_format,
+                },
+                "chunk_index": 0,
+                "chunk_count": 1,
+                "chunk_bytes": 4096,
+                "chunk_sha256": hashlib.sha256(b"x").hexdigest(),
+                "chunk_b64": base64.b64encode(b"x").decode(),
+            },
+        )
+    assert not (tmp_path / "data" / "incoming").exists()
+
+
+def test_cli_dispatch_fails_closed_on_restore_until_recipient_decryption_is_integrated(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    agent = module.MigrationAgent(
+        target_id="target-1", key_fingerprint="a" * 64, data_root=tmp_path / "data"
+    )
+
+    with pytest.raises(ValueError, match="recipient-encrypted migration bundle"):
+        module.dispatch(agent, "restore", {"artifact_id": "artifact-1"})
 
 
 def test_load_agent_uses_the_fixed_signed_root_activation_bridge(tmp_path: Path) -> None:
@@ -131,33 +174,6 @@ def test_identity_file_rejects_hardlinks(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="hard link"):
         module.load_agent(hardlink, tmp_path / "data")
-
-
-def test_cli_dispatch_accepts_chunked_receive_payloads(tmp_path: Path) -> None:
-    module = _module()
-    agent = module.MigrationAgent(
-        target_id="target-1", key_fingerprint="a" * 64, data_root=tmp_path / "data"
-    )
-    artifact = b"chunked-cli-payload"
-    manifest = {
-        "artifact_id": "chunked-cli",
-        "byte_size": len(artifact),
-        "artifact_sha256": hashlib.sha256(artifact).hexdigest(),
-        "artifact_format": "sqlite",
-    }
-    result = module.dispatch(
-        agent,
-        "receive",
-        {
-            "manifest": manifest,
-            "chunk_index": 0,
-            "chunk_count": 1,
-            "chunk_bytes": 4096,
-            "chunk_sha256": hashlib.sha256(artifact).hexdigest(),
-            "chunk_b64": base64.b64encode(artifact).decode(),
-        },
-    )
-    assert result["complete"] is True
 
 
 def test_cli_dispatch_signs_health_and_persists_activation(tmp_path: Path) -> None:
@@ -290,6 +306,34 @@ def test_http_handler_requires_signed_body_and_rejects_replay(tmp_path: Path) ->
         connection.request("POST", "/v1/enroll", body=body, headers=headers)
         assert connection.getresponse().status == 401
         connection.close()
+
+        receive_body = json.dumps(
+            {
+                "artifact_id": "legacy-artifact",
+                "byte_size": 1,
+                "artifact_format": "sqlite",
+                "artifact_b64": base64.b64encode(b"x").decode(),
+            },
+            separators=(",", ":"),
+        ).encode()
+        receive_headers = {"Content-Type": "application/json"}
+        receive_headers.update(
+            _auth_headers(
+                token,
+                receive_body,
+                timestamp=int(time.time()),
+                nonce="nonce-000000000102",
+            )
+        )
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        connection.request(
+            "POST", "/v1/receive", body=receive_body, headers=receive_headers
+        )
+        response = connection.getresponse()
+        assert response.status == 400
+        assert "recipient-encrypted migration bundle" in response.read().decode()
+        connection.close()
+        assert not (tmp_path / "data" / "incoming").exists()
     finally:
         server.shutdown()
         server.server_close()

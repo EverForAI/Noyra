@@ -151,7 +151,11 @@ class MigrationProposalBuilder:
                 },
                 "estimated_downtime_seconds": downtime,
                 "key_plan": policy.wallet_mode,
-                "data_plan": "encrypted backup; target restores and validates before epoch acquisition",
+                "migration_execution_ready": False,
+                "data_plan": (
+                    "blocked: recipient-encrypted bundle and target wallet/credential "
+                    "binding are not verified"
+                ),
                 "rollback_plan": "revoke target epoch and retain source authority until commit is verified",
             }
         )
