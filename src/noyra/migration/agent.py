@@ -26,6 +26,26 @@ from noyra.core.types import canonical_json, content_hash
 
 from .trust import TargetAttestation, TargetChallenge
 
+
+def _file_digest(path: Path, *, chunk_bytes: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(chunk_bytes):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _files_equal(path: Path, expected: bytes, *, chunk_bytes: int = 1024 * 1024) -> bool:
+    if path.stat().st_size != len(expected):
+        return False
+    offset = 0
+    with path.open("rb") as stream:
+        while chunk := stream.read(chunk_bytes):
+            if chunk != expected[offset : offset + len(chunk)]:
+                return False
+            offset += len(chunk)
+    return offset == len(expected)
+
 _ARTIFACT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _FORBIDDEN = frozenset(
     {"secret", "token", "password", "private_key", "api_key", "bearer", "credential"}
@@ -417,7 +437,7 @@ class MigrationAgent:
                 self._write_private_json(metadata_path, metadata)
             part = session / f"{chunk_index:08d}.part"
             if part.exists():
-                if part.is_symlink() or not part.is_file() or part.read_bytes() != chunk:
+                if part.is_symlink() or not part.is_file() or not _files_equal(part, chunk):
                     raise ValueError("migration chunk conflicts with an existing chunk")
             else:
                 file_count, byte_count = self._incoming_usage(incoming)
@@ -442,10 +462,11 @@ class MigrationAgent:
                 try:
                     with temporary.open("wb") as stream:
                         for part_path in parts:
-                            payload = part_path.read_bytes()
-                            artifact.update(payload)
-                            total += len(payload)
-                            stream.write(payload)
+                            with part_path.open("rb") as part_stream:
+                                while payload := part_stream.read(1024 * 1024):
+                                    artifact.update(payload)
+                                    total += len(payload)
+                                    stream.write(payload)
                         stream.flush()
                         os.fsync(stream.fileno())
                     if (
@@ -860,7 +881,7 @@ class MigrationAgent:
             stat_result = path.stat()
             if not path.is_file() or stat_result.st_size != values["byte_size"]:
                 raise ValueError("migration artifact byte size mismatch")
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            digest = _file_digest(path)
         except (OSError, ValueError) as error:
             raise ValueError("migration artifact cannot be read") from error
         expected = values.get("artifact_sha256")
