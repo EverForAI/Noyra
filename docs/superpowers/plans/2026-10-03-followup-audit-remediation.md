@@ -60,6 +60,18 @@ executor, and A07 quota preflight is still open.
 
 Root causes: the admin cutover button sends `{}` although the endpoint requires proof; quotas are not negotiated before transfer; hashing reads entire files into memory. Add a server-issued short-lived task-bound cutover ticket and have the UI submit only that ticket, with evidence summaries and stable error states. Add manifest preflight for target quota/free space and stream SHA-256 over bounded chunks, reusing the digest. Test UI request shape, expiry/replay, quota rejection before fencing, large artifacts, and bounded memory behavior. Commit.
 
+#### Follow-up status (2026-10-03)
+
+The admin UI no longer submits an empty cutover proof: the action is visibly
+disabled until recipient-encrypted transfer and target restore evidence are
+available (`f1546d5`). The target agent now exposes an authenticated `preflight`
+operation that checks the live encrypted-volume probe and incoming file/byte
+quota before any artifact is accepted (`b6e4786`). Provider and target-agent
+hash/assembly paths stream fixed-size chunks (`fb197ae`, `aa49ae6`). The server
+task-bound cutover ticket, recipient-bundle executor wiring, and source-side
+quota negotiation remain open; these changes intentionally do not enable
+migration.
+
 ### 6. External release gate and final audit (A09)
 
 Keep external evidence separate from local tests. Verify same-SHA signed gates for Ubuntu/systemd, encrypted storage, backup restore, two-host fence/cutover/rollback, signer/KMS, chain reorg/nonce, HTTPS proxy, and soak. Update the audit report only with fresh evidence; leave unknown gates explicitly blocked. Run the full repository quality suite and document any remaining environment-only skips. Commit documentation and code only when the final gates are green.
