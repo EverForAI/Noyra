@@ -129,6 +129,29 @@ def test_cli_dispatch_fails_closed_on_restore_until_recipient_decryption_is_inte
         module.dispatch(agent, "restore", {"artifact_id": "artifact-1"})
 
 
+def test_cli_preflight_rejects_before_transfer_when_quota_is_insufficient(tmp_path: Path) -> None:
+    module = _module()
+    agent = module.MigrationAgent(
+        target_id="target-1",
+        key_fingerprint="a" * 64,
+        data_root=tmp_path / "data",
+        max_incoming_bytes=128,
+    )
+    with pytest.raises(ValueError, match="quota"):
+        module.dispatch(
+            agent,
+            "preflight",
+            {
+                "manifest": {
+                    "artifact_id": "artifact-1",
+                    "byte_size": 256,
+                    "artifact_format": "sqlite",
+                }
+            },
+        )
+    assert not (tmp_path / "data" / "incoming" / "artifact-1.artifact").exists()
+
+
 def test_load_agent_uses_the_fixed_signed_root_activation_bridge(tmp_path: Path) -> None:
     module = _module()
     private = Ed25519PrivateKey.generate()

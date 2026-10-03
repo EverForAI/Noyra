@@ -618,6 +618,33 @@ class MigrationAgent:
             byte_count += size
         return file_count, byte_count
 
+    def preflight(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        """Validate target volume and incoming capacity before transfer begins."""
+        values = self._validate_manifest(manifest)
+        if self.data_root is None:
+            raise ValueError("migration preflight storage is unavailable")
+        self._require_encrypted_volume(self.data_root)
+        incoming = self.data_root / "incoming"
+        incoming.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._assert_private_directory(incoming)
+        with self._io_lock:
+            self.cleanup_expired()
+            file_count, byte_count = self._incoming_usage(incoming)
+            manifest_bytes = len(canonical_json(values).encode("utf-8"))
+            required_bytes = manifest_bytes + values["byte_size"]
+            if file_count + 2 > self.max_incoming_files:
+                raise ValueError("migration incoming file quota exceeded")
+            if byte_count + required_bytes > self.max_incoming_bytes:
+                raise ValueError("migration incoming byte quota exceeded")
+        return {
+            "status": "ready",
+            "target_id": self.target_id,
+            "artifact_id": values["artifact_id"],
+            "byte_size": values["byte_size"],
+            "required_bytes": required_bytes,
+            "available_bytes": self.max_incoming_bytes - byte_count,
+        }
+
     @staticmethod
     def _cleanup_nonces(replay_root: Path, now: float) -> None:
         paths = list(replay_root.glob("*.nonce"))

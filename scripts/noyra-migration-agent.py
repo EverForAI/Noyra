@@ -190,6 +190,11 @@ def dispatch(agent: MigrationAgent, operation: str, payload: dict[str, Any]) -> 
         result = asdict(attestation)
         result["challenge"] = asdict(attestation.challenge)
         return result
+    if operation == "preflight":
+        manifest = payload.get("manifest")
+        if not isinstance(manifest, dict):
+            raise ValueError("migration manifest is invalid")
+        return agent.preflight(manifest)
     if operation == "receive":
         if "chunk_index" in payload:
             encoded_chunk = payload.pop("chunk_b64", None)
@@ -277,6 +282,7 @@ class Handler(BaseHTTPRequestHandler):
         operations = {
             "/v1/enroll": "enroll",
             "/v1/challenge": "challenge",
+            "/v1/preflight": "preflight",
             "/v1/receive": "receive",
             "/v1/receive-chunk": "receive",
             "/v1/restore": "restore",
@@ -355,6 +361,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=(
             "enroll",
             "challenge",
+            "preflight",
             "receive",
             "restore",
             "health",
