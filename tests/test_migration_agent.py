@@ -22,6 +22,7 @@ from noyra.migration.agent import (
     RestoreReport,
     TargetHealthReport,
 )
+from noyra.migration.bundle import BUNDLE_FORMAT, encrypt_bundle
 from noyra.migration.recovery import RecoveryCoordinator, RecoveryRequest
 from noyra.migration.trust import (
     TargetChallenge,
@@ -113,12 +114,56 @@ def test_agent_recipient_pop_requires_private_key_and_is_one_time(tmp_path: Any)
     verify_recipient_pop(
         challenge,
         proof,
-        target_public_key=base64.urlsafe_b64encode(
-            signing.public_key().public_bytes_raw()
-        ).decode("ascii"),
+        target_public_key=base64.urlsafe_b64encode(signing.public_key().public_bytes_raw()).decode(
+            "ascii"
+        ),
     )
     with pytest.raises(ValueError, match="already consumed"):
         agent.recipient_pop(challenge)
+
+
+def test_agent_persists_and_restores_recipient_encrypted_bundle(tmp_path: Any) -> None:
+    signing = Ed25519PrivateKey.generate()
+    recipient = X25519PrivateKey.generate()
+    data_root = tmp_path / "incoming-root"
+    restore_root = tmp_path / "restore-root"
+    agent = MigrationAgent(
+        target_id="target-1",
+        key_fingerprint=hashlib.sha256(signing.public_key().public_bytes_raw()).hexdigest(),
+        signing_key=signing,
+        recipient_private_key=recipient,
+        data_root=data_root,
+        restore_root=restore_root,
+    )
+    source = tmp_path / "source.sqlite3"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE runtime_state(subject_id TEXT NOT NULL)")
+        connection.execute("INSERT INTO runtime_state VALUES ('Noyra-0001')")
+    encrypted = tmp_path / "payload.bundle"
+    manifest = encrypt_bundle(
+        source,
+        encrypted,
+        recipient_public_key=recipient.public_key(),
+        context={
+            "task_id": "task-bundle-1",
+            "target_id": "target-1",
+            "source_epoch": "source-1",
+            "artifact_id": "bundle-1",
+            "subject_id": "Noyra-0001",
+            "schema_version": "79",
+            "artifact_format": BUNDLE_FORMAT,
+        },
+    )
+    manifest = {
+        **manifest,
+        "byte_size": manifest["ciphertext_size"],
+        "artifact_sha256": manifest["ciphertext_sha256"],
+    }
+    receipt = agent.receive(manifest, artifact=encrypted.read_bytes())
+    report = agent.restore(receipt, task_id="task-bundle-1")
+    assert report.status == "restored"
+    assert report.restore_path is not None
+    assert Path(report.restore_path).is_file()
 
 
 def test_agent_signs_recovery_proof_without_exposing_private_key() -> None:
@@ -218,8 +263,9 @@ def test_target_activation_returns_agent_signed_service_receipt(tmp_path: Any) -
     )
     private.public_key().verify(
         signature,
-        canonical_json({key: value for key, value in receipt.items() if key != "target_signature"})
-        .encode(),
+        canonical_json(
+            {key: value for key, value in receipt.items() if key != "target_signature"}
+        ).encode(),
     )
     assert receipt["status"] == "active"
     assert receipt["service_unit"] == "noyra.service"
@@ -420,8 +466,7 @@ def test_agent_chunked_receive_is_resumable_idempotent_and_bound_to_manifest(tmp
     }
     chunk_bytes = 4096
     chunks = [
-        artifact[offset : offset + chunk_bytes]
-        for offset in range(0, len(artifact), chunk_bytes)
+        artifact[offset : offset + chunk_bytes] for offset in range(0, len(artifact), chunk_bytes)
     ]
     count = len(chunks)
 
@@ -528,7 +573,7 @@ def test_agent_rechecks_restore_volume_and_cannot_disable_requirement(tmp_path: 
             key_fingerprint="b" * 64,
             data_root=tmp_path / "other",
             require_encrypted_storage=False,
-        volume_probe=probe,
+            volume_probe=probe,
         )
 
 

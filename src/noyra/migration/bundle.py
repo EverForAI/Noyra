@@ -41,8 +41,22 @@ _MANIFEST_FIELDS = frozenset(
         "plaintext_sha256",
         "ciphertext_size",
         "ciphertext_sha256",
+        "artifact_id",
+        "subject_id",
+        "schema_version",
+        "artifact_format",
+        "byte_size",
+        "artifact_sha256",
     }
 )
+_REQUIRED_MANIFEST_FIELDS = _MANIFEST_FIELDS - {
+    "artifact_id",
+    "subject_id",
+    "schema_version",
+    "artifact_format",
+    "byte_size",
+    "artifact_sha256",
+}
 
 
 def encrypt_bundle(
@@ -180,11 +194,28 @@ def decrypt_bundle(
     )
     salt = _decode(values["salt"], 32, "salt")
     nonce = _decode(values["nonce"], 12, "nonce")
-    context = {key: str(values[key]) for key in ("task_id", "target_id", "source_epoch")}
+    context = {
+        key: str(values[key])
+        for key in values
+        if key
+        not in {
+            "format",
+            "recipient_key_fingerprint",
+            "ephemeral_public_key",
+            "salt",
+            "nonce",
+            "plaintext_size",
+            "plaintext_sha256",
+            "ciphertext_size",
+            "ciphertext_sha256",
+            "byte_size",
+            "artifact_sha256",
+        }
+    }
     metadata = {
         key: values[key]
         for key in values
-        if key not in {"ciphertext_size", "ciphertext_sha256"}
+        if key not in {"ciphertext_size", "ciphertext_sha256", "byte_size", "artifact_sha256"}
     }
     aad = canonical_json(metadata).encode("utf-8")
     key = _derive_key(recipient_private_key.exchange(ephemeral_public), salt, context)
@@ -261,7 +292,8 @@ def _validate_context(context: Mapping[str, str]) -> None:
     required = {"task_id", "target_id", "source_epoch"}
     if (
         not isinstance(context, Mapping)
-        or set(context) != required
+        or not required.issubset(context)
+        or any(not isinstance(key, str) or not key for key in context)
         or any(
             not isinstance(value, str) or not value or len(value) > 128
             for value in context.values()
@@ -271,7 +303,9 @@ def _validate_context(context: Mapping[str, str]) -> None:
 
 
 def _validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
-    if not isinstance(manifest, Mapping) or set(manifest) != _MANIFEST_FIELDS:
+    if not isinstance(manifest, Mapping) or not _REQUIRED_MANIFEST_FIELDS.issubset(manifest):
+        raise ValueError("migration bundle manifest is invalid")
+    if set(manifest) - _MANIFEST_FIELDS:
         raise ValueError("migration bundle manifest is invalid")
     values = dict(manifest)
     if values["format"] != BUNDLE_FORMAT:
@@ -292,6 +326,25 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     _decode(values["ephemeral_public_key"], 32, "ephemeral public key")
     _decode(values["salt"], 32, "salt")
     _decode(values["nonce"], 12, "nonce")
+    if "byte_size" in values and values["byte_size"] != values["ciphertext_size"]:
+        raise ValueError("migration bundle transfer size is invalid")
+    if "artifact_sha256" in values and values["artifact_sha256"] != values["ciphertext_sha256"]:
+        raise ValueError("migration bundle transfer digest is invalid")
+    if "artifact_id" in values and (
+        not isinstance(values["artifact_id"], str) or not values["artifact_id"]
+    ):
+        raise ValueError("migration bundle artifact id is invalid")
+    if "subject_id" in values and (
+        not isinstance(values["subject_id"], str) or not values["subject_id"]
+    ):
+        raise ValueError("migration bundle subject is invalid")
+    if "schema_version" in values and (
+        not (
+            (type(values["schema_version"]) is int and values["schema_version"] >= 1)
+            or (isinstance(values["schema_version"], str) and values["schema_version"].isdigit())
+        )
+    ):
+        raise ValueError("migration bundle schema version is invalid")
     return values
 
 

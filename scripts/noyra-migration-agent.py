@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from noyra.core.at_rest import EncryptedBackupManager
 from noyra.core.types import canonical_json, content_hash
@@ -29,6 +30,9 @@ IDENTITY_KEYS = frozenset(
         "generation",
         "public_key",
         "private_key",
+        "recipient_private_key",
+        "recipient_public_key",
+        "recipient_key_fingerprint",
         "session_token",
     }
 )
@@ -103,6 +107,20 @@ def _private_key(value: str | None) -> Ed25519PrivateKey | None:
     return Ed25519PrivateKey.from_private_bytes(raw)
 
 
+def _recipient_private_key(value: str | None) -> X25519PrivateKey | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("recipient private key is invalid")
+    try:
+        raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    except (TypeError, ValueError) as error:
+        raise ValueError("recipient private key is invalid") from error
+    if len(raw) != 32:
+        raise ValueError("recipient private key is invalid")
+    return X25519PrivateKey.from_private_bytes(raw)
+
+
 def _assert_identity_file(path: Path) -> None:
     if path.is_symlink() or not path.is_file():
         raise ValueError("identity file must be a regular file")
@@ -163,6 +181,9 @@ def load_agent(
         generation=identity.get("generation", 1),
         public_key=identity.get("public_key"),
         signing_key=signing_key,
+        recipient_private_key=_recipient_private_key(identity.get("recipient_private_key")),
+        recipient_public_key=identity.get("recipient_public_key"),
+        recipient_key_fingerprint=identity.get("recipient_key_fingerprint"),
         data_root=data_root,
         session_token=identity.get("session_token"),
         restore_root=configured_restore_root,
@@ -178,7 +199,7 @@ def _json(value: Any) -> bytes:
 def dispatch(agent: MigrationAgent, operation: str, payload: dict[str, Any]) -> Any:
     if operation in {"receive", "restore"} and (
         agent.data_root is not None or agent.restore_root is not None
-    ):
+    ) and agent._recipient_private_key is None:
         raise ValueError(
             "recipient-encrypted migration bundle support is unavailable; "
             "persistent receive and restore are disabled"
@@ -190,6 +211,8 @@ def dispatch(agent: MigrationAgent, operation: str, payload: dict[str, Any]) -> 
         result = asdict(attestation)
         result["challenge"] = asdict(attestation.challenge)
         return result
+    if operation == "recipient-pop":
+        return asdict(agent.recipient_pop(payload))
     if operation == "preflight":
         manifest = payload.get("manifest")
         if not isinstance(manifest, dict):
@@ -282,6 +305,7 @@ class Handler(BaseHTTPRequestHandler):
         operations = {
             "/v1/enroll": "enroll",
             "/v1/challenge": "challenge",
+            "/v1/recipient-pop": "recipient-pop",
             "/v1/preflight": "preflight",
             "/v1/receive": "receive",
             "/v1/receive-chunk": "receive",
@@ -361,6 +385,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=(
             "enroll",
             "challenge",
+            "recipient-pop",
             "preflight",
             "receive",
             "restore",

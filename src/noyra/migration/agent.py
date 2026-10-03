@@ -25,6 +25,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from noyra.core.at_rest import AtRestConfig, VolumeEncryptionProbe, VolumeEncryptionStatus
 from noyra.core.types import canonical_json, content_hash
 
+from .bundle import BUNDLE_FORMAT, decrypt_bundle
 from .trust import (
     RecipientPoPChallenge,
     RecipientPoPProof,
@@ -756,7 +757,45 @@ class MigrationAgent:
             raise ValueError("migration subject identity is invalid")
         if tip is not None and (not isinstance(tip, str) or not re.fullmatch(r"[0-9a-f]{64}", tip)):
             raise ValueError("migration event-chain tip is invalid")
-        restore_path = self._restore_artifact(artifact_path, values, task_id=task_id)
+        restore_values = values
+        restore_source = artifact_path
+        if values.get("format") == BUNDLE_FORMAT:
+            if self._recipient_private_key is None or self.restore_root is None:
+                raise ValueError("recipient-encrypted restore is not configured")
+            if task_id is None:
+                raise ValueError("migration restore task identity is required")
+            task_root = self.restore_root / task_id
+            task_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self._assert_private_directory(task_root)
+            plaintext = task_root / ".noyra.sqlite3.bundle-plaintext"
+            if plaintext.exists() or plaintext.is_symlink():
+                raise ValueError("migration restore target is not empty")
+            decrypt_bundle(
+                artifact_path,
+                plaintext,
+                recipient_private_key=self._recipient_private_key,
+                manifest=values,
+                expected_context={
+                    key: str(values[key])
+                    for key in (
+                        "task_id",
+                        "target_id",
+                        "source_epoch",
+                        "artifact_id",
+                        "subject_id",
+                        "schema_version",
+                        "artifact_format",
+                    )
+                },
+            )
+            restore_source = plaintext
+            restore_values = {
+                **values,
+                "artifact_format": "sqlite",
+                "byte_size": values["plaintext_size"],
+                "artifact_sha256": values["plaintext_sha256"],
+            }
+        restore_path = self._restore_artifact(restore_source, restore_values, task_id=task_id)
         return RestoreReport(
             self.target_id,
             self.generation,
@@ -1063,11 +1102,10 @@ class MigrationAgent:
         except (OSError, sqlite3.DatabaseError):
             return False
 
-    @classmethod
-    def _validate_manifest(cls, manifest: Mapping[str, Any]) -> dict[str, Any]:
+    def _validate_manifest(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(manifest, Mapping) or len(manifest) > 32:
             raise ValueError("migration manifest is invalid")
-        if any(cls._contains_forbidden_key(key, value) for key, value in manifest.items()):
+        if any(self._contains_forbidden_key(key, value) for key, value in manifest.items()):
             raise ValueError("migration manifest contains a forbidden secret field")
         try:
             values = json.loads(canonical_json(dict(manifest)))
@@ -1090,8 +1128,19 @@ class MigrationAgent:
         ):
             raise ValueError("migration artifact digest is invalid")
         artifact_format = values.get("artifact_format", "noyra-encrypted-backup")
-        if artifact_format not in {"noyra-encrypted-backup", "sqlite"}:
+        if artifact_format == BUNDLE_FORMAT:
+            from .bundle import _validate_manifest as validate_bundle_manifest
+
+            try:
+                values = validate_bundle_manifest(values)
+            except ValueError as error:
+                raise ValueError("migration recipient bundle manifest is invalid") from error
+            if values.get("artifact_format") != BUNDLE_FORMAT:
+                raise ValueError("migration recipient bundle format is invalid")
+        elif artifact_format not in {"noyra-encrypted-backup", "sqlite"}:
             raise ValueError("migration artifact format is unsupported")
+        if self._recipient_private_key is not None and artifact_format != BUNDLE_FORMAT:
+            raise ValueError("recipient-encrypted migration bundle is required")
         return cast(dict[str, Any], values)
 
     @staticmethod

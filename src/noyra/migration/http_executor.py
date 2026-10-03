@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import gc
 import hashlib
 import hmac
 import json
@@ -27,11 +28,19 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
 
+from noyra.core.database import CURRENT_SCHEMA_VERSION
 from noyra.core.types import canonical_json, content_hash
 
+from .bundle import BUNDLE_FORMAT, encrypt_bundle
 from .executor import MigrationExecutionError, MigrationExecutionReceipt
 from .manager import MigrationTask
+from .trust import (
+    RecipientPoPProof,
+    create_recipient_pop_challenge,
+    verify_recipient_pop,
+)
 
 MAX_RESPONSE_BYTES = 1_000_000
 MAX_CHUNK_BYTES = 4 * 1024 * 1024
@@ -45,48 +54,89 @@ class ArtifactBundle:
 
 
 class SQLiteArtifactProvider:
-    """Create a consistent SQLite snapshot for a proof-bound transfer."""
+    """Create a redacted SQLite snapshot and encrypt it to the target key."""
 
     def __init__(self, database_path: Path | str, output_root: Path | str):
         self.database_path = Path(database_path).resolve()
         self.output_root = Path(output_root).resolve()
 
     def __call__(self, task: MigrationTask, proof: Mapping[str, object]) -> ArtifactBundle:
-        raw_manifest = proof.get("manifest")
-        if not isinstance(raw_manifest, Mapping):
-            raise MigrationExecutionError("artifact_manifest_required")
-        manifest = dict(raw_manifest)
-        if manifest.get("artifact_id") != proof.get("artifact_id"):
-            raise MigrationExecutionError("artifact_id_mismatch")
-        if (
-            manifest.get("subject_id") != task.subject_id
-            or manifest.get("artifact_format") != "sqlite"
-        ):
-            raise MigrationExecutionError("artifact_manifest_invalid")
-        artifact_id = str(manifest["artifact_id"])
+        artifact_id = str(proof.get("artifact_id") or f"migration-{task.task_id}")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", artifact_id):
             raise MigrationExecutionError("artifact_id_invalid")
+        recipient_value = proof.get("recipient_public_key")
+        if not isinstance(recipient_value, str):
+            raise MigrationExecutionError("recipient_public_key_required")
+        try:
+            recipient_bytes = base64.urlsafe_b64decode(
+                recipient_value + "=" * (-len(recipient_value) % 4)
+            )
+            recipient_public = X25519PublicKey.from_public_bytes(recipient_bytes)
+        except (ValueError, TypeError, binascii.Error) as error:
+            raise MigrationExecutionError("recipient_public_key_invalid") from error
+        recipient_fingerprint = hashlib.sha256(recipient_bytes).hexdigest()
+        if proof.get("recipient_key_fingerprint") != recipient_fingerprint:
+            raise MigrationExecutionError("recipient_key_fingerprint_mismatch")
+        if proof.get("target_id") not in {None, task.target_id}:
+            raise MigrationExecutionError("target_registration_mismatch")
         self.output_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        destination = self.output_root / f"{artifact_id}.sqlite"
+        destination = self.output_root / f"{artifact_id}.bundle"
         if destination.exists() and destination.is_symlink():
             raise MigrationExecutionError("artifact_output_invalid")
-        temporary = self.output_root / f".{artifact_id}.sqlite"
-        temporary.unlink(missing_ok=True)
+        if destination.exists():
+            raise MigrationExecutionError("artifact_already_exists")
+        raw_snapshot = self.output_root / f".{artifact_id}.sqlite"
+        raw_snapshot.unlink(missing_ok=True)
         try:
-            with (
-                sqlite3.connect(self.database_path) as source,
-                sqlite3.connect(temporary) as target,
-            ):
+            source = sqlite3.connect(self.database_path)
+            target = sqlite3.connect(raw_snapshot)
+            try:
                 source.backup(target)
-            temporary.replace(destination)
+                target.execute("PRAGMA foreign_keys=OFF")
+                for table in (
+                    "search_provider_configs",
+                    "cognitive_resource_keys",
+                    "interaction_transports",
+                    "embedding_resources",
+                    "secret_file_intents",
+                ):
+                    if target.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                    ).fetchone():
+                        target.execute(f'DELETE FROM "{table}"')
+                target.commit()
+            finally:
+                target.close()
+                source.close()
+                gc.collect()
+            context = {
+                "task_id": task.task_id,
+                "target_id": task.target_id,
+                "source_epoch": task.source_epoch,
+                "artifact_id": artifact_id,
+                "subject_id": task.subject_id,
+                "schema_version": str(CURRENT_SCHEMA_VERSION),
+                "artifact_format": BUNDLE_FORMAT,
+            }
+            encrypted = encrypt_bundle(
+                raw_snapshot,
+                destination,
+                recipient_public_key=recipient_public,
+                context=context,
+            )
         except (OSError, sqlite3.DatabaseError) as error:
-            temporary.unlink(missing_ok=True)
+            raw_snapshot.unlink(missing_ok=True)
             raise MigrationExecutionError("artifact_snapshot_failed") from error
-        actual_size, actual_digest = _stream_digest(destination)
-        if actual_size != manifest.get("byte_size") or actual_digest != manifest.get(
-            "artifact_sha256"
-        ):
-            raise MigrationExecutionError("artifact_snapshot_mismatch")
+        finally:
+            try:
+                raw_snapshot.unlink(missing_ok=True)
+            except OSError as error:
+                raise MigrationExecutionError("artifact_snapshot_cleanup_failed") from error
+        manifest = {
+            **encrypted,
+            "byte_size": encrypted["ciphertext_size"],
+            "artifact_sha256": encrypted["ciphertext_sha256"],
+        }
         return ArtifactBundle(destination, manifest)
 
 
@@ -179,12 +229,11 @@ class HTTPMigrationExecutor:
     ) -> MigrationExecutionReceipt:
         if source_epoch != task.source_epoch:
             raise MigrationExecutionError("source_epoch_mismatch")
-        # There is currently no source-authenticated enrolled recipient-key
-        # contract or migration bundle encryptor.  Refuse before fencing so a
-        # plaintext SQLite snapshot can never become a migration artifact.
-        raise MigrationExecutionError("recipient_encrypted_bundle_unavailable")
         target = self._target(task)
         token = self._token(task)
+        if not target.get("recipient_public_key") or not target.get("recipient_key_fingerprint"):
+            raise MigrationExecutionError("recipient_encrypted_bundle_unavailable")
+        self._verify_recipient_key_possession(target, task, token, source_epoch)
         source_fence_digest = self.source_fence(task, source_epoch)
         if not self._digest(source_fence_digest):
             raise MigrationExecutionError("source_fence_proof_invalid")
@@ -192,16 +241,39 @@ class HTTPMigrationExecutor:
             # Acquire the durable source fence before snapshotting.  A
             # snapshot taken first can race a final source write and leave
             # the target with state that is not covered by the fence proof.
-            bundle = self.artifact_resolver(task, proof)
+            bundle = self.artifact_resolver(
+                task,
+                {
+                    **dict(proof),
+                    "recipient_public_key": target["recipient_public_key"],
+                    "recipient_key_fingerprint": target["recipient_key_fingerprint"],
+                    "target_id": task.target_id,
+                },
+            )
             path = bundle.path.expanduser()
             if path.is_symlink() or not path.is_file():
                 raise MigrationExecutionError("artifact_unavailable")
             manifest = self._manifest(bundle, task, proof)
             manifest_digest = content_hash(manifest)
-            if manifest_digest != proof.get("manifest_digest"):
+            expected_manifest_digest = proof.get("manifest_digest")
+            if expected_manifest_digest is not None and manifest_digest != expected_manifest_digest:
                 raise MigrationExecutionError("artifact_manifest_mismatch")
             if path.stat().st_size != manifest["byte_size"]:
                 raise MigrationExecutionError("artifact_size_mismatch")
+            preflight = self._request(
+                target,
+                token,
+                "/v1/preflight",
+                {
+                    "manifest": manifest,
+                    "manifest_digest": manifest_digest,
+                    "task_id": task.task_id,
+                    "subject_id": task.subject_id,
+                    "source_epoch": source_epoch,
+                },
+            )
+            if preflight.get("status") != "ready":
+                raise MigrationExecutionError("target_preflight_failed")
             final = self._send_chunks(target, token, manifest, manifest_digest, path)
             restore = self._request(
                 target,
@@ -351,6 +423,7 @@ class HTTPMigrationExecutor:
             raise MigrationExecutionError("target_transfer_incomplete")
         required = (
             "artifact_id",
+            "manifest_digest",
             "byte_size",
             "manifest_path",
             "artifact_path",
@@ -361,7 +434,51 @@ class HTTPMigrationExecutor:
             or final["artifact_id"] != manifest["artifact_id"]
         ):
             raise MigrationExecutionError("target_transfer_receipt_invalid")
-        return {key: final[key] for key in required}
+        receipt = {key: final[key] for key in required}
+        receipt["status"] = "received"
+        return receipt
+
+    def _verify_recipient_key_possession(
+        self,
+        target: Mapping[str, Any],
+        task: MigrationTask,
+        token: str,
+        source_epoch: str,
+    ) -> None:
+        try:
+            recipient_bytes = base64.urlsafe_b64decode(
+                str(target["recipient_public_key"])
+                + "=" * (-len(str(target["recipient_public_key"])) % 4)
+            )
+            recipient_public = X25519PublicKey.from_public_bytes(recipient_bytes)
+            if hashlib.sha256(recipient_bytes).hexdigest() != target["recipient_key_fingerprint"]:
+                raise ValueError("recipient key fingerprint mismatch")
+            challenge = create_recipient_pop_challenge(
+                task.target_id,
+                recipient_public,
+                source_epoch=source_epoch,
+            )
+            response = self._request(
+                target,
+                token,
+                "/v1/recipient-pop",
+                challenge.to_dict(),
+            )
+            proof = RecipientPoPProof(
+                target_id=str(response["target_id"]),
+                source_epoch=str(response["source_epoch"]),
+                expires_at=str(response["expires_at"]),
+                pop_nonce=str(response["pop_nonce"]),
+                recipient_key_fingerprint=str(response["recipient_key_fingerprint"]),
+                signature=str(response["signature"]),
+            )
+            verify_recipient_pop(
+                challenge,
+                proof,
+                target_public_key=str(target["public_key"]),
+            )
+        except (KeyError, TypeError, ValueError, binascii.Error) as error:
+            raise MigrationExecutionError("recipient_key_possession_failed") from error
 
     def _request(
         self, target: Mapping[str, Any], token: str, path: str, body: dict[str, Any]
@@ -406,7 +523,22 @@ class HTTPMigrationExecutor:
         _, digest = _stream_digest(bundle.path)
         manifest.setdefault("artifact_sha256", digest)
         manifest.setdefault("byte_size", bundle.path.stat().st_size)
-        if manifest.get("artifact_id") != proof.get("artifact_id"):
+        if manifest.get("format") != BUNDLE_FORMAT:
+            raise MigrationExecutionError("recipient_encrypted_bundle_unavailable")
+        if manifest.get("artifact_format") != BUNDLE_FORMAT:
+            raise MigrationExecutionError("artifact_manifest_invalid")
+        if manifest.get("task_id") != task.task_id or manifest.get("target_id") != task.target_id:
+            raise MigrationExecutionError("artifact_manifest_context_mismatch")
+        if manifest.get("source_epoch") != task.source_epoch:
+            raise MigrationExecutionError("artifact_manifest_context_mismatch")
+        if manifest.get("subject_id") != task.subject_id:
+            raise MigrationExecutionError("artifact_manifest_subject_mismatch")
+        if manifest.get("byte_size") != manifest.get("ciphertext_size"):
+            raise MigrationExecutionError("artifact_manifest_size_mismatch")
+        if (
+            proof.get("artifact_id") is not None
+            and manifest.get("artifact_id") != proof.get("artifact_id")
+        ):
             raise MigrationExecutionError("artifact_id_mismatch")
         return manifest
     @staticmethod

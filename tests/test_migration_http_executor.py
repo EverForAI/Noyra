@@ -8,8 +8,10 @@ from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from noyra.core.types import canonical_json, content_hash
+from noyra.migration.bundle import BUNDLE_FORMAT, decrypt_bundle
 from noyra.migration.executor import MigrationExecutionError
 from noyra.migration.http_executor import (
     ArtifactBundle,
@@ -28,6 +30,55 @@ def test_stream_digest_does_not_use_read_bytes(
     size, digest = _stream_digest(path, chunk_bytes=17)
     assert size == path.stat().st_size
     assert digest == hashlib.sha256(b"chunk" * 4096).hexdigest()
+
+
+def test_sqlite_artifact_provider_emits_recipient_encrypted_bundle(tmp_path: Path) -> None:
+    from noyra.migration.http_executor import SQLiteArtifactProvider
+
+    database = tmp_path / "source.sqlite3"
+    with __import__("sqlite3").connect(database) as connection:
+        connection.execute("CREATE TABLE runtime_state(subject_id TEXT NOT NULL)")
+        connection.execute("INSERT INTO runtime_state VALUES ('Noyra-0001')")
+        connection.execute("CREATE TABLE search_provider_configs(key_reference TEXT)")
+        connection.execute("INSERT INTO search_provider_configs VALUES ('secret:search')")
+    recipient = X25519PrivateKey.generate()
+    task = _task()
+    provider = SQLiteArtifactProvider(database, tmp_path / "outgoing")
+    proof = {
+        "artifact_id": "bundle-1",
+        "recipient_public_key": base64.urlsafe_b64encode(recipient.public_key().public_bytes_raw())
+        .decode("ascii")
+        .rstrip("="),
+        "recipient_key_fingerprint": hashlib.sha256(
+            recipient.public_key().public_bytes_raw()
+        ).hexdigest(),
+    }
+    bundle = provider(task, proof)
+    assert bundle.manifest["format"] == BUNDLE_FORMAT
+    assert bundle.manifest["artifact_format"] == BUNDLE_FORMAT
+    assert bundle.manifest["subject_id"] == task.subject_id
+    plaintext = tmp_path / "decrypted.sqlite3"
+    decrypt_bundle(
+        bundle.path,
+        plaintext,
+        recipient_private_key=recipient,
+        manifest=bundle.manifest,
+        expected_context={
+            "task_id": task.task_id,
+            "target_id": task.target_id,
+            "source_epoch": task.source_epoch,
+            "artifact_id": "bundle-1",
+            "subject_id": task.subject_id,
+            "schema_version": str(
+                __import__(
+                    "noyra.core.database", fromlist=["CURRENT_SCHEMA_VERSION"]
+                ).CURRENT_SCHEMA_VERSION
+            ),
+            "artifact_format": BUNDLE_FORMAT,
+        },
+    )
+    with __import__("sqlite3").connect(plaintext) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM search_provider_configs").fetchone()[0] == 0
 
 
 class _Transport:
