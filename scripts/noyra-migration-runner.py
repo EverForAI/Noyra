@@ -175,7 +175,7 @@ class MigrationExecutor:
         return path, payload
 
     def _restore_root(self, request: dict[str, Any]) -> Path:
-        root = self.data_root / "restored" / request["target_id"]
+        root = self.data_root / "restored" / str(request["target_id"])
         if root.exists() and root.is_symlink():
             raise RunnerError("restore_root_invalid")
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -215,7 +215,7 @@ class MigrationExecutor:
                 raise RunnerError("fence_conflict")
             value = existing
         else:
-            descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
             try:
                 with os.fdopen(descriptor, "wb") as stream:
                     stream.write(encoded)
@@ -230,6 +230,65 @@ class MigrationExecutor:
             **value,
             "target_epoch_id": request["fence_proof"]["target_epoch_id"],
             "epoch_number": request["fence_proof"]["epoch_number"],
+        }
+
+    def unfence(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Remove a source fence only while the source epoch is unchanged."""
+        source_root = self.data_root / "source"
+        _private_directory(source_root, "source")
+        epoch_path = source_root / "epoch"
+        _private_regular(epoch_path, "source_epoch")
+        try:
+            source_epoch = epoch_path.read_text(encoding="ascii").strip()
+        except (OSError, UnicodeError) as error:
+            raise RunnerError("source_epoch_unreadable") from error
+        if source_epoch != request["source_epoch"]:
+            raise RunnerError("source_epoch_mismatch")
+        fences = self.data_root / "fences"
+        if not fences.exists():
+            return {
+                "status": "completed",
+                "operation": "unfence",
+                "task_id": request["task_id"],
+                "source_epoch": source_epoch,
+                "already_inactive": True,
+                "completed_at": _now(),
+            }
+        _private_directory(fences, "fence")
+        marker = fences / f"{request['task_id']}.json"
+        if not marker.exists():
+            return {
+                "status": "completed",
+                "operation": "unfence",
+                "task_id": request["task_id"],
+                "source_epoch": source_epoch,
+                "already_inactive": True,
+                "completed_at": _now(),
+            }
+        _private_regular(marker, "fence")
+        try:
+            value = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as error:
+            raise RunnerError("fence_marker_invalid") from error
+        if (
+            not isinstance(value, dict)
+            or value.get("task_id") != request["task_id"]
+            or value.get("subject_id") != request["subject_id"]
+            or value.get("source_epoch") != source_epoch
+            or value.get("status") != "active"
+        ):
+            raise RunnerError("fence_conflict")
+        try:
+            marker.unlink()
+        except OSError as error:
+            raise RunnerError("fence_remove_failed") from error
+        return {
+            "status": "completed",
+            "operation": "unfence",
+            "task_id": request["task_id"],
+            "source_epoch": source_epoch,
+            "already_inactive": False,
+            "completed_at": _now(),
         }
 
     def restore(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -404,6 +463,9 @@ def _validate_request(request: dict[str, Any], action: str) -> dict[str, Any]:
             "epoch_number": fence["epoch_number"],
             "completed_at": _now(),
         }
+    if action == "unfence":
+        _fence(request)
+        return executor.unfence(request)
     raise RunnerError("unsupported_operation")
 
 
@@ -455,7 +517,8 @@ def main(argv: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else argv
     if len(arguments) != 3 or arguments[0] != "--request-id":
         print(
-            "usage: noyra-migration-runner.py --request-id SAFE_ID {status|restore|health|fence}",
+            "usage: noyra-migration-runner.py --request-id SAFE_ID "
+            "{status|restore|health|fence|unfence}",
             file=sys.stderr,
         )
         return 2

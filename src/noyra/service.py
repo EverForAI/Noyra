@@ -8878,6 +8878,7 @@ class NoyraService:
                 allow_subject_creation=False,
                 process_lock=self._startup_lock,
                 defer_preflight=True,
+                migration_fence_root=settings.data_dir / "migration",
             )
             self.http = cast(Any, _UnownedHTTPFacade())
             self._construction_complete = True
@@ -8910,6 +8911,7 @@ class NoyraService:
             settings.genesis_hash,
             allow_subject_creation=not database_preexisting,
             process_lock=self._startup_lock,
+            migration_fence_root=settings.data_dir / "migration",
         )
         subject_storage_binding_available = not database_preexisting or (
             _cloud_archive_subject_state_available(

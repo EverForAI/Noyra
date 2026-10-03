@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from typing import Any
 
 import pytest
@@ -182,3 +183,54 @@ def test_epoch_acquisition_rejects_missing_target_validation_proof(tmp_path: Any
             "target-1",
             expected_source_epoch=None,
         )
+
+
+def test_filesystem_source_fence_closes_admission_and_survives_restart(tmp_path: Any) -> None:
+    database_path = tmp_path / "file-fence.sqlite3"
+    fence_root = tmp_path / "migration"
+    subject_id = "Noyra-0001"
+    kernel = SubjectKernel(
+        database_path,
+        subject_id,
+        "8" * 64,
+        migration_fence_root=fence_root,
+    )
+    kernel.boot()
+    kernel.orient()
+    state = kernel.activate()
+    source = fence_root / "source"
+    fences = fence_root / "fences"
+    source.mkdir(parents=True, exist_ok=True)
+    fences.mkdir(parents=True, exist_ok=True)
+    (source / "epoch").write_text(f"runtime-{state.version}", encoding="ascii")
+    lease = kernel.admission.begin("fenced-operation")
+    (fences / "task-1.json").write_text(
+        json.dumps(
+            {
+                "task_id": "task-1",
+                "subject_id": subject_id,
+                "source_epoch": f"runtime-{state.version}",
+                "status": "active",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeOwnershipError, match="ownership"):
+        kernel.admission.begin("new-operation")
+    with pytest.raises(Exception, match="ownership"):
+        lease.assert_current()
+    with pytest.raises(RuntimeOwnershipError, match="migration fence"):
+        kernel.checkpoint({"fenced": True}, reason="must be rejected")
+    kernel.admission.finish(lease)
+    kernel.close()
+
+    restarted = SubjectKernel(
+        database_path,
+        subject_id,
+        "8" * 64,
+        migration_fence_root=fence_root,
+    )
+    with pytest.raises(RuntimeOwnershipError, match="migration fence"):
+        restarted.boot()
+    assert not restarted.process_lock.held

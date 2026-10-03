@@ -11,7 +11,7 @@ REQUEST_ID=""
 ACTION=""
 
 usage() {
-  echo "usage: $0 --request-id SAFE_ID {status|restore|health|fence}" >&2
+  echo "usage: $0 --request-id SAFE_ID {status|restore|health|fence|unfence}" >&2
 }
 
 safe_segment() {
@@ -25,7 +25,7 @@ while [[ $# -gt 0 ]]; do
       REQUEST_ID="$2"
       shift 2
       ;;
-    status|restore|health|fence)
+    status|restore|health|fence|unfence)
       [[ -z "$ACTION" ]] || { usage; exit 2; }
       ACTION="$1"
       shift

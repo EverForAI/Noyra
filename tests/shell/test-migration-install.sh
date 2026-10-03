@@ -21,6 +21,10 @@ grep -q 'Migration system file must be regular and not a symlink' "$INSTALLER"
 grep -q 'Migration identity must be a regular file and not a symlink' "$INSTALLER"
 grep -q 'chown root:noyra.*identity.json' "$INSTALLER"
 grep -q 'chmod 0640.*identity.json' "$INSTALLER"
+grep -q 'migration/source' "$INSTALLER"
+grep -q 'migration/fences' "$INSTALLER"
+grep -q 'source_epoch_file=' "$INSTALLER"
+grep -q 'runtime-.*row\[0\]' "$INSTALLER"
 
 # The systemd units must not inherit the ordinary environment file or expose
 # the loopback agent beyond the local host.
@@ -34,5 +38,7 @@ grep -q -- '--listen 127.0.0.1:8876' "$agent_unit"
 grep -q 'User=root' "$runner_unit"
 grep -q 'NoNewPrivileges=true' "$runner_unit"
 grep -q 'ReadWritePaths=/var/lib/noyra/migration' "$runner_unit"
+grep -q 'migration/source' "$runner_unit"
+grep -q 'migration/fences' "$runner_unit"
 
 echo 'migration install contract passed'

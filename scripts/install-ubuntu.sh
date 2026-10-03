@@ -892,8 +892,38 @@ install -d -o root -g root -m 0755 "$LIBEXEC_DIR"
 install -d -o root -g noyra -m 0750 "$CONFIG_DIR/migration"
 install -d -o noyra -g noyra -m 0700 "$DATA_DIR/migration-agent"
 install -d -o root -g noyra -m 0750 "$DATA_DIR/migration"
+install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/source"
+install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/fences"
 install -d -o noyra -g noyra -m 0700 "$DATA_DIR/migration/requests"
 install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/status"
+source_epoch_file="$DATA_DIR/migration/source/epoch"
+if [[ -L "$source_epoch_file" || ( -e "$source_epoch_file" && ! -f "$source_epoch_file" ) ]]; then
+  echo 'Migration source epoch must be a regular file and not a symlink' >&2
+  on_error 1
+fi
+if [[ ! -e "$source_epoch_file" ]]; then
+  source_epoch='uninitialized'
+  if [[ -f "$DATA_DIR/noyra.sqlite3" ]]; then
+    source_epoch="$($release_root/.venv/bin/python - "$DATA_DIR/noyra.sqlite3" <<'PY'
+import sqlite3
+import sys
+
+try:
+    with sqlite3.connect(sys.argv[1]) as connection:
+        row = connection.execute(
+            "SELECT version FROM runtime_state ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+except sqlite3.Error:
+    row = None
+print(f"runtime-{int(row[0])}" if row is not None else "uninitialized")
+PY
+)"
+  fi
+  printf '%s\n' "$source_epoch" | install -o noyra -g noyra -m 0600 /dev/stdin "$source_epoch_file"
+else
+  chown noyra:noyra "$source_epoch_file"
+  chmod 0600 "$source_epoch_file"
+fi
 if [[ -e "$CONFIG_DIR/migration/identity.json" || -L "$CONFIG_DIR/migration/identity.json" ]]; then
   if [[ -L "$CONFIG_DIR/migration/identity.json" || ! -f "$CONFIG_DIR/migration/identity.json" ]]; then
     echo 'Migration identity must be a regular file and not a symlink' >&2

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
+import tempfile
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -17,7 +20,42 @@ from .snapshots import SnapshotStore
 from .types import ActionRecord, RuntimeState, SnapshotRecord, SubjectIdentity, utc_now
 
 
-def _migration_epoch_guard(connection: Any, subject_id: str) -> None:
+def _migration_fence_active(fence_root: Path | None, subject_id: str) -> bool:
+    """Return whether the root-owned migration fence blocks this subject.
+
+    Fence markers are deliberately outside SQLite so a root migration runner
+    can stop a source before the service can write another database row. Any
+    malformed marker fails closed; an absent fence directory means the
+    migration runner has not been installed.
+    """
+    if fence_root is None:
+        return False
+    fences = fence_root / "fences"
+    if not fences.exists():
+        return False
+    if fences.is_symlink() or not fences.is_dir():
+        return True
+    try:
+        markers = tuple(fences.glob("*.json"))
+    except OSError:
+        return True
+    for marker in markers:
+        if marker.is_symlink() or not marker.is_file():
+            return True
+        try:
+            value = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return True
+        if not isinstance(value, dict):
+            return True
+        if value.get("status") == "active" and value.get("subject_id") == subject_id:
+            return True
+    return False
+
+
+def _migration_epoch_guard(
+    connection: Any, subject_id: str, fence_root: Path | None = None
+) -> None:
     """Reject a source mutation while a target or completed epoch owns it.
 
     The check runs inside the caller's ``BEGIN IMMEDIATE`` transaction.  This
@@ -31,9 +69,13 @@ def _migration_epoch_guard(connection: Any, subject_id: str) -> None:
     ).fetchone()
     if row is not None:
         raise RuntimeOwnershipError("runtime ownership is fenced by a migration epoch")
+    if _migration_fence_active(fence_root, subject_id):
+        raise RuntimeOwnershipError("runtime mutation is blocked by a migration fence")
 
 
-def _no_active_migration_epoch(database: Database, subject_id: str) -> bool:
+def _no_active_migration_epoch(
+    database: Database, subject_id: str, fence_root: Path | None = None
+) -> bool:
     """Fail closed when a durable target epoch owns this subject."""
     try:
         with database.connection() as connection:
@@ -51,7 +93,7 @@ def _no_active_migration_epoch(database: Database, subject_id: str) -> bool:
                 ).fetchone()
     except sqlite3.Error:
         return False
-    return row is None
+    return row is None and not _migration_fence_active(fence_root, subject_id)
 
 
 class SubjectKernel:
@@ -66,9 +108,13 @@ class SubjectKernel:
         allow_subject_creation: bool = True,
         process_lock: ProcessLock | None = None,
         defer_preflight: bool = False,
+        migration_fence_root: Path | str | None = None,
     ):
         validate_subject_id(subject_id)
         resolved_database_path = Path(database_path).resolve()
+        self._migration_fence_root = (
+            Path(migration_fence_root).resolve() if migration_fence_root is not None else None
+        )
         self.process_lock = process_lock or ProcessLock(f"{resolved_database_path}.lock")
         self._genesis_hash = genesis_hash
         self._runtime_ready = False
@@ -107,7 +153,10 @@ class SubjectKernel:
                 subject_id,
                 initially_accepting=False,
                 ownership_check=lambda: (
-                    process_lock_ref.held and _no_active_migration_epoch(database_ref, subject_id)
+                    process_lock_ref.held
+                    and _no_active_migration_epoch(
+                        database_ref, subject_id, self._migration_fence_root
+                    )
                 ),
             )
             self.identity_store = IdentityStore(self.database)
@@ -186,18 +235,24 @@ class SubjectKernel:
         self.recovered_actions = self.action_ledger.recover_interrupted(self.subject_id)
         current = self.lifecycle.current()
         if current.state == "booting":
-            return current
-        if current.state == "stopped":
-            return self.lifecycle.transition("booting", "process start", actor="supervisor")
-        return self.lifecycle.recover_for_restart()
+            state = current
+        elif current.state == "stopped":
+            state = self.lifecycle.transition("booting", "process start", actor="supervisor")
+        else:
+            state = self.lifecycle.recover_for_restart()
+        self._sync_migration_source_epoch(state.version)
+        return state
 
     def orient(self) -> RuntimeState:
         self._require_ownership()
-        return self.lifecycle.transition("orienting", "initial orientation", actor="supervisor")
+        state = self.lifecycle.transition("orienting", "initial orientation", actor="supervisor")
+        self._sync_migration_source_epoch(state.version)
+        return state
 
     def activate(self) -> RuntimeState:
         self._require_ownership()
         state = self.lifecycle.transition("active", "runtime ready", actor="supervisor")
+        self._sync_migration_source_epoch(state.version)
         self.admission.open(epoch=state.version)
         return state
 
@@ -208,7 +263,9 @@ class SubjectKernel:
         if current.state == "paused":
             return current
         try:
-            return self.lifecycle.transition("paused", reason, actor=actor)
+            state = self.lifecycle.transition("paused", reason, actor=actor)
+            self._sync_migration_source_epoch(state.version)
+            return state
         except Exception:
             # The fencing increment is intentionally retained, but a failed
             # lifecycle transaction must not strand an otherwise active
@@ -221,7 +278,9 @@ class SubjectKernel:
     def safe_pause(self, reason: str = "integrity policy requested safe pause") -> RuntimeState:
         self._require_ownership()
         self.admission.quarantine()
-        return self.lifecycle.safe_pause(reason, actor="resilience_watchdog")
+        state = self.lifecycle.safe_pause(reason, actor="resilience_watchdog")
+        self._sync_migration_source_epoch(state.version)
+        return state
 
     def resume(
         self,
@@ -231,6 +290,7 @@ class SubjectKernel:
     ) -> RuntimeState:
         self._require_ownership()
         state = self.lifecycle.transition("active", reason, actor=actor)
+        self._sync_migration_source_epoch(state.version)
         self.admission.open(epoch=state.version)
         return state
 
@@ -238,7 +298,9 @@ class SubjectKernel:
         self._require_ownership()
         self.admission.begin_drain()
         try:
-            return self.lifecycle.transition("stopped", reason, actor="operator")
+            state = self.lifecycle.transition("stopped", reason, actor="operator")
+            self._sync_migration_source_epoch(state.version)
+            return state
         finally:
             self.close()
 
@@ -251,8 +313,37 @@ class SubjectKernel:
     def _require_ownership(self) -> None:
         if not self.process_lock.held:
             raise RuntimeOwnershipError("this kernel does not own the subject runtime")
-        if not _no_active_migration_epoch(self.database, self.subject_id):
+        if not _no_active_migration_epoch(
+            self.database, self.subject_id, self._migration_fence_root
+        ):
+            if _migration_fence_active(self._migration_fence_root, self.subject_id):
+                raise RuntimeOwnershipError("runtime ownership is blocked by a migration fence")
             raise RuntimeOwnershipError("runtime ownership is fenced by a migration epoch")
+
+    def _sync_migration_source_epoch(self, version: int) -> None:
+        if self._migration_fence_root is None:
+            return
+        source_root = self._migration_fence_root / "source"
+        source_root.mkdir(mode=0o750, parents=True, exist_ok=True)
+        if source_root.is_symlink() or not source_root.is_dir():
+            raise RuntimeOwnershipError("migration source epoch directory is invalid")
+        path = source_root / "epoch"
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise RuntimeOwnershipError("migration source epoch file is invalid")
+        value = f"runtime-{int(version)}\n".encode("ascii")
+        descriptor, temporary = tempfile.mkstemp(prefix=".epoch.", dir=source_root)
+        try:
+            os.chmod(temporary, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(value)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        except Exception:
+            with suppress(OSError):
+                os.close(descriptor)
+            Path(temporary).unlink(missing_ok=True)
+            raise
 
     def __del__(self) -> None:
         with suppress(Exception):
@@ -267,7 +358,7 @@ class SubjectKernel:
         if not reason.strip():
             raise ValueError("checkpoint reason is required")
         with self.database.transaction() as connection:
-            _migration_epoch_guard(connection, self.subject_id)
+            _migration_epoch_guard(connection, self.subject_id, self._migration_fence_root)
             row = connection.execute(
                 "SELECT state_version FROM subject_identity WHERE subject_id = ?",
                 (self.subject_id,),

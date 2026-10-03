@@ -130,6 +130,49 @@ def test_runner_fence_operation_requires_task_bound_epoch(tmp_path: Path) -> Non
         module.run_request("task-1", "fence")
 
 
+def test_runner_fence_creates_runtime_marker_and_unfence_requires_same_epoch(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    module.DATA_ROOT = tmp_path
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    request = _request()
+    (tmp_path / "artifacts").mkdir()
+    (tmp_path / "source").mkdir()
+    (tmp_path / "source" / "epoch").write_text("runtime-1", encoding="ascii")
+    (request_dir / "task-1.json").write_text(json.dumps(request), encoding="utf-8")
+
+    result = module.run_request("task-1", "fence")
+    marker = tmp_path / "fences" / "task-1.json"
+    assert result["status"] == "completed"
+    assert json.loads(marker.read_text(encoding="utf-8"))["status"] == "active"
+
+    (request_dir / "task-1.json").write_text(json.dumps(request), encoding="utf-8")
+    result = module.run_request("task-1", "unfence")
+    assert result["status"] == "completed"
+    assert not marker.exists()
+
+
+def test_runner_unfence_rejects_changed_source_epoch(tmp_path: Path) -> None:
+    module = _module()
+    module.DATA_ROOT = tmp_path
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    request = _request()
+    (tmp_path / "artifacts").mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "epoch").write_text("runtime-1", encoding="ascii")
+    (request_dir / "task-1.json").write_text(json.dumps(request), encoding="utf-8")
+    module.run_request("task-1", "fence")
+    (source / "epoch").write_text("runtime-2", encoding="ascii")
+    (request_dir / "task-1.json").write_text(json.dumps(request), encoding="utf-8")
+    with pytest.raises(module.RunnerError, match="source_epoch_mismatch"):
+        module.run_request("task-1", "unfence")
+    assert (tmp_path / "fences" / "task-1.json").exists()
+
+
 def test_runner_never_completes_from_receipts_without_real_artifact(tmp_path: Path) -> None:
     module = _module()
     module.DATA_ROOT = tmp_path

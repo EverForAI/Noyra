@@ -16,7 +16,7 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
-ReadWritePaths=/var/lib/noyra/migration
+ReadWritePaths=/var/lib/noyra/migration/source /var/lib/noyra/migration/fences /var/lib/noyra/migration/requests /var/lib/noyra/migration/status
 UMask=0077
 
 [Install]
