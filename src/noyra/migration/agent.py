@@ -696,12 +696,18 @@ class MigrationAgent:
             "source_epoch",
             "manifest_digest",
             "artifact_id",
+            "artifact_sha256",
             "health_report_digest",
             "source_fence_digest",
         }
         if set(request) != required or request.get("target_id") != self.target_id:
             raise ValueError("migration activation request is invalid")
-        for key in ("manifest_digest", "health_report_digest", "source_fence_digest"):
+        for key in (
+            "manifest_digest",
+            "artifact_sha256",
+            "health_report_digest",
+            "source_fence_digest",
+        ):
             if not isinstance(request.get(key), str) or not re.fullmatch(
                 r"[0-9a-f]{64}", str(request[key])
             ):
@@ -735,6 +741,7 @@ class MigrationAgent:
                 "source_epoch",
                 "manifest_digest",
                 "artifact_id",
+                "artifact_sha256",
                 "health_report_digest",
                 "source_fence_digest",
             )

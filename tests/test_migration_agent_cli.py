@@ -213,6 +213,7 @@ def test_cli_dispatch_signs_health_and_persists_activation(tmp_path: Path) -> No
             "source_epoch": "runtime-1",
             "manifest_digest": "a" * 64,
             "artifact_id": "artifact-1",
+            "artifact_sha256": "e" * 64,
             "health_report_digest": module.content_hash(
                 {key: value for key, value in health.items() if key != "target_signature"}
             ),

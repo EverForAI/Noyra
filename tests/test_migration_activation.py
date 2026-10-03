@@ -26,8 +26,14 @@ from noyra.migration.targets import TargetRegistry
 
 SUBJECT_ID = "Noyra-0001"
 TARGET_ID = "target-1"
-MANIFEST_DIGEST = "a" * 64
 ARTIFACT_ID = "artifact-1"
+MANIFEST = {
+    "artifact_id": ARTIFACT_ID,
+    "artifact_format": "sqlite",
+    "subject_id": SUBJECT_ID,
+}
+MANIFEST_DIGEST = content_hash(MANIFEST)
+_ARTIFACT_HASHES: dict[str, str] = {}
 
 
 class _Systemd:
@@ -124,6 +130,7 @@ def _prepared_target_database(path: Path) -> tuple[str, str]:
     )
     manager.transition_task(task.task_id, "restoring", actor="test")
     manager.transition_task(task.task_id, "validating", actor="test")
+    _ARTIFACT_HASHES[task.task_id] = hashlib.sha256(path.read_bytes()).hexdigest()
     return task.task_id, content_hash(
         {
             "task_id": task.task_id,
@@ -143,6 +150,7 @@ def _request(task_id: str, source_fence_digest: str) -> dict[str, str]:
         "source_epoch": "runtime-0",
         "manifest_digest": MANIFEST_DIGEST,
         "artifact_id": ARTIFACT_ID,
+        "artifact_sha256": _ARTIFACT_HASHES.get(task_id, "e" * 64),
         "health_report_digest": "b" * 64,
         "source_fence_digest": source_fence_digest,
     }
@@ -254,7 +262,7 @@ def test_controller_revalidates_the_root_owned_staged_copy(tmp_path: Path, monke
 
     monkeypatch.setattr("noyra.migration.activation._copy_private", substitute_copy)
 
-    with pytest.raises(TargetActivationError, match="restored_database_identity_invalid"):
+    with pytest.raises(TargetActivationError, match="restored_artifact_digest_mismatch"):
         activator.activate(_request(task_id, fence_digest))
 
     assert hashlib.sha256(active_database.read_bytes()).hexdigest() == old_digest
@@ -326,6 +334,131 @@ def test_deactivation_readiness_failure_leaves_durable_recovery_state(tmp_path: 
     import json
 
     assert json.loads(marker.read_text())["status"] == "deactivating"
+
+
+def test_recovery_handles_crash_after_activating_journal_before_database_backup(
+    tmp_path: Path,
+) -> None:
+    task_id, _, active_database, previous_digest, systemd, activator = _runtime_fixture(tmp_path)
+    activator._ensure_dirs()
+    marker = activator.activation_root / f"{task_id}.json"
+    rollback = activator.rollback_root / task_id
+    rollback.mkdir()
+    import json
+
+    marker.write_text(
+        json.dumps(
+            {
+                "task_id": task_id,
+                "status": "activating",
+                "previous_database_sha256": previous_digest,
+                "manifest": MANIFEST,
+                "manifest_digest": MANIFEST_DIGEST,
+                "previous_subject_id": SUBJECT_ID,
+                "previous_dropin_present": False,
+            }
+        )
+    )
+
+    assert activator.recover_incomplete() == 1
+
+    assert hashlib.sha256(active_database.read_bytes()).hexdigest() == previous_digest
+    assert json.loads(marker.read_text())["status"] == "recovered"
+    assert systemd.active is True
+
+
+def test_stale_deactivation_cannot_restore_previous_database_after_new_activation(
+    tmp_path: Path,
+) -> None:
+    task_id, fence_digest, active_database, _, systemd, activator = _runtime_fixture(tmp_path)
+    activator.activate(_request(task_id, fence_digest))
+    old_target_digest = hashlib.sha256(active_database.read_bytes()).hexdigest()
+
+    next_task_id, next_fence_digest = _prepared_target_database(tmp_path / "next-target.sqlite3")
+    next_restored = activator.agent_root / "restored" / next_task_id / "noyra.sqlite3"
+    next_restored.parent.mkdir(parents=True)
+    shutil.copyfile(tmp_path / "next-target.sqlite3", next_restored)
+    _ARTIFACT_HASHES[next_task_id] = hashlib.sha256(next_restored.read_bytes()).hexdigest()
+    activator.activate(_request(next_task_id, next_fence_digest))
+    current_digest = hashlib.sha256(active_database.read_bytes()).hexdigest()
+    calls = list(systemd.calls)
+
+    with pytest.raises(TargetActivationError, match="active_runtime_ownership_mismatch"):
+        activator.deactivate(
+            {
+                "task_id": task_id,
+                "target_id": TARGET_ID,
+                "source_epoch": "runtime-0",
+                "manifest_digest": MANIFEST_DIGEST,
+            }
+        )
+
+    assert current_digest != old_target_digest
+    assert hashlib.sha256(active_database.read_bytes()).hexdigest() == current_digest
+    assert systemd.calls == calls
+
+
+def test_activation_rejects_artifact_id_mismatch_in_restored_migration_task(
+    tmp_path: Path,
+) -> None:
+    task_id, fence_digest, active_database, old_digest, systemd, activator = _runtime_fixture(
+        tmp_path
+    )
+    restored = activator.agent_root / "restored" / task_id / "noyra.sqlite3"
+    with sqlite3.connect(restored) as connection:
+        connection.execute(
+            "UPDATE migration_tasks SET artifact_id=? WHERE task_id=?",
+            ("artifact-other", task_id),
+        )
+
+    with pytest.raises(TargetActivationError, match="restored_migration_epoch_invalid"):
+        activator.activate(_request(task_id, fence_digest))
+
+    assert hashlib.sha256(active_database.read_bytes()).hexdigest() == old_digest
+    assert systemd.calls == []
+
+
+def test_activation_keeps_a_root_staged_snapshot_when_agent_copy_changes_source(
+    tmp_path: Path, monkeypatch
+) -> None:
+    task_id, fence_digest, _, _, _, activator = _runtime_fixture(tmp_path)
+    restored = activator.agent_root / "restored" / task_id / "noyra.sqlite3"
+    original_copy = __import__("noyra.migration.activation", fromlist=["_copy_private"])
+    copy_private = original_copy._copy_private
+
+    def mutate_source_after_copy(source: Path, destination: Path) -> None:
+        copy_private(source, destination)
+        with source.open("ab") as stream:
+            stream.write(b"agent-side-race")
+
+    monkeypatch.setattr("noyra.migration.activation._copy_private", mutate_source_after_copy)
+
+    receipt = activator.activate(_request(task_id, fence_digest))
+
+    marker = activator.activation_root / f"{task_id}.json"
+    import json
+
+    state = json.loads(marker.read_text())
+    assert state["staged_database_sha256"] == state["root_staged_database_sha256"]
+    assert state["root_staged_database_sha256"] != hashlib.sha256(restored.read_bytes()).hexdigest()
+    assert receipt["active_database_sha256"] == hashlib.sha256(
+        (activator.data_root / "noyra.sqlite3").read_bytes()
+    ).hexdigest()
+    assert restored.read_bytes().endswith(b"agent-side-race")
+
+
+def test_root_activation_rejects_manifest_artifact_digest_mismatch(tmp_path: Path) -> None:
+    task_id, fence_digest, active_database, old_digest, systemd, activator = _runtime_fixture(
+        tmp_path
+    )
+    request = _request(task_id, fence_digest)
+    request["artifact_sha256"] = "c" * 64
+
+    with pytest.raises(TargetActivationError, match="restored_artifact_digest_mismatch"):
+        activator.activate(request)
+
+    assert hashlib.sha256(active_database.read_bytes()).hexdigest() == old_digest
+    assert systemd.calls == []
 
 
 def test_root_activation_runner_rejects_unsigned_request_and_persists_failure(

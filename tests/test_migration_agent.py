@@ -124,6 +124,7 @@ def test_target_activation_fails_closed_without_a_runtime_handoff_controller(
         "source_epoch": "runtime-4",
         "manifest_digest": "a" * 64,
         "artifact_id": "artifact-1",
+        "artifact_sha256": "e" * 64,
         "health_report_digest": "b" * 64,
         "source_fence_digest": "d" * 64,
     }
@@ -160,6 +161,7 @@ def test_target_activation_returns_agent_signed_service_receipt(tmp_path: Any) -
         "source_epoch": "runtime-4",
         "manifest_digest": "a" * 64,
         "artifact_id": "artifact-1",
+        "artifact_sha256": "e" * 64,
         "health_report_digest": "b" * 64,
         "source_fence_digest": "d" * 64,
     }

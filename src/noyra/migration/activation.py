@@ -197,6 +197,15 @@ class TargetRuntimeActivator:
         cutover_started = False
         try:
             _copy_private(restored, staged)
+            staged_digest = _sha256_file(staged)
+            if staged_digest != values["artifact_sha256"]:
+                raise TargetActivationError("restored_artifact_digest_mismatch")
+            journal = {
+                **journal,
+                "staged_database_sha256": staged_digest,
+                "root_staged_database_sha256": staged_digest,
+            }
+            _atomic_json(marker, journal, 0o600)
             self._validate_restored_database(staged, values)
             self._finalize_target_database(staged, values)
             cutover_started = True
@@ -213,7 +222,7 @@ class TargetRuntimeActivator:
             ):
                 raise TargetActivationError("target_runtime_readiness_failed")
             result = {
-                **values,
+                **journal,
                 "status": "active",
                 "service_unit": "noyra.service",
                 "previous_subject_id": journal["previous_subject_id"],
@@ -221,6 +230,15 @@ class TargetRuntimeActivator:
                 "active_database_sha256": _sha256_file(active_database),
                 "activated_at": _now(),
             }
+            _atomic_json(
+                self.state_root / "current.json",
+                {
+                    "task_id": task_id,
+                    "target_id": target_id,
+                    "active_database_sha256": result["active_database_sha256"],
+                },
+                0o600,
+            )
             _atomic_json(marker, result, 0o600)
             return {key: result[key] for key in _ACTIVATION_RECEIPT_KEYS}
         except Exception as error:
@@ -269,6 +287,16 @@ class TargetRuntimeActivator:
             raise TargetActivationError("activation_record_binding_invalid")
         rollback = self.rollback_root / task_id
         active_database = self.data_root / "noyra.sqlite3"
+        current_path = self.state_root / "current.json"
+        current = _read_json(current_path, "active_runtime_ownership_invalid")
+        if (
+            current.get("task_id") != task_id
+            or current.get("target_id") != values["target_id"]
+            or current.get("active_database_sha256") != state.get("active_database_sha256")
+            or not active_database.is_file()
+            or _sha256_file(active_database) != state.get("active_database_sha256")
+        ):
+            raise TargetActivationError("active_runtime_ownership_mismatch")
         if not (rollback / "noyra.sqlite3").is_file():
             raise TargetActivationError("rollback_database_unavailable")
         try:
@@ -290,6 +318,7 @@ class TargetRuntimeActivator:
             _atomic_json(
                 marker, {**state, "status": "deactivated", "deactivated_at": _now()}, 0o600
             )
+            current_path.unlink(missing_ok=True)
             return {"status": "deactivated", "task_id": task_id}
         except TargetActivationError as error:
             _atomic_json(
@@ -340,6 +369,19 @@ class TargetRuntimeActivator:
                 )
                 recovered += 1
                 continue
+            if (
+                value.get("status") == "activating"
+                and active_database.is_file()
+                and _sha256_file(active_database) == value.get("previous_database_sha256")
+                and not backup_database.exists()
+            ):
+                _atomic_json(
+                    marker,
+                    {**value, "status": "recovered", "recovered_at": _now()},
+                    0o600,
+                )
+                recovered += 1
+                continue
             if not backup_database.is_file() or backup_database.is_symlink():
                 raise TargetActivationError("rollback_database_unavailable")
             if self.systemd.is_active():
@@ -369,7 +411,8 @@ class TargetRuntimeActivator:
                     "SELECT subject_id FROM runtime_state LIMIT 1"
                 ).fetchone()
                 task = connection.execute(
-                    "SELECT subject_id,target_id,status,manifest_digest,target_epoch_id,"
+                    "SELECT subject_id,target_id,status,manifest_digest,artifact_id,"
+                    "target_epoch_id,"
                     "source_epoch "
                     "FROM migration_tasks WHERE task_id=?",
                     (request["task_id"],),
@@ -398,6 +441,7 @@ class TargetRuntimeActivator:
             or task["source_epoch"] != request["source_epoch"]
             or task["status"] not in {"validating", "cutover"}
             or task["manifest_digest"] != request["manifest_digest"]
+            or task["artifact_id"] != request["artifact_id"]
             or epoch is None
             or epoch["target_id"] != request["target_id"]
             or epoch["status"] != "active"
@@ -729,6 +773,7 @@ _ACTIVATION_RECEIPT_KEYS = (
     "source_epoch",
     "manifest_digest",
     "artifact_id",
+    "artifact_sha256",
     "health_report_digest",
     "source_fence_digest",
     "status",
@@ -746,6 +791,7 @@ def _validate_activation_request(request: Mapping[str, Any]) -> dict[str, Any]:
         "source_epoch",
         "manifest_digest",
         "artifact_id",
+        "artifact_sha256",
         "health_report_digest",
         "source_fence_digest",
     }
@@ -765,7 +811,12 @@ def _validate_activation_request(request: Mapping[str, Any]) -> dict[str, Any]:
         r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", values["artifact_id"]
     ):
         raise TargetActivationError("activation_request_invalid")
-    for key in ("manifest_digest", "health_report_digest", "source_fence_digest"):
+    for key in (
+        "manifest_digest",
+        "artifact_sha256",
+        "health_report_digest",
+        "source_fence_digest",
+    ):
         if not isinstance(values[key], str) or not _DIGEST.fullmatch(values[key]):
             raise TargetActivationError("activation_request_invalid")
     return values

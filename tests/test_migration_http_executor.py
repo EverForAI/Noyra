@@ -102,6 +102,7 @@ class _Transport:
                 "source_epoch": body["source_epoch"],
                 "manifest_digest": body["manifest_digest"],
                 "artifact_id": body["artifact_id"],
+                "artifact_sha256": body["artifact_sha256"],
                 "health_report_digest": body["health_report_digest"],
                 "source_fence_digest": body["source_fence_digest"],
                 "status": "active",

@@ -37,3 +37,18 @@ Corrected the import ordering in `scripts/noyra-migration-agent.py` after a fres
 - `compileall`: passed.
 - Migration install and component rollback shell contracts: passed.
 - `git diff --check`: passed.
+
+## Independent review remediation follow-up
+
+Added regressions first; they failed on the activating-without-backup crash window, stale deactivation after a later activation, task artifact ID mismatch, and agent-side source substitution. The fixes now:
+
+- Recover an `activating` journal when the old active database still matches the recorded digest and no backup exists, so startup recovery does not fail permanently in the journal-before-move window.
+- Record root-owned active task/database ownership after activation and require the task, target, and current database digest to match before deactivation mutates service or files. A stale deactivation now fails before stopping the service.
+- Compare the restored migration task's `artifact_id` with the activation request.
+- Carry the manifest artifact SHA-256 into the privileged activation request, copy the restored SQLite database into root-only staging, and compare the staged bytes to the expected digest before semantic validation, finalization, or cutover. The journal records the staged digest; the signed activation receipt continues to bind the finalized active database digest.
+
+Verification: Gate 3 tests 7 passed; focused activation/agent/CLI/HTTP/fencing tests 51 passed; Ruff passed; mypy on seven modules passed; compileall passed; migration install and component rollback contracts passed; `git diff --check` passed with Git line-ending warnings only.
+
+### Remaining trust boundary
+
+The artifact digest reaches the root runner inside a request signed by the target agent key, which is readable by agent code. Root independently hashes the staged database and rejects mismatches, but it has no source-authenticated manifest/signature to establish that the agent-provided expected digest is the source-approved artifact digest if the agent itself is compromised. The current protocol has no source signing key/trust channel at the root runner. Closing that threat requires an architectural addition such as a source-signed artifact authorization verified by root, or moving artifact receipt and verification behind the root boundary. No such source signature was available to wire in this remediation, so this specific compromised-agent authenticity guarantee remains unverified.
