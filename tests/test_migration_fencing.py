@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
+import time
 from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from noyra.core import Database, IdentityStore, SubjectKernel
+from noyra.core.admission import OperationInvalidated, RuntimeAdmissionGate
 from noyra.core.errors import RuntimeOwnershipError
 from noyra.migration.fencing import EpochLease
 from noyra.migration.policy import MigrationStore
@@ -234,3 +237,68 @@ def test_filesystem_source_fence_closes_admission_and_survives_restart(tmp_path:
     with pytest.raises(RuntimeOwnershipError, match="migration fence"):
         restarted.boot()
     assert not restarted.process_lock.held
+
+
+def test_migration_control_fences_existing_and_new_normal_operations() -> None:
+    gate = RuntimeAdmissionGate(
+        "Noyra-0001",
+        ownership_check=lambda: True,
+        control_ownership_check=lambda: True,
+    )
+    gate.open(epoch=1)
+    lease = gate.begin("ordinary-write")
+
+    def finish_later() -> None:
+        time.sleep(0.02)
+        gate.finish(lease)
+
+    worker = threading.Thread(target=finish_later)
+    worker.start()
+
+    with gate.migration_control_scope():
+        fence_epoch = gate.fence_for_migration()
+        assert gate.migration_fenced is True
+        assert gate.active_operations == 0
+        with pytest.raises(RuntimeOwnershipError):
+            gate.begin("new-ordinary-write")
+    worker.join()
+
+    assert lease.valid is False
+    with pytest.raises(OperationInvalidated):
+        lease.assert_current()
+    with gate.migration_control_scope():
+        gate.clear_migration_fence(fence_epoch)
+    restored_lease = gate.begin("after-rollback")
+    assert restored_lease.valid is True
+    gate.finish(restored_lease)
+
+
+def test_migration_control_requires_process_ownership() -> None:
+    gate = RuntimeAdmissionGate(
+        "Noyra-0001",
+        ownership_check=lambda: False,
+        control_ownership_check=lambda: False,
+    )
+    gate.open(epoch=1)
+    with pytest.raises(RuntimeOwnershipError, match="ownership"), gate.migration_control_scope():
+        pass
+
+
+def test_migration_fence_cannot_be_cleared_while_durable_epoch_is_active() -> None:
+    durable_active = True
+    gate = RuntimeAdmissionGate(
+        "Noyra-0001",
+        ownership_check=lambda: not durable_active,
+        control_ownership_check=lambda: True,
+        migration_clear_check=lambda: not durable_active,
+    )
+    gate.open(epoch=1)
+    with gate.migration_control_scope():
+        fence_epoch = gate.fence_for_migration()
+        with pytest.raises(RuntimeOwnershipError, match="epoch is still active"):
+            gate.open(epoch=2)
+        with pytest.raises(RuntimeOwnershipError, match="epoch is still active"):
+            gate.clear_migration_fence(fence_epoch)
+        durable_active = False
+        gate.clear_migration_fence(fence_epoch)
+    assert gate.migration_fenced is False

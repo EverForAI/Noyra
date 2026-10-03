@@ -1569,6 +1569,10 @@ class NoyraHTTPServer:
             raise MigrationExecutionError("migration_target_token_unavailable") from error
 
     def _migration_http_source_fence(self, task: Any, source_epoch: str) -> str:
+        try:
+            self.kernel.admission.assert_migration_fenced()
+        except OperationInvalidated as error:
+            raise MigrationExecutionError("runtime_migration_fence_missing") from error
         with self.kernel.database.connection() as connection:
             row = connection.execute(
                 "SELECT e.epoch_id,e.epoch_number,e.status FROM migration_epochs e "
@@ -1776,11 +1780,19 @@ class NoyraHTTPServer:
             or path == "/api/admin/wallet-executions/recover"
         )
 
+    @staticmethod
+    def _is_migration_control(path: str) -> bool:
+        return path.startswith("/api/admin/migration/tasks/") and (
+            path.endswith("/cutover") or path.endswith("/rollback")
+        )
+
     def allow_mutation(self, path: str) -> bool:
         if self._closed or self.admission.closed:
             return False
         if self._quarantined():
             return self._is_recovery_mutation(path)
+        if self._is_migration_control(path):
+            return True
         if self.admission.accepting:
             return True
         # Manual pause closes cognition admission, but lifecycle controls must
@@ -4141,6 +4153,26 @@ class NoyraHTTPServer:
                         self._json(
                             HTTPStatus.SERVICE_UNAVAILABLE,
                             {"error": "integrity_quarantine"},
+                        )
+                    return
+                # Migration cutover and rollback are privileged controls that
+                # must remain usable while the durable migration epoch fences
+                # ordinary runtime admission.  The coordinator still requires
+                # the process ownership check and performs its own drain;
+                # this scope does not grant a general HTTP bypass.
+                migration_control = owner._is_migration_control(self.path)
+                if migration_control:
+                    # CutoverCoordinator owns the control scope so the
+                    # authenticated HTTP route cannot accidentally nest a
+                    # second scope around its durable epoch transition.
+                    try:
+                        self._dispatch_post()
+                    except (OperationInvalidated, RuntimeOwnershipError):
+                        self.close_connection = True
+                        self._discard_small_request_body()
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "migration_control_unavailable"},
                         )
                     return
                 # Only explicit recovery endpoints may bypass a paused or

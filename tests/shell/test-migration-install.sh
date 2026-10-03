@@ -23,6 +23,8 @@ grep -q 'chown root:noyra.*identity.json' "$INSTALLER"
 grep -q 'chmod 0640.*identity.json' "$INSTALLER"
 grep -q 'migration/source' "$INSTALLER"
 grep -q 'migration/fences' "$INSTALLER"
+grep -q 'install -d -o noyra -g noyra -m 0700.*migration/source' "$INSTALLER"
+grep -q 'chmod 0700.*migration/source' "$INSTALLER"
 grep -q 'source_epoch_file=' "$INSTALLER"
 grep -q 'runtime-.*row\[0\]' "$INSTALLER"
 

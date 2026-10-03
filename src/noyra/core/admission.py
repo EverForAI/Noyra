@@ -52,6 +52,8 @@ class RuntimeAdmissionGate:
         *,
         initially_accepting: bool = True,
         ownership_check: Callable[[], bool] | None = None,
+        control_ownership_check: Callable[[], bool] | None = None,
+        migration_clear_check: Callable[[], bool] | None = None,
     ):
         self.subject_id = subject_id
         self._condition = threading.Condition(threading.RLock())
@@ -61,6 +63,11 @@ class RuntimeAdmissionGate:
         self._quarantined = False
         self._closed = False
         self._ownership_check = ownership_check
+        self._control_ownership_check = control_ownership_check or ownership_check
+        self._migration_clear_check = migration_clear_check
+        self._migration_fenced = False
+        self._migration_fence_epoch: int | None = None
+        self._migration_control_active = False
 
     @property
     def epoch(self) -> int:
@@ -75,12 +82,22 @@ class RuntimeAdmissionGate:
     @property
     def accepting(self) -> bool:
         with self._condition:
-            return self._accepting and not self._closed
+            return self._accepting and not self._closed and not self._migration_fenced
 
     @property
     def closed(self) -> bool:
         with self._condition:
             return self._closed
+
+    @property
+    def migration_fenced(self) -> bool:
+        with self._condition:
+            return self._migration_fenced
+
+    @property
+    def migration_fence_epoch(self) -> int | None:
+        with self._condition:
+            return self._migration_fence_epoch
 
     @property
     def active_operations(self) -> int:
@@ -89,10 +106,17 @@ class RuntimeAdmissionGate:
 
     def open(self, *, epoch: int | None = None) -> None:
         with self._condition:
+            if self._migration_fenced and (
+                self._migration_clear_check is not None
+                and not self._migration_clear_check()
+            ):
+                raise RuntimeOwnershipError("migration epoch is still active")
             if epoch is not None:
                 self._epoch = max(self._epoch, int(epoch))
             self._quarantined = False
             self._accepting = True
+            self._migration_fenced = False
+            self._migration_fence_epoch = None
             self._closed = False
             self._condition.notify_all()
 
@@ -120,6 +144,70 @@ class RuntimeAdmissionGate:
             self._condition.notify_all()
             return self._epoch
 
+    @contextmanager
+    def migration_control_scope(self) -> Iterator[None]:
+        """Run one authenticated migration control without normal admission bypass.
+
+        Migration controls are allowed while the durable source epoch is active,
+        but only the process that owns this runtime may enter the scope.  The
+        scope deliberately does not hold the gate lock while the coordinator
+        performs network or filesystem work, so ordinary leases can drain.
+        """
+        with self._condition:
+            if self._control_ownership_check is not None and not self._control_ownership_check():
+                raise RuntimeOwnershipError("runtime ownership is required for migration control")
+            if self._closed:
+                raise OperationInvalidated("runtime is draining")
+            if self._quarantined:
+                raise OperationInvalidated("runtime is in integrity quarantine")
+            if self._migration_control_active:
+                raise OperationInvalidated("migration control is already active")
+            self._migration_control_active = True
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._migration_control_active = False
+                self._condition.notify_all()
+
+    def fence_for_migration(self, timeout: float | None = None) -> int:
+        """Invalidate normal leases and wait until all in-flight work drains."""
+        with self._condition:
+            if not self._migration_control_active:
+                raise OperationInvalidated("migration control scope is required to fence runtime")
+            if self._closed:
+                raise OperationInvalidated("runtime is draining")
+            self._epoch += 1
+            self._accepting = False
+            self._migration_fenced = True
+            self._migration_fence_epoch = self._epoch
+            self._condition.notify_all()
+            fence_epoch = self._epoch
+        if not self.wait_for_drain(timeout):
+            raise OperationInvalidated("migration fence could not drain active operations")
+        return fence_epoch
+
+    def clear_migration_fence(self, fence_epoch: int) -> None:
+        """Reopen normal admission after the durable migration epoch is revoked."""
+        with self._condition:
+            if not self._migration_control_active:
+                raise OperationInvalidated("migration control scope is required to clear fence")
+            if self._migration_fence_epoch != int(fence_epoch):
+                raise OperationInvalidated("migration fence epoch is stale")
+            if self._closed:
+                raise OperationInvalidated("runtime is draining")
+            if self._migration_clear_check is not None and not self._migration_clear_check():
+                raise RuntimeOwnershipError("migration epoch is still active")
+            self._migration_fenced = False
+            self._migration_fence_epoch = None
+            self._accepting = not self._quarantined
+            self._condition.notify_all()
+
+    def assert_migration_fenced(self) -> None:
+        with self._condition:
+            if not self._migration_fenced:
+                raise OperationInvalidated("migration source is not fenced")
+
     def begin(self, kind: str, *, allow_quarantine: bool = False) -> OperationLease:
         if not kind or not kind.strip():
             raise ValueError("operation kind is required")
@@ -128,6 +216,8 @@ class RuntimeAdmissionGate:
                 raise RuntimeOwnershipError("runtime ownership is required for operation admission")
             if self._closed:
                 raise OperationInvalidated("runtime is draining")
+            if self._migration_fenced:
+                raise RuntimeOwnershipError("runtime is fenced for migration")
             if not self._accepting and not allow_quarantine:
                 raise OperationInvalidated("runtime admission is closed")
             if self._quarantined and not allow_quarantine:
@@ -201,6 +291,8 @@ class RuntimeAdmissionGate:
             raise OperationInvalidated("operation epoch is stale")
         if self._closed:
             raise OperationInvalidated("runtime is draining")
+        if self._migration_fenced:
+            raise OperationInvalidated("runtime is fenced for migration")
         if not self._accepting and not lease.allow_quarantine:
             raise OperationInvalidated("runtime admission is closed")
         if self._quarantined and not lease.allow_quarantine:

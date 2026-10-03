@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import re
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 
 from cryptography.exceptions import InvalidSignature
@@ -128,22 +128,20 @@ class CutoverCoordinator:
         epoch = self._epoch_for_task(task_id)
         if epoch is None:
             raise ValueError("migration target epoch is missing")
-        epoch.assert_current()
         admission = self.admission
-        lease = admission.begin("migration-cutover") if admission is not None else None
+        control = (
+            admission.migration_control_scope() if admission is not None else nullcontext()
+        )
         receipt: MigrationExecutionReceipt | None = None
-        try:
-            proof = self._proof_for_task(task_id)
-            if admission is not None and lease is not None:
-                with admission.external_side_effect_scope(lease):
-                    receipt = execution_receipt_from(
-                        self.executor.execute(
-                            task,
-                            proof=proof,
-                            source_epoch=task.source_epoch,
-                        )
-                    )
-            else:
+        with control:
+            try:
+                epoch.assert_current()
+                if admission is not None:
+                    # The durable epoch is already active at this point.  Fence
+                    # the in-memory gate as well, invalidate existing normal
+                    # leases, and wait for them to drain before any side effect.
+                    admission.fence_for_migration()
+                proof = self._proof_for_task(task_id)
                 receipt = execution_receipt_from(
                     self.executor.execute(
                         task,
@@ -151,56 +149,57 @@ class CutoverCoordinator:
                         source_epoch=task.source_epoch,
                     )
                 )
-            receipt.validate(task, proof)
-            with self.database.transaction() as connection:
-                if task.status == "validating":
+                receipt.validate(task, proof)
+                with self.database.transaction() as connection:
+                    if task.status == "validating":
+                        task = self.manager.transition_task_in_transaction(
+                            connection,
+                            task_id,
+                            "cutover",
+                            actor=actor,
+                            expected_status="validating",
+                        )
+                    epoch.assert_current_in_transaction(connection)
                     task = self.manager.transition_task_in_transaction(
                         connection,
                         task_id,
-                        "cutover",
+                        "committed",
                         actor=actor,
-                        expected_status="validating",
+                        expected_status="cutover",
                     )
-                epoch.assert_current_in_transaction(connection)
-                task = self.manager.transition_task_in_transaction(
-                    connection,
-                    task_id,
-                    "committed",
-                    actor=actor,
-                    expected_status="cutover",
-                )
-                MigrationStore._append_audit(
-                    connection,
-                    task.subject_id,
-                    "migration_execution_completed",
-                    actor,
-                    {
-                        "task_id": receipt.task_id,
-                        "target_id": receipt.target_id,
-                        "source_epoch": receipt.source_epoch,
-                        "manifest_digest": receipt.manifest_digest,
-                        "artifact_id": receipt.artifact_id,
-                        "restore_report_digest": receipt.restore_report_digest,
-                        "health_report_digest": receipt.health_report_digest,
-                        "source_fence_digest": receipt.source_fence_digest,
-                        "target_activation_digest": receipt.target_activation_digest,
-                    },
-                )
-                epoch.complete_in_transaction(connection, actor)
-            return {"task_id": task_id, "status": task.status}
-        except (MigrationExecutionError, ValueError):
-            if receipt is not None:
-                with suppress(Exception):
-                    self.executor.rollback(task, receipt=receipt, reason="durable commit failed")
-            raise
-        except Exception:
-            if receipt is not None:
-                with suppress(Exception):
-                    self.executor.rollback(task, receipt=receipt, reason="durable commit failed")
-            raise
-        finally:
-            if lease is not None and admission is not None:
-                admission.finish(lease)
+                    MigrationStore._append_audit(
+                        connection,
+                        task.subject_id,
+                        "migration_execution_completed",
+                        actor,
+                        {
+                            "task_id": receipt.task_id,
+                            "target_id": receipt.target_id,
+                            "source_epoch": receipt.source_epoch,
+                            "manifest_digest": receipt.manifest_digest,
+                            "artifact_id": receipt.artifact_id,
+                            "restore_report_digest": receipt.restore_report_digest,
+                            "health_report_digest": receipt.health_report_digest,
+                            "source_fence_digest": receipt.source_fence_digest,
+                            "target_activation_digest": receipt.target_activation_digest,
+                        },
+                    )
+                    epoch.complete_in_transaction(connection, actor)
+                return {"task_id": task_id, "status": task.status}
+            except (MigrationExecutionError, ValueError):
+                if receipt is not None:
+                    with suppress(Exception):
+                        self.executor.rollback(
+                            task, receipt=receipt, reason="durable commit failed"
+                        )
+                raise
+            except Exception:
+                if receipt is not None:
+                    with suppress(Exception):
+                        self.executor.rollback(
+                            task, receipt=receipt, reason="durable commit failed"
+                        )
+                raise
 
     def _proof_for_task(self, task_id: str) -> dict[str, object]:
         """Load the proof digests recorded when the task entered validation."""
@@ -226,27 +225,44 @@ class CutoverCoordinator:
     def rollback(self, task_id: str, reason: str, *, actor: str = "operator") -> dict[str, str]:
         if not reason.strip():
             raise ValueError("rollback reason is required")
-        task = self.manager.get_task(task_id)
-        if task.status == "rolled_back":
-            return {"task_id": task_id, "status": "rolled_back"}
-        if task.status == "committed":
-            raise ValueError("migration task cannot be rolled back")
-        epoch = self._epoch_for_task(task_id)
-        if task.status == "rolling_back" and epoch is None:
+        admission = self.admission
+        control = (
+            admission.migration_control_scope() if admission is not None else nullcontext()
+        )
+        with control:
+            task = self.manager.get_task(task_id)
+            if task.status == "rolled_back":
+                if admission is not None and admission.migration_fenced:
+                    fence_epoch = admission.migration_fence_epoch
+                    if fence_epoch is not None:
+                        admission.clear_migration_fence(fence_epoch)
+                return {"task_id": task_id, "status": "rolled_back"}
+            if task.status == "committed":
+                raise ValueError("migration task cannot be rolled back")
+            epoch = self._epoch_for_task(task_id)
+            if task.status == "rolling_back" and epoch is None:
+                self.manager.transition_task(
+                    task_id, "rolled_back", actor=actor, error_code=reason.strip()[:256]
+                )
+                if admission is not None and admission.migration_fenced:
+                    fence_epoch = admission.migration_fence_epoch
+                    if fence_epoch is not None:
+                        admission.clear_migration_fence(fence_epoch)
+                return {"task_id": task_id, "status": "rolled_back"}
+            if task.status != "rolling_back":
+                self.manager.transition_task(
+                    task_id, "rolling_back", actor=actor, error_code=reason.strip()[:256]
+                )
+            if epoch is not None:
+                epoch.revoke(reason.strip()[:256], actor)
             self.manager.transition_task(
                 task_id, "rolled_back", actor=actor, error_code=reason.strip()[:256]
             )
+            if admission is not None and admission.migration_fenced:
+                fence_epoch = admission.migration_fence_epoch
+                if fence_epoch is not None:
+                    admission.clear_migration_fence(fence_epoch)
             return {"task_id": task_id, "status": "rolled_back"}
-        if task.status != "rolling_back":
-            self.manager.transition_task(
-                task_id, "rolling_back", actor=actor, error_code=reason.strip()[:256]
-            )
-        if epoch is not None:
-            epoch.revoke(reason.strip()[:256], actor)
-        self.manager.transition_task(
-            task_id, "rolled_back", actor=actor, error_code=reason.strip()[:256]
-        )
-        return {"task_id": task_id, "status": "rolled_back"}
 
     def _source_epoch(self, task_id: str) -> str:
         with self.database.connection() as connection:

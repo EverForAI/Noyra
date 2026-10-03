@@ -158,6 +158,10 @@ class SubjectKernel:
                         database_ref, subject_id, self._migration_fence_root
                     )
                 ),
+                control_ownership_check=lambda: process_lock_ref.held,
+                migration_clear_check=lambda: _no_active_migration_epoch(
+                    database_ref, subject_id, self._migration_fence_root
+                ),
             )
             self.identity_store = IdentityStore(self.database)
             self.event_store = EventStore(self.database)

@@ -227,6 +227,42 @@ def test_migration_rollback_route_uses_server_coordinator(
     migration_http: tuple[NoyraHTTPServer, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     server, base_url = migration_http
+    _add_attested_target(server)
+    with server.kernel.database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO migration_epochs("
+            "epoch_id,subject_id,target_id,epoch_number,status,acquired_at,state_hash) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                "migrationepoch-control",
+                server.kernel.subject_id,
+                "migration-target-1",
+                1,
+                "active",
+                "2099-01-01T00:00:00+00:00",
+                content_hash(
+                    {
+                        "epoch_id": "migrationepoch-control",
+                        "subject_id": server.kernel.subject_id,
+                        "target_id": "migration-target-1",
+                        "epoch_number": 1,
+                        "status": "active",
+                        "acquired_at": "2099-01-01T00:00:00+00:00",
+                        "revoked_at": None,
+                    }
+                ),
+            ),
+        )
+    with server.kernel.admission.migration_control_scope():
+        server.kernel.admission.fence_for_migration()
+
+    current_policy = server.migration_store.read_policy(server.kernel.subject_id)
+    status, error = _json_mutation(
+        f"{base_url}/api/v1/admin/migration/policy",
+        {"expected_revision": current_policy.revision, "enabled": True},
+    )
+    assert status == 503
+    assert error == {"error": "integrity_quarantine"}
 
     def rollback(task_id: str, reason: str, *, actor: str) -> dict[str, str]:
         return {"task_id": task_id, "reason": reason, "actor": actor}

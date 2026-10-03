@@ -15,13 +15,13 @@ Repair every confirmed issue in `docs/audit/2026-10-03-followup-full-readonly-au
 
 ## Module order
 
-### 1. Restore quality-gate confidence (A10/A11)
+### 1. Restore quality-gate confidence (A10/A11) — completed
 
-Root causes: booted test kernels are not explicitly closed before Windows temporary-directory cleanup; the release workflow test still asserts the old `continue-on-error` contract. Add a `SubjectKernel` context-manager/close contract, make the kernel fixture close all created kernels, and update the workflow contract test to require fail-closed artifact download behavior. Run the focused tests, then the full kernel/workflow subset, and commit.
+Root causes: booted test kernels are not explicitly closed before Windows temporary-directory cleanup; the release workflow test still asserts the old `continue-on-error` contract. Add a `SubjectKernel` context-manager/close contract, make the kernel fixture close all created kernels, and update the workflow contract test to require fail-closed artifact download behavior. Run the focused tests, then the full kernel/workflow subset, and commit. Completed in `3bcbc53`; 23 focused tests passed, Ruff, mypy, and diff checks passed.
 
-### 2. Make source ownership and migration fencing one boundary (A01/A03)
+### 2. Make source ownership and migration fencing one boundary (A01/A03) — completed
 
-Root causes: the installer creates `migration/source` as `root:noyra 0750` while the service atomically writes epochs as `noyra`; active database epochs are checked by ownership but do not coordinate admission drain. First write failing POSIX/systemd and concurrency tests. Then choose one bounded writable path or a restricted root helper, add a migration-specific drain/fence operation that rejects new leases, waits for in-flight leases, and records a durable epoch/fence atomically. Ensure cutover and rollback use an internal privileged migration-control path without re-entering normal subject admission. Verify restart recovery, stale leases, rollback, and malformed markers. Commit only after focused tests, shell install checks, Ruff, mypy, and compileall pass.
+Root causes: the installer created `migration/source` as `root:noyra 0750` while the service atomically writes epochs as `noyra`; active database epochs were checked by ownership but did not coordinate admission drain. The installer now gives only the service account access to the private source-epoch directory. The gate now has a process-owned migration-control scope, invalidates normal leases, waits for drain before artifact creation, blocks ordinary mutation while fenced, and clears the in-memory fence only after durable epoch revocation. Rollback remains reachable as an authenticated migration control while ordinary mutations remain denied. Restart recovery stays fail-closed through the durable epoch and filesystem markers. Completed with 20 migration fencing/cutover/service tests, 23 kernel/release contract tests, both migration shell contract tests, Ruff, mypy, compileall, and diff checks passing. No live Linux systemd ownership test was available in the Windows workspace; deployment audit remains an external release gate.
 
 ### 3. Make activation perform real target service handoff (A04)
 
