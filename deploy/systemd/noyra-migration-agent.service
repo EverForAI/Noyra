@@ -27,6 +27,7 @@ RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 ReadWritePaths=/var/lib/noyra/migration-agent
+ReadWritePaths=/var/lib/noyra/migration/target-activation/requests /var/lib/noyra/migration/target-activation/status
 ReadOnlyPaths=/etc/noyra/migration/identity.json /run/credentials
 UMask=0077
 

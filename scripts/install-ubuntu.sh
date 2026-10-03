@@ -85,6 +85,10 @@ UPGRADE_RECOVER_UNIT=/etc/systemd/system/noyra-upgrade-recover.service
 MIGRATION_AGENT_UNIT=/etc/systemd/system/noyra-migration-agent.service
 MIGRATION_RUNNER_UNIT=/etc/systemd/system/noyra-migration-runner.service
 MIGRATION_RUNNER=/usr/local/libexec/noyra-migration-runner.sh
+TARGET_ACTIVATION_RUNNER=/usr/local/libexec/noyra-target-activation-runner.py
+TARGET_ACTIVATION_UNIT=/etc/systemd/system/noyra-target-activation.service
+TARGET_ACTIVATION_PATH_UNIT=/etc/systemd/system/noyra-target-activation.path
+TARGET_ACTIVATION_RECOVER_UNIT=/etc/systemd/system/noyra-target-activation-recover.service
 BACKUP_KEYRING="$CONFIG_DIR/backup-keyring.json"
 
 assert_absolute_backup_dir() {
@@ -563,7 +567,9 @@ on_error() {
   fi
   if [[ "$MIGRATION_COMPONENTS_CHANGED" == true ]]; then
     if ! noyra_migration_components_restore \
-      "$MIGRATION_RUNNER" "$MIGRATION_AGENT_UNIT" "$MIGRATION_RUNNER_UNIT"; then
+      "$MIGRATION_RUNNER" "$MIGRATION_AGENT_UNIT" "$MIGRATION_RUNNER_UNIT" \
+      "$TARGET_ACTIVATION_RUNNER" "$TARGET_ACTIVATION_UNIT" \
+      "$TARGET_ACTIVATION_PATH_UNIT" "$TARGET_ACTIVATION_RECOVER_UNIT"; then
       migration_components_restored=false
       echo 'Failed to restore migration agent components; Noyra will remain stopped.' >&2
       status=1
@@ -880,9 +886,12 @@ install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-upgrade-recove
 MIGRATION_COMPONENT_BACKUP_DIR="$INSTALL_DIR/.migration-components.$$.$RANDOM"
 noyra_migration_components_snapshot \
   "$MIGRATION_COMPONENT_BACKUP_DIR" "$MIGRATION_RUNNER" "$MIGRATION_AGENT_UNIT" \
-  "$MIGRATION_RUNNER_UNIT"
+  "$MIGRATION_RUNNER_UNIT" "$TARGET_ACTIVATION_RUNNER" "$TARGET_ACTIVATION_UNIT" \
+  "$TARGET_ACTIVATION_PATH_UNIT" "$TARGET_ACTIVATION_RECOVER_UNIT"
 noyra_migration_components_mark_changed
-for migration_file in "$MIGRATION_RUNNER" "$MIGRATION_AGENT_UNIT" "$MIGRATION_RUNNER_UNIT"; do
+for migration_file in "$MIGRATION_RUNNER" "$MIGRATION_AGENT_UNIT" "$MIGRATION_RUNNER_UNIT" \
+  "$TARGET_ACTIVATION_RUNNER" "$TARGET_ACTIVATION_UNIT" "$TARGET_ACTIVATION_PATH_UNIT" \
+  "$TARGET_ACTIVATION_RECOVER_UNIT"; do
   if [[ -L "$migration_file" || ( -e "$migration_file" && ! -f "$migration_file" ) ]]; then
     echo "Migration system file must be regular and not a symlink: $migration_file" >&2
     exit 1
@@ -899,6 +908,10 @@ chmod 0700 "$DATA_DIR/migration/source"
 install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/fences"
 install -d -o noyra -g noyra -m 0700 "$DATA_DIR/migration/requests"
 install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/status"
+install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/target-activation"
+install -d -o root -g noyra -m 0730 "$DATA_DIR/migration/target-activation/requests"
+install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/target-activation/status"
+install -d -o root -g root -m 0700 "$DATA_DIR/migration/target-activation/state"
 source_epoch_file="$DATA_DIR/migration/source/epoch"
 if [[ -L "$source_epoch_file" || ( -e "$source_epoch_file" && ! -f "$source_epoch_file" ) ]]; then
   echo 'Migration source epoch must be a regular file and not a symlink' >&2
@@ -938,6 +951,10 @@ fi
 install -o root -g root -m 0750 "$SOURCE_DIR/scripts/noyra-migration-runner.sh" "$MIGRATION_RUNNER"
 install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-migration-agent.service" "$MIGRATION_AGENT_UNIT"
 install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-migration-runner.service" "$MIGRATION_RUNNER_UNIT"
+install -o root -g root -m 0750 "$SOURCE_DIR/scripts/noyra-target-activation-runner.py" "$TARGET_ACTIVATION_RUNNER"
+install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-target-activation.service" "$TARGET_ACTIVATION_UNIT"
+install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-target-activation.path" "$TARGET_ACTIVATION_PATH_UNIT"
+install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-target-activation-recover.service" "$TARGET_ACTIVATION_RECOVER_UNIT"
 if [[ ! -f "$CONFIG_DIR/noyra.env" ]]; then
   install -o root -g noyra -m 0640 "$SOURCE_DIR/deploy/noyra.env.example" "$CONFIG_DIR/noyra.env"
 fi
@@ -1001,6 +1018,7 @@ atomic_pointer "$CURRENT_LINK" "$release_id"
 systemctl daemon-reload
 systemctl enable noyra-upgrade-recover.service >/dev/null
 systemctl enable --now noyra-upgrade.path >/dev/null
+systemctl enable --now noyra-target-activation.path >/dev/null
 if [[ "$MIGRATION_AGENT_WAS_ENABLED" == true ]]; then
   systemctl enable noyra-migration-agent.service >/dev/null
   if [[ "$MIGRATION_AGENT_WAS_ACTIVE" == true ]]; then

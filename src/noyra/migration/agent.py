@@ -133,6 +133,7 @@ class MigrationAgent:
         artifact_ttl_seconds: int = 7 * 24 * 60 * 60,
         backup_manager: Any | None = None,
         restore_root: Path | str | None = None,
+        activation_controller: Any | None = None,
     ) -> None:
         if (
             not re.fullmatch(r"[A-Za-z0-9_-]{3,128}", target_id)
@@ -174,6 +175,7 @@ class MigrationAgent:
         self.max_incoming_files = max_incoming_files
         self.artifact_ttl_seconds = artifact_ttl_seconds
         self.backup_manager = backup_manager
+        self.activation_controller = activation_controller
         self.restore_root = (
             Path(restore_root).expanduser().resolve() if restore_root is not None else None
         )
@@ -592,12 +594,21 @@ class MigrationAgent:
             raise AgentAuthenticationError("migration request replay store is full")
 
     def restore(
-        self, receipt: ReceiveReceipt, *, expected_digest: str | None = None
+        self,
+        receipt: ReceiveReceipt,
+        *,
+        expected_digest: str | None = None,
+        task_id: str | None = None,
     ) -> RestoreReport:
         if not isinstance(receipt, ReceiveReceipt) or receipt.status != "received":
             raise ValueError("migration receipt is invalid")
         if expected_digest is not None and receipt.manifest_digest != expected_digest:
             raise ValueError("migration manifest digest mismatch")
+        if self.restore_root is not None and (
+            not isinstance(task_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}", task_id)
+        ):
+            raise ValueError("migration restore task identity is required")
         values = self._read_manifest(receipt)
         if content_hash(values) != receipt.manifest_digest:
             raise ValueError("migration manifest digest mismatch")
@@ -612,7 +623,7 @@ class MigrationAgent:
             raise ValueError("migration subject identity is invalid")
         if tip is not None and (not isinstance(tip, str) or not re.fullmatch(r"[0-9a-f]{64}", tip)):
             raise ValueError("migration event-chain tip is invalid")
-        restore_path = self._restore_artifact(artifact_path, values)
+        restore_path = self._restore_artifact(artifact_path, values, task_id=task_id)
         return RestoreReport(
             self.target_id,
             self.generation,
@@ -677,7 +688,7 @@ class MigrationAgent:
         )
 
     def activate(self, request: Mapping[str, Any]) -> dict[str, Any]:
-        """Publish target activation only after the source bound health proof."""
+        """Activate the installed service and return a target-signed receipt."""
         required = {
             "task_id",
             "subject_id",
@@ -686,10 +697,11 @@ class MigrationAgent:
             "manifest_digest",
             "artifact_id",
             "health_report_digest",
+            "source_fence_digest",
         }
         if set(request) != required or request.get("target_id") != self.target_id:
             raise ValueError("migration activation request is invalid")
-        for key in ("manifest_digest", "health_report_digest"):
+        for key in ("manifest_digest", "health_report_digest", "source_fence_digest"):
             if not isinstance(request.get(key), str) or not re.fullmatch(
                 r"[0-9a-f]{64}", str(request[key])
             ):
@@ -709,11 +721,47 @@ class MigrationAgent:
             raise ValueError("migration activation identity is invalid")
         if self.data_root is None:
             raise ValueError("migration activation storage is unavailable")
+        if self._signing_key is None:
+            raise ValueError("target signing identity is not configured")
+        if self.activation_controller is None:
+            raise ValueError("target runtime activation controller is unavailable")
+        active = self.activation_controller.activate(dict(request))
+        expected = {
+            key: request[key]
+            for key in (
+                "task_id",
+                "subject_id",
+                "target_id",
+                "source_epoch",
+                "manifest_digest",
+                "artifact_id",
+                "health_report_digest",
+                "source_fence_digest",
+            )
+        }
+        if (
+            not isinstance(active, Mapping)
+            or any(active.get(key) != value for key, value in expected.items())
+            or active.get("status") != "active"
+            or active.get("service_unit") != "noyra.service"
+            or not isinstance(active.get("active_database_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", str(active["active_database_sha256"]))
+        ):
+            raise ValueError("target service activation proof is invalid")
+        receipt = dict(active)
+        receipt.pop("target_signature", None)
+        receipt["target_signature"] = base64.urlsafe_b64encode(
+            self._signing_key.sign(
+                canonical_json(
+                    {key: value for key, value in receipt.items() if key != "target_signature"}
+                ).encode()
+            )
+        ).decode()
         activations = self.data_root / "activations"
         activations.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._assert_private_directory(activations)
         path = activations / f"{request['task_id']}.json"
-        value = {**dict(request), "status": "active"}
+        value = receipt
         if path.exists():
             if path.is_symlink() or not path.is_file():
                 raise ValueError("migration activation record is invalid")
@@ -729,10 +777,19 @@ class MigrationAgent:
             raise ValueError("migration deactivation request is invalid")
         if self.data_root is None:
             raise ValueError("migration activation storage is unavailable")
+        if self.activation_controller is None:
+            raise ValueError("target runtime activation controller is unavailable")
         if not isinstance(request.get("task_id"), str) or not re.fullmatch(
             r"[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}", str(request["task_id"])
         ):
             raise ValueError("migration deactivation identity is invalid")
+        result = self.activation_controller.deactivate(dict(request))
+        if (
+            not isinstance(result, Mapping)
+            or result.get("status") not in {"deactivated", "inactive"}
+            or result.get("task_id") != request["task_id"]
+        ):
+            raise ValueError("target service deactivation proof is invalid")
         path = self.data_root / "activations" / f"{request['task_id']}.json"
         if path.exists():
             if path.is_symlink() or not path.is_file():
@@ -782,21 +839,36 @@ class MigrationAgent:
             raise ValueError("migration artifact digest mismatch")
         return digest
 
-    def _restore_artifact(self, path: Path, values: Mapping[str, Any]) -> Path | None:
+    def _restore_artifact(
+        self,
+        path: Path,
+        values: Mapping[str, Any],
+        *,
+        task_id: str | None,
+    ) -> Path | None:
         if self.restore_root is None:
             return None
+        if not isinstance(task_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}", task_id
+        ):
+            raise ValueError("migration restore task identity is required")
+        task_root = self.restore_root / task_id
+        if task_root.exists() and (task_root.is_symlink() or not task_root.is_dir()):
+            raise ValueError("migration restore task directory is invalid")
+        task_root.mkdir(mode=0o700, parents=False, exist_ok=True)
+        self._assert_private_directory(task_root)
         artifact_format = values.get("artifact_format", "noyra-encrypted-backup")
         if artifact_format == "noyra-encrypted-backup":
             if self.backup_manager is None:
                 raise ValueError("encrypted backup restore is not configured")
             try:
-                return Path(self.backup_manager.restore(path, self.restore_root))
+                return Path(self.backup_manager.restore(path, task_root))
             except Exception as error:
                 raise ValueError("encrypted backup restore failed") from error
         if artifact_format != "sqlite":
             raise ValueError("migration artifact format is unsupported")
-        target = self.restore_root / "noyra.sqlite3"
-        temporary = self.restore_root / ".noyra.sqlite3.restore"
+        target = task_root / "noyra.sqlite3"
+        temporary = task_root / ".noyra.sqlite3.restore"
         if target.exists() or target.is_symlink():
             raise ValueError("migration restore target is not empty")
         try:

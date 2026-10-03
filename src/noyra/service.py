@@ -2550,6 +2550,8 @@ class NoyraHTTPServer:
                         payload = {
                             "status": "ok" if ready else "degraded",
                             "service": "noyra",
+                            "subject_id": owner.kernel.subject_id,
+                            "migration_target_id": owner.kernel.migration_target_id,
                             "lifecycle": lifecycle,
                             "at_rest": at_rest,
                             "cloud_archive": owner.cloud_archive_status,

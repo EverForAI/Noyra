@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from noyra.core.at_rest import EncryptedBackupManager
 from noyra.core.types import canonical_json, content_hash
 from noyra.migration.agent import AgentAuthenticationError, MigrationAgent
+from noyra.migration.activation import TargetActivationBridge
 
 MAX_BODY = 8 * 1024 * 1024
 IDENTITY_KEYS = frozenset(
@@ -130,6 +131,12 @@ def load_agent(
     *,
     restore_root: Path | None = None,
     backup_keyring: Path | None = None,
+    activation_request_root: Path = Path(
+        "/var/lib/noyra/migration/target-activation/requests"
+    ),
+    activation_status_root: Path = Path(
+        "/var/lib/noyra/migration/target-activation/status"
+    ),
 ) -> MigrationAgent:
     identity = _read_identity_json(identity_file)
     if set(identity) - IDENTITY_KEYS:
@@ -140,16 +147,27 @@ def load_agent(
         if configured_restore_root is not None and backup_keyring is not None
         else None
     )
+    signing_key = _private_key(identity.get("private_key"))
+    activation_controller = (
+        TargetActivationBridge(
+            activation_request_root,
+            activation_status_root,
+            signing_key,
+        )
+        if signing_key is not None
+        else None
+    )
     return MigrationAgent(
         target_id=identity["target_id"],
         key_fingerprint=identity["key_fingerprint"],
         generation=identity.get("generation", 1),
         public_key=identity.get("public_key"),
-        signing_key=_private_key(identity.get("private_key")),
+        signing_key=signing_key,
         data_root=data_root,
         session_token=identity.get("session_token"),
         restore_root=configured_restore_root,
         backup_manager=backup_manager,
+        activation_controller=activation_controller,
     )
 
 
@@ -197,8 +215,15 @@ def dispatch(agent: MigrationAgent, operation: str, payload: dict[str, Any]) -> 
     if operation == "restore":
         from noyra.migration.agent import ReceiveReceipt
 
+        task_id = payload.pop("task_id", None)
         expected_digest = payload.pop("expected_digest", None)
-        return asdict(agent.restore(ReceiveReceipt(**payload), expected_digest=expected_digest))
+        return asdict(
+            agent.restore(
+                ReceiveReceipt(**payload),
+                expected_digest=expected_digest,
+                task_id=task_id,
+            )
+        )
     if operation == "health":
         from noyra.migration.agent import RestoreReport
 
@@ -306,6 +331,16 @@ def main(argv: list[str] | None = None) -> int:
         "--restore-root", type=Path, default=None, help="private root for restored runtime data"
     )
     parser.add_argument("--backup-keyring", type=Path, default=None)
+    parser.add_argument(
+        "--activation-request-root",
+        type=Path,
+        default=Path("/var/lib/noyra/migration/target-activation/requests"),
+    )
+    parser.add_argument(
+        "--activation-status-root",
+        type=Path,
+        default=Path("/var/lib/noyra/migration/target-activation/status"),
+    )
     parser.add_argument("--listen", default="127.0.0.1:8876")
     parser.add_argument(
         "operation",
@@ -326,6 +361,8 @@ def main(argv: list[str] | None = None) -> int:
         args.data_root,
         restore_root=args.restore_root,
         backup_keyring=args.backup_keyring,
+        activation_request_root=args.activation_request_root,
+        activation_status_root=args.activation_status_root,
     )
     if args.operation:
         payload = _read_stdin()

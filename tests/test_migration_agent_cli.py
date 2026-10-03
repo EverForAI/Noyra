@@ -74,6 +74,41 @@ def test_cli_identity_and_dispatch_keep_secret_out_of_manifest(tmp_path: Path) -
     assert report["status"] == "restored"
 
 
+def test_load_agent_uses_the_fixed_signed_root_activation_bridge(tmp_path: Path) -> None:
+    module = _module()
+    private = Ed25519PrivateKey.generate()
+    public = private.public_key().public_bytes_raw()
+    identity = tmp_path / "identity.json"
+    identity.write_text(
+        json.dumps(
+            {
+                "target_id": "target-1",
+                "key_fingerprint": hashlib.sha256(public).hexdigest(),
+                "generation": 1,
+                "public_key": base64.urlsafe_b64encode(public).decode(),
+                "private_key": base64.urlsafe_b64encode(private.private_bytes_raw()).decode(),
+            }
+        )
+    )
+    if os.name != "nt":
+        identity.chmod(0o600)
+    request_root = tmp_path / "requests"
+    status_root = tmp_path / "status"
+
+    agent = module.load_agent(
+        identity,
+        tmp_path / "agent-data",
+        activation_request_root=request_root,
+        activation_status_root=status_root,
+    )
+
+    from noyra.migration.activation import TargetActivationBridge
+
+    assert isinstance(agent.activation_controller, TargetActivationBridge)
+    assert agent.activation_controller.request_root == request_root
+    assert agent.activation_controller.status_root == status_root
+
+
 def test_identity_file_rejects_hardlinks(tmp_path: Path) -> None:
     module = _module()
     identity = tmp_path / "identity.json"
@@ -117,14 +152,29 @@ def test_cli_dispatch_signs_health_and_persists_activation(tmp_path: Path) -> No
     module = _module()
     private = Ed25519PrivateKey.generate()
     public = private.public_key().public_bytes_raw()
+
+    class ActivationController:
+        def activate(self, request: dict[str, Any]) -> dict[str, Any]:
+            return {
+                **request,
+                "status": "active",
+                "service_unit": "noyra.service",
+                "active_database_sha256": "c" * 64,
+                "activated_at": "2026-10-03T00:00:00+00:00",
+            }
+
+        def deactivate(self, request: dict[str, Any]) -> dict[str, Any]:
+            return {"status": "deactivated", "task_id": request["task_id"]}
+
     agent = module.MigrationAgent(
         target_id="target-1",
         key_fingerprint=hashlib.sha256(public).hexdigest(),
         signing_key=private,
         data_root=tmp_path / "data",
         restore_root=tmp_path / "restore-root",
+        activation_controller=ActivationController(),
     )
-    restored_path = tmp_path / "restore-root" / "restored.sqlite3"
+    restored_path = tmp_path / "restore-root" / "task-1" / "noyra.sqlite3"
     restored_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(restored_path) as connection:
         connection.execute("CREATE TABLE runtime_state(subject_id TEXT NOT NULL)")
@@ -166,9 +216,20 @@ def test_cli_dispatch_signs_health_and_persists_activation(tmp_path: Path) -> No
             "health_report_digest": module.content_hash(
                 {key: value for key, value in health.items() if key != "target_signature"}
             ),
+            "source_fence_digest": "d" * 64,
         },
     )
     assert activation["status"] == "active"
+    assert activation["source_fence_digest"] == "d" * 64
+    signature = base64.urlsafe_b64decode(
+        activation["target_signature"] + "=" * (-len(activation["target_signature"]) % 4)
+    )
+    private.public_key().verify(
+        signature,
+        module.canonical_json(
+            {key: value for key, value in activation.items() if key != "target_signature"}
+        ).encode(),
+    )
     assert module.dispatch(
         agent,
         "deactivate",

@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from noyra.core.types import canonical_json
 from noyra.migration.agent import MigrationAgent, RestoreReport, TargetHealthReport
 from noyra.migration.recovery import RecoveryCoordinator, RecoveryRequest
 from noyra.migration.trust import TargetChallenge
@@ -105,6 +106,114 @@ def test_agent_rejects_recovery_signing_without_key() -> None:
         agent.sign_recovery_proof(b"proof")
 
 
+def test_target_activation_fails_closed_without_a_runtime_handoff_controller(
+    tmp_path: Any,
+) -> None:
+    private = Ed25519PrivateKey.generate()
+    public_bytes = private.public_key().public_bytes_raw()
+    agent = MigrationAgent(
+        target_id="target-1",
+        key_fingerprint=hashlib.sha256(public_bytes).hexdigest(),
+        signing_key=private,
+        data_root=tmp_path,
+    )
+    request = {
+        "task_id": "task-activation-1",
+        "subject_id": "Noyra-0001",
+        "target_id": "target-1",
+        "source_epoch": "runtime-4",
+        "manifest_digest": "a" * 64,
+        "artifact_id": "artifact-1",
+        "health_report_digest": "b" * 64,
+        "source_fence_digest": "d" * 64,
+    }
+
+    with pytest.raises(ValueError, match="runtime activation controller"):
+        agent.activate(request)
+
+
+def test_target_activation_returns_agent_signed_service_receipt(tmp_path: Any) -> None:
+    private = Ed25519PrivateKey.generate()
+    public_bytes = private.public_key().public_bytes_raw()
+
+    class ActivationController:
+        def activate(self, request: Any) -> dict[str, Any]:
+            return {
+                **dict(request),
+                "status": "active",
+                "service_unit": "noyra.service",
+                "active_database_sha256": "c" * 64,
+                "activated_at": "2026-10-03T00:00:00+00:00",
+            }
+
+    agent = MigrationAgent(
+        target_id="target-1",
+        key_fingerprint=hashlib.sha256(public_bytes).hexdigest(),
+        signing_key=private,
+        data_root=tmp_path,
+        activation_controller=ActivationController(),
+    )
+    request = {
+        "task_id": "task-activation-1",
+        "subject_id": "Noyra-0001",
+        "target_id": "target-1",
+        "source_epoch": "runtime-4",
+        "manifest_digest": "a" * 64,
+        "artifact_id": "artifact-1",
+        "health_report_digest": "b" * 64,
+        "source_fence_digest": "d" * 64,
+    }
+
+    receipt = agent.activate(request)
+
+    signature = base64.urlsafe_b64decode(
+        receipt["target_signature"] + "=" * (-len(receipt["target_signature"]) % 4)
+    )
+    private.public_key().verify(
+        signature,
+        canonical_json({key: value for key, value in receipt.items() if key != "target_signature"})
+        .encode(),
+    )
+    assert receipt["status"] == "active"
+    assert receipt["service_unit"] == "noyra.service"
+    assert receipt["active_database_sha256"] == "c" * 64
+
+
+def test_target_activation_requires_a_source_fence_digest(tmp_path: Any) -> None:
+    private = Ed25519PrivateKey.generate()
+    public_bytes = private.public_key().public_bytes_raw()
+
+    class ActivationController:
+        def activate(self, request: Any) -> dict[str, Any]:
+            return {
+                **dict(request),
+                "status": "active",
+                "service_unit": "noyra.service",
+                "active_database_sha256": "c" * 64,
+                "activated_at": "2026-10-03T00:00:00+00:00",
+            }
+
+    agent = MigrationAgent(
+        target_id="target-1",
+        key_fingerprint=hashlib.sha256(public_bytes).hexdigest(),
+        signing_key=private,
+        data_root=tmp_path,
+        activation_controller=ActivationController(),
+    )
+    request = {
+        "task_id": "task-activation-1",
+        "subject_id": "Noyra-0001",
+        "target_id": "target-1",
+        "source_epoch": "runtime-4",
+        "manifest_digest": "a" * 64,
+        "artifact_id": "artifact-1",
+        "health_report_digest": "b" * 64,
+    }
+
+    with pytest.raises(ValueError, match="migration activation request is invalid"):
+        agent.activate(request)
+
+
 def test_agent_persists_manifest_inside_private_root_and_restores_it(tmp_path: Any) -> None:
     agent = MigrationAgent(target_id="target-1", key_fingerprint="a" * 64, data_root=tmp_path)
     database_path = tmp_path / "fixture.sqlite3"
@@ -126,7 +235,7 @@ def test_agent_persists_manifest_inside_private_root_and_restores_it(tmp_path: A
     agent.restore_root = (tmp_path / "restored").resolve()
     agent.restore_root.mkdir(mode=0o700)
     agent._assert_private_directory(agent.restore_root)
-    report = agent.restore(receipt)
+    report = agent.restore(receipt, task_id="task-restore-1")
     health = agent.validate(report)
 
     manifest_path = tmp_path / "incoming" / "artifact-1.json"
@@ -139,6 +248,35 @@ def test_agent_persists_manifest_inside_private_root_and_restores_it(tmp_path: A
     assert isinstance(health, TargetHealthReport)
     assert health["status"] == "healthy"
     assert health["manifest_digest"] == receipt.manifest_digest
+
+
+def test_agent_restores_each_migration_task_to_its_own_directory(tmp_path: Any) -> None:
+    agent = MigrationAgent(target_id="target-1", key_fingerprint="a" * 64, data_root=tmp_path)
+    database_path = tmp_path / "fixture.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("CREATE TABLE runtime_state(subject_id TEXT NOT NULL)")
+        connection.execute("INSERT INTO runtime_state(subject_id) VALUES (?)", ("Noyra-0001",))
+    artifact = database_path.read_bytes()
+    receipt = agent.receive(
+        {
+            "artifact_id": "artifact-1",
+            "byte_size": len(artifact),
+            "artifact_sha256": hashlib.sha256(artifact).hexdigest(),
+            "artifact_format": "sqlite",
+            "subject_id": "Noyra-0001",
+        },
+        artifact=artifact,
+    )
+    agent.restore_root = (tmp_path / "restored").resolve()
+    agent.restore_root.mkdir(mode=0o700)
+
+    first = agent.restore(receipt, task_id="task-restore-1")
+    second = agent.restore(receipt, task_id="task-restore-2")
+
+    assert first.restore_path == str(agent.restore_root / "task-restore-1" / "noyra.sqlite3")
+    assert second.restore_path == str(agent.restore_root / "task-restore-2" / "noyra.sqlite3")
+    assert Path(first.restore_path).is_file()
+    assert Path(second.restore_path).is_file()
 
 
 def test_agent_rejects_manifest_path_traversal_and_restore_digest_mismatch(tmp_path: Any) -> None:

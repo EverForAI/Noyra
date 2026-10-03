@@ -239,6 +239,56 @@ def test_filesystem_source_fence_closes_admission_and_survives_restart(tmp_path:
     assert not restarted.process_lock.held
 
 
+def test_matching_migration_target_can_boot_and_mutate_its_fenced_runtime(tmp_path: Any) -> None:
+    database_path = tmp_path / "target-owned.sqlite3"
+    subject_id = "Noyra-0001"
+    kernel = SubjectKernel(database_path, subject_id, "7" * 64)
+    kernel.boot()
+    kernel.orient()
+    state = kernel.activate()
+    private = Ed25519PrivateKey.generate()
+    TargetRegistry(kernel.database, MigrationStore(kernel.database)).register(
+        subject_id,
+        target_id="target-1",
+        public_key=base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode(),
+        endpoint="https://target.example",
+        capabilities={},
+        region=None,
+        provider=None,
+        release_sha="a" * 40,
+        os_arch="linux-amd64",
+        encrypted_volume=True,
+        actor="test",
+    )
+    EpochLease._acquire_unchecked(
+        kernel.database,
+        subject_id,
+        "target-1",
+        expected_source_epoch=f"runtime-{state.version}",
+        actor="test",
+    )
+    kernel.close()
+
+    source = SubjectKernel(database_path, subject_id, "7" * 64)
+    with pytest.raises(RuntimeOwnershipError, match="migration epoch"):
+        source.boot()
+
+    target = SubjectKernel(
+        database_path,
+        subject_id,
+        "7" * 64,
+        migration_target_id="target-1",
+    )
+    target.boot()
+    target.orient()
+    target.activate()
+    target_lease = target.admission.begin("target-owned-operation")
+    target_lease.assert_current()
+    target.admission.finish(target_lease)
+    target.checkpoint({"active": "on target"}, reason="target ownership")
+    target.close()
+
+
 def test_migration_control_fences_existing_and_new_normal_operations() -> None:
     gate = RuntimeAdmissionGate(
         "Noyra-0001",

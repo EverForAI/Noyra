@@ -13,6 +13,7 @@ MIGRATION_COMPONENTS_BACKUP_DIR=""
 MIGRATION_COMPONENTS_CHANGED=false
 MIGRATION_AGENT_WAS_ENABLED=false
 MIGRATION_AGENT_WAS_ACTIVE=false
+TARGET_ACTIVATION_PATH_WAS_ENABLED=false
 
 noyra_upgrade_components_snapshot() {
   if [[ $# -ne 5 ]]; then
@@ -128,8 +129,8 @@ noyra_upgrade_components_commit() {
 # but have an independent activation state. Keeping a separate snapshot avoids
 # coupling migration enablement to the regular upgrade watcher.
 noyra_migration_components_snapshot() {
-  [[ $# -eq 4 ]] || {
-    echo 'Expected migration backup directory, runner and two unit paths.' >&2
+  [[ $# -ge 4 ]] || {
+    echo 'Expected migration backup directory, runner and unit paths.' >&2
     return 2
   }
   local backup_dir="$1"; shift
@@ -153,6 +154,11 @@ noyra_migration_components_snapshot() {
   case "$state" in enabled|enabled-runtime|linked|linked-runtime|alias) MIGRATION_AGENT_WAS_ENABLED=true ;; esac
   state="$(systemctl is-active noyra-migration-agent.service 2>/dev/null || true)"
   [[ "$state" == active ]] && MIGRATION_AGENT_WAS_ACTIVE=true
+  state="$(systemctl is-enabled noyra-target-activation.path 2>/dev/null || true)"
+  case "$state" in
+    enabled|enabled-runtime|linked|linked-runtime|alias) TARGET_ACTIVATION_PATH_WAS_ENABLED=true ;;
+    *) : ;;
+  esac
   MIGRATION_COMPONENTS_BACKUP_DIR="$backup_dir"
   MIGRATION_COMPONENTS_CHANGED=false
 }
@@ -164,7 +170,7 @@ noyra_migration_components_mark_changed() {
 
 noyra_migration_components_restore() {
   [[ "$MIGRATION_COMPONENTS_CHANGED" == true ]] || return 0
-  [[ $# -eq 3 ]] || return 2
+  [[ $# -ge 3 ]] || return 2
   local -a paths=("$@")
   local index=0 path temporary
   if [[ "$MIGRATION_AGENT_WAS_ACTIVE" == true ]]; then
@@ -188,6 +194,11 @@ noyra_migration_components_restore() {
     fi
   else
     systemctl disable --now noyra-migration-agent.service >/dev/null 2>&1 || true
+  fi
+  if [[ "${TARGET_ACTIVATION_PATH_WAS_ENABLED:-false}" == true ]]; then
+    systemctl enable --now noyra-target-activation.path >/dev/null 2>&1 || return 1
+  else
+    systemctl disable --now noyra-target-activation.path >/dev/null 2>&1 || true
   fi
   rm -rf -- "$MIGRATION_COMPONENTS_BACKUP_DIR" || return 1
   MIGRATION_COMPONENTS_BACKUP_DIR=""

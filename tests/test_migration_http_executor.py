@@ -6,11 +6,16 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from noyra.core.types import canonical_json, content_hash
 from noyra.migration.executor import MigrationExecutionReceipt
-from noyra.migration.http_executor import ArtifactBundle, HTTPMigrationExecutor
+from noyra.migration.http_executor import (
+    ArtifactBundle,
+    HTTPMigrationExecutor,
+    MigrationExecutionError,
+)
 from noyra.migration.manager import MigrationTask
 
 
@@ -18,6 +23,8 @@ class _Transport:
     def __init__(self, private: Ed25519PrivateKey) -> None:
         self.private = private
         self.calls: list[str] = []
+        self.activation_body: dict[str, Any] | None = None
+        self.activation_receipt: dict[str, Any] | None = None
 
     def request(self, url: str, body: dict[str, Any], token: str) -> dict[str, Any]:
         del token
@@ -87,13 +94,26 @@ class _Transport:
                 ).decode(),
             }
         if url.endswith("/v1/activate"):
+            self.activation_body = dict(body)
             activation = {
                 "task_id": body["task_id"],
+                "subject_id": body["subject_id"],
                 "target_id": "target-1",
+                "source_epoch": body["source_epoch"],
                 "manifest_digest": body["manifest_digest"],
+                "artifact_id": body["artifact_id"],
+                "health_report_digest": body["health_report_digest"],
+                "source_fence_digest": body["source_fence_digest"],
                 "status": "active",
+                "service_unit": "noyra.service",
+                "active_database_sha256": "c" * 64,
+                "activated_at": "2026-10-03T00:00:00+00:00",
             }
-            return activation
+            activation["target_signature"] = base64.urlsafe_b64encode(
+                self.private.sign(canonical_json(activation).encode())
+            ).decode()
+            self.activation_receipt = activation
+            return dict(activation)
         if url.endswith("/v1/deactivate"):
             return {"status": "deactivated"}
         raise AssertionError(url)
@@ -174,17 +194,82 @@ def test_http_executor_transfers_restores_health_checks_and_activates(tmp_path: 
     receipt = executor.execute(_task(), proof=proof, source_epoch="runtime-1")
     assert isinstance(receipt, MigrationExecutionReceipt)
     assert receipt.source_fence_digest == "f" * 64
-    assert receipt.target_activation_digest == content_hash(
-        {
-            "task_id": "task-1",
-            "target_id": "target-1",
-            "manifest_digest": content_hash(manifest),
-            "status": "active",
-        }
-    )
+    assert transport.activation_body is not None
+    assert transport.activation_body["source_fence_digest"] == "f" * 64
+    assert receipt.target_activation_digest == content_hash(transport.activation_receipt)
     assert fenced == ["runtime-1"]
     assert artifact_seen_fenced == [True]
     assert any(url.endswith("/v1/receive-chunk") for url in transport.calls)
 
     executor.rollback(_task(), receipt=receipt, reason="durable commit failed")
     assert fenced == []
+
+
+def test_http_executor_rejects_an_unsigned_target_activation_receipt(tmp_path: Path) -> None:
+    private = Ed25519PrivateKey.generate()
+    public = base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode()
+    artifact = tmp_path / "artifact.bin"
+    artifact.write_bytes(b"migration payload")
+    manifest = {
+        "artifact_id": "artifact-1",
+        "byte_size": artifact.stat().st_size,
+        "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        "artifact_format": "sqlite",
+        "schema_version": 75,
+        "subject_id": "Noyra-0001",
+    }
+
+    class UnsignedActivationTransport(_Transport):
+        def request(self, url: str, body: dict[str, Any], token: str) -> dict[str, Any]:
+            if url.endswith("/v1/activate"):
+                return {
+                    "task_id": body["task_id"],
+                    "subject_id": body["subject_id"],
+                    "target_id": body["target_id"],
+                    "source_epoch": body["source_epoch"],
+                    "manifest_digest": body["manifest_digest"],
+                    "artifact_id": body["artifact_id"],
+                    "health_report_digest": body["health_report_digest"],
+                    "status": "active",
+                    "service_unit": "noyra.service",
+                    "active_database_sha256": "c" * 64,
+                    "activated_at": "2026-10-03T00:00:00+00:00",
+                }
+            return super().request(url, body, token)
+
+    transport = UnsignedActivationTransport(private)
+    executor = HTTPMigrationExecutor(
+        target_resolver=lambda task: {
+            "target_id": task.target_id,
+            "endpoint": "https://target.example",
+            "public_key": public,
+        },
+        token_resolver=lambda task: "t" * 32,
+        artifact_resolver=lambda task, proof: ArtifactBundle(artifact, manifest),
+        source_fence=lambda task, epoch: "f" * 64,
+        source_unfence=lambda task, epoch: None,
+        transport=transport,
+        chunk_bytes=4096,
+    )
+    digest = content_hash(manifest)
+    proof = {
+        "manifest_digest": digest,
+        "artifact_id": "artifact-1",
+        "restore_report": {
+            "target_id": "target-1",
+            "artifact_id": "artifact-1",
+            "manifest_digest": digest,
+            "status": "restored",
+        },
+        "health_report": {
+            "target_id": "target-1",
+            "artifact_id": "artifact-1",
+            "manifest_digest": digest,
+            "status": "healthy",
+            "checks": {"database": True},
+        },
+        "target_signature": "x" * 80,
+    }
+
+    with pytest.raises(MigrationExecutionError, match="target_activation_signature_missing"):
+        executor.execute(_task(), proof=proof, source_epoch="runtime-1")

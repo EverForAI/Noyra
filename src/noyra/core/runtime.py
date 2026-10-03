@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import tempfile
 from contextlib import suppress
@@ -54,7 +55,10 @@ def _migration_fence_active(fence_root: Path | None, subject_id: str) -> bool:
 
 
 def _migration_epoch_guard(
-    connection: Any, subject_id: str, fence_root: Path | None = None
+    connection: Any,
+    subject_id: str,
+    fence_root: Path | None = None,
+    migration_target_id: str | None = None,
 ) -> None:
     """Reject a source mutation while a target or completed epoch owns it.
 
@@ -64,8 +68,9 @@ def _migration_epoch_guard(
     """
     row = connection.execute(
         "SELECT 1 FROM migration_epochs WHERE subject_id=? "
-        "AND status IN ('active','completed') LIMIT 1",
-        (subject_id,),
+        "AND status IN ('active','completed') "
+        "AND (? IS NULL OR target_id<>?) LIMIT 1",
+        (subject_id, migration_target_id, migration_target_id),
     ).fetchone()
     if row is not None:
         raise RuntimeOwnershipError("runtime ownership is fenced by a migration epoch")
@@ -74,22 +79,27 @@ def _migration_epoch_guard(
 
 
 def _no_active_migration_epoch(
-    database: Database, subject_id: str, fence_root: Path | None = None
+    database: Database,
+    subject_id: str,
+    fence_root: Path | None = None,
+    migration_target_id: str | None = None,
 ) -> bool:
     """Fail closed when a durable target epoch owns this subject."""
     try:
         with database.connection() as connection:
             row = connection.execute(
                 "SELECT 1 FROM migration_epochs WHERE subject_id=? "
-                "AND status IN ('active','completed') LIMIT 1",
-                (subject_id,),
+                "AND status IN ('active','completed') "
+                "AND (? IS NULL OR target_id<>?) LIMIT 1",
+                (subject_id, migration_target_id, migration_target_id),
             ).fetchone()
             if row is None:
                 row = connection.execute(
                     "SELECT 1 FROM migration_tasks t JOIN migration_epochs e "
                     "ON t.target_epoch_id=e.epoch_id WHERE t.subject_id=? "
-                    "AND t.status='rolling_back' AND e.status='revoked' LIMIT 1",
-                    (subject_id,),
+                    "AND t.status='rolling_back' AND e.status='revoked' "
+                    "AND (? IS NULL OR e.target_id<>?) LIMIT 1",
+                    (subject_id, migration_target_id, migration_target_id),
                 ).fetchone()
     except sqlite3.Error:
         return False
@@ -109,12 +119,21 @@ class SubjectKernel:
         process_lock: ProcessLock | None = None,
         defer_preflight: bool = False,
         migration_fence_root: Path | str | None = None,
+        migration_target_id: str | None = None,
     ):
         validate_subject_id(subject_id)
         resolved_database_path = Path(database_path).resolve()
         self._migration_fence_root = (
             Path(migration_fence_root).resolve() if migration_fence_root is not None else None
         )
+        configured_target_id = migration_target_id or os.environ.get(
+            "NOYRA_MIGRATION_TARGET_ID"
+        )
+        if configured_target_id is not None and not re.fullmatch(
+            r"[A-Za-z0-9_-]{3,128}", configured_target_id
+        ):
+            raise ValueError("migration target identity is invalid")
+        self._migration_target_id = configured_target_id
         self.process_lock = process_lock or ProcessLock(f"{resolved_database_path}.lock")
         self._genesis_hash = genesis_hash
         self._runtime_ready = False
@@ -155,12 +174,18 @@ class SubjectKernel:
                 ownership_check=lambda: (
                     process_lock_ref.held
                     and _no_active_migration_epoch(
-                        database_ref, subject_id, self._migration_fence_root
+                        database_ref,
+                        subject_id,
+                        self._migration_fence_root,
+                        self._migration_target_id,
                     )
                 ),
                 control_ownership_check=lambda: process_lock_ref.held,
                 migration_clear_check=lambda: _no_active_migration_epoch(
-                    database_ref, subject_id, self._migration_fence_root
+                    database_ref,
+                    subject_id,
+                    self._migration_fence_root,
+                    self._migration_target_id,
                 ),
             )
             self.identity_store = IdentityStore(self.database)
@@ -171,7 +196,9 @@ class SubjectKernel:
                 self.database,
                 self.event_store,
                 subject_id,
-                mutation_guard=lambda connection: _migration_epoch_guard(connection, subject_id),
+                mutation_guard=lambda connection: _migration_epoch_guard(
+                    connection, subject_id, self._migration_fence_root, self._migration_target_id
+                ),
             )
             self.identity: SubjectIdentity | None
             if allow_subject_creation and not self._preflight_only:
@@ -324,7 +351,10 @@ class SubjectKernel:
         if not self.process_lock.held:
             raise RuntimeOwnershipError("this kernel does not own the subject runtime")
         if not _no_active_migration_epoch(
-            self.database, self.subject_id, self._migration_fence_root
+            self.database,
+            self.subject_id,
+            self._migration_fence_root,
+            self._migration_target_id,
         ):
             if _migration_fence_active(self._migration_fence_root, self.subject_id):
                 raise RuntimeOwnershipError("runtime ownership is blocked by a migration fence")
@@ -368,7 +398,12 @@ class SubjectKernel:
         if not reason.strip():
             raise ValueError("checkpoint reason is required")
         with self.database.transaction() as connection:
-            _migration_epoch_guard(connection, self.subject_id, self._migration_fence_root)
+            _migration_epoch_guard(
+                connection,
+                self.subject_id,
+                self._migration_fence_root,
+                self._migration_target_id,
+            )
             row = connection.execute(
                 "SELECT state_version FROM subject_identity WHERE subject_id = ?",
                 (self.subject_id,),
@@ -448,3 +483,8 @@ class SubjectKernel:
             "lifecycle": self.lifecycle.current().__dict__,
             "recoverable_actions": len(self.action_ledger.recoverable(self.subject_id)),
         }
+
+    @property
+    def migration_target_id(self) -> str | None:
+        """Return the configured target identity, if this is a migrated runtime."""
+        return self._migration_target_id

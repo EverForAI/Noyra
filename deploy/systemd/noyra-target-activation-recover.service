@@ -1,0 +1,20 @@
+[Unit]
+Description=Recover interrupted Noyra target activation before service startup
+Before=noyra.service
+RequiresMountsFor=/var/lib/noyra
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/noyra/current/.venv/bin/python /opt/noyra/current/scripts/noyra-target-activation-runner.py --recover
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/noyra /var/lib/noyra/migration/target-activation/state /etc/systemd/system/noyra.service.d
+UMask=0077

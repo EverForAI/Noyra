@@ -18,6 +18,7 @@ import sqlite3
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
@@ -205,6 +206,7 @@ class HTTPMigrationExecutor:
                 "/v1/restore",
                 {
                     **final,
+                    "task_id": task.task_id,
                     "expected_digest": manifest_digest,
                 },
             )
@@ -244,10 +246,18 @@ class HTTPMigrationExecutor:
                     "manifest_digest": manifest_digest,
                     "artifact_id": manifest["artifact_id"],
                     "health_report_digest": content_hash(health_with_signature),
+                    "source_fence_digest": source_fence_digest,
                 },
             )
-            if activation.get("status") != "active":
-                raise MigrationExecutionError("target_activation_failed")
+            activation = self._verify_activation_receipt(
+                target,
+                task,
+                manifest_digest,
+                str(manifest["artifact_id"]),
+                content_hash(health_with_signature),
+                source_fence_digest,
+                activation,
+            )
             activation_digest = content_hash(activation)
             self._active[task.task_id] = (target, token, source_epoch)
             return MigrationExecutionReceipt(
@@ -441,6 +451,65 @@ class HTTPMigrationExecutor:
             )
         except _SIGNATURE_ERROR as error:
             raise MigrationExecutionError("target_health_signature_invalid") from error
+
+    @staticmethod
+    def _verify_activation_receipt(
+        target: Mapping[str, Any],
+        task: MigrationTask,
+        manifest_digest: str,
+        artifact_id: str,
+        health_report_digest: str,
+        source_fence_digest: str,
+        receipt: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(receipt, Mapping) or not isinstance(
+            receipt.get("target_signature"), str
+        ):
+            raise MigrationExecutionError("target_activation_signature_missing")
+        required = {
+            "task_id": task.task_id,
+            "subject_id": task.subject_id,
+            "target_id": task.target_id,
+            "source_epoch": task.source_epoch,
+            "manifest_digest": manifest_digest,
+            "artifact_id": artifact_id,
+            "health_report_digest": health_report_digest,
+            "source_fence_digest": source_fence_digest,
+            "status": "active",
+            "service_unit": "noyra.service",
+        }
+        if any(receipt.get(key) != value for key, value in required.items()):
+            raise MigrationExecutionError("target_activation_receipt_invalid")
+        if not isinstance(receipt.get("active_database_sha256"), str) or not re.fullmatch(
+            r"[0-9a-f]{64}", receipt["active_database_sha256"]
+        ):
+            raise MigrationExecutionError("target_activation_receipt_invalid")
+        activated_at = receipt.get("activated_at")
+        if not isinstance(activated_at, str):
+            raise MigrationExecutionError("target_activation_receipt_invalid")
+        try:
+            timestamp = datetime.fromisoformat(activated_at.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise MigrationExecutionError("target_activation_receipt_invalid") from error
+        if timestamp.tzinfo is None:
+            raise MigrationExecutionError("target_activation_receipt_invalid")
+        receipt_fields = {*required, "active_database_sha256", "activated_at", "target_signature"}
+        if set(receipt) != receipt_fields:
+            raise MigrationExecutionError("target_activation_receipt_invalid")
+        signed = {key: value for key, value in receipt.items() if key != "target_signature"}
+        try:
+            encoded_key = str(target["public_key"])
+            raw_key = base64.urlsafe_b64decode(encoded_key + "=" * (-len(encoded_key) % 4))
+            raw_signature = base64.urlsafe_b64decode(
+                str(receipt["target_signature"])
+                + "=" * (-len(str(receipt["target_signature"])) % 4)
+            )
+            Ed25519PublicKey.from_public_bytes(raw_key).verify(
+                raw_signature, canonical_json(signed).encode("utf-8")
+            )
+        except _SIGNATURE_ERROR as error:
+            raise MigrationExecutionError("target_activation_signature_invalid") from error
+        return dict(receipt)
 
     @staticmethod
     def _digest(value: Any) -> bool:
