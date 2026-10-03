@@ -180,6 +180,10 @@ class HTTPMigrationExecutor:
     ) -> MigrationExecutionReceipt:
         if source_epoch != task.source_epoch:
             raise MigrationExecutionError("source_epoch_mismatch")
+        # There is currently no source-authenticated enrolled recipient-key
+        # contract or migration bundle encryptor.  Refuse before fencing so a
+        # plaintext SQLite snapshot can never become a migration artifact.
+        raise MigrationExecutionError("recipient_encrypted_bundle_unavailable")
         target = self._target(task)
         token = self._token(task)
         source_fence_digest = self.source_fence(task, source_epoch)

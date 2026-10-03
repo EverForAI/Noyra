@@ -17,10 +17,11 @@ from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from noyra.core.at_rest import AtRestConfig, VolumeEncryptionProbe, VolumeEncryptionStatus
 from noyra.core.types import canonical_json, content_hash
 
 from .trust import TargetAttestation, TargetChallenge
@@ -37,6 +38,16 @@ _AUTH_MAX_BODY_BYTES = 8 * 1024 * 1024
 MAX_CHUNK_BYTES = 4 * 1024 * 1024
 MAX_CHUNKS = 2_000_000
 _NONCE = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
+
+
+class MigrationVolumeProbe(Protocol):
+    def probe(
+        self,
+        data_root: Path | str,
+        *,
+        backend: str,
+        attestation_path: Path | None,
+    ) -> VolumeEncryptionStatus: ...
 
 
 class AgentAuthenticationError(ValueError):
@@ -134,6 +145,7 @@ class MigrationAgent:
         backup_manager: Any | None = None,
         restore_root: Path | str | None = None,
         activation_controller: Any | None = None,
+        volume_probe: MigrationVolumeProbe | None = None,
     ) -> None:
         if (
             not re.fullmatch(r"[A-Za-z0-9_-]{3,128}", target_id)
@@ -164,12 +176,15 @@ class MigrationAgent:
             raise ValueError("incoming file quota is invalid")
         if type(artifact_ttl_seconds) is not int or not 60 <= artifact_ttl_seconds <= 90 * 86400:
             raise ValueError("artifact TTL is invalid")
+        if require_encrypted_storage is not True:
+            raise ValueError("migration encrypted storage requirement cannot be disabled")
         self.target_id = target_id
         self.key_fingerprint = key_fingerprint
         self.generation = generation
         self.public_key = public_key
         self._signing_key = signing_key
-        self.require_encrypted_storage = require_encrypted_storage
+        self.require_encrypted_storage = True
+        self._volume_probe = volume_probe or VolumeEncryptionProbe()
         self._session_token = session_token
         self.max_incoming_bytes = max_incoming_bytes
         self.max_incoming_files = max_incoming_files
@@ -257,6 +272,7 @@ class MigrationAgent:
         elif self.data_root is not None:
             raise ValueError("migration artifact bytes are required")
         if self.data_root is not None:
+            self._require_encrypted_volume(self.data_root)
             encoded = canonical_json(values).encode("utf-8")
             with self._io_lock:
                 self.cleanup_expired()
@@ -330,6 +346,7 @@ class MigrationAgent:
         values = self._validate_manifest(manifest)
         if self.data_root is None:
             raise ValueError("migration chunk storage is unavailable")
+        self._require_encrypted_volume(self.data_root)
         if type(chunk_index) is not int or chunk_index < 0:
             raise ValueError("migration chunk index is invalid")
         if type(chunk_count) is not int or not 1 <= chunk_count <= MAX_CHUNKS:
@@ -609,6 +626,10 @@ class MigrationAgent:
             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}", task_id)
         ):
             raise ValueError("migration restore task identity is required")
+        if self.data_root is not None:
+            self._require_encrypted_volume(self.data_root)
+        if self.restore_root is not None:
+            self._require_encrypted_volume(self.restore_root)
         values = self._read_manifest(receipt)
         if content_hash(values) != receipt.manifest_digest:
             raise ValueError("migration manifest digest mismatch")
@@ -727,6 +748,7 @@ class MigrationAgent:
             raise ValueError("migration activation identity is invalid")
         if self.data_root is None:
             raise ValueError("migration activation storage is unavailable")
+        self._require_encrypted_volume(self.data_root)
         if self._signing_key is None:
             raise ValueError("target signing identity is not configured")
         if self.activation_controller is None:
@@ -898,6 +920,16 @@ class MigrationAgent:
         return report.restore_path is not None and self.restore_root is not None and Path(
             report.restore_path
         ).resolve().is_relative_to(self.restore_root)
+
+    def _require_encrypted_volume(self, path: Path) -> None:
+        config = AtRestConfig.from_env(path)
+        status = self._volume_probe.probe(
+            path,
+            backend=config.volume_backend,
+            attestation_path=config.attestation_path,
+        )
+        if not status.encrypted:
+            raise ValueError(f"migration encrypted volume requirement failed: {status.detail}")
 
     @staticmethod
     def _database_quick_check(path: Path) -> bool:

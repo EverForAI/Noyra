@@ -10,11 +10,10 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from noyra.core.types import canonical_json, content_hash
-from noyra.migration.executor import MigrationExecutionReceipt
+from noyra.migration.executor import MigrationExecutionError
 from noyra.migration.http_executor import (
     ArtifactBundle,
     HTTPMigrationExecutor,
-    MigrationExecutionError,
 )
 from noyra.migration.manager import MigrationTask
 
@@ -192,21 +191,54 @@ def test_http_executor_transfers_restores_health_checks_and_activates(tmp_path: 
         },
         "target_signature": "x" * 80,
     }
-    receipt = executor.execute(_task(), proof=proof, source_epoch="runtime-1")
-    assert isinstance(receipt, MigrationExecutionReceipt)
-    assert receipt.source_fence_digest == "f" * 64
-    assert transport.activation_body is not None
-    assert transport.activation_body["source_fence_digest"] == "f" * 64
-    assert receipt.target_activation_digest == content_hash(transport.activation_receipt)
-    assert fenced == ["runtime-1"]
-    assert artifact_seen_fenced == [True]
-    assert any(url.endswith("/v1/receive-chunk") for url in transport.calls)
+    with pytest.raises(MigrationExecutionError, match="recipient_encrypted_bundle_unavailable"):
+        executor.execute(_task(), proof=proof, source_epoch="runtime-1")
 
-    executor.rollback(_task(), receipt=receipt, reason="durable commit failed")
+    assert fenced == []
+    assert artifact_seen_fenced == []
+    assert transport.calls == []
+
+
+def test_http_executor_fails_closed_before_fencing_without_recipient_crypto_contract(
+    tmp_path: Path,
+) -> None:
+    private = Ed25519PrivateKey.generate()
+    public = base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode()
+    fenced: list[str] = []
+
+    def fence(task: MigrationTask, epoch: str) -> str:
+        del task
+        fenced.append(epoch)
+        return "f" * 64
+
+    artifact = tmp_path / "artifact.sqlite"
+    artifact.write_bytes(b"plaintext sqlite bytes")
+    executor = HTTPMigrationExecutor(
+        target_resolver=lambda task: {
+            "target_id": task.target_id,
+            "endpoint": "https://target.example",
+            "public_key": public,
+        },
+        token_resolver=lambda task: "t" * 32,
+        artifact_resolver=lambda task, proof: ArtifactBundle(
+            artifact,
+            {
+                "artifact_id": "artifact-1",
+                "artifact_format": "sqlite",
+                "byte_size": artifact.stat().st_size,
+            },
+        ),
+        source_fence=fence,
+        source_unfence=lambda task, epoch: None,
+        transport=_Transport(private),
+    )
+    with pytest.raises(MigrationExecutionError, match="recipient_encrypted_bundle_unavailable"):
+        executor.execute(_task(), proof={}, source_epoch="runtime-1")
+    assert fenced == []
     assert fenced == []
 
 
-def test_http_executor_rejects_an_unsigned_target_activation_receipt(tmp_path: Path) -> None:
+def test_http_executor_refuses_unsafe_bundle_before_any_target_work(tmp_path: Path) -> None:
     private = Ed25519PrivateKey.generate()
     public = base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode()
     artifact = tmp_path / "artifact.bin"
@@ -239,6 +271,13 @@ def test_http_executor_rejects_an_unsigned_target_activation_receipt(tmp_path: P
             return super().request(url, body, token)
 
     transport = UnsignedActivationTransport(private)
+    fenced: list[str] = []
+
+    def fence(task: MigrationTask, epoch: str) -> str:
+        del task
+        fenced.append(epoch)
+        return "f" * 64
+
     executor = HTTPMigrationExecutor(
         target_resolver=lambda task: {
             "target_id": task.target_id,
@@ -247,7 +286,7 @@ def test_http_executor_rejects_an_unsigned_target_activation_receipt(tmp_path: P
         },
         token_resolver=lambda task: "t" * 32,
         artifact_resolver=lambda task, proof: ArtifactBundle(artifact, manifest),
-        source_fence=lambda task, epoch: "f" * 64,
+        source_fence=fence,
         source_unfence=lambda task, epoch: None,
         transport=transport,
         chunk_bytes=4096,
@@ -272,5 +311,7 @@ def test_http_executor_rejects_an_unsigned_target_activation_receipt(tmp_path: P
         "target_signature": "x" * 80,
     }
 
-    with pytest.raises(MigrationExecutionError, match="target_activation_signature_missing"):
+    with pytest.raises(MigrationExecutionError, match="recipient_encrypted_bundle_unavailable"):
         executor.execute(_task(), proof=proof, source_epoch="runtime-1")
+    assert fenced == []
+    assert transport.calls == []

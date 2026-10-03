@@ -14,10 +14,25 @@ from typing import Any
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from noyra.core.at_rest import VolumeEncryptionStatus
 from noyra.core.types import canonical_json
-from noyra.migration.agent import MigrationAgent, RestoreReport, TargetHealthReport
+from noyra.migration.agent import (
+    MigrationAgent,
+    RestoreReport,
+    TargetHealthReport,
+)
 from noyra.migration.recovery import RecoveryCoordinator, RecoveryRequest
 from noyra.migration.trust import TargetChallenge
+
+
+@pytest.fixture(autouse=True)
+def _test_volume_is_encrypted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "noyra.core.at_rest.VolumeEncryptionProbe.probe",
+        lambda self, root, *, backend, attestation_path: VolumeEncryptionStatus(
+            True, "test", "verified fixture volume", str(root)
+        ),
+    )
 
 
 def _auth_headers(token: str, body: bytes, *, timestamp: int, nonce: str) -> dict[str, str]:
@@ -420,3 +435,112 @@ def test_agent_chunked_receive_is_resumable_idempotent_and_bound_to_manifest(tmp
         )
     assert result is not None and result.complete is True
     assert result.artifact_path is not None and Path(result.artifact_path).read_bytes() == artifact
+
+
+def test_agent_requires_live_encrypted_volume_check_before_persisting(tmp_path: Any) -> None:
+    from noyra.core.at_rest import VolumeEncryptionStatus
+
+    class Probe:
+        def __init__(self) -> None:
+            self.paths: list[Path] = []
+
+        def probe(
+            self, root: Path | str, *, backend: str, attestation_path: Path | None
+        ) -> VolumeEncryptionStatus:
+            del backend, attestation_path
+            self.paths.append(Path(root))
+            return VolumeEncryptionStatus(False, "test", "unencrypted")
+
+    probe = Probe()
+    agent = MigrationAgent(
+        target_id="target-1",
+        key_fingerprint="a" * 64,
+        data_root=tmp_path,
+        volume_probe=probe,
+    )
+    with pytest.raises(ValueError, match="encrypted volume"):
+        agent.receive({"artifact_id": "artifact-1", "byte_size": 1}, artifact=b"x")
+    assert probe.paths == [tmp_path.resolve()]
+    assert not (tmp_path / "incoming").exists()
+
+
+def test_agent_rechecks_restore_volume_and_cannot_disable_requirement(tmp_path: Any) -> None:
+    from noyra.core.at_rest import VolumeEncryptionStatus
+
+    class Probe:
+        def __init__(self) -> None:
+            self.encrypted = True
+            self.paths: list[Path] = []
+
+        def probe(
+            self, root: Path | str, *, backend: str, attestation_path: Path | None
+        ) -> VolumeEncryptionStatus:
+            del backend, attestation_path
+            self.paths.append(Path(root))
+            return VolumeEncryptionStatus(self.encrypted, "test", "test status")
+
+    probe = Probe()
+    agent = MigrationAgent(
+        target_id="target-1",
+        key_fingerprint="a" * 64,
+        data_root=tmp_path,
+        volume_probe=probe,
+    )
+    receipt = agent.receive({"artifact_id": "artifact-1", "byte_size": 1}, artifact=b"x")
+    probe.encrypted = False
+    agent.restore_root = (tmp_path / "restore").resolve()
+    with pytest.raises(ValueError, match="encrypted volume"):
+        agent.restore(receipt, task_id="task-restore-1")
+    assert not (agent.restore_root / "task-restore-1").exists()
+    with pytest.raises(ValueError, match="cannot be disabled"):
+        MigrationAgent(
+            target_id="target-2",
+            key_fingerprint="b" * 64,
+            data_root=tmp_path / "other",
+            require_encrypted_storage=False,
+        volume_probe=probe,
+        )
+
+
+def test_agent_checks_encrypted_volume_before_activation_side_effect(tmp_path: Any) -> None:
+    from noyra.core.at_rest import VolumeEncryptionStatus
+
+    class Probe:
+        def probe(
+            self, root: Path | str, *, backend: str, attestation_path: Path | None
+        ) -> VolumeEncryptionStatus:
+            del root, backend, attestation_path
+            return VolumeEncryptionStatus(False, "test", "unencrypted")
+
+    class Controller:
+        called = False
+
+        def activate(self, request: dict[str, Any]) -> dict[str, Any]:
+            del request
+            self.called = True
+            return {}
+
+    private = Ed25519PrivateKey.generate()
+    controller = Controller()
+    agent = MigrationAgent(
+        target_id="target-1",
+        key_fingerprint=hashlib.sha256(private.public_key().public_bytes_raw()).hexdigest(),
+        signing_key=private,
+        data_root=tmp_path,
+        activation_controller=controller,
+        volume_probe=Probe(),
+    )
+    request = {
+        "task_id": "task-activate-1",
+        "subject_id": "Noyra-0001",
+        "target_id": "target-1",
+        "source_epoch": "runtime-1",
+        "manifest_digest": "a" * 64,
+        "artifact_id": "artifact-1",
+        "artifact_sha256": "b" * 64,
+        "health_report_digest": "c" * 64,
+        "source_fence_digest": "d" * 64,
+    }
+    with pytest.raises(ValueError, match="encrypted volume"):
+        agent.activate(request)
+    assert controller.called is False

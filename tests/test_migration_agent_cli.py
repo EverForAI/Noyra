@@ -16,6 +16,18 @@ from typing import Any
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from noyra.core.at_rest import VolumeEncryptionStatus
+
+
+@pytest.fixture(autouse=True)
+def _test_volume_is_encrypted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "noyra.core.at_rest.VolumeEncryptionProbe.probe",
+        lambda self, root, *, backend, attestation_path: VolumeEncryptionStatus(
+            True, "test", "verified fixture volume", str(root)
+        ),
+    )
+
 
 def _auth_headers(token: str, body: bytes, *, timestamp: int, nonce: str) -> dict[str, str]:
     digest = hashlib.sha256(body).hexdigest()
