@@ -25,3 +25,15 @@ Coverage includes actual database handoff, invalid subject/fence rejection, stag
 ## Limits
 
 This work ran on Windows. The tests exercise controller logic and static unit/installer contracts; actual Linux ownership enforcement, systemd activation/path/recovery ordering, and runtime readiness against a live Linux service could not be exercised here. No deployment or push was performed.
+
+## Post-commit verification follow-up
+
+Corrected the import ordering in `scripts/noyra-migration-agent.py` after a fresh Ruff run identified I001. Reverification after the fix:
+
+- Gate 3 contract tests: 7 passed.
+- Focused activation, agent, CLI, HTTP executor, and fencing tests: 46 passed.
+- Ruff: passed.
+- Mypy over the seven modified runtime/runner modules: passed.
+- `compileall`: passed.
+- Migration install and component rollback shell contracts: passed.
+- `git diff --check`: passed.

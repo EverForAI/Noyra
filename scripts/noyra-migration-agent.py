@@ -18,8 +18,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from noyra.core.at_rest import EncryptedBackupManager
 from noyra.core.types import canonical_json, content_hash
-from noyra.migration.agent import AgentAuthenticationError, MigrationAgent
 from noyra.migration.activation import TargetActivationBridge
+from noyra.migration.agent import AgentAuthenticationError, MigrationAgent
 
 MAX_BODY = 8 * 1024 * 1024
 IDENTITY_KEYS = frozenset(
