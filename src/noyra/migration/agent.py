@@ -676,6 +676,70 @@ class MigrationAgent:
             checks,
         )
 
+    def activate(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        """Publish target activation only after the source bound health proof."""
+        required = {
+            "task_id",
+            "subject_id",
+            "target_id",
+            "source_epoch",
+            "manifest_digest",
+            "artifact_id",
+            "health_report_digest",
+        }
+        if set(request) != required or request.get("target_id") != self.target_id:
+            raise ValueError("migration activation request is invalid")
+        for key in ("manifest_digest", "health_report_digest"):
+            if not isinstance(request.get(key), str) or not re.fullmatch(
+                r"[0-9a-f]{64}", str(request[key])
+            ):
+                raise ValueError("migration activation digest is invalid")
+        for key in ("task_id", "source_epoch"):
+            if not isinstance(request.get(key), str) or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}", str(request[key])
+            ):
+                raise ValueError("migration activation identity is invalid")
+        if not isinstance(request.get("subject_id"), str) or not re.fullmatch(
+            r"Noyra-[A-Za-z0-9_-]{1,120}", str(request["subject_id"])
+        ):
+            raise ValueError("migration activation identity is invalid")
+        if not isinstance(request.get("artifact_id"), str) or not _ARTIFACT_ID.fullmatch(
+            str(request["artifact_id"])
+        ):
+            raise ValueError("migration activation identity is invalid")
+        if self.data_root is None:
+            raise ValueError("migration activation storage is unavailable")
+        activations = self.data_root / "activations"
+        activations.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._assert_private_directory(activations)
+        path = activations / f"{request['task_id']}.json"
+        value = {**dict(request), "status": "active"}
+        if path.exists():
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("migration activation record is invalid")
+            if json.loads(path.read_text(encoding="utf-8")) != value:
+                raise ValueError("migration activation conflicts with existing task")
+        else:
+            self._write_private_json(path, value)
+        return value
+
+    def deactivate(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        required = {"task_id", "target_id", "source_epoch", "manifest_digest"}
+        if set(request) != required or request.get("target_id") != self.target_id:
+            raise ValueError("migration deactivation request is invalid")
+        if self.data_root is None:
+            raise ValueError("migration activation storage is unavailable")
+        if not isinstance(request.get("task_id"), str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}", str(request["task_id"])
+        ):
+            raise ValueError("migration deactivation identity is invalid")
+        path = self.data_root / "activations" / f"{request['task_id']}.json"
+        if path.exists():
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("migration activation record is invalid")
+            path.unlink()
+        return {"status": "deactivated", "task_id": request["task_id"]}
+
     def _read_manifest(self, receipt: ReceiveReceipt) -> dict[str, Any]:
         if self.data_root is None or receipt.manifest_path is None:
             raise ValueError("migration manifest is not persisted")

@@ -7,6 +7,7 @@ import http.client
 import importlib.util
 import json
 import os
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -110,6 +111,74 @@ def test_cli_dispatch_accepts_chunked_receive_payloads(tmp_path: Path) -> None:
         },
     )
     assert result["complete"] is True
+
+
+def test_cli_dispatch_signs_health_and_persists_activation(tmp_path: Path) -> None:
+    module = _module()
+    private = Ed25519PrivateKey.generate()
+    public = private.public_key().public_bytes_raw()
+    agent = module.MigrationAgent(
+        target_id="target-1",
+        key_fingerprint=hashlib.sha256(public).hexdigest(),
+        signing_key=private,
+        data_root=tmp_path / "data",
+        restore_root=tmp_path / "restore-root",
+    )
+    restored_path = tmp_path / "restore-root" / "restored.sqlite3"
+    restored_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(restored_path) as connection:
+        connection.execute("CREATE TABLE runtime_state(subject_id TEXT NOT NULL)")
+        connection.execute("INSERT INTO runtime_state(subject_id) VALUES (?)", ("Noyra-0001",))
+    artifact_bytes = restored_path.read_bytes()
+    restore = {
+        "target_id": "target-1",
+        "generation": 1,
+        "artifact_id": "artifact-1",
+        "manifest_digest": "a" * 64,
+        "status": "restored",
+        "subject_id": "Noyra-0001",
+        "artifact_sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+        "restore_path": str(restored_path),
+    }
+    health = module.dispatch(
+        agent,
+        "health",
+        {
+            **restore,
+            "expected_digest": "a" * 64,
+            "task_id": "task-1",
+            "subject_id": "Noyra-0001",
+            "source_epoch": "runtime-1",
+            "restore_report_digest": module.content_hash(restore),
+        },
+    )
+    assert isinstance(health["target_signature"], str)
+    activation = module.dispatch(
+        agent,
+        "activate",
+        {
+            "task_id": "task-1",
+            "subject_id": "Noyra-0001",
+            "target_id": "target-1",
+            "source_epoch": "runtime-1",
+            "manifest_digest": "a" * 64,
+            "artifact_id": "artifact-1",
+            "health_report_digest": module.content_hash(
+                {key: value for key, value in health.items() if key != "target_signature"}
+            ),
+        },
+    )
+    assert activation["status"] == "active"
+    assert module.dispatch(
+        agent,
+        "deactivate",
+        {
+            "task_id": "task-1",
+            "target_id": "target-1",
+            "source_epoch": "runtime-1",
+            "manifest_digest": "a" * 64,
+        },
+    )["status"] == "deactivated"
 
 
 def test_http_handler_requires_signed_body_and_rejects_replay(tmp_path: Path) -> None:

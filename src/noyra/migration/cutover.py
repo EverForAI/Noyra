@@ -105,6 +105,7 @@ class CutoverCoordinator:
                     "restore_report_digest": verified["restore_report_digest"],
                     "health_report_digest": verified["health_report_digest"],
                     "epoch_id": epoch.epoch_id,
+                    **({"manifest": proof["manifest"]} if "manifest" in proof else {}),
                 },
             )
         return CutoverPlan(
@@ -264,7 +265,7 @@ class CutoverCoordinator:
             "health_report",
             "target_signature",
         }
-        if set(proof) != required:
+        if not required.issubset(proof) or set(proof) - required - {"manifest"}:
             raise ValueError("verified target restore and health proof is invalid")
         manifest = proof["manifest_digest"]
         artifact = proof["artifact_id"]
@@ -281,6 +282,12 @@ class CutoverCoordinator:
         health = proof["health_report"]
         if not isinstance(restore, dict) or not isinstance(health, dict):
             raise ValueError("verified target restore and health proof is invalid")
+        manifest_proof = proof.get("manifest")
+        if manifest_proof is not None:
+            if not isinstance(manifest_proof, dict) or content_hash(manifest_proof) != manifest:
+                raise ValueError("verified migration artifact manifest is invalid")
+            if manifest_proof.get("artifact_id") != artifact:
+                raise ValueError("verified migration artifact manifest binding is invalid")
         for report, status in ((restore, "restored"), (health, "healthy")):
             if (
                 report.get("target_id") != task.target_id

@@ -16,6 +16,14 @@ from .discovery import (
     NeedAssessment,
     ResourceObservation,
 )
+from .executor import MigrationExecutionError, MigrationExecutionReceipt
+from .http_executor import (
+    ArtifactBundle,
+    HTTPMigrationExecutor,
+    HTTPTransport,
+    SQLiteArtifactProvider,
+    UrllibHTTPTransport,
+)
 from .manager import MigrationManager
 from .policy import MigrationPolicy, MigrationPolicyConflictError, MigrationStore
 from .proposals import MigrationProposalStore
@@ -32,6 +40,7 @@ from .trust import TargetAttestation, TargetChallenge, TrustDecision, TrustEvide
 from .wallet import WalletBindingReceipt, WalletMigration, WalletMigrationPlan
 
 __all__ = [
+    "ArtifactBundle",
     "CredentialBindingPlan",
     "CredentialBindingReceipt",
     "CredentialRebinder",
@@ -41,8 +50,12 @@ __all__ = [
     "EncryptedTransferReceipt",
     "EncryptedTransferSession",
     "EnrollmentReceipt",
+    "HTTPMigrationExecutor",
+    "HTTPTransport",
     "MigrationAgent",
     "MigrationDiscovery",
+    "MigrationExecutionError",
+    "MigrationExecutionReceipt",
     "MigrationManager",
     "MigrationNeed",
     "MigrationPolicy",
@@ -56,6 +69,7 @@ __all__ = [
     "RegisteredTargetProvider",
     "ResourceObservation",
     "RestoreReport",
+    "SQLiteArtifactProvider",
     "TargetAttestation",
     "TargetCandidate",
     "TargetChallenge",
@@ -66,6 +80,7 @@ __all__ = [
     "TransferSession",
     "TrustDecision",
     "TrustEvidence",
+    "UrllibHTTPTransport",
     "WalletBindingReceipt",
     "WalletMigration",
     "WalletMigrationPlan",

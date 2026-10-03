@@ -114,11 +114,14 @@ from noyra.knowledge import (
 )
 from noyra.migration import (
     CutoverCoordinator,
+    HTTPMigrationExecutor,
+    MigrationExecutionError,
     MigrationManager,
     MigrationProposalStore,
     MigrationStore,
     RecoveryCoordinator,
     RecoveryRequest,
+    SQLiteArtifactProvider,
     TargetChallenge,
     TargetRegistry,
 )
@@ -1495,7 +1498,22 @@ class NoyraHTTPServer:
         self.migration_targets = TargetRegistry(kernel.database, self.migration_store)
         self.migration_proposals = MigrationProposalStore(kernel.database)
         self.migration_manager = MigrationManager(kernel.database, self.migration_store)
-        self.migration_cutover = CutoverCoordinator(kernel.database, admission=kernel.admission)
+        database_path = (settings.data_dir / "noyra.sqlite3").resolve()
+        self.migration_http_executor = HTTPMigrationExecutor(
+            target_resolver=self._migration_http_target,
+            token_resolver=self._migration_http_token,
+            artifact_resolver=SQLiteArtifactProvider(
+                database_path,
+                settings.data_dir / "migration" / "outgoing",
+            ),
+            source_fence=self._migration_http_source_fence,
+            source_unfence=self._migration_http_source_unfence,
+        )
+        self.migration_cutover = CutoverCoordinator(
+            kernel.database,
+            admission=kernel.admission,
+            executor=self.migration_http_executor,
+        )
         self.migration_recovery = RecoveryCoordinator(kernel.database)
         handler = self._handler_type()
         self._rate_lock = threading.Lock()
@@ -1515,6 +1533,67 @@ class NoyraHTTPServer:
     def address(self) -> tuple[str, int]:
         host, port = self.server.server_address[:2]
         return str(host), int(port)
+
+    def _migration_http_target(self, task: Any) -> Mapping[str, Any]:
+        with self.kernel.database.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM migration_targets WHERE target_id=? AND subject_id=?",
+                (task.target_id, task.subject_id),
+            ).fetchone()
+        if row is None:
+            raise MigrationExecutionError("migration_target_not_found")
+        self.migration_targets._assert_row_integrity(row)
+        if row["status"] != "active":
+            raise MigrationExecutionError("migration_target_not_active")
+        return {
+            "target_id": row["target_id"],
+            "endpoint": row["endpoint"],
+            "public_key": row["public_key"],
+        }
+
+    def _migration_http_token(self, task: Any) -> str:
+        token_root = Path(
+            os.getenv(
+                "NOYRA_MIGRATION_TARGET_TOKEN_DIR",
+                str(self.settings.data_dir / "secrets" / "migration-targets"),
+            )
+        )
+        if not re.fullmatch(r"[A-Za-z0-9_-]{3,128}", task.target_id):
+            raise MigrationExecutionError("migration_target_id_invalid")
+        try:
+            return read_secret_file(
+                token_root / f"{task.target_id}.token",
+                label="migration target token",
+            )
+        except CredentialError as error:
+            raise MigrationExecutionError("migration_target_token_unavailable") from error
+
+    def _migration_http_source_fence(self, task: Any, source_epoch: str) -> str:
+        with self.kernel.database.connection() as connection:
+            row = connection.execute(
+                "SELECT e.epoch_id,e.epoch_number,e.status FROM migration_epochs e "
+                "JOIN migration_tasks t ON t.target_epoch_id=e.epoch_id "
+                "WHERE t.task_id=? AND t.subject_id=? AND e.status='active' "
+                "AND t.source_epoch=?",
+                (task.task_id, task.subject_id, source_epoch),
+            ).fetchone()
+        if row is None:
+            raise MigrationExecutionError("source_epoch_not_fenced")
+        return content_hash(
+            {
+                "task_id": task.task_id,
+                "source_epoch": source_epoch,
+                "epoch_id": row["epoch_id"],
+                "epoch_number": int(row["epoch_number"]),
+                "status": row["status"],
+            }
+        )
+
+    def _migration_http_source_unfence(self, task: Any, source_epoch: str) -> None:
+        # The durable EpochLease remains active until the operator explicitly
+        # rolls the task back; keeping it active is the fail-closed recovery
+        # state when a remote target fails after source fencing.
+        del task, source_epoch
 
     def _cached_health(self) -> tuple[HTTPStatus, dict[str, Any]] | None:
         """Return the bounded readiness projection while its TTL is valid."""
@@ -4424,7 +4503,7 @@ class NoyraHTTPServer:
                             proof=proof,
                         )
                         result = owner.migration_cutover.commit(task_id, actor=self._actor())
-                    except ValueError:
+                    except (ValueError, MigrationExecutionError):
                         self._json(
                             HTTPStatus.CONFLICT,
                             {"error": "migration_cutover_rejected"},

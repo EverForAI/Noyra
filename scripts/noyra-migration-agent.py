@@ -17,6 +17,7 @@ from typing import Any, cast
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from noyra.core.at_rest import EncryptedBackupManager
+from noyra.core.types import canonical_json, content_hash
 from noyra.migration.agent import AgentAuthenticationError, MigrationAgent
 
 MAX_BODY = 8 * 1024 * 1024
@@ -201,10 +202,38 @@ def dispatch(agent: MigrationAgent, operation: str, payload: dict[str, Any]) -> 
     if operation == "health":
         from noyra.migration.agent import RestoreReport
 
+        task_id = payload.pop("task_id", None)
+        subject_id = payload.pop("subject_id", None)
+        source_epoch = payload.pop("source_epoch", None)
+        restore_report_digest = payload.pop("restore_report_digest", None)
         expected_digest = payload.pop("expected_digest", None)
         payload.pop("checks", None)
         report = RestoreReport(**payload)
-        return agent.validate(report, expected_digest=expected_digest).to_dict()
+        health = agent.validate(report, expected_digest=expected_digest).to_dict()
+        if all(
+            isinstance(value, str) and value
+            for value in (task_id, subject_id, source_epoch, restore_report_digest)
+        ):
+            signing_payload = {
+                "task_id": task_id,
+                "subject_id": subject_id,
+                "target_id": report.target_id,
+                "source_epoch": source_epoch,
+                "manifest_digest": report.manifest_digest,
+                "artifact_id": report.artifact_id,
+                "restore_report_digest": restore_report_digest,
+                "health_report_digest": content_hash(health),
+            }
+            if agent._signing_key is None:
+                raise ValueError("target signing identity is not configured")
+            health["target_signature"] = agent.sign_recovery_proof(
+                canonical_json(signing_payload).encode()
+            )
+        return health
+    if operation == "activate":
+        return agent.activate(payload)
+    if operation == "deactivate":
+        return agent.deactivate(payload)
     raise ValueError("unsupported migration operation")
 
 
@@ -220,6 +249,8 @@ class Handler(BaseHTTPRequestHandler):
             "/v1/receive-chunk": "receive",
             "/v1/restore": "restore",
             "/v1/health": "health",
+            "/v1/activate": "activate",
+            "/v1/deactivate": "deactivate",
         }
         operation = operations.get(self.path)
         if operation is None:
@@ -279,7 +310,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "operation",
         nargs="?",
-        choices=("enroll", "challenge", "receive", "restore", "health"),
+        choices=(
+            "enroll",
+            "challenge",
+            "receive",
+            "restore",
+            "health",
+            "activate",
+            "deactivate",
+        ),
     )
     args = parser.parse_args(argv)
     agent = load_agent(
