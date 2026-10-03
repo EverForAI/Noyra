@@ -315,6 +315,25 @@ def test_deactivation_is_idempotent_and_restores_previous_database(tmp_path: Pat
     assert systemd.calls == calls
 
 
+def test_deactivation_allows_database_changes_since_activation(tmp_path: Path) -> None:
+    task_id, fence_digest, active_database, _, _, activator = _runtime_fixture(tmp_path)
+    activator.activate(_request(task_id, fence_digest))
+    connection = sqlite3.connect(active_database)
+    connection.execute("PRAGMA user_version=1")
+    connection.close()
+
+    result = activator.deactivate(
+        {
+            "task_id": task_id,
+            "target_id": TARGET_ID,
+            "source_epoch": "runtime-0",
+            "manifest_digest": MANIFEST_DIGEST,
+        }
+    )
+
+    assert result == {"status": "deactivated", "task_id": task_id}
+
+
 def test_deactivation_readiness_failure_leaves_durable_recovery_state(tmp_path: Path) -> None:
     task_id, fence_digest, _, _, _, activator = _runtime_fixture(tmp_path)
     activator.activate(_request(task_id, fence_digest))
@@ -396,6 +415,154 @@ def test_stale_deactivation_cannot_restore_previous_database_after_new_activatio
     assert current_digest != old_target_digest
     assert hashlib.sha256(active_database.read_bytes()).hexdigest() == current_digest
     assert systemd.calls == calls
+
+
+def test_deactivation_of_later_activation_restores_previous_runtime_owner(tmp_path: Path) -> None:
+    first_task_id, first_fence_digest, _, _, _, activator = _runtime_fixture(tmp_path)
+    activator.activate(_request(first_task_id, first_fence_digest))
+    current_path = activator.state_root / "current.json"
+    import json
+
+    first_owner = json.loads(current_path.read_text())
+
+    second_task_id, second_fence_digest = _prepared_target_database(
+        tmp_path / "second-target.sqlite3"
+    )
+    second_restored = activator.agent_root / "restored" / second_task_id / "noyra.sqlite3"
+    second_restored.parent.mkdir(parents=True)
+    shutil.copyfile(tmp_path / "second-target.sqlite3", second_restored)
+    _ARTIFACT_HASHES[second_task_id] = hashlib.sha256(second_restored.read_bytes()).hexdigest()
+    activator.activate(_request(second_task_id, second_fence_digest))
+
+    result = activator.deactivate(
+        {
+            "task_id": second_task_id,
+            "target_id": TARGET_ID,
+            "source_epoch": "runtime-0",
+            "manifest_digest": MANIFEST_DIGEST,
+        }
+    )
+
+    assert result == {"status": "deactivated", "task_id": second_task_id}
+    assert json.loads(current_path.read_text()) == first_owner
+
+
+def test_deactivation_recovery_restores_previous_runtime_owner(tmp_path: Path, monkeypatch) -> None:
+    first_task_id, first_fence_digest, _, _, _, activator = _runtime_fixture(tmp_path)
+    activator.activate(_request(first_task_id, first_fence_digest))
+    current_path = activator.state_root / "current.json"
+    import json
+
+    first_owner = json.loads(current_path.read_text())
+
+    second_task_id, second_fence_digest = _prepared_target_database(
+        tmp_path / "second-target.sqlite3"
+    )
+    second_restored = activator.agent_root / "restored" / second_task_id / "noyra.sqlite3"
+    second_restored.parent.mkdir(parents=True)
+    shutil.copyfile(tmp_path / "second-target.sqlite3", second_restored)
+    _ARTIFACT_HASHES[second_task_id] = hashlib.sha256(second_restored.read_bytes()).hexdigest()
+    activator.activate(_request(second_task_id, second_fence_digest))
+
+    from noyra.migration import activation as activation_module
+
+    atomic_json = activation_module._atomic_json
+    second_marker = activator.activation_root / f"{second_task_id}.json"
+
+    def crash_after_runtime_restore(path: Path, value: Any, mode: int, **kwargs: Any) -> None:
+        if path == second_marker and value.get("status") == "deactivated":
+            raise SystemExit("simulated crash before deactivation receipt")
+        atomic_json(path, value, mode, **kwargs)
+
+    monkeypatch.setattr(activation_module, "_atomic_json", crash_after_runtime_restore)
+
+    with pytest.raises(SystemExit, match="simulated crash"):
+        activator.deactivate(
+            {
+                "task_id": second_task_id,
+                "target_id": TARGET_ID,
+                "source_epoch": "runtime-0",
+                "manifest_digest": MANIFEST_DIGEST,
+            }
+        )
+
+    assert activator.recover_incomplete() == 1
+    assert json.loads(current_path.read_text()) == first_owner
+
+
+def test_failed_later_activation_restores_previous_runtime_ownership_record(
+    tmp_path: Path, monkeypatch
+) -> None:
+    first_task_id, first_fence_digest, _, _, _, activator = _runtime_fixture(tmp_path)
+    activator.activate(_request(first_task_id, first_fence_digest))
+    current_path = activator.state_root / "current.json"
+    import json
+
+    first_owner = json.loads(current_path.read_text())
+
+    second_task_id, second_fence_digest = _prepared_target_database(
+        tmp_path / "second-target.sqlite3"
+    )
+    second_restored = activator.agent_root / "restored" / second_task_id / "noyra.sqlite3"
+    second_restored.parent.mkdir(parents=True)
+    shutil.copyfile(tmp_path / "second-target.sqlite3", second_restored)
+    _ARTIFACT_HASHES[second_task_id] = hashlib.sha256(second_restored.read_bytes()).hexdigest()
+
+    from noyra.migration import activation as activation_module
+
+    atomic_json = activation_module._atomic_json
+    second_marker = activator.activation_root / f"{second_task_id}.json"
+
+    def fail_final_activation_marker(path: Path, value: Any, mode: int, **kwargs: Any) -> None:
+        if path == second_marker and value.get("status") == "active":
+            raise OSError("simulated final activation journal failure")
+        atomic_json(path, value, mode, **kwargs)
+
+    monkeypatch.setattr(activation_module, "_atomic_json", fail_final_activation_marker)
+
+    with pytest.raises(TargetActivationError, match="target_activation_failed"):
+        activator.activate(_request(second_task_id, second_fence_digest))
+
+    assert json.loads(current_path.read_text()) == first_owner
+
+
+def test_activation_recovery_restores_previous_runtime_ownership_record(
+    tmp_path: Path, monkeypatch
+) -> None:
+    first_task_id, first_fence_digest, _, _, _, activator = _runtime_fixture(tmp_path)
+    activator.activate(_request(first_task_id, first_fence_digest))
+    current_path = activator.state_root / "current.json"
+    import json
+
+    first_owner = json.loads(current_path.read_text())
+
+    second_task_id, second_fence_digest = _prepared_target_database(
+        tmp_path / "second-target.sqlite3"
+    )
+    second_restored = activator.agent_root / "restored" / second_task_id / "noyra.sqlite3"
+    second_restored.parent.mkdir(parents=True)
+    shutil.copyfile(tmp_path / "second-target.sqlite3", second_restored)
+    _ARTIFACT_HASHES[second_task_id] = hashlib.sha256(second_restored.read_bytes()).hexdigest()
+
+    from noyra.migration import activation as activation_module
+
+    atomic_json = activation_module._atomic_json
+    second_marker = activator.activation_root / f"{second_task_id}.json"
+
+    def crash_after_current_owner_switch(
+        path: Path, value: Any, mode: int, **kwargs: Any
+    ) -> None:
+        if path == second_marker and value.get("status") == "active":
+            raise SystemExit("simulated process crash after owner switch")
+        atomic_json(path, value, mode, **kwargs)
+
+    monkeypatch.setattr(activation_module, "_atomic_json", crash_after_current_owner_switch)
+
+    with pytest.raises(SystemExit, match="simulated process crash"):
+        activator.activate(_request(second_task_id, second_fence_digest))
+
+    assert activator.recover_incomplete() == 1
+    assert json.loads(current_path.read_text()) == first_owner
 
 
 def test_activation_rejects_artifact_id_mismatch_in_restored_migration_task(

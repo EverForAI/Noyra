@@ -46,8 +46,9 @@ Added regressions first; they failed on the activating-without-backup crash wind
 - Record root-owned active task/database ownership after activation and require the task, target, and current database digest to match before deactivation mutates service or files. A stale deactivation now fails before stopping the service.
 - Compare the restored migration task's `artifact_id` with the activation request.
 - Carry the manifest artifact SHA-256 into the privileged activation request, copy the restored SQLite database into root-only staging, and compare the staged bytes to the expected digest before semantic validation, finalization, or cutover. The journal records the staged digest; the signed activation receipt continues to bind the finalized active database digest.
+- Preserve the preceding root-owned runtime-owner record across failed/recovered re-activation and deactivation. This also allows a running target database to change after activation without making an authorized rollback impossible; ownership is tied to the committed task and target stored in the database, while stale tasks still fail before stopping the service.
 
-Verification: Gate 3 tests 7 passed; focused activation/agent/CLI/HTTP/fencing tests 51 passed; Ruff passed; mypy on seven modules passed; compileall passed; migration install and component rollback contracts passed; `git diff --check` passed with Git line-ending warnings only.
+Verification (fresh after the runtime-owner recovery fix): Gate 3 tests 7 passed; focused activation/agent/CLI/HTTP/fencing tests 56 passed; Ruff passed; mypy on the changed activation module passed (the earlier seven-module run also passed before this final activation-only delta); compileall passed; migration install and component rollback contracts passed; `git diff --check` passed.
 
 ### Remaining trust boundary
 

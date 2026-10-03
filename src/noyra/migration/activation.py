@@ -184,9 +184,11 @@ class TargetRuntimeActivator:
                 raise TargetActivationError("migration_target_dropin_invalid")
             old_dropin = dropin.read_bytes()
             _atomic_write(rollback / "previous-target.conf", old_dropin, 0o600)
+        previous_runtime_owner = self._current_runtime_owner(active_database)
         journal = {
             **values,
             "status": "activating",
+            "previous_runtime_owner": previous_runtime_owner,
             "previous_dropin_present": old_dropin is not None,
             "previous_subject_id": self._active_subject_id(active_database),
             "previous_database_sha256": _sha256_file(active_database),
@@ -289,12 +291,13 @@ class TargetRuntimeActivator:
         active_database = self.data_root / "noyra.sqlite3"
         current_path = self.state_root / "current.json"
         current = _read_json(current_path, "active_runtime_ownership_invalid")
+        # The database changes during normal operation, so runtime ownership is
+        # checked against the committed task identity rather than a stale hash.
         if (
             current.get("task_id") != task_id
             or current.get("target_id") != values["target_id"]
-            or current.get("active_database_sha256") != state.get("active_database_sha256")
             or not active_database.is_file()
-            or _sha256_file(active_database) != state.get("active_database_sha256")
+            or not self._database_owns_runtime(active_database, task_id, values["target_id"])
         ):
             raise TargetActivationError("active_runtime_ownership_mismatch")
         if not (rollback / "noyra.sqlite3").is_file():
@@ -315,10 +318,10 @@ class TargetRuntimeActivator:
                 self.ready_timeout_seconds,
             ):
                 raise TargetActivationError("rollback_runtime_readiness_failed")
+            self._restore_current_runtime_owner(state.get("previous_runtime_owner"))
             _atomic_json(
                 marker, {**state, "status": "deactivated", "deactivated_at": _now()}, 0o600
             )
-            current_path.unlink(missing_ok=True)
             return {"status": "deactivated", "task_id": task_id}
         except TargetActivationError as error:
             _atomic_json(
@@ -347,6 +350,13 @@ class TargetRuntimeActivator:
             if marker.is_symlink() or not marker.is_file():
                 raise TargetActivationError("activation_record_invalid")
             value = _read_json(marker, "activation_record_invalid")
+            if value.get("status") == "deactivated":
+                current_path = self.state_root / "current.json"
+                if current_path.exists():
+                    current = _read_json(current_path, "active_runtime_ownership_invalid")
+                    if current.get("task_id") == value.get("task_id"):
+                        current_path.unlink(missing_ok=True)
+                continue
             if value.get("status") not in {"activating", "deactivating", "recovery_required"}:
                 continue
             task_id = str(value.get("task_id", ""))
@@ -364,6 +374,7 @@ class TargetRuntimeActivator:
                     self.systemd.stop()
                 self._restore_dropin(rollback, bool(value.get("previous_dropin_present")))
                 self.systemd.daemon_reload()
+                self._restore_current_runtime_owner(value.get("previous_runtime_owner"))
                 _atomic_json(
                     marker, {**value, "status": "recovered", "recovered_at": _now()}, 0o600
                 )
@@ -394,6 +405,7 @@ class TargetRuntimeActivator:
             os.chmod(active_database, 0o600)
             self._restore_dropin(rollback, bool(value.get("previous_dropin_present")))
             self.systemd.daemon_reload()
+            self._restore_current_runtime_owner(value.get("previous_runtime_owner"))
             _atomic_json(marker, {**value, "status": "recovered", "recovered_at": _now()}, 0o600)
             recovered += 1
         return recovered
@@ -531,6 +543,7 @@ class TargetRuntimeActivator:
             ):
                 return "previous_runtime_readiness_failed"
             previous = _read_json(marker, "activation_record_invalid")
+            self._restore_current_runtime_owner(previous.get("previous_runtime_owner"))
             _atomic_json(
                 marker,
                 {**previous, "status": "failed_reverted", "error_code": "target_activation_failed"},
@@ -597,6 +610,76 @@ class TargetRuntimeActivator:
             (self.activation_root, "activation_directory_invalid"),
         ):
             _secure_root_directory(path, code, create=True, trusted_root=self.data_root)
+
+    def _current_runtime_owner(self, active_database: Path) -> dict[str, str] | None:
+        path = self.state_root / "current.json"
+        if not path.exists():
+            if path.is_symlink():
+                raise TargetActivationError("active_runtime_ownership_invalid")
+            return None
+        current = _read_json(path, "active_runtime_ownership_invalid")
+        task_id = current.get("task_id")
+        target_id = current.get("target_id")
+        database_digest = current.get("active_database_sha256")
+        if (
+            not isinstance(task_id, str)
+            or not _SAFE_ID.fullmatch(task_id)
+            or not isinstance(target_id, str)
+            or not _TARGET_ID.fullmatch(target_id)
+            or not isinstance(database_digest, str)
+            or not _DIGEST.fullmatch(database_digest)
+            or active_database.is_symlink()
+            or not active_database.is_file()
+            or not self._database_owns_runtime(active_database, task_id, target_id)
+        ):
+            raise TargetActivationError("active_runtime_ownership_mismatch")
+        return {
+            "task_id": task_id,
+            "target_id": target_id,
+            "active_database_sha256": database_digest,
+        }
+
+    def _restore_current_runtime_owner(self, owner: Any) -> None:
+        path = self.state_root / "current.json"
+        if owner is None:
+            path.unlink(missing_ok=True)
+            return
+        if not isinstance(owner, dict):
+            raise TargetActivationError("active_runtime_ownership_invalid")
+        task_id = owner.get("task_id")
+        target_id = owner.get("target_id")
+        database_digest = owner.get("active_database_sha256")
+        if (
+            not isinstance(task_id, str)
+            or not _SAFE_ID.fullmatch(task_id)
+            or not isinstance(target_id, str)
+            or not _TARGET_ID.fullmatch(target_id)
+            or not isinstance(database_digest, str)
+            or not _DIGEST.fullmatch(database_digest)
+        ):
+            raise TargetActivationError("active_runtime_ownership_invalid")
+        active_database = self.data_root / "noyra.sqlite3"
+        if (
+            active_database.is_symlink()
+            or not active_database.is_file()
+            or not self._database_owns_runtime(active_database, task_id, target_id)
+        ):
+            raise TargetActivationError("active_runtime_ownership_mismatch")
+        _atomic_json(path, owner, 0o600)
+
+    @staticmethod
+    def _database_owns_runtime(database_path: Path, task_id: str, target_id: str) -> bool:
+        try:
+            with closing(
+                sqlite3.connect(f"file:{database_path.as_posix()}?mode=ro", uri=True)
+            ) as connection:
+                row = connection.execute(
+                    "SELECT target_id,status FROM migration_tasks WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise TargetActivationError("active_runtime_database_invalid") from error
+        return row is not None and row[0] == target_id and row[1] == "committed"
 
 
 class TargetActivationBridge:
