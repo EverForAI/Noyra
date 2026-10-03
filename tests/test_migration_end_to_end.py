@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
@@ -13,13 +14,49 @@ from noyra.core.database import CURRENT_SCHEMA_VERSION
 from noyra.core.errors import RuntimeOwnershipError
 from noyra.core.types import canonical_json, content_hash
 from noyra.migration.cutover import CutoverCoordinator
+from noyra.migration.executor import MigrationExecutionReceipt
 from noyra.migration.fencing import EpochLease
-from noyra.migration.manager import MigrationManager
+from noyra.migration.manager import MigrationManager, MigrationTask
 from noyra.migration.policy import MigrationStore
 from noyra.migration.recovery import RecoveryCoordinator, RecoveryRequest
 from noyra.migration.targets import TargetRegistry
 from noyra.migration.transfer import EncryptedTransferSession, TransferSession
 from noyra.migration.wallet import WalletMigration
+
+
+class _ProofExecutor:
+    def execute(
+        self,
+        task: MigrationTask,
+        *,
+        proof: Mapping[str, object],
+        source_epoch: str,
+    ) -> MigrationExecutionReceipt:
+        restore = proof["restore_report"]
+        health = proof["health_report"]
+        assert isinstance(restore, dict)
+        assert isinstance(health, dict)
+        return MigrationExecutionReceipt(
+            task.task_id,
+            task.subject_id,
+            task.target_id,
+            source_epoch,
+            str(proof["manifest_digest"]),
+            str(proof["artifact_id"]),
+            content_hash(restore),
+            content_hash(health),
+            "f" * 64,
+            "a" * 64,
+        )
+
+    def rollback(
+        self,
+        task: MigrationTask,
+        *,
+        receipt: MigrationExecutionReceipt,
+        reason: str,
+    ) -> None:
+        del task, receipt, reason
 
 
 def _target_context(tmp_path: Any, *, emergency: bool = False) -> Any:
@@ -184,7 +221,7 @@ def test_stale_approval_changed_policy_cutover_failure_and_rollback(tmp_path: An
     rollback_task = rollback_manager.approve(
         rollback_proposal.proposal_id, actor="operator", idempotency_key="rollback-e2e"
     )
-    cutover = CutoverCoordinator(rollback_db)
+    cutover = CutoverCoordinator(rollback_db, executor=_ProofExecutor())
     with pytest.raises(ValueError, match="verified target"):
         cutover.commit(rollback_task.task_id)
     result = cutover.rollback(rollback_task.task_id, "cutover health failed")
@@ -267,7 +304,7 @@ def test_cutover_accepts_task_bound_signed_restore_and_health_proof(tmp_path: An
             private.sign(canonical_json(signing_payload).encode())
         ).decode("ascii"),
     }
-    cutover = CutoverCoordinator(database)
+    cutover = CutoverCoordinator(database, executor=_ProofExecutor())
     prepared = cutover.prepare(task.task_id, proof=proof)
     assert prepared.status == "validating"
     assert cutover.commit(task.task_id) == {"task_id": task.task_id, "status": "committed"}
@@ -326,7 +363,7 @@ def test_cutover_commit_rolls_back_task_when_epoch_completion_fails(
             private.sign(canonical_json(signing_payload).encode())
         ).decode("ascii"),
     }
-    cutover = CutoverCoordinator(database)
+    cutover = CutoverCoordinator(database, executor=_ProofExecutor())
     cutover.prepare(task.task_id, proof=proof)
 
     def fail_completion(self: EpochLease, connection: Any, actor: str) -> None:
@@ -342,7 +379,9 @@ def test_cutover_commit_rolls_back_task_when_epoch_completion_fails(
     with pytest.raises(RuntimeError, match="injected epoch completion failure"):
         cutover.commit(task.task_id)
 
-    assert manager.get_task(task.task_id).status == "cutover"
+    # The durable transaction rolls back completely, leaving the task in its
+    # retryable validation state while the executor compensates the target.
+    assert manager.get_task(task.task_id).status == "validating"
     with database.connection() as connection:
         epoch = connection.execute(
             "SELECT status FROM migration_epochs "

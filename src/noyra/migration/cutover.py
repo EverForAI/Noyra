@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import re
+from contextlib import suppress
 from dataclasses import dataclass
 
 from cryptography.exceptions import InvalidSignature
@@ -14,6 +15,12 @@ from noyra.core.admission import RuntimeAdmissionGate
 from noyra.core.database import Database
 from noyra.core.types import canonical_json, content_hash, utc_now
 
+from .executor import (
+    MigrationExecutionError,
+    MigrationExecutionReceipt,
+    MigrationExecutor,
+    execution_receipt_from,
+)
 from .fencing import EpochLease
 from .manager import MigrationManager, MigrationTask
 from .policy import MigrationStore
@@ -30,10 +37,17 @@ class CutoverPlan:
 
 
 class CutoverCoordinator:
-    def __init__(self, database: Database, *, admission: RuntimeAdmissionGate | None = None):
+    def __init__(
+        self,
+        database: Database,
+        *,
+        admission: RuntimeAdmissionGate | None = None,
+        executor: MigrationExecutor | None = None,
+    ):
         self.database = database
         self.manager = MigrationManager(database, MigrationStore(database))
         self.admission = admission
+        self.executor = executor
 
     def prepare(
         self,
@@ -45,6 +59,8 @@ class CutoverCoordinator:
         task = self.manager.get_task(task_id)
         if proof is None:
             raise ValueError("verified target restore and health proof is required")
+        if self.executor is None:
+            raise ValueError("migration executor unavailable")
         verified = self._verify_target_proof(task, proof)
         if task.status == "approved":
             task = self.manager.transition_task(
@@ -82,6 +98,10 @@ class CutoverCoordinator:
                     "task_id": task_id,
                     "target_id": task.target_id,
                     "manifest_digest": verified["manifest_digest"],
+                    "artifact_id": verified["artifact_id"],
+                    "restore_report": proof["restore_report"],
+                    "health_report": proof["health_report"],
+                    "target_signature": verified["target_signature"],
                     "restore_report_digest": verified["restore_report_digest"],
                     "health_report_digest": verified["health_report_digest"],
                     "epoch_id": epoch.epoch_id,
@@ -102,16 +122,44 @@ class CutoverCoordinator:
             return {"task_id": task_id, "status": "committed"}
         if task.status not in {"validating", "cutover"}:
             raise ValueError("verified target restore and health proof is required before commit")
+        if self.executor is None:
+            raise ValueError("migration executor unavailable")
         epoch = self._epoch_for_task(task_id)
         if epoch is None:
             raise ValueError("migration target epoch is missing")
         epoch.assert_current()
         admission = self.admission
         lease = admission.begin("migration-cutover") if admission is not None else None
+        receipt: MigrationExecutionReceipt | None = None
         try:
-            if task.status == "validating":
-                task = self.manager.transition_task(task_id, "cutover", actor=actor)
+            proof = self._proof_for_task(task_id)
+            if admission is not None and lease is not None:
+                with admission.external_side_effect_scope(lease):
+                    receipt = execution_receipt_from(
+                        self.executor.execute(
+                            task,
+                            proof=proof,
+                            source_epoch=task.source_epoch,
+                        )
+                    )
+            else:
+                receipt = execution_receipt_from(
+                    self.executor.execute(
+                        task,
+                        proof=proof,
+                        source_epoch=task.source_epoch,
+                    )
+                )
+            receipt.validate(task, proof)
             with self.database.transaction() as connection:
+                if task.status == "validating":
+                    task = self.manager.transition_task_in_transaction(
+                        connection,
+                        task_id,
+                        "cutover",
+                        actor=actor,
+                        expected_status="validating",
+                    )
                 epoch.assert_current_in_transaction(connection)
                 task = self.manager.transition_task_in_transaction(
                     connection,
@@ -120,11 +168,59 @@ class CutoverCoordinator:
                     actor=actor,
                     expected_status="cutover",
                 )
+                MigrationStore._append_audit(
+                    connection,
+                    task.subject_id,
+                    "migration_execution_completed",
+                    actor,
+                    {
+                        "task_id": receipt.task_id,
+                        "target_id": receipt.target_id,
+                        "source_epoch": receipt.source_epoch,
+                        "manifest_digest": receipt.manifest_digest,
+                        "artifact_id": receipt.artifact_id,
+                        "restore_report_digest": receipt.restore_report_digest,
+                        "health_report_digest": receipt.health_report_digest,
+                        "source_fence_digest": receipt.source_fence_digest,
+                        "target_activation_digest": receipt.target_activation_digest,
+                    },
+                )
                 epoch.complete_in_transaction(connection, actor)
             return {"task_id": task_id, "status": task.status}
+        except (MigrationExecutionError, ValueError):
+            if receipt is not None:
+                with suppress(Exception):
+                    self.executor.rollback(task, receipt=receipt, reason="durable commit failed")
+            raise
+        except Exception:
+            if receipt is not None:
+                with suppress(Exception):
+                    self.executor.rollback(task, receipt=receipt, reason="durable commit failed")
+            raise
         finally:
             if lease is not None and admission is not None:
                 admission.finish(lease)
+
+    def _proof_for_task(self, task_id: str) -> dict[str, object]:
+        """Load the proof digests recorded when the task entered validation."""
+        task = self.manager.get_task(task_id)
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                "SELECT payload_json FROM migration_audit_events "
+                "WHERE subject_id=? AND action='migration_target_proof_verified' "
+                "ORDER BY rowid DESC LIMIT 32",
+                (task.subject_id,),
+            ).fetchall()
+        import json
+
+        for row in rows:
+            try:
+                values = json.loads(row["payload_json"])
+            except (TypeError, ValueError, KeyError):
+                continue
+            if isinstance(values, dict) and values.get("task_id") == task_id:
+                return values
+        raise ValueError("migration execution proof is missing")
 
     def rollback(self, task_id: str, reason: str, *, actor: str = "operator") -> dict[str, str]:
         if not reason.strip():
