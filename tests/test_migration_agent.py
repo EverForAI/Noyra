@@ -8,6 +8,7 @@ import os
 import sqlite3
 import stat
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -219,3 +220,63 @@ def test_agent_incoming_quota_and_ttl_cleanup_are_durable(tmp_path: Any) -> None
     agent.receive(
         {"artifact_id": "artifact-2", "byte_size": 1, "artifact_format": "sqlite"}, artifact=b"x"
     )
+
+
+def test_agent_chunked_receive_is_resumable_idempotent_and_bound_to_manifest(tmp_path: Any) -> None:
+    agent = MigrationAgent(target_id="target-1", key_fingerprint="a" * 64, data_root=tmp_path)
+    artifact = (b"chunked migration payload" * 700)[:12_000]
+    manifest = {
+        "artifact_id": "chunked-1",
+        "byte_size": len(artifact),
+        "artifact_sha256": hashlib.sha256(artifact).hexdigest(),
+        "artifact_format": "sqlite",
+        "schema_version": 75,
+        "subject_id": "Noyra-0001",
+    }
+    chunk_bytes = 4096
+    chunks = [
+        artifact[offset : offset + chunk_bytes]
+        for offset in range(0, len(artifact), chunk_bytes)
+    ]
+    count = len(chunks)
+
+    first = agent.receive_chunk(
+        manifest,
+        chunk_index=1,
+        chunk_count=count,
+        chunk_bytes=chunk_bytes,
+        chunk_sha256=hashlib.sha256(chunks[1]).hexdigest(),
+        chunk=chunks[1],
+    )
+    assert first.complete is False
+    duplicate = agent.receive_chunk(
+        manifest,
+        chunk_index=1,
+        chunk_count=count,
+        chunk_bytes=chunk_bytes,
+        chunk_sha256=hashlib.sha256(chunks[1]).hexdigest(),
+        chunk=chunks[1],
+    )
+    assert duplicate.received_chunks == first.received_chunks
+    with pytest.raises(ValueError, match="conflicts"):
+        agent.receive_chunk(
+            manifest,
+            chunk_index=1,
+            chunk_count=count,
+            chunk_bytes=chunk_bytes,
+            chunk_sha256=hashlib.sha256(b"different").hexdigest(),
+            chunk=b"different",
+        )
+
+    result = None
+    for index, payload in enumerate(chunks):
+        result = agent.receive_chunk(
+            manifest,
+            chunk_index=index,
+            chunk_count=count,
+            chunk_bytes=chunk_bytes,
+            chunk_sha256=hashlib.sha256(payload).hexdigest(),
+            chunk=payload,
+        )
+    assert result is not None and result.complete is True
+    assert result.artifact_path is not None and Path(result.artifact_path).read_bytes() == artifact

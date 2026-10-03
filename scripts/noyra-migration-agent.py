@@ -16,9 +16,10 @@ from typing import Any, cast
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from noyra.core.at_rest import EncryptedBackupManager
 from noyra.migration.agent import AgentAuthenticationError, MigrationAgent
 
-MAX_BODY = 1_000_000
+MAX_BODY = 8 * 1024 * 1024
 IDENTITY_KEYS = frozenset(
     {
         "target_id",
@@ -115,17 +116,29 @@ def _validate_identity_metadata(metadata: os.stat_result) -> None:
     mode = stat.S_IMODE(metadata.st_mode)
     if mode & 0o037:
         raise ValueError("identity file must not be group or world accessible")
-    groups = {os.getegid(), *os.getgroups()}
-    if metadata.st_uid != os.geteuid() and not (
+    groups = {os.getegid(), *os.getgroups()}  # type: ignore[attr-defined]
+    if metadata.st_uid != os.geteuid() and not (  # type: ignore[attr-defined]
         metadata.st_uid == 0 and metadata.st_gid in groups and mode & 0o040
     ):
         raise ValueError("identity file owner is invalid")
 
 
-def load_agent(identity_file: Path, data_root: Path) -> MigrationAgent:
+def load_agent(
+    identity_file: Path,
+    data_root: Path,
+    *,
+    restore_root: Path | None = None,
+    backup_keyring: Path | None = None,
+) -> MigrationAgent:
     identity = _read_identity_json(identity_file)
     if set(identity) - IDENTITY_KEYS:
         raise ValueError("identity file contains unknown fields")
+    configured_restore_root = restore_root
+    backup_manager = (
+        EncryptedBackupManager(configured_restore_root, backup_keyring)
+        if configured_restore_root is not None and backup_keyring is not None
+        else None
+    )
     return MigrationAgent(
         target_id=identity["target_id"],
         key_fingerprint=identity["key_fingerprint"],
@@ -134,6 +147,8 @@ def load_agent(identity_file: Path, data_root: Path) -> MigrationAgent:
         signing_key=_private_key(identity.get("private_key")),
         data_root=data_root,
         session_token=identity.get("session_token"),
+        restore_root=configured_restore_root,
+        backup_manager=backup_manager,
     )
 
 
@@ -150,6 +165,24 @@ def dispatch(agent: MigrationAgent, operation: str, payload: dict[str, Any]) -> 
         result["challenge"] = asdict(attestation.challenge)
         return result
     if operation == "receive":
+        if "chunk_index" in payload:
+            encoded_chunk = payload.pop("chunk_b64", None)
+            if not isinstance(encoded_chunk, str):
+                raise ValueError("chunk_b64 must be a string")
+            try:
+                chunk = base64.b64decode(encoded_chunk, validate=True)
+            except (ValueError, TypeError) as error:
+                raise ValueError("chunk_b64 is invalid") from error
+            return asdict(
+                agent.receive_chunk(
+                    payload.pop("manifest"),
+                    chunk_index=payload.pop("chunk_index"),
+                    chunk_count=payload.pop("chunk_count"),
+                    chunk_bytes=payload.pop("chunk_bytes"),
+                    chunk_sha256=payload.pop("chunk_sha256"),
+                    chunk=chunk,
+                )
+            )
         encoded_artifact = payload.pop("artifact_b64", None)
         artifact = None
         if encoded_artifact is not None:
@@ -184,6 +217,7 @@ class Handler(BaseHTTPRequestHandler):
             "/v1/enroll": "enroll",
             "/v1/challenge": "challenge",
             "/v1/receive": "receive",
+            "/v1/receive-chunk": "receive",
             "/v1/restore": "restore",
             "/v1/health": "health",
         }
@@ -237,12 +271,23 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Noyra restricted migration target agent")
     parser.add_argument("--identity-file", type=Path, required=True)
     parser.add_argument("--data-root", type=Path, default=Path("/var/lib/noyra/migration-agent"))
+    parser.add_argument(
+        "--restore-root", type=Path, default=None, help="private root for restored runtime data"
+    )
+    parser.add_argument("--backup-keyring", type=Path, default=None)
     parser.add_argument("--listen", default="127.0.0.1:8876")
     parser.add_argument(
-        "operation", nargs="?", choices=("enroll", "challenge", "receive", "restore", "health")
+        "operation",
+        nargs="?",
+        choices=("enroll", "challenge", "receive", "restore", "health"),
     )
     args = parser.parse_args(argv)
-    agent = load_agent(args.identity_file, args.data_root)
+    agent = load_agent(
+        args.identity_file,
+        args.data_root,
+        restore_root=args.restore_root,
+        backup_keyring=args.backup_keyring,
+    )
     if args.operation:
         payload = _read_stdin()
         sys.stdout.write(

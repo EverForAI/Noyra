@@ -3,6 +3,7 @@ Description=Noyra restricted migration target agent
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/etc/noyra/migration/identity.json
+ConditionPathExists=/etc/noyra/backup-keyring.json
 RequiresMountsFor=/var/lib/noyra
 
 [Service]
@@ -10,7 +11,8 @@ Type=simple
 User=noyra
 Group=noyra
 WorkingDirectory=/opt/noyra/current
-ExecStart=/opt/noyra/current/.venv/bin/python /opt/noyra/current/scripts/noyra-migration-agent.py --identity-file /etc/noyra/migration/identity.json --data-root /var/lib/noyra/migration-agent --listen 127.0.0.1:8876
+LoadCredential=backup-keyring:/etc/noyra/backup-keyring.json
+ExecStart=/opt/noyra/current/.venv/bin/python /opt/noyra/current/scripts/noyra-migration-agent.py --identity-file /etc/noyra/migration/identity.json --data-root /var/lib/noyra/migration-agent --restore-root /var/lib/noyra/migration-agent/restored --backup-keyring %d/backup-keyring --listen 127.0.0.1:8876
 Restart=on-failure
 RestartSec=10
 NoNewPrivileges=true
@@ -25,7 +27,7 @@ RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 ReadWritePaths=/var/lib/noyra/migration-agent
-ReadOnlyPaths=/etc/noyra/migration/identity.json
+ReadOnlyPaths=/etc/noyra/migration/identity.json /run/credentials
 UMask=0077
 
 [Install]

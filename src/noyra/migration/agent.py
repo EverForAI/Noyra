@@ -33,6 +33,9 @@ _AUTH_SCHEME = "Noyra-HMAC"
 _AUTH_CLOCK_SKEW_SECONDS = 300
 _AUTH_NONCE_TTL_SECONDS = 600
 _AUTH_NONCE_LIMIT = 4096
+_AUTH_MAX_BODY_BYTES = 8 * 1024 * 1024
+MAX_CHUNK_BYTES = 4 * 1024 * 1024
+MAX_CHUNKS = 2_000_000
 _NONCE = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
 
 
@@ -54,6 +57,20 @@ class ReceiveReceipt:
     manifest_digest: str
     byte_size: int
     status: str
+    manifest_path: str | None = None
+    artifact_path: str | None = None
+    artifact_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class ChunkReceiveReceipt:
+    artifact_id: str
+    manifest_digest: str
+    byte_size: int
+    chunk_index: int
+    chunk_count: int
+    received_chunks: int
+    complete: bool
     manifest_path: str | None = None
     artifact_path: str | None = None
     artifact_sha256: str | None = None
@@ -297,6 +314,145 @@ class MigrationAgent:
             artifact_sha256,
         )
 
+    def receive_chunk(
+        self,
+        manifest: Mapping[str, Any],
+        *,
+        chunk_index: int,
+        chunk_count: int,
+        chunk_bytes: int,
+        chunk_sha256: str,
+        chunk: bytes,
+    ) -> ChunkReceiveReceipt:
+        """Accept one authenticated, resumable artifact chunk."""
+        values = self._validate_manifest(manifest)
+        if self.data_root is None:
+            raise ValueError("migration chunk storage is unavailable")
+        if type(chunk_index) is not int or chunk_index < 0:
+            raise ValueError("migration chunk index is invalid")
+        if type(chunk_count) is not int or not 1 <= chunk_count <= MAX_CHUNKS:
+            raise ValueError("migration chunk count is invalid")
+        if type(chunk_bytes) is not int or not 4096 <= chunk_bytes <= MAX_CHUNK_BYTES:
+            raise ValueError("migration chunk size is invalid")
+        if values["byte_size"] < 1:
+            raise ValueError("migration artifact byte size is invalid")
+        expected_count = (values["byte_size"] + chunk_bytes - 1) // chunk_bytes
+        if chunk_count != expected_count or chunk_index >= chunk_count:
+            raise ValueError("migration chunk layout is invalid")
+        if not isinstance(chunk, bytes) or not 1 <= len(chunk) <= chunk_bytes:
+            raise ValueError("migration chunk bytes are invalid")
+        if not isinstance(chunk_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", chunk_sha256):
+            raise ValueError("migration chunk digest is invalid")
+        if hashlib.sha256(chunk).hexdigest() != chunk_sha256:
+            raise ValueError("migration chunk digest mismatch")
+        if "artifact_sha256" not in values:
+            raise ValueError("migration artifact digest is required for chunked transfer")
+        digest = content_hash(values)
+        with self._io_lock:
+            self.cleanup_expired()
+            incoming = self.data_root / "incoming"
+            incoming.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self._assert_private_directory(incoming)
+            final_manifest = incoming / f"{values['artifact_id']}.json"
+            final_artifact = incoming / f"{values['artifact_id']}.artifact"
+            if final_manifest.is_file() and final_artifact.is_file():
+                return ChunkReceiveReceipt(
+                    values["artifact_id"],
+                    digest,
+                    values["byte_size"],
+                    chunk_index,
+                    chunk_count,
+                    chunk_count,
+                    True,
+                    str(final_manifest),
+                    str(final_artifact),
+                    values["artifact_sha256"],
+                )
+            session = incoming / f".{values['artifact_id']}.chunks"
+            if session.exists() and session.is_symlink():
+                raise ValueError("migration chunk session is invalid")
+            session.mkdir(mode=0o700, exist_ok=True)
+            self._assert_private_directory(session)
+            metadata_path = session / "manifest.json"
+            metadata = {
+                "manifest": values,
+                "manifest_digest": digest,
+                "chunk_count": chunk_count,
+                "chunk_bytes": chunk_bytes,
+            }
+            metadata_bytes = len(canonical_json(metadata).encode("utf-8"))
+            if metadata_path.exists():
+                try:
+                    existing = json.loads(metadata_path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, ValueError) as error:
+                    raise ValueError("migration chunk session metadata is invalid") from error
+                if existing != metadata:
+                    raise ValueError("migration chunk session binding mismatch")
+            else:
+                file_count, byte_count = self._incoming_usage(incoming)
+                if (
+                    file_count + 2 > self.max_incoming_files
+                    or byte_count + metadata_bytes + len(chunk) > self.max_incoming_bytes
+                ):
+                    raise ValueError("migration incoming quota exceeded")
+                self._write_private_json(metadata_path, metadata)
+            part = session / f"{chunk_index:08d}.part"
+            if part.exists():
+                if part.is_symlink() or not part.is_file() or part.read_bytes() != chunk:
+                    raise ValueError("migration chunk conflicts with an existing chunk")
+            else:
+                file_count, byte_count = self._incoming_usage(incoming)
+                if (
+                    file_count + 1 > self.max_incoming_files
+                    or byte_count + len(chunk) > self.max_incoming_bytes
+                ):
+                    raise ValueError("migration incoming quota exceeded")
+                self._write_private_bytes(part, chunk)
+            parts: list[Path] = []
+            for index in range(chunk_count):
+                candidate = session / f"{index:08d}.part"
+                if candidate.is_symlink() or (candidate.exists() and not candidate.is_file()):
+                    raise ValueError("migration chunk session contains an invalid part")
+                if candidate.is_file():
+                    parts.append(candidate)
+            complete = len(parts) == chunk_count
+            if complete:
+                temporary = incoming / f".{values['artifact_id']}.artifact"
+                artifact = hashlib.sha256()
+                total = 0
+                try:
+                    with temporary.open("wb") as stream:
+                        for part_path in parts:
+                            payload = part_path.read_bytes()
+                            artifact.update(payload)
+                            total += len(payload)
+                            stream.write(payload)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    if (
+                        total != values["byte_size"]
+                        or artifact.hexdigest() != values["artifact_sha256"]
+                    ):
+                        raise ValueError("migration artifact digest mismatch")
+                    os.replace(temporary, final_artifact)
+                    self._write_private_json(final_manifest, values)
+                except Exception:
+                    temporary.unlink(missing_ok=True)
+                    raise
+                shutil.rmtree(session)
+            return ChunkReceiveReceipt(
+                values["artifact_id"],
+                digest,
+                values["byte_size"],
+                chunk_index,
+                chunk_count,
+                len(parts),
+                complete,
+                str(final_manifest) if complete else None,
+                str(final_artifact) if complete else None,
+                values["artifact_sha256"] if complete else None,
+            )
+
     def cleanup_expired(self, *, now: float | None = None) -> int:
         """Delete only expired JSON manifests from the private incoming directory."""
         if self.data_root is None:
@@ -308,6 +464,14 @@ class MigrationAgent:
         current = time.time() if now is None else now
         removed = 0
         for path in incoming.iterdir():
+            if path.is_dir() and path.name.endswith(".chunks"):
+                try:
+                    if current - path.stat().st_mtime > self.artifact_ttl_seconds:
+                        shutil.rmtree(path)
+                        removed += 1
+                except OSError:
+                    continue
+                continue
             if path.suffix != ".json":
                 continue
             try:
@@ -336,7 +500,7 @@ class MigrationAgent:
         """Verify a task-independent HMAC request and persist its nonce atomically."""
         if self._session_token is None or self.data_root is None:
             raise AgentAuthenticationError("migration agent HTTP authentication is unavailable")
-        if not isinstance(body, bytes) or len(body) > 1_000_000:
+        if not isinstance(body, bytes) or len(body) > _AUTH_MAX_BODY_BYTES:
             raise AgentAuthenticationError("migration request body is invalid")
         authorization = headers.get("Authorization", "")
         scheme, separator, encoded_signature = authorization.partition(" ")
@@ -401,7 +565,7 @@ class MigrationAgent:
     def _incoming_usage(incoming: Path) -> tuple[int, int]:
         file_count = 0
         byte_count = 0
-        for path in incoming.iterdir():
+        for path in incoming.rglob("*"):
             if path.is_symlink():
                 raise ValueError("migration incoming directory contains a symlink")
             if not path.is_file():
@@ -691,3 +855,21 @@ class MigrationAgent:
             mode = path.stat().st_mode & 0o777
             if mode & 0o077:
                 raise ValueError("agent data root must not be group or world accessible")
+
+    @staticmethod
+    def _write_private_bytes(path: Path, value: bytes) -> None:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(value)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except Exception:
+            with suppress(OSError):
+                os.close(descriptor)
+            path.unlink(missing_ok=True)
+            raise
+
+    @classmethod
+    def _write_private_json(cls, path: Path, value: Mapping[str, Any]) -> None:
+        cls._write_private_bytes(path, canonical_json(dict(value)).encode("utf-8"))

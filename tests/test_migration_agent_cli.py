@@ -85,6 +85,33 @@ def test_identity_file_rejects_hardlinks(tmp_path: Path) -> None:
         module.load_agent(hardlink, tmp_path / "data")
 
 
+def test_cli_dispatch_accepts_chunked_receive_payloads(tmp_path: Path) -> None:
+    module = _module()
+    agent = module.MigrationAgent(
+        target_id="target-1", key_fingerprint="a" * 64, data_root=tmp_path / "data"
+    )
+    artifact = b"chunked-cli-payload"
+    manifest = {
+        "artifact_id": "chunked-cli",
+        "byte_size": len(artifact),
+        "artifact_sha256": hashlib.sha256(artifact).hexdigest(),
+        "artifact_format": "sqlite",
+    }
+    result = module.dispatch(
+        agent,
+        "receive",
+        {
+            "manifest": manifest,
+            "chunk_index": 0,
+            "chunk_count": 1,
+            "chunk_bytes": 4096,
+            "chunk_sha256": hashlib.sha256(artifact).hexdigest(),
+            "chunk_b64": base64.b64encode(artifact).decode(),
+        },
+    )
+    assert result["complete"] is True
+
+
 def test_http_handler_requires_signed_body_and_rejects_replay(tmp_path: Path) -> None:
     module = _module()
     token = "session-" + "b" * 32

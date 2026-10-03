@@ -891,6 +891,7 @@ done
 install -d -o root -g root -m 0755 "$LIBEXEC_DIR"
 install -d -o root -g noyra -m 0750 "$CONFIG_DIR/migration"
 install -d -o noyra -g noyra -m 0700 "$DATA_DIR/migration-agent"
+install -d -o noyra -g noyra -m 0700 "$DATA_DIR/migration-agent/restored"
 install -d -o root -g noyra -m 0750 "$DATA_DIR/migration"
 install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/source"
 install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/fences"

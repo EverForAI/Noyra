@@ -40,5 +40,8 @@ grep -q 'NoNewPrivileges=true' "$runner_unit"
 grep -q 'ReadWritePaths=/var/lib/noyra/migration' "$runner_unit"
 grep -q 'migration/source' "$runner_unit"
 grep -q 'migration/fences' "$runner_unit"
+grep -q 'LoadCredential=backup-keyring:/etc/noyra/backup-keyring.json' "$agent_unit"
+grep -q -- '--restore-root /var/lib/noyra/migration-agent/restored' "$agent_unit"
+grep -q -- '--backup-keyring %d/backup-keyring' "$agent_unit"
 
 echo 'migration install contract passed'
