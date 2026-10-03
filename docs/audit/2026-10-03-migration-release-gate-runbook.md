@@ -23,6 +23,10 @@
 
 使用真实生产格式的加密备份，在隔离的目标 restore root 恢复。验证 keyring generation、密钥指纹、SQLite quick check、subject identity、schema 和事件链 tip；故意使用错误 keyring、篡改一个 chunk、恢复到非空目录，均应拒绝。
 
+迁移代码使用已注册的目标 recipient X25519 公钥加密 bundle。验收时还要
+验证 recipient PoP、manifest context、AES-GCM 认证、明文摘要和错误 recipient
+私钥拒绝；不能用未加密的原始 SQLite 文件替代这条路径。
+
 ### 4. migration fence
 
 创建一个人工审批迁移任务并在源端执行 cutover。记录并验证：
@@ -39,6 +43,11 @@
 ### 5. signer/KMS
 
 如果部署使用独立 signer/KMS，确认迁移请求只携带 signer 引用和公钥指纹，签名操作在独立边界完成；源主机日志、artifact、审计记录和 target restore 中不得出现私钥。故意让 signer 超时、拒绝请求和返回错误签名，迁移及付款都必须停止并产生可审计的失败状态。
+
+目标返回的 credential、wallet、signer/KMS 和加密卷证明必须由已注册的
+target key 签名，并且证明摘要出现在 activation receipt 和 execution receipt
+中。local wallet 仅能使用 task/address 绑定的一次性人工批准，批准过期或重放
+必须失败。
 
 ### 6. nonce/reorg
 

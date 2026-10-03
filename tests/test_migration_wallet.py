@@ -80,6 +80,42 @@ def test_external_signer_rebind_verifies_target_identity_and_address() -> None:
         WalletMigration.apply_external_signer(plan, target_signer_id="other")
 
 
+def test_external_signer_verification_returns_target_bound_receipt() -> None:
+    plan = WalletMigration.plan(
+        mode="external_signer_rebind",
+        source_address="0xabc",
+        target_address="0xabc",
+        signer_id="kms-prod",
+        task_id="task-signer-proof",
+    )
+    from noyra.core.types import content_hash
+
+    proof = content_hash(
+        {
+            "task_id": plan.task_id,
+            "target_id": "target-1",
+            "manifest_digest": "b" * 64,
+            "signer_id": plan.signer_id,
+            "address": plan.source_address,
+            "target_identity": "target-host-1",
+        }
+    )
+    receipt = WalletMigration.verify_external_signer(
+        plan,
+        {
+            "status": "verified",
+            "signer_id": "kms-prod",
+            "address": "0xabc",
+            "target_identity": "target-host-1",
+            "proof_digest": proof,
+        },
+        target_id="target-1",
+        manifest_digest="b" * 64,
+    )
+    assert receipt.status == "verified"
+    assert receipt.proof_digest == proof
+
+
 def test_local_transfer_requires_one_time_approval_and_keeps_key_retained(tmp_path: Path) -> None:
     database, subject_id = _database(tmp_path)
     plan = WalletMigration.plan(

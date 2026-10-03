@@ -30,6 +30,8 @@ class _FakeExecutor:
         self.calls.append(task.task_id)
         assert source_epoch == task.source_epoch
         assert proof["manifest_digest"] == "b" * 64
+        volume = proof["target_volume_proof"]
+        credential = proof["credential_binding"]
         return MigrationExecutionReceipt(
             task.task_id,
             task.subject_id,
@@ -41,6 +43,16 @@ class _FakeExecutor:
             content_hash(proof["health_report"]),
             "f" * 64,
             "a" * 64,
+            "c" * 64,
+            content_hash(
+                {"task_id": task.task_id, "manifest_digest": "b" * 64, "proof": volume}
+            ),
+            content_hash(
+                {"task_id": task.task_id, "manifest_digest": "b" * 64, "binding": credential}
+            ),
+            None,
+            "disabled",
+            None,
         )
 
     def rollback(
@@ -126,6 +138,29 @@ def _task(tmp_path: Any) -> tuple[Database, MigrationTask, dict[str, object]]:
         "target_signature": base64.urlsafe_b64encode(
             private.sign(canonical_json(payload).encode())
         ).decode(),
+        "recipient_key_fingerprint": "c" * 64,
+        "target_volume_proof": {
+            "status": "verified",
+            "encrypted": True,
+            "target_id": "target-1",
+            "target_identity": "host-1",
+            "manifest_digest": "b" * 64,
+            "proof_digest": "d" * 64,
+        },
+        "credential_binding": {
+            "status": "verified",
+            "target_id": "target-1",
+            "target_identity": "host-1",
+            "manifest_digest": "b" * 64,
+            "availability_proof": "e" * 64,
+        },
+        "wallet_binding": {
+            "status": "verified",
+            "mode": "disabled",
+            "target_id": "target-1",
+            "target_identity": "host-1",
+            "manifest_digest": "b" * 64,
+        },
     }
     return database, task, proof
 

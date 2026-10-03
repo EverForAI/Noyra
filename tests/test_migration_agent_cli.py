@@ -15,8 +15,10 @@ from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from noyra.core.at_rest import VolumeEncryptionStatus
+from noyra.core.types import content_hash
 
 
 @pytest.fixture(autouse=True)
@@ -202,6 +204,7 @@ def test_identity_file_rejects_hardlinks(tmp_path: Path) -> None:
 def test_cli_dispatch_signs_health_and_persists_activation(tmp_path: Path) -> None:
     module = _module()
     private = Ed25519PrivateKey.generate()
+    recipient = X25519PrivateKey.generate()
     public = private.public_key().public_bytes_raw()
 
     class ActivationController:
@@ -221,6 +224,7 @@ def test_cli_dispatch_signs_health_and_persists_activation(tmp_path: Path) -> No
         target_id="target-1",
         key_fingerprint=hashlib.sha256(public).hexdigest(),
         signing_key=private,
+        recipient_private_key=recipient,
         data_root=tmp_path / "data",
         restore_root=tmp_path / "restore-root",
         activation_controller=ActivationController(),
@@ -254,6 +258,21 @@ def test_cli_dispatch_signs_health_and_persists_activation(tmp_path: Path) -> No
         },
     )
     assert isinstance(health["target_signature"], str)
+    binding = module.dispatch(
+        agent,
+        "bindings",
+        {
+            "task_id": "task-1",
+            "subject_id": "Noyra-0001",
+            "target_id": "target-1",
+            "source_epoch": "runtime-1",
+            "manifest_digest": "a" * 64,
+            "artifact_id": "artifact-1",
+            "recipient_key_fingerprint": agent.recipient_key_fingerprint,
+            "credential_binding": {"references": {}, "fingerprints": {}},
+            "wallet_binding": {"mode": "disabled"},
+        },
+    )
     activation = module.dispatch(
         agent,
         "activate",
@@ -267,10 +286,28 @@ def test_cli_dispatch_signs_health_and_persists_activation(tmp_path: Path) -> No
             "artifact_sha256": "e" * 64,
             "health_report_digest": module.content_hash(
                 {key: value for key, value in health.items() if key != "target_signature"}
-            ),
-            "source_fence_digest": "d" * 64,
-        },
-    )
+                ),
+                "source_fence_digest": "d" * 64,
+                "recipient_key_fingerprint": agent.recipient_key_fingerprint,
+                "target_volume_proof_digest": content_hash(
+                    {
+                        "task_id": "task-1",
+                        "manifest_digest": "a" * 64,
+                        "proof": binding["target_volume_proof"],
+                    }
+                ),
+                "credential_binding_digest": content_hash(
+                    {
+                        "task_id": "task-1",
+                        "manifest_digest": "a" * 64,
+                        "binding": binding["credential_binding"],
+                    }
+                ),
+                "signer_binding_digest": None,
+                "wallet_mode": "disabled",
+                "wallet_proof_digest": None,
+            },
+        )
     assert activation["status"] == "active"
     assert activation["source_fence_digest"] == "d" * 64
     signature = base64.urlsafe_b64decode(

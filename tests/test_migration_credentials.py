@@ -40,3 +40,35 @@ def test_credential_reference_rejects_traversal_and_unknown_scheme() -> None:
         CredentialRebinder.plan({}, {"model": "file:../secret"})
     with pytest.raises(ValueError, match="reference"):
         CredentialRebinder.plan({}, {"model": "https://example.test/key"})
+
+
+def test_credential_verification_returns_target_bound_receipt() -> None:
+    plan = CredentialRebinder.plan({"model": "source-secret"}, {"model": "systemd:model"})
+    from noyra.core.types import content_hash
+
+    task_id = "task-credential"
+    manifest_digest = "a" * 64
+    identity = "target-host-1"
+    proof = content_hash(
+        {
+            "task_id": task_id,
+            "manifest_digest": manifest_digest,
+            "target_id": "target-1",
+            "target_identity": identity,
+            "references": plan.references,
+            "fingerprints": plan.fingerprints,
+        }
+    )
+    receipt = CredentialRebinder.verify(
+        plan,
+        {
+            "status": "verified",
+            "target_id": "target-1",
+            "target_identity": identity,
+            "availability_proof": proof,
+        },
+        task_id=task_id,
+        manifest_digest=manifest_digest,
+    )
+    assert receipt.status == "verified"
+    assert receipt.availability_proof == proof

@@ -56,6 +56,28 @@ and streams source/ciphertext hashing. The resource-only A08 slice is complete
 stream fixed-size chunks. This does not change the A05/A06 status or reopen the
 executor, and A07 quota preflight is still open.
 
+#### Code closure for items 1-3 (2026-10-04)
+
+The remaining code boundary is now implemented. Target registration and
+recipient PoP are required before the source executor fences or snapshots a
+task. The encrypted bundle path is connected end to end: recipient-encrypted
+manifest, bounded chunk transfer, target assembly, recipient decryption,
+context/plaintext verification, restore, health, activation, and rollback.
+The target now signs a durable task-bound binding record covering credential
+references/fingerprints, wallet mode, external signer identity or one-time
+local-wallet approval, encrypted-volume evidence, generation, and recipient
+fingerprint. The source verifies it and binds its digests to activation and the
+execution receipt. Requests containing secret material, mismatched context,
+wrong recipient keys, expired or replayed approvals, and binding-record
+tampering fail closed; identical binding retries are idempotent.
+
+This is completion of the code planned for items 1-3, with focused and full
+migration tests covering the protocol and failure cases. The migration default
+remains disabled. Real Linux/LUKS/systemd, two-host, KMS/signer, restart,
+rollback, chain, and soak evidence remain external release gates; they are
+verification of this code rather than a reason to add placeholder behavior to
+the protocol.
+
 ### 5. Repair management proof UX and capacity/resource behavior (A02/A07/A08)
 
 Root causes: the admin cutover button sends `{}` although the endpoint requires proof; quotas are not negotiated before transfer; hashing reads entire files into memory. Add a server-issued short-lived task-bound cutover ticket and have the UI submit only that ticket, with evidence summaries and stable error states. Add manifest preflight for target quota/free space and stream SHA-256 over bounded chunks, reusing the digest. Test UI request shape, expiry/replay, quota rejection before fencing, large artifacts, and bounded memory behavior. Commit.

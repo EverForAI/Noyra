@@ -36,6 +36,8 @@ class _ProofExecutor:
         health = proof["health_report"]
         assert isinstance(restore, dict)
         assert isinstance(health, dict)
+        volume = proof["target_volume_proof"]
+        credential = proof["credential_binding"]
         return MigrationExecutionReceipt(
             task.task_id,
             task.subject_id,
@@ -47,6 +49,24 @@ class _ProofExecutor:
             content_hash(health),
             "f" * 64,
             "a" * 64,
+            "c" * 64,
+            content_hash(
+                {
+                    "task_id": task.task_id,
+                    "manifest_digest": str(proof["manifest_digest"]),
+                    "proof": volume,
+                }
+            ),
+            content_hash(
+                {
+                    "task_id": task.task_id,
+                    "manifest_digest": str(proof["manifest_digest"]),
+                    "binding": credential,
+                }
+            ),
+            None,
+            "disabled",
+            None,
         )
 
     def rollback(
@@ -58,6 +78,37 @@ class _ProofExecutor:
     ) -> None:
         del task, receipt, reason
 
+
+def _add_disabled_binding_proof(
+    proof: dict[str, object], *, task: MigrationTask, target_identity: str
+) -> None:
+    proof.update(
+        {
+            "recipient_key_fingerprint": "c" * 64,
+            "target_volume_proof": {
+                "status": "verified",
+                "encrypted": True,
+                "target_id": task.target_id,
+                "target_identity": target_identity,
+                "manifest_digest": proof["manifest_digest"],
+                "proof_digest": "d" * 64,
+            },
+            "credential_binding": {
+                "status": "verified",
+                "target_id": task.target_id,
+                "target_identity": target_identity,
+                "manifest_digest": proof["manifest_digest"],
+                "availability_proof": "e" * 64,
+            },
+            "wallet_binding": {
+                "status": "verified",
+                "mode": "disabled",
+                "target_id": task.target_id,
+                "target_identity": target_identity,
+                "manifest_digest": proof["manifest_digest"],
+            },
+        }
+    )
 
 def _target_context(tmp_path: Any, *, emergency: bool = False) -> Any:
     database = Database(tmp_path / "noyra.sqlite3")
@@ -304,6 +355,7 @@ def test_cutover_accepts_task_bound_signed_restore_and_health_proof(tmp_path: An
             private.sign(canonical_json(signing_payload).encode())
         ).decode("ascii"),
     }
+    _add_disabled_binding_proof(proof, task=task, target_identity="host-1")
     cutover = CutoverCoordinator(database, executor=_ProofExecutor())
     prepared = cutover.prepare(task.task_id, proof=proof)
     assert prepared.status == "validating"
@@ -363,6 +415,7 @@ def test_cutover_commit_rolls_back_task_when_epoch_completion_fails(
             private.sign(canonical_json(signing_payload).encode())
         ).decode("ascii"),
     }
+    _add_disabled_binding_proof(proof, task=task, target_identity="host-atomic")
     cutover = CutoverCoordinator(database, executor=_ProofExecutor())
     cutover.prepare(task.task_id, proof=proof)
 

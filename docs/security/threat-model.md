@@ -84,6 +84,15 @@ high-risk mode and requires a second approval bound to the exact task and
 address; source key material is retained until commit and never appears in
 status or audit projections.
 
+The target also signs a task-bound binding record after checking its registered
+recipient fingerprint, credential references and fingerprints, wallet mode,
+signer identity, local-wallet approval, target generation, and encrypted-volume
+proof. The source verifies that signature before transfer and binds the
+credential, wallet, signer, and volume proof digests to activation and the
+execution receipt. A missing, stale, replayed, tampered, or context-mismatched
+binding fails closed. Identical binding retries are idempotent; a changed
+request for the same task is rejected.
+
 Emergency recovery is an independent policy mode. It requires source failure
 evidence, a verified backup, an active and attested allowlisted standby, and a
 target signature over the task, backup, manifest, restore, and health digests.

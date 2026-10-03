@@ -100,7 +100,11 @@ def test_recipient_pop_rejects_tampered_ciphertext() -> None:
         "target-1", recipient.public_key(), source_epoch="epoch-1"
     )
     tampered = type(challenge)(
-        **{**challenge.to_dict(), "ciphertext": challenge.ciphertext[:-1] + "A"}
+        **{
+            **challenge.to_dict(),
+            "ciphertext": challenge.ciphertext[:-1]
+            + ("A" if challenge.ciphertext[-1] != "A" else "B"),
+        }
     )
     with pytest.raises(ValueError, match="authentication"):
         open_recipient_pop_challenge(tampered, recipient)

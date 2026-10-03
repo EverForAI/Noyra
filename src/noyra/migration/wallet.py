@@ -51,6 +51,10 @@ class WalletBindingReceipt:
     committed: bool = False
     approval_fingerprint: str | None = None
     channel_id: str | None = None
+    target_id: str | None = None
+    manifest_digest: str | None = None
+    target_identity: str | None = None
+    proof_digest: str | None = None
 
     def __getitem__(self, key: str) -> Any:
         return self.to_dict()[key]
@@ -68,6 +72,10 @@ class WalletBindingReceipt:
             "committed": self.committed,
             "approval_fingerprint": self.approval_fingerprint,
             "channel_id": self.channel_id,
+            "target_id": self.target_id,
+            "manifest_digest": self.manifest_digest,
+            "target_identity": self.target_identity,
+            "proof_digest": self.proof_digest,
         }
 
 
@@ -136,6 +144,57 @@ class WalletMigration:
             source_address=plan.source_address,
             target_address=plan.target_address,
             signer_id=plan.signer_id,
+        )
+
+    @staticmethod
+    def verify_external_signer(
+        plan: WalletMigrationPlan,
+        target: dict[str, Any],
+        *,
+        target_id: str,
+        manifest_digest: str,
+    ) -> WalletBindingReceipt:
+        if plan.mode != "external_signer_rebind" or not plan.signer_id:
+            raise ValueError("plan is not an external signer rebind")
+        if not isinstance(target, dict) or target.get("status") != "verified":
+            raise ValueError("target signer binding proof is required")
+        if target.get("signer_id") != plan.signer_id:
+            raise ValueError("target signer identity does not match")
+        if str(target.get("address", "")).casefold() != plan.source_address.casefold():
+            raise ValueError("target signer address does not match")
+        identity = target.get("target_identity")
+        proof = target.get("proof_digest")
+        if (
+            not isinstance(identity, str)
+            or not isinstance(proof, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", proof)
+            or not re.fullmatch(r"[0-9a-f]{64}", manifest_digest)
+        ):
+            raise ValueError("target signer binding proof is invalid")
+        expected = content_hash(
+            {
+                "task_id": plan.task_id,
+                "target_id": target_id,
+                "manifest_digest": manifest_digest,
+                "signer_id": plan.signer_id,
+                "address": plan.source_address,
+                "target_identity": identity,
+            }
+        )
+        if proof != expected:
+            raise ValueError("target signer proof does not match")
+        return WalletBindingReceipt(
+            binding_id=new_id("wallet-binding"),
+            status="verified",
+            mode=plan.mode,
+            task_id=plan.task_id,
+            source_address=plan.source_address,
+            target_address=plan.target_address,
+            signer_id=plan.signer_id,
+            target_id=target_id,
+            manifest_digest=manifest_digest,
+            target_identity=identity,
+            proof_digest=proof,
         )
 
     @staticmethod

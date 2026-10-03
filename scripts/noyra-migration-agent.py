@@ -34,6 +34,10 @@ IDENTITY_KEYS = frozenset(
         "recipient_public_key",
         "recipient_key_fingerprint",
         "session_token",
+        "credential_references",
+        "credential_fingerprints",
+        "signer_id",
+        "wallet_address",
     }
 )
 
@@ -189,6 +193,10 @@ def load_agent(
         restore_root=configured_restore_root,
         backup_manager=backup_manager,
         activation_controller=activation_controller,
+        credential_references=identity.get("credential_references"),
+        credential_fingerprints=identity.get("credential_fingerprints"),
+        signer_id=identity.get("signer_id"),
+        wallet_address=identity.get("wallet_address"),
     )
 
 
@@ -213,6 +221,8 @@ def dispatch(agent: MigrationAgent, operation: str, payload: dict[str, Any]) -> 
         return result
     if operation == "recipient-pop":
         return asdict(agent.recipient_pop(payload))
+    if operation == "bindings":
+        return agent.binding_proof(payload)
     if operation == "preflight":
         manifest = payload.get("manifest")
         if not isinstance(manifest, dict):
@@ -306,6 +316,7 @@ class Handler(BaseHTTPRequestHandler):
             "/v1/enroll": "enroll",
             "/v1/challenge": "challenge",
             "/v1/recipient-pop": "recipient-pop",
+            "/v1/bindings": "bindings",
             "/v1/preflight": "preflight",
             "/v1/receive": "receive",
             "/v1/receive-chunk": "receive",
@@ -386,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
             "enroll",
             "challenge",
             "recipient-pop",
+            "bindings",
             "preflight",
             "receive",
             "restore",

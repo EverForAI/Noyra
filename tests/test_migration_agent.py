@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from noyra.core.at_rest import VolumeEncryptionStatus
-from noyra.core.types import canonical_json
+from noyra.core.types import canonical_json, content_hash
 from noyra.migration.agent import (
     MigrationAgent,
     RestoreReport,
@@ -52,6 +52,45 @@ def _auth_headers(token: str, body: bytes, *, timestamp: int, nonce: str) -> dic
         "X-Noyra-Timestamp": str(timestamp),
         "X-Noyra-Nonce": nonce,
         "X-Noyra-Body-SHA256": digest,
+    }
+
+
+def _disabled_activation_binding(
+    agent: MigrationAgent, *, task_id: str, manifest_digest: str, artifact_id: str
+) -> dict[str, object]:
+    assert agent.recipient_key_fingerprint is not None
+    binding = agent.binding_proof(
+        {
+            "task_id": task_id,
+            "subject_id": "Noyra-0001",
+            "target_id": agent.target_id,
+            "source_epoch": "runtime-4",
+            "manifest_digest": manifest_digest,
+            "artifact_id": artifact_id,
+            "recipient_key_fingerprint": agent.recipient_key_fingerprint,
+            "credential_binding": {"references": {}, "fingerprints": {}},
+            "wallet_binding": {"mode": "disabled"},
+        }
+    )
+    return {
+        "recipient_key_fingerprint": agent.recipient_key_fingerprint,
+        "target_volume_proof_digest": content_hash(
+            {
+                "task_id": task_id,
+                "manifest_digest": manifest_digest,
+                "proof": binding["target_volume_proof"],
+            }
+        ),
+        "credential_binding_digest": content_hash(
+            {
+                "task_id": task_id,
+                "manifest_digest": manifest_digest,
+                "binding": binding["credential_binding"],
+            }
+        ),
+        "signer_binding_digest": None,
+        "wallet_mode": "disabled",
+        "wallet_proof_digest": None,
     }
 
 
@@ -200,11 +239,13 @@ def test_target_activation_fails_closed_without_a_runtime_handoff_controller(
     tmp_path: Any,
 ) -> None:
     private = Ed25519PrivateKey.generate()
+    recipient = X25519PrivateKey.generate()
     public_bytes = private.public_key().public_bytes_raw()
     agent = MigrationAgent(
         target_id="target-1",
         key_fingerprint=hashlib.sha256(public_bytes).hexdigest(),
         signing_key=private,
+        recipient_private_key=recipient,
         data_root=tmp_path,
     )
     request = {
@@ -218,6 +259,11 @@ def test_target_activation_fails_closed_without_a_runtime_handoff_controller(
         "health_report_digest": "b" * 64,
         "source_fence_digest": "d" * 64,
     }
+    request.update(
+        _disabled_activation_binding(
+            agent, task_id="task-activation-1", manifest_digest="a" * 64, artifact_id="artifact-1"
+        )
+    )
 
     with pytest.raises(ValueError, match="runtime activation controller"):
         agent.activate(request)
@@ -225,6 +271,7 @@ def test_target_activation_fails_closed_without_a_runtime_handoff_controller(
 
 def test_target_activation_returns_agent_signed_service_receipt(tmp_path: Any) -> None:
     private = Ed25519PrivateKey.generate()
+    recipient = X25519PrivateKey.generate()
     public_bytes = private.public_key().public_bytes_raw()
 
     class ActivationController:
@@ -241,6 +288,7 @@ def test_target_activation_returns_agent_signed_service_receipt(tmp_path: Any) -
         target_id="target-1",
         key_fingerprint=hashlib.sha256(public_bytes).hexdigest(),
         signing_key=private,
+        recipient_private_key=recipient,
         data_root=tmp_path,
         activation_controller=ActivationController(),
     )
@@ -255,6 +303,11 @@ def test_target_activation_returns_agent_signed_service_receipt(tmp_path: Any) -
         "health_report_digest": "b" * 64,
         "source_fence_digest": "d" * 64,
     }
+    request.update(
+        _disabled_activation_binding(
+            agent, task_id="task-activation-1", manifest_digest="a" * 64, artifact_id="artifact-1"
+        )
+    )
 
     receipt = agent.activate(request)
 
@@ -615,6 +668,12 @@ def test_agent_checks_encrypted_volume_before_activation_side_effect(tmp_path: A
         "artifact_sha256": "b" * 64,
         "health_report_digest": "c" * 64,
         "source_fence_digest": "d" * 64,
+        "recipient_key_fingerprint": "c" * 64,
+        "target_volume_proof_digest": "e" * 64,
+        "credential_binding_digest": "f" * 64,
+        "signer_binding_digest": None,
+        "wallet_mode": "disabled",
+        "wallet_proof_digest": None,
     }
     with pytest.raises(ValueError, match="encrypted volume"):
         agent.activate(request)

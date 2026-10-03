@@ -260,6 +260,17 @@ class HTTPMigrationExecutor:
                 raise MigrationExecutionError("artifact_manifest_mismatch")
             if path.stat().st_size != manifest["byte_size"]:
                 raise MigrationExecutionError("artifact_size_mismatch")
+            binding_proof = self._request_binding_proof(
+                target, token, task, manifest_digest, manifest, proof
+            )
+            if isinstance(proof, dict):
+                # Keep the verified, target-signed binding evidence attached to
+                # the in-memory execution proof so receipt validation can bind
+                # every digest to the exact response that was verified.
+                proof.update(binding_proof)
+            binding_evidence = self._binding_evidence(
+                binding_proof, task, manifest_digest, target
+            )
             preflight = self._request(
                 target,
                 token,
@@ -323,6 +334,12 @@ class HTTPMigrationExecutor:
                     "artifact_sha256": manifest["artifact_sha256"],
                     "health_report_digest": content_hash(health_with_signature),
                     "source_fence_digest": source_fence_digest,
+                    "recipient_key_fingerprint": target["recipient_key_fingerprint"],
+                    "target_volume_proof_digest": binding_evidence["volume_digest"],
+                    "credential_binding_digest": binding_evidence["credential_digest"],
+                    "signer_binding_digest": binding_evidence["signer_digest"],
+                    "wallet_mode": binding_evidence["wallet_mode"],
+                    "wallet_proof_digest": binding_evidence["wallet_digest"],
                 },
             )
             activation = self._verify_activation_receipt(
@@ -348,6 +365,12 @@ class HTTPMigrationExecutor:
                 content_hash(health_with_signature),
                 source_fence_digest,
                 activation_digest,
+                target["recipient_key_fingerprint"],
+                binding_evidence["volume_digest"],
+                binding_evidence["credential_digest"],
+                binding_evidence["signer_digest"],
+                binding_evidence["wallet_mode"],
+                binding_evidence["wallet_digest"],
             )
         except Exception:
             try:
@@ -479,6 +502,376 @@ class HTTPMigrationExecutor:
             )
         except (KeyError, TypeError, ValueError, binascii.Error) as error:
             raise MigrationExecutionError("recipient_key_possession_failed") from error
+
+    @staticmethod
+    def _binding_request(value: Any, *, wallet: bool = False) -> dict[str, Any]:
+        if value is None:
+            return {"mode": "disabled"} if wallet else {"references": {}, "fingerprints": {}}
+        if not isinstance(value, Mapping):
+            raise MigrationExecutionError("migration_binding_request_invalid")
+        forbidden = {"secret", "token", "password", "private", "api_key", "bearer"}
+
+        def contains_secret(item: Any) -> bool:
+            if isinstance(item, Mapping):
+                return any(
+                    (
+                        isinstance(key, str)
+                        and (
+                            key.casefold() in forbidden
+                            or any(part in key.casefold() for part in forbidden)
+                        )
+                    )
+                    or contains_secret(child)
+                    for key, child in item.items()
+                )
+            if isinstance(item, (list, tuple)):
+                return any(contains_secret(child) for child in item)
+            return False
+
+        if contains_secret(value):
+            raise MigrationExecutionError("migration_binding_request_contains_secret")
+        if wallet:
+            mode = value.get("mode")
+            if mode == "disabled":
+                if set(value) != {"mode"}:
+                    raise MigrationExecutionError("migration_wallet_binding_request_invalid")
+                return {"mode": "disabled"}
+            if mode == "external_signer_rebind":
+                allowed = {"mode", "signer_id", "address"}
+                if set(value) != allowed:
+                    raise MigrationExecutionError("migration_wallet_binding_request_invalid")
+                return {key: value[key] for key in allowed}
+            if mode == "local_wallet_transfer":
+                allowed = {"mode", "address", "approval"}
+                if set(value) != allowed or not isinstance(value.get("approval"), Mapping):
+                    raise MigrationExecutionError("migration_wallet_binding_request_invalid")
+                return {
+                    "mode": mode,
+                    "address": value["address"],
+                    "approval": dict(value["approval"]),
+                }
+            raise MigrationExecutionError("migration_wallet_binding_request_invalid")
+        allowed = {"references", "fingerprints"}
+        if (
+            set(value) != allowed
+            or not isinstance(value.get("references"), Mapping)
+            or not isinstance(value.get("fingerprints"), Mapping)
+        ):
+            raise MigrationExecutionError("migration_credential_binding_request_invalid")
+        return {
+            "references": dict(value["references"]),
+            "fingerprints": dict(value["fingerprints"]),
+        }
+
+    def _request_binding_proof(
+        self,
+        target: Mapping[str, Any],
+        token: str,
+        task: MigrationTask,
+        manifest_digest: str,
+        manifest: Mapping[str, Any],
+        proof: Mapping[str, object],
+    ) -> dict[str, Any]:
+        request = {
+            "task_id": task.task_id,
+            "subject_id": task.subject_id,
+            "target_id": task.target_id,
+            "source_epoch": task.source_epoch,
+            "manifest_digest": manifest_digest,
+            "artifact_id": manifest["artifact_id"],
+            "recipient_key_fingerprint": target["recipient_key_fingerprint"],
+            "credential_binding": self._binding_request(proof.get("credential_binding")),
+            "wallet_binding": self._binding_request(proof.get("wallet_binding"), wallet=True),
+        }
+        response = self._request(target, token, "/v1/bindings", request)
+        self._verify_binding_response(target, task, manifest_digest, request, response)
+        return response
+
+    @staticmethod
+    def _verify_binding_response(
+        target: Mapping[str, Any],
+        task: MigrationTask,
+        manifest_digest: str,
+        request: Mapping[str, Any],
+        response: Mapping[str, Any],
+    ) -> None:
+        required = {
+            "status",
+            "task_id",
+            "subject_id",
+            "target_id",
+            "source_epoch",
+            "manifest_digest",
+            "artifact_id",
+            "target_generation",
+            "target_identity",
+            "recipient_key_fingerprint",
+            "credential_binding",
+            "wallet_binding",
+            "target_volume_proof",
+            "target_signature",
+        }
+        if not isinstance(response, Mapping) or set(response) != required:
+            raise MigrationExecutionError("target_binding_proof_invalid")
+        if response.get("status") != "verified":
+            raise MigrationExecutionError("target_binding_proof_unverified")
+        for key in (
+            "task_id",
+            "subject_id",
+            "target_id",
+            "source_epoch",
+            "manifest_digest",
+            "artifact_id",
+            "recipient_key_fingerprint",
+        ):
+            if response.get(key) != request.get(key):
+                raise MigrationExecutionError("target_binding_proof_context_mismatch")
+        generation = response.get("target_generation")
+        if type(generation) is not int or generation < 1:
+            raise MigrationExecutionError("target_binding_proof_generation_invalid")
+        registered_generation = target.get("enrollment_generation")
+        if registered_generation is not None and (
+            type(registered_generation) is not int or generation != registered_generation
+        ):
+            raise MigrationExecutionError("target_binding_proof_generation_mismatch")
+        identity = response.get("target_identity")
+        if not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{64}", identity):
+            raise MigrationExecutionError("target_binding_proof_identity_invalid")
+        try:
+            raw_key = HTTPMigrationExecutor._decode_base64_key(str(target["public_key"]))
+        except (KeyError, ValueError, TypeError, binascii.Error) as error:
+            raise MigrationExecutionError("target_binding_proof_key_invalid") from error
+        expected_identity = hashlib.sha256(
+            (
+                "noyra-target-host-v1\n"
+                f"{task.target_id}\n{hashlib.sha256(raw_key).hexdigest()}\n{generation}"
+            ).encode()
+        ).hexdigest()
+        if identity != expected_identity:
+            raise MigrationExecutionError("target_binding_proof_identity_mismatch")
+        if response.get("recipient_key_fingerprint") != target.get(
+            "recipient_key_fingerprint"
+        ):
+            raise MigrationExecutionError("target_binding_proof_recipient_mismatch")
+        signature = response.get("target_signature")
+        if not isinstance(signature, str):
+            raise MigrationExecutionError("target_binding_proof_signature_missing")
+        signed = {key: value for key, value in response.items() if key != "target_signature"}
+        try:
+            raw_signature = HTTPMigrationExecutor._decode_signature(signature)
+            Ed25519PublicKey.from_public_bytes(raw_key).verify(
+                raw_signature, canonical_json(signed).encode("utf-8")
+            )
+        except _SIGNATURE_ERROR as error:
+            raise MigrationExecutionError("target_binding_proof_signature_invalid") from error
+        credential_request = request["credential_binding"]
+        credential_response = response["credential_binding"]
+        if (
+            not isinstance(credential_request, Mapping)
+            or not isinstance(credential_response, Mapping)
+            or credential_response.get("references") != credential_request.get("references")
+            or credential_response.get("fingerprints") != credential_request.get("fingerprints")
+            or credential_response.get("status") != "verified"
+            or credential_response.get("target_id") != task.target_id
+            or credential_response.get("manifest_digest") != manifest_digest
+            or credential_response.get("target_identity") != identity
+        ):
+            raise MigrationExecutionError("target_credential_binding_mismatch")
+        wallet_request = request["wallet_binding"]
+        wallet_response = response["wallet_binding"]
+        if (
+            not isinstance(wallet_request, Mapping)
+            or not isinstance(wallet_response, Mapping)
+            or wallet_response.get("mode") != wallet_request.get("mode")
+            or wallet_response.get("status") != "verified"
+            or wallet_response.get("target_id") != task.target_id
+            or wallet_response.get("manifest_digest") != manifest_digest
+            or wallet_response.get("target_identity") != identity
+        ):
+            raise MigrationExecutionError("target_wallet_binding_mismatch")
+        for key in ("signer_id", "address", "approval"):
+            if key in wallet_request and wallet_response.get(key) != wallet_request.get(key):
+                raise MigrationExecutionError("target_wallet_binding_mismatch")
+
+    @staticmethod
+    def _decode_base64_key(value: str) -> bytes:
+        if not value:
+            raise ValueError("base64 key encoding is invalid")
+        raw_value = value.rstrip("=")
+        if "=" in raw_value:
+            raise ValueError("base64 key encoding is invalid")
+        raw = base64.b64decode(
+            raw_value.encode("ascii") + b"=" * (-len(raw_value) % 4),
+            altchars=b"-_",
+            validate=True,
+        )
+        if (
+            len(raw) != 32
+            or base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=") != raw_value
+        ):
+            raise ValueError("base64 key encoding is invalid")
+        return raw
+
+    @staticmethod
+    def _decode_signature(value: str) -> bytes:
+        if not value:
+            raise ValueError("signature encoding is invalid")
+        raw_value = value.rstrip("=")
+        if "=" in raw_value:
+            raise ValueError("signature encoding is invalid")
+        raw = base64.b64decode(
+            raw_value.encode("ascii") + b"=" * (-len(raw_value) % 4),
+            altchars=b"-_",
+            validate=True,
+        )
+        if len(raw) != 64 or base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=") != raw_value:
+            raise ValueError("signature encoding is invalid")
+        return raw
+
+    @staticmethod
+    def _binding_evidence(
+        proof: Mapping[str, object],
+        task: MigrationTask,
+        manifest_digest: str,
+        target: Mapping[str, Any],
+    ) -> dict[str, str | None]:
+        def mapping(name: str) -> Mapping[str, Any]:
+            value = proof.get(name)
+            if not isinstance(value, Mapping):
+                raise MigrationExecutionError(f"{name}_proof_required")
+            if any(
+                isinstance(key, str)
+                and any(
+                    token in key.casefold() for token in ("secret", "token", "password", "private")
+                )
+                for key in value
+            ):
+                raise MigrationExecutionError(f"{name}_proof_contains_secret")
+            return value
+
+        credential = mapping("credential_binding")
+        wallet = mapping("wallet_binding")
+        volume = mapping("target_volume_proof")
+        if (
+            credential.get("status") != "verified"
+            or credential.get("target_id") != task.target_id
+            or credential.get("manifest_digest") != manifest_digest
+        ):
+            raise MigrationExecutionError("credential_binding_unverified")
+        if credential.get("target_identity") != volume.get("target_identity"):
+            raise MigrationExecutionError("credential_binding_target_mismatch")
+        availability = credential.get("availability_proof")
+        if not isinstance(availability, str) or not re.fullmatch(r"[0-9a-f]{64}", availability):
+            raise MigrationExecutionError("credential_binding_proof_invalid")
+        expected_credential = content_hash(
+            {
+                "task_id": task.task_id,
+                "manifest_digest": manifest_digest,
+                "target_id": task.target_id,
+                "target_identity": credential.get("target_identity"),
+                "references": credential.get("references"),
+                "fingerprints": credential.get("fingerprints"),
+            }
+        )
+        if availability != expected_credential:
+            raise MigrationExecutionError("credential_binding_proof_invalid")
+        if (
+            volume.get("status") != "verified"
+            or volume.get("target_id") != task.target_id
+            or volume.get("manifest_digest") != manifest_digest
+        ):
+            raise MigrationExecutionError("target_volume_proof_unverified")
+        if (
+            volume.get("encrypted") is not True
+            or target.get("recipient_key_fingerprint") is None
+            or volume.get("recipient_key_fingerprint") != target.get("recipient_key_fingerprint")
+        ):
+            raise MigrationExecutionError("target_volume_proof_invalid")
+        volume_proof = volume.get("proof_digest")
+        if not isinstance(volume_proof, str) or not re.fullmatch(r"[0-9a-f]{64}", volume_proof):
+            raise MigrationExecutionError("target_volume_proof_invalid")
+        expected_volume = content_hash(
+            {
+                "task_id": task.task_id,
+                "target_id": task.target_id,
+                "manifest_digest": manifest_digest,
+                "recipient_key_fingerprint": target["recipient_key_fingerprint"],
+                "target_identity": volume.get("target_identity"),
+                "target_generation": volume.get("target_generation"),
+                "backend": volume.get("backend"),
+            }
+        )
+        if volume_proof != expected_volume:
+            raise MigrationExecutionError("target_volume_proof_invalid")
+        if wallet.get("status") not in {"verified", "committed"}:
+            raise MigrationExecutionError("wallet_binding_unverified")
+        if (
+            wallet.get("target_id") != task.target_id
+            or wallet.get("manifest_digest") != manifest_digest
+            or wallet.get("target_identity") != volume.get("target_identity")
+        ):
+            raise MigrationExecutionError("wallet_binding_target_mismatch")
+        wallet_mode = wallet.get("mode")
+        if wallet_mode not in {"external_signer_rebind", "local_wallet_transfer", "disabled"}:
+            raise MigrationExecutionError("wallet_binding_mode_invalid")
+        wallet_proof = wallet.get("proof_digest")
+        if wallet_mode != "disabled" and (
+            not isinstance(wallet_proof, str) or not re.fullmatch(r"[0-9a-f]{64}", wallet_proof)
+        ):
+            raise MigrationExecutionError("wallet_binding_proof_invalid")
+        if wallet_mode == "external_signer_rebind":
+            expected_wallet = content_hash(
+                {
+                    "task_id": task.task_id,
+                    "target_id": task.target_id,
+                    "manifest_digest": manifest_digest,
+                    "signer_id": wallet.get("signer_id"),
+                    "address": wallet.get("address"),
+                    "target_identity": wallet.get("target_identity"),
+                }
+            )
+            if wallet_proof != expected_wallet:
+                raise MigrationExecutionError("wallet_binding_proof_invalid")
+        elif wallet_mode == "local_wallet_transfer":
+            expected_wallet = content_hash(
+                {
+                    "task_id": task.task_id,
+                    "target_id": task.target_id,
+                    "manifest_digest": manifest_digest,
+                    "address": wallet.get("address"),
+                    "target_identity": wallet.get("target_identity"),
+                    "approval_fingerprint": wallet.get("approval_fingerprint"),
+                }
+            )
+            if wallet_proof != expected_wallet:
+                raise MigrationExecutionError("wallet_binding_proof_invalid")
+        credential_digest = content_hash(
+            {
+                "task_id": task.task_id,
+                "manifest_digest": manifest_digest,
+                "binding": dict(credential),
+            }
+        )
+        wallet_digest = (
+            content_hash(
+                {
+                    "task_id": task.task_id,
+                    "manifest_digest": manifest_digest,
+                    "binding": dict(wallet),
+                }
+            )
+            if wallet_mode != "disabled"
+            else None
+        )
+        return {
+            "volume_digest": content_hash(
+                {"task_id": task.task_id, "manifest_digest": manifest_digest, "proof": dict(volume)}
+            ),
+            "credential_digest": credential_digest,
+            "signer_digest": wallet_digest if wallet_mode == "external_signer_rebind" else None,
+            "wallet_mode": str(wallet_mode),
+            "wallet_digest": wallet_digest,
+        }
 
     def _request(
         self, target: Mapping[str, Any], token: str, path: str, body: dict[str, Any]
@@ -614,9 +1007,43 @@ class HTTPMigrationExecutor:
             "artifact_sha256": artifact_sha256,
             "health_report_digest": health_report_digest,
             "source_fence_digest": source_fence_digest,
+            "recipient_key_fingerprint": target["recipient_key_fingerprint"],
+            "target_volume_proof_digest": None,
+            "credential_binding_digest": None,
+            "signer_binding_digest": None,
+            "wallet_mode": None,
+            "wallet_proof_digest": None,
             "status": "active",
             "service_unit": "noyra.service",
         }
+        for key in ("target_volume_proof_digest", "credential_binding_digest"):
+            value = receipt.get(key)
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise MigrationExecutionError("target_activation_receipt_invalid")
+            required[key] = value
+        wallet_mode = receipt.get("wallet_mode")
+        if wallet_mode not in {"external_signer_rebind", "local_wallet_transfer", "disabled"}:
+            raise MigrationExecutionError("target_activation_receipt_invalid")
+        required["wallet_mode"] = wallet_mode
+        for key in ("signer_binding_digest", "wallet_proof_digest"):
+            value = receipt.get(key)
+            if value is not None and (
+                not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+            ):
+                raise MigrationExecutionError("target_activation_receipt_invalid")
+            required[key] = value
+        if wallet_mode == "external_signer_rebind" and (
+            required["signer_binding_digest"] is None
+            or required["wallet_proof_digest"] is None
+            or required["signer_binding_digest"] != required["wallet_proof_digest"]
+        ):
+            raise MigrationExecutionError("target_activation_receipt_invalid")
+        if wallet_mode == "local_wallet_transfer" and required["wallet_proof_digest"] is None:
+            raise MigrationExecutionError("target_activation_receipt_invalid")
+        if wallet_mode == "disabled" and any(
+            required[key] is not None for key in ("signer_binding_digest", "wallet_proof_digest")
+        ):
+            raise MigrationExecutionError("target_activation_receipt_invalid")
         if any(receipt.get(key) != value for key, value in required.items()):
             raise MigrationExecutionError("target_activation_receipt_invalid")
         if not isinstance(receipt.get("active_database_sha256"), str) or not re.fullmatch(

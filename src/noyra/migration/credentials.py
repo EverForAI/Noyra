@@ -41,6 +41,10 @@ class CredentialBindingReceipt:
     status: str
     references: dict[str, str]
     fingerprints: dict[str, str]
+    target_id: str | None = None
+    manifest_digest: str | None = None
+    target_identity: str | None = None
+    availability_proof: str | None = None
 
     def __getitem__(self, key: str) -> Any:
         return self.to_dict()[key]
@@ -51,6 +55,10 @@ class CredentialBindingReceipt:
             "status": self.status,
             "references": dict(self.references),
             "fingerprints": dict(self.fingerprints),
+            "target_id": self.target_id,
+            "manifest_digest": self.manifest_digest,
+            "target_identity": self.target_identity,
+            "availability_proof": self.availability_proof,
         }
 
 
@@ -107,4 +115,50 @@ class CredentialRebinder:
             status="rebind_required",
             references=dict(plan.references),
             fingerprints=dict(plan.fingerprints),
+        )
+
+    @staticmethod
+    def verify(
+        plan: CredentialBindingPlan,
+        target: Mapping[str, Any],
+        *,
+        task_id: str,
+        manifest_digest: str,
+    ) -> CredentialBindingReceipt:
+        """Accept only a target-side availability proof, never a secret value."""
+        if not isinstance(target, Mapping) or target.get("status") != "verified":
+            raise ValueError("target credential binding proof is required")
+        target_id = target.get("target_id")
+        identity = target.get("target_identity")
+        proof = target.get("availability_proof")
+        if (
+            not isinstance(target_id, str)
+            or not isinstance(identity, str)
+            or not isinstance(proof, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", proof)
+            or not isinstance(task_id, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", manifest_digest)
+        ):
+            raise ValueError("target credential binding proof is invalid")
+        expected = content_hash(
+            {
+                "task_id": task_id,
+                "manifest_digest": manifest_digest,
+                "target_id": target_id,
+                "target_identity": identity,
+                "references": plan.references,
+                "fingerprints": plan.fingerprints,
+            }
+        )
+        if proof != expected:
+            raise ValueError("target credential availability proof does not match")
+        return CredentialBindingReceipt(
+            binding_id=plan.binding_id,
+            status="verified",
+            references=dict(plan.references),
+            fingerprints=dict(plan.fingerprints),
+            target_id=target_id,
+            manifest_digest=manifest_digest,
+            target_identity=identity,
+            availability_proof=proof,
         )

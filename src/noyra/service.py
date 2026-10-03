@@ -1554,6 +1554,8 @@ class NoyraHTTPServer:
             "recipient_public_key": row["recipient_public_key"],
             "recipient_key_fingerprint": row["recipient_key_fingerprint"],
             "enrollment_generation": int(row["enrollment_generation"]),
+            "encrypted_volume": bool(row["encrypted_volume"]),
+            "release_sha": row["release_sha"],
         }
 
     def _migration_http_token(self, task: Any) -> str:

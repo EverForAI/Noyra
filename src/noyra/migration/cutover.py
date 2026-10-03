@@ -106,6 +106,26 @@ class CutoverCoordinator:
                     "health_report_digest": verified["health_report_digest"],
                     "epoch_id": epoch.epoch_id,
                     **({"manifest": proof["manifest"]} if "manifest" in proof else {}),
+                    **(
+                        {"credential_binding": proof["credential_binding"]}
+                        if "credential_binding" in proof
+                        else {}
+                    ),
+                    **(
+                        {"wallet_binding": proof["wallet_binding"]}
+                        if "wallet_binding" in proof
+                        else {}
+                    ),
+                    **(
+                        {"recipient_key_fingerprint": proof["recipient_key_fingerprint"]}
+                        if "recipient_key_fingerprint" in proof
+                        else {}
+                    ),
+                    **(
+                        {"target_volume_proof": proof["target_volume_proof"]}
+                        if "target_volume_proof" in proof
+                        else {}
+                    ),
                 },
             )
         return CutoverPlan(
@@ -182,6 +202,12 @@ class CutoverCoordinator:
                             "health_report_digest": receipt.health_report_digest,
                             "source_fence_digest": receipt.source_fence_digest,
                             "target_activation_digest": receipt.target_activation_digest,
+                            "recipient_key_fingerprint": receipt.recipient_key_fingerprint,
+                            "target_volume_proof_digest": receipt.target_volume_proof_digest,
+                            "credential_binding_digest": receipt.credential_binding_digest,
+                            "signer_binding_digest": receipt.signer_binding_digest,
+                            "wallet_mode": receipt.wallet_mode,
+                            "wallet_proof_digest": receipt.wallet_proof_digest,
                         },
                     )
                     epoch.complete_in_transaction(connection, actor)
@@ -281,7 +307,14 @@ class CutoverCoordinator:
             "health_report",
             "target_signature",
         }
-        if not required.issubset(proof) or set(proof) - required - {"manifest"}:
+        optional = {
+            "manifest",
+            "credential_binding",
+            "wallet_binding",
+            "recipient_key_fingerprint",
+            "target_volume_proof",
+        }
+        if not required.issubset(proof) or set(proof) - required - optional:
             raise ValueError("verified target restore and health proof is invalid")
         manifest = proof["manifest_digest"]
         artifact = proof["artifact_id"]
@@ -304,6 +337,19 @@ class CutoverCoordinator:
                 raise ValueError("verified migration artifact manifest is invalid")
             if manifest_proof.get("artifact_id") != artifact:
                 raise ValueError("verified migration artifact manifest binding is invalid")
+        for key in ("credential_binding", "wallet_binding"):
+            value = proof.get(key)
+            if value is not None and not isinstance(value, dict):
+                raise ValueError("verified migration binding request is invalid")
+            if isinstance(value, dict) and any(
+                isinstance(name, str)
+                and any(
+                    token in name.casefold()
+                    for token in ("secret", "token", "password", "private", "api_key")
+                )
+                for name in value
+            ):
+                raise ValueError("verified migration binding request contains a secret")
         for report, status in ((restore, "restored"), (health, "healthy")):
             if (
                 report.get("target_id") != task.target_id
