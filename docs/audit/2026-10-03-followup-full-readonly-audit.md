@@ -56,11 +56,11 @@
 - **修复风险**：中。需选择 `noyra` 可写但 root 保护仍成立的目录合同，或定义 root runner IPC，并补充真实 POSIX/systemd 测试；不能简单把整个 migration 根目录改成 0777。
 - **时机**：立即修复。迁移和正常重启都依赖它。
 
-### A02：管理台 cutover 请求没有 proof
+### A02：管理台 cutover 请求没有 proof（已安全关闭 UI 误操作，后端 ticket 仍未实现）
 
-- **证据**：`src/noyra/web/admin.js:1158-1160` 对 `/api/v1/admin/migration/tasks/{id}/cutover` 发送 `JSON.stringify({})`；`src/noyra/service.py:4492-4497` 明确要求 `payload["proof"]` 为对象，否则返回 `verified_target_restore_and_health_proof_required`。
+- **证据**：原 UI 对 `/api/v1/admin/migration/tasks/{id}/cutover` 发送空 JSON；当前 UI 已改为禁用“执行切换”并明确显示等待加密迁移包/目标恢复证明，点击不会再提交伪 proof（`f1546d5`）。后端仍要求 task-bound proof，短期 ticket/证据摘要 API 尚未实现。
 - **根因**：后端已经改为 proof-bound cutover，但 UI 仍是旧的空 payload；界面没有显示/收集 target restore、health digest、manifest 和 target signature，也没有“从已验证任务加载 proof”的调用。
-- **影响**：管理员点击按钮必然得到 400/409，UI 不能完成已经准备好的迁移；若文案仍提示成功，会造成错误运维判断。
+- **影响**：管理员不能误以为空 payload 可以完成切换；在后端 ticket 和完整 bundle 接线前，迁移保持不可执行。功能可用性仍受阻，但不再产生错误成功提示。
 - **触发概率**：100%（通过当前管理台按钮执行时）。
 - **修复风险**：中。必须保持 proof 不可由普通文本框伪造，优先由后端返回短期、任务绑定的可提交票据，UI 只提交票据/显示摘要。
 - **时机**：立即修复；在修复前隐藏或禁用 cutover 按钮比让它看似可用更安全。
