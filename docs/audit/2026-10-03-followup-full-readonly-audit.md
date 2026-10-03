@@ -84,9 +84,9 @@
 - **修复风险**：极高。必须定义目标服务的 systemd/socket/入口切换合同，activation 必须返回“新实例已启动、读取指定 artifact、health/ownership 已确认”的证明；失败需可回滚。
 - **时机**：立即修复；在完成前不得宣传迁移已可用。
 
-### A05：数据与钱包迁移没有按提案合同执行
+### A05：数据与钱包迁移没有按提案合同执行（当前仍为阻断项）
 
-- **证据**：服务 wiring `src/noyra/service.py:1501-1510` 使用 `SQLiteArtifactProvider`；该 provider 在 `src/noyra/migration/http_executor.py:75-90` 复制并校验 raw SQLite。提案文案 `src/noyra/migration/proposals.py:153-155` 却固定写 `encrypted backup`。`WalletMigration` 的 `plan/apply_external_signer/apply_local_transfer`（`src/noyra/migration/wallet.py:74-160`）只在模块/测试中出现，服务 cutover wiring 没有调用它，也没有把 signer rebind receipt 纳入 `MigrationExecutionReceipt`。
+- **证据**：服务 wiring `src/noyra/service.py:1501-1510` 仍使用 `SQLiteArtifactProvider`；该 provider 生成 raw SQLite。当前 `HTTPMigrationExecutor` 在 target lookup、source fence 和 snapshot 之前以 `recipient_encrypted_bundle_unavailable` 失败关闭；target agent 的持久化 HTTP/CLI `receive`、`restore` 也在写入前拒绝旧格式和尚未接线的新格式。提案已明确标记 `migration_execution_ready=false`。独立的 `src/noyra/migration/bundle.py` 只提供经过测试的文件封装基础设施，尚未接入 recipient enrollment、私钥 provisioning、target decrypt/restore、钱包/凭据 proof 或 receipt。`WalletMigration` 的 `plan/apply_external_signer/apply_local_transfer`（`src/noyra/migration/wallet.py:74-160`）仍未进入服务 cutover wiring。
 - **根因**：迁移 artifact provider、secret/config/wallet binding 和 target service restore 是独立模块，没有统一的 migration bundle/receipt；提案层描述超前于执行层。
 - **影响**：API 密钥、provider secret、备份 key、钱包 keystore 或 signer 绑定不会随迁移按设计恢复；目标可能启动但不能认知、搜索、付款，或误用本地钱包。raw SQLite 还可能包含需要静态加密保护的数据。
 - **概率**：依赖配置的部署中高；一旦迁移触发则缺失是确定的。
@@ -111,9 +111,9 @@
 - **修复风险**：中。采用显式 per-target quota、manifest preflight、磁盘可用空间与 reserved bytes 检查，并保证失败在 source fence 前可预测。
 - **时机**：迁移开启前立即修复或至少将配额写入目标注册合同。
 
-### A08：完整 artifact 哈希读入内存
+### A08：完整 artifact 哈希读入内存（资源切片已修复，目标 agent 仍有其他读入点）
 
-- **证据**：`SQLiteArtifactProvider` 在 `http_executor.py:84-85` 使用 `destination.read_bytes()`；`_manifest()` 在 `http_executor.py:391` 再次 `bundle.path.read_bytes()`；agent `_verify_artifact()` 在 `agent.py:772-778` 使用 `path.read_bytes()`；manifest/agent 上限允许远大于内存友好大小。
+- **证据**：`SQLiteArtifactProvider` 和 `_manifest()` 已改为固定块大小的 `_stream_digest()`，并有回归测试证明不会调用 `Path.read_bytes()`（`fb197ae`）。target agent 的 `_verify_artifact()` 及分块组装路径仍存在一次性 `read_bytes()`，因此本项只完成 executor/provider 资源切片，不能宣称整个 A08 完成。
 - **根因**：哈希实现使用一次性 bytes，而不是固定块大小的 streaming hash；同一文件还可能被重复读取。
 - **影响**：大数据库会产生多个 artifact 大小级别的瞬时内存分配，导致高延迟、OOM 或服务被 systemd 杀死；迁移失败后可能触发复杂 rollback。
 - **概率**：未量化，随 artifact 增长；在小数据库中不触发。
