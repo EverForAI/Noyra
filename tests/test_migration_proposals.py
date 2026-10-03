@@ -71,8 +71,8 @@ def test_proposal_contains_reason_evidence_and_expiry() -> None:
     assert proposal.reason_code == "storage_pressure"
     assert proposal.evidence["storage"] == "hash-storage"
     assert proposal.expires_at > proposal.created_at
-    assert proposal.evidence["migration_execution_ready"] is False
-    assert "blocked" in proposal.evidence["data_plan"]
+    assert proposal.evidence["migration_execution_ready"] is True
+    assert "recipient-encrypted" in proposal.evidence["data_plan"]
 
 
 def test_rejection_cooldown_is_keyed_to_target_and_reason(tmp_path: Any) -> None:

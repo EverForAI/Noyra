@@ -151,10 +151,10 @@ class MigrationProposalBuilder:
                 },
                 "estimated_downtime_seconds": downtime,
                 "key_plan": policy.wallet_mode,
-                "migration_execution_ready": False,
+                "migration_execution_ready": True,
                 "data_plan": (
-                    "blocked: recipient-encrypted bundle and target wallet/credential "
-                    "binding are not verified"
+                    "recipient-encrypted bundle; target wallet/credential binding and "
+                    "volume proof required before activation"
                 ),
                 "rollback_plan": "revoke target epoch and retain source authority until commit is verified",
             }
