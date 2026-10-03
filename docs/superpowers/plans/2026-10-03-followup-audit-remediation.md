@@ -49,6 +49,11 @@ validation remains an external gate. Keep this module open until those protocol
 contracts have end-to-end tests. Do not remove either source or target
 fail-closed barrier in an intermediate commit.
 
+The bundle helper now rejects non-canonical encodings and symlink/reparse-point
+destination paths, uses exclusive private temporary files with atomic publish,
+and streams source/ciphertext hashing. The resource-only A08 slice is complete
+(`fb197ae`); this does not change the A05/A06 status or reopen the executor.
+
 ### 5. Repair management proof UX and capacity/resource behavior (A02/A07/A08)
 
 Root causes: the admin cutover button sends `{}` although the endpoint requires proof; quotas are not negotiated before transfer; hashing reads entire files into memory. Add a server-issued short-lived task-bound cutover ticket and have the UI submit only that ticket, with evidence summaries and stable error states. Add manifest preflight for target quota/free space and stream SHA-256 over bounded chunks, reusing the digest. Test UI request shape, expiry/replay, quota rejection before fencing, large artifacts, and bounded memory behavior. Commit.
