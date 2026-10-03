@@ -52,7 +52,9 @@ fail-closed barrier in an intermediate commit.
 The bundle helper now rejects non-canonical encodings and symlink/reparse-point
 destination paths, uses exclusive private temporary files with atomic publish,
 and streams source/ciphertext hashing. The resource-only A08 slice is complete
-(`fb197ae`); this does not change the A05/A06 status or reopen the executor.
+(`fb197ae`, `aa49ae6`); provider and target-agent digest/assembly paths now
+stream fixed-size chunks. This does not change the A05/A06 status or reopen the
+executor, and A07 quota preflight is still open.
 
 ### 5. Repair management proof UX and capacity/resource behavior (A02/A07/A08)
 

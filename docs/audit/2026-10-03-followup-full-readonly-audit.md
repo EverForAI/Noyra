@@ -113,7 +113,7 @@
 
 ### A08：完整 artifact 哈希读入内存（资源切片已修复，目标 agent 仍有其他读入点）
 
-- **证据**：`SQLiteArtifactProvider` 和 `_manifest()` 已改为固定块大小的 `_stream_digest()`，并有回归测试证明不会调用 `Path.read_bytes()`（`fb197ae`）。target agent 的 `_verify_artifact()` 及分块组装路径仍存在一次性 `read_bytes()`，因此本项只完成 executor/provider 资源切片，不能宣称整个 A08 完成。
+- **证据**：`SQLiteArtifactProvider` 和 `_manifest()` 已改为固定块大小的 `_stream_digest()`，target agent 的 `_verify_artifact()` 与分块组装也已改为固定块读取（`fb197ae`、`aa49ae6`），并有回归测试覆盖 executor/provider。仍需在真实大 artifact、配额和并发条件下做资源压力证据，因此本项代码层已修复，生产容量门仍属于 A07/A09 外部验证。
 - **根因**：哈希实现使用一次性 bytes，而不是固定块大小的 streaming hash；同一文件还可能被重复读取。
 - **影响**：大数据库会产生多个 artifact 大小级别的瞬时内存分配，导致高延迟、OOM 或服务被 systemd 杀死；迁移失败后可能触发复杂 rollback。
 - **概率**：未量化，随 artifact 增长；在小数据库中不触发。
