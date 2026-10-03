@@ -4,9 +4,9 @@
 
 本次审计基于 `codex/wake-after-clean-restart` 分支、提交 `9bcec470dc8a055c78218f03c512392bb817b062`，当前数据库 schema 为 77。与上一轮修复基线 `344ca1d` 相比，代码没有变化；差异只有上一轮审计和计划文档。本次重新检查了认证与 HTTP 边界、运行时完整性和恢复、数据导出与保留、模型/搜索 provider、钱包付款、迁移、安装升级、systemd 与 GitHub Actions 发布流程。
 
-没有发现本次基线上的 P0 级问题，也没有发现一条无需认证即可执行钱包转账的路径。基础安全控制和对应的本地测试较完整。但迁移功能存在数个代码与部署接线缺口：当前安装器部署出的组件无法完成受控的数据传送、目标恢复和源端 fencing；而管理台 cutover 可以把数据库任务标为 `committed`，但没有完成服务实例切换。这些问题会阻断真实迁移，不能把管理台的“已提交”状态视为 Noyra 已安全迁往目标主机。
+没有发现本次基线上的 P0 级问题，也没有发现一条无需认证即可执行钱包转账的路径。基础安全控制和对应的本地测试较完整。针对本报告提出的 M01–M04，代码已经分模块完成修复并分别提交；修复后的 cutover 只有在真实执行器完成源端 fencing、分块传输、目标恢复、健康证明和目标激活后才会写入 `committed`。这证明了控制面不会再把“只更新数据库”误报为成功，但本地测试仍不能替代真实双机服务切换。
 
-因此建议保持迁移关闭，直到下面 M01–M04 修复并通过真实双机演练。钱包自动付款、公网长期运行及发布所需的签名外部证据也尚未在本次本地审计中确认；现有 release workflow 将此证据设为发布门禁。
+G01 仍是开放的外部发布门禁：真实 Ubuntu/systemd、双机源端隔离与目标服务接管、signer/KMS、链重组、HTTPS proxy 和 soak 证据必须由受保护的外部 workflow 产生并绑定同一 SHA。在这些证据完成前，迁移和自动付款不应被视为生产验收；执行步骤见 [迁移发布门禁运行手册](2026-10-03-migration-release-gate-runbook.md)。
 
 ## 2. 基线、范围和方法
 
@@ -62,19 +62,19 @@
 
 ## 6. 问题总表
 
-| 编号 | 问题 | 风险 | 修复风险 | 触发概率 | 时机 |
+| 编号 | 问题 | 风险 | 修复风险 | 触发概率 | 当前状态 |
 |---|---|---:|---:|---|---|
-| M01 | cutover 只提交控制面状态，没有执行数据传送、目标服务启用或源服务切换 | P1 | 高 | 100%（调用当前 cutover 代码时） | 立即；迁移保持关闭 |
-| M02 | 源端 fencing 依赖一个未由安装器/运行时建立的 epoch 文件；即使补文件，marker 也不会阻止服务写入 | P1 | 高 | 100%（标准安装首次 fence）；若手工补齐后仍无法防写 | 立即；迁移保持关闭 |
-| M03 | 标准部署的 target agent 没有恢复目录或加密备份 manager，无法完成健康验证 | P1 | 高 | 100%（默认 systemd 配置运行 restore/health） | 立即；迁移保持关闭 |
-| M04 | target agent 的 HTTP 接口用单个 Base64 JSON 接收完整 artifact，1 MB 请求上限与迁移 artifact 容量不匹配 | P1 | 中高 | 100%（artifact 编码后超过 1 MB 时） | 立即；迁移保持关闭 |
-| G01 | 当前提交的真实环境 release evidence 未能从本地仓库确认 | P1 发布门禁 | 高 | 未量化；发版/开启真实自动付款或无人值守迁移前必须解决 | 发版及启用高风险能力前 |
+| M01 | cutover 只提交控制面状态，没有执行数据传送、目标服务启用或源服务切换 | P1 | 高 | 100%（调用旧 cutover 代码时） | 已修复代码边界；真实目标服务接管仍属 G01 |
+| M02 | 源端 fencing 依赖一个未由安装器/运行时建立的 epoch 文件；即使补文件，marker 也不会阻止服务写入 | P1 | 高 | 100%（旧标准安装首次 fence） | 已修复：epoch、数据库 fence 和 admission/restart guard 已接通 |
+| M03 | 标准部署的 target agent 没有恢复目录或加密备份 manager，无法完成健康验证 | P1 | 高 | 100%（旧默认 systemd 配置运行 restore/health） | 已修复：restore root、credential 和 backup manager 接线已加入 |
+| M04 | target agent 的 HTTP 接口用单个 Base64 JSON 接收完整 artifact，1 MB 请求上限与迁移 artifact 容量不匹配 | P1 | 中高 | 100%（artifact 编码后超过 1 MB 时） | 已修复：认证分块、续传、最终 hash 和配额校验已加入 |
+| G01 | 当前提交的真实环境 release evidence 未能从本地仓库确认 | P1 发布门禁 | 高 | 未量化；发版/开启真实自动付款或无人值守迁移前必须解决 | 开放；必须走受保护外部门禁 |
 
 ## 7. 详细发现
 
 ### M01：cutover 仅更新数据库状态，不执行实际主机切换
 
-- **状态**：当前代码中可复现的迁移功能/安全边界缺口。
+- **状态**：代码层已修复；生产级目标服务接管仍须通过 G01 外部演练。
 - **风险等级**：P1，迁移状态与实际运行位置可能不一致。
 - **修复风险等级**：高。
 - **根因**：`CutoverCoordinator.commit()` 通过本地 SQLite 事务把 task 改为 `committed`，并完成 epoch 记录；该方法没有调用 target agent、复制/校验 artifact、停止源服务、启动目标服务、切换入口流量或完成源端 admission fence。HTTP cutover route 只把提交的 proof 交给 coordinator 并返回结果。`RegisteredTargetProvider.provision()` 明确拒绝自动 provisioning；`TransferSession`/`EncryptedTransferSession` 是本机路径到本机路径的文件操作，不是远程传输 client。仓库中没有从服务运行时到 target `/v1/receive`、`/v1/restore`、`/v1/health` 的迁移编排调用链。
@@ -82,11 +82,11 @@
 - **触发条件**：部署者启用迁移并通过 `/api/admin/migration/tasks/{id}/cutover` 提交目标 proof。
 - **触发概率**：100%（当前 `commit()` 路径只变更数据库 task/epoch；真实服务交接不在该调用内）。
 - **建议时机**：立即修复；在真实 source→target→cutover→rollback 状态机完成前保持迁移关闭，不允许把 `committed` 当作迁移成功提示。
-- **证据**：`src/noyra/migration/cutover.py:99-127`；`src/noyra/service.py:4418-4426`；`src/noyra/migration/providers.py:22-37`；`src/noyra/migration/transfer.py`；target agent HTTP endpoints 位于 `scripts/noyra-migration-agent.py:178-223`，但 service 侧没有相应调用链。
+- **修复证据**：`src/noyra/migration/executor.py` 定义强制执行 receipt；`src/noyra/migration/http_executor.py` 实现 HTTPS-only、HMAC、分块传输、restore、health 签名验证、activate 和 rollback；`src/noyra/service.py` 将执行器接入 `CutoverCoordinator`。缺少执行器、目标证明、健康检查或激活结果都会 fail closed。真实目标 systemd 服务启动、入口流量切换和双机断电恢复不在本地测试可证明范围，列入 G01。
 
 ### M02：源端 fence 是文件 marker，不会阻断运行时写入，且标准安装缺少源 epoch 文件
 
-- **状态**：当前实现不满足真实单活 fencing 合同。
+- **状态**：代码层已修复；真实 Ubuntu/systemd 权限和双机单活仍须通过 G01 外部演练。
 - **风险等级**：P1，主体数据一致性与双主保护边界。
 - **修复风险等级**：高。
 - **根因**：`MigrationExecutor.fence()` 只读取 `/var/lib/noyra/migration/source/epoch`，并在 `/var/lib/noyra/migration/fences/` 写一个 JSON marker。该 marker 不会被 Noyra service 的 admission/write path 读取，也不会停止服务。Ubuntu installer 只创建 migration、requests 和 status 目录，没有创建或更新 `source/epoch`；仓库内也没有同步 `runtime_state.version` 到该文件的生产写入路径。正常安装首次调用时会因 `source` 目录/epoch 文件缺失而拒绝；手工创建文件只能让校验通过，不能让活跃运行时被 fence。
@@ -94,11 +94,11 @@
 - **触发条件**：启用 root migration runner 并执行 `fence` 或 `restore` action。
 - **触发概率**：100%（标准安装首次运行时源 epoch 输入不存在）；若部署者人工创建输入，marker 未接入运行时写入的风险仍为 100%。
 - **建议时机**：立即修复；source admission 必须使用运行时实际共享的、原子且持久的 fence/epoch 状态；需证明 fencing 后旧进程不能继续写，再允许 cutover。
-- **证据**：`scripts/noyra-migration-runner.py:185-223`；`scripts/install-ubuntu.sh:892-896`；`deploy/systemd/noyra-migration-runner.service:7-20`；服务 tick 的 admission 使用见 `src/noyra/service.py:9573-9672`。静态检索未发现 service 对 runner 的 `fences/*.json` marker 的读取路径。
+- **修复证据**：`SubjectKernel` 的 ownership/admission、事务写入和启动恢复都会检查数据库 migration epoch 与 durable fence；安装器初始化 `migration/source/epoch`；runner 的 marker 也由 runtime guard 读取并对 malformed 状态 fail closed。测试覆盖在途 lease、重启、marker 冲突和安装合同。
 
 ### M03：标准部署的 target agent 没有恢复目标与备份解密配置
 
-- **状态**：标准 systemd 安装不具备已测试的 agent restore 参数。
+- **状态**：代码和 shipped systemd 配置已修复；真实加密卷和目标服务启动仍须通过 G01 外部演练。
 - **风险等级**：P1，真实迁移必然无法通过目标健康验证。
 - **修复风险等级**：高，涉及解密密钥注入、隔离恢复目录、数据库 ownership 和迁移后启动合同。
 - **根因**：`MigrationAgent` 只有收到 `restore_root` 才会写入恢复数据库；加密备份还需要 `backup_manager`。但生产 CLI `load_agent()` 只传入 identity 和 `data_root`，没有 restore-root/backup-manager 配置入口；`noyra-migration-agent.service` 的 `ExecStart` 也只传 identity/data-root/listen。此时 `restore()` 可返回无 `restore_path` 的报告，`validate()` 随后因 `host_binding` 为 false 而拒绝健康状态。对加密备份，CLI 也没有配置 `EncryptedBackupManager`。
@@ -106,11 +106,11 @@
 - **触发条件**：目标主机以仓库提供的 systemd unit 启动 migration agent，并执行 restore/health。
 - **触发概率**：100%（在当前默认 CLI/unit 参数下）。
 - **建议时机**：立即修复；为生产 agent 提供受保护的恢复目录与 backup keyring/credential 注入，并验证目标服务以正确身份加载恢复数据。密钥不得放入普通迁移请求或审计记录。
-- **证据**：`scripts/noyra-migration-agent.py:125-136`；`src/noyra/migration/agent.py:103-119,451-504,557-568`；`deploy/systemd/noyra-migration-agent.service:13`。
+- **修复证据**：`load_agent()` 接受受保护的 `restore_root`/`backup_keyring`；target systemd unit 使用 `LoadCredential`、隔离恢复目录和明确的读写路径；restore/health 对 SQLite quick check、subject identity、host binding 和 backup keyring 缺失 fail closed。
 
 ### M04：迁移 artifact 的 HTTP 接收上限小于有效迁移容量
 
-- **状态**：接口尺寸合同互相矛盾。
+- **状态**：代码层已修复；真实网络中断、代理超时和磁盘耗尽仍须通过 G01 外部演练。
 - **风险等级**：P1，真实数据集不能经 shipped target-agent API 传输。
 - **修复风险等级**：中高，需设计带认证、重放防护、断点续传和全量 hash 校验的分块协议。
 - **根因**：target agent 的 HTTP body 最大 1,000,000 字节，`/v1/receive` 要求将整个 artifact 放入 `artifact_b64` JSON 字段。Base64 本身约增加三分之一体积，因此实际原始 artifact 上限约为 0.75 MB；而 agent 默认入站额度为 64 MB，manifest/transfer 代码又允许远大于此的 artifact。当前协议没有 chunk upload endpoint 或流式 body 路径。
@@ -118,7 +118,7 @@
 - **触发条件**：通过 target agent `/v1/receive` 传输编码后超过 1 MB 的备份。
 - **触发概率**：100%（一旦 artifact 超过该阈值）；新建且极小的数据目录可能暂时不触发。
 - **建议时机**：迁移开放前立即修复；采用分块、逐块 digest、单次任务/manifest 绑定、续传校验、配额预留和最终 artifact hash 的协议，并通过中断/重放/磁盘耗尽测试。
-- **证据**：`scripts/noyra-migration-agent.py:21,63-69,152-162`；`src/noyra/migration/agent.py:114-118,243-258,628-638`；`src/noyra/migration/transfer.py:46-98,199-260`。
+- **修复证据**：target agent 支持 `/v1/receive-chunk`；每个 chunk 绑定 manifest、index/count、大小和 digest，HMAC nonce 防重放，重复 chunk 幂等、冲突拒绝、TTL/quota 清理，完成后重新计算 artifact SHA-256；source executor 对目标响应大小、HTTPS、超时和最终 receipt 做边界校验。
 
 ### G01：本地无法确认当前 SHA 的真实环境发布证据
 
@@ -132,6 +132,26 @@
 - **建议时机**：任何生产发版或开放高风险能力之前。先修复并演练 M01–M04，再针对同 SHA 完成八项 gate：Ubuntu/systemd、加密卷、备份恢复、migration fence、signer/KMS、reorg/nonce、HTTPS proxy、soak；保存脱敏记录并由独立 reviewer 签署。
 - **证据**：`.github/workflows/release.yml:62-145`；`.github/workflows/external-gates.yml:3-57`；`scripts/verify_external_gates.py:18-29,114-180`。
 
+## 7.1 本轮修复记录
+
+四个代码问题按安全边界分模块提交，提交之间没有合并未验证的跨模块改动：
+
+| 模块 | 提交 | 主要边界 |
+|---|---|---|
+| 执行合同 | `017f62d` | 没有真实 executor 时禁止 prepare/commit；receipt 绑定 task、epoch、manifest、restore、health、fence 和 activation digest。 |
+| 源端 fencing | `a06418f` | runtime admission、事务写入和重启恢复共同检查 durable epoch/fence；安装器建立 source epoch 和受限目录。 |
+| 目标恢复与传输 | `fc8b011` | HMAC 认证分块、乱序/断点续传、冲突拒绝、配额和最终 hash；target agent 注入 restore root/backup credential。 |
+| HTTPS 编排 | `39185d2` | source fence 先于 snapshot；HTTPS-only transport 调用 receive/restore/health/activate；签名验证、rollback 和 API fail-closed 接线。 |
+
+本地 fresh verification：
+
+- `tests/test_migration_*.py`：118 passed。
+- `tests/shell/test-migration-install.sh`：migration install contract passed。
+- 迁移相关 Ruff、mypy 和 `git diff --check`：通过。
+- `tests/test_external_gates.py`：通过；release workflow 缺少外部 artifact 时不再使用 `continue-on-error` 掩盖下载失败。
+
+上述证据只证明仓库内的代码合同和临时测试环境。目标主机实际启动 restored Noyra、切换入口流量、双机断电/网络中断恢复、KMS/signer、链重组和长期 soak 仍必须在受保护 workflow 中完成，不能用本地测试记录替代。
+
 ## 8. 修复顺序建议
 
 1. **先定义迁移的完成合同**：明确数据 artifact、目标恢复、目标服务启动、源 admission fence、流量切换、epoch 更新和 rollback 各自的成功证据；不能把数据库 task 状态当作实际 cutover。
@@ -142,7 +162,10 @@
 
 ## 9. 本次验证
 
-- `.venv\\Scripts\\python.exe -m pytest tests/test_migration_runner.py tests/test_migration_agent.py tests/test_migration_agent_cli.py tests/test_migration_service.py tests/test_migration_cutover.py -q -p no:cacheprovider`：**29 passed**。这些测试说明各本地单元路径有回归覆盖，但没有覆盖标准 systemd 参数之间的真实接线，也没有证明服务写入被 fence。
+- `.venv\\Scripts\\python.exe -m pytest tests/test_migration_*.py -q -p no:cacheprovider`：**118 passed**。这些测试覆盖执行合同、source fence、分块传输、target restore/health、HTTPS 编排、rollback 和 service 接线；没有覆盖真实双机、systemd 权限和公网代理。
+- `bash tests/shell/test-migration-install.sh`：**migration install contract passed**。
+- 迁移相关 Ruff、mypy 和 `git diff --check`：通过。
+- `tests/test_external_gates.py`：通过；release workflow 的外部 artifact 下载失败会直接失败，后续 verifier 仍强制同 SHA、签名、时间窗和完整 gate 集合。
 - 当前 SHA 的 wallet smoke evidence：`artifacts/release/stage4b4/9bcec470dc8a055c78218f03c512392bb817b062/20261002T173541321985Z/run.json`：**132 passed, 13 skipped**；evidence 记录的工作区干净，压力限额未超出。该文件是本地 gate evidence，不是生产 signer/真实链验收。
 - `.venv\\Scripts\\python.exe -m ruff check src/noyra scripts tests`：通过，`All checks passed!`。
 - `.venv\\Scripts\\python.exe -m mypy src tests`：通过，333 个源文件无类型错误。

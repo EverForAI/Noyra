@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -128,6 +129,17 @@ def test_http_executor_transfers_restores_health_checks_and_activates(tmp_path: 
     transport = _Transport(private)
     fenced: list[str] = []
     artifact_seen_fenced: list[bool] = []
+
+    def resolve_artifact(task: MigrationTask, proof: Mapping[str, object]) -> ArtifactBundle:
+        del task, proof
+        artifact_seen_fenced.append(fenced == ["runtime-1"])
+        return ArtifactBundle(artifact, manifest)
+
+    def fence_source(task: MigrationTask, epoch: str) -> str:
+        del task
+        fenced.append(epoch)
+        return "f" * 64
+
     executor = HTTPMigrationExecutor(
         target_resolver=lambda task: {
             "target_id": task.target_id,
@@ -135,11 +147,8 @@ def test_http_executor_transfers_restores_health_checks_and_activates(tmp_path: 
             "public_key": public,
         },
         token_resolver=lambda task: "t" * 32,
-        artifact_resolver=lambda task, proof: (
-            artifact_seen_fenced.append(fenced == ["runtime-1"])
-            or ArtifactBundle(artifact, manifest)
-        ),
-        source_fence=lambda task, epoch: fenced.append(epoch) or "f" * 64,
+        artifact_resolver=resolve_artifact,
+        source_fence=fence_source,
         source_unfence=lambda task, epoch: fenced.remove(epoch),
         transport=transport,
         chunk_bytes=4096,

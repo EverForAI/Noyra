@@ -199,10 +199,15 @@ class HTTPMigrationExecutor:
             if path.stat().st_size != manifest["byte_size"]:
                 raise MigrationExecutionError("artifact_size_mismatch")
             final = self._send_chunks(target, token, manifest, manifest_digest, path)
-            restore = self._request(target, token, "/v1/restore", {
-                **final,
-                "expected_digest": manifest_digest,
-            })
+            restore = self._request(
+                target,
+                token,
+                "/v1/restore",
+                {
+                    **final,
+                    "expected_digest": manifest_digest,
+                },
+            )
             health_with_signature = self._request(
                 target,
                 token,
@@ -336,9 +341,10 @@ class HTTPMigrationExecutor:
             "artifact_path",
             "artifact_sha256",
         )
-        if any(key not in final for key in required) or final["artifact_id"] != manifest[
-            "artifact_id"
-        ]:
+        if (
+            any(key not in final for key in required)
+            or final["artifact_id"] != manifest["artifact_id"]
+        ):
             raise MigrationExecutionError("target_transfer_receipt_invalid")
         return {key: final[key] for key in required}
 
@@ -438,8 +444,10 @@ class HTTPMigrationExecutor:
 
     @staticmethod
     def _digest(value: Any) -> bool:
-        return isinstance(value, str) and len(value) == 64 and all(
-            character in "0123456789abcdef" for character in value
+        return (
+            isinstance(value, str)
+            and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value)
         )
 
 

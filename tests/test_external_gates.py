@@ -254,6 +254,7 @@ def test_external_gate_workflow_is_separate_protected_and_sha_bound() -> None:
     assert '--commit "$EXPECTED_SHA"' in release_workflow
     assert "actions/download-artifact" in release_workflow
     assert "run-id: ${{ steps.external-gates-run.outputs.run_id }}" in release_workflow
+    assert "continue-on-error: true" not in release_workflow
     assert "EXTERNAL_GATES_RUN_ID" not in release_workflow
 
 
