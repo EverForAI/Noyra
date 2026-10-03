@@ -58,5 +58,6 @@ def test_missing_external_gate_download_reaches_the_stable_verifier_failure() ->
     )
     download_step = WORKFLOW[download_start : WORKFLOW.index("      - name:", download_start + 1)]
 
-    assert "continue-on-error: true" in download_step
+    assert "continue-on-error: true" not in download_step
+    assert "actions/download-artifact" in download_step
     assert verifier_start < public_key_preflight_start

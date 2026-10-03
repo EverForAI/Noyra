@@ -27,12 +27,23 @@ class KernelTestCase(unittest.TestCase):
         self.db_path = Path(self.temp_dir.name) / "noyra.sqlite3"
         self.subject_id = "Noyra-0001"
         self.genesis_hash = content_hash({"project": "Noyra", "seed": "test"})
+        self.kernels: list[SubjectKernel] = []
 
     def tearDown(self: Self) -> None:
+        for kernel in reversed(self.kernels):
+            kernel.close()
         self.temp_dir.cleanup()
 
     def new_kernel(self: Self) -> SubjectKernel:
-        return SubjectKernel(self.db_path, self.subject_id, self.genesis_hash)
+        kernel = SubjectKernel(self.db_path, self.subject_id, self.genesis_hash)
+        self.kernels.append(kernel)
+        return kernel
+
+    def test_kernel_context_manager_releases_process_lock(self: Self) -> None:
+        with self.new_kernel() as kernel:
+            kernel.boot()
+            self.assertTrue(kernel.process_lock.held)
+        self.assertFalse(kernel.process_lock.held)
 
     def test_schema_creation_and_foreign_keys(self: Self) -> None:
         database = Database(self.db_path)

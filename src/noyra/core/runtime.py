@@ -310,6 +310,12 @@ class SubjectKernel:
         self.process_lock.release()
         self._runtime_ready = False
 
+    def __enter__(self) -> SubjectKernel:
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        self.close()
+
     def _require_ownership(self) -> None:
         if not self.process_lock.held:
             raise RuntimeOwnershipError("this kernel does not own the subject runtime")
