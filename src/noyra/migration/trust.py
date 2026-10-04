@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlsplit
 
 from cryptography.exceptions import InvalidSignature, InvalidTag
 from cryptography.hazmat.primitives import hashes
@@ -21,6 +22,34 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from noyra.core.types import canonical_json
+
+
+def normalize_endpoint(endpoint: str) -> str:
+    """Return the canonical HTTPS endpoint covered by enrollment evidence."""
+    if not isinstance(endpoint, str) or len(endpoint) > 512:
+        raise ValueError("target endpoint is invalid")
+    parsed = urlsplit(endpoint)
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("target endpoint must be HTTPS")
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("target endpoint port is invalid") from error
+    host = parsed.hostname.encode("idna").decode("ascii").lower()
+    if ":" in host:
+        host = f"[{host}]"
+    port_part = f":{port}" if port is not None and port != 443 else ""
+    path = parsed.path or "/"
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"https://{host}{port_part}{path}"
 
 
 def _decode(value: str, label: str) -> bytes:
@@ -51,12 +80,31 @@ class TargetChallenge:
     nonce: str
     expires_at: str
     source_epoch: str
+    target_id: str | None = None
+    endpoint_origin: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.target_id is not None and (
+            not isinstance(self.target_id, str) or not self.target_id
+        ):
+            raise ValueError("challenge target id is invalid")
+        if self.endpoint_origin is not None and (
+            not isinstance(self.endpoint_origin, str) or not self.endpoint_origin
+        ):
+            raise ValueError("challenge endpoint origin is invalid")
 
     def signing_bytes(self) -> bytes:
         if not self.nonce or len(self.nonce) > 256 or not self.source_epoch:
             raise ValueError("challenge fields are invalid")
+        target_id = self.target_id or ""
+        endpoint_origin = self.endpoint_origin or ""
+        if self.target_id is None and self.endpoint_origin is None:
+            return (
+                f"noyra-target-attestation-v1\n{self.nonce}\n{self.expires_at}\n{self.source_epoch}"
+            ).encode()
         return (
-            f"noyra-target-attestation-v1\n{self.nonce}\n{self.expires_at}\n{self.source_epoch}"
+            "noyra-target-attestation-v2\n"
+            f"{target_id}\n{endpoint_origin}\n{self.nonce}\n{self.expires_at}\n{self.source_epoch}"
         ).encode()
 
     def ensure_fresh(self, *, now: datetime | None = None) -> None:

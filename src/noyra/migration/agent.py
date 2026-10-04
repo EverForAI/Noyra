@@ -357,6 +357,12 @@ class MigrationAgent:
                     nonce=str(request["nonce"]),
                     expires_at=str(request["expires_at"]),
                     source_epoch=str(request["source_epoch"]),
+                    target_id=(str(request["target_id"]) if request.get("target_id") else None),
+                    endpoint_origin=(
+                        str(request["endpoint_origin"])
+                        if request.get("endpoint_origin")
+                        else None
+                    ),
                 )
             except (KeyError, TypeError) as error:
                 raise ValueError("challenge request is invalid") from error

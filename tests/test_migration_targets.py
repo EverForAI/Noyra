@@ -125,6 +125,37 @@ def test_revoked_target_cannot_be_attested(tmp_path: Any) -> None:
         registry.attest(target.target_id, challenge, signature, actor="operator")
 
 
+def test_target_attestation_binds_endpoint_origin(tmp_path: Any) -> None:
+    _, registry = _registry(tmp_path)
+    private, public = _key_material()
+    _, recipient_public = _recipient_material()
+    target = registry.register(
+        "Noyra-0001",
+        target_id="target-endpoint-binding",
+        public_key=public,
+        recipient_public_key=recipient_public,
+        endpoint="https://target.example/migration",
+        capabilities={},
+        region=None,
+        provider=None,
+        release_sha="e" * 40,
+        os_arch="linux-amd64",
+        encrypted_volume=True,
+        actor="operator",
+    )
+    issued = registry.issue_challenge(target.target_id, source_epoch="epoch-1")
+    tampered = type(issued)(
+        nonce=issued.nonce,
+        expires_at=issued.expires_at,
+        source_epoch=issued.source_epoch,
+        target_id=issued.target_id,
+        endpoint_origin="https://attacker.example/migration",
+    )
+    signature = base64.urlsafe_b64encode(private.sign(tampered.signing_bytes())).decode("ascii")
+    with pytest.raises(ValueError, match="endpoint binding"):
+        registry.attest(target.target_id, tampered, signature, actor="operator")
+
+
 def test_target_integrity_detects_key_and_revocation_tampering(tmp_path: Any) -> None:
     database, registry = _registry(tmp_path)
     _, public = _key_material()

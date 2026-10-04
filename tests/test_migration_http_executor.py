@@ -16,6 +16,7 @@ from noyra.migration.executor import MigrationExecutionError
 from noyra.migration.http_executor import (
     ArtifactBundle,
     HTTPMigrationExecutor,
+    UrllibHTTPTransport,
     _stream_digest,
 )
 from noyra.migration.manager import MigrationTask
@@ -30,6 +31,19 @@ def test_stream_digest_does_not_use_read_bytes(
     size, digest = _stream_digest(path, chunk_bytes=17)
     assert size == path.stat().st_size
     assert digest == hashlib.sha256(b"chunk" * 4096).hexdigest()
+
+
+def test_urllib_transport_blocks_private_literal_destinations() -> None:
+    transport = UrllibHTTPTransport()
+    with pytest.raises(MigrationExecutionError, match="private"):
+        transport.request("https://127.0.0.1/migration", {}, "t" * 32)
+
+
+def test_urllib_transport_allows_explicit_private_network_policy() -> None:
+    import ipaddress
+
+    transport = UrllibHTTPTransport(allowed_private_networks=("127.0.0.0/8",))
+    assert not transport._restricted_address(ipaddress.ip_address("127.0.0.1"))
 
 
 def test_sqlite_artifact_provider_emits_recipient_encrypted_bundle(tmp_path: Path) -> None:

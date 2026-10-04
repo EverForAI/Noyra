@@ -22,7 +22,7 @@ from noyra.core.identity import validate_subject_id
 from noyra.core.types import canonical_json, content_hash, utc_now
 
 from .policy import MigrationStore
-from .trust import TargetAttestation, TargetChallenge, TrustEvidence
+from .trust import TargetAttestation, TargetChallenge, TrustEvidence, normalize_endpoint
 
 
 @dataclass(frozen=True)
@@ -83,6 +83,7 @@ class TargetRegistry:
             raise ValueError("target endpoint must be HTTPS")
         if len(parsed.path) > 256 or parsed.query or parsed.fragment:
             raise ValueError("target endpoint must be an HTTPS origin or fixed agent path")
+        endpoint = normalize_endpoint(endpoint)
         public_bytes = self._decode_public_key(public_key)
         recipient_bytes = self._decode_recipient_public_key(recipient_public_key)
         if type(encrypted_volume) is not bool or not encrypted_volume:
@@ -209,7 +210,13 @@ class TargetRegistry:
                 "system",
                 {"target_id": target_id, "source_epoch": source_epoch, "expires_at": expires},
             )
-        return TargetChallenge(nonce=nonce, expires_at=expires, source_epoch=source_epoch)
+        return TargetChallenge(
+            nonce=nonce,
+            expires_at=expires,
+            source_epoch=source_epoch,
+            target_id=target_id,
+            endpoint_origin=normalize_endpoint(row["endpoint"]),
+        )
 
     def attest(
         self, target_id: str, challenge: TargetChallenge, signature: str, *, actor: str
@@ -223,6 +230,12 @@ class TargetRegistry:
             if row is None:
                 raise NotFoundError(f"migration target not found: {target_id}")
             self._assert_row_integrity(row)
+            if challenge.target_id is not None and challenge.target_id != target_id:
+                raise ValueError("challenge target identity mismatch")
+            if challenge.endpoint_origin is not None and challenge.endpoint_origin != normalize_endpoint(
+                row["endpoint"]
+            ):
+                raise ValueError("challenge endpoint binding mismatch")
             if row["status"] not in {"pending", "active"}:
                 raise ValueError("target is revoked or quarantined")
             stored = connection.execute(

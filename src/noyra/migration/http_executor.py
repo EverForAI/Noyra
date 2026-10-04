@@ -12,9 +12,12 @@ import binascii
 import gc
 import hashlib
 import hmac
+import ipaddress
 import json
+import os
 import re
 import secrets
+import socket
 import sqlite3
 import time
 from collections.abc import Callable, Mapping
@@ -39,6 +42,7 @@ from .manager import MigrationTask
 from .trust import (
     RecipientPoPProof,
     create_recipient_pop_challenge,
+    normalize_endpoint,
     verify_recipient_pop,
 )
 
@@ -150,13 +154,34 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 class UrllibHTTPTransport:
-    def __init__(self, *, timeout_seconds: float = 15.0):
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = 15.0,
+        allowed_private_networks: tuple[str, ...] | None = None,
+    ):
         if not 1 <= timeout_seconds <= 120:
             raise ValueError("migration HTTP timeout is invalid")
         self.timeout_seconds = timeout_seconds
+        configured_networks = (
+            allowed_private_networks
+            if allowed_private_networks is not None
+            else tuple(
+                item.strip()
+                for item in os.getenv("NOYRA_MIGRATION_ALLOWED_PRIVATE_NETWORKS", "").split(",")
+                if item.strip()
+            )
+        )
+        try:
+            self.allowed_private_networks = tuple(
+                ipaddress.ip_network(item, strict=False) for item in configured_networks
+            )
+        except ValueError as error:
+            raise ValueError("migration private network allowlist is invalid") from error
         self._opener = build_opener(_NoRedirect)
 
     def request(self, url: str, body: dict[str, Any], token: str) -> dict[str, Any]:
+        self._validate_connection_endpoint(url)
         encoded = canonical_json(body).encode("utf-8")
         digest = hashlib.sha256(encoded).hexdigest()
         timestamp = str(int(time.time()))
@@ -195,6 +220,48 @@ class UrllibHTTPTransport:
         if not isinstance(value, dict):
             raise MigrationExecutionError("target_response_invalid")
         return value
+
+    def _validate_connection_endpoint(self, url: str) -> None:
+        endpoint = normalize_endpoint(url)
+        parsed = urlsplit(endpoint)
+        assert parsed.hostname is not None
+        port = parsed.port or 443
+        try:
+            literal = ipaddress.ip_address(parsed.hostname)
+            addresses: tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...] = (literal,)
+        except ValueError:
+            try:
+                infos = socket.getaddrinfo(
+                    parsed.hostname, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP
+                )
+            except OSError as error:
+                raise MigrationExecutionError("target_http_unavailable") from error
+            addresses = tuple(
+                ipaddress.ip_address(info[4][0])
+                for info in infos
+                if info[4] and info[4][0]
+            )
+        if not addresses:
+            raise MigrationExecutionError("target_http_unavailable")
+        if any(self._restricted_address(address) for address in addresses):
+            raise MigrationExecutionError("target_private_address_blocked")
+
+    def _restricted_address(self, address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+        if address in {
+            ipaddress.ip_address("169.254.169.254"),
+            ipaddress.ip_address("169.254.169.253"),
+        }:
+            return True
+        if not (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_multicast
+            or address.is_unspecified
+            or address.is_reserved
+        ):
+            return False
+        return not any(address in network for network in self.allowed_private_networks)
 
 
 class HTTPMigrationExecutor:
