@@ -61,6 +61,43 @@ environment file. Rotate it on the server with `sudo scripts/rotate-operator-tok
 atomically replaces the token, updates the environment file, restarts Noyra, and verifies that the
 service is active. Store the new token in a password manager before closing the current session.
 
+### Migration target and recovery checklist
+
+The Ubuntu installer publishes the migration agent and root runner as a single
+rollbackable component set. A fresh host keeps the agent disabled because no
+`/etc/noyra/migration/identity.json` exists. Upgrades preserve the agent's
+enabled and active state and restore the previous files if readiness fails.
+
+Before registering a standby target, verify all of the following:
+
+1. The standby uses an encrypted volume and the same compatible release.
+2. Its identity file is a root-owned regular file with mode `0600`; the private
+   Ed25519 key is never placed in the source database or ordinary environment
+   file.
+3. The target agent is reachable only through its authenticated loopback or
+   mutually authenticated proxy channel and has a private data root.
+4. The target is enrolled, challenge-attested, and added to the subject's
+   migration allowlist. Revoke it immediately if its generation, release, or
+   health report changes.
+5. A verified encrypted backup and the backup key generation needed to restore
+   it are available on the target before emergency recovery is enabled.
+
+Use manual approval for the first rehearsal. The recovery request must carry
+the task id, standby target, backup id, source failure evidence, manifest,
+restore, and health digests, plus the target's signature over all of them. A
+repeated signed request is idempotent. The source will not acquire a second
+active epoch, and a stale source remains fenced after restart. If target health
+or integrity validation fails, leave migration disabled, revoke the target,
+and use the normal encrypted backup restore and rollback procedure.
+
+External signer/KMS rebinding is the production wallet default. Local-wallet
+transfer is available only after the migration policy's separate high-risk
+confirmation and a one-time approval bound to the exact wallet address and
+task. Never copy `noyra.env`, wallet keystores, provider API keys, or operator
+tokens into migration artifacts. A disposable two-host encrypted restore and
+rollback rehearsal with recorded epoch and health evidence is required before
+changing approval mode to `policy_auto`.
+
 If a reverse proxy fronts the public site, set `NOYRA_TRUSTED_PROXY_CIDRS` to the smallest network
 that contains only that proxy (for a same-host proxy, normally `127.0.0.1/32` and/or `::1/128`).
 Noyra ignores `X-Forwarded-For` from every other peer. Leaving this setting empty is safe for an
@@ -472,6 +509,26 @@ inactive or first-time service is left stopped. Code rollback is not a data roll
 migrations are forward-only, so a failed code deployment may still require restoring the recorded
 pre-update backup before the old release can safely run.
 
+### Upgrade from the management page
+
+After a native Ubuntu installation that includes the upgrade runner, open the HTTPS management page
+and use **总览 → Noyra 版本与升级**. Select **检查最新版本** to read the official GitHub `main`
+commit, then review its short SHA, commit time, and title before selecting **升级到最新版** and
+confirming. The check is read-only. A confirmed task runs in a separate root-owned systemd service,
+so closing the tab, losing the SSH session, or restarting the browser does not cancel it. Reopen the
+management page to see its status and bounded progress summary.
+
+The Ubuntu installer provisions the fixed systemd path trigger and recovery unit, keeps the runner
+source checkout root-owned, and gives the Noyra service access only to submit a fixed SHA request and
+read the redacted status. The runner accepts only the current tip of the official repository's `main`
+branch and preserves the installed `base` or `cloud` profile. It delegates backups, atomic release
+switching, readiness checks, and code rollback to the existing installer. If the checked commit
+changes before the runner fetches it, the request is rejected and the page asks you to check again.
+
+This workflow currently applies to the native Ubuntu/systemd installation. Docker and other deployment
+types continue to use their deployment-specific update process. An older Ubuntu installation must be
+updated once through the existing installer before this management-page control becomes available.
+
 Run the deployment audit before an update. The installer also creates an encrypted cold backup
 outside `/var/lib/noyra` before replacing an existing release:
 
@@ -520,6 +577,18 @@ sudo ./scripts/install-ubuntu.sh --rollback
 sudo systemctl status noyra
 curl --fail http://127.0.0.1:8765/health/ready
 ```
+
+If the management session is unavailable, inspect the fixed upgrade service and its redacted journal
+summary as a recovery path:
+
+```bash
+sudo systemctl status noyra-upgrade.service noyra-upgrade.path
+sudo journalctl -u noyra-upgrade.service -n 80 --no-pager
+sudo cat /var/lib/noyra/upgrade/status.json
+```
+
+Do not run the installer manually while the management task is active; both routes use the installer's
+exclusive lock, and the second attempt will be refused.
 
 Do not delete `/opt/noyra/releases/<id>` while it is selected by `current` or `previous`. Keep at
 least one verified backup keyring copy separate from the subject data; losing retired key material

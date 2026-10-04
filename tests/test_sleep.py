@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Self
 
 from pydantic import ValidationError
 
@@ -38,7 +39,7 @@ from noyra.sleep.errors import SleepStateConflictError
 
 
 class SleepTestCase(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "noyra.sqlite3"
         self.subject_id = "Noyra-sleep-test"
@@ -51,11 +52,11 @@ class SleepTestCase(unittest.TestCase):
         self.clock_value = "2026-08-11T00:00:00.000+00:00"
         self.sleep = SleepEngine(self.database, self.subject_id, clock=lambda: self.clock_value)
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.kernel.close()
         self.temp_dir.cleanup()
 
-    def test_fatigue_pressure_modes_and_restoration(self) -> None:
+    def test_fatigue_pressure_modes_and_restoration(self: Self) -> None:
         tracker = FatigueTracker(self.database)
         initial = tracker.ensure(self.subject_id)
         self.assertEqual(initial.mode, "active")
@@ -91,7 +92,7 @@ class SleepTestCase(unittest.TestCase):
         self.assertEqual(restored.fatigue, 28)
         self.assertEqual(restored.resource_pressure, 1)
 
-    def test_sleep_integrity_rejects_corrupt_fatigue_numbers(self) -> None:
+    def test_sleep_integrity_rejects_corrupt_fatigue_numbers(self: Self) -> None:
         FatigueTracker(self.database).ensure(self.subject_id)
         with self.database.connection() as connection:
             original = dict(
@@ -115,7 +116,7 @@ class SleepTestCase(unittest.TestCase):
                         (original[column], self.subject_id),
                     )
 
-    def test_sleep_integrity_rejects_invalid_run_numeric_storage(self) -> None:
+    def test_sleep_integrity_rejects_invalid_run_numeric_storage(self: Self) -> None:
         run = self.sleep.start("subject_choice", "audit durable sleep numbers")
         with self.database.connection() as connection:
             original = dict(
@@ -175,7 +176,7 @@ class SleepTestCase(unittest.TestCase):
                         (original[column], original["state_hash"], run.sleep_id),
                     )
 
-    def test_sleep_integrity_rejects_nonfinite_reflection_plan(self) -> None:
+    def test_sleep_integrity_rejects_nonfinite_reflection_plan(self: Self) -> None:
         run = self.sleep.start("subject_choice", "audit nonfinite reflection JSON")
         self.sleep.begin_reflection(run.sleep_id)
         self.sleep.commit_reflection(
@@ -201,7 +202,7 @@ class SleepTestCase(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             SleepIntegrity(self.database).verify(self.subject_id)
 
-    def test_sleep_integrity_rejects_invalid_retry_boundary_numbers(self) -> None:
+    def test_sleep_integrity_rejects_invalid_retry_boundary_numbers(self: Self) -> None:
         old_evidence = EventStore(self.database).append(
             self.subject_id, "retry_boundary_evidence", "test", {"old": True}
         )
@@ -306,7 +307,7 @@ class SleepTestCase(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             SleepIntegrity(self.database).verify(self.subject_id)
 
-    def test_sleep_integrity_rejects_invalid_personality_numbers(self) -> None:
+    def test_sleep_integrity_rejects_invalid_personality_numbers(self: Self) -> None:
         evidence_event = EventStore(self.database).append(
             self.subject_id, "personality_evidence", "test", {"evidence": True}
         )
@@ -409,7 +410,7 @@ class SleepTestCase(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             SleepIntegrity(self.database).verify(self.subject_id)
 
-    def test_full_sleep_cycle_commits_checkpoint_and_preserves_identity(self) -> None:
+    def test_full_sleep_cycle_commits_checkpoint_and_preserves_identity(self: Self) -> None:
         EventStore(self.database).append(
             self.subject_id, "test_event", "test", {"content": "A day of observation."}
         )
@@ -480,7 +481,7 @@ class SleepTestCase(unittest.TestCase):
         counts = SleepIntegrity(self.database).verify(self.subject_id)
         self.assertEqual(counts["sleep_runs"], 1)
 
-    def test_sleep_rejects_open_actions_and_enforces_wake_time(self) -> None:
+    def test_sleep_rejects_open_actions_and_enforces_wake_time(self: Self) -> None:
         action = self.kernel.action_ledger.prepare(
             self.subject_id,
             "publish",
@@ -507,7 +508,7 @@ class SleepTestCase(unittest.TestCase):
         self.sleep.wake(run.sleep_id, "operator approved early wake", force=True)
 
     def test_budget_sleep_clears_stale_resource_pressure_only_after_utc_day_rollover(
-        self,
+        self: Self,
     ) -> None:
         tracker = FatigueTracker(self.database)
         tracker.assess(
@@ -539,7 +540,7 @@ class SleepTestCase(unittest.TestCase):
         self.assertEqual(restored.resource_pressure, 0)
         self.assertEqual(restored.mode, "active")
 
-    def test_restart_during_deep_sleep_preserves_subject_and_sleep_state(self) -> None:
+    def test_restart_during_deep_sleep_preserves_subject_and_sleep_state(self: Self) -> None:
         run = self.sleep.start("subject_choice", "reflect before restart")
         self.sleep.begin_reflection(run.sleep_id)
         self.sleep.commit_reflection(
@@ -560,7 +561,7 @@ class SleepTestCase(unittest.TestCase):
         self.assertEqual(reopened_identity.genesis_hash, original_identity.genesis_hash)
         self.assertEqual(reopened_identity.last_checkpoint, original_identity.last_checkpoint)
 
-    def test_invalid_reflection_rolls_back_atomically(self) -> None:
+    def test_invalid_reflection_rolls_back_atomically(self: Self) -> None:
         run = self.sleep.start("subject_choice", "test atomic integration")
         self.sleep.begin_reflection(run.sleep_id)
         with self.assertRaises(NotFoundError):
@@ -592,7 +593,7 @@ class SleepTestCase(unittest.TestCase):
         self.assertEqual(event_count, 0)
         self.assertIsNone(self.sleep.get(run.sleep_id).reflection_event_id)
 
-    def test_retry_block_requires_new_evidence_before_same_strategy(self) -> None:
+    def test_retry_block_requires_new_evidence_before_same_strategy(self: Self) -> None:
         setup_evidence = EventStore(self.database).append(
             self.subject_id, "goal_setup_evidence", "test", {"setup": True}
         )
@@ -688,7 +689,7 @@ class SleepTestCase(unittest.TestCase):
         self.assertEqual(prepared.status, "prepared")
         SleepIntegrity(self.database).verify(self.subject_id)
 
-    def test_reflection_integrates_memory_goal_belief_and_personality_candidate(self) -> None:
+    def test_reflection_integrates_memory_goal_belief_and_personality_candidate(self: Self) -> None:
         events = EventStore(self.database)
         evidence = tuple(
             events.append(
@@ -779,7 +780,7 @@ class SleepTestCase(unittest.TestCase):
             )
         self.assertEqual(SleepIntegrity(self.database).verify(self.subject_id)["sleep_runs"], 1)
 
-    def test_schema_migrates_from_version_four(self) -> None:
+    def test_schema_migrates_from_version_four(self: Self) -> None:
         legacy = Path(self.temp_dir.name) / "legacy-v4.sqlite3"
         raw = sqlite3.connect(legacy)
         raw.execute("CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -800,7 +801,7 @@ class SleepTestCase(unittest.TestCase):
         self.assertEqual(int(version), CURRENT_SCHEMA_VERSION)
         self.assertTrue({"fatigue_states", "sleep_runs", "sleep_reflections"}.issubset(tables))
 
-    def test_plan_validation_rejects_blank_content(self) -> None:
+    def test_plan_validation_rejects_blank_content(self: Self) -> None:
         with self.assertRaises(ValidationError):
             SleepReflectionPlan(summary=" ")
         with self.assertRaises(ValidationError):

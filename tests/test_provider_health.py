@@ -1,22 +1,23 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from noyra.core import Database, IdentityStore
 from noyra.core.errors import IntegrityError
-from noyra.core.provider_health import ProviderHealthStore
+from noyra.core.provider_health import ProviderHealthStore, RoutePermit
 from noyra.core.types import content_hash
 
 
-def fixture(tmp_path: Path):
+def fixture(tmp_path: Path) -> Any:
     db = Database(tmp_path / "noyra.sqlite3")
     subject = "Noyra-provider-health"
     IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
     return db, subject
 
 
-def test_health_persists_only_hourly_aggregates_and_latency(tmp_path: Path):
+def test_health_persists_only_hourly_aggregates_and_latency(tmp_path: Path) -> None:
     db, subject = fixture(tmp_path)
     store = ProviderHealthStore(db)
     assert store.record_attempt(subject, "model", "provider-a", "attempt-1", True, 100, None)
@@ -40,7 +41,7 @@ def test_health_persists_only_hourly_aggregates_and_latency(tmp_path: Path):
         assert connection.execute("SELECT COUNT(*) FROM provider_health_buckets").fetchone()[0] == 1
 
 
-def test_projection_rejects_tampered_health_aggregate(tmp_path: Path):
+def test_projection_rejects_tampered_health_aggregate(tmp_path: Path) -> None:
     db, subject = fixture(tmp_path)
     store = ProviderHealthStore(db)
     store.record_attempt(subject, "model", "provider-a", "attempt-1", True, 100, None)
@@ -55,7 +56,7 @@ def test_projection_rejects_tampered_health_aggregate(tmp_path: Path):
         store.list_projection(subject, "model")
 
 
-def test_projection_includes_the_actual_metric_window(tmp_path: Path):
+def test_projection_includes_the_actual_metric_window(tmp_path: Path) -> None:
     db, subject = fixture(tmp_path)
     store = ProviderHealthStore(db)
     store.record_attempt(subject, "model", "provider-a", "attempt-1", True, 100, None)
@@ -66,7 +67,7 @@ def test_projection_includes_the_actual_metric_window(tmp_path: Path):
     assert row["window_start"] <= row["window_end"]
 
 
-def test_missing_state_for_recorded_provider_fails_closed(tmp_path: Path):
+def test_missing_state_for_recorded_provider_fails_closed(tmp_path: Path) -> None:
     db, subject = fixture(tmp_path)
     store = ProviderHealthStore(db)
     store.record_attempt(subject, "model", "provider-a", "attempt-1", False, 100, "timeout")
@@ -79,7 +80,7 @@ def test_missing_state_for_recorded_provider_fails_closed(tmp_path: Path):
         store.route_available(subject, "model", "provider-a")
 
 
-def test_probe_completion_requires_the_matching_probe_token(tmp_path: Path):
+def test_probe_completion_requires_the_matching_probe_token(tmp_path: Path) -> None:
     db, subject = fixture(tmp_path)
     store = ProviderHealthStore(db, failure_threshold=1)
     store.record_attempt(subject, "model", "provider-a", "attempt-1", False, 100, "timeout")
@@ -136,7 +137,7 @@ def test_probe_completion_requires_the_matching_probe_token(tmp_path: Path):
         )
 
 
-def test_health_cooldown_recovers_with_one_automatic_probe(tmp_path: Path):
+def test_health_cooldown_recovers_with_one_automatic_probe(tmp_path: Path) -> None:
     db, subject = fixture(tmp_path)
     store = ProviderHealthStore(db, failure_threshold=1)
     store.record_attempt(
@@ -172,3 +173,88 @@ def test_health_cooldown_recovers_with_one_automatic_probe(tmp_path: Path):
         )
     assert store.route_available(subject, "search", "provider-b") is True
     assert store.route_available(subject, "search", "provider-b") is False
+
+
+def test_unknown_outcome_is_not_counted_as_known_failure(tmp_path: Path) -> None:
+    db, subject = fixture(tmp_path)
+    store = ProviderHealthStore(db, failure_threshold=1)
+    store.record_attempt(
+        subject,
+        "model",
+        "provider-a",
+        "attempt-unknown",
+        False,
+        100,
+        "provider_outcome_unknown",
+        outcome_unknown=True,
+    )
+    projection = store.list_projection(subject, "model")[0]
+    assert projection["attempt_count"] == 1
+    assert projection["failure_count"] == 0
+    assert projection["unknown_count"] == 1
+    assert projection["failure_rate"] == 0.0
+    assert projection["unknown_rate"] == 1.0
+    assert projection["state"] == "healthy"
+
+
+def test_route_permit_is_required_to_complete_half_open_probe(tmp_path: Path) -> None:
+    db, subject = fixture(tmp_path)
+    store = ProviderHealthStore(db, failure_threshold=1)
+    store.record_attempt(subject, "model", "provider-a", "attempt-1", False, 100, "timeout")
+    with db.transaction() as connection:
+        row = connection.execute(
+            "SELECT * FROM provider_health_state WHERE subject_id=? AND provider_id=?",
+            (subject, "provider-a"),
+        ).fetchone()
+        expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+        state_hash = store._state_hash(
+            subject,
+            "model",
+            "provider-a",
+            row["state"],
+            expired,
+            row["probe_token"],
+            row["probe_started_at"],
+            row["consecutive_failures"],
+            row["last_success_at"],
+            row["last_failure_at"],
+            row["updated_at"],
+        )
+        connection.execute(
+            "UPDATE provider_health_state SET cooldown_until=?, state_hash=? "
+            "WHERE subject_id=? AND provider_id=?",
+            (expired, state_hash, subject, "provider-a"),
+        )
+    permit = store.claim_route(subject, "model", "provider-a")
+    assert isinstance(permit, RoutePermit)
+    assert permit.probe_token
+    assert store.claim_route(subject, "model", "provider-a") is None
+    store.record_attempt(
+        subject,
+        "model",
+        "provider-a",
+        "attempt-probe",
+        True,
+        10,
+        None,
+        probe_token=permit.probe_token,
+    )
+    assert store.route_available(subject, "model", "provider-a") is True
+
+
+def test_route_permit_identity_is_verified(tmp_path: Path) -> None:
+    db, subject = fixture(tmp_path)
+    store = ProviderHealthStore(db)
+    permit = store.claim_route(subject, "model", "provider-a")
+    assert isinstance(permit, RoutePermit)
+    with pytest.raises(ValueError, match="identity"):
+        store.record_attempt(
+            subject,
+            "model",
+            "provider-b",
+            "attempt-mismatch",
+            True,
+            10,
+            None,
+            permit=permit,
+        )

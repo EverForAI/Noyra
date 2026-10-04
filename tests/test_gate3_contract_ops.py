@@ -65,6 +65,25 @@ def test_liveness_and_readiness_are_separate(tmp_path: Path) -> None:
         service.kernel.close()
 
 
+def test_target_readiness_binds_subject_and_migration_target_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NOYRA_MIGRATION_TARGET_ID", "shelter-1")
+    settings = _settings(tmp_path)
+    service = NoyraService(settings)
+    service.boot()
+    service.http.start()
+    try:
+        _, port = service.http.address
+        with urlopen(f"http://127.0.0.1:{port}/health/ready", timeout=5) as response:
+            payload = json.loads(response.read())
+        assert payload["subject_id"] == settings.subject_id
+        assert payload["migration_target_id"] == "shelter-1"
+    finally:
+        service.http.close()
+        service.kernel.close()
+
+
 def test_health_readiness_is_cached_and_rate_errors_advertise_retry_after(
     tmp_path: Path,
 ) -> None:

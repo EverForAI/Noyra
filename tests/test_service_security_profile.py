@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -15,7 +16,7 @@ from noyra.service import ServiceSettings, _load_public_post_hash_key
 
 
 def _settings(**changes: object) -> ServiceSettings:
-    values: dict[str, object] = {
+    values: dict[str, Any] = {
         "data_dir": Path(".runtime/test-security-profile"),
         "subject_id": "Noyra-security-profile",
         "genesis_hash": content_hash({"test": "security-profile"}),
@@ -86,6 +87,11 @@ def test_production_settings_require_at_rest_enforcement() -> None:
             at_rest_mode="development",
             backup_keyring_path=None,
         )
+
+
+def test_production_settings_require_integrity_monitoring() -> None:
+    with pytest.raises(ValueError, match="integrity monitoring"):
+        _settings(profile="production", integrity_mode="off")
 
 
 def test_production_from_env_requires_explicit_genesis_hash() -> None:

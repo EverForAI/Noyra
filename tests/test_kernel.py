@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Self
 from unittest import mock
 
 from noyra.core import Database, EventStore, IdentityStore, SubjectKernel
@@ -21,19 +22,30 @@ from noyra.core.types import content_hash
 
 
 class KernelTestCase(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "noyra.sqlite3"
         self.subject_id = "Noyra-0001"
         self.genesis_hash = content_hash({"project": "Noyra", "seed": "test"})
+        self.kernels: list[SubjectKernel] = []
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
+        for kernel in reversed(self.kernels):
+            kernel.close()
         self.temp_dir.cleanup()
 
-    def new_kernel(self) -> SubjectKernel:
-        return SubjectKernel(self.db_path, self.subject_id, self.genesis_hash)
+    def new_kernel(self: Self) -> SubjectKernel:
+        kernel = SubjectKernel(self.db_path, self.subject_id, self.genesis_hash)
+        self.kernels.append(kernel)
+        return kernel
 
-    def test_schema_creation_and_foreign_keys(self) -> None:
+    def test_kernel_context_manager_releases_process_lock(self: Self) -> None:
+        with self.new_kernel() as kernel:
+            kernel.boot()
+            self.assertTrue(kernel.process_lock.held)
+        self.assertFalse(kernel.process_lock.held)
+
+    def test_schema_creation_and_foreign_keys(self: Self) -> None:
         database = Database(self.db_path)
         with database.connection() as connection:
             tables = {
@@ -60,7 +72,7 @@ class KernelTestCase(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             EventStore(database).append("missing-subject", "test", "test", {})
 
-    def test_identity_survives_database_reopen(self) -> None:
+    def test_identity_survives_database_reopen(self: Self) -> None:
         database = Database(self.db_path)
         first = IdentityStore(database).ensure(self.subject_id, self.genesis_hash)
         reopened = IdentityStore(Database(self.db_path)).load(self.subject_id)
@@ -68,13 +80,13 @@ class KernelTestCase(unittest.TestCase):
         self.assertEqual(first.genesis_hash, reopened.genesis_hash)
         self.assertEqual(first.created_at, reopened.created_at)
 
-    def test_identity_conflict_is_rejected(self) -> None:
+    def test_identity_conflict_is_rejected(self: Self) -> None:
         store = IdentityStore(Database(self.db_path))
         store.ensure(self.subject_id, self.genesis_hash)
         with self.assertRaises(IdentityConflictError):
             store.ensure(self.subject_id, "different-genesis")
 
-    def test_identity_metadata_and_checkpoint_updates_are_validated(self) -> None:
+    def test_identity_metadata_and_checkpoint_updates_are_validated(self: Self) -> None:
         database = Database(self.db_path)
         store = IdentityStore(database)
         with self.assertRaises(ValueError):
@@ -105,7 +117,7 @@ class KernelTestCase(unittest.TestCase):
                 checkpoint_id=snapshot.snapshot_id,
             )
 
-    def test_event_payload_hash_is_verified_on_read(self) -> None:
+    def test_event_payload_hash_is_verified_on_read(self: Self) -> None:
         database = Database(self.db_path)
         IdentityStore(database).ensure(self.subject_id, self.genesis_hash)
         events = EventStore(database)
@@ -124,7 +136,7 @@ class KernelTestCase(unittest.TestCase):
             )
         self.assertEqual(events.verify_chain(self.subject_id)["event_count"], 1)
 
-    def test_event_id_is_idempotent_but_conflicts_are_rejected(self) -> None:
+    def test_event_id_is_idempotent_but_conflicts_are_rejected(self: Self) -> None:
         kernel = self.new_kernel()
         first = kernel.event_store.append(
             self.subject_id, "observation", "test", {"value": 1}, event_id="evt_fixed"
@@ -142,7 +154,7 @@ class KernelTestCase(unittest.TestCase):
                 event_id="evt_fixed",
             )
 
-    def test_event_processing_lifecycle_is_queryable_and_validated(self) -> None:
+    def test_event_processing_lifecycle_is_queryable_and_validated(self: Self) -> None:
         kernel = self.new_kernel()
         first = kernel.event_store.append(self.subject_id, "first", "test", {"order": 1})
         kernel.event_store.append(self.subject_id, "second", "test", {"order": 2})
@@ -156,7 +168,7 @@ class KernelTestCase(unittest.TestCase):
         with self.assertRaises(NotFoundError):
             kernel.event_store.mark_processed("evt_missing", subject_id=self.subject_id)
 
-    def test_lifecycle_records_valid_transitions_and_rejects_invalid_ones(self) -> None:
+    def test_lifecycle_records_valid_transitions_and_rejects_invalid_ones(self: Self) -> None:
         kernel = self.new_kernel()
         with self.assertRaises(RuntimeOwnershipError):
             kernel.activate()
@@ -173,7 +185,7 @@ class KernelTestCase(unittest.TestCase):
         ]
         self.assertEqual(len(lifecycle_events), 3)
 
-    def test_restart_from_active_preserves_identity_and_records_recovery(self) -> None:
+    def test_restart_from_active_preserves_identity_and_records_recovery(self: Self) -> None:
         first = self.new_kernel()
         first.boot()
         first.activate()
@@ -191,7 +203,7 @@ class KernelTestCase(unittest.TestCase):
         self.assertEqual(events[0].event_type, "lifecycle_recovery")
         self.assertEqual(events[0].payload["from"], "active")
 
-    def test_lifecycle_pause_sleep_wake_and_stop_path(self) -> None:
+    def test_lifecycle_pause_sleep_wake_and_stop_path(self: Self) -> None:
         kernel = self.new_kernel()
         kernel.boot()
         kernel.activate()
@@ -208,7 +220,7 @@ class KernelTestCase(unittest.TestCase):
         self.assertEqual(kernel.stop().state, "stopped")
         self.assertEqual(kernel.boot().state, "booting")
 
-    def test_checkpoint_updates_identity_and_is_atomic(self) -> None:
+    def test_checkpoint_updates_identity_and_is_atomic(self: Self) -> None:
         kernel = self.new_kernel()
         kernel.boot()
         with (
@@ -235,7 +247,7 @@ class KernelTestCase(unittest.TestCase):
             reopened.snapshot_store.latest(self.subject_id).state, {"state": "initial"}
         )
 
-    def test_concurrent_checkpoints_receive_unique_monotonic_versions(self) -> None:
+    def test_concurrent_checkpoints_receive_unique_monotonic_versions(self: Self) -> None:
         first = self.new_kernel()
         first.boot()
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -250,7 +262,7 @@ class KernelTestCase(unittest.TestCase):
         self.assertEqual(reopened.identity.state_version, 2)
         self.assertEqual(reopened.snapshot_store.latest(self.subject_id).state_version, 2)
 
-    def test_snapshot_hash_and_identity_continuity_are_verified(self) -> None:
+    def test_snapshot_hash_and_identity_continuity_are_verified(self: Self) -> None:
         kernel = self.new_kernel()
         kernel.boot()
         snapshot = kernel.checkpoint({"stable": True}, reason="integrity test")
@@ -262,7 +274,7 @@ class KernelTestCase(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             self.new_kernel()
 
-    def test_orphan_snapshot_is_rejected_at_version_zero(self) -> None:
+    def test_orphan_snapshot_is_rejected_at_version_zero(self: Self) -> None:
         kernel = self.new_kernel()
         kernel.snapshot_store.save(
             self.subject_id,
@@ -273,7 +285,7 @@ class KernelTestCase(unittest.TestCase):
         with self.assertRaisesRegex(IntegrityError, "unexpectedly has snapshots"):
             self.new_kernel()
 
-    def test_action_idempotency_is_subject_scoped_and_collision_safe(self) -> None:
+    def test_action_idempotency_is_subject_scoped_and_collision_safe(self: Self) -> None:
         kernel = self.new_kernel()
         other_subject = "Noyra-0002"
         kernel.identity_store.ensure(other_subject, content_hash({"seed": "other"}))
@@ -313,7 +325,7 @@ class KernelTestCase(unittest.TestCase):
                 idempotency_key="shared-key",
             )
 
-    def test_interrupted_action_is_quarantined_and_not_executed_twice(self) -> None:
+    def test_interrupted_action_is_quarantined_and_not_executed_twice(self: Self) -> None:
         kernel = self.new_kernel()
         action = kernel.action_ledger.prepare(
             self.subject_id,
@@ -357,7 +369,7 @@ class KernelTestCase(unittest.TestCase):
             "succeeded",
         )
 
-    def test_completed_action_creates_privacy_safe_behavior_log(self) -> None:
+    def test_completed_action_creates_privacy_safe_behavior_log(self: Self) -> None:
         kernel = self.new_kernel()
         action = kernel.action_ledger.prepare(
             self.subject_id, "observe", "test-tool", "sensitive-path", {"x": 1}
@@ -376,7 +388,7 @@ class KernelTestCase(unittest.TestCase):
         with self.assertRaises(InvalidTransitionError):
             kernel.action_ledger.start(action.action_id)
 
-    def test_prepared_action_can_be_cancelled_without_exposing_target(self) -> None:
+    def test_prepared_action_can_be_cancelled_without_exposing_target(self: Self) -> None:
         kernel = self.new_kernel()
         action = kernel.action_ledger.prepare(
             self.subject_id, "observe", "test-tool", "sensitive-path", {"x": 1}

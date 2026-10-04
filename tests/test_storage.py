@@ -7,6 +7,7 @@ import unittest
 import zipfile
 from io import BytesIO
 from pathlib import Path
+from typing import Self
 
 from noyra.core import (
     ArchiveStore,
@@ -22,7 +23,7 @@ from noyra.model import ModelLedger
 
 
 class StorageTestCase(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
         self.database = Database(self.root / "subject.sqlite3")
@@ -31,10 +32,10 @@ class StorageTestCase(unittest.TestCase):
         identities.ensure(self.subject_id, content_hash({"subject": self.subject_id}))
         self.subject_storage_key = identities.storage_key(self.subject_id)
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.temp_dir.cleanup()
 
-    def test_layout_isolated_and_traversal_safe(self) -> None:
+    def test_layout_isolated_and_traversal_safe(self: Self) -> None:
         layout = StorageLayout.create(self.root / "runtime")
         self.assertTrue(layout.subject.is_dir())
         self.assertTrue(layout.workspace.is_dir())
@@ -45,7 +46,7 @@ class StorageTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             layout.path_for("workspace", "../subject/secret")
 
-    def test_events_create_immutable_training_provenance(self) -> None:
+    def test_events_create_immutable_training_provenance(self: Self) -> None:
         event = EventStore(self.database).append(
             self.subject_id, "observation", "test", {"value": 1}, privacy_level="public"
         )
@@ -58,7 +59,7 @@ class StorageTestCase(unittest.TestCase):
         ):
             connection.execute("DELETE FROM training_records WHERE event_id = ?", (event.event_id,))
 
-    def test_private_psychology_is_excluded_by_default(self) -> None:
+    def test_private_psychology_is_excluded_by_default(self: Self) -> None:
         event = EventStore(self.database).append(
             self.subject_id, "sleep_reflection", "sleep", {"thought": "private"}
         )
@@ -67,7 +68,7 @@ class StorageTestCase(unittest.TestCase):
         self.assertEqual(record.eligibility, "excluded")
         self.assertEqual(record.redaction_status, "excluded")
 
-    def test_archive_registration_hashes_bytes(self) -> None:
+    def test_archive_registration_hashes_bytes(self: Self) -> None:
         archive = ArchiveStore(self.database).register(
             self.subject_id,
             storage_class="cold",
@@ -80,7 +81,7 @@ class StorageTestCase(unittest.TestCase):
         self.assertEqual(len(archive.content_hash), 64)
         self.assertIsNotNone(archive.verified_at)
 
-    def test_private_psychology_can_be_explicitly_included_and_redacted(self) -> None:
+    def test_private_psychology_can_be_explicitly_included_and_redacted(self: Self) -> None:
         store = TrainingStore(self.database)
         store.update_policy(self.subject_id, include_private_psychology=True)
         event = EventStore(self.database).append(
@@ -103,7 +104,7 @@ class StorageTestCase(unittest.TestCase):
         self.assertIsNotNone(audit)
         self.assertEqual(audit["actor"], "operator")
 
-    def test_reclassification_drains_all_rows_with_small_batches(self) -> None:
+    def test_reclassification_drains_all_rows_with_small_batches(self: Self) -> None:
         events = EventStore(self.database)
         for index in range(3):
             events.append(
@@ -125,7 +126,7 @@ class StorageTestCase(unittest.TestCase):
         self.assertTrue(all(record.eligibility == "eligible" for record in records))
         self.assertTrue(all(record.consent_version == 2 for record in records))
 
-    def test_training_export_contains_eligible_events_only(self) -> None:
+    def test_training_export_contains_eligible_events_only(self: Self) -> None:
         events = EventStore(self.database)
         events.append(
             self.subject_id,
@@ -153,7 +154,7 @@ class StorageTestCase(unittest.TestCase):
         self.assertIn("trajectories.jsonl", names)
         self.assertIn("quality.json", names)
 
-    def test_training_export_includes_opt_in_redacted_model_io(self) -> None:
+    def test_training_export_includes_opt_in_redacted_model_io(self: Self) -> None:
         TrainingStore(self.database).update_policy(self.subject_id, include_model_io=True)
         ModelLedger(self.database).prepare_call(
             self.subject_id,
@@ -177,7 +178,7 @@ class StorageTestCase(unittest.TestCase):
         self.assertNotIn("person@example.com", data)
         self.assertNotIn("never-export-this", data)
 
-    def test_training_export_path_writes_streamed_archive(self) -> None:
+    def test_training_export_path_writes_streamed_archive(self: Self) -> None:
         EventStore(self.database).append(
             self.subject_id,
             "public_observation",
@@ -196,7 +197,7 @@ class StorageTestCase(unittest.TestCase):
         self.assertEqual(artifact.sha256, hashlib.sha256(target.read_bytes()).hexdigest())
         self.assertFalse(list(target.parent.glob("*.tmp")))
 
-    def test_training_export_path_streams_past_legacy_row_bound(self) -> None:
+    def test_training_export_path_streams_past_legacy_row_bound(self: Self) -> None:
         events = EventStore(self.database)
         for index in range(2):
             events.append(
@@ -218,7 +219,7 @@ class StorageTestCase(unittest.TestCase):
             self.assertIn('"row_count": 2', manifest)
             self.assertEqual(len(archive.read("events.jsonl").splitlines()), 2)
 
-    def test_training_export_workspace_is_subject_scoped_and_manifested(self) -> None:
+    def test_training_export_workspace_is_subject_scoped_and_manifested(self: Self) -> None:
         workspace_root = self.root / "workspace"
         own_root = workspace_root / self.subject_storage_key
         other_root = workspace_root / "Noyra-other-subject"
@@ -252,7 +253,7 @@ class StorageTestCase(unittest.TestCase):
             },
         )
 
-    def test_training_export_workspace_rejects_escape_and_symlink_bytes(self) -> None:
+    def test_training_export_workspace_rejects_escape_and_symlink_bytes(self: Self) -> None:
         workspace_root = self.root / "workspace"
         own_root = workspace_root / self.subject_storage_key
         other_root = workspace_root / "Noyra-other-subject"

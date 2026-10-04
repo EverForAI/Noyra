@@ -6,6 +6,7 @@ import http.client
 import json
 import os
 import re
+import subprocess
 import tempfile
 import threading
 import time
@@ -15,7 +16,7 @@ from collections.abc import Mapping
 from datetime import date
 from io import BytesIO
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Self, cast
 from unittest.mock import AsyncMock, Mock, patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -27,6 +28,7 @@ from noyra.core import EventStore, OperationInvalidated, SubjectKernel
 from noyra.core.database import CURRENT_SCHEMA_VERSION
 from noyra.core.errors import IntegrityError
 from noyra.core.types import content_hash, utc_now
+from noyra.core.upgrade import UpgradeManager
 from noyra.interaction import InteractionStore, PublicProjection
 from noyra.mind import GoalCandidate, GoalStore
 from noyra.model import (
@@ -44,7 +46,7 @@ from noyra.sleep import SleepEngine, SleepReflectionPlan
 
 
 class ServiceTestCase(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self.temp_dir.name) / "data"
         self.settings = ServiceSettings(
@@ -71,17 +73,17 @@ class ServiceTestCase(unittest.TestCase):
         _, port = self.http.address
         self.base_url = f"http://127.0.0.1:{port}"
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.http.close()
         self.kernel.close()
         self.temp_dir.cleanup()
 
-    def get_json(self, path: str) -> object:
+    def get_json(self: Self, path: str) -> object:
         with urlopen(f"{self.base_url}{path}", timeout=5) as response:
             return json.loads(response.read())
 
     def authorized_json(
-        self, path: str, *, payload: Mapping[str, object] | None = None
+        self: Self, path: str, *, payload: Mapping[str, object] | None = None
     ) -> tuple[int, object]:
         request = Request(
             f"{self.base_url}{path}",
@@ -95,7 +97,7 @@ class ServiceTestCase(unittest.TestCase):
         with urlopen(request, timeout=5) as response:
             return response.status, json.loads(response.read())
 
-    def wait_for_export_job(self, job_id: str) -> dict[str, Any]:
+    def wait_for_export_job(self: Self, job_id: str) -> dict[str, Any]:
         deadline = time.monotonic() + 10
         job: dict[str, Any] = {}
         while time.monotonic() < deadline:
@@ -109,7 +111,133 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(job.get("status"), "completed", job)
         return job
 
-    def test_dashboard_and_read_only_public_endpoints(self) -> None:
+    def test_admin_upgrade_routes_require_operator_and_use_runner_request_protocol(
+        self: Self,
+    ) -> None:
+        repo = self.data_dir / "upgrade-source"
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+            check=True,
+        )
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+        (repo / "tracked.txt").write_text("clean\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "current"], check=True)
+        current_release = self.data_dir / "releases" / ("d" * 40)
+        current_release.mkdir(parents=True)
+        trigger = self.data_dir / "noyra-upgrade.path"
+        trigger.parent.mkdir(parents=True, exist_ok=True)
+        trigger.write_text("installed", encoding="utf-8")
+        latest_sha = "b" * 40
+        self.http.upgrade_manager = UpgradeManager(
+            source_path=repo,
+            current_release_path=current_release,
+            status_path=self.data_dir / "root-upgrade" / "status.json",
+            request_path=self.data_dir / "upgrade-requests" / "pending.json",
+            runner_trigger_path=trigger,
+            github_owner="example",
+            github_repo="noyra",
+            github_fetcher=lambda: {
+                "sha": latest_sha,
+                "committed_at": "2026-10-01T00:00:00Z",
+                "title": "safe test update",
+            },
+        )
+        for path in (
+            "/api/v1/admin/upgrade/check",
+            "/api/v1/admin/upgrade/status",
+        ):
+            with self.assertRaises(HTTPError) as error:
+                urlopen(f"{self.base_url}{path}", timeout=5)
+            self.assertEqual(error.exception.code, 401)
+
+        check_status, check = self.authorized_json("/api/v1/admin/upgrade/check")
+        self.assertEqual(check_status, 200)
+        assert isinstance(check, dict)
+        self.assertEqual(check["latest"]["sha"], latest_sha)
+        start_status, started = self.authorized_json(
+            "/api/v1/admin/upgrade",
+            payload={
+                "reason": "routine update; token=do-not-record",
+                "idempotency_key": "admin-upgrade-test-1",
+                "target_sha": latest_sha,
+            },
+        )
+        self.assertEqual(start_status, 202)
+        assert isinstance(started, dict)
+        self.assertEqual(started["target_sha"], latest_sha)
+        request = json.loads(
+            (self.data_dir / "upgrade-requests" / "pending.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(request["target_sha"], latest_sha)
+        self.assertNotIn("reason", request)
+        with self.kernel.database.connection() as connection:
+            audit = connection.execute(
+                "SELECT payload_json FROM audit_records WHERE action = ? "
+                "ORDER BY occurred_at DESC LIMIT 1",
+                ("admin_upgrade_started",),
+            ).fetchone()
+        self.assertIsNotNone(audit)
+        audit_payload = json.loads(audit["payload_json"])
+        self.assertEqual(audit_payload["reason"], "routine update; token=[REDACTED]")
+
+    def test_admin_upgrade_post_rejects_unchecked_sha_with_stable_error(self: Self) -> None:
+        repo = self.data_dir / "upgrade-source"
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+            check=True,
+        )
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+        (repo / "tracked.txt").write_text("clean\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "current"], check=True)
+        current_release = self.data_dir / "releases" / ("d" * 40)
+        current_release.mkdir(parents=True)
+        trigger = self.data_dir / "noyra-upgrade.path"
+        trigger.write_text("installed", encoding="utf-8")
+        self.http.upgrade_manager = UpgradeManager(
+            source_path=repo,
+            current_release_path=current_release,
+            status_path=self.data_dir / "root-upgrade" / "status.json",
+            request_path=self.data_dir / "upgrade-requests" / "pending.json",
+            runner_trigger_path=trigger,
+            github_owner="example",
+            github_repo="noyra",
+            github_fetcher=lambda: {
+                "sha": "b" * 40,
+                "committed_at": "2026-10-01T00:00:00Z",
+                "title": "safe test update",
+            },
+        )
+        request = Request(
+            f"{self.base_url}/api/v1/admin/upgrade",
+            data=json.dumps(
+                {
+                    "reason": "routine update",
+                    "idempotency_key": "admin-upgrade-test-2",
+                    "target_sha": "c" * 40,
+                }
+            ).encode(),
+            method="POST",
+            headers={
+                "Authorization": "Bearer test-admin-token-with-sufficient-entropy",
+                "Content-Type": "application/json",
+            },
+        )
+        with self.assertRaises(HTTPError) as error:
+            urlopen(request, timeout=5)
+        self.assertEqual(error.exception.code, 400)
+        self.assertEqual(json.loads(error.exception.read())["error"], "upgrade_target_invalid")
+
+    def test_upgrade_manager_defaults_to_official_github_repository(self: Self) -> None:
+        self.assertEqual(self.http.upgrade_manager.github_owner, "EverForAI")
+        self.assertEqual(self.http.upgrade_manager.github_repo, "Noyra")
+
+    def test_dashboard_and_read_only_public_endpoints(self: Self) -> None:
         with urlopen(f"{self.base_url}/", timeout=5) as response:
             html = response.read().decode()
             self.assertEqual(response.headers["X-Frame-Options"], "DENY")
@@ -117,6 +245,9 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn('href="/admin"', html)
         with urlopen(f"{self.base_url}/favicon.ico", timeout=5) as response:
             self.assertEqual(response.status, 204)
+        with urlopen(f"{self.base_url}/api/state", timeout=5) as response:
+            self.assertEqual(response.headers["X-Noyra-Public-Contract"], "public-contract-v1")
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
         state = self.get_json("/api/state")
         assert isinstance(state, dict)
         self.assertEqual(state["subject_id"], self.settings.subject_id)
@@ -155,6 +286,20 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(health["status"], "ok")
         self.assertEqual(self.get_json("/api/interactions"), [])
         self.assertEqual(self.get_json("/api/behavior"), [])
+        original_diary = self.http.projection.diary
+        cast(Any, self.http.projection).diary = cast(
+            Any,
+            lambda *_args, **_kwargs: [{"body": "x" * 2_100_000}],
+        )
+        try:
+            with self.assertRaises(HTTPError) as error:
+                urlopen(f"{self.base_url}/api/diary", timeout=5)
+            self.assertEqual(error.exception.code, 413)
+            self.assertEqual(
+                json.loads(error.exception.read())["error"], "public_response_too_large"
+            )
+        finally:
+            cast(Any, self.http.projection).diary = original_diary
         for private_view in ("/api/goals", "/api/projects", "/api/outcomes"):
             with self.assertRaises(HTTPError) as error:
                 urlopen(f"{self.base_url}{private_view}", timeout=5)
@@ -191,7 +336,7 @@ class ServiceTestCase(unittest.TestCase):
             urlopen(f"{self.base_url}/missing", timeout=5)
         self.assertEqual(error.exception.code, 404)
 
-    def test_public_state_allowlist_and_unknown_lifecycle_fail_closed(self) -> None:
+    def test_public_state_allowlist_and_unknown_lifecycle_fail_closed(self: Self) -> None:
         forbidden_fields = {
             "reason",
             "changed_at",
@@ -263,7 +408,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(unknown["lifecycle"], {"state": "future_unknown"})
         self.assertFalse(unknown["online"])
 
-    def test_capability_api_rejects_unsupported_per_use_approval(self) -> None:
+    def test_capability_api_rejects_unsupported_per_use_approval(self: Self) -> None:
         payload = {
             "capability_type": "filesystem_read",
             "scope": {"root": str(self.data_dir.resolve())},
@@ -276,7 +421,7 @@ class ServiceTestCase(unittest.TestCase):
             self.authorized_json("/api/config/capabilities", payload=payload)
         self.assertEqual(error.exception.code, 400)
 
-    def test_legacy_capability_is_listed_as_blocked_for_operator_recovery(self) -> None:
+    def test_legacy_capability_is_listed_as_blocked_for_operator_recovery(self: Self) -> None:
         proposal = CapabilityGrant(
             capability_type="filesystem_read",
             scope={"root": str(self.data_dir.resolve())},
@@ -316,7 +461,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(listed["status"], "active")
         self.assertEqual(listed["effective_status"], "blocked_legacy_approval")
 
-    def test_capability_revoke_rejects_invalid_bodies_before_store_access(self) -> None:
+    def test_capability_revoke_rejects_invalid_bodies_before_store_access(self: Self) -> None:
         admin_token = self.settings.admin_token
         assert admin_token is not None
         headers = {
@@ -347,7 +492,7 @@ class ServiceTestCase(unittest.TestCase):
                 )
         revoke.assert_not_called()
 
-    def test_service_settings_reject_weak_credentials_and_invalid_hash(self) -> None:
+    def test_service_settings_reject_weak_credentials_and_invalid_hash(self: Self) -> None:
         with self.assertRaises(ValidationError):
             ServiceSettings(
                 data_dir=self.data_dir,
@@ -421,7 +566,7 @@ class ServiceTestCase(unittest.TestCase):
         ):
             ServiceSettings.from_env()
 
-    def test_service_settings_load_from_environment(self) -> None:
+    def test_service_settings_load_from_environment(self: Self) -> None:
         environment = {
             "NOYRA_DATA_DIR": str(self.data_dir / "environment"),
             "NOYRA_SUBJECT_ID": "Noyra-environment-test",
@@ -482,14 +627,14 @@ class ServiceTestCase(unittest.TestCase):
         self.assertFalse(settings.training_include_external_actions)
         self.assertTrue(settings.training_include_workspace)
 
-    def test_optional_environment_flag_rejects_invalid_value(self) -> None:
+    def test_optional_environment_flag_rejects_invalid_value(self: Self) -> None:
         with (
             patch.dict(os.environ, {"NOYRA_TRAINING_RECORD_ENABLED": "invalid"}),
             self.assertRaises(ValueError),
         ):
             ServiceSettings.from_env()
 
-    def test_service_from_env_builds_remote_cognition_without_calling_provider(self) -> None:
+    def test_service_from_env_builds_remote_cognition_without_calling_provider(self: Self) -> None:
         environment = {
             "NOYRA_DATA_DIR": str(self.data_dir / "cognition-environment"),
             "NOYRA_SUBJECT_ID": "Noyra-cognition-environment",
@@ -535,7 +680,7 @@ class ServiceTestCase(unittest.TestCase):
             service.kernel.close()
 
     def test_service_from_env_does_not_fallback_after_managed_embedding_integrity_failure(
-        self,
+        self: Self,
     ) -> None:
         environment = {
             "NOYRA_DATA_DIR": str(self.data_dir / "managed-embedding-integrity"),
@@ -579,7 +724,7 @@ class ServiceTestCase(unittest.TestCase):
         ):
             NoyraService.from_env()
 
-    def test_service_reads_live_model_io_consent_policy(self) -> None:
+    def test_service_reads_live_model_io_consent_policy(self: Self) -> None:
         settings = ServiceSettings(
             data_dir=self.data_dir / "live-policy",
             subject_id="Noyra-live-policy-test",
@@ -604,7 +749,7 @@ class ServiceTestCase(unittest.TestCase):
             service.http.close()
             service.kernel.close()
 
-    def test_http_request_validation_rejects_unsupported_or_malformed_bodies(self) -> None:
+    def test_http_request_validation_rejects_unsupported_or_malformed_bodies(self: Self) -> None:
         token = "Bearer test-admin-token-with-sufficient-entropy"
 
         def request(body: bytes, content_type: str = "application/json") -> int:
@@ -649,7 +794,7 @@ class ServiceTestCase(unittest.TestCase):
             urlopen(request_object, timeout=5)
         self.assertEqual(error.exception.code, 404)
 
-    def test_incoming_http_message_requires_auth_and_remains_an_invitation(self) -> None:
+    def test_incoming_http_message_requires_auth_and_remains_an_invitation(self: Self) -> None:
         payload = json.dumps(
             {
                 "channel": "web",
@@ -730,7 +875,7 @@ class ServiceTestCase(unittest.TestCase):
             urlopen(forged_request, timeout=5)
         self.assertEqual(error.exception.code, 400)
 
-    def test_goals_endpoint_exposes_goal_state_without_private_pressure(self) -> None:
+    def test_goals_endpoint_exposes_goal_state_without_private_pressure(self: Self) -> None:
         evidence = EventStore(self.kernel.database).append(
             self.kernel.subject_id,
             "goal-evidence",
@@ -771,7 +916,9 @@ class ServiceTestCase(unittest.TestCase):
         assert isinstance(details["learning_summary"], dict)
         self.assertEqual(details["learning_summary"]["evaluation_count"], 0)
 
-    def test_search_provider_configuration_requires_auth_and_never_returns_secret(self) -> None:
+    def test_search_provider_configuration_requires_auth_and_never_returns_secret(
+        self: Self,
+    ) -> None:
         secret = "search-api-secret-that-must-not-leak"
         payload = {
             "provider_type": "brave",
@@ -829,7 +976,7 @@ class ServiceTestCase(unittest.TestCase):
         database_bytes = (self.data_dir / "noyra.sqlite3").read_bytes()
         self.assertNotIn(secret.encode(), database_bytes)
 
-    def test_unstored_model_probe_and_discovery_do_not_create_resource(self) -> None:
+    def test_unstored_model_probe_and_discovery_do_not_create_resource(self: Self) -> None:
         payload = {
             "base_url": "https://models.example/v1",
             "model": "draft-model",
@@ -864,7 +1011,7 @@ class ServiceTestCase(unittest.TestCase):
         secret_dir = self.data_dir / "secrets" / "models"
         self.assertEqual(list(secret_dir.glob("*")), [])
 
-    def test_search_routing_mode_is_authenticated_persistent_and_audited(self) -> None:
+    def test_search_routing_mode_is_authenticated_persistent_and_audited(self: Self) -> None:
         status, current = self.authorized_json("/api/config/search-routing")
         self.assertEqual(status, 200)
         assert isinstance(current, dict)
@@ -887,7 +1034,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIsNotNone(audit)
         self.assertIn("api_first", audit["payload_json"])
 
-    def test_search_routing_rejects_non_string_mode(self) -> None:
+    def test_search_routing_rejects_non_string_mode(self: Self) -> None:
         request = Request(
             f"{self.base_url}/api/config/search-routing",
             data=json.dumps({"mode": []}).encode(),
@@ -901,7 +1048,7 @@ class ServiceTestCase(unittest.TestCase):
             urlopen(request, timeout=5)
         self.assertEqual(error.exception.code, 400)
 
-    def test_unstored_search_provider_test_does_not_save_secret(self) -> None:
+    def test_unstored_search_provider_test_does_not_save_secret(self: Self) -> None:
         secret = "search-draft-secret"
         with patch.object(
             SearchExecutor,
@@ -919,7 +1066,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(self.authorized_json("/api/config/search-providers")[1], [])
         self.assertNotIn(secret.encode(), (self.data_dir / "noyra.sqlite3").read_bytes())
 
-    def test_search_provider_can_be_disabled_and_reenabled(self) -> None:
+    def test_search_provider_can_be_disabled_and_reenabled(self: Self) -> None:
         status, created = self.authorized_json(
             "/api/config/search-providers",
             payload={
@@ -952,7 +1099,7 @@ class ServiceTestCase(unittest.TestCase):
         assert isinstance(enabled, dict)
         self.assertTrue(enabled["enabled"])
 
-    def test_model_resource_configuration_requires_auth_and_hides_keys(self) -> None:
+    def test_model_resource_configuration_requires_auth_and_hides_keys(self: Self) -> None:
         secret = "model-resource-secret-that-must-not-leak"
         payload = {
             "pool": "economy",
@@ -1047,7 +1194,9 @@ class ServiceTestCase(unittest.TestCase):
             "model_resource_label_exists",
         )
 
-    def test_model_resource_budget_update_is_audited_and_keeps_provider_identity(self) -> None:
+    def test_model_resource_budget_update_is_audited_and_keeps_provider_identity(
+        self: Self,
+    ) -> None:
         status, created = self.authorized_json(
             "/api/config/model-resources",
             payload={
@@ -1115,7 +1264,7 @@ class ServiceTestCase(unittest.TestCase):
             )
         self.assertEqual(empty_error.exception.code, 400)
 
-    def test_model_resource_integrity_failures_return_retryable_503(self) -> None:
+    def test_model_resource_integrity_failures_return_retryable_503(self: Self) -> None:
         status, created = self.authorized_json(
             "/api/config/model-resources",
             payload={
@@ -1185,7 +1334,7 @@ class ServiceTestCase(unittest.TestCase):
                 payload={"reason": "integrity regression test"},
             )
 
-    def test_provider_health_integrity_failure_is_a_retryable_service_error(self) -> None:
+    def test_provider_health_integrity_failure_is_a_retryable_service_error(self: Self) -> None:
         admin_token = self.settings.admin_token
         assert admin_token is not None
         request = Request(
@@ -1211,7 +1360,7 @@ class ServiceTestCase(unittest.TestCase):
             {"error": "provider_health_integrity_unavailable"},
         )
 
-    def test_search_provider_routing_api_validates_and_returns_configured_order(self) -> None:
+    def test_search_provider_routing_api_validates_and_returns_configured_order(self: Self) -> None:
         status, configured = self.authorized_json(
             "/api/config/search-providers",
             payload={
@@ -1241,6 +1390,7 @@ class ServiceTestCase(unittest.TestCase):
             payload={"priority": 4, "weight": 5, "reason": "promote healthy route"},
         )
         self.assertEqual(status, 200)
+        assert isinstance(updated, dict)
         self.assertEqual(
             updated,
             {
@@ -1258,7 +1408,7 @@ class ServiceTestCase(unittest.TestCase):
         provider = next(item for item in providers if item["config_id"] == config_id)
         self.assertEqual((provider["priority"], provider["weight"]), (4, 5))
 
-    def test_model_resource_routes_fail_closed_for_malformed_paths_and_bodies(self) -> None:
+    def test_model_resource_routes_fail_closed_for_malformed_paths_and_bodies(self: Self) -> None:
         """Malformed resource URLs must answer promptly instead of hanging."""
 
         token = "Bearer " + "test-admin-token-with-sufficient-" + "entropy"
@@ -1354,7 +1504,7 @@ class ServiceTestCase(unittest.TestCase):
                 urlopen(request, timeout=2)
             self.assertEqual(error.exception.code, 400, path)
 
-    def test_diagnostics_exposes_pending_interaction_reason_without_content(self) -> None:
+    def test_diagnostics_exposes_pending_interaction_reason_without_content(self: Self) -> None:
         invitation = InteractionStore(self.kernel.database).receive(
             self.kernel.subject_id,
             "web",
@@ -1370,7 +1520,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(pending[0]["status"], "offered")
         self.assertNotIn("content", pending[0])
 
-    def test_diagnostics_aggregates_existing_model_and_search_records_only(self) -> None:
+    def test_diagnostics_aggregates_existing_model_and_search_records_only(self: Self) -> None:
         day = date.today().isoformat()
         call_id = "diagnostic-model-call"
         with self.kernel.database.transaction() as connection:
@@ -1492,7 +1642,9 @@ class ServiceTestCase(unittest.TestCase):
             )
         self.assertEqual(after, before)
 
-    def test_wallet_audit_history_is_operator_only_and_redacts_unknown_payload_fields(self) -> None:
+    def test_wallet_audit_history_is_operator_only_and_redacts_unknown_payload_fields(
+        self: Self,
+    ) -> None:
         with self.kernel.database.transaction() as connection:
             connection.execute(
                 "INSERT INTO audit_records("
@@ -1530,7 +1682,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertNotIn("api_key", row["details"])
         self.assertNotIn("must-not-be-returned", json.dumps(rows))
 
-    def test_automatic_wallet_policy_rejects_missing_amount_caps(self) -> None:
+    def test_automatic_wallet_policy_rejects_missing_amount_caps(self: Self) -> None:
         for per_order_limit, daily_limit in (("0", "100"), ("20", "0")):
             with self.subTest(per_order_limit=per_order_limit, daily_limit=daily_limit):
                 request = Request(
@@ -1560,7 +1712,7 @@ class ServiceTestCase(unittest.TestCase):
         assert isinstance(policy, dict)
         self.assertEqual(policy["policy_version"], 1)
 
-    def test_public_site_metadata_crawlers_and_asset_cache_are_correct(self) -> None:
+    def test_public_site_metadata_crawlers_and_asset_cache_are_correct(self: Self) -> None:
         settings = self.settings.model_copy(
             update={"public_site_url": "https://archive.noyra.example"}
         )
@@ -1621,7 +1773,7 @@ class ServiceTestCase(unittest.TestCase):
         finally:
             site_http.close()
 
-    def test_public_site_url_requires_https_origin_without_path_or_credentials(self) -> None:
+    def test_public_site_url_requires_https_origin_without_path_or_credentials(self: Self) -> None:
         for invalid_url in (
             "http://archive.example",
             "https://user:password@archive.example",
@@ -1647,7 +1799,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(settings.public_site_url, "https://archive.example:8443")
 
     def test_model_resource_test_endpoint_is_explicit_and_targets_only_requested_resource(
-        self,
+        self: Self,
     ) -> None:
         first_status, first = self.authorized_json(
             "/api/config/model-resources",
@@ -1738,7 +1890,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(call["status"], "failed")
         self.assertEqual(call["error_code"], "provider_http_401")
 
-    def test_model_resource_test_endpoint_reports_missing_cognition_gateway(self) -> None:
+    def test_model_resource_test_endpoint_reports_missing_cognition_gateway(self: Self) -> None:
         status, created = self.authorized_json(
             "/api/config/model-resources",
             payload={
@@ -1758,7 +1910,7 @@ class ServiceTestCase(unittest.TestCase):
             )
         self.assertEqual(error.exception.code, 503)
 
-    def test_model_resource_test_endpoint_reports_runtime_unavailable(self) -> None:
+    def test_model_resource_test_endpoint_reports_runtime_unavailable(self: Self) -> None:
         status, created = self.authorized_json(
             "/api/config/model-resources",
             payload={
@@ -1795,7 +1947,7 @@ class ServiceTestCase(unittest.TestCase):
         assert error.exception.fp is not None
         self.assertEqual(json.loads(error.exception.read()), {"error": "runtime_unavailable"})
 
-    def test_bearer_tokens_reject_non_ascii_values(self) -> None:
+    def test_bearer_tokens_reject_non_ascii_values(self: Self) -> None:
         with self.assertRaises(ValueError, msg="ASCII-only tokens prevent HTTP header failures"):
             ServiceSettings(
                 data_dir=self.data_dir,
@@ -1804,7 +1956,7 @@ class ServiceTestCase(unittest.TestCase):
                 admin_token=SecretStr("令牌" * 16),
             )
 
-    def test_admin_session_authenticates_private_surface_and_requires_csrf(self) -> None:
+    def test_admin_session_authenticates_private_surface_and_requires_csrf(self: Self) -> None:
         with urlopen(f"{self.base_url}/admin", timeout=5) as response:
             admin_html = response.read().decode()
             self.assertIn("管理台", admin_html)
@@ -1878,7 +2030,7 @@ class ServiceTestCase(unittest.TestCase):
         with urlopen(post_with_csrf, timeout=5) as response:
             self.assertEqual(response.status, 201)
 
-    def test_admin_login_failures_are_rate_limited_per_client(self) -> None:
+    def test_admin_login_failures_are_rate_limited_per_client(self: Self) -> None:
         settings = self.settings.model_copy(update={"admin_login_rate_limit_per_minute": 2})
         http = NoyraHTTPServer(self.kernel, settings)
         http.start()
@@ -1907,7 +2059,9 @@ class ServiceTestCase(unittest.TestCase):
         finally:
             http.close()
 
-    def test_admin_session_secure_cookie_and_security_headers_follow_https_setting(self) -> None:
+    def test_admin_session_secure_cookie_and_security_headers_follow_https_setting(
+        self: Self,
+    ) -> None:
         settings = self.settings.model_copy(
             update={
                 "admin_session_cookie_secure": True,
@@ -1936,9 +2090,10 @@ class ServiceTestCase(unittest.TestCase):
         finally:
             http.close()
 
-    def test_operator_token_file_overrides_inline_environment_token(self) -> None:
+    def test_operator_token_file_overrides_inline_environment_token(self: Self) -> None:
         token_path = self.data_dir / "operator.token"
         token_path.write_text("file-operator-token-with-sufficient-entropy\n", encoding="ascii")
+        token_path.chmod(0o600)
         environment = {
             "NOYRA_DATA_DIR": str(self.data_dir / "from-env-token-file"),
             "NOYRA_SUBJECT_ID": "Noyra-operator-token-file",
@@ -1950,12 +2105,13 @@ class ServiceTestCase(unittest.TestCase):
         }
         with patch.dict(os.environ, environment, clear=False):
             settings = ServiceSettings.from_env()
+        assert settings.operator_token is not None
         self.assertEqual(
             settings.operator_token.get_secret_value(),
             "file-operator-token-with-sufficient-entropy",
         )
 
-    def test_operator_token_file_rejects_unsafe_posix_permissions(self) -> None:
+    def test_operator_token_file_rejects_unsafe_posix_permissions(self: Self) -> None:
         if os.name != "posix":
             self.skipTest("POSIX token-file permission checks are not portable")
         token_path = self.data_dir / "operator.token"
@@ -1972,7 +2128,7 @@ class ServiceTestCase(unittest.TestCase):
         with patch.dict(os.environ, environment, clear=False), self.assertRaises(ValueError):
             ServiceSettings.from_env()
 
-    def test_embedding_resource_configuration_is_independent(self) -> None:
+    def test_embedding_resource_configuration_is_independent(self: Self) -> None:
         secret = "embedding-api-key-that-must-not-export"
         status, created = self.authorized_json(
             "/api/config/embedding-resources",
@@ -2002,7 +2158,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(changed["status"], "disabled")
         self.assertNotIn(secret.encode(), (self.data_dir / "noyra.sqlite3").read_bytes())
 
-    def test_runtime_logs_and_complete_export_require_auth_and_redact_secrets(self) -> None:
+    def test_runtime_logs_and_complete_export_require_auth_and_redact_secrets(self: Self) -> None:
         model_secret = "model-api-key-that-must-never-export"
         search_secret = "search-api-key-that-must-never-export"
         admin_secret = "test-admin-token-with-sufficient-entropy"
@@ -2101,7 +2257,7 @@ class ServiceTestCase(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(audit_count, 1)
 
-    def test_training_policy_and_export_are_authenticated(self) -> None:
+    def test_training_policy_and_export_are_authenticated(self: Self) -> None:
         EventStore(self.kernel.database).append(
             self.kernel.subject_id,
             "training-public-event",
@@ -2186,7 +2342,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertGreaterEqual(manifest["row_count"], 1)
         self.assertIn(b"training-public-event", events)
 
-    def test_legacy_export_route_enqueues_without_blocking_request_worker(self) -> None:
+    def test_legacy_export_route_enqueues_without_blocking_request_worker(self: Self) -> None:
         started = threading.Event()
         release = threading.Event()
 
@@ -2214,7 +2370,7 @@ class ServiceTestCase(unittest.TestCase):
         finally:
             release.set()
 
-    def test_export_jobs_are_authenticated_bounded_and_downloadable(self) -> None:
+    def test_export_jobs_are_authenticated_bounded_and_downloadable(self: Self) -> None:
         with self.assertRaises(HTTPError) as error:
             urlopen(
                 Request(
@@ -2268,7 +2424,7 @@ class ServiceTestCase(unittest.TestCase):
             self.authorized_json("/api/admin/export-jobs", payload={"kind": "invalid"})
         self.assertEqual(error.exception.code, 400)
 
-    def test_self_modification_status_is_read_only_and_authenticated(self) -> None:
+    def test_self_modification_status_is_read_only_and_authenticated(self: Self) -> None:
         with self.assertRaises(HTTPError) as error:
             urlopen(f"{self.base_url}/api/self-modification", timeout=5)
         self.assertEqual(error.exception.code, 401)
@@ -2276,7 +2432,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(records, [])
 
-    def test_service_boots_runtime_to_active(self) -> None:
+    def test_service_boots_runtime_to_active(self: Self) -> None:
         other = ServiceSettings(
             data_dir=Path(self.temp_dir.name) / "other",
             subject_id="Noyra-service-other",
@@ -2293,7 +2449,7 @@ class ServiceTestCase(unittest.TestCase):
         service.http.close()
         service.kernel.close()
 
-    def test_boot_syncs_explicit_training_policy_and_creates_checkpoint(self) -> None:
+    def test_boot_syncs_explicit_training_policy_and_creates_checkpoint(self: Self) -> None:
         settings = ServiceSettings(
             data_dir=Path(self.temp_dir.name) / "policy-service",
             subject_id="Noyra-policy-service",
@@ -2318,7 +2474,7 @@ class ServiceTestCase(unittest.TestCase):
             service.http.server.server_close()
             service.kernel.close()
 
-    def test_cloud_archive_configuration_failure_aborts_startup(self) -> None:
+    def test_cloud_archive_configuration_failure_aborts_startup(self: Self) -> None:
         environment = {
             "NOYRA_DATA_DIR": str(self.data_dir / "cloud-fallback"),
             "NOYRA_SUBJECT_ID": "Noyra-cloud-fallback",
@@ -2334,7 +2490,7 @@ class ServiceTestCase(unittest.TestCase):
         ):
             NoyraService.from_env()
 
-    def test_cloud_archive_configuration_reports_ready_profile(self) -> None:
+    def test_cloud_archive_configuration_reports_ready_profile(self: Self) -> None:
         environment = {
             "NOYRA_DATA_DIR": str(self.data_dir / "cloud-profile"),
             "NOYRA_SUBJECT_ID": "Noyra-cloud-profile",
@@ -2360,7 +2516,7 @@ class ServiceTestCase(unittest.TestCase):
             service.http.server.server_close()
             service.kernel.close()
 
-    def test_sleep_reflection_delegates_to_enabled_cognition(self) -> None:
+    def test_sleep_reflection_delegates_to_enabled_cognition(self: Self) -> None:
         settings = ServiceSettings(
             data_dir=Path(self.temp_dir.name) / "reflection-service",
             subject_id="Noyra-reflection-service",
@@ -2371,10 +2527,10 @@ class ServiceTestCase(unittest.TestCase):
         service = NoyraService(settings)
 
         class CognitionStub:
-            def __init__(self) -> None:
+            def __init__(self: Self) -> None:
                 self.calls = 0
 
-            async def reflect_sleep(self, _: object) -> SleepReflectionPlan:
+            async def reflect_sleep(self: Self, _: object) -> SleepReflectionPlan:
                 self.calls += 1
                 return SleepReflectionPlan(summary="A delegated bounded reflection.")
 
@@ -2392,7 +2548,7 @@ class ServiceTestCase(unittest.TestCase):
             service.http.close()
             service.kernel.close()
 
-    def test_service_run_accepts_a_graceful_shutdown_request(self) -> None:
+    def test_service_run_accepts_a_graceful_shutdown_request(self: Self) -> None:
         async def exercise() -> None:
             settings = ServiceSettings(
                 data_dir=Path(self.temp_dir.name) / "run-service",
@@ -2417,7 +2573,7 @@ class ServiceTestCase(unittest.TestCase):
 
         asyncio.run(exercise())
 
-    def test_service_loop_advances_a_restart_safe_sleep_cycle(self) -> None:
+    def test_service_loop_advances_a_restart_safe_sleep_cycle(self: Self) -> None:
         async def exercise() -> None:
             from noyra.sleep import FatigueInputs, FatigueTracker
 

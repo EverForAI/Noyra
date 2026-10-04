@@ -7,7 +7,7 @@ import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Self, cast
 from urllib.error import HTTPError
 from urllib.request import urlopen
 
@@ -38,36 +38,36 @@ from noyra.service import NoyraHTTPServer, ServiceSettings
 
 
 class _SyncChunks(httpx.SyncByteStream):
-    def __init__(self, chunks: tuple[bytes, ...], *, delay: float = 0.0) -> None:
+    def __init__(self: Self, chunks: tuple[bytes, ...], *, delay: float = 0.0) -> None:
         self.chunks = chunks
         self.delay = delay
         self.closed = False
 
-    def __iter__(self) -> Iterator[bytes]:
+    def __iter__(self: Self) -> Iterator[bytes]:
         for chunk in self.chunks:
             if self.delay:
                 time.sleep(self.delay)
             yield chunk
 
-    def close(self) -> None:
+    def close(self: Self) -> None:
         self.closed = True
 
 
 class _AsyncConnector:
-    def __init__(self) -> None:
+    def __init__(self: Self) -> None:
         self.addresses: list[str] = []
 
-    async def connect_tcp(self, host: str, port: int, **_: Any) -> Any:
+    async def connect_tcp(self: Self, host: str, port: int, **_: Any) -> Any:
         del port
         self.addresses.append(host)
         return object()
 
 
 class _SyncConnector:
-    def __init__(self) -> None:
+    def __init__(self: Self) -> None:
         self.addresses: list[str] = []
 
-    def connect_tcp(self, host: str, port: int, **_: Any) -> Any:
+    def connect_tcp(self: Self, host: str, port: int, **_: Any) -> Any:
         del port
         self.addresses.append(host)
         return object()

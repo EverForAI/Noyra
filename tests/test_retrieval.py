@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Self
 
 from noyra.core import Database, EventStore, IdentityStore
 from noyra.core.types import content_hash
@@ -13,7 +14,7 @@ from noyra.mind import MemoryEmbeddingIndex, MemoryStore
 class FakeEmbedding:
     name = "test-embedding"
 
-    def embed(self, texts: Sequence[str]) -> list[list[float]]:
+    def embed(self: Self, texts: Sequence[str]) -> list[list[float]]:
         return [
             [1.0, 0.0]
             if any(term in text.casefold() for term in ("energy", "renewable", "storage"))
@@ -23,7 +24,7 @@ class FakeEmbedding:
 
 
 class RetrievalTestCase(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.database = Database(Path(self.temp_dir.name) / "noyra.sqlite3")
         self.subject_id = "Noyra-retrieval-test"
@@ -32,10 +33,10 @@ class RetrievalTestCase(unittest.TestCase):
         )
         self.events = EventStore(self.database)
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.temp_dir.cleanup()
 
-    def test_embedding_index_is_rebuildable_and_hybrid_recall_uses_semantics(self) -> None:
+    def test_embedding_index_is_rebuildable_and_hybrid_recall_uses_semantics(self: Self) -> None:
         index = MemoryEmbeddingIndex(self.database, FakeEmbedding())
         store = MemoryStore(self.database, embedding_index=index)
         event = self.events.append(self.subject_id, "observation", "test", {"v": 1})

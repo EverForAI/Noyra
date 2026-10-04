@@ -11,7 +11,7 @@ import zipfile
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import pytest
 
@@ -427,10 +427,10 @@ def test_stream_queries_do_not_create_unbounded_sqlite_temp_sort(
     original_snapshot = database.read_snapshot
 
     class SnapshotProxy:
-        def __init__(self, connection: Any):
+        def __init__(self: Self, connection: Any) -> None:
             self.connection = connection
 
-        def execute(self, sql: str, parameters: Any = ()) -> Any:
+        def execute(self: Self, sql: str, parameters: Any = ()) -> Any:
             if sql in {
                 training_export_module._ELIGIBLE_ITEMS_SQL,
                 training_export_module._MODEL_IO_SQL,
@@ -442,7 +442,7 @@ def test_stream_queries_do_not_create_unbounded_sqlite_temp_sort(
                 plans.append([str(row[-1]) for row in plan])
             return self.connection.execute(sql, parameters)
 
-        def __getattr__(self, name: str) -> Any:
+        def __getattr__(self: Self, name: str) -> Any:
             return getattr(self.connection, name)
 
     @contextmanager

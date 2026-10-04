@@ -1,0 +1,23 @@
+[Unit]
+Description=Noyra restricted migration root runner
+After=noyra-migration-agent.service
+RequiresMountsFor=/var/lib/noyra
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/libexec/noyra-migration-runner.sh --request-id health-check health
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/noyra/migration/source /var/lib/noyra/migration/fences /var/lib/noyra/migration/requests /var/lib/noyra/migration/status
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

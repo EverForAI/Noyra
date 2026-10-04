@@ -7,6 +7,7 @@ import subprocess
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Self
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -73,7 +74,7 @@ def _restore_process_umask() -> Iterator[None]:
 
 class _EncryptedProbe:
     def probe(
-        self,
+        self: Self,
         data_root: Path | str,
         *,
         backend: str,
@@ -607,7 +608,7 @@ def test_keyring_rejects_hard_links(tmp_path: Path) -> None:
 
 def test_required_guard_rejects_unencrypted_volume_before_database_creation(tmp_path: Path) -> None:
     class UnencryptedProbe:
-        def probe(self, *args: object, **kwargs: object) -> VolumeEncryptionStatus:
+        def probe(self: Self, *args: object, **kwargs: object) -> VolumeEncryptionStatus:
             del args, kwargs
             return VolumeEncryptionStatus(False, "test", "not encrypted")
 

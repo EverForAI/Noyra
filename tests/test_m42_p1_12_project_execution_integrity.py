@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Self
 from unittest.mock import Mock
 
 from noyra.capability import CapabilityGrant, CapabilityStore
@@ -40,7 +41,7 @@ from noyra.world.types import FetchedDocument
 
 
 class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.database_path = self.root / "noyra.sqlite3"
@@ -80,11 +81,11 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
             causal_source_ids=(self.event.event_id,),
         )
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.kernel.close()
         self.temporary.cleanup()
 
-    def gateway(self, payloads: list[Mapping[str, object]]) -> ModelGateway:
+    def gateway(self: Self, payloads: list[Mapping[str, object]]) -> ModelGateway:
         provider = FakeProvider(
             [
                 ProviderResponse(content=json.dumps(payload), usage=ModelUsage(300, 150))
@@ -99,7 +100,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
             resource_pool="economy",
         )
 
-    def settings(self) -> CognitionSettings:
+    def settings(self: Self) -> CognitionSettings:
         return CognitionSettings(
             enabled=True,
             sources=(
@@ -115,7 +116,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
             max_project_context_chars=64_000,
         )
 
-    def formation(self, output_type: str, project_type: str) -> dict[str, object]:
+    def formation(self: Self, output_type: str, project_type: str) -> dict[str, object]:
         return {
             "disposition": "form",
             "summary": "A bounded executable acceptance fixture is warranted.",
@@ -158,7 +159,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
         }
 
     async def active_project(
-        self, output_type: str, project_type: str
+        self: Self, output_type: str, project_type: str
     ) -> tuple[AutonomousProjectRecord, AutonomousProjectPhaseRecord]:
         if project_type == "software_prototype":
             CapabilityStore(self.kernel.database).grant(
@@ -202,7 +203,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await manager.run_due(), "autonomous_project_activate")
         return manager.get(project.project_id), manager.phases(project.project_id)[0]
 
-    def record_observation(self) -> str:
+    def record_observation(self: Self) -> str:
         source = SourceRegistry(self.kernel.database).register(
             self.subject_id,
             "P1-12 execution source",
@@ -234,7 +235,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
         return observation.observation_id
 
     async def prediction_execution(
-        self,
+        self: Self,
     ) -> tuple[ProjectExecutionLedger, ProjectExecutionRecord]:
         project, phase = await self.active_project("prediction_record", "prediction")
         observation_id = self.record_observation()
@@ -275,7 +276,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(execution.status, "succeeded")
         return executor.ledger, execution
 
-    def reanchor_execution(self, ledger: ProjectExecutionLedger, execution_id: str) -> None:
+    def reanchor_execution(self: Self, ledger: ProjectExecutionLedger, execution_id: str) -> None:
         with self.kernel.database.transaction() as connection:
             connection.execute("DROP TRIGGER IF EXISTS prevent_project_execution_revision_update")
             row = connection.execute(
@@ -320,7 +321,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
                 (result_hash, revision_state, revision["revision_id"]),
             )
 
-    async def test_prediction_result_restarts_with_joined_digests(self) -> None:
+    async def test_prediction_result_restarts_with_joined_digests(self: Self) -> None:
         ledger, execution = await self.prediction_execution()
         self.assertEqual(ledger.verified(execution.execution_id).status, "succeeded")
         artifact = Path(execution.artifact_path or "")
@@ -333,7 +334,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
             restarted.verified(execution.execution_id).result_hash, execution.result_hash
         )
 
-    async def test_execution_prepare_rejects_forged_subject_and_phase_bindings(self) -> None:
+    async def test_execution_prepare_rejects_forged_subject_and_phase_bindings(self: Self) -> None:
         project, phase = await self.active_project("self_experiment", "self_development")
         ledger = ProjectExecutionLedger(self.kernel.database, self.subject_id)
         with self.assertRaises(ProjectExecutionError):
@@ -349,7 +350,9 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
                 workflow="self_experiment",
             )
 
-    async def test_tamper_matrix_rejects_artifact_evidence_source_and_revision_damage(self) -> None:
+    async def test_tamper_matrix_rejects_artifact_evidence_source_and_revision_damage(
+        self: Self,
+    ) -> None:
         ledger, execution = await self.prediction_execution()
         artifact = Path(execution.artifact_path or "")
         original_payload = artifact.read_bytes()
@@ -384,7 +387,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
             ledger.verify_integrity()
 
     async def test_forged_evidence_fails_even_when_result_and_revision_hashes_are_reanchored(
-        self,
+        self: Self,
     ) -> None:
         ledger, execution = await self.prediction_execution()
         artifact = Path(execution.artifact_path or "")
@@ -407,7 +410,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
             ledger.verify_integrity()
 
     async def test_prediction_resolution_evidence_requires_owned_analyzed_observations(
-        self,
+        self: Self,
     ) -> None:
         ledger, execution = await self.prediction_execution()
         prediction_id = str(execution.acceptance["evidence"]["prediction_id"])
@@ -474,7 +477,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ProjectExecutionValidationError):
                 ledger._validate_prediction_connection(connection, execution, forged, phase)
 
-    async def test_prediction_validator_rejects_unhashable_calibration_ids(self) -> None:
+    async def test_prediction_validator_rejects_unhashable_calibration_ids(self: Self) -> None:
         ledger, execution = await self.prediction_execution()
         malformed = dict(execution.acceptance["evidence"])
         malformed["calibration_prediction_ids"] = [[], [], []]
@@ -486,7 +489,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ProjectExecutionValidationError):
                 ledger._validate_prediction_connection(connection, execution, malformed, phase)
 
-    async def test_missing_and_workspace_escaped_artifacts_are_rejected(self) -> None:
+    async def test_missing_and_workspace_escaped_artifacts_are_rejected(self: Self) -> None:
         ledger, execution = await self.prediction_execution()
         artifact = Path(execution.artifact_path or "")
         payload = artifact.read_bytes()
@@ -506,7 +509,9 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(IntegrityError):
             ledger.verify_integrity()
 
-    async def test_placeholder_software_and_baseline_only_experiment_cannot_succeed(self) -> None:
+    async def test_placeholder_software_and_baseline_only_experiment_cannot_succeed(
+        self: Self,
+    ) -> None:
         project, phase = await self.active_project("software_prototype", "software_prototype")
         gateway = self.gateway(
             [
@@ -523,7 +528,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(software.status, "blocked")
         self.assertEqual(software.error_code, "output_validation_failed")
 
-    async def test_software_requires_and_records_bounded_declarative_tests(self) -> None:
+    async def test_software_requires_and_records_bounded_declarative_tests(self: Self) -> None:
         project, phase = await self.active_project("software_prototype", "software_prototype")
         gateway = self.gateway(
             [
@@ -560,7 +565,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("prototype_build", validator["checks"])
         self.assertIn("prototype_tests", validator["checks"])
 
-    def test_vacuous_model_authored_negative_prototype_assertion_is_rejected(self) -> None:
+    def test_vacuous_model_authored_negative_prototype_assertion_is_rejected(self: Self) -> None:
         with self.assertRaises(ProjectExecutionValidationError):
             _run_prototype_tests(
                 {
@@ -581,7 +586,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_collaboration_is_artifact_bound_while_self_experiment_awaits_follow_up(
-        self,
+        self: Self,
     ) -> None:
         project, phase = await self.active_project("collaboration_request", "collaboration")
         collaboration = await ProjectPhaseExecutor(
@@ -590,7 +595,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(collaboration.status, "succeeded")
         self.assertTrue(Path(collaboration.artifact_path or "").is_file())
 
-    async def test_baseline_only_self_experiment_awaits_independent_follow_up(self) -> None:
+    async def test_baseline_only_self_experiment_awaits_independent_follow_up(self: Self) -> None:
         project, phase = await self.active_project("self_experiment", "self_development")
         experiment = await ProjectPhaseExecutor(
             self.kernel.database, self.subject_id, Mock()
@@ -598,7 +603,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(experiment.status, "executing")
         self.assertEqual(experiment.error_code, "self_experiment_follow_up_pending")
 
-    async def test_self_experiment_succeeds_only_after_measured_follow_up(self) -> None:
+    async def test_self_experiment_succeeds_only_after_measured_follow_up(self: Self) -> None:
         project, phase = await self.active_project("self_experiment", "self_development")
         executor = ProjectPhaseExecutor(self.kernel.database, self.subject_id, Mock())
         baseline = await executor.run_phase(project, phase)
@@ -616,7 +621,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(executor.ledger.verify_integrity(), 1)
 
-    async def test_self_experiment_events_are_bound_to_the_execution_phase(self) -> None:
+    async def test_self_experiment_events_are_bound_to_the_execution_phase(self: Self) -> None:
         project, phase = await self.active_project("self_experiment", "self_development")
         executor = ProjectPhaseExecutor(self.kernel.database, self.subject_id, Mock())
         await executor.run_phase(project, phase)
@@ -646,7 +651,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
                     phase_row,
                 )
 
-    async def test_prediction_without_calibration_stays_open(self) -> None:
+    async def test_prediction_without_calibration_stays_open(self: Self) -> None:
         project, phase = await self.active_project("prediction_record", "prediction")
         self.record_observation()
         executor = ProjectPhaseExecutor(self.kernel.database, self.subject_id, Mock())

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Self
 
 from noyra.cognition import CognitionSettings, MetacognitiveControl, WorldSourceConfig
 from noyra.core import EventStore, SubjectKernel
@@ -19,7 +20,7 @@ from noyra.model import ModelLedger
 
 
 class MetacognitiveControlTestCase(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.subject_id = "Noyra-metacognition-test"
         self.kernel = SubjectKernel(
@@ -33,11 +34,11 @@ class MetacognitiveControlTestCase(unittest.TestCase):
         self.clock_value = "2026-08-13T12:00:00.000+00:00"
         self.events = EventStore(self.kernel.database)
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.kernel.close()
         self.temp_dir.cleanup()
 
-    def settings(self, **updates: object) -> CognitionSettings:
+    def settings(self: Self, **updates: object) -> CognitionSettings:
         base = CognitionSettings(
             enabled=True,
             sources=(
@@ -56,7 +57,7 @@ class MetacognitiveControlTestCase(unittest.TestCase):
         )
         return base.model_copy(update=updates)
 
-    def control(self, **updates: object) -> MetacognitiveControl:
+    def control(self: Self, **updates: object) -> MetacognitiveControl:
         return MetacognitiveControl(
             self.kernel.database,
             self.subject_id,
@@ -64,7 +65,7 @@ class MetacognitiveControlTestCase(unittest.TestCase):
             clock=lambda: self.clock_value,
         )
 
-    def establish_goal(self) -> str:
+    def establish_goal(self: Self) -> str:
         event = self.events.append(
             self.subject_id,
             "experience",
@@ -124,7 +125,7 @@ class MetacognitiveControlTestCase(unittest.TestCase):
         )
         return goal.goal_id
 
-    def insert_agenda(self, *, no_change: int = 0) -> str:
+    def insert_agenda(self: Self, *, no_change: int = 0) -> str:
         agenda_id = new_id("agenda")
         state_hash = content_hash(
             {
@@ -186,7 +187,7 @@ class MetacognitiveControlTestCase(unittest.TestCase):
         return agenda_id
 
     def insert_successful_call(
-        self, call_id: str, purpose: str, payload: Mapping[str, object]
+        self: Self, call_id: str, purpose: str, payload: Mapping[str, object]
     ) -> None:
         response = {
             "content": json.dumps(payload),
@@ -214,7 +215,7 @@ class MetacognitiveControlTestCase(unittest.TestCase):
                 ),
             )
 
-    def test_selects_high_value_thought_and_learns_productive_outcome(self) -> None:
+    def test_selects_high_value_thought_and_learns_productive_outcome(self: Self) -> None:
         agenda_id = self.insert_agenda()
         control = self.control()
         decision = control.run_due()
@@ -242,7 +243,7 @@ class MetacognitiveControlTestCase(unittest.TestCase):
         self.assertEqual(profile.last_outcome, "productive")
         self.assertEqual(control.verify_integrity()["metacognitive_outcomes"], 1)
 
-    def test_integrity_rejects_fractional_strategy_revision_integer(self) -> None:
+    def test_integrity_rejects_fractional_strategy_revision_integer(self: Self) -> None:
         control = self.control()
         profile_id = new_id("cstrategy")
         revision_id = new_id("cstrategy-rev")
@@ -279,7 +280,7 @@ class MetacognitiveControlTestCase(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             control.verify_integrity()
 
-    def test_high_fatigue_selects_sleep_without_model_call(self) -> None:
+    def test_high_fatigue_selects_sleep_without_model_call(self: Self) -> None:
         from noyra.sleep import FatigueInputs, FatigueTracker
 
         FatigueTracker(self.kernel.database).assess(
@@ -300,7 +301,7 @@ class MetacognitiveControlTestCase(unittest.TestCase):
                 connection.execute("SELECT COUNT(*) FROM model_calls").fetchone()[0], 0
             )
 
-    def test_pending_outcome_forces_wait_until_deterministic_evaluation(self) -> None:
+    def test_pending_outcome_forces_wait_until_deterministic_evaluation(self: Self) -> None:
         goal_id = self.establish_goal()
         call_id = "meta-research-call"
         self.insert_successful_call(call_id, "research_plan:0", {"fixture": True})
@@ -328,14 +329,16 @@ class MetacognitiveControlTestCase(unittest.TestCase):
         self.assertEqual(decision.strategy, "wait")
         self.assertEqual(decision.reason_code, "durable_outcome_must_be_evaluated_first")
 
-    def test_authenticated_projection_shows_aggregate_decision_not_private_state(self) -> None:
+    def test_authenticated_projection_shows_aggregate_decision_not_private_state(
+        self: Self,
+    ) -> None:
         self.control().run_due()
         public = PublicProjection(self.kernel.database).private_state(self.subject_id)
         self.assertEqual(public["metacognition_summary"]["decision_count"], 1)
         self.assertNotIn("uncertainty", public["metacognition_summary"]["latest"])
         self.assertNotIn("fixation_risk", public["metacognition_summary"]["latest"])
 
-    def test_unresolved_decision_is_recovered_without_duplicate_choice(self) -> None:
+    def test_unresolved_decision_is_recovered_without_duplicate_choice(self: Self) -> None:
         control = self.control()
         first = control.run_due()
         recovered = control.run_due()
@@ -346,7 +349,7 @@ class MetacognitiveControlTestCase(unittest.TestCase):
                 1,
             )
 
-    def test_stale_unresolved_decision_is_quarantined_and_released(self) -> None:
+    def test_stale_unresolved_decision_is_quarantined_and_released(self: Self) -> None:
         control = self.control(metacognitive_pending_timeout_seconds=60)
         first = control.run_due()
         self.clock_value = "2026-08-13T12:02:00.000+00:00"
@@ -361,7 +364,7 @@ class MetacognitiveControlTestCase(unittest.TestCase):
         assert outcome is not None
         self.assertEqual(tuple(outcome), ("unknown", "workflow_timeout_quarantined"))
 
-    def test_database_rejects_cross_subject_metacognitive_outcome(self) -> None:
+    def test_database_rejects_cross_subject_metacognitive_outcome(self: Self) -> None:
         decision = self.control().run_due()
         other_subject = "Noyra-metacognition-other"
         from noyra.core.identity import IdentityStore
@@ -388,7 +391,7 @@ class MetacognitiveControlTestCase(unittest.TestCase):
                 ),
             )
 
-    def test_append_only_decisions_and_schema_seventeen(self) -> None:
+    def test_append_only_decisions_and_schema_seventeen(self: Self) -> None:
         control = self.control()
         control.run_due()
         with self.kernel.database.connection() as connection:
@@ -402,11 +405,11 @@ class MetacognitiveControlTestCase(unittest.TestCase):
         ):
             connection.execute("DELETE FROM metacognitive_decisions")
 
-    def test_model_ledger_recovery_still_operates_with_new_schema(self) -> None:
+    def test_model_ledger_recovery_still_operates_with_new_schema(self: Self) -> None:
         self.assertEqual(ModelLedger(self.kernel.database).recover_interrupted(self.subject_id), [])
 
     def insert_thought_episode(
-        self, agenda_id: str, call_id: str, proposal: Mapping[str, object]
+        self: Self, agenda_id: str, call_id: str, proposal: Mapping[str, object]
     ) -> None:
         from noyra.cognition.thought import IntrinsicThought
 

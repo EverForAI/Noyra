@@ -5,7 +5,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import pytest
 from pydantic import SecretStr
@@ -531,11 +531,11 @@ def test_reward_execution_batch_stops_after_workflow_enters_manual_intervention(
     fixture = _fixture(tmp_path, max_submissions=2, reward_slots=2)
 
     class RejectFirstSigner(MockSigner):
-        def __init__(self, **kwargs: Any) -> None:
+        def __init__(self: Self, **kwargs: Any) -> None:
             super().__init__(**kwargs)
             self.calls = 0
 
-        def sign_and_broadcast(self, transfer: Any, *, request_id: str) -> Any:
+        def sign_and_broadcast(self: Self, transfer: Any, *, request_id: str) -> Any:
             self.calls += 1
             if self.calls == 1:
                 raise WalletSignerError("temporary signer rejection")
@@ -697,7 +697,7 @@ def test_signer_rejection_fails_closed_to_manual_intervention(tmp_path: Path) ->
     fixture = _fixture(tmp_path)
 
     class RejectingSigner(MockSigner):
-        def sign_and_broadcast(self, transfer: Any, *, request_id: str) -> Any:
+        def sign_and_broadcast(self: Self, transfer: Any, *, request_id: str) -> Any:
             del transfer, request_id
             raise WalletSignerError("policy rejected")
 

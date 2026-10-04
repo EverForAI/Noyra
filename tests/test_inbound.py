@@ -8,7 +8,7 @@ import os
 import sqlite3
 import time
 from pathlib import Path
-from typing import cast
+from typing import Self, cast
 from urllib.request import Request, urlopen
 
 import pytest
@@ -117,7 +117,7 @@ def test_rejected_inbound_event_can_retry_without_creating_a_ghost_interaction(
         calls = 0
 
         def receive(
-            self,
+            self: Self,
             subject_id: str,
             channel: str,
             counterparty: str,
@@ -176,7 +176,7 @@ def test_successful_inbound_recovers_rejected_state_from_concurrent_failure(
 
     class RejectAfterCommit(InteractionStore):
         def receive(
-            self,
+            self: Self,
             subject_id: str,
             channel: str,
             counterparty: str,

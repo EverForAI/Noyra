@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from .database import Database
@@ -22,10 +23,18 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
 
 
 class LifecycleManager:
-    def __init__(self, database: Database, event_store: EventStore, subject_id: str):
+    def __init__(
+        self,
+        database: Database,
+        event_store: EventStore,
+        subject_id: str,
+        *,
+        mutation_guard: Callable[[Any], None] | None = None,
+    ):
         self.database = database
         self.event_store = event_store
         self.subject_id = subject_id
+        self.mutation_guard = mutation_guard
 
     def ensure_initial(
         self, state: str = "stopped", reason: str = "initialization"
@@ -40,6 +49,8 @@ class LifecycleManager:
             ).fetchone()
             if row:
                 return self._from_row(row)
+            if self.mutation_guard is not None:
+                self.mutation_guard(connection)
             changed_at = utc_now()
             connection.execute(
                 "INSERT INTO runtime_state(subject_id, state, reason, version, changed_at) "
@@ -65,6 +76,8 @@ class LifecycleManager:
         if not actor.strip():
             raise ValueError("transition actor is required")
         with self.database.transaction() as connection:
+            if self.mutation_guard is not None:
+                self.mutation_guard(connection)
             return self._transition_connection(connection, new_state, reason, actor=actor)
 
     def safe_pause(
@@ -81,6 +94,8 @@ class LifecycleManager:
         except IntegrityError as integrity_error:
             changed_at = utc_now()
             with self.database.transaction() as connection:
+                if self.mutation_guard is not None:
+                    self.mutation_guard(connection)
                 row = connection.execute(
                     "SELECT * FROM runtime_state WHERE subject_id = ?", (self.subject_id,)
                 ).fetchone()
@@ -167,6 +182,8 @@ class LifecycleManager:
         if not reason.strip():
             raise ValueError("restart recovery reason is required")
         with self.database.transaction() as connection:
+            if self.mutation_guard is not None:
+                self.mutation_guard(connection)
             row = connection.execute(
                 "SELECT * FROM runtime_state WHERE subject_id = ?", (self.subject_id,)
             ).fetchone()

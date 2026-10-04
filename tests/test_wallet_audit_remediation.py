@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, Self, cast
 
 import pytest
 
@@ -101,7 +101,7 @@ def test_prebroadcast_failure_can_reuse_chain_nonce(tmp_path: Path) -> None:
     class RejectFirst(MockSigner):
         rejected = False
 
-        def sign_and_broadcast(self, transfer: Any, *, request_id: str) -> Any:
+        def sign_and_broadcast(self: Self, transfer: Any, *, request_id: str) -> Any:
             if not self.rejected:
                 self.rejected = True
                 raise WalletSignerError("rejected before broadcast")

@@ -65,3 +65,46 @@ deliberately makes that backup unavailable and never causes an unauthenticated r
 The model does not claim that remote providers, a compromised host, or a
 malicious operator are trustworthy. Production deployments must protect the
 data directory, archive key, bearer tokens, and reverse-proxy termination.
+
+## Migration-specific boundaries
+
+Migration is an operator capability, not an autonomous network-discovery
+capability. It is disabled by default and enabling it selects manual approval.
+The registered-target provider only returns targets explicitly enrolled for the
+subject; it cannot scan the Internet, create cloud instances, or receive
+provider credentials. Enrollment binds a target to an Ed25519 public key,
+release, encrypted-volume assertion, and an attested generation. Revocation
+removes the target from every later proposal and recovery request.
+
+The migration artifact is an encrypted backup plus a non-secret manifest. API
+keys, operator tokens, signer credentials, and local wallet private keys remain
+outside the artifact. The preferred wallet mode rebinds an external signer or
+KMS identity on the target. Local-wallet transfer is an explicitly enabled
+high-risk mode and requires a second approval bound to the exact task and
+address; source key material is retained until commit and never appears in
+status or audit projections.
+
+The target also signs a task-bound binding record after checking its registered
+recipient fingerprint, credential references and fingerprints, wallet mode,
+signer identity, local-wallet approval, target generation, and encrypted-volume
+proof. The source verifies that signature before transfer and binds the
+credential, wallet, signer, and volume proof digests to activation and the
+execution receipt. A missing, stale, replayed, tampered, or context-mismatched
+binding fails closed. Identical binding retries are idempotent; a changed
+request for the same task is rejected.
+
+Emergency recovery is an independent policy mode. It requires source failure
+evidence, a verified backup, an active and attested allowlisted standby, and a
+target signature over the task, backup, manifest, restore, and health digests.
+Evidence text is hashed and secret-looking material is rejected. The source
+acquires a durable epoch only after this proof verifies. A database uniqueness
+constraint and runtime admission guard permit one active epoch, so a restarted
+or stale source cannot become a second writer. Replaying a signed task is
+idempotent; a different proof or target is rejected as task-identity reuse.
+
+The root migration runner is a fixed-operation systemd boundary. It accepts a
+safe request identifier and a fixed action, never evaluates request text, and
+does not inherit the ordinary service environment file. The target agent binds
+to loopback, uses a private data root, and refuses symlink traversal and
+unencrypted target storage. A real two-host encrypted restore, fencing, and
+rollback rehearsal remains a release gate before enabling policy-auto approval.

@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Self
 
 import httpx
 
@@ -24,7 +25,7 @@ from noyra.world import SafeWebReader, SourceRegistry
 
 
 class CapabilityTestCase(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name) / "authorized"
         self.root.mkdir()
@@ -38,11 +39,11 @@ class CapabilityTestCase(unittest.TestCase):
         self.capabilities = CapabilityStore(self.kernel.database)
         self.tools = ToolRunner(self.kernel.database)
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.kernel.close()
         self.temp_dir.cleanup()
 
-    def test_authorized_atomic_write_and_read_with_rate_limit(self) -> None:
+    def test_authorized_atomic_write_and_read_with_rate_limit(self: Self) -> None:
         with self.assertRaises(ValueError):
             self.capabilities.grant(
                 self.subject_id,
@@ -117,7 +118,7 @@ class CapabilityTestCase(unittest.TestCase):
         counts = CapabilityIntegrity(self.kernel.database).verify(self.subject_id)
         self.assertEqual(counts["capability_uses"], 2)
 
-    def test_legacy_approval_flag_fails_closed_for_any_token(self) -> None:
+    def test_legacy_approval_flag_fails_closed_for_any_token(self: Self) -> None:
         proposal = CapabilityGrant(
             capability_type="filesystem_write",
             scope={"root": str(self.root)},
@@ -170,14 +171,14 @@ class CapabilityTestCase(unittest.TestCase):
             0,
         )
 
-    def test_per_use_approval_is_not_advertised_by_configuration_ui(self) -> None:
+    def test_per_use_approval_is_not_advertised_by_configuration_ui(self: Self) -> None:
         root = Path(__file__).resolve().parents[1]
         html = (root / "src" / "noyra" / "web" / "index.html").read_text(encoding="utf-8")
         javascript = (root / "src" / "noyra" / "web" / "app.js").read_text(encoding="utf-8")
         self.assertNotIn("capability-approval", html)
         self.assertNotIn("requires_approval: document", javascript)
 
-    def test_scope_escape_and_revoked_grant_are_denied(self) -> None:
+    def test_scope_escape_and_revoked_grant_are_denied(self: Self) -> None:
         with self.assertRaises(ValueError):
             self.capabilities.grant(
                 self.subject_id,
@@ -222,7 +223,7 @@ class CapabilityTestCase(unittest.TestCase):
             1,
         )
 
-    def test_autonomy_loop_heartbeats_and_requests_sleep_without_busy_work(self) -> None:
+    def test_autonomy_loop_heartbeats_and_requests_sleep_without_busy_work(self: Self) -> None:
         hook_calls: list[str] = []
 
         async def active_hook() -> str:
@@ -268,7 +269,7 @@ class CapabilityTestCase(unittest.TestCase):
 
         asyncio.run(run_briefly())
 
-    def test_autonomy_loop_opens_circuit_after_repeated_failures(self) -> None:
+    def test_autonomy_loop_opens_circuit_after_repeated_failures(self: Self) -> None:
         async def failing_hook() -> str:
             raise RuntimeError("persistent failure")
 
@@ -288,7 +289,7 @@ class CapabilityTestCase(unittest.TestCase):
         self.assertEqual(asyncio.run(loop.tick()).action, "circuit_open")
         self.assertEqual(loop.health()["circuit_status"], "open")
 
-    def test_durable_workflow_requires_valid_resume_transitions(self) -> None:
+    def test_durable_workflow_requires_valid_resume_transitions(self: Self) -> None:
         workflows = DurableWorkflowStore(self.kernel.database)
         first = workflows.checkpoint(
             self.subject_id,
@@ -315,7 +316,7 @@ class CapabilityTestCase(unittest.TestCase):
         self.assertEqual((first.checkpoint_version, interrupted.status), (1, "interrupted"))
         self.assertEqual(resumed.checkpoint_version, 3)
 
-    def test_public_web_read_requires_host_scoped_grant(self) -> None:
+    def test_public_web_read_requires_host_scoped_grant(self: Self) -> None:
         source = SourceRegistry(self.kernel.database).register(
             self.subject_id,
             "Example",
@@ -360,7 +361,9 @@ class CapabilityTestCase(unittest.TestCase):
 
         self.assertEqual(asyncio.run(execute()), "authorized public observation")
 
-    def test_public_web_read_policy_covers_new_public_hosts_but_not_private_urls(self) -> None:
+    def test_public_web_read_policy_covers_new_public_hosts_but_not_private_urls(
+        self: Self,
+    ) -> None:
         self.capabilities.grant(
             self.subject_id,
             CapabilityGrant(
@@ -400,7 +403,7 @@ class CapabilityTestCase(unittest.TestCase):
             1,
         )
 
-    def test_web_read_rejects_wildcard_host_scopes(self) -> None:
+    def test_web_read_rejects_wildcard_host_scopes(self: Self) -> None:
         with self.assertRaisesRegex(ValueError, "wildcard hosts"):
             self.capabilities.grant(
                 self.subject_id,
@@ -414,7 +417,7 @@ class CapabilityTestCase(unittest.TestCase):
                 actor="operator",
             )
 
-    def test_legacy_wildcard_web_read_grant_fails_closed(self) -> None:
+    def test_legacy_wildcard_web_read_grant_fails_closed(self: Self) -> None:
         proposal = CapabilityGrant(
             capability_type="web_read",
             scope={"hosts": ["example.com"]},
@@ -455,7 +458,7 @@ class CapabilityTestCase(unittest.TestCase):
             1,
         )
 
-    def test_web_read_malformed_urls_fail_closed(self) -> None:
+    def test_web_read_malformed_urls_fail_closed(self: Self) -> None:
         self.capabilities.grant(
             self.subject_id,
             CapabilityGrant(
@@ -487,7 +490,7 @@ class CapabilityTestCase(unittest.TestCase):
                     )
 
     def test_persisted_malformed_scopes_raise_integrity_error_even_with_matching_hash(
-        self,
+        self: Self,
     ) -> None:
         cases: tuple[tuple[str, CapabilityType, dict[str, object], dict[str, object]], ...] = (
             (
@@ -581,7 +584,7 @@ class CapabilityTestCase(unittest.TestCase):
                             (canonical_json(valid_scope), valid_hash, record.grant_id),
                         )
 
-    def test_allows_rejects_noncanonical_persisted_scalar_with_matching_hash(self) -> None:
+    def test_allows_rejects_noncanonical_persisted_scalar_with_matching_hash(self: Self) -> None:
         proposal = CapabilityGrant(
             capability_type="web_read",
             scope={"hosts": ["example.com"]},

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -46,6 +47,15 @@ def _percentile(samples: list[int], fraction: float) -> int:
     return samples[min(len(samples) - 1, int(len(samples) * fraction))]
 
 
+@dataclass(frozen=True)
+class RoutePermit:
+    subject_id: str
+    provider_kind: str
+    provider_id: str
+    state_hash: str
+    probe_token: str | None = None
+
+
 class ProviderHealthStore:
     """Persist provider outcomes as bounded hourly aggregates.
 
@@ -76,6 +86,16 @@ class ProviderHealthStore:
             raise IntegrityError(
                 "provider health schema is unavailable; run the database migrations first"
             )
+        with self.database.transaction() as connection:
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(provider_health_buckets)")
+            }
+            if "unknown_count" not in columns:
+                connection.execute(
+                    "ALTER TABLE provider_health_buckets "
+                    "ADD COLUMN unknown_count INTEGER NOT NULL DEFAULT 0"
+                )
 
     @staticmethod
     def _bucket_hash(
@@ -87,6 +107,7 @@ class ProviderHealthStore:
         success_count: int,
         failure_count: int,
         latency_total_ms: int,
+        unknown_count: int,
         last_success_at: str | None,
         last_failure_at: str | None,
         error_counts: dict[str, int] | None = None,
@@ -101,6 +122,7 @@ class ProviderHealthStore:
                 "attempt_count": attempt_count,
                 "success_count": success_count,
                 "failure_count": failure_count,
+                "unknown_count": unknown_count,
                 "latency_total_ms": latency_total_ms,
                 "last_success_at": last_success_at,
                 "last_failure_at": last_failure_at,
@@ -173,6 +195,7 @@ class ProviderHealthStore:
         attempts = int(row["attempt_count"])
         successes = int(row["success_count"])
         failures = int(row["failure_count"])
+        unknown = int(row["unknown_count"])
         latency = int(row["latency_total_ms"])
         try:
             error_counts = json.loads(row["error_counts_json"] or "{}")
@@ -183,7 +206,8 @@ class ProviderHealthStore:
             attempts < 0
             or successes < 0
             or failures < 0
-            or successes + failures != attempts
+            or unknown < 0
+            or successes + failures + unknown != attempts
             or latency < 0
             or row["state_hash"]
             not in {
@@ -196,6 +220,7 @@ class ProviderHealthStore:
                     successes,
                     failures,
                     latency,
+                    unknown,
                     row["last_success_at"],
                     row["last_failure_at"],
                     error_counts,
@@ -248,6 +273,8 @@ class ProviderHealthStore:
         *,
         cooldown_seconds: int = 60,
         probe_token: str | None = None,
+        permit: RoutePermit | None = None,
+        outcome_unknown: bool = False,
     ) -> bool:
         if not all(
             isinstance(value, str) and value
@@ -256,6 +283,8 @@ class ProviderHealthStore:
             raise ValueError("provider health identity is invalid")
         if (
             type(success) is not bool
+            or type(outcome_unknown) is not bool
+            or (success and outcome_unknown)
             or isinstance(latency_ms, bool)
             or not isinstance(latency_ms, int)
             or latency_ms < 0
@@ -266,6 +295,18 @@ class ProviderHealthStore:
             raise ValueError("latency and cooldown must be non-negative")
         if probe_token is not None and (not isinstance(probe_token, str) or not probe_token):
             raise ValueError("probe token must be a non-empty string")
+        if permit is not None:
+            if not isinstance(permit, RoutePermit):
+                raise ValueError("route permit is invalid")
+            if (
+                permit.subject_id != subject_id
+                or permit.provider_kind != provider_kind
+                or permit.provider_id != provider_id
+            ):
+                raise ValueError("route permit identity does not match provider attempt")
+            if probe_token is not None and probe_token != permit.probe_token:
+                raise ValueError("probe token does not match route permit")
+            probe_token = permit.probe_token
         now = utc_now()
         bucket = _bucket(now)
         category = _error_category(error_code)
@@ -281,6 +322,7 @@ class ProviderHealthStore:
                 self._verify_bucket(existing)
             success_count = int(existing["success_count"]) if existing else 0
             failure_count = int(existing["failure_count"]) if existing else 0
+            unknown_count = int(existing["unknown_count"]) if existing else 0
             attempt_count = int(existing["attempt_count"]) if existing else 0
             latency_total = int(existing["latency_total_ms"]) if existing else 0
             error_counts = json.loads(existing["error_counts_json"] or "{}") if existing else {}
@@ -291,7 +333,8 @@ class ProviderHealthStore:
                 error_counts[category] = int(error_counts.get(category, 0)) + 1
             latency_samples = [*latency_samples, latency_ms][-128:]
             success_count += int(success)
-            failure_count += int(not success)
+            failure_count += int(not success and not outcome_unknown)
+            unknown_count += int(not success and outcome_unknown)
             attempt_count += 1
             latency_total += latency_ms
             last_success = now if success else (existing["last_success_at"] if existing else None)
@@ -307,6 +350,7 @@ class ProviderHealthStore:
                 success_count,
                 failure_count,
                 latency_total,
+                unknown_count,
                 last_success,
                 last_failure,
                 error_counts,
@@ -314,12 +358,17 @@ class ProviderHealthStore:
             )
             connection.execute(
                 """
-                INSERT INTO provider_health_buckets
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO provider_health_buckets(
+                    subject_id, provider_kind, provider_id, bucket_start,
+                    attempt_count, success_count, failure_count, unknown_count,
+                    latency_total_ms, last_success_at, last_failure_at, state_hash,
+                    error_counts_json, latency_samples_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(subject_id, provider_kind, provider_id, bucket_start)
                 DO UPDATE SET attempt_count=excluded.attempt_count,
                     success_count=excluded.success_count,
                     failure_count=excluded.failure_count,
+                    unknown_count=excluded.unknown_count,
                     latency_total_ms=excluded.latency_total_ms,
                     last_success_at=excluded.last_success_at,
                     last_failure_at=excluded.last_failure_at,
@@ -335,6 +384,7 @@ class ProviderHealthStore:
                     attempt_count,
                     success_count,
                     failure_count,
+                    unknown_count,
                     latency_total,
                     last_success,
                     last_failure,
@@ -358,10 +408,21 @@ class ProviderHealthStore:
                 # by leaving the claim in place until its lease expires.
                 if state["probe_token"] and state["probe_token"] != probe_token:
                     return True
-            consecutive = 0 if success else (int(state["consecutive_failures"]) + 1 if state else 1)
+            if outcome_unknown and state is not None:
+                return True
+            consecutive = (
+                0
+                if success or outcome_unknown
+                else (int(state["consecutive_failures"]) + 1 if state else 1)
+            )
             cooldown_until = None
-            state_name = "healthy" if success else "degraded"
-            if not success and consecutive >= self.failure_threshold and cooldown_seconds:
+            state_name = "healthy" if success or outcome_unknown else "degraded"
+            if (
+                not success
+                and not outcome_unknown
+                and consecutive >= self.failure_threshold
+                and cooldown_seconds
+            ):
                 cooldown_until = (
                     datetime.now(UTC) + timedelta(seconds=cooldown_seconds)
                 ).isoformat()
@@ -374,7 +435,9 @@ class ProviderHealthStore:
             probe_started_at = None
             state_last_success = now if success else (state["last_success_at"] if state else None)
             state_last_failure = (
-                now if not success else (state["last_failure_at"] if state else None)
+                now
+                if not success and not outcome_unknown
+                else (state["last_failure_at"] if state else None)
             )
             state_hash = self._state_hash(
                 subject_id,
@@ -443,6 +506,7 @@ class ProviderHealthStore:
                     "attempts": 0,
                     "successes": 0,
                     "failures": 0,
+                    "unknown": 0,
                     "latency": 0,
                     "last_success": None,
                     "errors": {},
@@ -461,6 +525,7 @@ class ProviderHealthStore:
             aggregate["attempts"] += int(bucket["attempt_count"])
             aggregate["successes"] += int(bucket["success_count"])
             aggregate["failures"] += int(bucket["failure_count"])
+            aggregate["unknown"] += int(bucket["unknown_count"])
             aggregate["latency"] += int(bucket["latency_total_ms"])
             for category, count in json.loads(bucket["error_counts_json"] or "{}").items():
                 aggregate["errors"][category] = aggregate["errors"].get(category, 0) + int(count)
@@ -472,14 +537,17 @@ class ProviderHealthStore:
                 aggregate["last_success"] = bucket["last_success_at"]
         result = []
         now = datetime.now(UTC)
+        state_provider_ids: set[str] = set()
         for row in states:
             self._verify_state(row)
+            state_provider_ids.add(str(row["provider_id"]))
             aggregate = aggregates.get(
                 str(row["provider_id"]),
                 {
                     "attempts": 0,
                     "successes": 0,
                     "failures": 0,
+                    "unknown": 0,
                     "latency": 0,
                     "last_success": None,
                     "errors": {},
@@ -491,6 +559,7 @@ class ProviderHealthStore:
             )
             attempts = int(aggregate["attempts"])
             failures = int(aggregate["failures"])
+            unknown = int(aggregate["unknown"])
             samples = sorted(int(value) for value in aggregate.get("samples", []))
 
             cooldown = _parse_time(row["cooldown_until"])
@@ -505,7 +574,9 @@ class ProviderHealthStore:
                     "attempt_count": attempts,
                     "success_count": int(aggregate["successes"]),
                     "failure_count": failures,
+                    "unknown_count": unknown,
                     "failure_rate": (failures / attempts) if attempts else 0.0,
+                    "unknown_rate": (unknown / attempts) if attempts else 0.0,
                     "average_latency_ms": (int(aggregate["latency"]) / attempts) if attempts else 0,
                     "p50_latency_ms": _percentile(samples, 0.50),
                     "p95_latency_ms": _percentile(samples, 0.95),
@@ -517,10 +588,47 @@ class ProviderHealthStore:
                     "bucket_count": int(aggregate["bucket_count"]),
                 }
             )
+        # Unknown outcomes may be recorded before a breaker state is created.
+        # Keep those aggregates visible instead of dropping their telemetry.
+        for provider_id in sorted(set(aggregates) - state_provider_ids):
+            aggregate = aggregates[provider_id]
+            attempts = int(aggregate["attempts"])
+            unknown = int(aggregate["unknown"])
+            samples = sorted(int(value) for value in aggregate.get("samples", []))
+            result.append(
+                {
+                    "provider_id": provider_id,
+                    "provider_kind": provider_kind,
+                    "state": "healthy",
+                    "attempt_count": attempts,
+                    "success_count": int(aggregate["successes"]),
+                    "failure_count": int(aggregate["failures"]),
+                    "unknown_count": unknown,
+                    "failure_rate": (int(aggregate["failures"]) / attempts) if attempts else 0.0,
+                    "unknown_rate": (unknown / attempts) if attempts else 0.0,
+                    "average_latency_ms": (int(aggregate["latency"]) / attempts) if attempts else 0,
+                    "p50_latency_ms": _percentile(samples, 0.50),
+                    "p95_latency_ms": _percentile(samples, 0.95),
+                    "error_counts": dict(sorted(aggregate.get("errors", {}).items())),
+                    "last_success_at": aggregate["last_success"],
+                    "cooldown_until": None,
+                    "window_start": aggregate["window_start"],
+                    "window_end": aggregate["window_end"],
+                    "bucket_count": int(aggregate["bucket_count"]),
+                }
+            )
         return result
 
-    def route_available(self, subject_id: str, provider_kind: str, provider_id: str) -> bool:
-        """Return whether normal traffic may use a provider, claiming one recovery probe."""
+    def claim_route(
+        self, subject_id: str, provider_kind: str, provider_id: str
+    ) -> RoutePermit | None:
+        """Atomically authorize one provider attempt.
+
+        Healthy and degraded providers receive a normal permit.  A provider
+        whose cooldown has elapsed receives one short-lived half-open probe
+        permit.  The compare-and-swap below makes concurrent recovery probes
+        mutually exclusive.
+        """
         now = datetime.now(UTC)
         with self.database.transaction() as connection:
             row = connection.execute(
@@ -536,17 +644,17 @@ class ProviderHealthStore:
                 ).fetchone()
                 if recorded is not None:
                     raise IntegrityError("provider health state is missing for recorded provider")
-                return True
+                return RoutePermit(subject_id, provider_kind, provider_id, "")
             self._verify_state(row)
             if row["state"] in {"healthy", "degraded"}:
-                return True
+                return RoutePermit(subject_id, provider_kind, provider_id, str(row["state_hash"]))
             if row["probe_token"]:
                 started = _parse_time(row["probe_started_at"])
                 if started and started + timedelta(minutes=2) > now:
-                    return False
+                    return None
             cooldown = _parse_time(row["cooldown_until"])
             if cooldown is None or cooldown > now:
-                return False
+                return None
             token = new_id("probe")
             timestamp = now.isoformat()
             state_hash = self._state_hash(
@@ -580,4 +688,44 @@ class ProviderHealthStore:
                     (now - timedelta(minutes=2)).isoformat(),
                 ),
             ).rowcount
-            return bool(updated)
+            if not updated:
+                return None
+            return RoutePermit(
+                subject_id,
+                provider_kind,
+                provider_id,
+                state_hash,
+                probe_token=token,
+            )
+
+    def route_available(self, subject_id: str, provider_kind: str, provider_id: str) -> bool:
+        """Compatibility wrapper returning whether a route may be used."""
+        return self.claim_route(subject_id, provider_kind, provider_id) is not None
+
+    def route_eligible(self, subject_id: str, provider_kind: str, provider_id: str) -> bool:
+        """Return eligibility without consuming a half-open recovery probe."""
+        now = datetime.now(UTC)
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM provider_health_state "
+                "WHERE subject_id=? AND provider_kind=? AND provider_id=?",
+                (subject_id, provider_kind, provider_id),
+            ).fetchone()
+            if row is None:
+                recorded = connection.execute(
+                    "SELECT 1 FROM provider_health_buckets WHERE subject_id=? "
+                    "AND provider_kind=? AND provider_id=? LIMIT 1",
+                    (subject_id, provider_kind, provider_id),
+                ).fetchone()
+                if recorded is not None:
+                    raise IntegrityError("provider health state is missing for recorded provider")
+                return True
+            self._verify_state(row)
+            if row["state"] in {"healthy", "degraded"}:
+                return True
+            if row["probe_token"]:
+                started = _parse_time(row["probe_started_at"])
+                if started and started + timedelta(minutes=2) > now:
+                    return False
+            cooldown = _parse_time(row["cooldown_until"])
+            return cooldown is not None and cooldown <= now

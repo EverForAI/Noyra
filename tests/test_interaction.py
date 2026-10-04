@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Self
 
 from noyra.core import SubjectKernel
 from noyra.core.database import CURRENT_SCHEMA_VERSION
@@ -20,7 +21,7 @@ from noyra.sleep import SleepEngine, SleepReflectionPlan
 
 
 class InteractionTestCase(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "noyra.sqlite3"
         self.subject_id = "Noyra-interaction-test"
@@ -31,11 +32,11 @@ class InteractionTestCase(unittest.TestCase):
         self.kernel.activate()
         self.interactions = InteractionStore(self.kernel.database)
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.kernel.close()
         self.temp_dir.cleanup()
 
-    def test_human_message_is_an_invitation_and_subject_can_silence_it(self) -> None:
+    def test_human_message_is_an_invitation_and_subject_can_silence_it(self: Self) -> None:
         invitation = self.interactions.receive(
             self.subject_id,
             "local",
@@ -73,7 +74,7 @@ class InteractionTestCase(unittest.TestCase):
         )
 
     def test_subject_can_initiate_help_request_but_human_cannot_initiate_subject_message(
-        self,
+        self: Self,
     ) -> None:
         request = self.interactions.send(
             self.subject_id,
@@ -97,7 +98,9 @@ class InteractionTestCase(unittest.TestCase):
             1,
         )
 
-    def test_public_projection_excludes_private_state_and_diary_is_subject_selected(self) -> None:
+    def test_public_projection_excludes_private_state_and_diary_is_subject_selected(
+        self: Self,
+    ) -> None:
         sleep = SleepEngine(self.kernel.database, self.subject_id)
         self.interactions.send(
             self.subject_id,
@@ -170,7 +173,7 @@ class InteractionTestCase(unittest.TestCase):
             1,
         )
 
-    def test_schema_migrates_from_version_five(self) -> None:
+    def test_schema_migrates_from_version_five(self: Self) -> None:
         legacy = Path(self.temp_dir.name) / "legacy-v5.sqlite3"
         raw = sqlite3.connect(legacy)
         raw.execute("CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")

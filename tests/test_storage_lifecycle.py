@@ -12,7 +12,7 @@ import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Self, cast
 from unittest.mock import patch
 
 from noyra.core import (
@@ -37,7 +37,7 @@ from noyra.service import NoyraService
 
 
 class StorageLifecycleTestCase(unittest.TestCase):
-    def test_usage_classifies_database_freelist_wal_cold_staging_and_exports(self) -> None:
+    def test_usage_classifies_database_freelist_wal_cold_staging_and_exports(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = StorageLayout.create(directory)
             database = Database(Path(directory) / "noyra.sqlite3")
@@ -75,7 +75,7 @@ class StorageLifecycleTestCase(unittest.TestCase):
                 usage.subject_bytes - usage.database_reclaimable_bytes,
             )
 
-    def test_usage_samples_are_append_only_and_prediction_is_bounded(self) -> None:
+    def test_usage_samples_are_append_only_and_prediction_is_bounded(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "noyra.sqlite3")
             subject_id = "Noyra-storage-trend-test"
@@ -145,7 +145,7 @@ class StorageLifecycleTestCase(unittest.TestCase):
                     (subject_id,),
                 )
 
-    def test_maintenance_retains_append_only_research_usage(self) -> None:
+    def test_maintenance_retains_append_only_research_usage(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = StorageLayout.create(directory)
             database = Database(Path(directory) / "noyra.sqlite3")
@@ -186,11 +186,11 @@ class StorageLifecycleTestCase(unittest.TestCase):
             self.assertEqual(retained, 1)
             self.assertEqual(samples, 1)
 
-    def test_active_tick_runs_cloud_gc_before_final_storage_pressure_decision(self) -> None:
+    def test_active_tick_runs_cloud_gc_before_final_storage_pressure_decision(self: Self) -> None:
         order: list[str] = []
 
         class Lifecycle:
-            def maintain(self, *, defer_pressure_decision: bool = False) -> SimpleNamespace:
+            def maintain(self: Self, *, defer_pressure_decision: bool = False) -> SimpleNamespace:
                 order.append(f"maintain:{defer_pressure_decision}")
                 return SimpleNamespace(
                     actions=(),
@@ -198,14 +198,14 @@ class StorageLifecycleTestCase(unittest.TestCase):
                     write_amplification_allowed=False,
                 )
 
-            def reassess(self, previous: SimpleNamespace) -> SimpleNamespace:
+            def reassess(self: Self, previous: SimpleNamespace) -> SimpleNamespace:
                 del previous
                 order.append("reassess")
                 return SimpleNamespace(actions=(), cognition_allowed=False)
 
         class Cloud:
             def tick(
-                self,
+                self: Self,
                 *,
                 garbage_collect_local: bool = False,
                 allow_staging: bool = True,
@@ -218,7 +218,7 @@ class StorageLifecycleTestCase(unittest.TestCase):
         service._thread_workers = set()
         service.storage_lifecycle = cast(Any, Lifecycle())
         service.cloud_archives = cast(Any, Cloud())
-        service._run_retention_if_due = lambda: order.append("retention")
+        cast(Any, service)._run_retention_if_due = lambda: order.append("retention")
 
         self.assertEqual(asyncio.run(service._active_tick()), "storage_pressure")
         self.assertEqual(
@@ -227,11 +227,11 @@ class StorageLifecycleTestCase(unittest.TestCase):
         )
         self.assertEqual(service._thread_workers, set())
 
-    def test_active_tick_disables_cloud_staging_for_noncritical_quota_pressure(self) -> None:
+    def test_active_tick_disables_cloud_staging_for_noncritical_quota_pressure(self: Self) -> None:
         calls: list[bool] = []
 
         class Lifecycle:
-            def maintain(self, *, defer_pressure_decision: bool = False) -> SimpleNamespace:
+            def maintain(self: Self, *, defer_pressure_decision: bool = False) -> SimpleNamespace:
                 del defer_pressure_decision
                 return SimpleNamespace(
                     actions=(),
@@ -239,12 +239,12 @@ class StorageLifecycleTestCase(unittest.TestCase):
                     write_amplification_allowed=False,
                 )
 
-            def reassess(self, previous: SimpleNamespace) -> SimpleNamespace:
+            def reassess(self: Self, previous: SimpleNamespace) -> SimpleNamespace:
                 return previous
 
         class Cloud:
             def tick(
-                self,
+                self: Self,
                 *,
                 garbage_collect_local: bool = False,
                 allow_staging: bool = True,
@@ -263,11 +263,11 @@ class StorageLifecycleTestCase(unittest.TestCase):
         self.assertEqual(calls, [False])
         self.assertEqual(service._thread_workers, set())
 
-    def test_active_tick_keeps_pressure_fail_closed_when_cloud_gc_cannot_write(self) -> None:
+    def test_active_tick_keeps_pressure_fail_closed_when_cloud_gc_cannot_write(self: Self) -> None:
         order: list[str] = []
 
         class Lifecycle:
-            def maintain(self, *, defer_pressure_decision: bool = False) -> SimpleNamespace:
+            def maintain(self: Self, *, defer_pressure_decision: bool = False) -> SimpleNamespace:
                 order.append(f"maintain:{defer_pressure_decision}")
                 return SimpleNamespace(
                     actions=(),
@@ -275,12 +275,12 @@ class StorageLifecycleTestCase(unittest.TestCase):
                     write_amplification_allowed=False,
                 )
 
-            def reassess(self, previous: SimpleNamespace) -> SimpleNamespace:
+            def reassess(self: Self, previous: SimpleNamespace) -> SimpleNamespace:
                 order.append("reassess")
                 return previous
 
         class Cloud:
-            def tick(self, **kwargs: Any) -> dict[str, int]:
+            def tick(self: Self, **kwargs: Any) -> dict[str, int]:
                 order.append(f"cloud:{kwargs['allow_staging']}")
                 raise sqlite3.OperationalError("database or disk is full")
 
@@ -294,7 +294,7 @@ class StorageLifecycleTestCase(unittest.TestCase):
         self.assertEqual(order, ["maintain:True", "cloud:False", "reassess"])
         self.assertEqual(service._thread_workers, set())
 
-    def test_warning_clears_cache_and_compacts_snapshots(self) -> None:
+    def test_warning_clears_cache_and_compacts_snapshots(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = StorageLayout.create(directory)
             database = Database(Path(directory) / "noyra.sqlite3")
@@ -328,7 +328,7 @@ class StorageLifecycleTestCase(unittest.TestCase):
             self.assertIn("subject", result.warnings)
             self.assertEqual(snapshots.verify_archives(subject_id), 1)
 
-    def test_cold_event_payloads_move_to_encrypted_segments_and_remain_readable(self) -> None:
+    def test_cold_event_payloads_move_to_encrypted_segments_and_remain_readable(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = StorageLayout.create(directory)
             database = Database(Path(directory) / "noyra.sqlite3")
@@ -405,7 +405,7 @@ class StorageLifecycleTestCase(unittest.TestCase):
             self.assertIn('"payload_json":"{\\"large\\":', events_jsonl)
             self.assertNotIn('"payload_json":"{}"', events_jsonl)
 
-    def test_subject_quota_prunes_old_export_artifacts(self) -> None:
+    def test_subject_quota_prunes_old_export_artifacts(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = StorageLayout.create(directory)
             database = Database(Path(directory) / "noyra.sqlite3")
@@ -451,7 +451,7 @@ class StorageLifecycleTestCase(unittest.TestCase):
             self.assertIsNone(row["byte_size"])
             self.assertEqual(row["error_code"], "artifact_pruned")
 
-    def test_export_prune_delete_failure_keeps_recoverable_intent(self) -> None:
+    def test_export_prune_delete_failure_keeps_recoverable_intent(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = StorageLayout.create(directory)
             database = Database(Path(directory) / "noyra.sqlite3")
@@ -521,7 +521,7 @@ class StorageLifecycleTestCase(unittest.TestCase):
             self.assertIsNone(finalized["byte_size"])
             self.assertEqual(finalized["error_code"], "artifact_pruned")
 
-    def test_export_prune_recovers_after_delete_before_finalize(self) -> None:
+    def test_export_prune_recovers_after_delete_before_finalize(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = StorageLayout.create(directory)
             database = Database(Path(directory) / "noyra.sqlite3")
@@ -593,7 +593,7 @@ class StorageLifecycleTestCase(unittest.TestCase):
             self.assertIsNone(row["byte_size"])
             self.assertEqual(row["error_code"], "artifact_pruned")
 
-    def test_export_manager_retries_recent_pending_prune(self) -> None:
+    def test_export_manager_retries_recent_pending_prune(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             layout = StorageLayout.create(directory)
             database = Database(Path(directory) / "noyra.sqlite3")

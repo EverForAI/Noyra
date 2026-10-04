@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Self
 
 from noyra.cognition import CognitionSettings, SemanticMemoryIntegrator
 from noyra.core import EventStore, SubjectKernel
@@ -22,7 +23,7 @@ from noyra.model import (
 
 
 class SemanticMemoryIntegrationTestCase(unittest.IsolatedAsyncioTestCase):
-    async def test_model_candidate_is_supervised_and_originals_remain(self) -> None:
+    async def test_model_candidate_is_supervised_and_originals_remain(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             kernel = SubjectKernel(
                 Path(directory) / "noyra.sqlite3",

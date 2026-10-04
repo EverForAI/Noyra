@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from noyra.core import Database, IdentityStore
@@ -9,7 +11,7 @@ from noyra.research.provider import SearchProviderStore
 from noyra.research.types import SearchProviderInput
 
 
-def test_route_update_does_not_overwrite_a_corrupt_existing_state(tmp_path):
+def test_route_update_does_not_overwrite_a_corrupt_existing_state(tmp_path: Any) -> None:
     database = Database(tmp_path / "noyra.sqlite3")
     subject = "Noyra-route-state"
     IdentityStore(database).ensure(subject, content_hash({"subject": subject}))

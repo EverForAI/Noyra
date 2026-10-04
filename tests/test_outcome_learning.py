@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Self
 
 import httpx
 
@@ -20,7 +21,7 @@ from noyra.world import ObservationStore, SafeWebReader, SourceRegistry
 
 
 class OutcomeLearningTestCase(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.subject_id = "Noyra-outcome-learning-test"
         self.kernel = SubjectKernel(
@@ -66,11 +67,11 @@ class OutcomeLearningTestCase(unittest.IsolatedAsyncioTestCase):
             reason="test source",
         )
 
-    async def asyncTearDown(self) -> None:
+    async def asyncTearDown(self: Self) -> None:
         self.kernel.close()
         self.temp_dir.cleanup()
 
-    def test_profile_parser_rejects_non_finite_durable_confidence(self) -> None:
+    def test_profile_parser_rejects_non_finite_durable_confidence(self: Self) -> None:
         with self.assertRaises(IntegrityError):
             OutcomeEvaluator._profile_from_row(
                 {
@@ -83,7 +84,7 @@ class OutcomeLearningTestCase(unittest.IsolatedAsyncioTestCase):
                 }
             )
 
-    def evaluator(self, *, progress_delta: float = 0.05) -> OutcomeEvaluator:
+    def evaluator(self: Self, *, progress_delta: float = 0.05) -> OutcomeEvaluator:
         return OutcomeEvaluator(
             self.kernel.database,
             self.subject_id,
@@ -92,7 +93,7 @@ class OutcomeLearningTestCase(unittest.IsolatedAsyncioTestCase):
             max_progress_delta=progress_delta,
         )
 
-    async def test_new_observation_advances_goal_and_strategy_confidence(self) -> None:
+    async def test_new_observation_advances_goal_and_strategy_confidence(self: Self) -> None:
         CapabilityStore(self.kernel.database).grant(
             self.subject_id,
             CapabilityGrant(
@@ -171,7 +172,9 @@ class OutcomeLearningTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(evaluator.run_due())
 
-    async def test_candidate_search_is_informative_but_cannot_claim_goal_progress(self) -> None:
+    async def test_candidate_search_is_informative_but_cannot_claim_goal_progress(
+        self: Self,
+    ) -> None:
         async def browser_response(_: httpx.Request) -> httpx.Response:
             return httpx.Response(
                 200,
@@ -260,7 +263,7 @@ class OutcomeLearningTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(profile.last_outcome, "informative")
         self.assertGreater(profile.confidence, 0.5)
 
-    def test_failed_action_lowers_strategy_confidence_without_progress(self) -> None:
+    def test_failed_action_lowers_strategy_confidence_without_progress(self: Self) -> None:
         actions = ActionLedger(self.kernel.database)
         action = actions.prepare(
             self.subject_id,
@@ -282,7 +285,7 @@ class OutcomeLearningTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertLess(profile.confidence, 0.5)
         self.assertEqual(GoalStore(self.kernel.database).get(self.goal.goal_id).progress, 0)
 
-    def test_records_are_append_only_and_integrity_checked(self) -> None:
+    def test_records_are_append_only_and_integrity_checked(self: Self) -> None:
         actions = ActionLedger(self.kernel.database)
         action = actions.prepare(
             self.subject_id,
@@ -317,7 +320,7 @@ class OutcomeLearningTestCase(unittest.IsolatedAsyncioTestCase):
             connection.execute("DELETE FROM strategy_profile_revisions")
 
     def _insert_deliberation(
-        self, action_id: str, observation_id: str | None, *, status: str
+        self: Self, action_id: str, observation_id: str | None, *, status: str
     ) -> None:
         proposal = {
             "summary": "evaluate fixture action",
@@ -365,7 +368,7 @@ class OutcomeLearningTestCase(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
-    def _insert_model_call(self, connection: sqlite3.Connection, suffix: str) -> str:
+    def _insert_model_call(self: Self, connection: sqlite3.Connection, suffix: str) -> str:
         call_id = f"call_{content_hash(suffix)[:16]}"
         response = {
             "content": "{}",

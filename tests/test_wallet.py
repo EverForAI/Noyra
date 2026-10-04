@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -1028,28 +1028,28 @@ def test_wallet_integrity_consumes_history_cursors_without_fetchall(
     _register_graph(store, subject_id)
 
     class NoFetchallCursor:
-        def __init__(self, cursor: Any) -> None:
+        def __init__(self: Self, cursor: Any) -> None:
             self._cursor = cursor
 
-        def __iter__(self) -> Iterator[Any]:
+        def __iter__(self: Self) -> Iterator[Any]:
             return iter(self._cursor)
 
-        def fetchone(self) -> Any:
+        def fetchone(self: Self) -> Any:
             return self._cursor.fetchone()
 
-        def fetchall(self) -> list[Any]:
+        def fetchall(self: Self) -> list[Any]:
             raise AssertionError("wallet integrity must consume cursors incrementally")
 
     class NoFetchallConnection:
-        def __init__(self, connection: Any) -> None:
+        def __init__(self: Self, connection: Any) -> None:
             self._connection = connection
 
-        def execute(self, *args: Any, **kwargs: Any) -> NoFetchallCursor:
+        def execute(self: Self, *args: Any, **kwargs: Any) -> NoFetchallCursor:
             return NoFetchallCursor(self._connection.execute(*args, **kwargs))
 
     class NoFetchallDatabase(Database):
         @contextmanager
-        def read_transaction(self) -> Iterator[Any]:
+        def read_transaction(self: Self) -> Iterator[Any]:
             with super().read_transaction() as connection:
                 yield NoFetchallConnection(connection)
 

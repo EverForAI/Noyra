@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Self
 
 from noyra.cognition import (
     CognitionSettings,
@@ -36,7 +37,7 @@ from noyra.world.types import ObservationRecord
 
 
 class EpistemicReviewTestCase(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.subject_id = "Noyra-epistemic-test"
         self.kernel = SubjectKernel(
@@ -57,11 +58,11 @@ class EpistemicReviewTestCase(unittest.IsolatedAsyncioTestCase):
             status="active",
         )
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.kernel.close()
         self.temp_dir.cleanup()
 
-    def settings(self) -> CognitionSettings:
+    def settings(self: Self) -> CognitionSettings:
         return CognitionSettings(
             enabled=True,
             sources=(
@@ -76,7 +77,7 @@ class EpistemicReviewTestCase(unittest.IsolatedAsyncioTestCase):
             max_belief_confidence_delta=0.15,
         )
 
-    def observation(self, label: str, *, analyzed: bool = True) -> ObservationRecord:
+    def observation(self: Self, label: str, *, analyzed: bool = True) -> ObservationRecord:
         content = f"Analyzed evidence {label}."
         record = ObservationStore(self.kernel.database).record(
             self.subject_id,
@@ -99,7 +100,7 @@ class EpistemicReviewTestCase(unittest.IsolatedAsyncioTestCase):
             )
         return record
 
-    def gateway(self, proposal: Mapping[str, object]) -> ModelGateway:
+    def gateway(self: Self, proposal: Mapping[str, object]) -> ModelGateway:
         provider = FakeProvider(
             [
                 ProviderResponse(
@@ -116,7 +117,7 @@ class EpistemicReviewTestCase(unittest.IsolatedAsyncioTestCase):
             limits=BudgetLimits(20, 100_000, 100_000, 1_000_000),
         )
 
-    async def no_change_review(self) -> EpistemicReview:
+    async def no_change_review(self: Self) -> EpistemicReview:
         self.observation("integrity")
         proposal = {
             "summary": "The analyzed evidence does not justify a state change.",
@@ -133,7 +134,9 @@ class EpistemicReviewTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await review.run_due(), "epistemic_review_no_change")
         return review
 
-    async def test_revises_belief_and_resolves_due_prediction_from_analyzed_evidence(self) -> None:
+    async def test_revises_belief_and_resolves_due_prediction_from_analyzed_evidence(
+        self: Self,
+    ) -> None:
         original = self.observation("original")
         counter = self.observation("counter")
         belief = BeliefStore(self.kernel.database).create(
@@ -196,7 +199,7 @@ class EpistemicReviewTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(latest.status, "committed")
         self.assertEqual(latest.applied_belief_ids, (belief.belief_id,))
 
-    async def test_rejects_unanalyzed_evidence_and_excessive_confidence_change(self) -> None:
+    async def test_rejects_unanalyzed_evidence_and_excessive_confidence_change(self: Self) -> None:
         analyzed = self.observation("analyzed")
         pending = self.observation("pending", analyzed=False)
         belief = BeliefStore(self.kernel.database).create(
@@ -233,7 +236,7 @@ class EpistemicReviewTestCase(unittest.IsolatedAsyncioTestCase):
             BeliefStore(self.kernel.database).get(belief.belief_id).current_revision, 1
         )
 
-    def test_prediction_resolution_requires_analyzed_observation(self) -> None:
+    def test_prediction_resolution_requires_analyzed_observation(self: Self) -> None:
         pending = self.observation("pending", analyzed=False)
         store = PredictionStore(self.kernel.database, clock=lambda: "2026-08-10T00:00:00.000+00:00")
         prediction = store.create(
@@ -255,7 +258,7 @@ class EpistemicReviewTestCase(unittest.IsolatedAsyncioTestCase):
                 rationale="Unanalyzed evidence is insufficient.",
             )
 
-    async def test_metacognitive_integrity_covers_epistemic_review_json(self) -> None:
+    async def test_metacognitive_integrity_covers_epistemic_review_json(self: Self) -> None:
         review = await self.no_change_review()
         self.assertEqual(review.verify_integrity(), 1)
         control = MetacognitiveControl(
@@ -277,7 +280,7 @@ class EpistemicReviewTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(IntegrityError):
             control.verify_integrity()
 
-    async def test_epistemic_integrity_rejects_matching_hash_invalid_status(self) -> None:
+    async def test_epistemic_integrity_rejects_matching_hash_invalid_status(self: Self) -> None:
         review = await self.no_change_review()
         latest = review.latest()
         assert latest is not None

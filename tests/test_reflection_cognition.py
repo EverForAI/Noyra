@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from typing import Self
 
 from noyra.cognition import (
     CognitionSettings,
@@ -36,7 +37,7 @@ from noyra.sleep import (
 
 
 class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.subject_id = "Noyra-reflection-cognition-test"
         self.kernel = SubjectKernel(
@@ -101,11 +102,11 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
         self.sleep_run = self.sleep.start("subject_choice", "integrate recent experience")
         self.sleep_run = self.sleep.begin_reflection(self.sleep_run.sleep_id)
 
-    async def asyncTearDown(self) -> None:
+    async def asyncTearDown(self: Self) -> None:
         self.kernel.close()
         self.temp_dir.cleanup()
 
-    def settings(self, *, max_calls: int = 3, max_active: int = 3) -> CognitionSettings:
+    def settings(self: Self, *, max_calls: int = 3, max_active: int = 3) -> CognitionSettings:
         return CognitionSettings(
             enabled=False,
             max_sleep_model_calls_per_run=max_calls,
@@ -114,7 +115,7 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
     def cognition(
-        self,
+        self: Self,
         provider: FakeProvider,
         *,
         max_calls: int = 3,
@@ -136,7 +137,7 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
             self.settings(max_calls=max_calls, max_active=max_active),
         )
 
-    def proposal(self, *, event_id: str | None = None) -> str:
+    def proposal(self: Self, *, event_id: str | None = None) -> str:
         source = event_id or self.evidence[0]
         return json.dumps(
             {
@@ -173,7 +174,9 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-    async def test_reflection_proposal_is_cached_validated_and_atomically_integrated(self) -> None:
+    async def test_reflection_proposal_is_cached_validated_and_atomically_integrated(
+        self: Self,
+    ) -> None:
         provider = FakeProvider(
             [ProviderResponse(content=self.proposal(), usage=ModelUsage(1_000, 500))]
         )
@@ -200,7 +203,7 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
             ).fetchone()[0]
         self.assertEqual(candidates, 1)
 
-    async def test_invalid_causal_reference_falls_back_without_partial_state(self) -> None:
+    async def test_invalid_causal_reference_falls_back_without_partial_state(self: Self) -> None:
         provider = FakeProvider(
             [
                 ProviderResponse(
@@ -222,7 +225,9 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rejected, 1)
         self.sleep.commit_reflection(self.sleep_run.sleep_id, plan)
 
-    async def test_invalid_saved_response_is_skipped_before_a_later_valid_recovery(self) -> None:
+    async def test_invalid_saved_response_is_skipped_before_a_later_valid_recovery(
+        self: Self,
+    ) -> None:
         provider = FakeProvider(
             [
                 ProviderResponse(
@@ -239,7 +244,7 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(provider.requests), 2)
         self.assertEqual(plan.goal_revisions[0].goal_id, self.goal.goal_id)
 
-    async def test_provider_failure_reaches_bounded_fallback(self) -> None:
+    async def test_provider_failure_reaches_bounded_fallback(self: Self) -> None:
         provider = FakeProvider([])
         cognition = self.cognition(provider, max_calls=1)
         plan = await cognition.propose(self.sleep_run)
@@ -252,11 +257,11 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call["status"], "unknown")
         self.assertEqual(call["purpose"], f"sleep_reflection:{self.sleep_run.sleep_id}")
 
-    async def test_provider_failure_remains_pending_before_call_cap(self) -> None:
+    async def test_provider_failure_remains_pending_before_call_cap(self: Self) -> None:
         with self.assertRaises(ReflectionCognitionPending):
             await self.cognition(FakeProvider([]), max_calls=2).propose(self.sleep_run)
 
-    async def test_budget_denial_uses_immediate_no_change_fallback(self) -> None:
+    async def test_budget_denial_uses_immediate_no_change_fallback(self: Self) -> None:
         budget_plan = await self.cognition(
             FakeProvider([]),
             max_calls=1,
@@ -264,7 +269,9 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
         ).propose(self.sleep_run)
         self.assertIn("budget unavailable", budget_plan.summary)
 
-    async def test_supervisor_rejects_invalid_sleep_targets_before_engine_commit(self) -> None:
+    async def test_supervisor_rejects_invalid_sleep_targets_before_engine_commit(
+        self: Self,
+    ) -> None:
         cognition = self.cognition(FakeProvider([]))
         context = cognition._context(self.sleep_run)
         with self.assertRaises(ReflectionCognitionValidationError):
@@ -369,7 +376,7 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await cognition.propose(replace(self.sleep_run, status="deep_sleep"))
 
-    async def test_reflection_cannot_bypass_active_goal_limit(self) -> None:
+    async def test_reflection_cannot_bypass_active_goal_limit(self: Self) -> None:
         second = GoalStore(self.kernel.database).create_candidate(
             self.subject_id,
             GoalCandidate(
@@ -402,7 +409,7 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("fallback reflection", plan.summary)
         self.assertEqual(plan.goal_revisions, ())
 
-    async def test_events_arriving_after_sleep_start_are_not_in_current_context(self) -> None:
+    async def test_events_arriving_after_sleep_start_are_not_in_current_context(self: Self) -> None:
         later = self.events.append(
             self.subject_id,
             "late_event",

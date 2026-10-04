@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch signed Noyra target activation requests
+
+[Path]
+PathChanged=/var/lib/noyra/migration/target-activation/requests
+PathExistsGlob=/var/lib/noyra/migration/target-activation/requests/*.json
+Unit=noyra-target-activation.service
+
+[Install]
+WantedBy=multi-user.target

@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import pytest
 
@@ -398,7 +398,7 @@ def test_nonce_conflict_after_restart_preserves_original_payment_identity(tmp_pa
     assert order is not None
 
     class LostResponseThenNonceConflict(MockSigner):
-        def __init__(self) -> None:
+        def __init__(self: Self) -> None:
             super().__init__(
                 signer_id="stable-release-signer",
                 chain_id=network.chain_id,
@@ -408,7 +408,7 @@ def test_nonce_conflict_after_restart_preserves_original_payment_identity(tmp_pa
             self.request_ids: list[str] = []
             self.retry_transfers: list[Any] = []
 
-        def sign_and_broadcast(self, transfer: Any, *, request_id: str) -> Any:
+        def sign_and_broadcast(self: Self, transfer: Any, *, request_id: str) -> Any:
             self.request_ids.append(request_id)
             if len(self.request_ids) > 1:
                 self.retry_transfers.append(transfer)
@@ -494,35 +494,35 @@ def test_confirmation_timeout_then_receipt_reconciles_without_duplicate_settleme
 
 
 class _NoFetchallCursor:
-    def __init__(self, cursor: Any):
+    def __init__(self: Self, cursor: Any) -> None:
         self._cursor = cursor
 
-    def __iter__(self) -> Iterator[Any]:
+    def __iter__(self: Self) -> Iterator[Any]:
         return iter(self._cursor)
 
-    def fetchone(self) -> Any:
+    def fetchone(self: Self) -> Any:
         return self._cursor.fetchone()
 
-    def fetchall(self) -> list[Any]:
+    def fetchall(self: Self) -> list[Any]:
         raise AssertionError("wallet economy history must stream rows")
 
 
 class _NoFetchallConnection:
-    def __init__(self, connection: Any):
+    def __init__(self: Self, connection: Any) -> None:
         self._connection = connection
 
-    def execute(self, *args: Any, **kwargs: Any) -> _NoFetchallCursor:
+    def execute(self: Self, *args: Any, **kwargs: Any) -> _NoFetchallCursor:
         return _NoFetchallCursor(self._connection.execute(*args, **kwargs))
 
 
 class _NoFetchallDatabase(Database):
     @contextmanager
-    def connection(self) -> Iterator[Any]:
+    def connection(self: Self) -> Iterator[Any]:
         with super().connection() as connection:
             yield _NoFetchallConnection(connection)
 
     @contextmanager
-    def read_transaction(self) -> Iterator[Any]:
+    def read_transaction(self: Self) -> Iterator[Any]:
         with super().read_transaction() as connection:
             yield _NoFetchallConnection(connection)
 
@@ -729,7 +729,7 @@ def test_signer_failures_and_exports_never_persist_key_material(tmp_path: Path) 
     assert order is not None
 
     class ExplodingSigner(MockSigner):
-        def sign_and_broadcast(self, transfer: Any, *, request_id: str) -> Any:
+        def sign_and_broadcast(self: Self, transfer: Any, *, request_id: str) -> Any:
             del transfer, request_id
             raise RuntimeError("private-key-material-must-not-leak")
 

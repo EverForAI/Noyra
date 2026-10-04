@@ -28,7 +28,11 @@ from .archive import (
     ArchiveKeyring,
     ArchiveReplicaLedger,
 )
-from .database import Database
+from .database import (
+    _SCHEMA_DDL_FINGERPRINTS,
+    _SCHEMA_STRUCTURE_FINGERPRINTS,
+    Database,
+)
 from .errors import (
     ArchiveKeyUnavailableError,
     ArchiveUnavailableError,
@@ -1267,6 +1271,14 @@ _INITIAL_TRAINING_POLICY = {
 def _default_checks() -> tuple[IntegrityCheckSpec, ...]:
     return (
         IntegrityCheckSpec(
+            "core.schema_contract",
+            1,
+            "core",
+            _STARTUP_PROFILES,
+            _check_schema_contract,
+            "light",
+        ),
+        IntegrityCheckSpec(
             "core.sqlite_quick_check", 1, "core", _STARTUP_PROFILES, _check_sqlite, "light"
         ),
         IntegrityCheckSpec(
@@ -1503,6 +1515,46 @@ def _check_sqlite(context: IntegrityContext) -> IntegrityCheckOutcome:
     return IntegrityCheckOutcome(details={"result": "ok"})
 
 
+def _check_schema_contract(context: IntegrityContext) -> IntegrityCheckOutcome:
+    """Detect trigger-only DDL drift after the database can be opened safely."""
+    row = context.connection.execute(
+        "SELECT value FROM schema_meta WHERE key='schema_version'"
+    ).fetchone()
+    if row is None:
+        raise IntegrityError("schema version marker is missing")
+    version = int(row[0])
+    expected = _SCHEMA_DDL_FINGERPRINTS.get(version)
+    structure_expected = _SCHEMA_STRUCTURE_FINGERPRINTS.get(version)
+    if expected is None or structure_expected is None:
+        if version < max(_SCHEMA_DDL_FINGERPRINTS):
+            return IntegrityCheckOutcome(details={"schema_version": version, "historical": True})
+        return IntegrityCheckOutcome(
+            "corrupt", "p0", "schema_contract_unavailable", {"schema_version": version}
+        )
+    connection = cast(sqlite3.Connection, context.connection)
+    structure_actual = Database.schema_structure_fingerprint(connection)
+    if structure_actual != structure_expected:
+        return IntegrityCheckOutcome(
+            "corrupt",
+            "p0",
+            "schema_structure_contract_mismatch",
+            {
+                "schema_version": version,
+                "expected": structure_expected,
+                "found": structure_actual,
+            },
+        )
+    actual = Database.schema_ddl_fingerprint(connection)
+    if actual != expected:
+        return IntegrityCheckOutcome(
+            "corrupt",
+            "p0",
+            "schema_trigger_contract_mismatch",
+            {"schema_version": version, "expected": expected, "found": actual},
+        )
+    return IntegrityCheckOutcome(details={"schema_version": version, "status": "ok"})
+
+
 def _check_provider_health(context: IntegrityContext) -> IntegrityCheckOutcome:
     tables = {"provider_health_buckets", "provider_health_state"}
     present = {
@@ -1530,6 +1582,7 @@ def _check_provider_health(context: IntegrityContext) -> IntegrityCheckOutcome:
             int(row["success_count"]),
             int(row["failure_count"]),
             int(row["latency_total_ms"]),
+            int(row["unknown_count"]),
             row["last_success_at"],
             row["last_failure_at"],
             json.loads(row["error_counts_json"] or "{}"),
@@ -1552,7 +1605,14 @@ def _check_provider_health(context: IntegrityContext) -> IntegrityCheckOutcome:
 
 
 def _check_retention_runs(context: IntegrityContext) -> IntegrityCheckOutcome:
-    from .retention import validate_retention_run_row
+    from .retention import retention_registry_diagnostics, validate_retention_run_row
+
+    registry = retention_registry_diagnostics(context.connection)
+    if registry["unclassified"] or registry.get("missing"):
+        raise IntegrityError(
+            "retention registry does not match schema inventory: "
+            + ", ".join(registry["unclassified"] or registry.get("missing", ()))
+        )
 
     rows = context.connection.execute(
         "SELECT * FROM retention_runs WHERE subject_id=? ORDER BY started_at, rowid",
@@ -1563,7 +1623,7 @@ def _check_retention_runs(context: IntegrityContext) -> IntegrityCheckOutcome:
             validate_retention_run_row(row)
         except (TypeError, ValueError) as error:
             raise IntegrityError(f"retention run provenance is invalid: {error}") from error
-    return IntegrityCheckOutcome(details={"runs": len(rows)})
+    return IntegrityCheckOutcome(details={"runs": len(rows), "retention_registry": registry})
 
 
 def _check_foreign_keys(context: IntegrityContext) -> IntegrityCheckOutcome:

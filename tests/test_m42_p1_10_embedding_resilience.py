@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event, Lock
-from typing import Any
+from typing import Any, Self
 
 import httpx
 import pytest
@@ -40,28 +40,28 @@ from noyra.sleep import FatigueTracker
 
 
 class MutableClock:
-    def __init__(self) -> None:
+    def __init__(self: Self) -> None:
         self.value = datetime(2026, 8, 17, tzinfo=UTC)
 
-    def __call__(self) -> str:
+    def __call__(self: Self) -> str:
         return self.value.isoformat(timespec="milliseconds")
 
-    def advance(self, seconds: float) -> None:
+    def advance(self: Self, seconds: float) -> None:
         self.value += timedelta(seconds=seconds)
 
 
 class ScriptedEmbeddingProvider:
     name = "scripted-embedding"
 
-    def __init__(self, outcomes: Sequence[int | Exception]):
+    def __init__(self: Self, outcomes: Sequence[int | Exception]) -> None:
         self._outcomes = list(outcomes)
         self._lock = Lock()
         self.calls = 0
 
-    def embed(self, texts: Sequence[str]) -> list[list[float]]:
+    def embed(self: Self, texts: Sequence[str]) -> list[list[float]]:
         return [list(vector) for vector in self.embed_with_usage(texts).vectors]
 
-    def embed_with_usage(self, texts: Sequence[str]) -> EmbeddingProviderResponse:
+    def embed_with_usage(self: Self, texts: Sequence[str]) -> EmbeddingProviderResponse:
         with self._lock:
             self.calls += 1
             outcome = self._outcomes.pop(0) if self._outcomes else 1
@@ -78,14 +78,14 @@ class ScriptedEmbeddingProvider:
 class BlockingEmbeddingProvider:
     name = "blocking-embedding"
 
-    def __init__(self, release: Event):
+    def __init__(self: Self, release: Event) -> None:
         self.release = release
         self.calls = 0
 
-    def embed(self, texts: Sequence[str]) -> list[list[float]]:
+    def embed(self: Self, texts: Sequence[str]) -> list[list[float]]:
         return [list(vector) for vector in self.embed_with_usage(texts).vectors]
 
-    def embed_with_usage(self, texts: Sequence[str]) -> EmbeddingProviderResponse:
+    def embed_with_usage(self: Self, texts: Sequence[str]) -> EmbeddingProviderResponse:
         self.calls += 1
         self.release.wait(timeout=1)
         return EmbeddingProviderResponse(

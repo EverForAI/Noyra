@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 from noyra.core.credentials import read_env_secret
 
 from .execution import HTTPSWalletSigner, WalletSigner
+from .types import canonical_evm_address
 
 
 def _env(name: str) -> str:
@@ -90,6 +91,7 @@ def configured_wallet_signer_from_env() -> WalletSigner | None:
     mode = _env("NOYRA_WALLET_MODE").casefold()
     endpoint = _env("NOYRA_WALLET_SIGNER_ENDPOINT")
     signer_id = _env("NOYRA_WALLET_SIGNER_ID")
+    signer_address = _env("NOYRA_WALLET_SIGNER_ADDRESS")
     if mode and mode not in {"disabled", "external", "local"}:
         raise ValueError("NOYRA_WALLET_MODE is invalid")
     if mode == "disabled":
@@ -105,7 +107,7 @@ def configured_wallet_signer_from_env() -> WalletSigner | None:
         raise ValueError("external wallet signer configuration is invalid") from error
 
     if mode == "local":
-        if endpoint or signer_id or bearer:
+        if endpoint or signer_id or bearer or signer_address:
             raise _invalid()
         keystore = _local_setting("NOYRA_WALLET_KEYSTORE_PATH", "NOYRA_WALLET_LOCAL_KEYSTORE_PATH")
         password_file = _local_setting(
@@ -149,6 +151,7 @@ def configured_wallet_signer_from_env() -> WalletSigner | None:
             return HTTPSWalletSigner(
                 endpoint,
                 signer_id=signer_id,
+                wallet_address=(canonical_evm_address(signer_address) if signer_address else None),
                 timeout_seconds=timeout,
                 bearer_token=bearer or None,
             )

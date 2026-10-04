@@ -5,7 +5,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any, Self, TypeAlias
 
 import httpx
 import pytest
@@ -31,10 +31,10 @@ from noyra.wallet import (
 class FakeClock:
     value: datetime = datetime(2026, 8, 31, tzinfo=UTC)
 
-    def __call__(self) -> str:
+    def __call__(self: Self) -> str:
         return self.value.isoformat(timespec="milliseconds")
 
-    def advance(self, seconds: float) -> None:
+    def advance(self: Self, seconds: float) -> None:
         self.value += timedelta(seconds=seconds)
 
 

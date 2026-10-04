@@ -15,7 +15,7 @@ import secrets
 import signal
 import threading
 import time
-from collections import OrderedDict, defaultdict, deque
+from collections import defaultdict, deque
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future as ConcurrentFuture
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -41,7 +41,7 @@ from noyra.cognition import (
 from noyra.core.admission import OperationInvalidated, bind_lease, current_lease
 from noyra.core.archive import CloudArchiveCoordinator, S3ArchiveProvider, StorageQuota
 from noyra.core.at_rest import AtRestConfig, AtRestError, AtRestGuard
-from noyra.core.credentials import CredentialError, read_secret_file
+from noyra.core.credentials import CredentialError, read_env_secret, read_secret_file
 from noyra.core.database import Database
 from noyra.core.errors import (
     IntegrityError,
@@ -72,6 +72,15 @@ from noyra.core.storage import StorageLayout, TrainingStore
 from noyra.core.storage_lifecycle import StorageLifecycleManager
 from noyra.core.training_export import TrainingDatasetExporter, TrainingExportLimits
 from noyra.core.types import content_hash, strict_json_loads, utc_now
+from noyra.core.upgrade import (
+    UPGRADE_CURRENT_RELEASE_PATH,
+    UPGRADE_REQUEST_PATH,
+    UPGRADE_RUNNER_TRIGGER_PATH,
+    UPGRADE_SOURCE_PATH,
+    UPGRADE_STATUS_PATH,
+    UpgradeError,
+    UpgradeManager,
+)
 from noyra.interaction import (
     ADAPTERS,
     REPLAY_WINDOW_SECONDS,
@@ -93,10 +102,28 @@ from noyra.interaction import (
     TransportStore,
     WeChatInboundAdapter,
 )
+from noyra.interaction.public_contract import (
+    PUBLIC_CACHE_CONTROL,
+    PUBLIC_CONTRACT_ID,
+    PUBLIC_MAX_RESPONSE_BYTES,
+)
 from noyra.knowledge import (
     CommonKnowledgePeerInput,
     CommonKnowledgeStore,
     CommonKnowledgeSyncError,
+)
+from noyra.migration import (
+    CutoverCoordinator,
+    HTTPMigrationExecutor,
+    MigrationExecutionError,
+    MigrationManager,
+    MigrationProposalStore,
+    MigrationStore,
+    RecoveryCoordinator,
+    RecoveryRequest,
+    SQLiteArtifactProvider,
+    TargetChallenge,
+    TargetRegistry,
 )
 from noyra.model import (
     CognitiveResourceGroupInput,
@@ -802,6 +829,16 @@ class ServiceSettings(BaseModel):
     admin_session_ttl_seconds: int = Field(default=43_200, ge=300, le=604_800)
     admin_session_max_count: int = Field(default=256, ge=8, le=10_000)
     admin_session_cookie_secure: bool = False
+    migration_enabled: bool = False
+    migration_approval_mode: Literal["disabled", "manual", "policy_auto", "emergency_recovery"] = (
+        "disabled"
+    )
+    migration_rejection_cooldown_days: int = Field(default=7, ge=0, le=365)
+    migration_proposal_expiry_seconds: int = Field(default=86400, ge=300, le=604800)
+    migration_wallet_mode: Literal[
+        "external_signer_rebind", "local_wallet_transfer", "disabled"
+    ] = "external_signer_rebind"
+    migration_local_wallet_transfer_enabled: bool = False
 
     @field_validator("trusted_proxy_cidrs", mode="before")
     @classmethod
@@ -942,6 +979,8 @@ class ServiceSettings(BaseModel):
             object.__setattr__(self, "admin_session_cookie_secure", True)
             if self.at_rest_mode != "required":
                 raise ValueError("production profile requires at-rest protection")
+            if self.integrity_mode == "off":
+                raise ValueError("production profile requires integrity monitoring")
             if self.developer_log_export_enabled:
                 # The field default is intentionally development-friendly for
                 # direct construction in tests and libraries.  Production
@@ -1044,9 +1083,16 @@ class ServiceSettings(BaseModel):
             if operator_token_file_value
             else None
         )
-        operator_token = cls._read_operator_token_file(operator_token_file) or os.getenv(
-            "NOYRA_OPERATOR_TOKEN"
-        )
+        try:
+            operator_token = read_env_secret(
+                value_var="NOYRA_OPERATOR_TOKEN",
+                file_var="NOYRA_OPERATOR_TOKEN_FILE",
+                credential_var="NOYRA_OPERATOR_TOKEN_CREDENTIAL",
+                label="operator token",
+                allow_inline=profile != "production",
+            )
+        except CredentialError as error:
+            raise ValueError(str(error)) from error
         export_token = os.getenv("NOYRA_EXPORT_TOKEN")
         break_glass_token = os.getenv("NOYRA_BREAK_GLASS_TOKEN")
         return cls(
@@ -1197,6 +1243,24 @@ class ServiceSettings(BaseModel):
                 "NOYRA_ADMIN_SESSION_COOKIE_SECURE",
                 "true" if profile == "production" else "false",
             ),
+            migration_enabled=cls._environment_flag("NOYRA_MIGRATION_ENABLED", "false"),
+            migration_approval_mode=cast(
+                Literal["disabled", "manual", "policy_auto", "emergency_recovery"],
+                os.getenv("NOYRA_MIGRATION_APPROVAL_MODE", "disabled").strip().lower(),
+            ),
+            migration_rejection_cooldown_days=int(
+                os.getenv("NOYRA_MIGRATION_REJECTION_COOLDOWN_DAYS", "7")
+            ),
+            migration_proposal_expiry_seconds=int(
+                os.getenv("NOYRA_MIGRATION_PROPOSAL_EXPIRY_SECONDS", "86400")
+            ),
+            migration_wallet_mode=cast(
+                Literal["external_signer_rebind", "local_wallet_transfer", "disabled"],
+                os.getenv("NOYRA_MIGRATION_WALLET_MODE", "external_signer_rebind").strip().lower(),
+            ),
+            migration_local_wallet_transfer_enabled=cls._environment_flag(
+                "NOYRA_MIGRATION_LOCAL_WALLET_TRANSFER_ENABLED", "false"
+            ),
         )
 
 
@@ -1302,10 +1366,24 @@ class NoyraHTTPServer:
         repair_secrets_on_init: bool = True,
         wallet_signer: WalletSigner | None = None,
         close_wallet_signer: bool = False,
+        upgrade_manager: UpgradeManager | None = None,
     ):
         public_hash_key = _load_public_post_hash_key(settings)
         self.kernel = kernel
         self.settings = settings
+        self.upgrade_manager = upgrade_manager or UpgradeManager(
+            source_path=Path(os.getenv("NOYRA_UPGRADE_SOURCE", str(UPGRADE_SOURCE_PATH))),
+            current_release_path=Path(
+                os.getenv("NOYRA_UPGRADE_CURRENT_RELEASE", str(UPGRADE_CURRENT_RELEASE_PATH))
+            ),
+            status_path=Path(os.getenv("NOYRA_UPGRADE_STATUS", str(UPGRADE_STATUS_PATH))),
+            request_path=Path(os.getenv("NOYRA_UPGRADE_REQUEST_PATH", str(UPGRADE_REQUEST_PATH))),
+            runner_trigger_path=Path(
+                os.getenv("NOYRA_UPGRADE_TRIGGER_PATH", str(UPGRADE_RUNNER_TRIGGER_PATH))
+            ),
+            github_owner=os.getenv("NOYRA_UPGRADE_GITHUB_OWNER", "EverForAI"),
+            github_repo=os.getenv("NOYRA_UPGRADE_GITHUB_REPO", "Noyra"),
+        )
         self.admission = kernel.admission
         self.quarantine_checker: Any = None
         self.event_loop: asyncio.AbstractEventLoop | None = None
@@ -1416,15 +1494,33 @@ class NoyraHTTPServer:
         self.self_modification = ControlledSelfModification(
             kernel.database, kernel.subject_id, CognitionSettings()
         )
+        self.migration_store = MigrationStore(kernel.database)
+        self.migration_targets = TargetRegistry(kernel.database, self.migration_store)
+        self.migration_proposals = MigrationProposalStore(kernel.database)
+        self.migration_manager = MigrationManager(kernel.database, self.migration_store)
+        database_path = (settings.data_dir / "noyra.sqlite3").resolve()
+        self.migration_http_executor = HTTPMigrationExecutor(
+            target_resolver=self._migration_http_target,
+            token_resolver=self._migration_http_token,
+            artifact_resolver=SQLiteArtifactProvider(
+                database_path,
+                settings.data_dir / "migration" / "outgoing",
+            ),
+            source_fence=self._migration_http_source_fence,
+            source_unfence=self._migration_http_source_unfence,
+        )
+        self.migration_cutover = CutoverCoordinator(
+            kernel.database,
+            admission=kernel.admission,
+            executor=self.migration_http_executor,
+        )
+        self.migration_recovery = RecoveryCoordinator(kernel.database)
         handler = self._handler_type()
         self._rate_lock = threading.Lock()
         self._request_times: dict[str, deque[float]] = defaultdict(deque)
-        self._admin_login_failures: dict[str, deque[float]] = defaultdict(deque)
         self._health_cache_lock = threading.Lock()
         self._health_cache_at = 0.0
         self._health_cache: tuple[HTTPStatus, dict[str, Any]] | None = None
-        self._session_lock = threading.RLock()
-        self._admin_sessions: OrderedDict[str, _AdminSession] = OrderedDict()
         self.server = BoundedThreadingHTTPServer(
             (settings.host, settings.port), handler, settings.max_http_threads
         )
@@ -1437,6 +1533,78 @@ class NoyraHTTPServer:
     def address(self) -> tuple[str, int]:
         host, port = self.server.server_address[:2]
         return str(host), int(port)
+
+    def _migration_http_target(self, task: Any) -> Mapping[str, Any]:
+        with self.kernel.database.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM migration_targets WHERE target_id=? AND subject_id=?",
+                (task.target_id, task.subject_id),
+            ).fetchone()
+        if row is None:
+            raise MigrationExecutionError("migration_target_not_found")
+        self.migration_targets._assert_row_integrity(row)
+        if row["status"] != "active":
+            raise MigrationExecutionError("migration_target_not_active")
+        if not row["recipient_public_key"] or not row["recipient_key_fingerprint"]:
+            raise MigrationExecutionError("migration_target_recipient_key_unavailable")
+        return {
+            "target_id": row["target_id"],
+            "endpoint": row["endpoint"],
+            "public_key": row["public_key"],
+            "recipient_public_key": row["recipient_public_key"],
+            "recipient_key_fingerprint": row["recipient_key_fingerprint"],
+            "enrollment_generation": int(row["enrollment_generation"]),
+            "encrypted_volume": bool(row["encrypted_volume"]),
+            "release_sha": row["release_sha"],
+        }
+
+    def _migration_http_token(self, task: Any) -> str:
+        token_root = Path(
+            os.getenv(
+                "NOYRA_MIGRATION_TARGET_TOKEN_DIR",
+                str(self.settings.data_dir / "secrets" / "migration-targets"),
+            )
+        )
+        if not re.fullmatch(r"[A-Za-z0-9_-]{3,128}", task.target_id):
+            raise MigrationExecutionError("migration_target_id_invalid")
+        try:
+            return read_secret_file(
+                token_root / f"{task.target_id}.token",
+                label="migration target token",
+            )
+        except CredentialError as error:
+            raise MigrationExecutionError("migration_target_token_unavailable") from error
+
+    def _migration_http_source_fence(self, task: Any, source_epoch: str) -> str:
+        try:
+            self.kernel.admission.assert_migration_fenced()
+        except OperationInvalidated as error:
+            raise MigrationExecutionError("runtime_migration_fence_missing") from error
+        with self.kernel.database.connection() as connection:
+            row = connection.execute(
+                "SELECT e.epoch_id,e.epoch_number,e.status FROM migration_epochs e "
+                "JOIN migration_tasks t ON t.target_epoch_id=e.epoch_id "
+                "WHERE t.task_id=? AND t.subject_id=? AND e.status='active' "
+                "AND t.source_epoch=?",
+                (task.task_id, task.subject_id, source_epoch),
+            ).fetchone()
+        if row is None:
+            raise MigrationExecutionError("source_epoch_not_fenced")
+        return content_hash(
+            {
+                "task_id": task.task_id,
+                "source_epoch": source_epoch,
+                "epoch_id": row["epoch_id"],
+                "epoch_number": int(row["epoch_number"]),
+                "status": row["status"],
+            }
+        )
+
+    def _migration_http_source_unfence(self, task: Any, source_epoch: str) -> None:
+        # The durable EpochLease remains active until the operator explicitly
+        # rolls the task back; keeping it active is the fail-closed recovery
+        # state when a remote target fails after source fencing.
+        del task, source_epoch
 
     def _cached_health(self) -> tuple[HTTPStatus, dict[str, Any]] | None:
         """Return the bounded readiness projection while its TTL is valid."""
@@ -1619,11 +1787,19 @@ class NoyraHTTPServer:
             or path == "/api/admin/wallet-executions/recover"
         )
 
+    @staticmethod
+    def _is_migration_control(path: str) -> bool:
+        return path.startswith("/api/admin/migration/tasks/") and (
+            path.endswith("/cutover") or path.endswith("/rollback")
+        )
+
     def allow_mutation(self, path: str) -> bool:
         if self._closed or self.admission.closed:
             return False
         if self._quarantined():
             return self._is_recovery_mutation(path)
+        if self._is_migration_control(path):
+            return True
         if self.admission.accepting:
             return True
         # Manual pause closes cognition admission, but lifecycle controls must
@@ -1699,31 +1875,89 @@ class NoyraHTTPServer:
             return True
 
     def allow_admin_login(self, client_ip: str) -> bool:
-        """Apply a separate failure budget to the public admin login endpoint."""
-        now = time.monotonic()
-        cutoff = now - 60
-        bucket_key = self._rate_limit_bucket_key(client_ip)
-        with self._rate_lock:
-            bucket = self._admin_login_failures[bucket_key]
-            while bucket and bucket[0] <= cutoff:
-                bucket.popleft()
-            if len(bucket) >= self.settings.admin_login_rate_limit_per_minute:
+        """Apply the failure budget through a durable SQLite bucket.
+
+        Login requests may be handled by several workers or across a restart.
+        The cleanup, count and reservation are one transaction so every worker
+        observes the same budget.
+        """
+        now = time.time()
+        cutoff = now - 60.0
+        client_key_hash = self._admin_client_key_hash(client_ip)
+        with self.kernel.database.transaction() as connection:
+            connection.execute(
+                "DELETE FROM admin_login_rate_events WHERE subject_id=? AND occurred_at <= ?",
+                (self.kernel.subject_id, cutoff),
+            )
+            count = connection.execute(
+                "SELECT COUNT(*) FROM admin_login_rate_events "
+                "WHERE subject_id=? AND client_key_hash=? AND occurred_at > ?",
+                (self.kernel.subject_id, client_key_hash, cutoff),
+            ).fetchone()[0]
+            if int(count) >= self.settings.admin_login_rate_limit_per_minute:
                 return False
-            bucket.append(now)
-            if len(self._admin_login_failures) > 10_000:
-                self._admin_login_failures = defaultdict(
-                    deque,
-                    {
-                        key: values
-                        for key, values in self._admin_login_failures.items()
-                        if values and values[-1] > cutoff
-                    },
-                )
+            connection.execute(
+                "INSERT INTO admin_login_rate_events("
+                "event_id, subject_id, client_key_hash, occurred_at) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    f"admin_rate_{secrets.token_hex(16)}",
+                    self.kernel.subject_id,
+                    client_key_hash,
+                    now,
+                ),
+            )
             return True
 
     def clear_admin_login_failures(self, client_ip: str) -> None:
-        with self._rate_lock:
-            self._admin_login_failures.pop(self._rate_limit_bucket_key(client_ip), None)
+        with self.kernel.database.transaction() as connection:
+            connection.execute(
+                "DELETE FROM admin_login_rate_events WHERE subject_id=? AND client_key_hash=?",
+                (self.kernel.subject_id, self._admin_client_key_hash(client_ip)),
+            )
+
+    @staticmethod
+    def _admin_client_key_hash(client_ip: str) -> str:
+        return hashlib.sha256(f"noyra-admin-client:{client_ip}".encode()).hexdigest()
+
+    @staticmethod
+    def _admin_session_hash(session_id: str) -> str:
+        return hashlib.sha256(f"noyra-admin-session:{session_id}".encode()).hexdigest()
+
+    def _admin_session_csrf(self, session_id: str, role: str) -> str:
+        secret_value = {
+            "admin": self.settings.admin_token,
+            "operator": self.settings.operator_token,
+            "break_glass": self.settings.break_glass_token,
+        }.get(role)
+        secret = None if secret_value is None else secret_value.get_secret_value()
+        if secret is None:
+            raise RuntimeError("admin session signing secret is unavailable")
+        return hmac.new(
+            secret.encode("ascii"),
+            f"{self.kernel.subject_id}:{session_id}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _admin_session_state_hash(
+        self,
+        *,
+        session_hash: str,
+        role: str,
+        actor: str,
+        expires_at: float,
+        created_at: float,
+    ) -> str:
+        return content_hash(
+            {
+                "session_hash": session_hash,
+                "subject_id": self.kernel.subject_id,
+                "role": role,
+                "actor": actor,
+                "expires_at": expires_at,
+                "created_at": created_at,
+            }
+        )
 
     def client_ip(self, peer: str, forwarded_for: str | None = None) -> str:
         """Resolve a rate-limit identity without trusting spoofable headers.
@@ -1771,32 +2005,98 @@ class NoyraHTTPServer:
         if role not in {"operator", "admin", "break_glass"} or not actor.strip():
             raise ValueError("invalid admin session identity")
         now = time.time()
+        session_id = secrets.token_urlsafe(32)
+        session_hash = self._admin_session_hash(session_id)
+        expires_at = now + self.settings.admin_session_ttl_seconds
         session = _AdminSession(
             role=role,
             actor=actor,
-            csrf_token=secrets.token_urlsafe(32),
-            expires_at=now + self.settings.admin_session_ttl_seconds,
+            csrf_token=self._admin_session_csrf(session_id, role),
+            expires_at=expires_at,
         )
-        session_id = secrets.token_urlsafe(32)
-        with self._session_lock:
-            self._purge_sessions_locked(now)
-            while len(self._admin_sessions) >= self.settings.admin_session_max_count:
-                self._admin_sessions.popitem(last=False)
-            self._admin_sessions[session_id] = session
+        state_hash = self._admin_session_state_hash(
+            session_hash=session_hash,
+            role=role,
+            actor=actor,
+            expires_at=expires_at,
+            created_at=now,
+        )
+        with self.kernel.database.transaction() as connection:
+            connection.execute(
+                "DELETE FROM admin_sessions WHERE subject_id=? AND "
+                "(revoked_at IS NOT NULL OR expires_at <= ?)",
+                (self.kernel.subject_id, now),
+            )
+            oldest = connection.execute(
+                "SELECT session_hash FROM admin_sessions WHERE subject_id=? "
+                "AND revoked_at IS NULL AND expires_at > ? "
+                "ORDER BY created_at ASC LIMIT 1 OFFSET ?",
+                (self.kernel.subject_id, now, self.settings.admin_session_max_count - 1),
+            ).fetchone()
+            if oldest is not None:
+                connection.execute(
+                    "UPDATE admin_sessions SET revoked_at=? WHERE session_hash=?",
+                    (now, oldest["session_hash"]),
+                )
+            connection.execute(
+                "INSERT INTO admin_sessions("
+                "session_hash, subject_id, role, actor, expires_at, created_at, "
+                "revoked_at, state_hash) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)",
+                (
+                    session_hash,
+                    self.kernel.subject_id,
+                    role,
+                    actor,
+                    expires_at,
+                    now,
+                    state_hash,
+                ),
+            )
         return session_id, session
 
     def admin_session(self, session_id: str) -> _AdminSession | None:
         if not session_id:
             return None
         now = time.time()
-        with self._session_lock:
-            self._purge_sessions_locked(now)
-            session = self._admin_sessions.get(session_id)
-            return session if session is not None and session.expires_at > now else None
+        session_hash = self._admin_session_hash(session_id)
+        with self.kernel.database.connection() as connection:
+            row = connection.execute(
+                "SELECT role, actor, expires_at, created_at, revoked_at, state_hash "
+                "FROM admin_sessions WHERE session_hash=? AND subject_id=?",
+                (session_hash, self.kernel.subject_id),
+            ).fetchone()
+        if row is None or row["revoked_at"] is not None:
+            return None
+        expires_at = float(row["expires_at"])
+        created_at = float(row["created_at"])
+        if expires_at <= now:
+            self.revoke_admin_session(session_id)
+            return None
+        expected_hash = self._admin_session_state_hash(
+            session_hash=session_hash,
+            role=str(row["role"]),
+            actor=str(row["actor"]),
+            expires_at=expires_at,
+            created_at=created_at,
+        )
+        if not hmac.compare_digest(str(row["state_hash"]), expected_hash):
+            return None
+        return _AdminSession(
+            role=str(row["role"]),
+            actor=str(row["actor"]),
+            csrf_token=self._admin_session_csrf(session_id, str(row["role"])),
+            expires_at=expires_at,
+        )
 
     def revoke_admin_session(self, session_id: str) -> None:
-        with self._session_lock:
-            self._admin_sessions.pop(session_id, None)
+        if not session_id:
+            return
+        with self.kernel.database.transaction() as connection:
+            connection.execute(
+                "UPDATE admin_sessions SET revoked_at=? WHERE session_hash=? "
+                "AND subject_id=? AND revoked_at IS NULL",
+                (time.time(), self._admin_session_hash(session_id), self.kernel.subject_id),
+            )
 
     def audit_admin_event(self, action: str, actor: str, payload: dict[str, Any]) -> None:
         """Append a redacted authentication/management audit event."""
@@ -1817,11 +2117,6 @@ class NoyraHTTPServer:
                     utc_now(),
                 ),
             )
-
-    def _purge_sessions_locked(self, now: float) -> None:
-        for session_id, session in tuple(self._admin_sessions.items()):
-            if session.expires_at <= now:
-                self._admin_sessions.pop(session_id, None)
 
     def diagnostics(self) -> dict[str, Any]:
         """Return bounded operational diagnostics for the read-only panel."""
@@ -2262,6 +2557,8 @@ class NoyraHTTPServer:
                         payload = {
                             "status": "ok" if ready else "degraded",
                             "service": "noyra",
+                            "subject_id": owner.kernel.subject_id,
+                            "migration_target_id": owner.kernel.migration_target_id,
                             "lifecycle": lifecycle,
                             "at_rest": at_rest,
                             "cloud_archive": owner.cloud_archive_status,
@@ -2297,6 +2594,195 @@ class NoyraHTTPServer:
                 else:
                     query = parse_qs(parsed.query)
                 limit = self._limit(query)
+                if parsed.path == "/api/admin/migration/policy":
+                    if not self._authorized("operator"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    policy = owner.migration_store.read_policy(owner.kernel.subject_id)
+                    projection = dict(policy.__dict__)
+                    with owner.kernel.database.connection() as connection:
+                        epoch = connection.execute(
+                            "SELECT epoch_id,target_id,epoch_number,status,acquired_at,revoked_at "
+                            "FROM migration_epochs WHERE subject_id=? AND status='active' "
+                            "ORDER BY epoch_number DESC LIMIT 1",
+                            (owner.kernel.subject_id,),
+                        ).fetchone()
+                    projection["active_epoch"] = None if epoch is None else dict(epoch)
+                    self._json(
+                        HTTPStatus.OK,
+                        projection,
+                    )
+                    return
+                if parsed.path == "/api/admin/migration/targets":
+                    if not self._authorized("operator"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    with owner.kernel.database.connection() as connection:
+                        rows = connection.execute(
+                            "SELECT * FROM migration_targets "
+                            "WHERE subject_id=? ORDER BY created_at DESC LIMIT ?",
+                            (owner.kernel.subject_id, limit),
+                        ).fetchall()
+                    output = []
+                    for row in rows:
+                        try:
+                            owner.migration_targets._assert_row_integrity(row)
+                        except ValueError:
+                            self._json(
+                                HTTPStatus.SERVICE_UNAVAILABLE,
+                                {"error": "migration_target_integrity_unavailable"},
+                            )
+                            return
+                        item = {
+                            key: row[key]
+                            for key in (
+                                "target_id",
+                                "subject_id",
+                                "key_fingerprint",
+                                "recipient_public_key",
+                                "recipient_key_fingerprint",
+                                "enrollment_generation",
+                                "endpoint",
+                                "region",
+                                "provider",
+                                "release_sha",
+                                "os_arch",
+                                "encrypted_volume",
+                                "status",
+                                "attested_at",
+                                "attestation_epoch",
+                                "created_at",
+                                "updated_at",
+                            )
+                        }
+                        item["capabilities_json"] = row["capabilities_json"]
+                        item["capabilities"] = json.loads(item.pop("capabilities_json"))
+                        output.append(item)
+                    self._json(HTTPStatus.OK, output)
+                    return
+                if parsed.path == "/api/admin/migration/candidates":
+                    if not self._authorized("operator"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    policy = owner.migration_store.read_policy(owner.kernel.subject_id)
+                    if not policy.enabled or policy.approval_mode == "disabled":
+                        self._json(HTTPStatus.OK, [])
+                        return
+                    with owner.kernel.database.connection() as connection:
+                        rows = connection.execute(
+                            "SELECT * FROM migration_targets WHERE subject_id=? "
+                            "AND status='active' AND attested_at IS NOT NULL "
+                            "ORDER BY updated_at DESC LIMIT ?",
+                            (owner.kernel.subject_id, limit),
+                        ).fetchall()
+                    candidates = []
+                    for row in rows:
+                        try:
+                            owner.migration_targets._assert_row_integrity(row)
+                        except ValueError:
+                            self._json(
+                                HTTPStatus.SERVICE_UNAVAILABLE,
+                                {"error": "migration_target_integrity_unavailable"},
+                            )
+                            return
+                        reasons = ["resource_observation_unavailable"]
+                        if (
+                            policy.allowed_target_ids
+                            and row["target_id"] not in policy.allowed_target_ids
+                        ):
+                            reasons.insert(0, "target_not_allowlisted")
+                        candidates.append(
+                            {
+                                "target_id": row["target_id"],
+                                "status": row["status"],
+                                "trusted": True,
+                                "resources_verified": False,
+                                "eligible": False,
+                                "reasons": reasons,
+                            }
+                        )
+                    self._json(HTTPStatus.OK, candidates)
+                    return
+                if parsed.path == "/api/admin/migration/proposals":
+                    if not self._authorized("operator"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    try:
+                        items = owner.migration_manager.list_proposals(
+                            owner.kernel.subject_id, limit=limit
+                        )
+                    except ValueError:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "migration_proposal_integrity_unavailable"},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, items)
+                    return
+                if parsed.path.startswith("/api/admin/migration/proposals/"):
+                    if not self._authorized("operator"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    proposal_id = parsed.path.removeprefix("/api/admin/migration/proposals/").strip(
+                        "/"
+                    )
+                    if not proposal_id or "/" in proposal_id:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "migration_proposal_not_found"})
+                        return
+                    try:
+                        proposal = owner.migration_manager.get_proposal(
+                            owner.kernel.subject_id, proposal_id
+                        )
+                    except NotFoundError:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "migration_proposal_not_found"})
+                        return
+                    except ValueError:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "migration_proposal_integrity_unavailable"},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, proposal)
+                    return
+                if parsed.path == "/api/admin/migration/tasks":
+                    if not self._authorized("operator"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    try:
+                        tasks = owner.migration_manager.list_tasks(
+                            owner.kernel.subject_id, limit=limit
+                        )
+                    except ValueError:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "migration_task_integrity_unavailable"},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, [task.__dict__ for task in tasks])
+                    return
+                if parsed.path.startswith("/api/admin/migration/tasks/"):
+                    if not self._authorized("operator"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    task_id = parsed.path.removeprefix("/api/admin/migration/tasks/").strip("/")
+                    if not task_id or "/" in task_id:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "migration_task_not_found"})
+                        return
+                    try:
+                        task = owner.migration_manager.get_task(
+                            task_id, subject_id=owner.kernel.subject_id
+                        )
+                    except NotFoundError:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "migration_task_not_found"})
+                        return
+                    except ValueError:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "migration_task_integrity_unavailable"},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, task.__dict__)
+                    return
                 if (
                     parsed.path != "/health"
                     and parsed.path.startswith("/api/")
@@ -2398,7 +2884,7 @@ class NoyraHTTPServer:
                     self._json(health_status, health_payload)
                 elif parsed.path == "/api/state":
                     state = owner.projection.state(owner.kernel.subject_id)
-                    self._json(HTTPStatus.OK, state)
+                    self._json(HTTPStatus.OK, state, public_contract=True)
                 elif parsed.path == "/api/state/details":
                     if not self._authorized("read"):
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -2409,12 +2895,15 @@ class NoyraHTTPServer:
                     self._json(HTTPStatus.OK, state)
                 elif parsed.path == "/api/diary":
                     self._json(
-                        HTTPStatus.OK, owner.projection.diary(owner.kernel.subject_id, limit=limit)
+                        HTTPStatus.OK,
+                        owner.projection.diary(owner.kernel.subject_id, limit=limit),
+                        public_contract=True,
                     )
                 elif parsed.path == "/api/behavior":
                     self._json(
                         HTTPStatus.OK,
                         owner.projection.behavior_logs(owner.kernel.subject_id, limit=limit),
+                        public_contract=True,
                     )
                 elif parsed.path == "/api/goals":
                     if not self._authorized("read"):
@@ -2465,6 +2954,26 @@ class NoyraHTTPServer:
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
                     self._json(HTTPStatus.OK, owner.diagnostics())
+                elif parsed.path in {
+                    "/api/admin/upgrade/check",
+                    "/api/admin/upgrade/status",
+                }:
+                    if not self._authorized():
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    try:
+                        payload = (
+                            owner.upgrade_manager.check_version()
+                            if parsed.path.endswith("/check")
+                            else owner.upgrade_manager.status()
+                        )
+                    except UpgradeError as error:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": error.code},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, payload)
                 elif parsed.path == "/api/admin/health":
                     if not self._authorized():
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -2502,6 +3011,7 @@ class NoyraHTTPServer:
                     self._json(
                         HTTPStatus.OK,
                         owner.projection.interactions_view(owner.kernel.subject_id, limit=limit),
+                        public_contract=True,
                     )
                 elif parsed.path == "/api/public-posts":
                     try:
@@ -2513,9 +3023,10 @@ class NoyraHTTPServer:
                             HTTPStatus.SERVICE_UNAVAILABLE,
                             {"error": "public_post_integrity_unavailable"},
                             retry_after=60,
+                            public_contract=True,
                         )
                         return
-                    self._json(HTTPStatus.OK, posts)
+                    self._json(HTTPStatus.OK, posts, public_contract=True)
                 elif parsed.path == "/api/admin/public-posts":
                     if not self._authorized():
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -3655,6 +4166,26 @@ class NoyraHTTPServer:
                             {"error": "integrity_quarantine"},
                         )
                     return
+                # Migration cutover and rollback are privileged controls that
+                # must remain usable while the durable migration epoch fences
+                # ordinary runtime admission.  The coordinator still requires
+                # the process ownership check and performs its own drain;
+                # this scope does not grant a general HTTP bypass.
+                migration_control = owner._is_migration_control(self.path)
+                if migration_control:
+                    # CutoverCoordinator owns the control scope so the
+                    # authenticated HTTP route cannot accidentally nest a
+                    # second scope around its durable epoch transition.
+                    try:
+                        self._dispatch_post()
+                    except (OperationInvalidated, RuntimeOwnershipError):
+                        self.close_connection = True
+                        self._discard_small_request_body()
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "migration_control_unavailable"},
+                        )
+                    return
                 # Only explicit recovery endpoints may bypass a paused or
                 # quarantined admission.  Deriving this from the current
                 # gate state would let a race after ``allow_mutation`` turn
@@ -3686,7 +4217,413 @@ class NoyraHTTPServer:
                 finally:
                     owner.admission.finish(lease)
 
+            def do_PUT(self) -> None:
+                """Route authenticated JSON updates through the same admission boundary."""
+                self.command = "PUT"
+                self.do_POST()
+
             def _dispatch_post(self) -> None:
+                if self.path == "/api/admin/migration/policy":
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    try:
+                        expected_revision = payload.pop("expected_revision")
+                        current_policy = owner.migration_store.read_policy(owner.kernel.subject_id)
+                        requested_mode = payload.get("approval_mode", current_policy.approval_mode)
+                        requested_enabled = payload.get("enabled", current_policy.enabled)
+                        requested_wallet_mode = payload.get(
+                            "wallet_mode", current_policy.wallet_mode
+                        )
+                        requested_local_wallet = payload.get(
+                            "local_wallet_transfer_enabled",
+                            current_policy.local_wallet_transfer_enabled,
+                        )
+                        entering_policy_auto = bool(
+                            requested_enabled
+                            and requested_mode == "policy_auto"
+                            and (
+                                current_policy.approval_mode != "policy_auto"
+                                or not current_policy.enabled
+                            )
+                        )
+                        entering_local_wallet = bool(
+                            requested_enabled
+                            and requested_wallet_mode == "local_wallet_transfer"
+                            and requested_local_wallet
+                            and (
+                                current_policy.wallet_mode != "local_wallet_transfer"
+                                or not current_policy.local_wallet_transfer_enabled
+                            )
+                        )
+                        if entering_policy_auto:
+                            if payload.pop("confirm_policy_auto", False) is not True:
+                                self._json(
+                                    HTTPStatus.BAD_REQUEST,
+                                    {"error": "migration_policy_confirmation_required"},
+                                )
+                                return
+                        else:
+                            payload.pop("confirm_policy_auto", None)
+                        if entering_local_wallet:
+                            if payload.pop("confirm_local_wallet_transfer", False) is not True:
+                                self._json(
+                                    HTTPStatus.BAD_REQUEST,
+                                    {"error": "migration_local_wallet_confirmation_required"},
+                                )
+                                return
+                        else:
+                            payload.pop("confirm_local_wallet_transfer", None)
+                        updated = owner.migration_store.update_policy(
+                            owner.kernel.subject_id,
+                            expected_revision,
+                            payload,
+                            self._actor(),
+                        )
+                    except KeyError:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "expected_revision_required"})
+                        return
+                    except Exception as error:
+                        if error.__class__.__name__ == "MigrationPolicyConflictError":
+                            self._json(HTTPStatus.CONFLICT, {"error": "migration_policy_conflict"})
+                        else:
+                            self._json(
+                                HTTPStatus.BAD_REQUEST,
+                                {"error": "invalid_migration_policy"},
+                            )
+                        return
+                    self._json(HTTPStatus.OK, updated.__dict__)
+                    return
+                if self.path == "/api/admin/migration/targets":
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    try:
+                        target = owner.migration_targets.register(
+                            owner.kernel.subject_id,
+                            target_id=str(payload["target_id"]),
+                            public_key=str(payload["public_key"]),
+                            recipient_public_key=(
+                                str(payload["recipient_public_key"])
+                                if payload.get("recipient_public_key") is not None
+                                else None
+                            ),
+                            endpoint=str(payload["endpoint"]),
+                            capabilities=payload.get("capabilities", {}),
+                            region=payload.get("region"),
+                            provider=payload.get("provider"),
+                            release_sha=str(payload["release_sha"]),
+                            os_arch=str(payload["os_arch"]),
+                            encrypted_volume=payload.get("encrypted_volume") is True,
+                            actor=self._actor(),
+                        )
+                    except Exception:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_migration_target"})
+                        return
+                    self._json(HTTPStatus.CREATED, target.__dict__)
+                    return
+                if self.path.startswith("/api/admin/migration/targets/") and self.path.endswith(
+                    "/challenge"
+                ):
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    target_id = (
+                        self.path.removeprefix("/api/admin/migration/targets/")
+                        .removesuffix("/challenge")
+                        .strip("/")
+                    )
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    try:
+                        challenge = owner.migration_targets.issue_challenge(
+                            target_id,
+                            source_epoch=str(
+                                payload.get(
+                                    "source_epoch",
+                                    f"runtime-{owner.kernel.lifecycle.current().version}",
+                                )
+                            ),
+                        )
+                    except (NotFoundError, ValueError):
+                        self._json(
+                            HTTPStatus.CONFLICT,
+                            {"error": "migration_target_challenge_failed"},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, challenge.__dict__)
+                    return
+                if self.path.startswith("/api/admin/migration/targets/") and self.path.endswith(
+                    "/attest"
+                ):
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    target_id = (
+                        self.path.removeprefix("/api/admin/migration/targets/")
+                        .removesuffix("/attest")
+                        .strip("/")
+                    )
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    try:
+                        evidence = owner.migration_targets.attest(
+                            target_id,
+                            TargetChallenge(
+                                nonce=str(payload["nonce"]),
+                                expires_at=str(payload["expires_at"]),
+                                source_epoch=str(payload["source_epoch"]),
+                                target_id=(
+                                    str(payload["target_id"]) if payload.get("target_id") else None
+                                ),
+                                endpoint_origin=(
+                                    str(payload["endpoint_origin"])
+                                    if payload.get("endpoint_origin")
+                                    else None
+                                ),
+                            ),
+                            str(payload["signature"]),
+                            actor=self._actor(),
+                        )
+                    except (KeyError, NotFoundError, ValueError):
+                        self._json(
+                            HTTPStatus.CONFLICT,
+                            {"error": "migration_target_attestation_failed"},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, evidence.__dict__)
+                    return
+                if self.path.startswith("/api/admin/migration/targets/") and self.path.endswith(
+                    "/revoke"
+                ):
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    target_id = (
+                        self.path.removeprefix("/api/admin/migration/targets/")
+                        .removesuffix("/revoke")
+                        .strip("/")
+                    )
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    try:
+                        owner.migration_targets.revoke(
+                            target_id,
+                            reason=str(payload.get("reason", "revoked by operator")),
+                            actor=self._actor(),
+                        )
+                    except Exception:
+                        self._json(
+                            HTTPStatus.BAD_REQUEST,
+                            {"error": "migration_target_revoke_failed"},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, {"target_id": target_id, "status": "revoked"})
+                    return
+                if self.path.startswith("/api/admin/migration/proposals/") and self.path.endswith(
+                    "/approve"
+                ):
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    proposal_id = (
+                        self.path.removeprefix("/api/admin/migration/proposals/")
+                        .removesuffix("/approve")
+                        .strip("/")
+                    )
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    try:
+                        task = owner.migration_manager.approve(
+                            proposal_id,
+                            actor=self._actor(),
+                            idempotency_key=str(payload.get("idempotency_key", proposal_id)),
+                        )
+                    except Exception as error:
+                        status = (
+                            HTTPStatus.NOT_FOUND
+                            if isinstance(error, NotFoundError)
+                            else HTTPStatus.CONFLICT
+                        )
+                        self._json(status, {"error": "migration_proposal_approval_failed"})
+                        return
+                    self._json(HTTPStatus.ACCEPTED, task.__dict__)
+                    return
+                if self.path.startswith("/api/admin/migration/proposals/") and self.path.endswith(
+                    "/reject"
+                ):
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    proposal_id = (
+                        self.path.removeprefix("/api/admin/migration/proposals/")
+                        .removesuffix("/reject")
+                        .strip("/")
+                    )
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    try:
+                        rejected = owner.migration_manager.reject(
+                            proposal_id,
+                            actor=self._actor(),
+                            reason=str(payload.get("reason", "rejected by operator")),
+                        )
+                    except NotFoundError:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "migration_proposal_not_found"})
+                        return
+                    except ValueError:
+                        self._json(
+                            HTTPStatus.CONFLICT,
+                            {"error": "migration_proposal_rejection_failed"},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, rejected.__dict__)
+                    return
+                if self.path.startswith("/api/admin/migration/tasks/") and self.path.endswith(
+                    "/cancel"
+                ):
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    task_id = (
+                        self.path.removeprefix("/api/admin/migration/tasks/")
+                        .removesuffix("/cancel")
+                        .strip("/")
+                    )
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    try:
+                        cancelled = owner.migration_manager.cancel(
+                            task_id,
+                            actor=self._actor(),
+                            reason=str(payload.get("reason", "")),
+                        )
+                    except NotFoundError:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "migration_task_not_found"})
+                        return
+                    except ValueError:
+                        self._json(HTTPStatus.CONFLICT, {"error": "migration_task_cancel_failed"})
+                        return
+                    self._json(HTTPStatus.OK, cancelled.__dict__)
+                    return
+                if self.path.startswith("/api/admin/migration/tasks/") and self.path.endswith(
+                    "/cutover"
+                ):
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    if self.headers.get_content_type() != "application/json":
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+                        return
+                    task_id = (
+                        self.path.removeprefix("/api/admin/migration/tasks/")
+                        .removesuffix("/cutover")
+                        .strip("/")
+                    )
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    proof = payload.get("proof")
+                    if not isinstance(proof, dict):
+                        self._json(
+                            HTTPStatus.BAD_REQUEST,
+                            {"error": "verified_target_restore_and_health_proof_required"},
+                        )
+                        return
+                    try:
+                        owner.migration_cutover.prepare(
+                            task_id,
+                            actor=self._actor(),
+                            proof=proof,
+                        )
+                        result = owner.migration_cutover.commit(task_id, actor=self._actor())
+                    except (ValueError, MigrationExecutionError):
+                        self._json(
+                            HTTPStatus.CONFLICT,
+                            {"error": "migration_cutover_rejected"},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, result)
+                    return
+                if self.path.startswith("/api/admin/migration/tasks/") and self.path.endswith(
+                    "/rollback"
+                ):
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    task_id = (
+                        self.path.removeprefix("/api/admin/migration/tasks/")
+                        .removesuffix("/rollback")
+                        .strip("/")
+                    )
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    try:
+                        result = owner.migration_cutover.rollback(
+                            task_id,
+                            str(payload.get("reason", "operator rollback")),
+                            actor=self._actor(),
+                        )
+                    except ValueError:
+                        self._json(HTTPStatus.CONFLICT, {"error": "migration_rollback_rejected"})
+                        return
+                    self._json(HTTPStatus.OK, result)
+                    return
+                if self.path == "/api/admin/migration/recovery":
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    try:
+                        policy = owner.migration_store.read_policy(owner.kernel.subject_id)
+                        result = owner.migration_recovery.restore_standby(
+                            RecoveryRequest(
+                                task_id=str(payload["task_id"]),
+                                standby_target_id=str(payload["standby_target_id"]),
+                                verified_backup_id=str(payload["verified_backup_id"]),
+                                source_failure_evidence=str(payload["source_failure_evidence"]),
+                                manifest_digest=str(payload["manifest_digest"]),
+                                restore_report_digest=str(payload["restore_report_digest"]),
+                                health_report_digest=str(payload["health_report_digest"]),
+                                target_signature=str(payload["target_signature"]),
+                            ),
+                            policy,
+                        )
+                    except (KeyError, ValueError):
+                        self._json(HTTPStatus.CONFLICT, {"error": "migration_recovery_rejected"})
+                        return
+                    self._json(HTTPStatus.ACCEPTED, result)
+                    return
+                if self.path == "/api/admin/upgrade":
+                    self._start_upgrade()
+                    return
                 if self.path in {
                     "/api/admin/lifecycle/pause",
                     "/api/admin/lifecycle/resume",
@@ -6963,6 +7900,64 @@ class NoyraHTTPServer:
                     return
                 self._json(HTTPStatus.OK, {"config_id": record.config_id, "status": record.status})
 
+            def _start_upgrade(self) -> None:
+                if not self._authorized():
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+                    return
+                payload = self._request_json()
+                if payload is None:
+                    return
+                if set(payload) - {"target_sha", "reason", "idempotency_key"}:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "upgrade_target_invalid"})
+                    return
+                reason = payload.get("reason")
+                idempotency_key = payload.get("idempotency_key")
+                target_sha = payload.get("target_sha")
+                if (
+                    not isinstance(reason, str)
+                    or not isinstance(idempotency_key, str)
+                    or (target_sha is not None and not isinstance(target_sha, str))
+                ):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "upgrade_target_invalid"})
+                    return
+                try:
+                    started = owner.upgrade_manager.start(
+                        target_sha=target_sha,
+                        reason=reason,
+                        idempotency_key=idempotency_key,
+                    )
+                except UpgradeError as error:
+                    status = {
+                        "upgrade_target_invalid": HTTPStatus.BAD_REQUEST,
+                        "upgrade_source_dirty": HTTPStatus.CONFLICT,
+                        "upgrade_in_progress": HTTPStatus.CONFLICT,
+                        "upgrade_unavailable": HTTPStatus.SERVICE_UNAVAILABLE,
+                        "upgrade_start_failed": HTTPStatus.SERVICE_UNAVAILABLE,
+                        "upgrade_interrupted": HTTPStatus.CONFLICT,
+                    }.get(error.code, HTTPStatus.SERVICE_UNAVAILABLE)
+                    owner.audit_admin_event(
+                        "admin_upgrade_rejected",
+                        self._actor(),
+                        {"error_code": error.code},
+                    )
+                    self._json(status, {"error": error.code})
+                    return
+                owner.audit_admin_event(
+                    "admin_upgrade_started",
+                    self._actor(),
+                    {
+                        "task_id": started["task_id"],
+                        "target_short_sha": str(started["target_sha"])[:12],
+                        "reason": reason.strip()[:256],
+                    },
+                )
+                self._json(HTTPStatus.ACCEPTED, started)
+
             def _authorized(self, required_role: str = "operator") -> bool:
                 allowed: dict[str, tuple[SecretStr | None, ...]] = {
                     "read": (
@@ -7006,7 +8001,7 @@ class NoyraHTTPServer:
                     "break_glass",
                 }:
                     return False
-                if self.command == "POST" and self.path not in {
+                if self.command in {"POST", "PUT"} and self.path not in {
                     "/admin/session",
                     "/admin/session/logout",
                 }:
@@ -7876,20 +8871,45 @@ class NoyraHTTPServer:
                 self._json(HTTPStatus.OK, payload)
 
             def _json(
-                self, status: HTTPStatus, payload: Any, *, retry_after: int | None = None
+                self,
+                status: HTTPStatus,
+                payload: Any,
+                *,
+                retry_after: int | None = None,
+                public_contract: bool = False,
             ) -> None:
                 body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+                if public_contract and len(body) > PUBLIC_MAX_RESPONSE_BYTES:
+                    status = HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+                    body = json.dumps(
+                        {
+                            "error": "public_response_too_large",
+                            "contract": PUBLIC_CONTRACT_ID,
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode()
                 self.send_response(status)
                 if status == HTTPStatus.TOO_MANY_REQUESTS:
                     self.send_header("Retry-After", str(60 if retry_after is None else retry_after))
                 elif status == HTTPStatus.SERVICE_UNAVAILABLE:
                     self.send_header("Retry-After", str(5 if retry_after is None else retry_after))
-                self._headers("application/json; charset=utf-8", len(body))
+                self._headers(
+                    "application/json; charset=utf-8",
+                    len(body),
+                    cache_control=PUBLIC_CACHE_CONTROL if public_contract else "no-store",
+                    public_contract=public_contract,
+                )
                 self.end_headers()
                 self.wfile.write(body)
 
             def _headers(
-                self, content_type: str, length: int, *, cache_control: str = "no-store"
+                self,
+                content_type: str,
+                length: int,
+                *,
+                cache_control: str = "no-store",
+                public_contract: bool = False,
             ) -> None:
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(length))
@@ -7901,6 +8921,8 @@ class NoyraHTTPServer:
                 self.send_header("Cross-Origin-Opener-Policy", "same-origin")
                 self.send_header("Cross-Origin-Resource-Policy", "same-origin")
                 self.send_header("X-Permitted-Cross-Domain-Policies", "none")
+                if public_contract:
+                    self.send_header("X-Noyra-Public-Contract", PUBLIC_CONTRACT_ID)
                 if owner.settings.public_site_url or owner.settings.admin_session_cookie_secure:
                     self.send_header(
                         "Strict-Transport-Security",
@@ -7991,6 +9013,7 @@ class NoyraService:
                 allow_subject_creation=False,
                 process_lock=self._startup_lock,
                 defer_preflight=True,
+                migration_fence_root=settings.data_dir / "migration",
             )
             self.http = cast(Any, _UnownedHTTPFacade())
             self._construction_complete = True
@@ -8023,6 +9046,7 @@ class NoyraService:
             settings.genesis_hash,
             allow_subject_creation=not database_preexisting,
             process_lock=self._startup_lock,
+            migration_fence_root=settings.data_dir / "migration",
         )
         subject_storage_binding_available = not database_preexisting or (
             _cloud_archive_subject_state_available(

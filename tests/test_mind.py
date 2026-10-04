@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
 from noyra.core import Database, EventStore, IdentityStore
 from noyra.core.database import CURRENT_SCHEMA_VERSION
@@ -31,12 +31,12 @@ from noyra.mind.errors import CausalValidationError, MindStateConflictError
 class FakeEmbedding:
     name = "test-embedding"
 
-    def embed(self, texts: Sequence[str]) -> list[list[float]]:
+    def embed(self: Self, texts: Sequence[str]) -> list[list[float]]:
         return [[1.0, 0.0] for _ in texts]
 
 
 class MindTestCase(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.database = Database(Path(self.temp_dir.name) / "noyra.sqlite3")
         self.subject_id = "Noyra-mind-test"
@@ -51,7 +51,7 @@ class MindTestCase(unittest.TestCase):
         self.clock_value = "2026-08-11T00:00:00.000+00:00"
         self.engine = MindEngine(self.database, clock=lambda: self.clock_value)
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.temp_dir.cleanup()
 
     @staticmethod
@@ -106,10 +106,10 @@ class MindTestCase(unittest.TestCase):
             minimum_motive_intensity=0.5,
         )
 
-    def new_event(self, label: str) -> str:
+    def new_event(self: Self, label: str) -> str:
         return self.events.append(self.subject_id, "test_event", "test", {"label": label}).event_id
 
-    def test_current_schema_and_mind_append_only_triggers_exist(self) -> None:
+    def test_current_schema_and_mind_append_only_triggers_exist(self: Self) -> None:
         with self.database.connection() as connection:
             version = connection.execute(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
@@ -125,7 +125,7 @@ class MindTestCase(unittest.TestCase):
         self.assertIn("prevent_causal_link_update", triggers)
         self.assertIn("prevent_psychological_snapshot_delete", triggers)
 
-    def test_schema_migrates_from_version_two(self) -> None:
+    def test_schema_migrates_from_version_two(self: Self) -> None:
         legacy_path = Path(self.temp_dir.name) / "legacy-v2.sqlite3"
         connection = sqlite3.connect(legacy_path)
         connection.execute("CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -143,7 +143,7 @@ class MindTestCase(unittest.TestCase):
         self.assertEqual(int(version), CURRENT_SCHEMA_VERSION)
         self.assertIsNotNone(mind_table)
 
-    def test_memory_is_revisioned_searchable_and_not_deletable(self) -> None:
+    def test_memory_is_revisioned_searchable_and_not_deletable(self: Self) -> None:
         store = MemoryStore(self.database)
         memory = store.create(
             self.subject_id,
@@ -185,7 +185,7 @@ class MindTestCase(unittest.TestCase):
         ):
             connection.execute("DELETE FROM memories WHERE memory_id = ?", (memory.memory_id,))
 
-    def test_memory_hash_tampering_is_detected(self) -> None:
+    def test_memory_hash_tampering_is_detected(self: Self) -> None:
         store = MemoryStore(self.database)
         memory = store.create(
             self.subject_id,
@@ -203,7 +203,7 @@ class MindTestCase(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             store.get(memory.memory_id)
 
-    def test_entity_integrity_classifies_persisted_corruption(self) -> None:
+    def test_entity_integrity_classifies_persisted_corruption(self: Self) -> None:
         store = EntityStore(self.database)
         source = store.upsert(
             self.subject_id,
@@ -268,7 +268,7 @@ class MindTestCase(unittest.TestCase):
                         (original, identifier),
                     )
 
-    def test_memory_embedding_integrity_classifies_persisted_corruption(self) -> None:
+    def test_memory_embedding_integrity_classifies_persisted_corruption(self: Self) -> None:
         index = MemoryEmbeddingIndex(self.database, FakeEmbedding())
         memory = MemoryStore(self.database, embedding_index=index).create(
             self.subject_id,
@@ -312,7 +312,7 @@ class MindTestCase(unittest.TestCase):
                         (original[column], memory.memory_id),
                     )
 
-    def test_memory_block_integrity_rejects_fractional_versions(self) -> None:
+    def test_memory_block_integrity_rejects_fractional_versions(self: Self) -> None:
         store = MemoryBlockStore(self.database)
         block = store.create(
             self.subject_id,
@@ -340,7 +340,7 @@ class MindTestCase(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             store.verify_integrity(self.subject_id)
 
-    def test_belief_requires_evidence_and_keeps_revisions(self) -> None:
+    def test_belief_requires_evidence_and_keeps_revisions(self: Self) -> None:
         store = BeliefStore(self.database)
         belief = store.create(
             self.subject_id,
@@ -370,7 +370,7 @@ class MindTestCase(unittest.TestCase):
                 (belief.belief_id,),
             )
 
-    def test_relationship_state_is_revisioned_and_integrity_checked(self) -> None:
+    def test_relationship_state_is_revisioned_and_integrity_checked(self: Self) -> None:
         store = RelationshipStore(self.database)
         relationship = store.ensure(
             self.subject_id,
@@ -400,7 +400,7 @@ class MindTestCase(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             store.get(relationship.relationship_id)
 
-    def test_any_emotion_label_has_causal_state_and_psychological_snapshot(self) -> None:
+    def test_any_emotion_label_has_causal_state_and_psychological_snapshot(self: Self) -> None:
         result = self.engine.process_event(
             self.subject_id,
             self.event.event_id,
@@ -415,7 +415,7 @@ class MindTestCase(unittest.TestCase):
         links = CausalStore(self.database).links_from(self.subject_id, "event", self.event.event_id)
         self.assertEqual(links[0].target_type, "appraisal")
 
-    def test_curiosity_can_generate_autonomous_goal_candidate(self) -> None:
+    def test_curiosity_can_generate_autonomous_goal_candidate(self: Self) -> None:
         result = self.engine.process_event(
             self.subject_id,
             self.event.event_id,
@@ -435,7 +435,7 @@ class MindTestCase(unittest.TestCase):
         )
         self.assertTrue(any(link.relation == "motivated" for link in links))
 
-    def test_event_processing_is_idempotent_and_conflict_checked(self) -> None:
+    def test_event_processing_is_idempotent_and_conflict_checked(self: Self) -> None:
         first = self.engine.process_event(
             self.subject_id,
             self.event.event_id,
@@ -468,7 +468,7 @@ class MindTestCase(unittest.TestCase):
                 idempotency_key="primary-observation",
             )
 
-    def test_unsupported_autonomous_goal_rolls_back_entire_experience(self) -> None:
+    def test_unsupported_autonomous_goal_rolls_back_entire_experience(self: Self) -> None:
         unsupported = self.candidate("Uncaused goal").model_copy(update={"motive_emotion": "hope"})
         with self.assertRaises(CausalValidationError):
             self.engine.process_event(
@@ -484,7 +484,7 @@ class MindTestCase(unittest.TestCase):
         self.assertEqual(appraisals, 0)
         self.assertEqual(affects, 0)
 
-    def test_human_proposal_is_not_active_until_subject_accepts_it(self) -> None:
+    def test_human_proposal_is_not_active_until_subject_accepts_it(self: Self) -> None:
         result = self.engine.process_event(
             self.subject_id,
             self.event.event_id,
@@ -515,7 +515,7 @@ class MindTestCase(unittest.TestCase):
         self.assertEqual(accepted.status, "candidate")
         self.assertEqual(active.status, "active")
 
-    def test_negative_affect_can_force_active_goal_reconsideration(self) -> None:
+    def test_negative_affect_can_force_active_goal_reconsideration(self: Self) -> None:
         formation = self.engine.process_event(
             self.subject_id,
             self.event.event_id,
@@ -548,7 +548,7 @@ class MindTestCase(unittest.TestCase):
         self.assertEqual(revised.status, "reconsidering")
         self.assertLessEqual(revised.emotional_pressure, -0.7)
 
-    def test_affect_decays_with_elapsed_time_and_records_transition(self) -> None:
+    def test_affect_decays_with_elapsed_time_and_records_transition(self: Self) -> None:
         self.engine.process_event(
             self.subject_id,
             self.event.event_id,
@@ -566,7 +566,7 @@ class MindTestCase(unittest.TestCase):
         self.assertAlmostEqual(affect.intensity, 0.5)
         self.assertTrue(any(item.impulse == 0 for item in result.transitions))
 
-    def test_goal_pressure_recedes_as_its_causal_emotion_decays(self) -> None:
+    def test_goal_pressure_recedes_as_its_causal_emotion_decays(self: Self) -> None:
         formation = self.engine.process_event(
             self.subject_id,
             self.event.event_id,
@@ -605,7 +605,7 @@ class MindTestCase(unittest.TestCase):
         )
         self.assertAlmostEqual(store.get(goal.goal_id).emotional_pressure, -0.4)
 
-    def test_cross_subject_event_cannot_change_mind_state(self) -> None:
+    def test_cross_subject_event_cannot_change_mind_state(self: Self) -> None:
         other_subject = "Noyra-other-mind"
         IdentityStore(self.database).ensure(other_subject, content_hash({"seed": "other"}))
         other_event = self.events.append(other_subject, "test", "test", {}).event_id
@@ -617,7 +617,7 @@ class MindTestCase(unittest.TestCase):
                 [self.impulse()],
             )
 
-    def test_snapshot_and_goal_hash_tampering_are_detected(self) -> None:
+    def test_snapshot_and_goal_hash_tampering_are_detected(self: Self) -> None:
         result = self.engine.process_event(
             self.subject_id,
             self.event.event_id,
@@ -641,7 +641,7 @@ class MindTestCase(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             GoalStore(self.database).get(result.goals[0].goal_id)
 
-    def test_integrity_audit_detects_current_revision_divergence(self) -> None:
+    def test_integrity_audit_detects_current_revision_divergence(self: Self) -> None:
         memory = MemoryStore(self.database).create(
             self.subject_id,
             "episodic",
@@ -659,7 +659,9 @@ class MindTestCase(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             self.engine.verify_integrity(self.subject_id)
 
-    def test_integrity_audit_classifies_malformed_persisted_numbers_as_corruption(self) -> None:
+    def test_integrity_audit_classifies_malformed_persisted_numbers_as_corruption(
+        self: Self,
+    ) -> None:
         result = self.engine.process_event(
             self.subject_id,
             self.event.event_id,
@@ -715,7 +717,7 @@ class MindTestCase(unittest.TestCase):
                     )
         self.assertEqual(result.mood.version, original["version"])
 
-    def test_integrity_audit_rejects_blob_numbers_across_mind_rows(self) -> None:
+    def test_integrity_audit_rejects_blob_numbers_across_mind_rows(self: Self) -> None:
         result = self.engine.process_event(
             self.subject_id,
             self.event.event_id,
@@ -828,7 +830,7 @@ class MindTestCase(unittest.TestCase):
                         (original, identifier),
                     )
 
-    def test_integrity_audit_rejects_nonfinite_durable_floats(self) -> None:
+    def test_integrity_audit_rejects_nonfinite_durable_floats(self: Self) -> None:
         belief = BeliefStore(self.database).create(
             self.subject_id,
             "Finite confidence fixture.",
@@ -846,7 +848,7 @@ class MindTestCase(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             self.engine.verify_integrity(self.subject_id)
 
-    def test_causal_links_reject_dangling_entities_and_mutation(self) -> None:
+    def test_causal_links_reject_dangling_entities_and_mutation(self: Self) -> None:
         store = CausalStore(self.database)
         with self.assertRaises(CausalValidationError):
             store.add(

@@ -64,8 +64,11 @@ command -v flock >/dev/null 2>&1 || { echo 'flock is required (install util-linu
 command -v curl >/dev/null 2>&1 || { echo 'curl is required for the readiness check.' >&2; exit 1; }
 
 SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$SOURCE_DIR/scripts/lib/upgrade-components.sh"
 INSTALL_DIR=/opt/noyra
 RELEASES_DIR="$INSTALL_DIR/releases"
+UPGRADE_INSTALL_DIR="$INSTALL_DIR/upgrade"
+UPGRADE_SOURCE_DIR="$UPGRADE_INSTALL_DIR/source"
 CURRENT_LINK="$INSTALL_DIR/current"
 PREVIOUS_LINK="$INSTALL_DIR/previous"
 LOCK_FILE="$INSTALL_DIR/.install.lock"
@@ -75,6 +78,17 @@ CREDENTIALS_DIR="$CONFIG_DIR/credentials"
 UNIT_FILE=/etc/systemd/system/noyra.service
 PROFILE_DROPIN_DIR=/etc/systemd/system/noyra.service.d
 PROFILE_DROPIN="$PROFILE_DROPIN_DIR/profile.conf"
+UPGRADE_HANDOFF_LOCK="$DATA_DIR/upgrade/manager.lock"
+UPGRADE_RUNNER_UNIT=/etc/systemd/system/noyra-upgrade.service
+UPGRADE_PATH_UNIT=/etc/systemd/system/noyra-upgrade.path
+UPGRADE_RECOVER_UNIT=/etc/systemd/system/noyra-upgrade-recover.service
+MIGRATION_AGENT_UNIT=/etc/systemd/system/noyra-migration-agent.service
+MIGRATION_RUNNER_UNIT=/etc/systemd/system/noyra-migration-runner.service
+MIGRATION_RUNNER=/usr/local/libexec/noyra-migration-runner.sh
+TARGET_ACTIVATION_RUNNER=/usr/local/libexec/noyra-target-activation-runner.py
+TARGET_ACTIVATION_UNIT=/etc/systemd/system/noyra-target-activation.service
+TARGET_ACTIVATION_PATH_UNIT=/etc/systemd/system/noyra-target-activation.path
+TARGET_ACTIVATION_RECOVER_UNIT=/etc/systemd/system/noyra-target-activation-recover.service
 BACKUP_KEYRING="$CONFIG_DIR/backup-keyring.json"
 
 assert_absolute_backup_dir() {
@@ -229,6 +243,43 @@ for protected_dir in "$INSTALL_DIR" "$RELEASES_DIR" "$DATA_DIR" "$CONFIG_DIR" "$
   fi
 done
 install -d -o root -g root -m 0755 "$INSTALL_DIR" "$RELEASES_DIR"
+for upgrade_path in "$UPGRADE_INSTALL_DIR" "$UPGRADE_SOURCE_DIR"; do
+  if [[ -L "$upgrade_path" || ( -e "$upgrade_path" && ! -d "$upgrade_path" ) ]]; then
+    echo "Upgrade deployment path must be a real directory: $upgrade_path" >&2
+    exit 1
+  fi
+done
+install -d -o root -g root -m 0755 "$UPGRADE_INSTALL_DIR"
+upgrade_state_dir="$DATA_DIR/upgrade"
+upgrade_request_dir="$upgrade_state_dir/requests"
+upgrade_processing_dir="$upgrade_state_dir/processing"
+for upgrade_path in "$upgrade_state_dir" "$upgrade_request_dir" "$upgrade_processing_dir"; do
+  if [[ -L "$upgrade_path" || ( -e "$upgrade_path" && ! -d "$upgrade_path" ) ]]; then
+    echo "Upgrade state path must be a real directory: $upgrade_path" >&2
+    exit 1
+  fi
+done
+install -d -o root -g noyra -m 0750 "$upgrade_state_dir"
+install -d -o noyra -g noyra -m 0700 "$upgrade_request_dir"
+install -d -o root -g root -m 0700 "$upgrade_processing_dir"
+if [[ -L "$UPGRADE_HANDOFF_LOCK" || ( -e "$UPGRADE_HANDOFF_LOCK" && ! -f "$UPGRADE_HANDOFF_LOCK" ) ]]; then
+  echo 'Upgrade handoff lock must be a regular file, not a symlink.' >&2
+  exit 1
+fi
+if [[ -e "$UPGRADE_HANDOFF_LOCK" ]]; then
+  chown root:noyra "$UPGRADE_HANDOFF_LOCK"
+  chmod 0660 "$UPGRADE_HANDOFF_LOCK"
+else
+  install -o root -g noyra -m 0660 /dev/null "$UPGRADE_HANDOFF_LOCK"
+fi
+if [[ -L "$upgrade_state_dir/status.json" || ( -e "$upgrade_state_dir/status.json" && ! -f "$upgrade_state_dir/status.json" ) ]]; then
+  echo 'Upgrade status must be a regular file, not a symlink.' >&2
+  exit 1
+fi
+if [[ -e "$upgrade_state_dir/status.json" ]]; then
+  chown root:noyra "$upgrade_state_dir/status.json"
+  chmod 0640 "$upgrade_state_dir/status.json"
+fi
 install -d -o noyra -g noyra -m 0700 "$DATA_DIR"
 install -d -o root -g noyra -m 0750 "$CONFIG_DIR"
 install -d -o root -g noyra -m 0750 "$CREDENTIALS_DIR"
@@ -329,6 +380,8 @@ noyra_uid=""
 noyra_gid=""
 staging=""
 cleanup_failed=false
+upgrade_components_restored=true
+migration_components_restored=true
 legacy_venv=""
 legacy_id=""
 legacy_moved=false
@@ -504,12 +557,33 @@ on_error() {
     service_was_stopped=false
     status=1
   fi
+  if [[ "$UPGRADE_COMPONENTS_CHANGED" == true ]]; then
+    if ! noyra_upgrade_components_restore \
+      "$UPGRADE_RUNNER" "$UPGRADE_PATH_UNIT" "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT"; then
+      upgrade_components_restored=false
+      echo 'Failed to restore root upgrade components; Noyra will remain stopped.' >&2
+      status=1
+    fi
+  fi
+  if [[ "$MIGRATION_COMPONENTS_CHANGED" == true ]]; then
+    if ! noyra_migration_components_restore \
+      "$MIGRATION_RUNNER" "$MIGRATION_AGENT_UNIT" "$MIGRATION_RUNNER_UNIT" \
+      "$TARGET_ACTIVATION_RUNNER" "$TARGET_ACTIVATION_UNIT" \
+      "$TARGET_ACTIVATION_PATH_UNIT" "$TARGET_ACTIVATION_RECOVER_UNIT"; then
+      migration_components_restored=false
+      echo 'Failed to restore migration agent components; Noyra will remain stopped.' >&2
+      status=1
+    fi
+  fi
   if [[ "$switched" == true ]]; then
     systemctl stop noyra >/dev/null 2>&1 || true
     local restored=true
     if ! restore_pointers_after_failure; then
       restored=false
       echo 'Failed to restore the previous release pointers; service will remain stopped.' >&2
+    fi
+    if [[ "$upgrade_components_restored" != true || "$migration_components_restored" != true ]]; then
+      restored=false
     fi
     restore_profile_dropin_after_failure
     if [[ "$service_active" == true && "$restored" == true && "$cleanup_failed" == false ]]; then
@@ -529,7 +603,7 @@ on_error() {
       legacy_moved=false
     fi
     restore_profile_dropin_after_failure
-    if [[ "$service_was_stopped" == true ]]; then
+    if [[ "$service_was_stopped" == true && "$upgrade_components_restored" == true && "$migration_components_restored" == true ]]; then
       systemctl start noyra >/dev/null 2>&1 || true
     fi
   elif [[ "$legacy_moved" == true ]]; then
@@ -538,10 +612,10 @@ on_error() {
     rmdir -- "$RELEASES_DIR/$legacy_id" 2>/dev/null || true
     legacy_moved=false
     restore_profile_dropin_after_failure
-    if [[ "$service_was_stopped" == true ]]; then
+    if [[ "$service_was_stopped" == true && "$upgrade_components_restored" == true && "$migration_components_restored" == true ]]; then
       systemctl start noyra >/dev/null 2>&1 || true
     fi
-  elif [[ "$service_was_stopped" == true ]]; then
+  elif [[ "$service_was_stopped" == true && "$upgrade_components_restored" == true && "$migration_components_restored" == true ]]; then
     systemctl start noyra >/dev/null 2>&1 || true
   fi
   exit "$status"
@@ -597,6 +671,11 @@ if [[ -z "$release_id" ]]; then
   else
     release_id="source-$(date -u +%Y%m%d%H%M%S)-$$"
   fi
+fi
+source_sha=""
+if command -v git >/dev/null 2>&1; then
+  source_sha="$(git -C "$SOURCE_DIR" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)"
+  [[ "$source_sha" =~ ^[0-9a-f]{40,64}$ ]] || source_sha=""
 fi
 assert_safe_segment "$release_id" release_id
 release_root="$RELEASES_DIR/$release_id"
@@ -770,12 +849,112 @@ fi
 mv -- "$staging" "$release_root"
 staging=""
 release_published=true
+if [[ -n "$source_sha" ]]; then
+  printf '%s\n' "$source_sha" > "$release_root/.noyra-source-sha"
+  chown root:root "$release_root/.noyra-source-sha"
+  chmod 0644 "$release_root/.noyra-source-sha"
+fi
 chown -R root:root "$release_root"
 chmod 0755 "$release_root" "$release_root/.venv" "$release_root/.venv/bin"
 
 ensure_backup_keyring "$release_root/.venv/bin/python"
 
 install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra.service" "$UNIT_FILE"
+LIBEXEC_DIR=/usr/local/libexec
+UPGRADE_RUNNER="$LIBEXEC_DIR/noyra-upgrade-runner.sh"
+UPGRADE_COMPONENT_BACKUP_DIR="$INSTALL_DIR/.upgrade-components.$$.$RANDOM"
+noyra_upgrade_components_snapshot \
+  "$UPGRADE_COMPONENT_BACKUP_DIR" "$UPGRADE_RUNNER" "$UPGRADE_PATH_UNIT" \
+  "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT"
+noyra_upgrade_components_mark_changed
+for upgrade_file in \
+  "$UPGRADE_RUNNER" \
+  "$UPGRADE_PATH_UNIT" \
+  "$UPGRADE_RUNNER_UNIT" \
+  "$UPGRADE_RECOVER_UNIT"; do
+  if [[ -L "$upgrade_file" || ( -e "$upgrade_file" && ! -f "$upgrade_file" ) ]]; then
+    echo "Upgrade system file must be regular and not a symlink: $upgrade_file" >&2
+    exit 1
+  fi
+done
+install -d -o root -g root -m 0755 "$LIBEXEC_DIR"
+install -o root -g root -m 0750 "$SOURCE_DIR/scripts/upgrade-ubuntu-runner.sh" "$UPGRADE_RUNNER"
+install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-upgrade.path" "$UPGRADE_PATH_UNIT"
+install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-upgrade.service" "$UPGRADE_RUNNER_UNIT"
+install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-upgrade-recover.service" \
+  "$UPGRADE_RECOVER_UNIT"
+MIGRATION_COMPONENT_BACKUP_DIR="$INSTALL_DIR/.migration-components.$$.$RANDOM"
+noyra_migration_components_snapshot \
+  "$MIGRATION_COMPONENT_BACKUP_DIR" "$MIGRATION_RUNNER" "$MIGRATION_AGENT_UNIT" \
+  "$MIGRATION_RUNNER_UNIT" "$TARGET_ACTIVATION_RUNNER" "$TARGET_ACTIVATION_UNIT" \
+  "$TARGET_ACTIVATION_PATH_UNIT" "$TARGET_ACTIVATION_RECOVER_UNIT"
+noyra_migration_components_mark_changed
+for migration_file in "$MIGRATION_RUNNER" "$MIGRATION_AGENT_UNIT" "$MIGRATION_RUNNER_UNIT" \
+  "$TARGET_ACTIVATION_RUNNER" "$TARGET_ACTIVATION_UNIT" "$TARGET_ACTIVATION_PATH_UNIT" \
+  "$TARGET_ACTIVATION_RECOVER_UNIT"; do
+  if [[ -L "$migration_file" || ( -e "$migration_file" && ! -f "$migration_file" ) ]]; then
+    echo "Migration system file must be regular and not a symlink: $migration_file" >&2
+    exit 1
+  fi
+done
+install -d -o root -g root -m 0755 "$LIBEXEC_DIR"
+install -d -o root -g noyra -m 0750 "$CONFIG_DIR/migration"
+install -d -o noyra -g noyra -m 0700 "$DATA_DIR/migration-agent"
+install -d -o noyra -g noyra -m 0700 "$DATA_DIR/migration-agent/restored"
+install -d -o root -g noyra -m 0750 "$DATA_DIR/migration"
+install -d -o noyra -g noyra -m 0700 "$DATA_DIR/migration/source"
+chown noyra:noyra "$DATA_DIR/migration/source"
+chmod 0700 "$DATA_DIR/migration/source"
+install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/fences"
+install -d -o noyra -g noyra -m 0700 "$DATA_DIR/migration/requests"
+install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/status"
+install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/target-activation"
+install -d -o root -g noyra -m 0730 "$DATA_DIR/migration/target-activation/requests"
+install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/target-activation/status"
+install -d -o root -g root -m 0700 "$DATA_DIR/migration/target-activation/state"
+source_epoch_file="$DATA_DIR/migration/source/epoch"
+if [[ -L "$source_epoch_file" || ( -e "$source_epoch_file" && ! -f "$source_epoch_file" ) ]]; then
+  echo 'Migration source epoch must be a regular file and not a symlink' >&2
+  on_error 1
+fi
+if [[ ! -e "$source_epoch_file" ]]; then
+  source_epoch='uninitialized'
+  if [[ -f "$DATA_DIR/noyra.sqlite3" ]]; then
+    source_epoch="$($release_root/.venv/bin/python - "$DATA_DIR/noyra.sqlite3" <<'PY'
+import sqlite3
+import sys
+
+try:
+    with sqlite3.connect(sys.argv[1]) as connection:
+        row = connection.execute(
+            "SELECT version FROM runtime_state ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+except sqlite3.Error:
+    row = None
+print(f"runtime-{int(row[0])}" if row is not None else "uninitialized")
+PY
+)"
+  fi
+  printf '%s\n' "$source_epoch" | install -o noyra -g noyra -m 0600 /dev/stdin "$source_epoch_file"
+else
+  chown noyra:noyra "$source_epoch_file"
+  chmod 0600 "$source_epoch_file"
+fi
+if [[ -e "$CONFIG_DIR/migration/identity.json" || -L "$CONFIG_DIR/migration/identity.json" ]]; then
+  if [[ -L "$CONFIG_DIR/migration/identity.json" || ! -f "$CONFIG_DIR/migration/identity.json" ]]; then
+    echo 'Migration identity must be a regular file and not a symlink' >&2
+    exit 1
+  fi
+  chown root:noyra "$CONFIG_DIR/migration/identity.json"
+  chmod 0640 "$CONFIG_DIR/migration/identity.json"
+fi
+install -o root -g root -m 0750 "$SOURCE_DIR/scripts/noyra-migration-runner.sh" "$MIGRATION_RUNNER"
+install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-migration-agent.service" "$MIGRATION_AGENT_UNIT"
+install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-migration-runner.service" "$MIGRATION_RUNNER_UNIT"
+install -o root -g root -m 0750 "$SOURCE_DIR/scripts/noyra-target-activation-runner.py" "$TARGET_ACTIVATION_RUNNER"
+install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-target-activation.service" "$TARGET_ACTIVATION_UNIT"
+install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-target-activation.path" "$TARGET_ACTIVATION_PATH_UNIT"
+install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-target-activation-recover.service" "$TARGET_ACTIVATION_RECOVER_UNIT"
 if [[ ! -f "$CONFIG_DIR/noyra.env" ]]; then
   install -o root -g noyra -m 0640 "$SOURCE_DIR/deploy/noyra.env.example" "$CONFIG_DIR/noyra.env"
 fi
@@ -837,6 +1016,15 @@ fi
 atomic_pointer "$CURRENT_LINK" "$release_id"
 
 systemctl daemon-reload
+systemctl enable noyra-upgrade-recover.service >/dev/null
+systemctl enable --now noyra-upgrade.path >/dev/null
+systemctl enable --now noyra-target-activation.path >/dev/null
+if [[ "$MIGRATION_AGENT_WAS_ENABLED" == true ]]; then
+  systemctl enable noyra-migration-agent.service >/dev/null
+  if [[ "$MIGRATION_AGENT_WAS_ACTIVE" == true ]]; then
+    systemctl restart noyra-migration-agent.service
+  fi
+fi
 if [[ "$(env_value NOYRA_PROFILE development)" == "production" ]]; then
   preflight_python="$INSTALL_DIR/current/.venv/bin/python"
   preflight_script="$INSTALL_DIR/current/scripts/preflight-production.py"
@@ -867,3 +1055,5 @@ if [[ -n "$backup_path" ]]; then
 fi
 echo 'Edit /etc/noyra/noyra.env, then run: systemctl enable --now noyra'
 rm -f -- "$profile_dropin_backup"
+noyra_upgrade_components_commit
+noyra_migration_components_commit

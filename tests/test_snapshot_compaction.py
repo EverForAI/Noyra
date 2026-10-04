@@ -3,13 +3,14 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Self
 
 from noyra.core import IdentityStore, SnapshotStore
 from noyra.core.database import Database
 
 
 class SnapshotCompactionTestCase(unittest.TestCase):
-    def test_old_snapshots_compress_and_latest_remains_online(self) -> None:
+    def test_old_snapshots_compress_and_latest_remains_online(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "noyra.sqlite3")
             subject_id = "Noyra-snapshot-test"

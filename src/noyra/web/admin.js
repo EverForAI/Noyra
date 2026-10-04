@@ -18,10 +18,20 @@ let walletObservationLoadVersion = 0;
 let walletEconomyLoadVersion = 0;
 let walletExecutionLoadVersion = 0;
 let latestDiagnostics = null;
+let upgradeCheckResult = null;
+let upgradeTaskId = null;
+let upgradeStatusAvailable = false;
+let upgradePollTimer = null;
+let upgradePollController = null;
+let upgradePollDelay = 3000;
+const migrationRiskErrors = {
+  migration_policy_confirmation_required: "开启策略自动前必须再次确认风险",
+  migration_local_wallet_confirmation_required: "开启本地钱包迁移前必须再次确认风险",
+};
 const MODEL_KEY_REQUEST_CONCURRENCY = 4;
 const $ = (selector) => document.querySelector(selector);
 const esc = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
-const errorText = (error) => ({ admin_network_unavailable: "管理台暂时无法连接服务，请检查 HTTPS 地址或服务器后重试", admin_login_rate_limited: "登录失败次数过多，请 1 分钟后再试", unauthorized: "令牌无效或会话已过期", json_required: "请求格式不正确", invalid_wallet_policy: "自动付款需要填写大于 0 的单笔上限和每日总额上限", invalid_wallet_audit_query: "审计记录筛选条件不正确", wallet_integrity_unavailable: "钱包完整性检查未通过，请稍后重试", invalid_model_resource_test: "模型测试信息不完整", invalid_model_discovery: "模型发现信息不完整", provider_auth_failed: "模型服务拒绝了密钥，请检查密钥和地址", provider_response_empty: "模型服务返回了空内容", provider_response_invalid: "模型服务响应格式不正确", provider_connect_failed: "无法连接模型服务", invalid_search_provider: "搜索 API 配置不完整", invalid_search_provider_test: "搜索 API 测试信息不完整", search_provider_test_failed: "搜索 API 连接失败", search_provider_test_unknown: "搜索 API 结果未知，请稍后查看供应商记录", model_discovery_unsupported: "该接口不支持获取模型列表，请手动填写模型名称", model_discovery_invalid_response: "模型列表响应格式不正确", model_resource_label_exists: "该认知池已有相同名称", invalid_model_resource_update: "预算或路由参数不符合要求", model_resource_not_found: "认知资源不存在", model_resource_key_not_found: "模型密钥不存在", model_resource_integrity_unavailable: "认知资源完整性检查未通过，请稍后重试", search_provider_not_found: "搜索 API 不存在", search_provider_integrity_unavailable: "搜索 API 完整性检查未通过，请稍后重试", search_routing_integrity_unavailable: "搜索方式完整性检查未通过，请稍后重试", invalid_search_routing: "搜索方式配置不正确", invalid_capability: "能力授权请求不符合要求", capability_not_found: "能力授权不存在", cognition_unavailable: "认知功能尚未启用", public_post_not_found: "帖子不存在或已不可用", invalid_public_post_moderation: "审核状态或理由不符合要求", public_post_moderation_conflict: "帖子状态或幂等请求已发生变化，请刷新后重试", public_post_integrity_unavailable: "帖子完整性检查未通过，审核已暂停", invalid_wallet_acquisition: "采集目标或参数不符合要求", invalid_wallet_acquisition_query: "采集队列筛选条件不符合要求", invalid_wallet_acquisition_run: "采集执行上限不符合要求", invalid_wallet_acquisition_retry: "重试参数不符合要求", invalid_wallet_acquisition_cancel: "取消参数不符合要求", wallet_acquisition_conflict: "相同目标已有活动采集，或幂等键指向其他目标", wallet_acquisition_target_not_found: "采集目标不存在", wallet_acquisition_not_found: "采集运行不存在", wallet_acquisition_unknown_retry_not_allowed: "只有结果未知的运行可以重试", wallet_acquisition_attempt_limit_reached: "采集已达到最大尝试次数", wallet_acquisition_cancel_not_allowed: "当前状态不允许取消", wallet_network_not_found: "钱包网络不存在", invalid_wallet_observation_health_query: "钱包观测健康筛选条件不符合要求", wallet_execution_unavailable: "独立签名器未配置，转账执行已关闭", wallet_execution_not_found: "转账执行不存在", wallet_execution_integrity_unavailable: "转账执行完整性检查未通过，请稍后重试", invalid_wallet_order_execution: "转账执行参数或状态不符合要求", wallet_order_transition_conflict: "订单状态已变化，请刷新后重试", invalid_wallet_receipt_request: "回执查询请求不符合要求", invalid_wallet_execution_recovery: "未完成转账恢复参数不符合要求" }[error?.code] || (error?.message && error.message !== error.code ? error.message : error?.status ? `服务器暂时无法完成请求（HTTP ${error.status}）` : typeof error?.code === "string" && /^[a-z][a-z0-9_]*$/.test(error.code) ? "服务器返回了暂未识别的错误，请检查配置后重试" : error?.message || "请求失败"));
+const errorText = (error) => ({ admin_network_unavailable: "管理台暂时无法连接服务，请检查 HTTPS 地址或服务器后重试", admin_login_rate_limited: "登录失败次数过多，请 1 分钟后再试", unauthorized: "令牌无效或会话已过期", migration_target_integrity_unavailable: "迁移目标完整性检查未通过，系统已暂停相关操作", migration_target_challenge_failed: "迁移目标挑战发起失败，请确认目标仍处于可用状态", migration_target_attestation_failed: "迁移目标验证失败，请核对签名和挑战是否匹配", migration_proposal_rejection_failed: "迁移提案拒绝失败，请刷新后重试", migration_cutover_rejected: "迁移切换未通过安全状态检查", migration_rollback_rejected: "迁移回滚未通过安全状态检查", migration_recovery_rejected: "紧急恢复证明未通过，请核对目标、备份、摘要和签名", upgrade_unavailable: "网页升级当前不可用，请检查服务器网络和升级组件后重试", upgrade_in_progress: "已有升级任务正在执行", upgrade_source_dirty: "服务器升级源码状态异常，已停止升级", upgrade_target_invalid: "版本检查已过期，请重新检查最新版本", upgrade_target_stale: "GitHub 版本刚刚更新，请重新检查后再升级", upgrade_start_failed: "服务器未能启动升级任务，请稍后重试", upgrade_install_failed: "升级未成功；安装器已执行已有的恢复保护，请查看运行状态", upgrade_interrupted: "升级过程曾被系统中断，请重新检查版本并发起升级", json_required: "请求格式不正确", invalid_wallet_policy: "自动付款需要填写大于 0 的单笔上限和每日总额上限", invalid_wallet_audit_query: "审计记录筛选条件不符合要求", wallet_integrity_unavailable: "钱包完整性检查未通过，请稍后重试", invalid_model_resource_test: "模型测试信息不完整", invalid_model_discovery: "模型发现信息不完整", provider_auth_failed: "模型服务拒绝了密钥，请检查密钥和地址", provider_response_empty: "模型服务返回了空内容", provider_response_invalid: "模型服务响应格式不正确", provider_connect_failed: "无法连接模型服务", invalid_search_provider: "搜索 API 配置不完整", invalid_search_provider_test: "搜索 API 测试信息不完整", search_provider_test_failed: "搜索 API 连接失败", search_provider_test_unknown: "搜索 API 结果未知，请稍后查看供应商记录", model_discovery_unsupported: "该接口不支持获取模型列表，请手动填写模型名称", model_discovery_invalid_response: "模型列表响应格式不正确", provider_response_invalid: "模型服务响应格式不正确", model_resource_label_exists: "该认知池已有相同名称", invalid_model_resource_update: "预算或路由参数不符合要求", model_resource_not_found: "认知资源不存在", model_resource_key_not_found: "模型密钥不存在", model_resource_integrity_unavailable: "认知资源完整性检查未通过，请稍后重试", search_provider_not_found: "搜索 API 不存在", search_provider_integrity_unavailable: "搜索 API 完整性检查未通过，请稍后重试", search_routing_integrity_unavailable: "搜索方式完整性检查不通过，请稍后重试", invalid_search_routing: "搜索方式配置不正确", invalid_capability: "能力授权请求不符合要求", capability_not_found: "能力授权不存在", cognition_unavailable: "认知功能尚未启用", public_post_not_found: "帖子不存在或已不可用", invalid_public_post_moderation: "审核状态或理由不符合要求", public_post_moderation_conflict: "帖子状态或幂等请求已发生变化，请刷新后重试", public_post_integrity_unavailable: "帖子完整性检查未通过，审核已暂停", invalid_wallet_acquisition: "采集目标或参数不符合要求", invalid_wallet_acquisition_query: "采集队列筛选条件不符合要求", invalid_wallet_acquisition_run: "采集执行上限不符合要求", invalid_wallet_acquisition_retry: "重试参数不符合要求", invalid_wallet_acquisition_cancel: "取消参数不符合要求", wallet_acquisition_conflict: "相同目标已有活动采集，或幂等键指向其他目标", wallet_acquisition_target_not_found: "采集目标不存在", wallet_acquisition_not_found: "采集运行不存在", wallet_acquisition_unknown_retry_not_allowed: "只有结果未知的运行可以重试", wallet_acquisition_attempt_limit_reached: "采集已达到最大尝试次数", wallet_acquisition_cancel_not_allowed: "当前状态不允许取消", wallet_network_not_found: "钱包网络不存在", invalid_wallet_observation_health_query: "钱包观测健康筛选条件不符合要求", wallet_execution_unavailable: "独立签名器未配置，转账执行已关闭", wallet_execution_not_found: "转账执行不存在", wallet_execution_integrity_unavailable: "转账执行完整性检查未通过，请稍后重试", invalid_wallet_order_execution: "转账执行参数或状态不符合要求", wallet_order_transition_conflict: "订单状态已变化，请刷新后重试", invalid_wallet_receipt_request: "回执查询请求不符合要求", invalid_wallet_execution_recovery: "未完成转账恢复参数不符合要求" }[error?.code] || (error?.message && error.message !== error.code ? error.message : error?.status ? `服务器暂时无法完成请求（HTTP ${error.status}）` : typeof error?.code === "string" && /^[a-z][a-z0-9_]*$/.test(error?.code) ? "服务器返回了暂未识别的错误，请检查配置后重试" : error?.message || "请求失败"));
 
 async function request(path, options = {}) {
   const headers = { ...(options.body ? { "Content-Type": "application/json" } : {}), ...(options.headers || {}) };
@@ -41,7 +51,14 @@ async function request(path, options = {}) {
 }
 
 function setStatus(target, message, error = false) { const node = $(target); node.textContent = message || ""; node.classList.toggle("error", error); }
-function showSection(section) { activeSection = section; document.querySelectorAll("[data-section-panel]").forEach((panel) => { panel.hidden = panel.dataset.sectionPanel !== section; }); document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.section === section)); $("#page-title").textContent = { overview: "总览", conversation: "私密交流", "public-posts": "内容审核", models: "认知资源", search: "搜索配置", capabilities: "能力授权", channels: "通讯渠道", wallet: "钱包采集", runtime: "运行防护" }[section]; }
+function showSection(section) { activeSection = section; document.querySelectorAll("[data-section-panel]").forEach((panel) => { panel.hidden = panel.dataset.sectionPanel !== section; }); document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.section === section)); $("#page-title").textContent = { overview: "总览", conversation: "私密交流", "public-posts": "内容审核", models: "认知资源", search: "搜索配置", capabilities: "能力授权", channels: "通讯渠道", wallet: "钱包采集", migration: "迁移与庇护所", runtime: "运行防护" }[section]; }
+async function loadMigration() {
+  const [policy, targets, proposals, tasks] = await Promise.all([request("/api/v1/admin/migration/policy"), request("/api/v1/admin/migration/targets"), request("/api/v1/admin/migration/proposals"), request("/api/v1/admin/migration/tasks")]);
+  $("#migration-enabled").checked = Boolean(policy.enabled); $("#migration-approval-mode").value = policy.approval_mode; $("#migration-cooldown").value = Math.round((policy.rejection_cooldown_seconds || 0) / 86400); $("#migration-wallet-mode").value = policy.wallet_mode; $("#migration-local-wallet").checked = Boolean(policy.local_wallet_transfer_enabled); $("#migration-policy-summary").innerHTML = summaryRows([["当前状态", policy.enabled ? "已开启" : "已关闭"], ["策略版本", policy.revision], ["审批模式", policy.approval_mode], ["钱包模式", policy.wallet_mode], ["活动 epoch", policy.active_epoch ? `${policy.active_epoch.epoch_number} · ${policy.active_epoch.target_id}` : "无"]]);
+  $("#migration-target-list").innerHTML = targets.length ? targets.map((item) => `<article class="resource-item"><div><h3>${esc(item.target_id)}</h3><p>${item.status === "active" ? "已验证" : "等待验证"} · ${esc(item.region || "未设置区域")}</p><small>${esc(item.endpoint)} · ${esc(item.key_fingerprint)}</small></div><div class="resource-actions"><button type="button" data-migration-challenge="${esc(item.target_id)}">${item.status === "active" ? "重新验证" : "发起验证"}</button>${item.status !== "revoked" ? `<button class="text-button" type="button" data-migration-revoke="${esc(item.target_id)}">撤销</button>` : ""}</div></article>`).join("") : '<div class="muted">尚未注册迁移目标</div>';
+  $("#migration-proposal-list").innerHTML = proposals.length ? proposals.map((item) => `<article class="resource-item"><div><h3>${esc(item.reason_code)}</h3><p>${esc(item.status)} · 目标 ${esc(item.target_id)} · 策略版本 ${esc(item.policy_revision)}</p><small>${esc(item.reason)}</small><small>收益 ${esc(item.benefit_score)} · 风险 ${esc(item.risk_score)} · 过期 ${esc(item.expires_at)}</small><small>证据：${esc(JSON.stringify(item.evidence || {}))}</small></div>${["awaiting_approval", "planned"].includes(item.status) ? `<div class="resource-actions"><button type="button" data-migration-approve="${esc(item.proposal_id)}">批准</button><button class="text-button" type="button" data-migration-reject="${esc(item.proposal_id)}">拒绝</button></div>` : ""}</article>`).join("") : '<div class="muted">暂无迁移提案</div>';
+  $("#migration-task-list").innerHTML = tasks.length ? tasks.map((item) => `<article class="resource-item"><div><h3>${esc(item.task_id)}</h3><p>${esc(item.status)} · 目标 ${esc(item.target_id)}</p><small>${esc(item.updated_at || item.created_at)}</small></div>${["preparing", "validating", "cutover"].includes(item.status) ? `<div class="resource-actions"><button type="button" disabled title="等待加密迁移包和目标恢复证明接线">执行切换（等待安全证明）</button></div>` : ""}${["approved", "preflight", "awaiting_approval"].includes(item.status) ? `<div class="resource-actions"><button class="text-button" type="button" data-migration-cancel="${esc(item.task_id)}">取消任务</button></div>` : ""}${!["committed", "rolled_back", "cancelled"].includes(item.status) ? `<div class="resource-actions"><button class="text-button" type="button" data-migration-rollback="${esc(item.task_id)}">回滚</button></div>` : ""}</article>`).join("") : '<div class="muted">暂无迁移任务</div>';
+}
 function summaryRows(items) { return items.map(([label, value]) => `<div class="summary-row"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join(""); }
 const integerFormatter = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 });
 const modelResourceStatusLabels = { active: "可用", disabled: "已停用", revoked: "已撤销" };
@@ -140,6 +157,214 @@ async function mapWithConcurrency(items, limit, mapper) {
 function formatTimestamp(value) { if (!value) return "无"; const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString("zh-CN", { hour12: false }); }
 function shortFingerprint(value) { const fingerprint = String(value || ""); return fingerprint ? `${fingerprint.slice(0, 12)}…` : "未知"; }
 
+const upgradeActiveStatuses = new Set(["queued", "running", "rolling_back"]);
+const upgradeStatusLabels = { idle: "空闲", queued: "等待服务器开始", running: "正在升级", rolling_back: "正在恢复旧版本", completed: "升级完成", failed: "升级失败", interrupted: "升级中断" };
+function stopUpgradePolling() {
+  if (upgradePollTimer !== null) clearTimeout(upgradePollTimer);
+  upgradePollTimer = null;
+  upgradePollController?.abort();
+  upgradePollController = null;
+}
+function scheduleUpgradePoll() {
+  if (!csrfToken || upgradePollTimer !== null) return;
+  upgradePollTimer = setTimeout(() => {
+    upgradePollTimer = null;
+    void pollUpgradeStatus();
+  }, upgradePollDelay);
+}
+function renderUpgradeCheck(result) {
+  upgradeCheckResult = result;
+  const latest = result.latest || {};
+  const busy = upgradeTaskId !== null;
+  $("#upgrade-current-version").textContent = result.current_sha
+    ? `${result.current_release} · ${String(result.current_sha).slice(0, 12)}`
+    : result.current_release || "未知";
+  $("#upgrade-latest-version").textContent = latest.short_sha || String(latest.sha || "-").slice(0, 12) || "-";
+  $("#upgrade-commit-time").textContent = formatTimestamp(latest.committed_at);
+  $("#upgrade-checked-time").textContent = formatTimestamp(result.checked_at);
+  $("#upgrade-commit-title").textContent = latest.title || "没有可显示的提交说明。";
+  if (!busy) $("#upgrade-status-label").textContent = result.update_available ? "发现新版本" : "已是最新版本";
+  $("#start-upgrade").disabled = !result.update_available || busy || !upgradeStatusAvailable;
+}
+function renderUpgradeStatus(result) {
+  upgradeStatusAvailable = true;
+  const label = upgradeStatusLabels[result.status] || "状态未知";
+  $("#upgrade-status-label").textContent = result.status === "idle" && upgradeCheckResult
+    ? (upgradeCheckResult.update_available ? "发现新版本" : "已是最新版本")
+    : label;
+  const phaseLabels = { queued: "等待后台任务启动", fetching: "核对官方版本", installing: "安装与健康检查", completed: "安装与健康检查已完成", failed: "安装器停止了升级", interrupted: "系统重启或进程中断" };
+  const phase = phaseLabels[result.phase] || phaseLabels[result.status] || label;
+  let message = result.status === "idle" && upgradeCheckResult
+    ? (upgradeCheckResult.update_available ? "目前没有升级任务；检查到新版本后，可以核对信息并手动确认升级。" : "目前没有升级任务，当前已经是最新版本。")
+    : `${label}：${phase}`;
+  if (result.status === "failed") message += `。${errorText({ code: result.error_code })}`;
+  if (result.status === "interrupted") message += "。请重新检查版本后再发起升级。";
+  $("#upgrade-status").textContent = message;
+  const logs = Array.isArray(result.logs) ? result.logs.slice(0, 8) : [];
+  $("#upgrade-log-summary").innerHTML = logs.map((line) => `<li>${esc(line)}</li>`).join("");
+  if (result.status === "completed" && result.ended_at) {
+    $("#upgrade-status").textContent += `（${formatTimestamp(result.ended_at)}）`;
+  }
+  if (upgradeActiveStatuses.has(result.status)) {
+    $("#start-upgrade").disabled = true;
+  } else {
+    upgradeTaskId = null;
+    $("#start-upgrade").disabled = !upgradeCheckResult?.update_available || !upgradeStatusAvailable;
+  }
+}
+async function pollUpgradeStatus() {
+  if (!csrfToken) return;
+  const controller = new AbortController();
+  upgradePollController = controller;
+  try {
+    const result = await request("/api/v1/admin/upgrade/status", { signal: controller.signal });
+    if (!csrfToken || controller.signal.aborted) return;
+    upgradeStatusAvailable = true;
+    if (upgradeTaskId && result.task_id !== upgradeTaskId) {
+      $("#upgrade-status-label").textContent = "等待服务器开始";
+      $("#upgrade-status").textContent = "已收到升级请求，正在等待服务器后台任务启动。";
+      scheduleUpgradePoll();
+      return;
+    }
+    if (!upgradeTaskId && upgradeActiveStatuses.has(result.status)) upgradeTaskId = result.task_id;
+    renderUpgradeStatus(result);
+    if (upgradeActiveStatuses.has(result.status)) {
+      upgradePollDelay = 3000;
+      scheduleUpgradePoll();
+    } else {
+      stopUpgradePolling();
+      if (result.status === "completed") {
+        await loadUpgradeCheck(true);
+        $("#upgrade-status-label").textContent = "升级完成";
+      }
+    }
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    if (error.status === 401) {
+      await logout();
+      return;
+    }
+    if (!csrfToken) return;
+    setStatus("#upgrade-status", `暂时无法读取升级状态，稍后自动重试。${errorText(error)}`, true);
+    upgradePollDelay = Math.min(upgradePollDelay * 2, 30000);
+    scheduleUpgradePoll();
+  } finally {
+    if (upgradePollController === controller) upgradePollController = null;
+  }
+}
+async function loadUpgradeCheck(quiet = false) {
+  try {
+    const result = await request("/api/v1/admin/upgrade/check");
+    renderUpgradeCheck(result);
+    if (!quiet) setStatus("#upgrade-status", result.update_available ? "已找到可升级版本，请核对信息后手动确认。" : "当前已经是最新版本。");
+    return result;
+  } catch (error) {
+    if (error.status === 401) {
+      await logout();
+      return null;
+    }
+    upgradeCheckResult = null;
+    $("#upgrade-current-version").textContent = "暂不可读取";
+    $("#upgrade-latest-version").textContent = "检查失败";
+    $("#upgrade-commit-time").textContent = "-";
+    $("#upgrade-checked-time").textContent = "-";
+    $("#upgrade-commit-title").textContent = "服务器可能尚未安装网页升级组件，或暂时无法连接 GitHub。";
+    $("#upgrade-status-label").textContent = "无法检查版本";
+    $("#start-upgrade").disabled = true;
+    if (!quiet) setStatus("#upgrade-status", errorText(error), true);
+    return null;
+  }
+}
+async function loadUpgradePanel() {
+  const [checkResult, statusResult] = await Promise.allSettled([
+    request("/api/v1/admin/upgrade/check"),
+    request("/api/v1/admin/upgrade/status"),
+  ]);
+  if ([checkResult, statusResult].some((entry) => entry.status === "rejected" && entry.reason?.status === 401)) {
+    await logout();
+    return;
+  }
+  if (checkResult.status === "fulfilled") renderUpgradeCheck(checkResult.value);
+  else {
+    upgradeCheckResult = null;
+    $("#upgrade-current-version").textContent = "暂不可读取";
+    $("#upgrade-latest-version").textContent = "检查失败";
+    $("#upgrade-commit-title").textContent = "服务器可能尚未安装网页升级组件，或暂时无法连接 GitHub。";
+    $("#upgrade-status-label").textContent = "无法检查版本";
+    $("#start-upgrade").disabled = true;
+  }
+  if (statusResult.status === "fulfilled") {
+    upgradeStatusAvailable = true;
+    const state = statusResult.value;
+    if (upgradeTaskId && state.task_id !== upgradeTaskId) {
+      $("#upgrade-status-label").textContent = "等待服务器开始";
+      $("#upgrade-status").textContent = "已收到升级请求，正在等待服务器后台任务启动。";
+      $("#start-upgrade").disabled = true;
+      startUpgradePolling();
+      return;
+    }
+    if (upgradeActiveStatuses.has(state.status)) upgradeTaskId = state.task_id;
+    renderUpgradeStatus(state);
+    if (upgradeActiveStatuses.has(state.status)) {
+      upgradePollDelay = 3000;
+      startUpgradePolling();
+    } else stopUpgradePolling();
+  } else {
+    upgradeStatusAvailable = false;
+    setStatus("#upgrade-status", errorText(statusResult.reason), true);
+    $("#start-upgrade").disabled = true;
+  }
+  if (checkResult.status === "rejected" && statusResult.status === "rejected") {
+    setStatus("#upgrade-status", errorText(checkResult.reason), true);
+  }
+}
+function startUpgradePolling() {
+  if (!csrfToken) return;
+  if (upgradePollTimer !== null || upgradePollController !== null) return;
+  scheduleUpgradePoll();
+}
+async function checkUpgradeVersion() {
+  const button = $("#check-upgrade-version");
+  button.disabled = true;
+  try {
+    await loadUpgradeCheck();
+  } finally {
+    button.disabled = false;
+  }
+}
+function requestUpgradeConfirmation() {
+  if (!upgradeCheckResult?.update_available) return;
+  $("#upgrade-confirmation-sha").textContent = upgradeCheckResult.latest.short_sha || upgradeCheckResult.latest.sha;
+  $("#upgrade-confirmation").showModal();
+}
+async function confirmUpgrade() {
+  const button = $("#confirm-upgrade");
+  if (!upgradeCheckResult?.update_available || !csrfToken) return;
+  button.disabled = true;
+  try {
+    const result = await request("/api/v1/admin/upgrade", {
+      method: "POST",
+      body: JSON.stringify({
+        target_sha: upgradeCheckResult.latest.sha,
+        reason: "管理员已确认升级",
+        idempotency_key: crypto.randomUUID(),
+      }),
+    });
+    $("#upgrade-confirmation").close();
+    upgradeTaskId = result.task_id;
+    setStatus("#upgrade-status", "升级任务已提交。服务器会在后台继续运行，页面关闭后不会取消。请勿再次发起升级。");
+    $("#upgrade-status-label").textContent = upgradeStatusLabels[result.status] || "等待后台任务";
+    $("#start-upgrade").disabled = true;
+    upgradePollDelay = 1500;
+    startUpgradePolling();
+  } catch (error) {
+    if (error.status === 401) await logout();
+    else setStatus("#upgrade-status", errorText(error), true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function renderModelKey(item, key) {
   const status = modelKeyStatusLabels[key.status] || key.status || "未知";
   const cooldown = key.cooldown_until ? ` · 冷却至 ${formatTimestamp(key.cooldown_until)}` : "";
@@ -147,8 +372,8 @@ function renderModelKey(item, key) {
   return `<details class="model-key-details"><summary><span class="model-key-identity"><code title="密钥指纹（截断）">${esc(shortFingerprint(key.key_fingerprint))}</code><span class="status-chip status-${esc(key.status)}">${esc(status)}</span></span><span class="model-key-counters">选用 ${esc(formatInteger(key.selection_count))} 次 · 连续失败 ${esc(formatInteger(key.consecutive_failures))} 次${esc(cooldown)}</span></summary><div class="model-key-body"><dl class="model-key-metadata"><div><dt>密钥标识</dt><dd>${esc(key.key_id)}</dd></div><div><dt>创建时间</dt><dd>${esc(formatTimestamp(key.created_at))}</dd></div><div><dt>最近选用</dt><dd>${esc(formatTimestamp(key.last_selected_at))}</dd></div><div><dt>最近成功</dt><dd>${esc(formatTimestamp(key.last_success_at))}</dd></div><div><dt>最近失败</dt><dd>${esc(formatTimestamp(key.last_failure_at))}</dd></div><div><dt>冷却结束</dt><dd>${esc(formatTimestamp(key.cooldown_until))}</dd></div></dl>${canRevoke ? `<div class="resource-actions"><button data-model-key-action="revoke" data-group-id="${esc(item.group_id)}" data-key-id="${esc(key.key_id)}" type="button">撤销密钥</button></div>` : ""}</div></details>`;
 }
 
-async function login(event) { event.preventDefault(); const form = event.currentTarget; const token = $("#login-token").value.trim(); if (!token) return; const button = submitButton(form, event); if (button) button.disabled = true; setStatus("#login-status", "正在建立会话"); try { const result = await request("/admin/session", { method: "POST", body: JSON.stringify({ token }) }); csrfToken = result.csrf_token; $("#login-token").value = ""; $("#login-shell").hidden = true; $("#admin-shell").hidden = false; await loadAll(); } catch (error) { setStatus("#login-status", errorText(error), true); } finally { if (button) button.disabled = false; } }
-async function logout() { try { await request("/admin/session/logout", { method: "POST" }); } catch { /* session is already unusable */ } csrfToken = ""; publicPostCursor = ""; publicPostRows = []; publicPostActionKeys.clear(); $("#public-post-review-list").replaceChildren(); $("#admin-shell").hidden = true; $("#login-shell").hidden = false; }
+async function login(event) { event.preventDefault(); const form = event.currentTarget; const token = $("#login-token").value.trim(); if (!token) return; const button = submitButton(form, event); if (button) button.disabled = true; setStatus("#login-status", "正在建立会话"); try { const result = await request("/admin/session", { method: "POST", body: JSON.stringify({ token }) }); stopUpgradePolling(); upgradeTaskId = null; upgradeStatusAvailable = false; upgradeCheckResult = null; csrfToken = result.csrf_token; $("#login-token").value = ""; $("#login-shell").hidden = true; $("#admin-shell").hidden = false; await loadAll(); } catch (error) { setStatus("#login-status", errorText(error), true); } finally { if (button) button.disabled = false; } }
+async function logout() { stopUpgradePolling(); try { await request("/admin/session/logout", { method: "POST" }); } catch { /* session is already unusable */ } csrfToken = ""; upgradeTaskId = null; upgradeStatusAvailable = false; upgradeCheckResult = null; publicPostCursor = ""; publicPostRows = []; publicPostActionKeys.clear(); $("#public-post-review-list").replaceChildren(); $("#admin-shell").hidden = true; $("#login-shell").hidden = false; }
 
 async function loadOverview() {
   latestDiagnostics = null;
@@ -852,9 +1077,9 @@ async function loadChannels() {
 async function loadRuntime() { const [diagnostics, controls] = await Promise.all([request("/api/diagnostics"), request("/api/admin/public-post-controls")]); const cognition = diagnostics.cognition || {}; $("#runtime-summary").innerHTML = summaryRows([["认知状态", cognition.enabled ? "已启用" : "未启用"], ["待处理消息", cognition.pending_interactions?.length || 0], ["认知等待任务", cognition.waiting_interaction_tasks?.length || 0], ["入站去重", JSON.stringify(diagnostics.inbound || {})], ["未知模型调用", diagnostics.unknown?.model_calls || 0], ["外部投递", JSON.stringify(diagnostics.deliveries || {})], ["完整性", diagnostics.integrity?.status || "未配置"]]).replaceAll("summary-row", "runtime-item"); $("#public-post-rate-limit").value = controls.rate_limit_per_hour; $("#public-post-queue-cap").value = controls.queue_cap; $("#public-post-captcha-ttl").value = controls.captcha_ttl_seconds; $("#public-post-captcha-attempts").value = controls.captcha_max_attempts; $("#public-post-captcha-mode").value = controls.captcha_mode; $("#public-post-captcha-issue-limit").value = controls.captcha_issue_limit_per_hour; $("#public-post-captcha-global-rate").value = controls.captcha_global_rate_per_minute; $("#public-post-storage-cap").value = controls.storage_cap_bytes; const usage = controls.usage || {}; $("#public-post-usage").innerHTML = summaryRows([["待审核", usage.pending_count ?? 0], ["帖子总数", usage.post_count ?? 0], ["帖子内容", `${usage.byte_size ?? 0} / ${usage.storage_cap_bytes ?? controls.storage_cap_bytes} 字节`]]); }
 async function loadAll() {
   const tasks = [
-    ["总览", loadOverview], ["供应商健康", loadProviderHealth], ["数据保留", loadRetention], ["私密交流", loadMailbox], ["内容审核", loadPublicPosts],
+    ["总览", loadOverview], ["版本升级", loadUpgradePanel], ["供应商健康", loadProviderHealth], ["数据保留", loadRetention], ["私密交流", loadMailbox], ["内容审核", loadPublicPosts],
     ["认知资源", loadModels], ["搜索配置", loadSearchProviders], ["能力授权", loadCapabilities],
-    ["通讯渠道", loadChannels], ["钱包与转账", loadWallet], ["运行防护", loadRuntime],
+    ["通讯渠道", loadChannels], ["钱包与转账", loadWallet], ["迁移与庇护所", loadMigration], ["运行防护", loadRuntime],
   ];
   const results = await Promise.allSettled(tasks.map(([, load]) => load()));
   const failures = [];
@@ -877,9 +1102,125 @@ async function loadAll() {
 }
 async function restoreSession() { try { const result = await request("/admin/session"); if (!result.authenticated) return; csrfToken = result.csrf_token; $("#login-shell").hidden = true; $("#admin-shell").hidden = false; await loadAll(); } catch (error) { setStatus("#login-status", errorText(error), true); } }
 
-$("#login-form").addEventListener("submit", login); $("#logout").addEventListener("click", logout); $("#refresh-admin").addEventListener("click", loadAll); $("#refresh-observability").addEventListener("click", () => { void loadOverview().catch((error) => setStatus("#global-status", errorText(error), true)); }); $("#refresh-provider-health").addEventListener("click", () => { void loadProviderHealth().catch((error) => setStatus("#provider-health-status", errorText(error), true)); }); $("#refresh-retention").addEventListener("click", () => { void loadRetention().catch((error) => setStatus("#retention-status", errorText(error), true)); }); $("#run-retention").addEventListener("click", () => { void runRetention(); }); $("#refresh-mailbox").addEventListener("click", loadMailbox); $("#refresh-models").addEventListener("click", loadModels); $("#refresh-search-providers").addEventListener("click", loadSearchProviders); $("#refresh-capabilities").addEventListener("click", loadCapabilities); $("#refresh-runtime").addEventListener("click", loadRuntime); document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => showSection(button.dataset.section)));
+$("#login-form").addEventListener("submit", login); $("#logout").addEventListener("click", logout); $("#refresh-admin").addEventListener("click", loadAll); $("#check-upgrade-version").addEventListener("click", checkUpgradeVersion); $("#start-upgrade").addEventListener("click", requestUpgradeConfirmation); $("#confirm-upgrade").addEventListener("click", confirmUpgrade); $("#refresh-observability").addEventListener("click", () => { void loadOverview().catch((error) => setStatus("#global-status", errorText(error), true)); }); $("#refresh-provider-health").addEventListener("click", () => { void loadProviderHealth().catch((error) => setStatus("#provider-health-status", errorText(error), true)); }); $("#refresh-retention").addEventListener("click", () => { void loadRetention().catch((error) => setStatus("#retention-status", errorText(error), true)); }); $("#run-retention").addEventListener("click", () => { void runRetention(); }); $("#refresh-mailbox").addEventListener("click", loadMailbox); $("#refresh-models").addEventListener("click", loadModels); $("#refresh-search-providers").addEventListener("click", loadSearchProviders); $("#refresh-capabilities").addEventListener("click", loadCapabilities); $("#refresh-runtime").addEventListener("click", loadRuntime); document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => showSection(button.dataset.section)));
 $("#setup-guide-list").addEventListener("click", (event) => { const button = event.target.closest("[data-setup-go]"); if (button) showSection(button.dataset.setupGo); });
 $("#refresh-wallet-audits").addEventListener("click", () => { void loadWalletAudits().catch(() => {}); });
+$("#refresh-migration").addEventListener("click", () => { void loadMigration().catch((error) => setStatus("#migration-status", errorText(error), true)); });
+$("#refresh-migration-tasks").addEventListener("click", () => { void loadMigration().catch((error) => setStatus("#migration-status", errorText(error), true)); });
+$("#migration-target-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    await request("/api/v1/admin/migration/targets", { method: "POST", body: JSON.stringify({
+      target_id: $("#migration-target-id").value.trim(), endpoint: $("#migration-target-endpoint").value.trim(), public_key: $("#migration-target-key").value.trim(), release_sha: $("#migration-target-release").value.trim(), os_arch: $("#migration-target-arch").value.trim(), region: $("#migration-target-region").value.trim() || null, provider: $("#migration-target-provider").value.trim() || null, capabilities: {}, encrypted_volume: $("#migration-target-encrypted").checked,
+    }) });
+    event.currentTarget.reset(); $("#migration-target-arch").value = "linux-amd64"; setStatus("#migration-target-status", "迁移目标已注册"); await loadMigration();
+  } catch (error) { setStatus("#migration-target-status", errorText(error), true); }
+});
+$("#migration-target-list").addEventListener("click", async (event) => {
+  const challengeButton = event.target.closest("[data-migration-challenge]");
+  const revokeButton = event.target.closest("[data-migration-revoke]");
+  try {
+    if (challengeButton) {
+      const targetId = challengeButton.dataset.migrationChallenge;
+      const challenge = await request(`/api/v1/admin/migration/targets/${encodeURIComponent(targetId)}/challenge`, { method: "POST", body: JSON.stringify({}) });
+      const signature = window.prompt(`请让目标 ${targetId} 对以下挑战签名，然后粘贴签名：\nnonce=${challenge.nonce}\nexpires_at=${challenge.expires_at}\nsource_epoch=${challenge.source_epoch}`);
+      if (!signature) return;
+      await request(`/api/v1/admin/migration/targets/${encodeURIComponent(targetId)}/attest`, { method: "POST", body: JSON.stringify({ ...challenge, signature: signature.trim() }) });
+      setStatus("#migration-target-status", "目标验证成功"); await loadMigration();
+    } else if (revokeButton) {
+      const targetId = revokeButton.dataset.migrationRevoke;
+      if (!window.confirm(`确定撤销目标 ${targetId} 吗？`)) return;
+      await request(`/api/v1/admin/migration/targets/${encodeURIComponent(targetId)}/revoke`, { method: "POST", body: JSON.stringify({ reason: "管理员在管理台撤销" }) });
+      setStatus("#migration-target-status", "目标已撤销"); await loadMigration();
+    }
+  } catch (error) { setStatus("#migration-target-status", errorText(error), true); }
+});
+$("#migration-proposal-list").addEventListener("click", async (event) => {
+  const approve = event.target.closest("[data-migration-approve]");
+  const reject = event.target.closest("[data-migration-reject]");
+  try {
+    if (approve) {
+      await request(`/api/v1/admin/migration/proposals/${encodeURIComponent(approve.dataset.migrationApprove)}/approve`, { method: "POST", body: JSON.stringify({ idempotency_key: `admin-approve-${approve.dataset.migrationApprove}` }) });
+      setStatus("#migration-status", "迁移提案已批准"); await loadMigration();
+    } else if (reject) {
+      const reason = window.prompt("请输入拒绝原因：");
+      if (!reason?.trim()) return;
+      await request(`/api/v1/admin/migration/proposals/${encodeURIComponent(reject.dataset.migrationReject)}/reject`, { method: "POST", body: JSON.stringify({ reason: reason.trim() }) });
+      setStatus("#migration-status", "迁移提案已拒绝"); await loadMigration();
+    }
+  } catch (error) { setStatus("#migration-status", errorText(error), true); }
+});
+$("#migration-task-list").addEventListener("click", async (event) => {
+  const cutover = event.target.closest("[data-migration-cutover]");
+  const rollback = event.target.closest("[data-migration-rollback]");
+  const cancel = event.target.closest("[data-migration-cancel]");
+  try {
+    if (cutover) {
+      setStatus("#migration-status", "迁移切换需要目标恢复证明和加密迁移包，当前功能已安全暂停", true);
+    } else if (cancel) {
+      const reason = window.prompt("请输入取消迁移的原因：");
+      if (!reason?.trim()) return;
+      await request(`/api/v1/admin/migration/tasks/${encodeURIComponent(cancel.dataset.migrationCancel)}/cancel`, { method: "POST", body: JSON.stringify({ reason: reason.trim() }) });
+      setStatus("#migration-status", "迁移任务已取消"); await loadMigration();
+    } else if (rollback) {
+      const reason = window.prompt("请输入回滚原因：");
+      if (!reason?.trim()) return;
+      await request(`/api/v1/admin/migration/tasks/${encodeURIComponent(rollback.dataset.migrationRollback)}/rollback`, { method: "POST", body: JSON.stringify({ reason: reason.trim() }) });
+      setStatus("#migration-status", "迁移任务已回滚"); await loadMigration();
+    }
+  } catch (error) { setStatus("#migration-status", errorText(error), true); }
+});
+$("#migration-recovery-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = submitButton(form, event);
+  if (button) button.disabled = true;
+  try {
+    await request("/api/v1/admin/migration/recovery", { method: "POST", body: JSON.stringify({
+      task_id: $("#migration-recovery-task-id").value.trim(),
+      standby_target_id: $("#migration-recovery-standby-target-id").value.trim(),
+      verified_backup_id: $("#migration-recovery-backup-id").value.trim(),
+      manifest_digest: $("#migration-recovery-manifest-digest").value.trim(),
+      restore_report_digest: $("#migration-recovery-restore-report-digest").value.trim(),
+      health_report_digest: $("#migration-recovery-health-report-digest").value.trim(),
+      target_signature: $("#migration-recovery-target-signature").value.trim(),
+      source_failure_evidence: $("#migration-recovery-source-failure-evidence").value.trim(),
+    }) });
+    setStatus("#migration-recovery-status", "紧急恢复已提交，服务器正在准备验证任务");
+    await loadMigration();
+  } catch (error) {
+    setStatus("#migration-recovery-status", errorText(error), true);
+  } finally {
+    if (button) button.disabled = false;
+  }
+});
+$("#migration-policy-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const current = await request("/api/v1/admin/migration/policy");
+    const approvalMode = $("#migration-approval-mode").value;
+    const walletMode = $("#migration-wallet-mode").value;
+    const localWalletEnabled = $("#migration-local-wallet").checked;
+    const enteringPolicyAuto = approvalMode === "policy_auto" && (current.approval_mode !== "policy_auto" || !current.enabled);
+    const enteringLocalWallet = walletMode === "local_wallet_transfer" && localWalletEnabled && (current.wallet_mode !== "local_wallet_transfer" || !current.local_wallet_transfer_enabled);
+    const confirmPolicyAuto = !enteringPolicyAuto || window.confirm("策略自动模式会允许无需逐次人工批准的迁移，必须确认目标、资源和回滚边界均已验证。继续吗？");
+    if (!confirmPolicyAuto) return;
+    const confirmLocalWallet = !enteringLocalWallet || window.confirm("本地钱包迁移会在受保护通道中转移密钥，必须确认已准备二次批准和回滚方案。继续吗？");
+    if (!confirmLocalWallet) return;
+    await request("/api/v1/admin/migration/policy", { method: "PUT", body: JSON.stringify({
+      expected_revision: current.revision,
+      enabled: $("#migration-enabled").checked,
+      approval_mode: approvalMode,
+      rejection_cooldown_seconds: Number($("#migration-cooldown").value) * 86400,
+      wallet_mode: walletMode,
+      local_wallet_transfer_enabled: localWalletEnabled,
+      ...(enteringPolicyAuto ? { confirm_policy_auto: true } : {}),
+      ...(enteringLocalWallet ? { confirm_local_wallet_transfer: true } : {}),
+    }) });
+    setStatus("#migration-status", "迁移策略已保存");
+    await loadMigration();
+  } catch (error) { setStatus("#migration-status", errorText(error), true); }
+});
 $("#admin-message-form").addEventListener("submit", async (event) => { event.preventDefault(); const form = event.currentTarget; const button = submitButton(form, event); if (button) button.disabled = true; try { await request("/api/interactions", { method: "POST", body: JSON.stringify({ channel: "web", counterparty: "web-user", content: $("#admin-message").value.trim(), idempotency_key: crypto.randomUUID() }) }); $("#admin-message").value = ""; setStatus("#message-status", "消息已记录，正在等待认知处理"); await Promise.all([loadMailbox(), loadOverview()]); } catch (error) { setStatus("#message-status", errorText(error), true); } finally { if (button) button.disabled = false; } });
 
 $("#wallet-enqueue-asset").addEventListener("change", updateWalletAddressOptions);

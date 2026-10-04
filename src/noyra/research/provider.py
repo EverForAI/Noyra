@@ -37,21 +37,8 @@ class SearchProviderStore:
             self.secret_cleanup.repair(None, "search", self.secret_dir)
 
     def _ensure_routing_table(self) -> None:
-        with self.database.transaction() as connection:
-            self.database._execute_sql_script(
-                connection,
-                """
-                CREATE TABLE IF NOT EXISTS search_provider_routing (
-                    config_id TEXT PRIMARY KEY REFERENCES search_provider_configs(config_id),
-                    priority INTEGER NOT NULL CHECK(priority BETWEEN 0 AND 1000),
-                    weight INTEGER NOT NULL CHECK(weight BETWEEN 1 AND 1000),
-                    updated_at TEXT NOT NULL,
-                    state_hash TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_search_provider_routing_order
-                    ON search_provider_routing(priority, config_id);
-                """,
-            )
+        with self.database.connection() as connection:
+            self.database.require_persistent_feature(connection, "search_provider_routing")
 
     @staticmethod
     def _routing_hash(config_id: str, priority: int, weight: int, updated_at: str) -> str:

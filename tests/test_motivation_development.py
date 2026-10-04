@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Self
 
 from noyra.cognition import CognitionSettings, MotivationDevelopment, WorldSourceConfig
 from noyra.core import EventStore, SubjectKernel
@@ -26,7 +27,7 @@ from noyra.sleep import SleepEngine, SleepReflectionPlan
 
 
 class MotivationDevelopmentTestCase(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.subject_id = "Noyra-motivation-test"
         self.kernel = SubjectKernel(
@@ -40,17 +41,17 @@ class MotivationDevelopmentTestCase(unittest.IsolatedAsyncioTestCase):
         self.clock_value = "2026-08-14T12:00:00.000+00:00"
         self.events = EventStore(self.kernel.database)
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.kernel.close()
         self.temp_dir.cleanup()
 
-    def test_review_parser_rejects_blob_durable_json(self) -> None:
+    def test_review_parser_rejects_blob_durable_json(self: Self) -> None:
         with self.assertRaises(IntegrityError):
             MotivationDevelopment._review_from_row(
                 {"review_id": "motivation-corrupt", "proposal_json": b"{}"}
             )
 
-    def settings(self, **updates: object) -> CognitionSettings:
+    def settings(self: Self, **updates: object) -> CognitionSettings:
         base = CognitionSettings(
             enabled=True,
             sources=(
@@ -70,7 +71,9 @@ class MotivationDevelopmentTestCase(unittest.IsolatedAsyncioTestCase):
         )
         return base.model_copy(update=updates)
 
-    def gateway(self, payloads: list[Mapping[str, object]]) -> tuple[ModelGateway, FakeProvider]:
+    def gateway(
+        self: Self, payloads: list[Mapping[str, object]]
+    ) -> tuple[ModelGateway, FakeProvider]:
         provider = FakeProvider(
             [
                 ProviderResponse(content=json.dumps(payload), usage=ModelUsage(500, 250))
@@ -87,7 +90,7 @@ class MotivationDevelopmentTestCase(unittest.IsolatedAsyncioTestCase):
             provider,
         )
 
-    def establish_state(self, *, sleep_count: int = 2) -> dict[str, object]:
+    def establish_state(self: Self, *, sleep_count: int = 2) -> dict[str, object]:
         event_ids = tuple(
             self.events.append(
                 self.subject_id, "experience", "test", {"index": index, "theme": "evidence"}
@@ -193,7 +196,7 @@ class MotivationDevelopmentTestCase(unittest.IsolatedAsyncioTestCase):
             },
         }
 
-    async def test_forms_revisable_values_after_repeated_sleep(self) -> None:
+    async def test_forms_revisable_values_after_repeated_sleep(self: Self) -> None:
         ids = self.establish_state()
         gateway, provider = self.gateway([self.proposal(ids)])
         development = MotivationDevelopment(
@@ -213,7 +216,7 @@ class MotivationDevelopmentTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(public["motivation_summary"]["mission"])
         self.assertEqual(development.verify_integrity()["value_profiles"], 2)
 
-    async def test_forms_mission_only_from_existing_values_and_three_events(self) -> None:
+    async def test_forms_mission_only_from_existing_values_and_three_events(self: Self) -> None:
         ids = self.establish_state()
         gateway, _ = self.gateway([self.proposal(ids)])
         development = MotivationDevelopment(
@@ -255,7 +258,7 @@ class MotivationDevelopmentTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(current.status, "candidate")
         self.assertEqual(current.title, "Explore continuity responsibly")
 
-    async def test_can_form_values_and_mission_atomically_with_value_keys(self) -> None:
+    async def test_can_form_values_and_mission_atomically_with_value_keys(self: Self) -> None:
         ids = self.establish_state()
         event_ids = ids["event_ids"]
         assert isinstance(event_ids, tuple)
@@ -285,7 +288,7 @@ class MotivationDevelopmentTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(development.values()), 2)
         self.assertEqual(len(development.missions()), 1)
 
-    async def test_rejects_premature_or_forged_mission_without_partial_state(self) -> None:
+    async def test_rejects_premature_or_forged_mission_without_partial_state(self: Self) -> None:
         ids = self.establish_state()
         event_ids = ids["event_ids"]
         assert isinstance(event_ids, tuple)
@@ -316,7 +319,7 @@ class MotivationDevelopmentTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(development.values(), [])
         self.assertEqual(development.missions(), [])
 
-    async def test_requires_repeated_sleep_before_any_development(self) -> None:
+    async def test_requires_repeated_sleep_before_any_development(self: Self) -> None:
         ids = self.establish_state(sleep_count=1)
         gateway, provider = self.gateway([self.proposal(ids)])
         development = MotivationDevelopment(
@@ -329,7 +332,7 @@ class MotivationDevelopmentTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await development.run_due())
         self.assertEqual(provider.requests, [])
 
-    async def test_integrity_and_append_only_histories(self) -> None:
+    async def test_integrity_and_append_only_histories(self: Self) -> None:
         ids = self.establish_state()
         development = MotivationDevelopment(
             self.kernel.database,
@@ -354,7 +357,7 @@ class MotivationDevelopmentTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(IntegrityError):
             development.verify_integrity()
 
-    def test_schema_version_eighteen(self) -> None:
+    def test_schema_version_eighteen(self: Self) -> None:
         with self.kernel.database.connection() as connection:
             version = connection.execute(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"

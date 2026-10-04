@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from typing import Self
 from unittest.mock import patch
 
 from noyra.core import Database, IdentityStore, TrainingStore
@@ -15,7 +16,7 @@ from noyra.core.types import content_hash
 
 
 class TrainingWorkspaceIsolationTestCase(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self: Self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.database = Database(self.root / "noyra.sqlite3")
@@ -33,17 +34,17 @@ class TrainingWorkspaceIsolationTestCase(unittest.TestCase):
         self.subject_root.mkdir(parents=True)
         self.other_subject_root.mkdir(parents=True)
 
-    def tearDown(self) -> None:
+    def tearDown(self: Self) -> None:
         self.temporary.cleanup()
 
-    def export(self, name: str = "training.zip") -> Path:
+    def export(self: Self, name: str = "training.zip") -> Path:
         target = self.root / "exports" / name
         TrainingDatasetExporter(self.database, workspace_root=self.workspace_root).export_to_path(
             self.subject_id, actor="test", target=target
         )
         return target
 
-    def test_export_starts_at_subject_root_and_records_exact_path_policy(self) -> None:
+    def test_export_starts_at_subject_root_and_records_exact_path_policy(self: Self) -> None:
         (self.workspace_root / "shared.md").write_text("shared-root-secret", encoding="utf-8")
         (self.subject_root / "own.md").write_text("subject-a", encoding="utf-8")
         (self.other_subject_root / "other.md").write_text("subject-b-secret", encoding="utf-8")
@@ -70,7 +71,7 @@ class TrainingWorkspaceIsolationTestCase(unittest.TestCase):
         )
         self.assertEqual(set(manifest["workspace_files"]), {"workspace/own.md"})
 
-    def test_foreign_directory_link_is_never_followed(self) -> None:
+    def test_foreign_directory_link_is_never_followed(self: Self) -> None:
         (self.subject_root / "own.md").write_text("subject-a", encoding="utf-8")
         (self.other_subject_root / "other.md").write_text("subject-b-secret", encoding="utf-8")
         link = self.subject_root / "foreign"
@@ -86,7 +87,7 @@ class TrainingWorkspaceIsolationTestCase(unittest.TestCase):
         self.assertNotIn("workspace/foreign/other.md", names)
         self.assertNotIn(b"subject-b-secret", content)
 
-    def test_subject_root_link_fails_closed(self) -> None:
+    def test_subject_root_link_fails_closed(self: Self) -> None:
         self.subject_root.rmdir()
         (self.other_subject_root / "other.md").write_text("subject-b-secret", encoding="utf-8")
         self._make_directory_link(self.subject_root, self.other_subject_root)
@@ -98,7 +99,7 @@ class TrainingWorkspaceIsolationTestCase(unittest.TestCase):
             self._remove_directory_link(self.subject_root)
         self.assertFalse((self.root / "exports" / "subject-link.zip").exists())
 
-    def test_compatibility_export_preserves_workspace_root_link_rejection(self) -> None:
+    def test_compatibility_export_preserves_workspace_root_link_rejection(self: Self) -> None:
         linked_root = self.root / "workspace-link"
         self._make_directory_link(linked_root, self.workspace_root)
         try:
@@ -112,7 +113,7 @@ class TrainingWorkspaceIsolationTestCase(unittest.TestCase):
             self._remove_directory_link(linked_root)
         self.assertFalse(list((self.root / "exports" / "work").glob("*.work")))
 
-    def test_rename_race_cannot_substitute_foreign_bytes(self) -> None:
+    def test_rename_race_cannot_substitute_foreign_bytes(self: Self) -> None:
         own = (self.subject_root / "own.md").resolve()
         foreign = (self.other_subject_root / "foreign.md").resolve()
         displaced = (self.subject_root / ".own.md.displaced").resolve()
@@ -154,11 +155,11 @@ class TrainingWorkspaceIsolationTestCase(unittest.TestCase):
             content = b"\n".join(archive.read(name) for name in archive.namelist())
         self.assertNotIn(b"subject-b-secret", content)
 
-    def test_rename_race_with_noncanonical_workspace_spelling(self) -> None:
+    def test_rename_race_with_noncanonical_workspace_spelling(self: Self) -> None:
         self.subject_root = self.subject_root / ".." / self.subject_storage_key
         self.test_rename_race_cannot_substitute_foreign_bytes()
 
-    def _make_directory_link(self, link: Path, target: Path) -> None:
+    def _make_directory_link(self: Self, link: Path, target: Path) -> None:
         if os.name != "nt":
             link.symlink_to(target, target_is_directory=True)
             return

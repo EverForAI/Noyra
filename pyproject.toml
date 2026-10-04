@@ -38,7 +38,7 @@ cloud = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-noyra = ["web/*.html", "web/*.css", "web/*.js", "web/assets/*"]
+noyra = ["py.typed", "web/*.html", "web/*.css", "web/*.js", "web/assets/*"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"

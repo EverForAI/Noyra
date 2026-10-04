@@ -1,0 +1,21 @@
+[Unit]
+Description=Noyra fixed target activation bridge
+After=noyra-migration-agent.service
+RequiresMountsFor=/var/lib/noyra
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/noyra/current/.venv/bin/python /opt/noyra/current/scripts/noyra-target-activation-runner.py
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/noyra /var/lib/noyra/migration-agent /var/lib/noyra/migration/target-activation/state
+ReadWritePaths=/etc/systemd/system/noyra.service.d
+UMask=0077

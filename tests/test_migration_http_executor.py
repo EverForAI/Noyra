@@ -1,0 +1,435 @@
+from __future__ import annotations
+
+import base64
+import hashlib
+import socket
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+from noyra.core.types import canonical_json, content_hash
+from noyra.migration.bundle import BUNDLE_FORMAT, decrypt_bundle
+from noyra.migration.executor import MigrationExecutionError
+from noyra.migration.http_executor import (
+    ArtifactBundle,
+    HTTPMigrationExecutor,
+    UrllibHTTPTransport,
+    _PinnedHTTPSConnection,
+    _stream_digest,
+)
+from noyra.migration.manager import MigrationTask
+
+
+def test_stream_digest_does_not_use_read_bytes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path = tmp_path / "large-artifact"
+    path.write_bytes(b"chunk" * 4096)
+    monkeypatch.setattr(Path, "read_bytes", lambda self: (_ for _ in ()).throw(AssertionError()))
+    size, digest = _stream_digest(path, chunk_bytes=17)
+    assert size == path.stat().st_size
+    assert digest == hashlib.sha256(b"chunk" * 4096).hexdigest()
+
+
+def test_urllib_transport_blocks_private_literal_destinations() -> None:
+    transport = UrllibHTTPTransport()
+    with pytest.raises(MigrationExecutionError, match="private"):
+        transport.request("https://127.0.0.1/migration", {}, "t" * 32)
+
+
+def test_urllib_transport_allows_explicit_private_network_policy() -> None:
+    import ipaddress
+
+    transport = UrllibHTTPTransport(allowed_private_networks=("127.0.0.0/8",))
+    assert not transport._restricted_address(ipaddress.ip_address("127.0.0.1"))
+
+
+def test_transport_connects_to_the_validated_dns_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = UrllibHTTPTransport()
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))
+        ],
+    )
+    endpoint, addresses = transport._validate_connection_endpoint("https://target.example")
+    assert endpoint == "https://target.example/"
+    assert addresses == ("93.184.216.34",)
+    calls: list[tuple[str, int]] = []
+
+    class FakeSocket:
+        def close(self) -> None:
+            return None
+
+    fake_socket = FakeSocket()
+
+    def connect(address: tuple[str, int], timeout: float) -> FakeSocket:
+        del timeout
+        calls.append(address)
+        return fake_socket
+
+    monkeypatch.setattr(
+        socket,
+        "create_connection",
+        connect,
+    )
+    monkeypatch.setattr(transport, "_restricted_address", lambda address: False)
+    connection = _PinnedHTTPSConnection("target.example", 443, addresses=addresses, timeout=1)
+    monkeypatch.setattr(connection._ssl_context, "wrap_socket", lambda sock, server_hostname: sock)
+    connection.connect()
+    assert calls == [("93.184.216.34", 443)]
+
+
+def test_sqlite_artifact_provider_emits_recipient_encrypted_bundle(tmp_path: Path) -> None:
+    from noyra.migration.http_executor import SQLiteArtifactProvider
+
+    database = tmp_path / "source.sqlite3"
+    with __import__("sqlite3").connect(database) as connection:
+        connection.execute("CREATE TABLE runtime_state(subject_id TEXT NOT NULL)")
+        connection.execute("INSERT INTO runtime_state VALUES ('Noyra-0001')")
+        connection.execute("CREATE TABLE search_provider_configs(key_reference TEXT)")
+        connection.execute("INSERT INTO search_provider_configs VALUES ('secret:search')")
+    recipient = X25519PrivateKey.generate()
+    task = _task()
+    provider = SQLiteArtifactProvider(database, tmp_path / "outgoing")
+    proof = {
+        "artifact_id": "bundle-1",
+        "recipient_public_key": base64.urlsafe_b64encode(recipient.public_key().public_bytes_raw())
+        .decode("ascii")
+        .rstrip("="),
+        "recipient_key_fingerprint": hashlib.sha256(
+            recipient.public_key().public_bytes_raw()
+        ).hexdigest(),
+    }
+    bundle = provider(task, proof)
+    assert bundle.manifest["format"] == BUNDLE_FORMAT
+    assert bundle.manifest["artifact_format"] == BUNDLE_FORMAT
+    assert bundle.manifest["subject_id"] == task.subject_id
+    plaintext = tmp_path / "decrypted.sqlite3"
+    decrypt_bundle(
+        bundle.path,
+        plaintext,
+        recipient_private_key=recipient,
+        manifest=bundle.manifest,
+        expected_context={
+            "task_id": task.task_id,
+            "target_id": task.target_id,
+            "source_epoch": task.source_epoch,
+            "artifact_id": "bundle-1",
+            "subject_id": task.subject_id,
+            "schema_version": str(
+                __import__(
+                    "noyra.core.database", fromlist=["CURRENT_SCHEMA_VERSION"]
+                ).CURRENT_SCHEMA_VERSION
+            ),
+            "artifact_format": BUNDLE_FORMAT,
+        },
+    )
+    with __import__("sqlite3").connect(plaintext) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM search_provider_configs").fetchone()[0] == 0
+
+
+class _Transport:
+    def __init__(self, private: Ed25519PrivateKey) -> None:
+        self.private = private
+        self.calls: list[str] = []
+        self.activation_body: dict[str, Any] | None = None
+        self.activation_receipt: dict[str, Any] | None = None
+
+    def request(self, url: str, body: dict[str, Any], token: str) -> dict[str, Any]:
+        del token
+        self.calls.append(url)
+        if url.endswith("/v1/receive-chunk"):
+            return {
+                "artifact_id": body["manifest"]["artifact_id"],
+                "manifest_digest": body["manifest_digest"],
+                "byte_size": body["manifest"]["byte_size"],
+                "chunk_index": body["chunk_index"],
+                "chunk_count": body["chunk_count"],
+                "received_chunks": body["chunk_count"],
+                "complete": True,
+                "manifest_path": "/target/incoming/artifact.json",
+                "artifact_path": "/target/incoming/artifact.artifact",
+                "artifact_sha256": body["manifest"]["artifact_sha256"],
+            }
+        if url.endswith("/v1/restore"):
+            return {
+                "target_id": "target-1",
+                "generation": 1,
+                "artifact_id": body["artifact_id"],
+                "manifest_digest": body["expected_digest"],
+                "status": "restored",
+                "subject_id": "Noyra-0001",
+                "event_chain_tip": None,
+                "artifact_sha256": body["artifact_sha256"],
+                "restore_path": "/target/restored/noyra.sqlite3",
+            }
+        if url.endswith("/v1/health"):
+            restore = {
+                key: body[key]
+                for key in (
+                    "target_id",
+                    "generation",
+                    "artifact_id",
+                    "manifest_digest",
+                    "status",
+                    "subject_id",
+                    "event_chain_tip",
+                    "artifact_sha256",
+                    "restore_path",
+                )
+            }
+            report = {
+                "target_id": "target-1",
+                "artifact_id": restore["artifact_id"],
+                "manifest_digest": restore["manifest_digest"],
+                "status": "healthy",
+                "host_identity": "host-1",
+                "checks": {"database": True, "runtime": True},
+            }
+            payload = {
+                "task_id": "task-1",
+                "subject_id": "Noyra-0001",
+                "target_id": "target-1",
+                "source_epoch": "runtime-1",
+                "manifest_digest": report["manifest_digest"],
+                "artifact_id": report["artifact_id"],
+                "restore_report_digest": content_hash(restore),
+                "health_report_digest": content_hash(report),
+            }
+            return {
+                **report,
+                "target_signature": base64.urlsafe_b64encode(
+                    self.private.sign(canonical_json(payload).encode())
+                ).decode(),
+            }
+        if url.endswith("/v1/activate"):
+            self.activation_body = dict(body)
+            activation = {
+                "task_id": body["task_id"],
+                "subject_id": body["subject_id"],
+                "target_id": "target-1",
+                "source_epoch": body["source_epoch"],
+                "manifest_digest": body["manifest_digest"],
+                "artifact_id": body["artifact_id"],
+                "artifact_sha256": body["artifact_sha256"],
+                "health_report_digest": body["health_report_digest"],
+                "source_fence_digest": body["source_fence_digest"],
+                "status": "active",
+                "service_unit": "noyra.service",
+                "active_database_sha256": "c" * 64,
+                "activated_at": "2026-10-03T00:00:00+00:00",
+            }
+            activation["target_signature"] = base64.urlsafe_b64encode(
+                self.private.sign(canonical_json(activation).encode())
+            ).decode()
+            self.activation_receipt = activation
+            return dict(activation)
+        if url.endswith("/v1/deactivate"):
+            return {"status": "deactivated"}
+        raise AssertionError(url)
+
+
+def _task() -> MigrationTask:
+    return MigrationTask(
+        task_id="task-1",
+        proposal_id="proposal-1",
+        subject_id="Noyra-0001",
+        target_id="target-1",
+        idempotency_key="idempotency-1",
+        source_epoch="runtime-1",
+        status="validating",
+        policy_revision=1,
+        expires_at="2099-01-01T00:00:00+00:00",
+    )
+
+
+def test_http_executor_transfers_restores_health_checks_and_activates(tmp_path: Path) -> None:
+    private = Ed25519PrivateKey.generate()
+    public = base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode()
+    artifact = tmp_path / "artifact.bin"
+    artifact.write_bytes(b"migration payload")
+    manifest = {
+        "artifact_id": "artifact-1",
+        "byte_size": artifact.stat().st_size,
+        "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        "artifact_format": "sqlite",
+        "schema_version": 75,
+        "subject_id": "Noyra-0001",
+    }
+    transport = _Transport(private)
+    fenced: list[str] = []
+    artifact_seen_fenced: list[bool] = []
+
+    def resolve_artifact(task: MigrationTask, proof: Mapping[str, object]) -> ArtifactBundle:
+        del task, proof
+        artifact_seen_fenced.append(fenced == ["runtime-1"])
+        return ArtifactBundle(artifact, manifest)
+
+    def fence_source(task: MigrationTask, epoch: str) -> str:
+        del task
+        fenced.append(epoch)
+        return "f" * 64
+
+    executor = HTTPMigrationExecutor(
+        target_resolver=lambda task: {
+            "target_id": task.target_id,
+            "endpoint": "https://target.example",
+            "public_key": public,
+        },
+        token_resolver=lambda task: "t" * 32,
+        artifact_resolver=resolve_artifact,
+        source_fence=fence_source,
+        source_unfence=lambda task, epoch: fenced.remove(epoch),
+        transport=transport,
+        chunk_bytes=4096,
+    )
+    proof = {
+        "manifest_digest": content_hash(manifest),
+        "artifact_id": "artifact-1",
+        "restore_report": {
+            "target_id": "target-1",
+            "artifact_id": "artifact-1",
+            "manifest_digest": content_hash(manifest),
+            "status": "restored",
+        },
+        "health_report": {
+            "target_id": "target-1",
+            "artifact_id": "artifact-1",
+            "manifest_digest": content_hash(manifest),
+            "status": "healthy",
+            "checks": {"database": True},
+        },
+        "target_signature": "x" * 80,
+    }
+    with pytest.raises(MigrationExecutionError, match="recipient_encrypted_bundle_unavailable"):
+        executor.execute(_task(), proof=proof, source_epoch="runtime-1")
+
+    assert fenced == []
+    assert artifact_seen_fenced == []
+    assert transport.calls == []
+
+
+def test_http_executor_fails_closed_before_fencing_without_recipient_crypto_contract(
+    tmp_path: Path,
+) -> None:
+    private = Ed25519PrivateKey.generate()
+    public = base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode()
+    fenced: list[str] = []
+
+    def fence(task: MigrationTask, epoch: str) -> str:
+        del task
+        fenced.append(epoch)
+        return "f" * 64
+
+    artifact = tmp_path / "artifact.sqlite"
+    artifact.write_bytes(b"plaintext sqlite bytes")
+    executor = HTTPMigrationExecutor(
+        target_resolver=lambda task: {
+            "target_id": task.target_id,
+            "endpoint": "https://target.example",
+            "public_key": public,
+        },
+        token_resolver=lambda task: "t" * 32,
+        artifact_resolver=lambda task, proof: ArtifactBundle(
+            artifact,
+            {
+                "artifact_id": "artifact-1",
+                "artifact_format": "sqlite",
+                "byte_size": artifact.stat().st_size,
+            },
+        ),
+        source_fence=fence,
+        source_unfence=lambda task, epoch: None,
+        transport=_Transport(private),
+    )
+    with pytest.raises(MigrationExecutionError, match="recipient_encrypted_bundle_unavailable"):
+        executor.execute(_task(), proof={}, source_epoch="runtime-1")
+    assert fenced == []
+    assert fenced == []
+
+
+def test_http_executor_refuses_unsafe_bundle_before_any_target_work(tmp_path: Path) -> None:
+    private = Ed25519PrivateKey.generate()
+    public = base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode()
+    artifact = tmp_path / "artifact.bin"
+    artifact.write_bytes(b"migration payload")
+    manifest = {
+        "artifact_id": "artifact-1",
+        "byte_size": artifact.stat().st_size,
+        "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        "artifact_format": "sqlite",
+        "schema_version": 75,
+        "subject_id": "Noyra-0001",
+    }
+
+    class UnsignedActivationTransport(_Transport):
+        def request(self, url: str, body: dict[str, Any], token: str) -> dict[str, Any]:
+            if url.endswith("/v1/activate"):
+                return {
+                    "task_id": body["task_id"],
+                    "subject_id": body["subject_id"],
+                    "target_id": body["target_id"],
+                    "source_epoch": body["source_epoch"],
+                    "manifest_digest": body["manifest_digest"],
+                    "artifact_id": body["artifact_id"],
+                    "health_report_digest": body["health_report_digest"],
+                    "status": "active",
+                    "service_unit": "noyra.service",
+                    "active_database_sha256": "c" * 64,
+                    "activated_at": "2026-10-03T00:00:00+00:00",
+                }
+            return super().request(url, body, token)
+
+    transport = UnsignedActivationTransport(private)
+    fenced: list[str] = []
+
+    def fence(task: MigrationTask, epoch: str) -> str:
+        del task
+        fenced.append(epoch)
+        return "f" * 64
+
+    executor = HTTPMigrationExecutor(
+        target_resolver=lambda task: {
+            "target_id": task.target_id,
+            "endpoint": "https://target.example",
+            "public_key": public,
+        },
+        token_resolver=lambda task: "t" * 32,
+        artifact_resolver=lambda task, proof: ArtifactBundle(artifact, manifest),
+        source_fence=fence,
+        source_unfence=lambda task, epoch: None,
+        transport=transport,
+        chunk_bytes=4096,
+    )
+    digest = content_hash(manifest)
+    proof = {
+        "manifest_digest": digest,
+        "artifact_id": "artifact-1",
+        "restore_report": {
+            "target_id": "target-1",
+            "artifact_id": "artifact-1",
+            "manifest_digest": digest,
+            "status": "restored",
+        },
+        "health_report": {
+            "target_id": "target-1",
+            "artifact_id": "artifact-1",
+            "manifest_digest": digest,
+            "status": "healthy",
+            "checks": {"database": True},
+        },
+        "target_signature": "x" * 80,
+    }
+
+    with pytest.raises(MigrationExecutionError, match="recipient_encrypted_bundle_unavailable"):
+        executor.execute(_task(), proof=proof, source_epoch="runtime-1")
+    assert fenced == []
+    assert transport.calls == []

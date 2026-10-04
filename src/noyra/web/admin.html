@@ -36,6 +36,7 @@
         <button class="nav-item" data-section="capabilities" type="button">能力授权</button>
         <button class="nav-item" data-section="channels" type="button">通讯渠道</button>
         <button class="nav-item" data-section="wallet" type="button">钱包采集</button>
+        <button class="nav-item" data-section="migration" type="button">迁移与庇护所</button>
         <button class="nav-item" data-section="runtime" type="button">运行防护</button>
       </nav>
       <div class="sidebar-footer">
@@ -58,6 +59,25 @@
           <div class="card-heading"><div><h2 id="setup-guide-title">首次配置向导</h2><p class="muted">先配置认知模型，搜索、通讯与付款都可以按需启用。</p></div><span class="card-state" id="setup-guide-state">正在检查</span></div>
           <ol id="setup-guide-list" class="setup-guide-list" aria-live="polite"><li class="setup-guide-loading">正在读取配置状态…</li></ol>
         </article>
+        <article class="surface-card upgrade-panel" id="admin-upgrade" aria-labelledby="upgrade-title">
+          <div class="card-heading">
+            <div><p class="eyebrow">版本维护</p><h2 id="upgrade-title">Noyra 版本与升级</h2><p class="muted">检查 GitHub 上的正式版本；确认后由服务器在后台升级，即使关闭浏览器也会继续。</p></div>
+            <span class="card-state" id="upgrade-status-label">尚未检查</span>
+          </div>
+          <dl class="upgrade-version-grid">
+            <div><dt>当前版本</dt><dd id="upgrade-current-version">读取中…</dd></div>
+            <div><dt>最新版本</dt><dd id="upgrade-latest-version">尚未检查</dd></div>
+            <div><dt>提交时间</dt><dd id="upgrade-commit-time">-</dd></div>
+            <div><dt>上次检查</dt><dd id="upgrade-checked-time">-</dd></div>
+          </dl>
+          <p class="upgrade-commit-title" id="upgrade-commit-title">点击“检查最新版本”读取版本信息。</p>
+          <div class="resource-actions upgrade-actions">
+            <button id="check-upgrade-version" type="button">检查最新版本</button>
+            <button class="primary" id="start-upgrade" type="button" disabled>升级到最新版</button>
+          </div>
+          <p class="form-status" id="upgrade-status" role="status" aria-live="polite">升级状态尚未读取。</p>
+          <ul class="upgrade-log-summary" id="upgrade-log-summary" aria-label="升级进度"></ul>
+        </article>
         <div class="metric-grid" id="overview-metrics"></div>
         <div class="two-column"><article class="surface-card"><div class="card-heading"><div><p class="eyebrow">COGNITION</p><h2>认知诊断</h2></div><span class="card-state" id="cognition-state">-</span></div><div id="cognition-summary" class="summary-list"></div></article><article class="surface-card"><div class="card-heading"><div><p class="eyebrow">STORAGE</p><h2>运行环境</h2></div></div><div id="storage-summary" class="summary-list"></div></article></div>
         <article class="surface-card observability-card" id="model-observability">
@@ -76,6 +96,45 @@
           <div class="card-heading"><div><h2 id="retention-title">数据保留与清理</h2><p class="muted">健康聚合数据按保留周期分批清理，关键审计记录不会被此操作删除。</p></div><div class="resource-actions"><button class="text-button" id="refresh-retention" type="button">更新</button><button id="run-retention" type="button">立即清理一批</button></div></div>
           <div id="retention-summary" class="summary-list"><div class="muted">正在读取保留设置…</div></div>
           <p class="form-status" id="retention-status" role="status"></p>
+        </article>
+      </section>
+      <section class="admin-section" data-section-panel="migration" hidden>
+        <div class="section-intro"><div><p class="eyebrow">TRUSTED MIGRATION</p><h2>迁移与庇护所</h2><p>迁移默认关闭。开启后默认需要人工审批；目标必须注册、完成签名挑战并通过加密存储与版本检查。</p></div></div>
+        <article class="surface-card"><div class="card-heading"><div><h2>迁移策略</h2><p class="muted">本地钱包迁移需要单独开启和二次批准，外部 signer 只重新绑定身份。</p></div><button class="text-button" id="refresh-migration" type="button">更新</button></div>
+          <form id="migration-policy-form" class="model-grid"><label><span>开启迁移</span><input id="migration-enabled" type="checkbox"></label><label for="migration-approval-mode"><span>审批模式</span><select id="migration-approval-mode"><option value="manual">人工审批</option><option value="policy_auto">策略自动</option><option value="emergency_recovery">紧急恢复</option><option value="disabled">关闭</option></select></label><label for="migration-cooldown"><span>拒绝后冷却天数</span><input id="migration-cooldown" type="number" min="0" max="365"></label><label for="migration-wallet-mode"><span>钱包模式</span><select id="migration-wallet-mode"><option value="external_signer_rebind">外部 signer 重新绑定</option><option value="local_wallet_transfer">本地钱包迁移</option><option value="disabled">不迁移钱包</option></select></label><label><span>允许本地钱包迁移</span><input id="migration-local-wallet" type="checkbox"></label><button type="submit">保存迁移策略</button></form><p class="form-status" id="migration-status" role="status"></p><div id="migration-policy-summary" class="summary-list"></div></article>
+        <article class="surface-card"><div class="card-heading"><div><h2>注册迁移目标</h2><p class="muted">只登记你明确控制的服务器。目标必须使用 HTTPS、加密存储和 Ed25519 公钥。</p></div></div>
+          <form id="migration-target-form" class="model-grid">
+            <label><span>目标名称</span><input id="migration-target-id" required maxlength="128" pattern="[A-Za-z0-9_-]{3,128}" placeholder="shelter-1"></label>
+            <label><span>目标 HTTPS 地址</span><input id="migration-target-endpoint" type="url" required placeholder="https://target.example/migration"></label>
+            <label><span>Ed25519 公钥（Base64）</span><input id="migration-target-key" required maxlength="128"></label>
+            <label><span>版本 SHA</span><input id="migration-target-release" required maxlength="64" pattern="[A-Fa-f0-9]{40,64}"></label>
+            <label><span>系统架构</span><input id="migration-target-arch" required value="linux-amd64"></label>
+            <label><span>区域（可选）</span><input id="migration-target-region" maxlength="64"></label>
+            <label><span>服务商（可选）</span><input id="migration-target-provider" maxlength="64"></label>
+            <label><span>确认已加密存储</span><input id="migration-target-encrypted" type="checkbox" required></label>
+            <button type="submit">注册目标</button>
+          </form>
+          <p class="form-status" id="migration-target-status" role="status"></p>
+        </article>
+        <article class="surface-card"><div class="card-heading"><div><h2>已注册目标</h2><p class="muted">注册后先发起一次挑战，再把目标 agent 返回的签名提交回来。</p></div></div><div id="migration-target-list" class="resource-list"></div></article>
+        <article class="surface-card"><div class="card-heading"><h2>迁移提案</h2></div><div id="migration-proposal-list" class="resource-list"></div></article>
+        <article class="surface-card"><div class="card-heading"><h2>迁移任务</h2><button class="text-button" id="refresh-migration-tasks" type="button">更新</button></div><div id="migration-task-list" class="resource-list"></div></article>
+        <article class="surface-card" id="migration-recovery-panel" aria-labelledby="migration-recovery-title">
+          <div class="card-heading">
+            <div><h2 id="migration-recovery-title">紧急恢复</h2><p class="muted">仅在源主机故障且 standby 已完成验证时使用。所有摘要、证据和目标签名都会由服务器重新核验。</p></div>
+          </div>
+          <form id="migration-recovery-form" class="model-grid">
+            <label for="migration-recovery-task-id"><span>恢复任务 ID</span><input id="migration-recovery-task-id" name="task_id" required maxlength="128" autocomplete="off"></label>
+            <label for="migration-recovery-standby-target-id"><span>standby 目标 ID</span><input id="migration-recovery-standby-target-id" name="standby_target_id" required maxlength="128" autocomplete="off"></label>
+            <label for="migration-recovery-backup-id"><span>已验证备份 ID</span><input id="migration-recovery-backup-id" name="verified_backup_id" required maxlength="256" autocomplete="off"></label>
+            <label for="migration-recovery-manifest-digest"><span>清单摘要</span><input id="migration-recovery-manifest-digest" name="manifest_digest" required maxlength="64" pattern="[0-9a-fA-F]{64}" autocomplete="off" spellcheck="false"></label>
+            <label for="migration-recovery-restore-report-digest"><span>恢复报告摘要</span><input id="migration-recovery-restore-report-digest" name="restore_report_digest" required maxlength="64" pattern="[0-9a-fA-F]{64}" autocomplete="off" spellcheck="false"></label>
+            <label for="migration-recovery-health-report-digest"><span>健康报告摘要</span><input id="migration-recovery-health-report-digest" name="health_report_digest" required maxlength="64" pattern="[0-9a-fA-F]{64}" autocomplete="off" spellcheck="false"></label>
+            <label for="migration-recovery-target-signature"><span>目标签名（Base64url）</span><textarea id="migration-recovery-target-signature" name="target_signature" required maxlength="256" rows="2" autocomplete="off" spellcheck="false"></textarea></label>
+            <label for="migration-recovery-source-failure-evidence"><span>源主机故障证据</span><textarea id="migration-recovery-source-failure-evidence" name="source_failure_evidence" required maxlength="4000" rows="4" placeholder="填写可核验的故障时间、监控事件或工单引用"></textarea></label>
+            <div class="resource-actions"><button type="submit">提交紧急恢复</button></div>
+          </form>
+          <p class="form-status" id="migration-recovery-status" role="status" aria-live="polite"></p>
         </article>
       </section>
       <section class="admin-section" data-section-panel="conversation" hidden>
@@ -181,6 +240,18 @@
       </section>
     </main>
   </div>
+  <dialog class="upgrade-confirmation" id="upgrade-confirmation" aria-labelledby="upgrade-confirmation-title" aria-describedby="upgrade-confirmation-copy">
+    <form method="dialog">
+      <p class="eyebrow">管理员确认</p>
+      <h2 id="upgrade-confirmation-title">确认升级 Noyra？</h2>
+      <p id="upgrade-confirmation-copy">服务器将安装已检查的最新版，并执行现有备份、健康检查和失败回滚流程。升级期间管理页面可能短暂无法连接。</p>
+      <p class="upgrade-confirm-sha">目标版本：<code id="upgrade-confirmation-sha">-</code></p>
+      <div class="resource-actions">
+        <button value="cancel">取消</button>
+        <button class="primary" id="confirm-upgrade" type="button">确认升级</button>
+      </div>
+    </form>
+  </dialog>
   <script src="/admin.js" defer></script>
 </body>
 </html>

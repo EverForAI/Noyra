@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Self
 
 from noyra.core import EventStore, SubjectKernel
 from noyra.core.types import content_hash
@@ -16,7 +17,7 @@ from noyra.mind import (
 
 
 class AffectPolicyTestCase(unittest.TestCase):
-    def test_affect_changes_multiple_bounded_decision_dimensions(self) -> None:
+    def test_affect_changes_multiple_bounded_decision_dimensions(self: Self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             kernel = SubjectKernel(
                 Path(directory) / "noyra.sqlite3",

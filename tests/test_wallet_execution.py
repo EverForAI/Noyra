@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from sqlite3 import IntegrityError as SQLiteIntegrityError
-from typing import Any
+from typing import Any, Self
 
 import httpx
 import pytest
@@ -202,6 +202,36 @@ def test_https_signer_uses_only_fixed_transfer_and_receipt_routes() -> None:
     assert "private_key" not in json.dumps(calls)
 
 
+def test_https_signer_rejects_transfer_from_a_different_bound_address() -> None:
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200)))
+    signer = HTTPSWalletSigner(
+        "https://signer.example",
+        signer_id="signer",
+        wallet_address="0xA111111111111111111111111111111111111111",
+        client=client,
+    )
+    transfer = EVMTransferAdapter().build(
+        WalletTransferIntent(
+            order_id="order",
+            subject_id="subject",
+            network_id="network",
+            asset_id="asset",
+            asset_type="native",
+            source_address="0xB111111111111111111111111111111111111111",
+            recipient_address="0xC111111111111111111111111111111111111111",
+            amount="1",
+            chain_id=1,
+            nonce=0,
+            gas_limit=21_000,
+            max_fee_per_gas="1",
+        )
+    )
+    from noyra.wallet.execution import WalletSignerError
+
+    with pytest.raises(WalletSignerError, match="source address"):
+        signer.sign_and_broadcast(transfer, request_id="order:attempt:1")
+
+
 def test_https_signer_rejects_insecure_or_credentialed_endpoint() -> None:
     client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
     for endpoint in (
@@ -318,7 +348,7 @@ def test_schema_55_migrates_execution_tables_and_reopens_idempotently(tmp_path: 
 
 def test_signer_exception_is_classified_without_persisting_secret(tmp_path: Path) -> None:
     class ExplodingSigner(MockSigner):
-        def sign_and_broadcast(self, transfer: Any, *, request_id: str) -> Any:
+        def sign_and_broadcast(self: Self, transfer: Any, *, request_id: str) -> Any:
             del transfer, request_id
             raise RuntimeError("private-key-material-must-not-leak")
 
@@ -371,7 +401,7 @@ def test_untrusted_signer_error_text_does_not_select_persisted_reason_code() -> 
 
 def test_receipt_lookup_failure_is_reconcileable_rpc_state(tmp_path: Path) -> None:
     class UnavailableReceiptSigner(MockSigner):
-        def get_receipt(self, tx_hash: str, *, chain_id: int) -> Any:
+        def get_receipt(self: Self, tx_hash: str, *, chain_id: int) -> Any:
             del tx_hash, chain_id
             from noyra.wallet.execution import WalletExecutionError
 
@@ -388,7 +418,7 @@ def test_receipt_lookup_failure_is_reconcileable_rpc_state(tmp_path: Path) -> No
 
 def test_unclassified_receipt_failure_requires_manual_reconciliation(tmp_path: Path) -> None:
     class BrokenReceiptSigner(MockSigner):
-        def get_receipt(self, tx_hash: str, *, chain_id: int) -> Any:
+        def get_receipt(self: Self, tx_hash: str, *, chain_id: int) -> Any:
             del tx_hash, chain_id
             raise RuntimeError("unclassified internal failure")
 
@@ -514,11 +544,11 @@ def test_transfer_adapter_rejects_arbitrary_transaction_shape() -> None:
 
 
 class _BadResponseSigner(MockSigner):
-    def sign_and_broadcast(self, transfer: Any, *, request_id: str) -> Any:
+    def sign_and_broadcast(self: Self, transfer: Any, *, request_id: str) -> Any:
         result = super().sign_and_broadcast(transfer, request_id=request_id)
         return type(result)(result.tx_hash, result.chain_id + 1, result.nonce, result.accepted_at)
 
-    def get_receipt(self, tx_hash: str, *, chain_id: int) -> Any:
+    def get_receipt(self: Self, tx_hash: str, *, chain_id: int) -> Any:
         return type(
             "BadReceipt",
             (),
@@ -633,28 +663,28 @@ def test_execution_integrity_consumes_history_without_fetchall(tmp_path: Path) -
     )
 
     class NoFetchallCursor:
-        def __init__(self, cursor: Any) -> None:
+        def __init__(self: Self, cursor: Any) -> None:
             self._cursor = cursor
 
-        def __iter__(self) -> Iterator[Any]:
+        def __iter__(self: Self) -> Iterator[Any]:
             return iter(self._cursor)
 
-        def fetchone(self) -> Any:
+        def fetchone(self: Self) -> Any:
             return self._cursor.fetchone()
 
-        def fetchall(self) -> list[Any]:
+        def fetchall(self: Self) -> list[Any]:
             raise AssertionError("wallet execution integrity must stream history")
 
     class NoFetchallConnection:
-        def __init__(self, connection: Any) -> None:
+        def __init__(self: Self, connection: Any) -> None:
             self._connection = connection
 
-        def execute(self, *args: Any, **kwargs: Any) -> NoFetchallCursor:
+        def execute(self: Self, *args: Any, **kwargs: Any) -> NoFetchallCursor:
             return NoFetchallCursor(self._connection.execute(*args, **kwargs))
 
     class NoFetchallDatabase(Database):
         @contextmanager
-        def read_transaction(self) -> Iterator[Any]:
+        def read_transaction(self: Self) -> Iterator[Any]:
             with super().read_transaction() as connection:
                 yield NoFetchallConnection(connection)
 

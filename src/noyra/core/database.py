@@ -25,6 +25,63 @@ from .wallet_schema import (
     wallet_upgrade_fingerprint,
 )
 
+
+def _canonical_schema_sql(source: str) -> str:
+    """Normalize harmless DDL formatting while preserving quoted values."""
+    tokens: list[str] = []
+    punctuation = set("(),.;=<>+-*/%|&~!^:?{}").union({"[", "]"})
+    index = 0
+    while index < len(source):
+        character = source[index]
+        if character.isspace():
+            index += 1
+            continue
+        if source.startswith("--", index):
+            newline = source.find("\n", index + 2)
+            index = len(source) if newline < 0 else newline + 1
+            continue
+        if source.startswith("/*", index):
+            comment_end = source.find("*/", index + 2)
+            index = len(source) if comment_end < 0 else comment_end + 2
+            continue
+        if character in "'\"`[":
+            start = index
+            terminator = "]" if character == "[" else character
+            index += 1
+            while index < len(source):
+                if source[index] == terminator:
+                    if (
+                        terminator != "]"
+                        and index + 1 < len(source)
+                        and source[index + 1] == terminator
+                    ):
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                index += 1
+            tokens.append(source[start:index])
+            continue
+        if character in punctuation:
+            tokens.append(character)
+            index += 1
+            continue
+        start = index
+        while index < len(source):
+            character = source[index]
+            if (
+                character.isspace()
+                or character in punctuation
+                or character in "'\"`["
+                or source.startswith("--", index)
+                or source.startswith("/*", index)
+            ):
+                break
+            index += 1
+        tokens.append(source[start:index])
+    return "\x1f".join(tokens)
+
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
     key TEXT PRIMARY KEY,
@@ -231,7 +288,53 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 71
+CURRENT_SCHEMA_VERSION = 79
+
+# The schema DDL fingerprint is checked after every successful initialization.
+# Update this value only alongside a reviewed schema migration and its tests.
+# This is the complete contract, including security triggers.  Existing v77
+# installations persist this value in ``schema_meta`` and therefore require
+# the value to remain stable across compatible runtime fixes.
+_SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
+    77: "2487f1a2703fc940178b2c77f2b3982a37b4a526de37b9b253204be71f4a6d1f",
+    78: "895ea957c9befde841e2c665c1cae4d47d9f90c9b37a9f6341e2cea339bbd5d5",
+    79: "af5da5087bbb8cac85b14699d10fa2e706d07b2eb225e3a22b19ed87ea08e7c6",
+}
+
+# Structural objects are checked independently so a trigger-only integrity
+# defect can reach the startup integrity gate and be quarantined with an
+# auditable P0 finding.  Tables, indexes, and views still fail closed during
+# database construction because they define the storage contract itself.
+_SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
+    77: "03eae2bf8cdb2379f5a7271801044ce1920e0805018827d3661184b2a9fca896",
+    78: "d8cc66309f41f32f3c7a7f05954ac237ad3826cfcdf6cf178c07538aa30fe828",
+    79: "d7b6e06f229327411a7862d6b65fd452a3cd88ab3f1034f6e3002d9f4d4e32d4",
+}
+
+_PERSISTENT_FEATURE_OBJECTS: dict[str, tuple[str, ...]] = {
+    "secret_cleanup": ("secret_cleanup_queue", "idx_secret_cleanup_subject_status"),
+    "provider_health_metrics": ("provider_health_buckets",),
+    "secret_file_intents": (
+        "secret_file_intents",
+        "idx_secret_file_intents_subject_state",
+        "validate_secret_file_intent_reference_binding",
+        "validate_secret_file_intent_intent_binding",
+        "validate_secret_file_intent_reference_binding_update",
+        "validate_secret_file_intent_identity_immutable",
+        "prevent_secret_file_intent_delete",
+        "validate_secret_file_intent_transition",
+        "validate_secret_file_intent_operation_state",
+    ),
+    "search_provider_routing": (
+        "search_provider_routing",
+        "idx_search_provider_routing_order",
+    ),
+}
+
+_PERSISTENT_FEATURE_MIN_SCHEMA: dict[str, int] = {
+    "provider_health_metrics": 68,
+    "search_provider_routing": 77,
+}
 
 MIGRATIONS: dict[int, str] = {
     2: """
@@ -6534,6 +6637,213 @@ WHEN NOT (
 )
 BEGIN SELECT RAISE(ABORT,'wallet payment order transition is invalid'); END;
 """,
+    72: """
+CREATE TABLE IF NOT EXISTS migration_policies (
+    subject_id TEXT PRIMARY KEY REFERENCES subject_identity(subject_id),
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+    approval_mode TEXT NOT NULL DEFAULT 'disabled' CHECK (approval_mode IN ('disabled', 'manual', 'policy_auto', 'emergency_recovery')),
+    emergency_recovery_enabled INTEGER NOT NULL DEFAULT 0 CHECK (emergency_recovery_enabled IN (0, 1)),
+    local_wallet_transfer_enabled INTEGER NOT NULL DEFAULT 0 CHECK (local_wallet_transfer_enabled IN (0, 1)),
+    wallet_mode TEXT NOT NULL DEFAULT 'external_signer_rebind' CHECK (wallet_mode IN ('external_signer_rebind', 'local_wallet_transfer', 'disabled')),
+    allowed_target_ids_json TEXT NOT NULL DEFAULT '[]',
+    allowed_regions_json TEXT NOT NULL DEFAULT '[]',
+    min_free_bytes INTEGER NOT NULL DEFAULT 0 CHECK (min_free_bytes >= 0),
+    max_cost_microusd INTEGER NOT NULL DEFAULT 0 CHECK (max_cost_microusd >= 0),
+    max_downtime_seconds INTEGER NOT NULL DEFAULT 3600 CHECK (max_downtime_seconds BETWEEN 0 AND 604800),
+    maintenance_window_start_minute INTEGER NOT NULL DEFAULT 0 CHECK (maintenance_window_start_minute BETWEEN 0 AND 1439),
+    maintenance_window_duration_minutes INTEGER NOT NULL DEFAULT 1440 CHECK (maintenance_window_duration_minutes BETWEEN 1 AND 1440),
+    trust_level INTEGER NOT NULL DEFAULT 3 CHECK (trust_level BETWEEN 1 AND 5),
+    rejection_cooldown_seconds INTEGER NOT NULL DEFAULT 604800 CHECK (rejection_cooldown_seconds BETWEEN 0 AND 31536000),
+    proposal_expiry_seconds INTEGER NOT NULL DEFAULT 86400 CHECK (proposal_expiry_seconds BETWEEN 300 AND 604800),
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+    updated_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL CHECK (length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*')
+);
+CREATE TABLE IF NOT EXISTS migration_targets (
+    target_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    public_key TEXT NOT NULL,
+    key_fingerprint TEXT NOT NULL,
+    enrollment_generation INTEGER NOT NULL CHECK (enrollment_generation >= 1),
+    endpoint TEXT NOT NULL,
+    capabilities_json TEXT NOT NULL DEFAULT '{}',
+    region TEXT,
+    provider TEXT,
+    release_sha TEXT NOT NULL,
+    os_arch TEXT NOT NULL,
+    encrypted_volume INTEGER NOT NULL CHECK (encrypted_volume IN (0, 1)),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'revoked', 'quarantined')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    revoked_at TEXT,
+    revoke_reason TEXT,
+    state_hash TEXT NOT NULL CHECK (length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'),
+    UNIQUE(subject_id, key_fingerprint, enrollment_generation)
+);
+CREATE INDEX IF NOT EXISTS idx_migration_targets_subject_status ON migration_targets(subject_id, status, updated_at DESC);
+CREATE TABLE IF NOT EXISTS migration_proposals (
+    proposal_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    target_id TEXT NOT NULL REFERENCES migration_targets(target_id),
+    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 1),
+    status TEXT NOT NULL CHECK (status IN ('planned', 'awaiting_approval', 'approved', 'rejected', 'expired', 'cancelled', 'executing')),
+    reason_code TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    benefit_score REAL NOT NULL CHECK (benefit_score BETWEEN 0 AND 1),
+    risk_score REAL NOT NULL CHECK (risk_score BETWEEN 0 AND 1),
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    decision_reason TEXT,
+    state_hash TEXT NOT NULL CHECK (length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*')
+);
+CREATE INDEX IF NOT EXISTS idx_migration_proposals_subject_status ON migration_proposals(subject_id, status, created_at DESC);
+CREATE TABLE IF NOT EXISTS migration_tasks (
+    task_id TEXT PRIMARY KEY,
+    proposal_id TEXT NOT NULL REFERENCES migration_proposals(proposal_id),
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    target_id TEXT NOT NULL REFERENCES migration_targets(target_id),
+    idempotency_key TEXT NOT NULL,
+    source_epoch TEXT NOT NULL,
+    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 1),
+    status TEXT NOT NULL CHECK (status IN ('planned', 'preflight', 'awaiting_approval', 'approved', 'preparing', 'transferring', 'restoring', 'validating', 'cutover', 'committed', 'rolling_back', 'rolled_back', 'cancelled', 'failed')),
+    manifest_digest TEXT,
+    artifact_id TEXT,
+    error_code TEXT,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL CHECK (length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'),
+    UNIQUE(subject_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_migration_tasks_subject_status ON migration_tasks(subject_id, status, updated_at DESC);
+CREATE TABLE IF NOT EXISTS migration_epochs (
+    epoch_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    target_id TEXT NOT NULL REFERENCES migration_targets(target_id),
+    epoch_number INTEGER NOT NULL CHECK (epoch_number >= 1),
+    status TEXT NOT NULL CHECK (status IN ('active', 'revoked', 'completed')),
+    acquired_at TEXT NOT NULL,
+    revoked_at TEXT,
+    state_hash TEXT NOT NULL CHECK (length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'),
+    UNIQUE(subject_id, epoch_number)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_migration_epochs_active_subject ON migration_epochs(subject_id) WHERE status = 'active';
+CREATE TABLE IF NOT EXISTS migration_rejections (
+    rejection_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    proposal_id TEXT NOT NULL REFERENCES migration_proposals(proposal_id),
+    target_id TEXT NOT NULL REFERENCES migration_targets(target_id),
+    reason_code TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    cooldown_until TEXT NOT NULL,
+    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 1),
+    actor TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL CHECK (length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*')
+);
+CREATE INDEX IF NOT EXISTS idx_migration_rejections_cooldown ON migration_rejections(subject_id, target_id, reason_code, cooldown_until);
+CREATE TABLE IF NOT EXISTS migration_audit_events (
+    audit_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    action TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL CHECK (length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*')
+);
+CREATE INDEX IF NOT EXISTS idx_migration_audit_subject_time ON migration_audit_events(subject_id, occurred_at DESC, audit_id DESC);
+CREATE TRIGGER IF NOT EXISTS prevent_migration_audit_update BEFORE UPDATE ON migration_audit_events BEGIN SELECT RAISE(ABORT, 'migration audit events are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS prevent_migration_audit_delete BEFORE DELETE ON migration_audit_events BEGIN SELECT RAISE(ABORT, 'migration audit events cannot be deleted'); END;
+""",
+    73: """
+CREATE TABLE IF NOT EXISTS migration_target_challenges (
+    nonce TEXT PRIMARY KEY,
+    target_id TEXT NOT NULL REFERENCES migration_targets(target_id),
+    source_epoch TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    consumed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_migration_target_challenges_target
+    ON migration_target_challenges(target_id, expires_at);
+""",
+    74: """
+-- Attestation columns are added by the idempotent migration hook.  Keeping
+-- this marker replay-safe matters for databases whose schema marker is
+-- deliberately rewound during migration verification.
+SELECT 1;
+""",
+    75: """
+-- The target epoch column and index are installed by the idempotent migration
+-- hook so migration verification can safely replay this marker.
+SELECT 1;
+""",
+    76: """
+CREATE TABLE IF NOT EXISTS admin_login_rate_events (
+    event_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    client_key_hash TEXT NOT NULL CHECK (
+        length(client_key_hash) = 64 AND client_key_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    occurred_at REAL NOT NULL CHECK (occurred_at >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_admin_login_rate_events_subject_client_time
+    ON admin_login_rate_events(subject_id, client_key_hash, occurred_at);
+CREATE TABLE IF NOT EXISTS admin_sessions (
+    session_hash TEXT PRIMARY KEY CHECK (
+        length(session_hash) = 64 AND session_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    role TEXT NOT NULL CHECK (role IN ('operator', 'admin', 'break_glass')),
+    actor TEXT NOT NULL,
+    expires_at REAL NOT NULL CHECK (expires_at >= 0),
+    created_at REAL NOT NULL CHECK (created_at >= 0),
+    revoked_at REAL,
+    state_hash TEXT NOT NULL CHECK (
+        length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    CHECK (revoked_at IS NULL OR revoked_at >= created_at)
+);
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_subject_active
+    ON admin_sessions(subject_id, revoked_at, expires_at, created_at);
+""",
+    77: """
+CREATE TABLE IF NOT EXISTS search_provider_routing (
+    config_id TEXT PRIMARY KEY REFERENCES search_provider_configs(config_id),
+    priority INTEGER NOT NULL CHECK(priority BETWEEN 0 AND 1000),
+    weight INTEGER NOT NULL CHECK(weight BETWEEN 1 AND 1000),
+    updated_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_search_provider_routing_order
+    ON search_provider_routing(priority, config_id);
+""",
+    78: """
+CREATE TABLE IF NOT EXISTS migration_backup_registry (
+    backup_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    backup_path TEXT NOT NULL,
+    content_hash TEXT NOT NULL CHECK(length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'),
+    byte_size INTEGER NOT NULL CHECK(byte_size > 0),
+    schema_version INTEGER NOT NULL CHECK(schema_version >= 1),
+    genesis_hash TEXT NOT NULL CHECK(length(genesis_hash) = 64 AND genesis_hash NOT GLOB '*[^0-9a-f]*'),
+    key_id TEXT NOT NULL,
+    keyring_generation INTEGER NOT NULL CHECK(keyring_generation >= 1),
+    status TEXT NOT NULL CHECK(status IN ('registered', 'verified', 'revoked', 'expired')),
+    verified_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL CHECK(length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*')
+);
+CREATE INDEX IF NOT EXISTS idx_migration_backup_registry_subject_status
+    ON migration_backup_registry(subject_id, status, verified_at DESC);
+""",
+    79: """
+-- Recipient X25519 keys are installed by the idempotent migration hook.  The
+-- marker remains replay-safe for databases created before recipient-encrypted
+-- migration bundles were introduced.
+SELECT 1;
+""",
 }
 
 
@@ -7000,6 +7310,7 @@ class Database:
             with self.transaction() as connection:
                 self._upgrade_wallet_payment_policy_automation(connection)
             self._ensure_training_policies()
+            self._validate_schema_contract()
             with self.connection() as connection:
                 connection.execute("PRAGMA journal_mode = WAL")
                 connection.execute("PRAGMA synchronous = FULL")
@@ -7037,6 +7348,130 @@ class Database:
                 continue
             removed += 1
         return removed
+
+    @staticmethod
+    def schema_ddl_fingerprint(connection: sqlite3.Connection) -> str:
+        """Fingerprint the complete persistent DDL inventory."""
+        return Database._schema_fingerprint(connection, include_triggers=True)
+
+    @staticmethod
+    def schema_structure_fingerprint(connection: sqlite3.Connection) -> str:
+        """Fingerprint tables, indexes, and views without trigger definitions."""
+        return Database._schema_fingerprint(connection, include_triggers=False)
+
+    @staticmethod
+    def _schema_fingerprint(connection: sqlite3.Connection, *, include_triggers: bool) -> str:
+        shadow_tables = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_list").fetchall()
+            if str(row["type"]) == "shadow"
+        }
+        definitions = [
+            {
+                "type": str(row["type"]),
+                "name": str(row["name"]),
+                "sql": _canonical_schema_sql(str(row["sql"])),
+            }
+            for row in connection.execute(
+                """SELECT type, name, sql FROM sqlite_master
+                   WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'
+                   ORDER BY type, name"""
+            ).fetchall()
+            if str(row["name"]) not in shadow_tables
+            and (include_triggers or str(row["type"]) != "trigger")
+        ]
+        return content_hash(definitions)
+
+    @staticmethod
+    def _persistent_feature_ddl_fingerprint(
+        connection: sqlite3.Connection, object_names: tuple[str, ...]
+    ) -> str:
+        definitions: list[dict[str, str]] = []
+        for object_name in object_names:
+            row = connection.execute(
+                "SELECT type, name, sql FROM sqlite_master WHERE name=?", (object_name,)
+            ).fetchone()
+            if row is None or not row["sql"]:
+                raise RuntimeError(
+                    f"persistent schema feature is missing database object {object_name}"
+                )
+            definitions.append(
+                {"type": str(row["type"]), "name": str(row["name"]), "sql": str(row["sql"])}
+            )
+        return content_hash(definitions)
+
+    def require_persistent_feature(self, connection: sqlite3.Connection, feature_id: str) -> None:
+        """Fail closed when a module's persistent schema feature has drifted."""
+        object_names = _PERSISTENT_FEATURE_OBJECTS.get(feature_id)
+        if object_names is None:
+            raise RuntimeError(f"unknown persistent schema feature {feature_id}")
+        fingerprint = self._persistent_feature_ddl_fingerprint(connection, object_names)
+        marker = connection.execute(
+            "SELECT feature_version, ddl_fingerprint FROM persistent_features WHERE feature_id=?",
+            (feature_id,),
+        ).fetchone()
+        if (
+            marker is None
+            or int(marker["feature_version"]) != 1
+            or str(marker["ddl_fingerprint"]) != fingerprint
+        ):
+            raise RuntimeError(f"persistent schema feature {feature_id} contract mismatch")
+
+    def _validate_schema_contract(self) -> None:
+        """Verify the complete versioned DDL inventory before opening service."""
+        with self.transaction() as connection:
+            version_row = connection.execute(
+                "SELECT value FROM schema_meta WHERE key='schema_version'"
+            ).fetchone()
+            if version_row is None:
+                raise RuntimeError("database schema contract has no schema version")
+            version = int(version_row[0])
+            expected = _SCHEMA_DDL_FINGERPRINTS.get(version)
+            latest_contract_version = max(_SCHEMA_DDL_FINGERPRINTS)
+            if expected is None and version < latest_contract_version:
+                # Historical-version test fixtures and migration handoff
+                # images are validated after they reach the current runtime
+                # schema.  The current schema itself must always have a
+                # reviewed fingerprint.
+                return
+            if expected is None or len(expected) != 64 or set(expected) - set("0123456789abcdef"):
+                raise RuntimeError(f"database schema contract is unavailable for schema {version}")
+            structure_expected = _SCHEMA_STRUCTURE_FINGERPRINTS.get(version)
+            if (
+                structure_expected is None
+                or len(structure_expected) != 64
+                or set(structure_expected) - set("0123456789abcdef")
+            ):
+                raise RuntimeError(
+                    f"database schema structural contract is unavailable for schema {version}"
+                )
+            structure_actual = self.schema_structure_fingerprint(connection)
+            if structure_actual != structure_expected:
+                raise RuntimeError(
+                    f"database schema contract structural mismatch for schema {version}: "
+                    f"expected {structure_expected}, found {structure_actual}"
+                )
+            previous = connection.execute(
+                "SELECT value FROM schema_meta WHERE key='schema_ddl_contract'"
+            ).fetchone()
+            if previous is not None:
+                try:
+                    previous_version_text, previous_fingerprint = str(previous[0]).split(":", 1)
+                    previous_version = int(previous_version_text)
+                except (ValueError, TypeError) as error:
+                    raise RuntimeError("database schema contract marker is invalid") from error
+                if previous_version > version:
+                    raise RuntimeError("database schema contract marker is newer than runtime")
+                if previous_version == version and previous_fingerprint != expected:
+                    raise RuntimeError(
+                        "database schema contract marker does not match installed DDL"
+                    )
+
+            connection.execute(
+                "INSERT INTO schema_meta(key, value) VALUES ('schema_ddl_contract', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (f"{version}:{expected}",),
+            )
 
     @staticmethod
     def _ensure_archive_transfer_claim_columns(connection: sqlite3.Connection) -> None:
@@ -7392,35 +7827,35 @@ BEGIN
 END;
 """,
             )
-            feature_objects = {
-                "secret_cleanup": ("secret_cleanup_queue", "idx_secret_cleanup_subject_status"),
-                "secret_file_intents": (
-                    "secret_file_intents",
-                    "idx_secret_file_intents_subject_state",
-                    "validate_secret_file_intent_reference_binding",
-                    "validate_secret_file_intent_intent_binding",
-                    "validate_secret_file_intent_reference_binding_update",
-                    "validate_secret_file_intent_identity_immutable",
-                    "prevent_secret_file_intent_delete",
-                    "validate_secret_file_intent_transition",
-                    "validate_secret_file_intent_operation_state",
-                ),
-            }
+            schema_version = int(
+                connection.execute(
+                    "SELECT value FROM schema_meta WHERE key='schema_version'"
+                ).fetchone()[0]
+            )
             now = utc_now()
-            for feature_id, object_names in feature_objects.items():
-                definitions = []
+            for feature_id, object_names in _PERSISTENT_FEATURE_OBJECTS.items():
+                definitions: list[dict[str, str]] = []
                 for object_name in object_names:
                     row = connection.execute(
                         "SELECT type, name, sql FROM sqlite_master WHERE name=?",
                         (object_name,),
                     ).fetchone()
                     if row is None or not row["sql"]:
+                        if schema_version < _PERSISTENT_FEATURE_MIN_SCHEMA.get(feature_id, 0):
+                            # A migration test (or an intentionally pinned
+                            # older runtime) may stop before an additive
+                            # feature's introduction.  Do not register or
+                            # require a feature whose schema cannot contain it.
+                            definitions = []
+                            break
                         raise RuntimeError(
                             f"optional feature {feature_id} is missing database object {object_name}"
                         )
                     definitions.append(
                         {"type": str(row["type"]), "name": str(row["name"]), "sql": str(row["sql"])}
                     )
+                if not definitions:
+                    continue
                 fingerprint = content_hash(definitions)
                 existing = connection.execute(
                     "SELECT feature_version, ddl_fingerprint, installed_at "
@@ -7629,6 +8064,8 @@ END;
             }
             if schema_version >= 71:
                 required_tables.add("wallet_payment_reconciliation_events")
+            if schema_version >= 76:
+                required_tables.update({"admin_login_rate_events", "admin_sessions"})
             installed_tables = {
                 str(row[0])
                 for row in connection.execute(
@@ -7679,6 +8116,40 @@ END;
             self._ensure_wallet_reward_triggers(connection)
             self._ensure_inbound_triggers(connection)
             self._ensure_public_post_triggers(connection)
+            # Retention diagnostics need a durable baseline of the tables
+            # produced by this schema version.  A table added at runtime (or
+            # by an incomplete migration) is then visible as unclassified
+            # instead of silently inheriting a delete policy.
+            inventory = sorted(
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type IN ('table', 'virtual table')"
+                ).fetchall()
+                if str(row[0]) != "sqlite_sequence"
+            )
+            inventory_json = canonical_json(inventory)
+            baseline_version = connection.execute(
+                "SELECT value FROM schema_meta WHERE key='retention_contract_schema_version'"
+            ).fetchone()
+            baseline_inventory = connection.execute(
+                "SELECT value FROM schema_meta WHERE key='retention_contract_inventory'"
+            ).fetchone()
+            if baseline_version is None or str(baseline_version[0]) != str(schema_version):
+                connection.execute(
+                    "INSERT INTO schema_meta(key, value) VALUES ('retention_contract_schema_version', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (str(schema_version),),
+                )
+                connection.execute(
+                    "INSERT INTO schema_meta(key, value) VALUES ('retention_contract_inventory', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (inventory_json,),
+                )
+            elif baseline_inventory is None:
+                connection.execute(
+                    "INSERT INTO schema_meta(key, value) VALUES ('retention_contract_inventory', ?) ",
+                    (inventory_json,),
+                )
 
     @staticmethod
     def _ensure_subject_scoped_triggers(connection: sqlite3.Connection) -> None:
@@ -9478,6 +9949,66 @@ END;
                 "ALTER TABLE provider_health_buckets "
                 "ADD COLUMN latency_samples_json TEXT NOT NULL DEFAULT '[]'"
             )
+        if "unknown_count" not in columns:
+            connection.execute(
+                "ALTER TABLE provider_health_buckets "
+                "ADD COLUMN unknown_count INTEGER NOT NULL DEFAULT 0"
+            )
+
+    @staticmethod
+    def _ensure_migration_target_attestation_columns(connection: sqlite3.Connection) -> None:
+        """Add target attestation columns without making migration replay unsafe."""
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='migration_targets'"
+        ).fetchone()
+        if table is None:
+            raise RuntimeError("migration targets table is missing")
+        columns = {
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(migration_targets)")
+        }
+        if "attested_at" not in columns:
+            connection.execute("ALTER TABLE migration_targets ADD COLUMN attested_at TEXT")
+        if "attestation_epoch" not in columns:
+            connection.execute("ALTER TABLE migration_targets ADD COLUMN attestation_epoch TEXT")
+
+    @staticmethod
+    def _ensure_migration_target_recipient_columns(connection: sqlite3.Connection) -> None:
+        """Install the recipient-encryption identity without fabricating keys."""
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='migration_targets'"
+        ).fetchone()
+        if table is None:
+            raise RuntimeError("migration targets table is missing")
+        columns = {
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(migration_targets)")
+        }
+        if "recipient_public_key" not in columns:
+            connection.execute("ALTER TABLE migration_targets ADD COLUMN recipient_public_key TEXT")
+        if "recipient_key_fingerprint" not in columns:
+            connection.execute(
+                "ALTER TABLE migration_targets ADD COLUMN recipient_key_fingerprint TEXT"
+            )
+
+    @staticmethod
+    def _ensure_migration_task_epoch_column(connection: sqlite3.Connection) -> None:
+        """Add the target epoch fence without making migration replay unsafe."""
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='migration_tasks'"
+        ).fetchone()
+        if table is None:
+            raise RuntimeError("migration tasks table is missing")
+        columns = {
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(migration_tasks)")
+        }
+        if "target_epoch_id" not in columns:
+            connection.execute(
+                "ALTER TABLE migration_tasks ADD COLUMN target_epoch_id "
+                "TEXT REFERENCES migration_epochs(epoch_id)"
+            )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_migration_tasks_target_epoch "
+            "ON migration_tasks(target_epoch_id) WHERE target_epoch_id IS NOT NULL"
+        )
 
     def _migrate(self, *, wallet_legacy_approval: WalletLegacyApproval | None = None) -> None:
         with self.connection() as connection:
@@ -9667,6 +10198,47 @@ END;
                     try:
                         connection.execute("BEGIN IMMEDIATE")
                         self._upgrade_provider_health_metrics(connection)
+                        connection.execute(
+                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                            (str(target_version),),
+                        )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
+                if target_version == 74:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._ensure_migration_target_attestation_columns(connection)
+                        self._execute_sql_script(connection, migration)
+                        connection.execute(
+                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                            (str(target_version),),
+                        )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
+                if target_version == 75:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._ensure_migration_task_epoch_column(connection)
+                        self._execute_sql_script(connection, migration)
+                        connection.execute(
+                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                            (str(target_version),),
+                        )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
+                if target_version == 79:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._ensure_migration_target_recipient_columns(connection)
                         connection.execute(
                             "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                             (str(target_version),),

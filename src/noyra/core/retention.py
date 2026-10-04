@@ -174,6 +174,33 @@ RETENTION_REGISTRY: tuple[RetentionTableSpec, ...] = (
 _RETENTION_BY_TABLE = {item.table: item for item in RETENTION_REGISTRY}
 _DELETE_SPECS = tuple(item for item in RETENTION_REGISTRY if item.retention_action == "delete")
 RETENTION_TABLES = tuple(item.table for item in _DELETE_SPECS)
+# Compaction preserves the immutable model ledger rows and hashes while
+# replacing cold request/response payloads with bounded compressed values.
+# It is deliberately separate from deletion so audit and idempotency rows
+# remain available to integrity, budget, and recovery code.
+COMPACTION_REGISTRY: tuple[dict[str, str], ...] = (
+    {
+        "table": "model_calls",
+        "action": "compress_payloads",
+        "cutoff_setting": "runtime_days",
+        "reason": "preserve ledger rows and hashes; compact cold JSON only",
+    },
+)
+RETENTION_REGISTRY_VERSION = content_hash(
+    [
+        {
+            "table": item.table,
+            "class": item.retention_class,
+            "action": item.retention_action,
+            "time": item.time_column,
+            "ids": item.id_columns,
+            "cutoff": item.cutoff_setting,
+            "cutoff_kind": item.cutoff_kind,
+        }
+        for item in RETENTION_REGISTRY
+    ]
+)
+_CURSOR_META_KEY = "_meta"
 
 # Backwards-compatible view used by callers that need a time/id pair.  The
 # actual policy remains the dataclass registry above.
@@ -183,17 +210,46 @@ DERIVED_RUNTIME_TABLES: dict[str, tuple[str, str]] = {
     if item.table not in {"provider_health_buckets", "search_provider_uses", "retention_runs"}
 }
 _LEGACY_RETENTION_TABLES = {"cognitive_route_attempts", "cognitive_route_outcomes"}
+_CURSOR_SORT_KEY_VERSION = "v1"
 
 
-def retention_registry_diagnostics() -> dict[str, tuple[str, ...]]:
+def retention_registry_diagnostics(connection: Any | None = None) -> dict[str, tuple[str, ...]]:
     """Return deterministic diagnostics for operators and integrity checks."""
-    return {
+    diagnostics = {
         "delete_tables": tuple(item.table for item in _DELETE_SPECS),
         "preserve_tables": tuple(
             item.table for item in RETENTION_REGISTRY if item.retention_action == "preserve"
         ),
         "unclassified": (),
     }
+    if connection is None:
+        return diagnostics
+    tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'virtual table')"
+        ).fetchall()
+        if str(row[0]) not in {"sqlite_sequence"}
+    }
+    row = connection.execute(
+        "SELECT value FROM schema_meta WHERE key='retention_contract_inventory'"
+    ).fetchone()
+    if row is None:
+        diagnostics["unclassified"] = tuple(sorted(tables))
+        return diagnostics
+    try:
+        baseline = strict_json_loads(str(row[0]))
+    except (TypeError, ValueError):
+        diagnostics["unclassified"] = tuple(sorted(tables))
+        return diagnostics
+    if not isinstance(baseline, list) or not all(
+        isinstance(item, str) and item for item in baseline
+    ):
+        diagnostics["unclassified"] = tuple(sorted(tables))
+        return diagnostics
+    diagnostics["unclassified"] = tuple(sorted(tables - set(baseline)))
+    diagnostics["missing"] = tuple(sorted(set(baseline) - tables))
+    return diagnostics
 
 
 def _valid_iso(value: Any) -> bool:
@@ -212,9 +268,35 @@ def _valid_cursor(cursor: Any, *, allow_legacy: bool = True) -> bool:
     expected = set(RETENTION_TABLES)
     if allow_legacy:
         expected |= _LEGACY_RETENTION_TABLES
+    expected.add(_CURSOR_META_KEY)
     if set(cursor) - expected:
         return False
+    metadata = cursor.get(_CURSOR_META_KEY)
+    if metadata is not None and (
+        not isinstance(metadata, dict)
+        or set(metadata)
+        != {
+            "registry_version",
+            "data_epoch",
+            "cutoff_policy",
+            "cutoffs",
+            "sort_key_version",
+        }
+        or not all(
+            isinstance(metadata.get(key), str) and metadata[key]
+            for key in ("registry_version", "data_epoch", "cutoff_policy", "sort_key_version")
+        )
+    ):
+        return False
+    if metadata is not None:
+        cutoffs = metadata.get("cutoffs")
+        if not isinstance(cutoffs, dict) or set(cutoffs) != set(RETENTION_TABLES):
+            return False
+        if not all(_valid_iso(value) for value in cutoffs.values()):
+            return False
     for _table, entry in cursor.items():
+        if _table == _CURSOR_META_KEY:
+            continue
         if not isinstance(entry, dict):
             return False
         if set(entry) != {"cursor", "cutoff", "deleted", "protected"}:
@@ -346,14 +428,16 @@ class RetentionManager:
 
     def _cutoff_for(self, spec: RetentionTableSpec, moment: datetime) -> str:
         if spec.cutoff_setting == "health_days":
-            return (moment - timedelta(days=self.settings.health_days)).isoformat()
-        if spec.cutoff_setting == "search_use_hours":
-            return (moment - timedelta(hours=self.settings.search_use_hours)).isoformat()
-        if spec.cutoff_setting == "runtime_days":
-            return (moment - timedelta(days=self.settings.runtime_days)).isoformat()
-        if spec.cutoff_setting == "run_history":
-            return moment.isoformat()
-        raise ValueError(f"unknown retention cutoff setting for {spec.table}")
+            cutoff = moment - timedelta(days=self.settings.health_days)
+        elif spec.cutoff_setting == "search_use_hours":
+            cutoff = moment - timedelta(hours=self.settings.search_use_hours)
+        elif spec.cutoff_setting == "runtime_days":
+            cutoff = moment - timedelta(days=self.settings.runtime_days)
+        elif spec.cutoff_setting == "run_history":
+            cutoff = moment
+        else:
+            raise ValueError(f"unknown retention cutoff setting for {spec.table}")
+        return cutoff.isoformat()
 
     def run_batch(
         self,
@@ -368,19 +452,51 @@ class RetentionManager:
             else _positive(batch_size, "batch size", maximum=500)
         )
         moment = now or datetime.now(UTC)
+        compacted: dict[str, int] = {}
+        with self.database.connection() as connection:
+            model_calls = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='model_calls'"
+            ).fetchone()
+        if model_calls is not None:
+            from noyra.model.ledger import ModelLedger
+
+            compacted["model_calls"] = ModelLedger(self.database).compress_cold_payloads(
+                subject_id,
+                older_than_days=self.settings.runtime_days,
+                limit=size,
+            )
         run_id = new_id("retention")
         started = utc_now()
         deleted: dict[str, int] = {spec.table: 0 for spec in _DELETE_SPECS}
         protected = 0
         failed_reason: str | None = None
+        cutoffs = {spec.table: self._cutoff_for(spec, moment) for spec in _DELETE_SPECS}
         cursor: dict[str, dict[str, Any]] = {
             spec.table: {
                 "cursor": None,
-                "cutoff": self._cutoff_for(spec, moment),
+                "cutoff": cutoffs[spec.table],
                 "deleted": 0,
                 "protected": None,
             }
             for spec in _DELETE_SPECS
+        }
+        with self.database.connection() as connection:
+            schema_row = connection.execute(
+                "SELECT value FROM schema_meta WHERE key='schema_version'"
+            ).fetchone()
+        cursor[_CURSOR_META_KEY] = {
+            "registry_version": RETENTION_REGISTRY_VERSION,
+            "data_epoch": str(schema_row[0]) if schema_row is not None else "unknown",
+            "cutoff_policy": content_hash(
+                {
+                    "health_days": self.settings.health_days,
+                    "search_use_hours": self.settings.search_use_hours,
+                    "run_history": self.settings.run_history,
+                    "runtime_days": self.settings.runtime_days,
+                }
+            ),
+            "cutoffs": cutoffs,
+            "sort_key_version": _CURSOR_SORT_KEY_VERSION,
         }
         # Continue a prior bounded batch when its cutoff is still applicable.
         # A malformed/legacy cursor is ignored and safely starts a fresh pass.
@@ -395,7 +511,7 @@ class RetentionManager:
                 previous_cursor = strict_json_loads(previous["next_cursor"])
             except (TypeError, ValueError):
                 previous_cursor = None
-            if _valid_cursor(previous_cursor):
+            if _valid_cursor(previous_cursor) and self._cursor_compatible(previous_cursor, cursor):
                 for table in RETENTION_TABLES:
                     entry = previous_cursor.get(table)
                     if isinstance(entry, dict):
@@ -416,7 +532,7 @@ class RetentionManager:
                         connection,
                         table,
                         subject_id,
-                        self._cutoff_for(spec, moment),
+                        cursor[table]["cutoff"],
                         remaining,
                         cursor[table]["cursor"],
                     )
@@ -424,6 +540,22 @@ class RetentionManager:
                     cursor[table]["deleted"] += count
                     cursor[table]["cursor"] = last_cursor
                     remaining -= count
+                # Retention run summaries are bounded operational metadata,
+                # separate from the capped batch of user-facing aggregates.
+                stale_runs = connection.execute(
+                    "SELECT run_id FROM (SELECT run_id FROM retention_runs "
+                    "WHERE subject_id=? ORDER BY started_at DESC, rowid DESC "
+                    "LIMIT -1 OFFSET ?) ORDER BY run_id",
+                    (subject_id, max(self.settings.run_history - 1, 0)),
+                ).fetchall()
+                for stale in stale_runs:
+                    connection.execute(
+                        "DELETE FROM retention_runs WHERE run_id=? AND subject_id=?",
+                        (stale["run_id"], subject_id),
+                    )
+                pruned_run_history = len(stale_runs)
+                deleted["retention_runs"] = pruned_run_history
+                cursor["retention_runs"]["deleted"] = pruned_run_history
                 payload = {
                     "run_id": run_id,
                     "subject_id": subject_id,
@@ -453,22 +585,6 @@ class RetentionManager:
                         "protected row predicates are not configured for this registry",
                     ),
                 )
-                # Retention run summaries are bounded operational metadata,
-                # separate from the capped batch of user-facing aggregates.
-                stale_runs = connection.execute(
-                    "SELECT run_id FROM (SELECT run_id FROM retention_runs "
-                    "WHERE subject_id=? ORDER BY started_at DESC, rowid DESC "
-                    "LIMIT -1 OFFSET ?) ORDER BY run_id",
-                    (subject_id, self.settings.run_history),
-                ).fetchall()
-                for stale in stale_runs:
-                    connection.execute(
-                        "DELETE FROM retention_runs WHERE run_id=? AND subject_id=?",
-                        (stale["run_id"], subject_id),
-                    )
-                pruned_run_history = len(stale_runs)
-                deleted["retention_runs"] = pruned_run_history
-                cursor["retention_runs"]["deleted"] = pruned_run_history
         except Exception as error:
             failed_reason = type(error).__name__
             retry_at = (moment + timedelta(seconds=self.settings.interval_seconds)).isoformat()
@@ -515,14 +631,23 @@ class RetentionManager:
         return {
             "run_id": run_id,
             "deleted_by_table": deleted,
-            "protected_rows": None,
+            "protected_rows": protected,
             "protected_rows_reason": (
                 "protected row predicates are not configured for this registry"
             ),
             "pruned_run_history": pruned_run_history,
             "failed_reason": failed_reason,
             "next_cursor": cursor,
+            "compacted_by_table": compacted,
         }
+
+    @staticmethod
+    def _cursor_compatible(previous: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
+        previous_meta = previous.get(_CURSOR_META_KEY)
+        current_meta = current.get(_CURSOR_META_KEY)
+        if previous_meta is None or current_meta is None:
+            return previous_meta is None and current_meta is not None
+        return bool(previous_meta == current_meta)
 
     def _delete_table(
         self,
@@ -583,16 +708,16 @@ class RetentionManager:
             return len(rows), last
         if table == "search_provider_uses":
             keyset = ""
-            params: list[Any] = [subject_id, cutoff]
+            use_params: list[Any] = [subject_id, cutoff]
             if isinstance(cursor, dict) and {"created_at", "use_id"} <= set(cursor):
                 keyset = " AND (created_at > ? OR (created_at = ? AND use_id > ?))"
-                params.extend([cursor["created_at"], cursor["created_at"], cursor["use_id"]])
-            params.append(limit)
+                use_params.extend([cursor["created_at"], cursor["created_at"], cursor["use_id"]])
+            use_params.append(limit)
             rows = connection.execute(
                 f"""SELECT use_id, created_at FROM search_provider_uses
                    WHERE subject_id=? AND created_at < ?{keyset}
                    ORDER BY created_at, use_id LIMIT ?""",
-                tuple(params),
+                tuple(use_params),
             ).fetchall()
             for row in rows:
                 connection.execute(

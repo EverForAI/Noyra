@@ -4,7 +4,7 @@ import asyncio
 import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Self, cast
 from unittest.mock import patch
 
 import httpx
@@ -22,18 +22,18 @@ from noyra.research.types import SearchProviderRecord
 
 
 class _ChunkStream(httpx.AsyncByteStream):
-    def __init__(self, chunks: tuple[bytes, ...], *, delay: float = 0.0) -> None:
+    def __init__(self: Self, chunks: tuple[bytes, ...], *, delay: float = 0.0) -> None:
         self.chunks = chunks
         self.delay = delay
         self.closed = False
 
-    async def __aiter__(self) -> AsyncIterator[bytes]:
+    async def __aiter__(self: Self) -> AsyncIterator[bytes]:
         for chunk in self.chunks:
             if self.delay:
                 await asyncio.sleep(self.delay)
             yield chunk
 
-    async def aclose(self) -> None:
+    async def aclose(self: Self) -> None:
         self.closed = True
 
 

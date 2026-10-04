@@ -11,7 +11,7 @@ import time
 import zlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, Self, cast
 from urllib.error import HTTPError
 from urllib.request import urlopen
 
@@ -54,6 +54,7 @@ from support.faults import (
 _REGISTRY_VERSION = "noyra-integrity-registry/v2"
 _REPORT_VERSION = "noyra-integrity-report/v1"
 _CHECK_IDS = (
+    "core.schema_contract",
     "core.sqlite_quick_check",
     "core.foreign_keys",
     "core.identity_continuity",
@@ -672,16 +673,16 @@ def test_materializing_cursor_fetches_one_row_before_enforcing_the_budget() -> N
     class CursorStub:
         arraysize = 128
 
-        def __init__(self) -> None:
+        def __init__(self: Self) -> None:
             self.rows = iter(((b"a" * 16,), (b"b" * 16,), (b"c" * 16,)))
             self.fetchone_calls = 0
             self.fetchmany_calls = 0
 
-        def fetchone(self) -> Any | None:
+        def fetchone(self: Self) -> Any | None:
             self.fetchone_calls += 1
             return next(self.rows, None)
 
-        def fetchmany(self, _size: int) -> list[Any]:
+        def fetchmany(self: Self, _size: int) -> list[Any]:
             self.fetchmany_calls += 1
             raise AssertionError("budgeted materialization must not prefetch a batch")
 
@@ -1536,7 +1537,7 @@ def test_service_boot_pause_policy_skips_cognition_bootstrap(tmp_path: Path) -> 
     bootstrap_calls: list[str] = []
 
     class CognitionStub:
-        def bootstrap(self) -> None:
+        def bootstrap(self: Self) -> None:
             bootstrap_calls.append("bootstrap")
 
     def corrupt(_context: Any) -> IntegrityCheckOutcome:
@@ -3836,26 +3837,26 @@ def test_snapshot_decompression_uses_the_remaining_external_byte_budget(
     flush_limits: list[int] = []
 
     class TrackingDecompressor:
-        def __init__(self) -> None:
+        def __init__(self: Self) -> None:
             self.inner: Any = real_factory()
 
         @property
-        def unconsumed_tail(self) -> bytes:
+        def unconsumed_tail(self: Self) -> bytes:
             return bytes(self.inner.unconsumed_tail)
 
         @property
-        def eof(self) -> bool:
+        def eof(self: Self) -> bool:
             return bool(self.inner.eof)
 
         @property
-        def unused_data(self) -> bytes:
+        def unused_data(self: Self) -> bytes:
             return bytes(self.inner.unused_data)
 
-        def decompress(self, data: bytes, max_length: int) -> bytes:
+        def decompress(self: Self, data: bytes, max_length: int) -> bytes:
             decompress_limits.append(max_length)
             return bytes(self.inner.decompress(data, max_length))
 
-        def flush(self, length: int) -> bytes:
+        def flush(self: Self, length: int) -> bytes:
             flush_limits.append(length)
             return bytes(self.inner.flush(length))
 
@@ -4180,7 +4181,7 @@ def test_sleep_state_startup_findings_suppress_only_pause_mode_initialization(
     calls: list[str] = []
 
     class CognitionStub:
-        def bootstrap(self) -> None:
+        def bootstrap(self: Self) -> None:
             calls.append("bootstrap")
 
     registry = IntegrityRegistry(

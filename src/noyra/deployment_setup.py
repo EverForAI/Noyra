@@ -538,8 +538,9 @@ class SetupRunner:
         temp = Path(temp_name)
         try:
             os.chmod(temp, 0o640)
-            if hasattr(os, "geteuid") and os.geteuid() == 0 and hasattr(os, "chown"):
-                os.chown(temp, 0, -1)
+            chown = getattr(os, "chown", None)
+            if hasattr(os, "geteuid") and os.geteuid() == 0 and callable(chown):
+                chown(temp, 0, -1)
             with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
                 stream.write(content)
             os.replace(temp, path)
@@ -558,8 +559,9 @@ class SetupRunner:
         temp = Path(temp_name)
         try:
             os.chmod(temp, 0o600)
-            if hasattr(os, "geteuid") and os.geteuid() == 0 and hasattr(os, "chown"):
-                os.chown(temp, 0, -1)
+            chown = getattr(os, "chown", None)
+            if hasattr(os, "geteuid") and os.geteuid() == 0 and callable(chown):
+                chown(temp, 0, -1)
             with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
                 stream.write(content)
             os.replace(temp, path)
