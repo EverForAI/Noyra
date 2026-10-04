@@ -49,6 +49,41 @@ def test_retention_run_history_is_bounded(tmp_path: Any) -> None:
     assert count == 2
 
 
+def test_retention_compacts_cold_model_payloads_without_deleting_ledger_rows(
+    tmp_path: Any,
+) -> None:
+    from noyra.model.ledger import ModelLedger
+
+    db = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-retention-model-payloads"
+    IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
+    ledger = ModelLedger(db)
+    call, _ = ledger.prepare_call(
+        subject,
+        "provider",
+        "model",
+        "retention-test",
+        content_hash({"prompt": "x"}),
+        "retention-call-1",
+        request={"prompt": "x"},
+    )
+    old = (datetime.now(UTC) - timedelta(days=120)).isoformat()
+    payload = '{"prompt":"' + ('x' * 5000) + '"}'
+    with db.transaction() as connection:
+        connection.execute(
+            "UPDATE model_calls SET status='failed', request_json=?, created_at=? WHERE call_id=?",
+            (payload, old, call.call_id),
+        )
+    result = RetentionManager(db, RetentionSettings(runtime_days=90)).run_batch(subject)
+    assert result["compacted_by_table"]["model_calls"] == 1
+    with db.connection() as connection:
+        row = connection.execute(
+            "SELECT request_json FROM model_calls WHERE call_id=?", (call.call_id,)
+        ).fetchone()
+    assert row is not None
+    assert row["request_json"] != payload
+
+
 def test_run_batch_is_bounded_and_removes_old_health_rows(tmp_path: Any) -> None:
     db = Database(tmp_path / "noyra.sqlite3")
     subject = "Noyra-retention"

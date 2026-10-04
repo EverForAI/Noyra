@@ -174,6 +174,18 @@ RETENTION_REGISTRY: tuple[RetentionTableSpec, ...] = (
 _RETENTION_BY_TABLE = {item.table: item for item in RETENTION_REGISTRY}
 _DELETE_SPECS = tuple(item for item in RETENTION_REGISTRY if item.retention_action == "delete")
 RETENTION_TABLES = tuple(item.table for item in _DELETE_SPECS)
+# Compaction preserves the immutable model ledger rows and hashes while
+# replacing cold request/response payloads with bounded compressed values.
+# It is deliberately separate from deletion so audit and idempotency rows
+# remain available to integrity, budget, and recovery code.
+COMPACTION_REGISTRY: tuple[dict[str, str], ...] = (
+    {
+        "table": "model_calls",
+        "action": "compress_payloads",
+        "cutoff_setting": "runtime_days",
+        "reason": "preserve ledger rows and hashes; compact cold JSON only",
+    },
+)
 RETENTION_REGISTRY_VERSION = content_hash(
     [
         {
@@ -440,6 +452,19 @@ class RetentionManager:
             else _positive(batch_size, "batch size", maximum=500)
         )
         moment = now or datetime.now(UTC)
+        compacted: dict[str, int] = {}
+        with self.database.connection() as connection:
+            model_calls = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='model_calls'"
+            ).fetchone()
+        if model_calls is not None:
+            from noyra.model.ledger import ModelLedger
+
+            compacted["model_calls"] = ModelLedger(self.database).compress_cold_payloads(
+                subject_id,
+                older_than_days=self.settings.runtime_days,
+                limit=size,
+            )
         run_id = new_id("retention")
         started = utc_now()
         deleted: dict[str, int] = {spec.table: 0 for spec in _DELETE_SPECS}
@@ -613,6 +638,7 @@ class RetentionManager:
             "pruned_run_history": pruned_run_history,
             "failed_reason": failed_reason,
             "next_cursor": cursor,
+            "compacted_by_table": compacted,
         }
 
     @staticmethod
