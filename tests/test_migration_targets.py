@@ -156,6 +156,35 @@ def test_target_attestation_binds_endpoint_origin(tmp_path: Any) -> None:
         registry.attest(target.target_id, tampered, signature, actor="operator")
 
 
+def test_target_attestation_rejects_legacy_unbound_challenge(tmp_path: Any) -> None:
+    _, registry = _registry(tmp_path)
+    private, public = _key_material()
+    _, recipient_public = _recipient_material()
+    target = registry.register(
+        "Noyra-0001",
+        target_id="target-bound-challenge",
+        public_key=public,
+        recipient_public_key=recipient_public,
+        endpoint="https://target.example",
+        capabilities={},
+        region=None,
+        provider=None,
+        release_sha="f" * 40,
+        os_arch="linux-amd64",
+        encrypted_volume=True,
+        actor="operator",
+    )
+    issued = registry.issue_challenge(target.target_id, source_epoch="epoch-1")
+    unbound = type(issued)(
+        nonce=issued.nonce,
+        expires_at=issued.expires_at,
+        source_epoch=issued.source_epoch,
+    )
+    signature = base64.urlsafe_b64encode(private.sign(unbound.signing_bytes())).decode("ascii")
+    with pytest.raises(ValueError, match="target identity"):
+        registry.attest(target.target_id, unbound, signature, actor="operator")
+
+
 def test_target_integrity_detects_key_and_revocation_tampering(tmp_path: Any) -> None:
     database, registry = _registry(tmp_path)
     _, public = _key_material()

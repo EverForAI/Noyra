@@ -230,11 +230,9 @@ class TargetRegistry:
             if row is None:
                 raise NotFoundError(f"migration target not found: {target_id}")
             self._assert_row_integrity(row)
-            if challenge.target_id is not None and challenge.target_id != target_id:
+            if challenge.target_id != target_id:
                 raise ValueError("challenge target identity mismatch")
-            if challenge.endpoint_origin is not None and challenge.endpoint_origin != normalize_endpoint(
-                row["endpoint"]
-            ):
+            if challenge.endpoint_origin != normalize_endpoint(row["endpoint"]):
                 raise ValueError("challenge endpoint binding mismatch")
             if row["status"] not in {"pending", "active"}:
                 raise ValueError("target is revoked or quarantined")
