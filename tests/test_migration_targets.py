@@ -253,13 +253,13 @@ def test_recipient_key_is_bound_to_target_integrity(tmp_path: Any) -> None:
     )
     assert target.recipient_public_key == recipient_public
     assert len(target.recipient_key_fingerprint) == 64
+    tampered_key = bytearray(base64.urlsafe_b64decode(recipient_public + "="))
+    tampered_key[0] ^= 1
+    tampered_public = base64.urlsafe_b64encode(tampered_key).decode("ascii").rstrip("=")
     with database.transaction() as connection:
         connection.execute(
             "UPDATE migration_targets SET recipient_public_key=? WHERE target_id=?",
-            (
-                recipient_public[:-1] + ("A" if recipient_public[-1] != "A" else "B"),
-                target.target_id,
-            ),
+            (tampered_public, target.target_id),
         )
     with pytest.raises(ValueError, match="integrity"):
         registry.assert_integrity(target.target_id)

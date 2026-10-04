@@ -49,6 +49,9 @@ def _allow_current_user_owned_test_roots(tmp_path: Path, monkeypatch: pytest.Mon
         return
 
     test_root = tmp_path.resolve()
+    test_owner = test_root.stat()
+    monkeypatch.setattr(activation_module, "_service_uid", lambda: test_owner.st_uid)
+    monkeypatch.setattr(activation_module, "_service_gid", lambda: test_owner.st_gid)
 
     def validate_test_root(
         path: Path,
@@ -90,7 +93,10 @@ def _allow_current_user_owned_test_roots(tmp_path: Path, monkeypatch: pytest.Mon
             if directory.is_symlink() or not directory.is_dir():
                 raise TargetActivationError(error_code)
             metadata = directory.stat(follow_symlinks=False)
-            if metadata.st_uid not in {0, os.geteuid()} or stat.S_IMODE(metadata.st_mode) & 0o022:
+            if (
+                metadata.st_uid not in {0, test_owner.st_uid}
+                or stat.S_IMODE(metadata.st_mode) & 0o022
+            ):
                 raise TargetActivationError(error_code)
 
     monkeypatch.setattr(activation_module, "_secure_root_directory", validate_test_root)
@@ -275,7 +281,7 @@ def test_secure_root_directory_rejects_untrusted_owner_or_writable_mode(
         pytest.skip("POSIX ownership and mode checks are not available on Windows")
     path = tmp_path / "root-only-state"
     path.mkdir(mode=0o700)
-    if os.geteuid() == 0:
+    if path.stat().st_uid == 0:
         path.chmod(0o777)
 
     with pytest.raises(TargetActivationError, match="activation_state_directory_invalid"):
@@ -740,7 +746,7 @@ def test_root_activation_runner_rejects_unsigned_request_and_persists_failure(
             SimpleNamespace(getgrnam=lambda name: SimpleNamespace(gr_gid=4242)),
         )
         monkeypatch.setattr(
-            activation_module.os,
+            os,
             "chown",
             lambda path, uid, gid: group_calls.append((str(path), uid, gid)),
         )
