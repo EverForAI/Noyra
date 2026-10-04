@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import sqlite3
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -297,12 +298,12 @@ class _AgentTransport:
             )
             return receipt.__dict__.copy()
         if operation == "restore":
-            receipt = self.agent.restore(
+            restore_receipt = self.agent.restore(
                 ReceiveReceipt(**{key: body[key] for key in ReceiveReceipt.__dataclass_fields__}),
                 expected_digest=body["expected_digest"],
                 task_id=body["task_id"],
             )
-            return receipt.__dict__.copy()
+            return restore_receipt.__dict__.copy()
         if operation == "health":
             report = RestoreReport(
                 **{
@@ -368,7 +369,16 @@ def test_http_executor_requires_and_records_agent_binding_proofs(
     ).hexdigest()
     fenced: list[str] = []
 
-    def artifact_resolver(task_value: MigrationTask, proof: dict[str, object]) -> ArtifactBundle:
+    def fence(_task_value: MigrationTask, epoch: str) -> str:
+        fenced.append(epoch)
+        return "f" * 64
+
+    def unfence(_task_value: MigrationTask, epoch: str) -> None:
+        fenced.remove(epoch)
+
+    def artifact_resolver(
+        task_value: MigrationTask, proof: Mapping[str, object]
+    ) -> ArtifactBundle:
         return artifact_provider(task_value, proof)
 
     executor = HTTPMigrationExecutor(
@@ -382,8 +392,8 @@ def test_http_executor_requires_and_records_agent_binding_proofs(
         },
         token_resolver=lambda task_value: "t" * 32,
         artifact_resolver=artifact_resolver,
-        source_fence=lambda task_value, epoch: (fenced.append(epoch) or "f" * 64),
-        source_unfence=lambda task_value, epoch: fenced.remove(epoch),
+        source_fence=fence,
+        source_unfence=unfence,
         transport=_AgentTransport(agent, signing),
         chunk_bytes=4096,
     )

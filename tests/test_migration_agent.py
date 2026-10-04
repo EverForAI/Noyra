@@ -248,7 +248,7 @@ def test_target_activation_fails_closed_without_a_runtime_handoff_controller(
         recipient_private_key=recipient,
         data_root=tmp_path,
     )
-    request = {
+    request: dict[str, object] = {
         "task_id": "task-activation-1",
         "subject_id": "Noyra-0001",
         "target_id": "target-1",
@@ -292,7 +292,7 @@ def test_target_activation_returns_agent_signed_service_receipt(tmp_path: Any) -
         data_root=tmp_path,
         activation_controller=ActivationController(),
     )
-    request = {
+    request: dict[str, object] = {
         "task_id": "task-activation-1",
         "subject_id": "Noyra-0001",
         "target_id": "target-1",

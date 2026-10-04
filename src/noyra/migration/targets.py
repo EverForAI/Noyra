@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
 import secrets
@@ -389,7 +390,7 @@ class TargetRegistry:
             raw = base64.b64decode(
                 encoded + b"=" * (-len(encoded) % 4), altchars=b"-_", validate=True
             )
-        except (ValueError, TypeError, UnicodeEncodeError, base64.binascii.Error) as error:
+        except (ValueError, TypeError, UnicodeEncodeError, binascii.Error) as error:
             raise ValueError("recipient public key is invalid") from error
         canonical = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
         if len(raw) != 32 or canonical != public_key:

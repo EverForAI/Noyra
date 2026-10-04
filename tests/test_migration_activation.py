@@ -247,7 +247,9 @@ def test_activation_rejects_mismatched_source_fence_before_switch(tmp_path: Path
     assert systemd.calls == []
 
 
-def test_controller_revalidates_the_root_owned_staged_copy(tmp_path: Path, monkeypatch) -> None:
+def test_controller_revalidates_the_root_owned_staged_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     task_id, fence_digest, active_database, old_digest, systemd, activator = _runtime_fixture(
         tmp_path
     )
@@ -447,7 +449,9 @@ def test_deactivation_of_later_activation_restores_previous_runtime_owner(tmp_pa
     assert json.loads(current_path.read_text()) == first_owner
 
 
-def test_deactivation_recovery_restores_previous_runtime_owner(tmp_path: Path, monkeypatch) -> None:
+def test_deactivation_recovery_restores_previous_runtime_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     first_task_id, first_fence_digest, _, _, _, activator = _runtime_fixture(tmp_path)
     activator.activate(_request(first_task_id, first_fence_digest))
     current_path = activator.state_root / "current.json"
@@ -491,7 +495,7 @@ def test_deactivation_recovery_restores_previous_runtime_owner(tmp_path: Path, m
 
 
 def test_failed_later_activation_restores_previous_runtime_ownership_record(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     first_task_id, first_fence_digest, _, _, _, activator = _runtime_fixture(tmp_path)
     activator.activate(_request(first_task_id, first_fence_digest))
@@ -527,7 +531,7 @@ def test_failed_later_activation_restores_previous_runtime_ownership_record(
 
 
 def test_activation_recovery_restores_previous_runtime_ownership_record(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     first_task_id, first_fence_digest, _, _, _, activator = _runtime_fixture(tmp_path)
     activator.activate(_request(first_task_id, first_fence_digest))
@@ -586,7 +590,7 @@ def test_activation_rejects_artifact_id_mismatch_in_restored_migration_task(
 
 
 def test_activation_keeps_a_root_staged_snapshot_when_agent_copy_changes_source(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     task_id, fence_digest, _, _, _, activator = _runtime_fixture(tmp_path)
     restored = activator.agent_root / "restored" / task_id / "noyra.sqlite3"
