@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import shutil
 import sqlite3
+import stat
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -14,6 +18,7 @@ from noyra.core import Database, IdentityStore
 from noyra.core.events import EventStore
 from noyra.core.lifecycle import LifecycleManager
 from noyra.core.types import content_hash
+from noyra.migration import activation as activation_module
 from noyra.migration.activation import (
     TargetActivationError,
     TargetRuntimeActivator,
@@ -34,6 +39,61 @@ MANIFEST = {
 }
 MANIFEST_DIGEST = content_hash(MANIFEST)
 _ARTIFACT_HASHES: dict[str, str] = {}
+_REAL_SECURE_ROOT_DIRECTORY = activation_module._secure_root_directory
+
+
+@pytest.fixture(autouse=True)
+def _allow_current_user_owned_test_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Model root ownership for isolated temp trees without weakening production checks."""
+    if os.name == "nt":
+        return
+
+    test_root = tmp_path.resolve()
+
+    def validate_test_root(
+        path: Path,
+        error_code: str,
+        *,
+        create: bool = False,
+        trusted_root: Path | None = None,
+    ) -> None:
+        candidate = Path(path)
+        try:
+            candidate.absolute().relative_to(test_root)
+            if trusted_root is not None:
+                Path(trusted_root).absolute().relative_to(test_root)
+        except ValueError:
+            _REAL_SECURE_ROOT_DIRECTORY(
+                candidate,
+                error_code,
+                create=create,
+                trusted_root=trusted_root,
+            )
+            return
+
+        if create:
+            candidate.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if candidate.is_symlink() or not candidate.is_dir():
+            raise TargetActivationError(error_code)
+
+        directories = [candidate]
+        parent = candidate.parent
+        while trusted_root is not None and parent != Path(trusted_root).parent:
+            directories.append(parent)
+            if parent == trusted_root:
+                break
+            parent = parent.parent
+        if trusted_root is not None and Path(trusted_root) not in directories:
+            raise TargetActivationError(error_code)
+
+        for directory in directories:
+            if directory.is_symlink() or not directory.is_dir():
+                raise TargetActivationError(error_code)
+            metadata = directory.stat(follow_symlinks=False)
+            if metadata.st_uid not in {0, os.geteuid()} or stat.S_IMODE(metadata.st_mode) & 0o022:
+                raise TargetActivationError(error_code)
+
+    monkeypatch.setattr(activation_module, "_secure_root_directory", validate_test_root)
 
 
 class _Systemd:
@@ -206,6 +266,20 @@ def test_controller_recovery_state_is_outside_the_agent_writable_root(tmp_path: 
 
     assert activator.rollback_root.is_relative_to(data_root / "migration-agent") is False
     assert activator.activation_root.is_relative_to(data_root / "migration-agent") is False
+
+
+def test_secure_root_directory_rejects_untrusted_owner_or_writable_mode(
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("POSIX ownership and mode checks are not available on Windows")
+    path = tmp_path / "root-only-state"
+    path.mkdir(mode=0o700)
+    if os.geteuid() == 0:
+        path.chmod(0o777)
+
+    with pytest.raises(TargetActivationError, match="activation_state_directory_invalid"):
+        _REAL_SECURE_ROOT_DIRECTORY(path, "activation_state_directory_invalid")
 
 
 def test_target_activation_reverts_the_previous_runtime_after_readiness_failure(
@@ -632,7 +706,7 @@ def test_root_activation_rejects_manifest_artifact_digest_mismatch(tmp_path: Pat
 
 
 def test_root_activation_runner_rejects_unsigned_request_and_persists_failure(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from noyra.migration.activation import _atomic_json
 
@@ -658,6 +732,19 @@ def test_root_activation_runner_rejects_unsigned_request_and_persists_failure(
         0o600,
     )
 
+    if os.name != "nt":
+        group_calls: list[tuple[str, int, int]] = []
+        monkeypatch.setitem(
+            sys.modules,
+            "grp",
+            SimpleNamespace(getgrnam=lambda name: SimpleNamespace(gr_gid=4242)),
+        )
+        monkeypatch.setattr(
+            activation_module.os,
+            "chown",
+            lambda path, uid, gid: group_calls.append((str(path), uid, gid)),
+        )
+
     assert (
         run_target_activation_requests(
             root=root,
@@ -674,6 +761,9 @@ def test_root_activation_runner_rejects_unsigned_request_and_persists_failure(
 
     assert json.loads(status.read_text())["error_code"] == "activation_request_signature_invalid"
     assert status.is_file(), "root runner result must remain available for audit"
+    if os.name != "nt":
+        assert group_calls == [(str(status), 0, 4242)]
+        assert stat.S_IMODE(status.stat().st_mode) == 0o640
 
 
 def test_activation_systemd_units_use_fixed_entrypoint_and_recovery_precedes_service() -> None:
