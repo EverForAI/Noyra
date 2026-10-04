@@ -12,6 +12,7 @@ import binascii
 import gc
 import hashlib
 import hmac
+import http.client
 import ipaddress
 import json
 import os
@@ -19,15 +20,14 @@ import re
 import secrets
 import socket
 import sqlite3
+import ssl
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -148,11 +148,6 @@ class HTTPTransport(Protocol):
     def request(self, url: str, body: dict[str, Any], token: str) -> dict[str, Any]: ...
 
 
-class _NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
-        return None
-
-
 class UrllibHTTPTransport:
     def __init__(
         self,
@@ -178,10 +173,10 @@ class UrllibHTTPTransport:
             )
         except ValueError as error:
             raise ValueError("migration private network allowlist is invalid") from error
-        self._opener = build_opener(_NoRedirect)
-
     def request(self, url: str, body: dict[str, Any], token: str) -> dict[str, Any]:
-        self._validate_connection_endpoint(url)
+        endpoint, addresses = self._validate_connection_endpoint(url)
+        parsed = urlsplit(endpoint)
+        assert parsed.hostname is not None
         encoded = canonical_json(body).encode("utf-8")
         digest = hashlib.sha256(encoded).hexdigest()
         timestamp = str(int(time.time()))
@@ -190,27 +185,32 @@ class UrllibHTTPTransport:
         signature = base64.urlsafe_b64encode(
             hmac.new(token.encode("utf-8"), signing_bytes, hashlib.sha256).digest()
         ).decode("ascii")
-        request = Request(
-            url,
-            data=encoded,
-            method="POST",
-            headers={
+        headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Noyra-HMAC {signature}",
                 "X-Noyra-Timestamp": timestamp,
                 "X-Noyra-Nonce": nonce,
                 "X-Noyra-Body-SHA256": digest,
-            },
+        }
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        connection = _PinnedHTTPSConnection(
+            parsed.hostname,
+            parsed.port or 443,
+            addresses=addresses,
+            timeout=self.timeout_seconds,
         )
         try:
-            with self._opener.open(request, timeout=self.timeout_seconds) as response:
-                if response.status < 200 or response.status >= 300:
-                    raise MigrationExecutionError("target_http_status")
-                raw = response.read(MAX_RESPONSE_BYTES + 1)
-        except HTTPError as error:
-            raise MigrationExecutionError("target_http_status") from error
-        except (TimeoutError, URLError, OSError) as error:
+            connection.request("POST", path, body=encoded, headers=headers)
+            response = connection.getresponse()
+            if response.status < 200 or response.status >= 300:
+                raise MigrationExecutionError("target_http_status")
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+        except (http.client.HTTPException, TimeoutError, OSError) as error:
             raise MigrationExecutionError("target_http_unavailable") from error
+        finally:
+            connection.close()
         if len(raw) > MAX_RESPONSE_BYTES:
             raise MigrationExecutionError("target_response_too_large")
         try:
@@ -221,14 +221,16 @@ class UrllibHTTPTransport:
             raise MigrationExecutionError("target_response_invalid")
         return value
 
-    def _validate_connection_endpoint(self, url: str) -> None:
+    def _validate_connection_endpoint(
+        self, url: str
+    ) -> tuple[str, tuple[str, ...]]:
         endpoint = normalize_endpoint(url)
         parsed = urlsplit(endpoint)
         assert parsed.hostname is not None
         port = parsed.port or 443
         try:
             literal = ipaddress.ip_address(parsed.hostname)
-            addresses: tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...] = (literal,)
+            addresses: tuple[str, ...] = (str(literal),)
         except ValueError:
             try:
                 infos = socket.getaddrinfo(
@@ -237,14 +239,15 @@ class UrllibHTTPTransport:
             except OSError as error:
                 raise MigrationExecutionError("target_http_unavailable") from error
             addresses = tuple(
-                ipaddress.ip_address(info[4][0])
+                str(ipaddress.ip_address(info[4][0]))
                 for info in infos
                 if info[4] and info[4][0]
             )
         if not addresses:
             raise MigrationExecutionError("target_http_unavailable")
-        if any(self._restricted_address(address) for address in addresses):
+        if any(self._restricted_address(ipaddress.ip_address(address)) for address in addresses):
             raise MigrationExecutionError("target_private_address_blocked")
+        return endpoint, addresses
 
     def _restricted_address(self, address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
         if address in {
@@ -262,6 +265,40 @@ class UrllibHTTPTransport:
         ):
             return False
         return not any(address in network for network in self.allowed_private_networks)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """Connect to the address validated for this request while retaining SNI."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        *,
+        addresses: tuple[str, ...],
+        timeout: float,
+    ) -> None:
+        super().__init__(host, port, timeout=timeout)
+        self._validated_addresses = addresses
+        self._ssl_context = ssl.create_default_context()
+
+    def connect(self) -> None:
+        last_error: OSError | None = None
+        for address in self._validated_addresses:
+            try:
+                self.sock = socket.create_connection((address, self.port), self.timeout)
+                self.sock = self._ssl_context.wrap_socket(
+                    self.sock, server_hostname=self.host
+                )
+                return
+            except OSError as error:
+                last_error = error
+                if self.sock is not None:
+                    self.sock.close()
+                    self.sock = None
+        if last_error is not None:
+            raise last_error
+        raise OSError("validated target has no connection address")
 
 
 class HTTPMigrationExecutor:

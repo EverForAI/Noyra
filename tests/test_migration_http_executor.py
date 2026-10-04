@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import socket
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from noyra.migration.http_executor import (
     ArtifactBundle,
     HTTPMigrationExecutor,
     UrllibHTTPTransport,
+    _PinnedHTTPSConnection,
     _stream_digest,
 )
 from noyra.migration.manager import MigrationTask
@@ -44,6 +46,47 @@ def test_urllib_transport_allows_explicit_private_network_policy() -> None:
 
     transport = UrllibHTTPTransport(allowed_private_networks=("127.0.0.0/8",))
     assert not transport._restricted_address(ipaddress.ip_address("127.0.0.1"))
+
+
+def test_transport_connects_to_the_validated_dns_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = UrllibHTTPTransport()
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))
+        ],
+    )
+    endpoint, addresses = transport._validate_connection_endpoint("https://target.example")
+    assert endpoint == "https://target.example/"
+    assert addresses == ("93.184.216.34",)
+    calls: list[tuple[str, int]] = []
+
+    class FakeSocket:
+        def close(self) -> None:
+            return None
+
+    fake_socket = FakeSocket()
+
+    def connect(address: tuple[str, int], timeout: float) -> FakeSocket:
+        del timeout
+        calls.append(address)
+        return fake_socket
+
+    monkeypatch.setattr(
+        socket,
+        "create_connection",
+        connect,
+    )
+    monkeypatch.setattr(transport, "_restricted_address", lambda address: False)
+    connection = _PinnedHTTPSConnection(
+        "target.example", 443, addresses=addresses, timeout=1
+    )
+    monkeypatch.setattr(connection._ssl_context, "wrap_socket", lambda sock, server_hostname: sock)
+    connection.connect()
+    assert calls == [("93.184.216.34", 443)]
 
 
 def test_sqlite_artifact_provider_emits_recipient_encrypted_bundle(tmp_path: Path) -> None:
