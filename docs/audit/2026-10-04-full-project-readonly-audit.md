@@ -12,7 +12,7 @@
 
 本轮已按独立模块提交以下代码修复：`2d8f6a9` 为 schema 79 增加显式 runtime export ownership graph；`884624e` 修复已跟踪迁移代码/测试的 strict mypy 问题；`f6cee70` 将迁移目标 enrollment 绑定到规范化 HTTPS origin，并在连接前解析地址、默认阻断 loopback、link-local、保留/多播/未指定及云元数据地址，私有网络仅可通过显式 allowlist 放行；`2f24f32` 要求 attestation challenge 同时携带并验证 target identity 与 endpoint origin；`67de724` 在 retention 批次中对冷 terminal model payload 做有界压缩，保留 model ledger 行、哈希、预算和恢复所需证据。
 
-修复后的本地证据：schema/export 聚焦测试通过；迁移聚焦测试通过；retention/storage/model/integrity 回归通过（195 passed、172 subtests passed）；`mypy src tests --exclude tests/test_pelican_bicycle_page.py` 通过（342 files）；Ruff 与 compileall 通过。完整工作区的 mypy 仍会报告用户未跟踪 Pelican 测试缺少返回类型，该文件未被修改。
+修复后的本地证据：schema/export 聚焦测试通过；迁移聚焦测试通过；retention/storage/model/integrity 回归通过（195 passed、172 subtests passed）；最终全量 pytest 通过（1,814 passed、25 skipped、259 subtests passed）；`mypy src tests --exclude tests/test_pelican_bicycle_page.py` 通过（342 files）；Ruff 与 compileall 通过。完整工作区的 mypy 仍会报告用户未跟踪 Pelican 测试缺少返回类型，该文件未被修改。
 
 N01-N04 的代码层问题已分别处理，但 N05 的真实 release gates 仍未关闭；真实 Ubuntu/systemd、LUKS、双机迁移、KMS、链、代理与 soak 仍必须在对应环境产生同一 SHA 的外部证据。
 
