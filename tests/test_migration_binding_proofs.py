@@ -102,8 +102,7 @@ def test_agent_returns_signed_task_bound_binding_proof(
     assert response["target_volume_proof"]["encrypted"] is True
     signed = {key: value for key, value in response.items() if key != "target_signature"}
     signature = base64.urlsafe_b64decode(
-        str(response["target_signature"])
-        + "=" * (-len(str(response["target_signature"])) % 4)
+        str(response["target_signature"]) + "=" * (-len(str(response["target_signature"])) % 4)
     )
     signing.public_key().verify(signature, canonical_json(signed).encode())
     assert "kms-prod" in canonical_json(response)
@@ -306,11 +305,7 @@ class _AgentTransport:
             return restore_receipt.__dict__.copy()
         if operation == "health":
             report = RestoreReport(
-                **{
-                    key: body[key]
-                    for key in RestoreReport.__dataclass_fields__
-                    if key in body
-                }
+                **{key: body[key] for key in RestoreReport.__dataclass_fields__ if key in body}
             )
             health = self.agent.validate(report, expected_digest=body["expected_digest"]).to_dict()
             signed = {
@@ -361,9 +356,13 @@ def test_http_executor_requires_and_records_agent_binding_proofs(
     )
     artifact_provider = SQLiteArtifactProvider(source_db, tmp_path / "outgoing")
     target_public = base64.urlsafe_b64encode(signing.public_key().public_bytes_raw()).decode()
-    recipient_public = base64.urlsafe_b64encode(
-        agent._recipient_private_key.public_key().public_bytes_raw()  # type: ignore[union-attr]
-    ).decode().rstrip("=")
+    recipient_public = (
+        base64.urlsafe_b64encode(
+            agent._recipient_private_key.public_key().public_bytes_raw()  # type: ignore[union-attr]
+        )
+        .decode()
+        .rstrip("=")
+    )
     recipient_fingerprint = hashlib.sha256(
         agent._recipient_private_key.public_key().public_bytes_raw()  # type: ignore[union-attr]
     ).hexdigest()
@@ -376,9 +375,7 @@ def test_http_executor_requires_and_records_agent_binding_proofs(
     def unfence(_task_value: MigrationTask, epoch: str) -> None:
         fenced.remove(epoch)
 
-    def artifact_resolver(
-        task_value: MigrationTask, proof: Mapping[str, object]
-    ) -> ArtifactBundle:
+    def artifact_resolver(task_value: MigrationTask, proof: Mapping[str, object]) -> ArtifactBundle:
         return artifact_provider(task_value, proof)
 
     executor = HTTPMigrationExecutor(

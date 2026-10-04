@@ -110,6 +110,7 @@ def _add_disabled_binding_proof(
         }
     )
 
+
 def _target_context(tmp_path: Any, *, emergency: bool = False) -> Any:
     database = Database(tmp_path / "noyra.sqlite3")
     subject_id = "Noyra-0001"

@@ -111,14 +111,10 @@ def encrypt_bundle(
     plaintext_read = 0
     try:
         with ExitStack() as stack:
-            input_stream = stack.enter_context(
-                os.fdopen(_open_regular_source(source_path), "rb")
-            )
+            input_stream = stack.enter_context(os.fdopen(_open_regular_source(source_path), "rb"))
             output_stream = stack.enter_context(
                 os.fdopen(
-                    _open_new_private_file(
-                        parent_fd, destination_path.parent, temporary_name
-                    ),
+                    _open_new_private_file(parent_fd, destination_path.parent, temporary_name),
                     "wb",
                 )
             )
@@ -231,14 +227,10 @@ def decrypt_bundle(
     plaintext_written = 0
     try:
         with ExitStack() as stack:
-            input_stream = stack.enter_context(
-                os.fdopen(_open_regular_source(source_path), "rb")
-            )
+            input_stream = stack.enter_context(os.fdopen(_open_regular_source(source_path), "rb"))
             output_stream = stack.enter_context(
                 os.fdopen(
-                    _open_new_private_file(
-                        parent_fd, destination_path.parent, temporary_name
-                    ),
+                    _open_new_private_file(parent_fd, destination_path.parent, temporary_name),
                     "wb",
                 )
             )
@@ -319,8 +311,10 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     ):
         raise ValueError("migration bundle size is invalid")
     for field in ("recipient_key_fingerprint", "plaintext_sha256", "ciphertext_sha256"):
-        if not isinstance(values[field], str) or len(values[field]) != 64 or any(
-            character not in "0123456789abcdef" for character in values[field]
+        if (
+            not isinstance(values[field], str)
+            or len(values[field]) != 64
+            or any(character not in "0123456789abcdef" for character in values[field])
         ):
             raise ValueError("migration bundle digest is invalid")
     _decode(values["ephemeral_public_key"], 32, "ephemeral public key")

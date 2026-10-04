@@ -77,12 +77,9 @@ _FILE_REFERENCE = re.compile(r"file:/[A-Za-z0-9_./@:+,-]{1,510}\Z")
 
 
 def _safe_reference(value: str) -> bool:
-    return (
-        _REFERENCE.fullmatch(value) is not None
-        or (
-            _FILE_REFERENCE.fullmatch(value) is not None
-            and ".." not in value.removeprefix("file:").split("/")
-        )
+    return _REFERENCE.fullmatch(value) is not None or (
+        _FILE_REFERENCE.fullmatch(value) is not None
+        and ".." not in value.removeprefix("file:").split("/")
     )
 
 
@@ -359,9 +356,7 @@ class MigrationAgent:
                     source_epoch=str(request["source_epoch"]),
                     target_id=(str(request["target_id"]) if request.get("target_id") else None),
                     endpoint_origin=(
-                        str(request["endpoint_origin"])
-                        if request.get("endpoint_origin")
-                        else None
+                        str(request["endpoint_origin"]) if request.get("endpoint_origin") else None
                     ),
                 )
             except (KeyError, TypeError) as error:
@@ -551,9 +546,7 @@ class MigrationAgent:
         if not value or "=" in value.rstrip("="):
             raise ValueError("signature encoding is invalid")
         try:
-            raw = base64.b64decode(
-                value.encode("ascii"), altchars=b"-_", validate=True
-            )
+            raw = base64.b64decode(value.encode("ascii"), altchars=b"-_", validate=True)
         except (ValueError, TypeError, UnicodeError, binascii.Error) as error:
             raise ValueError("signature encoding is invalid") from error
         if base64.urlsafe_b64encode(raw).decode("ascii") != value:
@@ -725,8 +718,7 @@ class MigrationAgent:
             or self.wallet_address is None
             or address.casefold() != self.wallet_address.casefold()
             or not isinstance(approval, Mapping)
-            or set(approval)
-            != {"approval_id", "task_id", "address", "channel_id", "expires_at"}
+            or set(approval) != {"approval_id", "task_id", "address", "channel_id", "expires_at"}
         ):
             raise ValueError("target local wallet approval is invalid")
         approval_id = approval.get("approval_id")

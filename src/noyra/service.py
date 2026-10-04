@@ -4386,9 +4386,7 @@ class NoyraHTTPServer:
                                 expires_at=str(payload["expires_at"]),
                                 source_epoch=str(payload["source_epoch"]),
                                 target_id=(
-                                    str(payload["target_id"])
-                                    if payload.get("target_id")
-                                    else None
+                                    str(payload["target_id"]) if payload.get("target_id") else None
                                 ),
                                 endpoint_origin=(
                                     str(payload["endpoint_origin"])

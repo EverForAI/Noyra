@@ -173,6 +173,7 @@ class UrllibHTTPTransport:
             )
         except ValueError as error:
             raise ValueError("migration private network allowlist is invalid") from error
+
     def request(self, url: str, body: dict[str, Any], token: str) -> dict[str, Any]:
         endpoint, addresses = self._validate_connection_endpoint(url)
         parsed = urlsplit(endpoint)
@@ -186,11 +187,11 @@ class UrllibHTTPTransport:
             hmac.new(token.encode("utf-8"), signing_bytes, hashlib.sha256).digest()
         ).decode("ascii")
         headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Noyra-HMAC {signature}",
-                "X-Noyra-Timestamp": timestamp,
-                "X-Noyra-Nonce": nonce,
-                "X-Noyra-Body-SHA256": digest,
+            "Content-Type": "application/json",
+            "Authorization": f"Noyra-HMAC {signature}",
+            "X-Noyra-Timestamp": timestamp,
+            "X-Noyra-Nonce": nonce,
+            "X-Noyra-Body-SHA256": digest,
         }
         path = parsed.path or "/"
         if parsed.query:
@@ -221,9 +222,7 @@ class UrllibHTTPTransport:
             raise MigrationExecutionError("target_response_invalid")
         return value
 
-    def _validate_connection_endpoint(
-        self, url: str
-    ) -> tuple[str, tuple[str, ...]]:
+    def _validate_connection_endpoint(self, url: str) -> tuple[str, tuple[str, ...]]:
         endpoint = normalize_endpoint(url)
         parsed = urlsplit(endpoint)
         assert parsed.hostname is not None
@@ -239,9 +238,7 @@ class UrllibHTTPTransport:
             except OSError as error:
                 raise MigrationExecutionError("target_http_unavailable") from error
             addresses = tuple(
-                str(ipaddress.ip_address(info[4][0]))
-                for info in infos
-                if info[4] and info[4][0]
+                str(ipaddress.ip_address(info[4][0])) for info in infos if info[4] and info[4][0]
             )
         if not addresses:
             raise MigrationExecutionError("target_http_unavailable")
@@ -287,9 +284,7 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         for address in self._validated_addresses:
             try:
                 self.sock = socket.create_connection((address, self.port), self.timeout)
-                self.sock = self._ssl_context.wrap_socket(
-                    self.sock, server_hostname=self.host
-                )
+                self.sock = self._ssl_context.wrap_socket(self.sock, server_hostname=self.host)
                 return
             except OSError as error:
                 last_error = error
@@ -372,9 +367,7 @@ class HTTPMigrationExecutor:
                 # the in-memory execution proof so receipt validation can bind
                 # every digest to the exact response that was verified.
                 proof.update(binding_proof)
-            binding_evidence = self._binding_evidence(
-                binding_proof, task, manifest_digest, target
-            )
+            binding_evidence = self._binding_evidence(binding_proof, task, manifest_digest, target)
             preflight = self._request(
                 target,
                 token,
@@ -753,9 +746,7 @@ class HTTPMigrationExecutor:
         ).hexdigest()
         if identity != expected_identity:
             raise MigrationExecutionError("target_binding_proof_identity_mismatch")
-        if response.get("recipient_key_fingerprint") != target.get(
-            "recipient_key_fingerprint"
-        ):
+        if response.get("recipient_key_fingerprint") != target.get("recipient_key_fingerprint"):
             raise MigrationExecutionError("target_binding_proof_recipient_mismatch")
         signature = response.get("target_signature")
         if not isinstance(signature, str):
@@ -809,10 +800,7 @@ class HTTPMigrationExecutor:
             altchars=b"-_",
             validate=True,
         )
-        if (
-            len(raw) != 32
-            or base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=") != raw_value
-        ):
+        if len(raw) != 32 or base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=") != raw_value:
             raise ValueError("base64 key encoding is invalid")
         return raw
 
@@ -1032,12 +1020,12 @@ class HTTPMigrationExecutor:
             raise MigrationExecutionError("artifact_manifest_subject_mismatch")
         if manifest.get("byte_size") != manifest.get("ciphertext_size"):
             raise MigrationExecutionError("artifact_manifest_size_mismatch")
-        if (
-            proof.get("artifact_id") is not None
-            and manifest.get("artifact_id") != proof.get("artifact_id")
+        if proof.get("artifact_id") is not None and manifest.get("artifact_id") != proof.get(
+            "artifact_id"
         ):
             raise MigrationExecutionError("artifact_id_mismatch")
         return manifest
+
     @staticmethod
     def _validate_health(value: Mapping[str, Any], task: MigrationTask, digest: str) -> None:
         if (
@@ -1097,9 +1085,7 @@ class HTTPMigrationExecutor:
         source_fence_digest: str,
         receipt: Mapping[str, Any],
     ) -> dict[str, Any]:
-        if not isinstance(receipt, Mapping) or not isinstance(
-            receipt.get("target_signature"), str
-        ):
+        if not isinstance(receipt, Mapping) or not isinstance(receipt.get("target_signature"), str):
             raise MigrationExecutionError("target_activation_signature_missing")
         required = {
             "task_id": task.task_id,

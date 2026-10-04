@@ -38,9 +38,10 @@ def test_encrypted_migration_bundle_round_trips_to_enrolled_recipient(tmp_path: 
 
     assert restored.read_bytes() == source.read_bytes()
     assert manifest["format"] == "noyra-migration-bundle/v1"
-    assert manifest["recipient_key_fingerprint"] == hashlib.sha256(
-        recipient.public_key().public_bytes_raw()
-    ).hexdigest()
+    assert (
+        manifest["recipient_key_fingerprint"]
+        == hashlib.sha256(recipient.public_key().public_bytes_raw()).hexdigest()
+    )
     assert "private_key" not in manifest
 
 

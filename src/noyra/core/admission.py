@@ -107,8 +107,7 @@ class RuntimeAdmissionGate:
     def open(self, *, epoch: int | None = None) -> None:
         with self._condition:
             if self._migration_fenced and (
-                self._migration_clear_check is not None
-                and not self._migration_clear_check()
+                self._migration_clear_check is not None and not self._migration_clear_check()
             ):
                 raise RuntimeOwnershipError("migration epoch is still active")
             if epoch is not None:

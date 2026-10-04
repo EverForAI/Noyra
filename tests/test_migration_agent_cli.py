@@ -286,28 +286,28 @@ def test_cli_dispatch_signs_health_and_persists_activation(tmp_path: Path) -> No
             "artifact_sha256": "e" * 64,
             "health_report_digest": module.content_hash(
                 {key: value for key, value in health.items() if key != "target_signature"}
-                ),
-                "source_fence_digest": "d" * 64,
-                "recipient_key_fingerprint": agent.recipient_key_fingerprint,
-                "target_volume_proof_digest": content_hash(
-                    {
-                        "task_id": "task-1",
-                        "manifest_digest": "a" * 64,
-                        "proof": binding["target_volume_proof"],
-                    }
-                ),
-                "credential_binding_digest": content_hash(
-                    {
-                        "task_id": "task-1",
-                        "manifest_digest": "a" * 64,
-                        "binding": binding["credential_binding"],
-                    }
-                ),
-                "signer_binding_digest": None,
-                "wallet_mode": "disabled",
-                "wallet_proof_digest": None,
-            },
-        )
+            ),
+            "source_fence_digest": "d" * 64,
+            "recipient_key_fingerprint": agent.recipient_key_fingerprint,
+            "target_volume_proof_digest": content_hash(
+                {
+                    "task_id": "task-1",
+                    "manifest_digest": "a" * 64,
+                    "proof": binding["target_volume_proof"],
+                }
+            ),
+            "credential_binding_digest": content_hash(
+                {
+                    "task_id": "task-1",
+                    "manifest_digest": "a" * 64,
+                    "binding": binding["credential_binding"],
+                }
+            ),
+            "signer_binding_digest": None,
+            "wallet_mode": "disabled",
+            "wallet_proof_digest": None,
+        },
+    )
     assert activation["status"] == "active"
     assert activation["source_fence_digest"] == "d" * 64
     signature = base64.urlsafe_b64decode(
@@ -319,16 +319,19 @@ def test_cli_dispatch_signs_health_and_persists_activation(tmp_path: Path) -> No
             {key: value for key, value in activation.items() if key != "target_signature"}
         ).encode(),
     )
-    assert module.dispatch(
-        agent,
-        "deactivate",
-        {
-            "task_id": "task-1",
-            "target_id": "target-1",
-            "source_epoch": "runtime-1",
-            "manifest_digest": "a" * 64,
-        },
-    )["status"] == "deactivated"
+    assert (
+        module.dispatch(
+            agent,
+            "deactivate",
+            {
+                "task_id": "task-1",
+                "target_id": "target-1",
+                "source_epoch": "runtime-1",
+                "manifest_digest": "a" * 64,
+            },
+        )["status"]
+        == "deactivated"
+    )
 
 
 def test_http_handler_requires_signed_body_and_rejects_replay(tmp_path: Path) -> None:
@@ -386,9 +389,7 @@ def test_http_handler_requires_signed_body_and_rejects_replay(tmp_path: Path) ->
             )
         )
         connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
-        connection.request(
-            "POST", "/v1/receive", body=receive_body, headers=receive_headers
-        )
+        connection.request("POST", "/v1/receive", body=receive_body, headers=receive_headers)
         response = connection.getresponse()
         assert response.status == 400
         assert "recipient-encrypted migration bundle" in response.read().decode()

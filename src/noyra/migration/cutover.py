@@ -149,9 +149,7 @@ class CutoverCoordinator:
         if epoch is None:
             raise ValueError("migration target epoch is missing")
         admission = self.admission
-        control = (
-            admission.migration_control_scope() if admission is not None else nullcontext()
-        )
+        control = admission.migration_control_scope() if admission is not None else nullcontext()
         receipt: MigrationExecutionReceipt | None = None
         with control:
             try:
@@ -252,9 +250,7 @@ class CutoverCoordinator:
         if not reason.strip():
             raise ValueError("rollback reason is required")
         admission = self.admission
-        control = (
-            admission.migration_control_scope() if admission is not None else nullcontext()
-        )
+        control = admission.migration_control_scope() if admission is not None else nullcontext()
         with control:
             task = self.manager.get_task(task_id)
             if task.status == "rolled_back":

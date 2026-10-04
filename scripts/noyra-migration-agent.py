@@ -153,12 +153,8 @@ def load_agent(
     *,
     restore_root: Path | None = None,
     backup_keyring: Path | None = None,
-    activation_request_root: Path = Path(
-        "/var/lib/noyra/migration/target-activation/requests"
-    ),
-    activation_status_root: Path = Path(
-        "/var/lib/noyra/migration/target-activation/status"
-    ),
+    activation_request_root: Path = Path("/var/lib/noyra/migration/target-activation/requests"),
+    activation_status_root: Path = Path("/var/lib/noyra/migration/target-activation/status"),
 ) -> MigrationAgent:
     identity = _read_identity_json(identity_file)
     if set(identity) - IDENTITY_KEYS:
@@ -205,9 +201,11 @@ def _json(value: Any) -> bytes:
 
 
 def dispatch(agent: MigrationAgent, operation: str, payload: dict[str, Any]) -> Any:
-    if operation in {"receive", "restore"} and (
-        agent.data_root is not None or agent.restore_root is not None
-    ) and agent._recipient_private_key is None:
+    if (
+        operation in {"receive", "restore"}
+        and (agent.data_root is not None or agent.restore_root is not None)
+        and agent._recipient_private_key is None
+    ):
         raise ValueError(
             "recipient-encrypted migration bundle support is unavailable; "
             "persistent receive and restore are disabled"

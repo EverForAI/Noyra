@@ -9983,9 +9983,7 @@ END;
             str(row["name"]) for row in connection.execute("PRAGMA table_info(migration_targets)")
         }
         if "recipient_public_key" not in columns:
-            connection.execute(
-                "ALTER TABLE migration_targets ADD COLUMN recipient_public_key TEXT"
-            )
+            connection.execute("ALTER TABLE migration_targets ADD COLUMN recipient_public_key TEXT")
         if "recipient_key_fingerprint" not in columns:
             connection.execute(
                 "ALTER TABLE migration_targets ADD COLUMN recipient_key_fingerprint TEXT"

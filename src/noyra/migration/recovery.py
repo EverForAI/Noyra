@@ -116,11 +116,23 @@ class RecoveryCoordinator:
                 "backup_id,subject_id,backup_path,content_hash,byte_size,schema_version,"
                 "genesis_hash,key_id,keyring_generation,status,verified_at,state_hash) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                tuple(values[key] for key in (
-                    "backup_id", "subject_id", "backup_path", "content_hash", "byte_size",
-                    "schema_version", "genesis_hash", "key_id", "keyring_generation",
-                    "status", "verified_at", "state_hash",
-                )),
+                tuple(
+                    values[key]
+                    for key in (
+                        "backup_id",
+                        "subject_id",
+                        "backup_path",
+                        "content_hash",
+                        "byte_size",
+                        "schema_version",
+                        "genesis_hash",
+                        "key_id",
+                        "keyring_generation",
+                        "status",
+                        "verified_at",
+                        "state_hash",
+                    )
+                ),
             )
             MigrationStore._append_audit(
                 connection,
@@ -357,11 +369,24 @@ class RecoveryCoordinator:
         if int(row["schema_version"]) != CURRENT_SCHEMA_VERSION:
             raise ValueError("verified backup schema version is stale")
         values = dict(row)
-        expected = content_hash({key: values[key] for key in (
-            "backup_id", "subject_id", "backup_path", "content_hash", "byte_size",
-            "schema_version", "genesis_hash", "key_id", "keyring_generation", "status",
-            "verified_at",
-        )})
+        expected = content_hash(
+            {
+                key: values[key]
+                for key in (
+                    "backup_id",
+                    "subject_id",
+                    "backup_path",
+                    "content_hash",
+                    "byte_size",
+                    "schema_version",
+                    "genesis_hash",
+                    "key_id",
+                    "keyring_generation",
+                    "status",
+                    "verified_at",
+                )
+            }
+        )
         if row["state_hash"] != expected:
             raise ValueError("verified backup registry integrity failed")
         path = RecoveryCoordinator._safe_backup_path(str(row["backup_path"]))

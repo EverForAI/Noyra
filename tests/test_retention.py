@@ -68,7 +68,7 @@ def test_retention_compacts_cold_model_payloads_without_deleting_ledger_rows(
         request={"prompt": "x"},
     )
     old = (datetime.now(UTC) - timedelta(days=120)).isoformat()
-    payload = '{"prompt":"' + ('x' * 5000) + '"}'
+    payload = '{"prompt":"' + ("x" * 5000) + '"}'
     with db.transaction() as connection:
         connection.execute(
             "UPDATE model_calls SET status='failed', request_json=?, created_at=? WHERE call_id=?",

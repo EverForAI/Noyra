@@ -331,9 +331,7 @@ class MigrationExecutor:
             raise RunnerError("artifact_format_unsupported")
         try:
             with sqlite3.connect(database) as connection:
-                row = connection.execute(
-                    "SELECT subject_id FROM runtime_state LIMIT 1"
-                ).fetchone()
+                row = connection.execute("SELECT subject_id FROM runtime_state LIMIT 1").fetchone()
             if row is None or row[0] != request["subject_id"]:
                 raise RunnerError("restore_subject_mismatch")
         except RunnerError:

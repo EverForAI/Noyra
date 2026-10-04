@@ -44,9 +44,7 @@ class _FakeExecutor:
             "f" * 64,
             "a" * 64,
             "c" * 64,
-            content_hash(
-                {"task_id": task.task_id, "manifest_digest": "b" * 64, "proof": volume}
-            ),
+            content_hash({"task_id": task.task_id, "manifest_digest": "b" * 64, "proof": volume}),
             content_hash(
                 {"task_id": task.task_id, "manifest_digest": "b" * 64, "binding": credential}
             ),

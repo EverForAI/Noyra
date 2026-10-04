@@ -553,9 +553,7 @@ def test_activation_recovery_restores_previous_runtime_ownership_record(
     atomic_json = activation_module._atomic_json
     second_marker = activator.activation_root / f"{second_task_id}.json"
 
-    def crash_after_current_owner_switch(
-        path: Path, value: Any, mode: int, **kwargs: Any
-    ) -> None:
+    def crash_after_current_owner_switch(path: Path, value: Any, mode: int, **kwargs: Any) -> None:
         if path == second_marker and value.get("status") == "active":
             raise SystemExit("simulated process crash after owner switch")
         atomic_json(path, value, mode, **kwargs)
@@ -612,9 +610,10 @@ def test_activation_keeps_a_root_staged_snapshot_when_agent_copy_changes_source(
     state = json.loads(marker.read_text())
     assert state["staged_database_sha256"] == state["root_staged_database_sha256"]
     assert state["root_staged_database_sha256"] != hashlib.sha256(restored.read_bytes()).hexdigest()
-    assert receipt["active_database_sha256"] == hashlib.sha256(
-        (activator.data_root / "noyra.sqlite3").read_bytes()
-    ).hexdigest()
+    assert (
+        receipt["active_database_sha256"]
+        == hashlib.sha256((activator.data_root / "noyra.sqlite3").read_bytes()).hexdigest()
+    )
     assert restored.read_bytes().endswith(b"agent-side-race")
 
 

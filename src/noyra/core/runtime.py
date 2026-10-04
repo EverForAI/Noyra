@@ -126,9 +126,7 @@ class SubjectKernel:
         self._migration_fence_root = (
             Path(migration_fence_root).resolve() if migration_fence_root is not None else None
         )
-        configured_target_id = migration_target_id or os.environ.get(
-            "NOYRA_MIGRATION_TARGET_ID"
-        )
+        configured_target_id = migration_target_id or os.environ.get("NOYRA_MIGRATION_TARGET_ID")
         if configured_target_id is not None and not re.fullmatch(
             r"[A-Za-z0-9_-]{3,128}", configured_target_id
         ):

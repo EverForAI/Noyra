@@ -81,9 +81,7 @@ def test_transport_connects_to_the_validated_dns_address(
         connect,
     )
     monkeypatch.setattr(transport, "_restricted_address", lambda address: False)
-    connection = _PinnedHTTPSConnection(
-        "target.example", 443, addresses=addresses, timeout=1
-    )
+    connection = _PinnedHTTPSConnection("target.example", 443, addresses=addresses, timeout=1)
     monkeypatch.setattr(connection._ssl_context, "wrap_socket", lambda sock, server_hostname: sock)
     connection.connect()
     assert calls == [("93.184.216.34", 443)]
