@@ -12,7 +12,16 @@ load autonomous wallet automation:
 NOYRA_WALLET_AUTOMATION_RELEASE_GATE=external_verified
 ```
 
-That setting is an operator assertion, not a substitute for evidence. A
+That setting remains an operator opt-in. Production policy activation and each
+new automatic payment authorization also verify a root-controlled Ed25519 key
+at `/etc/noyra/release-evidence-public-key` and the current release's
+`.noyra-external-gates.json`, bound to its `.noyra-source-sha`. An environment
+assertion alone cannot enable production automation. Disabling and emergency
+pause remain available when evidence is missing; receipt query/reconciliation
+for already-broadcast transactions remains available. Container deployments instead bind
+the image's `/opt/noyra/.noyra-source-sha` to an independently provisioned, read-only
+`/run/noyra/release-assurance` directory containing `public-key` and `external-gates.json`;
+see the optional Compose overlay in the Ubuntu deployment guide. A
 release must carry a signed `external-gates.json` with format
 `noyra-external-gates/v1`, the exact release commit SHA, all fixed gate IDs,
 reviewer identity, UTC test windows, and evidence references. The release job
@@ -57,3 +66,9 @@ The wallet policy still enforces the global automation switch, emergency
 pause, single-payment cap, daily amount limit, balance and gas admission, and
 durable reconciliation for unknown or reorged transactions. External evidence
 does not weaken any of those runtime controls.
+
+The 72-hour freshness window applies **at release publication**, not every
+72 hours during operation. An older accepted release can restart offline with
+the same valid signature and source SHA. Replacing the code SHA or trusted key
+requires matching evidence. Production policy-auto migration consumes the same
+contract; manual approval and explicitly opted-in local wallets remain supported.

@@ -1,9 +1,8 @@
-#!/usr/bin/env sh
-set -eu
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-PYTHON="$ROOT/.venv/bin/python"
-"$PYTHON" -m ruff check src tests
-"$PYTHON" -m ruff format --check src tests
-"$PYTHON" -m mypy
-"$PYTHON" -m pytest -q
-"$PYTHON" -m compileall -q src
+#!/usr/bin/env bash
+set -euo pipefail
+NOYRA_PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd -- "$NOYRA_PROJECT_ROOT"
+source "$NOYRA_PROJECT_ROOT/scripts/lib/audit-environment.sh"
+PYTHON="$(audit_python)"
+export PYTHONDONTWRITEBYTECODE=1
+"$PYTHON" "$NOYRA_PROJECT_ROOT/scripts/verify-committed.py" --commit HEAD --scope all

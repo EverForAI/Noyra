@@ -12,7 +12,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from noyra.core.at_rest import (
     VOLUME_ATTESTATION_FORMAT,
@@ -795,6 +795,7 @@ def test_service_health_exposes_non_secret_at_rest_status(tmp_path: Path) -> Non
     settings = ServiceSettings(
         data_dir=tmp_path / "service",
         subject_id="Noyra-p214-service-health",
+        operator_token=SecretStr("health-detail-test-operator-token-123456"),
         genesis_hash=content_hash({"seed": "p2-14-service"}),
         host="127.0.0.1",
         port=0,
@@ -804,7 +805,11 @@ def test_service_health_exposes_non_secret_at_rest_status(tmp_path: Path) -> Non
         service.boot()
         service.http.start()
         _, port = service.http.address
-        with urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as response:
+        request = Request(
+            f"http://127.0.0.1:{port}/health",
+            headers={"Authorization": "Bearer health-detail-test-operator-token-123456"},
+        )
+        with urlopen(request, timeout=5) as response:
             payload = json.loads(response.read())
         assert payload["at_rest"]["mode"] == "development"
         assert payload["at_rest"]["enforced"] is False

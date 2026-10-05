@@ -5,6 +5,7 @@ from typing import Any
 from noyra.core.admission import accounting_scope
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
+from noyra.core.evidence_capacity import require_evidence_capacity
 from noyra.core.payload_codec import compress_text, decompress_text
 from noyra.core.types import (
     canonical_json,
@@ -86,6 +87,7 @@ class ModelLedger:
                         "idempotency key already identifies a different model call"
                     )
                 return self._call_from_row(existing), False
+            require_evidence_capacity(connection, subject_id, "model_calls")
             call_id = new_id("mcall")
             connection.execute(
                 """INSERT INTO model_calls(
@@ -208,6 +210,7 @@ class ModelLedger:
                 )
                 + 1
             )
+            require_evidence_capacity(connection, str(call["subject_id"]), "model_attempts")
             attempt_id = new_id("matt")
             connection.execute(
                 """INSERT INTO model_attempts(
@@ -424,12 +427,39 @@ class ModelLedger:
         bounded = max(1, min(limit, 2_000))
         changed = 0
         with self.database.transaction() as connection:
+            cursor_key = f"model_compaction:{subject_id}:{older_than_days}"
+            persisted = connection.execute(
+                "SELECT value FROM schema_meta WHERE key=?", (cursor_key,)
+            ).fetchone()
+            try:
+                progress = strict_json_loads(persisted[0]) if persisted else None
+            except (TypeError, ValueError):
+                progress = None
+            if not isinstance(progress, dict) or set(progress) != {"last", "horizon"}:
+                progress = None
+            if progress is not None and any(
+                not isinstance(progress[key], list)
+                or len(progress[key]) != 2
+                or not all(isinstance(value, str) for value in progress[key])
+                for key in ("last", "horizon")
+            ):
+                progress = None
+            if progress is None:
+                horizon = connection.execute(
+                    "SELECT created_at,call_id FROM model_calls WHERE subject_id=? "
+                    "AND created_at<? ORDER BY created_at DESC,call_id DESC LIMIT 1",
+                    (subject_id, cutoff),
+                ).fetchone()
+                if horizon is None:
+                    return 0
+                progress = {"last": ["", ""], "horizon": list(horizon)}
             rows = connection.execute(
-                "SELECT call_id, request_json, response_json FROM model_calls "
+                "SELECT call_id,created_at,request_json,response_json FROM model_calls "
                 "WHERE subject_id = ? AND status IN ('succeeded', 'failed', 'unknown') "
                 "AND created_at < ? AND (request_json IS NOT NULL OR response_json IS NOT NULL) "
+                "AND (created_at,call_id) > (?,?) AND (created_at,call_id) <= (?,?) "
                 "ORDER BY created_at, call_id LIMIT ?",
-                (subject_id, cutoff, bounded),
+                (subject_id, cutoff, *progress["last"], *progress["horizon"], bounded),
             ).fetchall()
             for row in rows:
                 request_json = (
@@ -445,6 +475,17 @@ class ModelLedger:
                     (request_json, response_json, row["call_id"]),
                 )
                 changed += 1
+            if rows:
+                progress["last"] = [rows[-1]["created_at"], rows[-1]["call_id"]]
+            if len(rows) < bounded or progress["last"] >= progress["horizon"]:
+                # Finish this finite pass before rescanning for newly backdated
+                # rows or records that became terminal behind the cursor.
+                connection.execute("DELETE FROM schema_meta WHERE key=?", (cursor_key,))
+            else:
+                connection.execute(
+                    "INSERT OR REPLACE INTO schema_meta(key,value) VALUES(?,?)",
+                    (cursor_key, canonical_json(progress)),
+                )
         return changed
 
     def prepare_unknown_retry(self, call_id: str, *, actor: str, reason: str) -> CallRecord:

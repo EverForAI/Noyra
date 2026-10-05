@@ -88,14 +88,23 @@ def test_transport_connects_to_the_validated_dns_address(
 
 
 def test_sqlite_artifact_provider_emits_recipient_encrypted_bundle(tmp_path: Path) -> None:
+    from noyra.core import Database, IdentityStore
     from noyra.migration.http_executor import SQLiteArtifactProvider
+    from noyra.migration.subject_payload import restore_payload
+    from noyra.research.provider import SearchProviderStore
+    from noyra.research.types import SearchProviderInput
 
     database = tmp_path / "source.sqlite3"
-    with __import__("sqlite3").connect(database) as connection:
-        connection.execute("CREATE TABLE runtime_state(subject_id TEXT NOT NULL)")
-        connection.execute("INSERT INTO runtime_state VALUES ('Noyra-0001')")
-        connection.execute("CREATE TABLE search_provider_configs(key_reference TEXT)")
-        connection.execute("INSERT INTO search_provider_configs VALUES ('secret:search')")
+    db = Database(database)
+    IdentityStore(db).ensure("Noyra-0001", "a" * 64)
+    provider_config = SearchProviderStore(db, tmp_path / "secrets").configure(
+        "Noyra-0001",
+        SearchProviderInput(provider_type="brave", label="migration", api_key="test-api-secret"),
+        actor="operator",
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "note.txt").write_text("preserved subject work", encoding="utf-8")
     recipient = X25519PrivateKey.generate()
     task = _task()
     provider = SQLiteArtifactProvider(database, tmp_path / "outgoing")
@@ -132,8 +141,17 @@ def test_sqlite_artifact_provider_emits_recipient_encrypted_bundle(tmp_path: Pat
             "artifact_format": BUNDLE_FORMAT,
         },
     )
-    with __import__("sqlite3").connect(plaintext) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM search_provider_configs").fetchone()[0] == 0
+    restored = restore_payload(plaintext, tmp_path / "restored", task.subject_id)
+    with __import__("sqlite3").connect(restored) as connection:
+        assert (
+            connection.execute("SELECT config_id FROM search_provider_configs").fetchone()[0]
+            == provider_config.config_id
+        )
+        assert connection.execute("SELECT COUNT(*) FROM secret_file_intents").fetchone()[0] > 0
+        assert connection.execute("PRAGMA foreign_key_check").fetchone() is None
+    assert (restored.parent / "workspace" / "note.txt").read_text() == "preserved subject work"
+    assert not (restored.parent / "secrets").exists()
+    assert not list((tmp_path / "outgoing").glob(".*"))
 
 
 class _Transport:
@@ -433,3 +451,46 @@ def test_http_executor_refuses_unsafe_bundle_before_any_target_work(tmp_path: Pa
         executor.execute(_task(), proof=proof, source_epoch="runtime-1")
     assert fenced == []
     assert transport.calls == []
+
+
+def test_rollback_verifies_signed_cancellation_without_activation_receipt(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from noyra.migration.executor import MigrationExecutionError
+
+    private = Ed25519PrivateKey.generate()
+    public = base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode()
+    task = replace(_task(), manifest_digest="b" * 64)
+
+    class CancellationTransport:
+        tamper = False
+
+        def request(self, url: str, body: dict[str, Any], token: str) -> dict[str, Any]:
+            assert url.endswith("/v1/deactivate")
+            result = {**body, "status": "deactivated", "activation_revoked": True}
+            result["target_signature"] = base64.urlsafe_b64encode(
+                private.sign(canonical_json(result).encode())
+            ).decode()
+            if self.tamper:
+                result["source_epoch"] = "wrong-epoch"
+            return result
+
+    transport = CancellationTransport()
+    unfenced: list[str] = []
+    executor = HTTPMigrationExecutor(
+        target_resolver=lambda task: {
+            "target_id": task.target_id,
+            "endpoint": "https://target.example",
+            "public_key": public,
+        },
+        token_resolver=lambda task: "t" * 32,
+        artifact_resolver=lambda task, proof: ArtifactBundle(tmp_path / "unused", {}),
+        source_fence=lambda task, epoch: "f" * 64,
+        source_unfence=lambda task, epoch: unfenced.append(epoch),
+        transport=transport,
+    )
+    assert executor.rollback(task, reason="lost reply")["activation_revoked"] is True
+    assert unfenced == []  # Admission belongs to the durable source coordinator.
+    transport.tamper = True
+    with pytest.raises(MigrationExecutionError, match="proof_invalid"):
+        executor.rollback(task, reason="replayed wrong epoch")

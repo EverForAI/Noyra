@@ -6,6 +6,7 @@ services:
       context: .
       args:
         NOYRA_INSTALL_PROFILE: ${NOYRA_INSTALL_PROFILE:-base}
+        NOYRA_SOURCE_SHA: ${NOYRA_SOURCE_SHA:-}
     # Retry transient crashes a bounded number of times.  The service exits
     # with EX_CONFIG (78) for invalid configuration, so a bad deployment does
     # not restart forever and hide the operator error.

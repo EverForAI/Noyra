@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import shutil
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .database import Database
+from .evidence_capacity import evidence_capacity_status
 from .types import canonical_json, content_hash, new_id, strict_json_loads, utc_now
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _positive(value: Any, name: str, *, maximum: int = 36_500) -> int:
@@ -380,9 +386,16 @@ def validate_retention_run_row(row: Mapping[str, Any]) -> None:
 
 
 class RetentionManager:
-    def __init__(self, database: Database, settings: RetentionSettings | None = None):
+    def __init__(
+        self,
+        database: Database,
+        settings: RetentionSettings | None = None,
+        *,
+        minimum_free_bytes: int = 500_000_000,
+    ):
         self.database = database
         self.settings = settings or RetentionSettings()
+        self.minimum_free_bytes = minimum_free_bytes
         with self.database.connection() as connection:
             exists = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='retention_runs'"
@@ -398,6 +411,10 @@ class RetentionManager:
             ).fetchone()
             is not None
         )
+
+    def evidence_capacity(self, subject_id: str) -> dict[str, Any]:
+        with self.database.connection() as connection:
+            return evidence_capacity_status(connection, subject_id)
 
     def estimate(self, subject_id: str, *, now: datetime | None = None) -> dict[str, int]:
         moment = now or datetime.now(UTC)
@@ -445,6 +462,7 @@ class RetentionManager:
         now: datetime | None = None,
         *,
         batch_size: int | None = None,
+        allow_compaction: bool = True,
     ) -> dict[str, Any]:
         size = (
             self.settings.batch_size
@@ -453,18 +471,6 @@ class RetentionManager:
         )
         moment = now or datetime.now(UTC)
         compacted: dict[str, int] = {}
-        with self.database.connection() as connection:
-            model_calls = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='model_calls'"
-            ).fetchone()
-        if model_calls is not None:
-            from noyra.model.ledger import ModelLedger
-
-            compacted["model_calls"] = ModelLedger(self.database).compress_cold_payloads(
-                subject_id,
-                older_than_days=self.settings.runtime_days,
-                limit=size,
-            )
         run_id = new_id("retention")
         started = utc_now()
         deleted: dict[str, int] = {spec.table: 0 for spec in _DELETE_SPECS}
@@ -518,7 +524,24 @@ class RetentionManager:
                         cursor[table]["cursor"] = entry.get("cursor")
         pruned_run_history = 0
         failure_stage: str | None = None
+        delete_stage = "transaction"
+        committed_cursor = deepcopy(cursor)
+        compaction_skipped = not allow_compaction
         try:
+            try:
+                compaction_skipped = compaction_skipped or (
+                    shutil.disk_usage(self.database.path.parent).free < self.minimum_free_bytes
+                )
+                if not compaction_skipped:
+                    from noyra.model.ledger import ModelLedger
+
+                    compacted["model_calls"] = ModelLedger(self.database).compress_cold_payloads(
+                        subject_id, older_than_days=self.settings.runtime_days, limit=size
+                    )
+            except Exception as error:
+                failed_reason = type(error).__name__
+                failure_stage = "compaction"
+                LOGGER.warning("retention compaction deferred: %s", failed_reason)
             with self.database.transaction() as connection:
                 remaining = size
                 for spec in _DELETE_SPECS:
@@ -527,7 +550,7 @@ class RetentionManager:
                         continue
                     if not remaining or not self._table_exists(connection, table):
                         continue
-                    failure_stage = "delete"
+                    delete_stage = "delete"
                     count, last_cursor = self._delete_table(
                         connection,
                         table,
@@ -563,6 +586,25 @@ class RetentionManager:
                     "protected": protected,
                     "cursor": cursor,
                 }
+                retry_at = None
+                failure_count = 0
+                if failed_reason:
+                    retry_at = (
+                        moment + timedelta(seconds=self.settings.interval_seconds)
+                    ).isoformat()
+                    previous_failure = connection.execute(
+                        "SELECT failure_count FROM retention_runs WHERE subject_id=? "
+                        "ORDER BY started_at DESC,rowid DESC LIMIT 1",
+                        (subject_id,),
+                    ).fetchone()
+                    failure_count = int(previous_failure[0] or 0) + 1 if previous_failure else 1
+                    payload = {
+                        "run_id": run_id,
+                        "subject_id": subject_id,
+                        "failed_reason": failed_reason,
+                        "failure_stage": failure_stage,
+                        "cursor": cursor,
+                    }
                 connection.execute(
                     """INSERT INTO retention_runs(
                         run_id, subject_id, started_at, completed_at, deleted_by_table_json,
@@ -573,20 +615,25 @@ class RetentionManager:
                         run_id,
                         subject_id,
                         started,
-                        utc_now(),
+                        None if failed_reason else utc_now(),
                         canonical_json(deleted),
                         protected,
                         failed_reason,
                         canonical_json(cursor),
                         content_hash(payload),
-                        None,
-                        None,
-                        0,
+                        failure_stage,
+                        retry_at,
+                        failure_count,
                         "protected row predicates are not configured for this registry",
                     ),
                 )
         except Exception as error:
             failed_reason = type(error).__name__
+            failure_stage = delete_stage
+            # The deletion transaction rolled back; never report its tentative counts.
+            deleted = {spec.table: 0 for spec in _DELETE_SPECS}
+            pruned_run_history = 0
+            cursor = committed_cursor
             retry_at = (moment + timedelta(seconds=self.settings.interval_seconds)).isoformat()
             try:
                 with self.database.transaction() as connection:
@@ -624,10 +671,12 @@ class RetentionManager:
                             "protected row predicates are not configured for this registry",
                         ),
                     )
-            except Exception:
+            except Exception as recording_error:
                 # A second failure (for example, a full disk) is returned to
                 # the caller; it cannot safely be made durable.
-                pass
+                LOGGER.warning(
+                    "retention failure could not be persisted: %s", type(recording_error).__name__
+                )
         return {
             "run_id": run_id,
             "deleted_by_table": deleted,
@@ -637,6 +686,8 @@ class RetentionManager:
             ),
             "pruned_run_history": pruned_run_history,
             "failed_reason": failed_reason,
+            "failure_stage": failure_stage,
+            "compaction_skipped": compaction_skipped,
             "next_cursor": cursor,
             "compacted_by_table": compacted,
         }

@@ -4,6 +4,7 @@ from typing import Any
 
 from .database import Database, action_state_hash, behavior_log_state_hash
 from .errors import DuplicateActionError, IntegrityError, InvalidTransitionError, NotFoundError
+from .evidence_capacity import require_evidence_capacity
 from .types import (
     ActionRecord,
     canonical_json,
@@ -128,6 +129,7 @@ class ActionLedger:
                     )
                 return self._from_row(existing)
 
+            require_evidence_capacity(connection, subject_id, "actions")
             action_id = new_id("act")
             prepared_at = utc_now()
             connection.execute(

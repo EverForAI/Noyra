@@ -1,0 +1,10 @@
+# Optional production automation evidence, provisioned independently by root.
+services:
+  noyra:
+    volumes:
+      - type: bind
+        source: ${NOYRA_RELEASE_ASSURANCE_HOST_PATH:?Set the absolute root-controlled acceptance directory}
+        target: /run/noyra/release-assurance
+        read_only: true
+        bind:
+          create_host_path: false

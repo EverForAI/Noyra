@@ -832,6 +832,16 @@ class EncryptedBackupManager:
         for source in _private_root_entries(self.data_root):
             if source == work_root or source.name in skipped_names:
                 continue
+            if _installed_migration_control(self.data_root, source):
+                # Machine-local activation journals and request queues must not
+                # be replayed on a restored host. Preserve the source epoch and
+                # fences; an unreadable active fence aborts backup, never drops it.
+                list(_migration_service_paths(self.data_root, source))
+                destination = payload_root / source.name
+                destination.mkdir(mode=0o700)
+                for name in ("source", "fences"):
+                    self._copy_entry(source / name, destination / name, budget)
+                continue
             if source.name.startswith("noyra.sqlite3.pre-migration-v") and source.name.endswith(
                 ".bak"
             ):
@@ -1464,6 +1474,9 @@ def _private_paths(data_root: Path) -> Iterator[Path]:
     # can all contain private material and must obey the same contract.
     for path in _private_root_entries(data_root):
         try:
+            if _installed_migration_control(data_root, path):
+                yield from _migration_service_paths(data_root, path)
+                continue
             if path.is_dir():
                 yield path
                 yield from _walk_private_tree(path)
@@ -1471,6 +1484,74 @@ def _private_paths(data_root: Path) -> Iterator[Path]:
                 yield path
         except OSError as error:
             raise AtRestError("private storage metadata is unavailable") from error
+
+
+def _installed_migration_control(data_root: Path, path: Path) -> bool:
+    if os.name != "posix" or path != data_root / "migration":
+        return False
+    metadata = path.lstat()
+    # A normal service-owned development/restore tree retains the ordinary
+    # private-data checks. Only the installer's root-owned layout is special.
+    return metadata.st_uid == 0 and stat.S_IMODE(metadata.st_mode) != 0o700
+
+
+def _migration_service_paths(data_root: Path, root: Path) -> Iterator[Path]:
+    """Validate the installer's privileged boundary without chmod/traversing state.
+
+    Root-only recovery snapshots share the encrypted volume but are deliberately
+    inaccessible to the service. Group access is only for that service's group,
+    and group write is limited to the fixed activation request spool.
+    """
+    data = data_root.stat()
+
+    def directory(path: Path, owner: int, group: int, mode: int) -> None:
+        metadata = path.lstat()
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_dev != data.st_dev
+            or metadata.st_uid != owner
+            or metadata.st_gid != group
+            or stat.S_IMODE(metadata.st_mode) != mode
+        ):
+            raise AtRestError("migration control directory permissions are invalid")
+
+    def root_records(path: Path) -> None:
+        directory(path, 0, data.st_gid, 0o750)
+        for child in path.iterdir():
+            metadata = child.lstat()
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or metadata.st_dev != data.st_dev
+                or metadata.st_uid != 0
+                or stat.S_IMODE(metadata.st_mode) not in {0o600, 0o640}
+                or (metadata.st_mode & 0o040 and metadata.st_gid != data.st_gid)
+            ):
+                raise AtRestError("migration control record permissions are invalid")
+
+    directory(root, 0, data.st_gid, 0o750)
+    if {path.name for path in root.iterdir()} != {
+        "source",
+        "fences",
+        "requests",
+        "status",
+        "target-activation",
+    }:
+        raise AtRestError("migration control layout is invalid")
+    for name in ("fences", "status"):
+        root_records(root / name)
+    target = root / "target-activation"
+    directory(target, 0, data.st_gid, 0o750)
+    if {path.name for path in target.iterdir()} != {"requests", "status", "state"}:
+        raise AtRestError("migration activation layout is invalid")
+    directory(target / "requests", 0, data.st_gid, 0o730)
+    root_records(target / "status")
+    directory(target / "state", 0, 0, 0o700)
+    for name in ("source", "requests"):
+        path = root / name
+        directory(path, data.st_uid, data.st_gid, 0o700)
+        yield path
+        yield from _walk_private_tree(path)
 
 
 def _private_root_entries(data_root: Path) -> Iterator[Path]:

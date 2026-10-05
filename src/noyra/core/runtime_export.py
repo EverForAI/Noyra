@@ -524,6 +524,10 @@ _OWNERSHIP_GRAPH_V78 = {
 # Schema 79 adds recipient public-key metadata to the already subject-owned
 # migration_targets table; it adds no tables or ownership edges.
 _OWNERSHIP_GRAPH_V79 = _OWNERSHIP_GRAPH_V78
+_OWNERSHIP_GRAPH_V80 = {
+    **_OWNERSHIP_GRAPH_V79,
+    "evidence_row_counts": _subject_rule(),
+}
 
 _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     33: _OWNERSHIP_GRAPH_V33,
@@ -573,6 +577,7 @@ _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     77: _OWNERSHIP_GRAPH_V77,
     78: _OWNERSHIP_GRAPH_V78,
     79: _OWNERSHIP_GRAPH_V79,
+    80: _OWNERSHIP_GRAPH_V80,
 }
 
 

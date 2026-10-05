@@ -17,10 +17,12 @@ def test_migration_console_exposes_audited_pre_cutover_cancellation() -> None:
     assert 'id="migration-task-list"' in ADMIN_HTML
 
 
-def test_migration_console_does_not_offer_unproven_cutover_submission() -> None:
-    assert "等待安全证明" in ADMIN_JS
-    assert 'disabled title="等待加密迁移包和目标恢复证明接线"' in ADMIN_JS
-    assert '/cutover`, { method: "POST", body: JSON.stringify({})' not in ADMIN_JS
+def test_migration_console_requests_managed_execution_and_local_wallet_approval() -> None:
+    assert 'data-migration-cutover="${esc(item.task_id)}"' in ADMIN_JS
+    assert '/cutover`, { method: "POST", body: JSON.stringify({})' in ADMIN_JS
+    assert "authorize_local_wallet: true" in ADMIN_JS
+    assert 'id="migration-target-recipient"' in ADMIN_HTML
+    assert 'id="migration-target-token" type="password"' in ADMIN_HTML
 
 
 def test_migration_console_confirms_high_risk_modes_and_shows_evidence() -> None:

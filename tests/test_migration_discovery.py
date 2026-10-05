@@ -144,6 +144,75 @@ def test_missing_observation_is_explicitly_unavailable(tmp_path: Any) -> None:
     assert result[0].reasons == ("resource_observation_unavailable",)
 
 
+@pytest.mark.parametrize("failure", ["signature", "stale", "cost"])
+def test_rejected_discovery_cannot_become_an_approved_proposal(tmp_path: Any, failure: str) -> None:
+    from noyra.migration.discovery import MigrationNeed
+    from noyra.migration.proposals import MigrationProposalBuilder
+    from noyra.migration.trust import TrustDecision
+
+    database, policy, _, private = _setup(tmp_path)
+    changes: dict[str, Any] = {}
+    if failure == "cost":
+        changes["cost_microusd_month"] = 1
+    if failure == "stale":
+        changes["observed_at"] = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    observation = _observation(private, **changes)
+    if failure == "signature":
+        observation = observation.with_signature("invalid")
+    result = MigrationDiscovery(
+        database, StaticObservationProvider({"target-1": observation})
+    ).discover("Noyra-0001", policy)[0]
+    assert not result.eligible
+    assert (
+        MigrationProposalBuilder().build(
+            subject_id="Noyra-0001",
+            candidate=result,
+            need=MigrationNeed.assess(source_health=0.1, storage_pressure=1.0),
+            trust=TrustDecision(True),
+            policy=policy,
+        )
+        is None
+    )
+
+
+def test_rejection_writer_is_readable_by_manager_and_cannot_change_reason_to_bypass(
+    tmp_path: Any,
+) -> None:
+    from noyra.migration.manager import MigrationManager
+    from noyra.migration.proposals import MigrationProposalStore
+
+    database, _, _, _ = _setup(tmp_path)
+    policy_store = MigrationStore(database)
+    current = policy_store.read_policy("Noyra-0001")
+    policy = policy_store.update_policy(
+        "Noyra-0001", current.revision, {"enabled": True}, "operator"
+    )
+    rejection_store = MigrationProposalStore(database)
+    rejection_store.record_rejection(
+        subject_id="Noyra-0001",
+        target_id="target-1",
+        reason_code="storage_pressure",
+        reason="暂不迁移",
+        policy_revision=policy.revision,
+        cooldown_seconds=3600,
+        actor="operator",
+    )
+    manager = MigrationManager(database, policy_store)
+    assert manager.list_proposals("Noyra-0001")[0]["status"] == "rejected"
+    assert (
+        rejection_store.next_eligible_at("Noyra-0001", "target-1", "different_reason") is not None
+    )
+    with pytest.raises(ValueError, match="cooldown"):
+        manager.create_proposal(
+            subject_id="Noyra-0001",
+            target_id="target-1",
+            reason_code="different_reason",
+            reason="new text",
+            policy_revision=policy.revision,
+            expires_at="2099-01-01T00:00:00+00:00",
+        )
+
+
 def test_observation_payload_is_bounded_and_digest_bound() -> None:
     with pytest.raises(ValueError, match="capacity"):
         ResourceObservation.create_signed_payload(

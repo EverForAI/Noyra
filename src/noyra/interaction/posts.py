@@ -20,6 +20,7 @@ from noyra.core.database import Database, public_post_identity_hash
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.types import content_hash, new_id, utc_now
 
+from .captcha_audio import audio_challenge
 from .types import PublicPostInput, PublicPostRecord
 
 
@@ -326,6 +327,7 @@ class PublicPostStore:
         ttl_seconds: int = 300,
         max_attempts: int = 5,
         mode: str = "alphanumeric",
+        presentation: str = "image",
         issue_limit_per_hour: int | None = None,
         global_rate_per_minute: int | None = None,
         queue_cap: int | None = None,
@@ -363,8 +365,10 @@ class PublicPostStore:
             "alphanumeric": "ABCDEFGHJKLMNPQRSTUVWXYZ23456789",
         }
         alphabet = alphabets.get(mode)
-        if alphabet is None:
+        if alphabet is None or presentation not in {"image", "audio"}:
             raise ValueError("invalid CAPTCHA mode")
+        if presentation == "audio":
+            alphabet = alphabets["digits"]
         answer = "".join(secrets.choice(alphabet) for _ in range(6))
         challenge_id = new_id("captcha")
         salt = secrets.token_hex(16)
@@ -446,6 +450,9 @@ class PublicPostStore:
                 storage_cap_bytes=effective_storage_cap,
                 prospective_bytes=0,
             )
+            media = (
+                audio_challenge(answer) if presentation == "audio" else self._captcha_image(answer)
+            )
             connection.execute(
                 "INSERT INTO public_post_captcha_issue_events("
                 "event_id, subject_id, client_ip, issued_at) VALUES (?, ?, ?, ?)",
@@ -470,7 +477,8 @@ class PublicPostStore:
         return {
             "challenge_id": challenge_id,
             "captcha_id": challenge_id,
-            "image": self._captcha_image(answer),
+            "presentation": presentation,
+            presentation: media,
             "expires_at": now + ttl_seconds,
         }
 

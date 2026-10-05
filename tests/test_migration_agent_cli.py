@@ -218,7 +218,7 @@ def test_cli_dispatch_signs_health_and_persists_activation(tmp_path: Path) -> No
             }
 
         def deactivate(self, request: dict[str, Any]) -> dict[str, Any]:
-            return {"status": "deactivated", "task_id": request["task_id"]}
+            return {**request, "status": "deactivated", "activation_revoked": True}
 
     agent = module.MigrationAgent(
         target_id="target-1",
@@ -288,6 +288,9 @@ def test_cli_dispatch_signs_health_and_persists_activation(tmp_path: Path) -> No
                 {key: value for key, value in health.items() if key != "target_signature"}
             ),
             "source_fence_digest": "d" * 64,
+            "format": "noyra-target-activation/v2",
+            "restored_database_sha256": "e" * 64,
+            "inventory_sha256": None,
             "recipient_key_fingerprint": agent.recipient_key_fingerprint,
             "target_volume_proof_digest": content_hash(
                 {

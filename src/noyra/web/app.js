@@ -6,6 +6,7 @@ const MAX_EXPORT_DOWNLOAD_BYTES = 128 * 1024 * 1024;
 let publicPostCaptchaId = "";
 let publicPostIdempotencyKey = "";
 let publicPostCaptchaGeneration = 0;
+let publicPostCaptchaPresentation = "image";
 
 // Private management routes and forms belong exclusively to /admin.
 // These names document the boundary covered by the compatibility contract:
@@ -177,7 +178,22 @@ async function loadPublicPostCaptcha() {
   const imageWrap = document.querySelector("#captcha-image-wrap");
   const loading = document.querySelector("#captcha-loading");
   const status = document.querySelector("#captcha-status");
+  const audio = document.querySelector("#public-post-captcha-audio");
+  const audioWrap = document.querySelector("#captcha-audio-wrap");
   if (!image || !answer) return;
+  const presentation = publicPostCaptchaPresentation;
+  publicPostCaptchaId = "";
+  const controller = requestScope("captcha");
+  audio?.pause();
+  audio?.removeAttribute("src");
+  image.removeAttribute("src");
+  if (imageWrap) imageWrap.hidden = presentation === "audio";
+  if (audioWrap) audioWrap.hidden = presentation !== "audio";
+  document.querySelector(".captcha-row")?.classList.toggle("audio-mode", presentation === "audio");
+  document.querySelectorAll("[data-captcha-presentation]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.captchaPresentation === presentation)));
+  document.querySelector("#public-post-captcha-refresh").textContent = "换一组";
+  answer.inputMode = presentation === "audio" ? "numeric" : "text";
+  answer.placeholder = presentation === "audio" ? "输入六位数字" : "输入验证码";
   imageWrap?.classList.remove("has-image");
   if (loading) loading.textContent = "正在生成验证码";
   if (status) { status.textContent = ""; status.classList.remove("error"); }
@@ -186,23 +202,32 @@ async function loadPublicPostCaptcha() {
       method: "POST",
       cache: "no-store",
       credentials: "same-origin",
+      signal: controller.signal,
       headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: "{}",
+      body: JSON.stringify({ presentation }),
     });
     const payload = await response.json().catch(() => null);
     if (!response.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
-    if (typeof payload?.challenge_id !== "string" || typeof payload?.image !== "string" || !payload.image.startsWith("data:image/png;base64,")) {
+    const media = payload?.[presentation];
+    const prefix = presentation === "audio" ? "data:audio/wav;base64," : "data:image/png;base64,";
+    if (typeof payload?.challenge_id !== "string" || typeof media !== "string" || !media.startsWith(prefix)) {
       throw new Error("验证码响应无效");
     }
     if (generation !== publicPostCaptchaGeneration) return;
-    image.src = payload.image;
-    await image.decode();
+    if (presentation === "audio") {
+      audio.src = media;
+      audio.load();
+    } else {
+      image.src = media;
+      await image.decode();
+    }
     if (generation !== publicPostCaptchaGeneration) return;
     publicPostCaptchaId = payload.challenge_id;
     imageWrap?.classList.add("has-image");
     answer.value = "";
+    if (status) status.textContent = presentation === "audio" ? "中文数字音频已就绪" : "图片验证码已就绪";
   } catch (error) {
-    if (generation !== publicPostCaptchaGeneration) return;
+    if (isAbortError(error) || generation !== publicPostCaptchaGeneration) return;
     publicPostCaptchaId = "";
     image.removeAttribute("src");
     if (loading) loading.textContent = "验证码暂时不可用";
@@ -222,7 +247,18 @@ document.querySelectorAll(".tab").forEach((button) => button.addEventListener("c
   refresh();
 }));
 document.querySelector("#refresh").addEventListener("click", refresh);
-document.querySelector("#public-post-captcha-refresh")?.addEventListener("click", loadPublicPostCaptcha);
+document.querySelector("#public-post-captcha-refresh")?.addEventListener("click", () => loadPublicPostCaptcha());
+document.querySelectorAll("[data-captcha-presentation]").forEach((button) => button.addEventListener("click", () => {
+  if (publicPostCaptchaPresentation === button.dataset.captchaPresentation) return;
+  publicPostCaptchaPresentation = button.dataset.captchaPresentation;
+  loadPublicPostCaptcha();
+}));
+document.querySelector("#public-post-captcha-audio")?.addEventListener("error", () => {
+  if (publicPostCaptchaPresentation !== "audio") return;
+  publicPostCaptchaId = "";
+  const status = document.querySelector("#captcha-status");
+  if (status) { status.textContent = "音频暂时无法播放，请换一组后重试"; status.classList.add("error"); }
+});
 document.querySelector("#public-post-form")?.addEventListener("input", (event) => {
   if (event.target.id !== "public-post-captcha-answer") publicPostIdempotencyKey = "";
 });

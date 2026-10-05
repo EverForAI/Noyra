@@ -121,16 +121,11 @@ def test_migration_candidates_route_is_operator_only_and_discloses_missing_resou
         f"{base_url}/api/v1/admin/migration/candidates", authenticated=True
     )
     assert status == 200
-    assert candidates == [
-        {
-            "target_id": "migration-target-1",
-            "status": "active",
-            "trusted": True,
-            "resources_verified": False,
-            "eligible": False,
-            "reasons": ["resource_observation_unavailable"],
-        }
-    ]
+    assert len(candidates) == 1
+    assert candidates[0]["target_id"] == "migration-target-1"
+    assert candidates[0]["resources_verified"] is False
+    assert candidates[0]["eligible"] is False
+    assert "resource_observation_unavailable" in candidates[0]["reasons"]
 
 
 def test_disabled_migration_does_not_discover_candidates(

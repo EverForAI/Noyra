@@ -9,7 +9,9 @@ wallet or a separate HTTPS service; MockSigner is test-only.
 from __future__ import annotations
 
 import ipaddress
+import json
 import re
+import secrets
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -34,7 +36,7 @@ from noyra.core.http import (
     validate_response_headers,
 )
 from noyra.core.identity import validate_subject_id
-from noyra.core.types import content_hash, new_id, strict_json_loads, utc_now
+from noyra.core.types import canonical_json, content_hash, new_id, strict_json_loads, utc_now
 
 from .economy import WalletEconomyStore
 from .economy_types import PaymentOrderRecord, canonical_amount
@@ -379,6 +381,39 @@ class HTTPSWalletSigner:
                 on_timeout=timeout_hook.cancel,
             ),
         )
+
+    def prove_migration_identity(self, context: dict[str, str]) -> str:
+        """Verify an isolated signer's possession without authorizing a payment."""
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+
+        if set(context) != {"task_id", "target_id", "manifest_digest", "target_identity"}:
+            raise ValueError("wallet identity proof context is invalid")
+        nonce = secrets.token_hex(32)
+        challenge = canonical_json(
+            {
+                "domain": "noyra-migration-wallet/v1",
+                **context,
+                "signer_id": self.signer_id,
+                "nonce": nonce,
+            }
+        )
+        status, body = self._request(
+            "/migration-identity",
+            {
+                "signer_id": self.signer_id,
+                "challenge": challenge,
+            },
+        )
+        try:
+            result = json.loads(body)
+            signature = result["signature"]
+            address = Account.recover_message(encode_defunct(text=challenge), signature=signature)
+            if status != 200 or not self.address or address.casefold() != self.address.casefold():
+                raise ValueError("wallet identity mismatch")
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("wallet signer possession proof invalid") from error
+        return content_hash({"challenge": challenge, "signature": signature})
 
     def sign_and_broadcast(
         self, transfer: WalletUnsignedTransfer, *, request_id: str

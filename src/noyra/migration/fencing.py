@@ -79,61 +79,81 @@ class EpochLease:
         expected_source_epoch: str | None,
         actor: str = "system",
     ) -> EpochLease:
-        """Internal fixture hook until target proof verification is integrated."""
+        """Internal transaction wrapper used after caller validation."""
         if not actor.strip():
             raise ValueError("epoch acquisition actor is required")
         with database.transaction() as c:
-            active = c.execute(
-                "SELECT * FROM migration_epochs WHERE subject_id=? AND status='active'",
-                (subject_id,),
-            ).fetchone()
-            if active is not None:
-                raise ValueError("subject already has an active migration epoch")
-            latest = c.execute(
-                "SELECT COALESCE(MAX(epoch_number),0) FROM migration_epochs WHERE subject_id=?",
-                (subject_id,),
-            ).fetchone()[0]
-            if expected_source_epoch is not None and not expected_source_epoch.strip():
-                raise ValueError("expected source epoch is invalid")
-            if expected_source_epoch and expected_source_epoch.startswith("runtime-"):
-                runtime = c.execute(
-                    "SELECT version FROM runtime_state WHERE subject_id=?", (subject_id,)
-                ).fetchone()
-                if runtime is None or expected_source_epoch != f"runtime-{int(runtime['version'])}":
-                    raise ValueError("source runtime epoch is stale")
-            epoch_id = new_id("migrationepoch")
-            number = int(latest) + 1
-            now = utc_now()
-            c.execute(
-                "INSERT INTO migration_epochs(epoch_id,subject_id,target_id,epoch_number,status,acquired_at,state_hash) VALUES (?,?,?,?,?,?,?)",
-                (
-                    epoch_id,
-                    subject_id,
-                    target_id,
-                    number,
-                    "active",
-                    now,
-                    content_hash(
-                        {
-                            "epoch_id": epoch_id,
-                            "subject_id": subject_id,
-                            "target_id": target_id,
-                            "epoch_number": number,
-                            "status": "active",
-                            "acquired_at": now,
-                            "revoked_at": None,
-                        }
-                    ),
-                ),
-            )
-            MigrationStore._append_audit(
+            return cls._acquire_in_transaction(
+                database,
                 c,
                 subject_id,
-                "migration_epoch_acquired",
-                actor.strip(),
-                {"epoch_id": epoch_id, "target_id": target_id, "epoch_number": number},
+                target_id,
+                expected_source_epoch=expected_source_epoch,
+                actor=actor,
             )
-            return cls(database, subject_id, target_id, epoch_id, number)
+
+    @classmethod
+    def _acquire_in_transaction(
+        cls,
+        database: Database,
+        c: Any,
+        subject_id: str,
+        target_id: str,
+        *,
+        expected_source_epoch: str | None,
+        actor: str,
+    ) -> EpochLease:
+        active = c.execute(
+            "SELECT * FROM migration_epochs WHERE subject_id=? AND status='active'",
+            (subject_id,),
+        ).fetchone()
+        if active is not None:
+            raise ValueError("subject already has an active migration epoch")
+        latest = c.execute(
+            "SELECT COALESCE(MAX(epoch_number),0) FROM migration_epochs WHERE subject_id=?",
+            (subject_id,),
+        ).fetchone()[0]
+        if expected_source_epoch is not None and not expected_source_epoch.strip():
+            raise ValueError("expected source epoch is invalid")
+        if expected_source_epoch and expected_source_epoch.startswith("runtime-"):
+            runtime = c.execute(
+                "SELECT version FROM runtime_state WHERE subject_id=?", (subject_id,)
+            ).fetchone()
+            if runtime is None or expected_source_epoch != f"runtime-{int(runtime['version'])}":
+                raise ValueError("source runtime epoch is stale")
+        epoch_id = new_id("migrationepoch")
+        number = int(latest) + 1
+        now = utc_now()
+        c.execute(
+            "INSERT INTO migration_epochs(epoch_id,subject_id,target_id,epoch_number,status,acquired_at,state_hash) VALUES (?,?,?,?,?,?,?)",
+            (
+                epoch_id,
+                subject_id,
+                target_id,
+                number,
+                "active",
+                now,
+                content_hash(
+                    {
+                        "epoch_id": epoch_id,
+                        "subject_id": subject_id,
+                        "target_id": target_id,
+                        "epoch_number": number,
+                        "status": "active",
+                        "acquired_at": now,
+                        "revoked_at": None,
+                    }
+                ),
+            ),
+        )
+        MigrationStore._append_audit(
+            c,
+            subject_id,
+            "migration_epoch_acquired",
+            actor.strip(),
+            {"epoch_id": epoch_id, "target_id": target_id, "epoch_number": number},
+        )
+        return cls(database, subject_id, target_id, epoch_id, number)
 
     @staticmethod
     def _validate_target_validation_proof(
@@ -172,34 +192,37 @@ class EpochLease:
             raise ValueError("migration epoch integrity check failed")
 
     def revoke(self, reason: str, actor: str) -> None:
+        with self.database.transaction() as connection:
+            self.revoke_in_transaction(connection, reason, actor)
+
+    def revoke_in_transaction(self, c: Any, reason: str, actor: str) -> None:
         if not reason.strip() or not actor.strip():
             raise ValueError("epoch revoke metadata is required")
-        self.assert_current()
-        with self.database.transaction() as c:
-            revoked_at = utc_now()
-            row = c.execute(
-                "SELECT * FROM migration_epochs WHERE epoch_id=? AND status='active'",
-                (self.epoch_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("migration epoch is already inactive")
-            updated = c.execute(
-                "UPDATE migration_epochs SET status='revoked', revoked_at=?, state_hash=? WHERE epoch_id=? AND status='active'",
-                (
-                    revoked_at,
-                    self._state_hash({**dict(row), "status": "revoked", "revoked_at": revoked_at}),
-                    self.epoch_id,
-                ),
-            )
-            if updated.rowcount != 1:
-                raise ValueError("migration epoch is already inactive")
-            MigrationStore._append_audit(
-                c,
-                self.subject_id,
-                "migration_epoch_revoked",
-                actor.strip(),
-                {"epoch_id": self.epoch_id, "reason": reason.strip()},
-            )
+        self.assert_current_in_transaction(c)
+        revoked_at = utc_now()
+        row = c.execute(
+            "SELECT * FROM migration_epochs WHERE epoch_id=? AND status='active'",
+            (self.epoch_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("migration epoch is already inactive")
+        updated = c.execute(
+            "UPDATE migration_epochs SET status='revoked', revoked_at=?, state_hash=? WHERE epoch_id=? AND status='active'",
+            (
+                revoked_at,
+                self._state_hash({**dict(row), "status": "revoked", "revoked_at": revoked_at}),
+                self.epoch_id,
+            ),
+        )
+        if updated.rowcount != 1:
+            raise ValueError("migration epoch is already inactive")
+        MigrationStore._append_audit(
+            c,
+            self.subject_id,
+            "migration_epoch_revoked",
+            actor.strip(),
+            {"epoch_id": self.epoch_id, "reason": reason.strip()},
+        )
 
     def complete(self, actor: str) -> None:
         if not actor.strip():

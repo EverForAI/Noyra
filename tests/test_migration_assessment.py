@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import base64
-from types import SimpleNamespace
+from datetime import UTC, datetime
 from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from noyra.core import Database, IdentityStore
-from noyra.migration.discovery import MigrationNeed
+from noyra.migration.discovery import DiscoveryResult, MigrationNeed, ResourceObservation
 from noyra.migration.policy import MigrationPolicy, MigrationStore
 from noyra.migration.proposals import MigrationProposalBuilder, MigrationProposalStore
 from noyra.migration.targets import TargetRegistry
@@ -27,17 +27,28 @@ def _context(tmp_path: Any) -> Any:
     return database, policy, store
 
 
-def _candidate(**changes: Any) -> Any:
-    return SimpleNamespace(
+def _candidate(**changes: Any) -> DiscoveryResult:
+    observation = ResourceObservation.create_signed_payload(
+        target_id="target-1",
+        observed_at=datetime.now(UTC).isoformat(),
+        capacity={"free_bytes": 8_000_000_000},
+        latency_ms=40,
+        cost_microusd_month=0,
+        region="test",
+        enrollment_generation=1,
+    )
+    return DiscoveryResult(
         target_id="target-1",
         status="active",
-        region="test",
+        trusted=True,
+        resources_verified=True,
+        eligible=True,
+        reasons=(),
+        observation=observation,
         encrypted_volume=True,
-        free_bytes=8_000_000_000,
-        cost_microusd_month=0,
         trust_level=5,
         release_sha="a" * 40,
-        observation_evidence_hash="f" * 64,
+        endpoint="https://target.example",
         **changes,
     )
 
@@ -114,7 +125,7 @@ def test_proposal_records_hard_gates_scores_key_and_rollback_plans(tmp_path: Any
     assert proposal is not None
     assert proposal.reason_code == "storage_pressure"
     assert proposal.evidence["hard_gates"]["target_trusted"] is True
-    assert proposal.evidence["evidence_hashes"]["target_resources"] == "f" * 64
+    assert len(proposal.evidence["evidence_hashes"]["target_resources"]) == 64
     assert proposal.evidence["estimated_downtime_seconds"] == 1800
     assert proposal.evidence["key_plan"] == "external_signer_rebind"
     assert proposal.evidence["rollback_plan"]

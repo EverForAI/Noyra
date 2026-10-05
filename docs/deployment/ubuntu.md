@@ -71,8 +71,8 @@ enabled and active state and restore the previous files if readiness fails.
 Before registering a standby target, verify all of the following:
 
 1. The standby uses an encrypted volume and the same compatible release.
-2. Its identity file is a root-owned regular file with mode `0600`; the private
-   Ed25519 key is never placed in the source database or ordinary environment
+2. Its identity file is a root:noyra regular file with mode `0640`; the private
+   Ed25519/X25519 keys is never placed in the source database or ordinary environment
    file.
 3. The target agent is reachable only through its authenticated loopback or
    mutually authenticated proxy channel and has a private data root.
@@ -409,6 +409,36 @@ explicit deployment decision that must be paired with a TLS reverse proxy and au
 read-only root filesystem, drops Linux capabilities, disables privilege escalation, limits process
 creation, and stores the subject database in the `noyra-data` volume.
 
+### Container production automation acceptance
+
+Production automatic payment and policy-auto migration use the same signed acceptance
+as native installations. Manual deployments need no additional mount. To enable production
+automation after real environment acceptance:
+
+1. Build from the exact reviewed clean source commit. Set `NOYRA_SOURCE_SHA` in `.env`
+   to that full 40-character commit before building; it is baked into the image as a
+   root-owned, read-only source marker. Setting a runtime environment value alone has no effect.
+2. Independently provision the trusted base64 Ed25519 public key as `public-key` and the
+   signed matching acceptance as `external-gates.json` in an absolute root-controlled host
+   directory, for example `/etc/noyra/container-acceptance`. All ancestors must be root-owned
+   and not writable by group/others. Use mode `0755` for directories and `0644` for these
+   non-secret files so the unprivileged container can verify them. Never obtain the trust key
+   from the same untrusted download as the evidence.
+3. Set `NOYRA_RELEASE_ASSURANCE_HOST_PATH` to that directory in `.env`, then use:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.assurance.yml build
+docker compose -f docker-compose.yml -f docker-compose.assurance.yml up -d
+```
+
+The optional overlay mounts the existing directory read-only and refuses to create missing
+host paths. Missing, mismatched, unsigned or tampered evidence keeps production automation
+blocked. Pause, disable, manual approval and reconciliation remain available. After changing
+source commits, provision matching reviewed evidence and rebuild; a previous release's evidence
+does not authorize a different image. The source marker is a trusted build operator statement,
+not proof that an arbitrary third-party image was built correctly. Verify source/image provenance
+before deployment. Real image build and host ownership checks remain part of external acceptance.
+
 ## Backup and recovery
 
 Noyra backups are offline, bounded, and encrypted with the separate versioned backup keyring. The
@@ -512,7 +542,7 @@ pre-update backup before the old release can safely run.
 ### Upgrade from the management page
 
 After a native Ubuntu installation that includes the upgrade runner, open the HTTPS management page
-and use **总览 → Noyra 版本与升级**. Select **检查最新版本** to read the official GitHub `main`
+and use **总览 → Noyra 版本与升级**. Select **检查最新版本** to read the official GitHub stable release
 commit, then review its short SHA, commit time, and title before selecting **升级到最新版** and
 confirming. The check is read-only. A confirmed task runs in a separate root-owned systemd service,
 so closing the tab, losing the SSH session, or restarting the browser does not cancel it. Reopen the
@@ -520,10 +550,27 @@ management page to see its status and bounded progress summary.
 
 The Ubuntu installer provisions the fixed systemd path trigger and recovery unit, keeps the runner
 source checkout root-owned, and gives the Noyra service access only to submit a fixed SHA request and
-read the redacted status. The runner accepts only the current tip of the official repository's `main`
-branch and preserves the installed `base` or `cloud` profile. It delegates backups, atomic release
+read the redacted status. The stable runner verifies the latest non-draft,
+non-prerelease tag, the latest successful quality workflow for its exact SHA,
+and independently signed eight-gate evidence with the installed verifier before
+running fetched installation code. It preserves the installed `base` or `cloud` profile.
+It delegates backups, atomic release
 switching, readiness checks, and code rollback to the existing installer. If the checked commit
 changes before the runner fetches it, the request is rejected and the page asks you to check again.
+
+Stable is the default. Provision the release reviewer's **public** Ed25519 key
+(base64 raw 32 bytes, independently obtained) as root-owned mode 0644 at
+`/etc/noyra/release-evidence-public-key`; never download the trust key together
+with the artifact being verified. Missing key/evidence/quality rejects the
+upgrade and leaves the current service running. Evidence is copied into the
+release directory, so rollback also selects the matching evidence.
+
+For a staging host, root may explicitly write `development-main` plus a newline
+to `/etc/noyra/upgrade-channel` (root-owned mode 0644). The management page labels
+this channel as unverified for production. Set the file to `stable` or remove it
+to restore the default. The application cannot choose a channel, URL, ref, or
+command through the upgrade request. Development upgrades do not grant
+production automatic payment or policy-auto migration authorization.
 
 This workflow currently applies to the native Ubuntu/systemd installation. Docker and other deployment
 types continue to use their deployment-specific update process. An older Ubuntu installation must be
@@ -533,7 +580,7 @@ Run the deployment audit before an update. The installer also creates an encrypt
 outside `/var/lib/noyra` before replacing an existing release:
 
 ```bash
-./scripts/audit-deployment.sh
+bash ./scripts/audit-deployment.sh --static
 sudo ./scripts/install-ubuntu.sh --profile base --release-id "$(git rev-parse --short=12 HEAD)-$(date -u +%Y%m%d%H%M%S)"
 ```
 
@@ -542,6 +589,22 @@ backup itself through `runuser` as `noyra`. The backup keyring therefore remains
 `0640`; do not change it to a root-only `0600` file or make it globally readable. A per-upgrade
 staging directory is temporarily `root:noyra` mode `1770` so the service account can create the
 encrypted file and fsync its parent directory; root-owned marker and lock files remain mode `0600`.
+
+Static deployment contracts do not need pytest or a repository venv. For the
+full developer audit, prepare a separate environment once, as the checkout
+owner (do not install tools into the running release):
+
+```bash
+bash /srv/noyra/scripts/prepare-audit-environment.sh
+bash /srv/noyra/scripts/audit-deployment.sh --full
+bash /srv/noyra/scripts/audit-release.sh
+```
+
+The scripts work from any current directory, prefer `.audit-venv`, and accept an
+explicit `NOYRA_PYTHON` executable path. `NOYRA_AUDIT_BOOTSTRAP_PYTHON` selects
+the Python used to create the audit venv. Missing tools print the exact setup
+command. Full audit requires developer dependencies and is separate from
+service readiness or real-host acceptance.
 Root validates the artifact, publishes it as `root:root` mode `0600`, and restores
 `/var/backups/noyra` to root-only mode `0700` before continuing.
 The staging directory carries root-owned marker and lock files and is accepted only with the

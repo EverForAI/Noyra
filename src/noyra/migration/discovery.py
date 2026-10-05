@@ -1,7 +1,6 @@
 """Fail-closed resource observations and source-need assessment.
 
-This module deliberately has no networking or provisioning code.  A caller must
-provide an observation adapter for an already enrolled target.  The adapter is
+The network adapter only contacts an already enrolled target. The adapter is
 given only the registered target id and the returned observation is verified
 against the enrollment public key before it can be used for migration planning.
 """
@@ -12,6 +11,7 @@ import base64
 import hashlib
 import json
 import re
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -94,6 +94,20 @@ class ResourceObservation:
         ).encode()
 
     def verify(self, *, public_key: str, expected_target_id: str, expected_generation: int) -> None:
+        # Direct deserialization must satisfy the same bounds as construction.
+        if (
+            self._validated_values(
+                self.target_id,
+                self.observed_at,
+                self.capacity,
+                self.latency_ms,
+                self.cost_microusd_month,
+                self.region,
+                self.enrollment_generation,
+            )
+            != self._unsigned_values()
+        ):
+            raise ValueError("resource observation payload is not canonical")
         if self.target_id != expected_target_id:
             raise ValueError("resource observation target mismatch")
         if self.enrollment_generation != expected_generation:
@@ -279,6 +293,41 @@ class ResourceObservationProvider(Protocol):
     def observe(self, target_id: str) -> ResourceObservation | None: ...
 
 
+class TargetObservationProvider:
+    """Fetch observations only from an enrolled target over its authenticated channel."""
+
+    def __init__(self, target_resolver: Any, token_resolver: Any, transport: Any) -> None:
+        self.target_resolver, self.token_resolver, self.transport = (
+            target_resolver,
+            token_resolver,
+            transport,
+        )
+        self.measured_latency: dict[str, int] = {}
+
+    def observe(self, target_id: str) -> ResourceObservation | None:
+        target = self.target_resolver(target_id)
+        started = time.monotonic()
+        value = self.transport.request(
+            str(target["endpoint"]).rstrip("/") + "/v1/observe",
+            {"target_id": target_id},
+            self.token_resolver(target_id),
+        )
+        self.measured_latency[target_id] = min(
+            3_600_000, max(1, int((time.monotonic() - started) * 1000))
+        )
+        return ResourceObservation(
+            target_id=str(value["target_id"]),
+            observed_at=str(value["observed_at"]),
+            capacity=dict(value["capacity"]),
+            latency_ms=value["latency_ms"],
+            cost_microusd_month=value["cost_microusd_month"],
+            region=value.get("region"),
+            enrollment_generation=value["enrollment_generation"],
+            evidence_hash=str(value["evidence_hash"]),
+            signature=str(value["signature"]),
+        )
+
+
 @dataclass(frozen=True)
 class DiscoveryResult:
     target_id: str
@@ -288,6 +337,11 @@ class DiscoveryResult:
     eligible: bool
     reasons: tuple[str, ...]
     observation: ResourceObservation | None = None
+    encrypted_volume: bool = False
+    trust_level: int = 0
+    release_sha: str = ""
+    endpoint: str = ""
+    measured_latency_ms: int | None = None
 
     @property
     def free_bytes(self) -> int:
@@ -296,6 +350,16 @@ class DiscoveryResult:
     @property
     def region(self) -> str | None:
         return None if self.observation is None else self.observation.region
+
+    @property
+    def cost_microusd_month(self) -> int:
+        return 0 if self.observation is None else self.observation.cost_microusd_month
+
+    @property
+    def latency_ms(self) -> int:
+        if self.measured_latency_ms is not None:
+            return self.measured_latency_ms
+        return 0 if self.observation is None else self.observation.latency_ms
 
 
 class MigrationDiscovery:
@@ -320,6 +384,7 @@ class MigrationDiscovery:
                 (subject_id,),
             ).fetchall()
         results: list[DiscoveryResult] = []
+        deadline = time.monotonic() + 20
         for row in rows:
             target_id = str(row["target_id"])
             if policy.allowed_target_ids and target_id not in policy.allowed_target_ids:
@@ -351,7 +416,11 @@ class MigrationDiscovery:
                 )
                 continue
             try:
-                observation = self.observation_provider.observe(target_id)
+                observation = (
+                    self.observation_provider.observe(target_id)
+                    if time.monotonic() < deadline
+                    else None
+                )
             except Exception:
                 observation = None
             if observation is None:
@@ -379,8 +448,20 @@ class MigrationDiscovery:
                     reasons.append("resource_observation_region_mismatch")
                 if observation.free_bytes < policy.min_free_bytes:
                     reasons.append("target_storage_insufficient")
-            except ValueError:
+                if observation.cost_microusd_month > policy.max_cost_microusd:
+                    reasons.append("target_cost_exceeded")
+                if policy.allowed_regions and observation.region not in policy.allowed_regions:
+                    reasons.append("region_not_allowlisted")
+                if not row["encrypted_volume"]:
+                    reasons.append("target_volume_not_encrypted")
+            except (ValueError, TypeError, AttributeError):
                 reasons.append("resource_observation_invalid")
+            capabilities = json.loads(row["capabilities_json"])
+            trust_level = capabilities.get("trust_level", 3)
+            if type(trust_level) is not int or not 1 <= trust_level <= 5:
+                trust_level = 0
+            if trust_level < policy.trust_level:
+                reasons.append("trust_level_insufficient")
             results.append(
                 DiscoveryResult(
                     target_id,
@@ -390,6 +471,15 @@ class MigrationDiscovery:
                     not reasons,
                     tuple(reasons),
                     observation,
+                    bool(row["encrypted_volume"]),
+                    trust_level,
+                    str(row["release_sha"]),
+                    str(row["endpoint"]),
+                    (
+                        self.observation_provider.measured_latency.get(target_id)
+                        if isinstance(self.observation_provider, TargetObservationProvider)
+                        else None
+                    ),
                 )
             )
         return results

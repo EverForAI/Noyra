@@ -14,7 +14,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Mapping
-from contextlib import suppress
+from contextlib import closing, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,7 +27,9 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from noyra.core.at_rest import AtRestConfig, VolumeEncryptionProbe, VolumeEncryptionStatus
 from noyra.core.types import canonical_json, content_hash
 
+from .activation_contract import validate_activation_receipt, validate_activation_request
 from .bundle import BUNDLE_FORMAT, decrypt_bundle
+from .discovery import ResourceObservation
 from .trust import (
     RecipientPoPChallenge,
     RecipientPoPProof,
@@ -141,6 +143,7 @@ class RestoreReport:
     event_chain_tip: str | None = None
     artifact_sha256: str | None = None
     restore_path: str | None = None
+    restored_database_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -688,6 +691,29 @@ class MigrationAgent:
                 or address.casefold() != self.wallet_address.casefold()
             ):
                 raise ValueError("target signer binding does not match")
+            from noyra.wallet.config import configured_wallet_signer_from_env
+            from noyra.wallet.execution import HTTPSWalletSigner
+
+            signer = configured_wallet_signer_from_env()
+            if not isinstance(signer, HTTPSWalletSigner):
+                if signer is not None:
+                    close = getattr(signer, "close", None)
+                    if callable(close):
+                        close()
+                raise ValueError("target external signer is not configured")
+            try:
+                if signer.signer_id != signer_id or signer.address != address.casefold():
+                    raise ValueError("target signer runtime identity mismatch")
+                possession = signer.prove_migration_identity(
+                    {
+                        "task_id": task_id,
+                        "target_id": target_id,
+                        "manifest_digest": manifest_digest,
+                        "target_identity": self.host_identity,
+                    }
+                )
+            finally:
+                signer.close()
             proof = content_hash(
                 {
                     "task_id": task_id,
@@ -707,6 +733,7 @@ class MigrationAgent:
                 "manifest_digest": manifest_digest,
                 "signer_id": signer_id,
                 "address": address,
+                "possession_proof": possession,
                 "proof_digest": proof,
             }
         if mode != "local_wallet_transfer" or set(value) != {"mode", "address", "approval"}:
@@ -715,8 +742,10 @@ class MigrationAgent:
         approval = value.get("approval")
         if (
             not isinstance(address, str)
-            or self.wallet_address is None
-            or address.casefold() != self.wallet_address.casefold()
+            or (
+                self.wallet_address is not None
+                and address.casefold() != self.wallet_address.casefold()
+            )
             or not isinstance(approval, Mapping)
             or set(approval) != {"approval_id", "task_id", "address", "channel_id", "expires_at"}
         ):
@@ -742,6 +771,11 @@ class MigrationAgent:
             raise ValueError("target local wallet approval expiry is invalid") from error
         if expiry.tzinfo is None or expiry.astimezone(UTC) <= datetime.now(UTC):
             raise ValueError("target local wallet approval has expired")
+        from .wallet_material import verify_local_wallet
+
+        if self.restore_root is None:
+            raise ValueError("restored wallet unavailable")
+        verify_local_wallet(self.restore_root / task_id / "migration-wallet", address)
         approval_fingerprint = content_hash(
             {
                 "approval_id": approval_id,
@@ -790,6 +824,7 @@ class MigrationAgent:
             "address": address,
             "approval_id": approval_id,
             "approval_fingerprint": approval_fingerprint,
+            "approval": dict(approval),
             "channel_id": channel_id,
             "expires_at": expires_at,
             "proof_digest": proof,
@@ -844,6 +879,43 @@ class MigrationAgent:
         if not isinstance(signing_bytes, bytes) or not signing_bytes:
             raise ValueError("recovery proof bytes are required")
         return base64.urlsafe_b64encode(self._signing_key.sign(signing_bytes)).decode()
+
+    def observe(self, target_id: str | None = None) -> dict[str, Any]:
+        """Return a short-lived, target-signed capacity observation."""
+        if self._signing_key is None or target_id not in {None, self.target_id}:
+            raise ValueError("target observation identity is invalid")
+        root = self.data_root or Path("/")
+        usage = shutil.disk_usage(root)
+        configured_cost = os.environ.get("NOYRA_MIGRATION_COST_MICROUSD_MONTH")
+        if configured_cost is None:
+            raise ValueError("target monthly resource cost is not configured")
+        try:
+            cost_microusd_month = int(configured_cost)
+        except ValueError as error:
+            raise ValueError("target monthly resource cost is invalid") from error
+        observation = ResourceObservation.create_signed_payload(
+            target_id=self.target_id,
+            observed_at=datetime.now(UTC).isoformat(timespec="milliseconds"),
+            capacity={"free_bytes": int(usage.free), "total_bytes": int(usage.total)},
+            latency_ms=0,
+            cost_microusd_month=cost_microusd_month,
+            region=os.getenv("NOYRA_MIGRATION_REGION") or None,
+            enrollment_generation=self.generation,
+        )
+        signed = observation.with_signature(
+            base64.urlsafe_b64encode(self._signing_key.sign(observation.signing_bytes())).decode()
+        )
+        return {
+            "target_id": signed.target_id,
+            "observed_at": signed.observed_at,
+            "capacity": signed.capacity,
+            "latency_ms": signed.latency_ms,
+            "cost_microusd_month": signed.cost_microusd_month,
+            "region": signed.region,
+            "enrollment_generation": signed.enrollment_generation,
+            "evidence_hash": signed.evidence_hash,
+            "signature": signed.signature,
+        }
 
     def receive(
         self,
@@ -1197,9 +1269,13 @@ class MigrationAgent:
             byte_count += size
         return file_count, byte_count
 
-    def preflight(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+    def preflight(
+        self, manifest: Mapping[str, Any], *, chunk_bytes: int = 1024 * 1024
+    ) -> dict[str, Any]:
         """Validate target volume and incoming capacity before transfer begins."""
         values = self._validate_manifest(manifest)
+        if type(chunk_bytes) is not int or not 4096 <= chunk_bytes <= MAX_CHUNK_BYTES:
+            raise ValueError("migration chunk size is invalid")
         if self.data_root is None:
             raise ValueError("migration preflight storage is unavailable")
         self._require_encrypted_volume(self.data_root)
@@ -1210,11 +1286,15 @@ class MigrationAgent:
             self.cleanup_expired()
             file_count, byte_count = self._incoming_usage(incoming)
             manifest_bytes = len(canonical_json(values).encode("utf-8"))
-            required_bytes = manifest_bytes + values["byte_size"]
-            if file_count + 2 > self.max_incoming_files:
+            required_bytes = manifest_bytes * 2 + values["byte_size"] * 2 + 4096
+            required_files = (values["byte_size"] + chunk_bytes - 1) // chunk_bytes + 3
+            if file_count + required_files > self.max_incoming_files:
                 raise ValueError("migration incoming file quota exceeded")
             if byte_count + required_bytes > self.max_incoming_bytes:
                 raise ValueError("migration incoming byte quota exceeded")
+            plaintext_size = values.get("plaintext_size", values["byte_size"])
+            if shutil.disk_usage(self.data_root).free < required_bytes + plaintext_size * 3:
+                raise ValueError("migration restore disk capacity insufficient")
         return {
             "status": "ready",
             "target_id": self.target_id,
@@ -1278,10 +1358,10 @@ class MigrationAgent:
                 raise ValueError("recipient-encrypted restore is not configured")
             if task_id is None:
                 raise ValueError("migration restore task identity is required")
+            if values.get("task_id") != task_id or values.get("target_id") != self.target_id:
+                raise ValueError("migration restore bundle identity mismatch")
             task_root = self.restore_root / task_id
-            task_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-            self._assert_private_directory(task_root)
-            plaintext = task_root / ".noyra.sqlite3.bundle-plaintext"
+            plaintext = self.restore_root / f".{task_id}.bundle-plaintext"
             if plaintext.exists() or plaintext.is_symlink():
                 raise ValueError("migration restore target is not empty")
             decrypt_bundle(
@@ -1302,6 +1382,41 @@ class MigrationAgent:
                     )
                 },
             )
+            if values.get("payload_format") is not None:
+                from .subject_payload import restore_payload, verify_archives, verify_payload
+
+                staging = self.restore_root / f".{task_id}.restoring"
+                if staging.exists() or staging.is_symlink():
+                    plaintext.unlink(missing_ok=True)
+                    raise ValueError("migration restore staging already exists")
+                try:
+                    database = restore_payload(plaintext, staging, str(subject_id))
+                    if (
+                        _file_digest(database) != values["database_sha256"]
+                        or content_hash(verify_payload(staging, str(subject_id)))
+                        != values["inventory_sha256"]
+                    ):
+                        raise ValueError("subject payload digest mismatch")
+                    verify_archives(staging, str(subject_id))
+                    if task_root.exists():
+                        raise ValueError("migration restore target is not empty")
+                    staging.rename(task_root)
+                finally:
+                    plaintext.unlink(missing_ok=True)
+                    if staging.exists():
+                        shutil.rmtree(staging)
+                return RestoreReport(
+                    self.target_id,
+                    self.generation,
+                    receipt.artifact_id,
+                    receipt.manifest_digest,
+                    "restored",
+                    subject_id,
+                    tip,
+                    artifact_sha256,
+                    str(task_root / "noyra.sqlite3"),
+                    values["database_sha256"],
+                )
             restore_source = plaintext
             restore_values = {
                 **values,
@@ -1309,7 +1424,11 @@ class MigrationAgent:
                 "byte_size": values["plaintext_size"],
                 "artifact_sha256": values["plaintext_sha256"],
             }
-        restore_path = self._restore_artifact(restore_source, restore_values, task_id=task_id)
+        try:
+            restore_path = self._restore_artifact(restore_source, restore_values, task_id=task_id)
+        finally:
+            if restore_source != artifact_path:
+                restore_source.unlink(missing_ok=True)
         return RestoreReport(
             self.target_id,
             self.generation,
@@ -1320,6 +1439,7 @@ class MigrationAgent:
             tip,
             artifact_sha256,
             str(restore_path) if restore_path is not None else None,
+            _file_digest(restore_path) if restore_path is not None else None,
         )
 
     def validate(
@@ -1356,6 +1476,10 @@ class MigrationAgent:
             ),
         }
         if report.restore_path:
+            if report.restored_database_sha256 is not None:
+                checks["restored_database_digest"] = (
+                    _file_digest(Path(report.restore_path)) == report.restored_database_sha256
+                )
             checks["database_quick_check"] = self._database_quick_check(Path(report.restore_path))
             if report.subject_id is not None:
                 checks["subject_identity"] = self._database_subject_matches(
@@ -1375,66 +1499,9 @@ class MigrationAgent:
 
     def activate(self, request: Mapping[str, Any]) -> dict[str, Any]:
         """Activate the installed service and return a target-signed receipt."""
-        required = {
-            "task_id",
-            "subject_id",
-            "target_id",
-            "source_epoch",
-            "manifest_digest",
-            "artifact_id",
-            "artifact_sha256",
-            "health_report_digest",
-            "source_fence_digest",
-            "recipient_key_fingerprint",
-            "target_volume_proof_digest",
-            "credential_binding_digest",
-            "signer_binding_digest",
-            "wallet_mode",
-            "wallet_proof_digest",
-        }
-        if set(request) != required or request.get("target_id") != self.target_id:
+        request = validate_activation_request(request)
+        if request["target_id"] != self.target_id:
             raise ValueError("migration activation request is invalid")
-        for key in (
-            "manifest_digest",
-            "artifact_sha256",
-            "health_report_digest",
-            "source_fence_digest",
-            "recipient_key_fingerprint",
-            "target_volume_proof_digest",
-            "credential_binding_digest",
-            "wallet_proof_digest",
-        ):
-            value = request.get(key)
-            if value is None and key in {
-                "signer_binding_digest",
-                "wallet_proof_digest",
-            }:
-                continue
-            if not isinstance(value, str) or not _HEX64.fullmatch(value):
-                raise ValueError("migration activation digest is invalid")
-        if request.get("signer_binding_digest") is not None and not _HEX64.fullmatch(
-            str(request["signer_binding_digest"])
-        ):
-            raise ValueError("migration activation digest is invalid")
-        if request.get("wallet_mode") not in {
-            "external_signer_rebind",
-            "local_wallet_transfer",
-            "disabled",
-        }:
-            raise ValueError("migration activation wallet mode is invalid")
-        for key in ("task_id", "source_epoch"):
-            if not isinstance(request.get(key), str) or not re.fullmatch(
-                r"[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}", str(request[key])
-            ):
-                raise ValueError("migration activation identity is invalid")
-        if not isinstance(request.get("subject_id"), str) or not re.fullmatch(
-            r"Noyra-[A-Za-z0-9_-]{1,120}", str(request["subject_id"])
-        ):
-            raise ValueError("migration activation identity is invalid")
-        if not isinstance(request.get("artifact_id"), str) or not _ARTIFACT_ID.fullmatch(
-            str(request["artifact_id"])
-        ):
-            raise ValueError("migration activation identity is invalid")
         if self.data_root is None:
             raise ValueError("migration activation storage is unavailable")
         self._require_encrypted_volume(self.data_root)
@@ -1521,35 +1588,9 @@ class MigrationAgent:
             if expiry.tzinfo is None or expiry.astimezone(UTC) <= datetime.now(UTC):
                 raise ValueError("target local wallet approval has expired")
         active = self.activation_controller.activate(dict(request))
-        expected = {
-            key: request[key]
-            for key in (
-                "task_id",
-                "subject_id",
-                "target_id",
-                "source_epoch",
-                "manifest_digest",
-                "artifact_id",
-                "artifact_sha256",
-                "health_report_digest",
-                "source_fence_digest",
-                "recipient_key_fingerprint",
-                "target_volume_proof_digest",
-                "credential_binding_digest",
-                "signer_binding_digest",
-                "wallet_mode",
-                "wallet_proof_digest",
-            )
-        }
-        if (
-            not isinstance(active, Mapping)
-            or any(active.get(key) != value for key, value in expected.items())
-            or active.get("status") != "active"
-            or active.get("service_unit") != "noyra.service"
-            or not isinstance(active.get("active_database_sha256"), str)
-            or not re.fullmatch(r"[0-9a-f]{64}", str(active["active_database_sha256"]))
-        ):
+        if not isinstance(active, Mapping):
             raise ValueError("target service activation proof is invalid")
+        validate_activation_receipt(request, active)
         receipt = dict(active)
         receipt.pop("target_signature", None)
         receipt["target_signature"] = base64.urlsafe_b64encode(
@@ -1581,6 +1622,8 @@ class MigrationAgent:
             raise ValueError("migration activation storage is unavailable")
         if self.activation_controller is None:
             raise ValueError("target runtime activation controller is unavailable")
+        if self._signing_key is None:
+            raise ValueError("target signing identity is not configured")
         if not isinstance(request.get("task_id"), str) or not re.fullmatch(
             r"[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}", str(request["task_id"])
         ):
@@ -1588,8 +1631,10 @@ class MigrationAgent:
         result = self.activation_controller.deactivate(dict(request))
         if (
             not isinstance(result, Mapping)
-            or result.get("status") not in {"deactivated", "inactive"}
+            or result.get("status") != "deactivated"
             or result.get("task_id") != request["task_id"]
+            or result.get("activation_revoked") is not True
+            or any(result.get(key) != value for key, value in request.items())
         ):
             raise ValueError("target service deactivation proof is invalid")
         path = self.data_root / "activations" / f"{request['task_id']}.json"
@@ -1597,7 +1642,11 @@ class MigrationAgent:
             if path.is_symlink() or not path.is_file():
                 raise ValueError("migration activation record is invalid")
             path.unlink()
-        return {"status": "deactivated", "task_id": request["task_id"]}
+        receipt = {**dict(request), "status": "deactivated", "activation_revoked": True}
+        receipt["target_signature"] = base64.urlsafe_b64encode(
+            self._signing_key.sign(canonical_json(receipt).encode())
+        ).decode()
+        return receipt
 
     def _read_manifest(self, receipt: ReceiveReceipt) -> dict[str, Any]:
         if self.data_root is None or receipt.manifest_path is None:
@@ -1709,7 +1758,9 @@ class MigrationAgent:
     @staticmethod
     def _database_quick_check(path: Path) -> bool:
         try:
-            with sqlite3.connect(path) as connection:
+            with closing(
+                sqlite3.connect(f"{path.as_uri()}?mode=ro&immutable=1", uri=True)
+            ) as connection:
                 result = connection.execute("PRAGMA quick_check").fetchone()
             return result is not None and result[0] == "ok"
         except (OSError, sqlite3.DatabaseError):
@@ -1718,7 +1769,9 @@ class MigrationAgent:
     @staticmethod
     def _database_subject_matches(path: Path, subject_id: str) -> bool:
         try:
-            with sqlite3.connect(path) as connection:
+            with closing(
+                sqlite3.connect(f"{path.as_uri()}?mode=ro&immutable=1", uri=True)
+            ) as connection:
                 row = connection.execute("SELECT subject_id FROM runtime_state LIMIT 1").fetchone()
             return row is not None and row[0] == subject_id
         except (OSError, sqlite3.DatabaseError):

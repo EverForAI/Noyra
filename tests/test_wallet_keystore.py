@@ -42,6 +42,25 @@ def test_import_encrypts_private_key_and_round_trips_with_private_permissions(
     assert account.key.hex() == PRIVATE_KEY[2:]
 
 
+def test_import_pads_leading_zero_iv_from_eth_keyfile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import eth_keyfile.keyfile as keyfile
+
+    from noyra.wallet.keystore import create_keystore, load_account
+
+    # ``Random`` is a private helper in eth-keyfile and is not exported by its
+    # type stubs. Resolve it dynamically so the regression test remains
+    # compatible with both the runtime package and mypy's public surface.
+    random_helper = keyfile.__dict__["Random"]
+    monkeypatch.setattr(random_helper, "get_random_bytes", lambda size: b"\x00" * size)
+    path = tmp_path / "wallet" / "account.json"
+    assert create_keystore(path, PASSWORD, private_key=PRIVATE_KEY) == ADDRESS
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["crypto"]["cipherparams"]["iv"] == "0" * 32
+    assert load_account(path, PASSWORD).address.lower() == ADDRESS
+
+
 def test_creation_never_overwrites_existing_wallet(tmp_path: Path) -> None:
     from noyra.wallet.keystore import create_keystore
 

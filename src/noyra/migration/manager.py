@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from noyra.core.admission import assert_current_lease
@@ -128,6 +128,8 @@ class MigrationManager:
             if policy.revision != policy_revision:
                 raise ValueError("migration policy revision is stale")
             self._ensure_target(connection, subject_id, target_id)
+            if self.cooldown_until(connection, subject_id, target_id) is not None:
+                raise ValueError("migration rejection cooldown is active")
             proposal_id = new_id("migrationproposal")
             created_at = utc_now()
             values = {
@@ -197,6 +199,8 @@ class MigrationManager:
                 self._set_proposal_status(connection, row, "expired", actor, "proposal expired")
                 raise ValueError("migration proposal is expired")
             self._ensure_target(connection, row["subject_id"], row["target_id"])
+            if self.cooldown_until(connection, row["subject_id"], row["target_id"]) is not None:
+                raise ValueError("migration rejection cooldown is active")
             current_revision = self._policy_revision(connection, row["subject_id"])
             if current_revision is not None and current_revision != int(row["policy_revision"]):
                 raise ValueError("migration policy revision is stale")
@@ -319,6 +323,142 @@ class MigrationManager:
                     "SELECT * FROM migration_proposals WHERE proposal_id=?", (proposal_id,)
                 ).fetchone()
             )
+
+    def record_rejection(
+        self,
+        *,
+        subject_id: str,
+        target_id: str,
+        reason_code: str,
+        reason: str,
+        policy_revision: int,
+        cooldown_seconds: int,
+        actor: str,
+    ) -> str:
+        assert_current_lease()
+        self._validate_actor(actor)
+        if (
+            type(cooldown_seconds) is not int
+            or cooldown_seconds < 0
+            or cooldown_seconds > 31_536_000
+        ):
+            raise ValueError("cooldown is outside safety bounds")
+        if (
+            not isinstance(reason_code, str)
+            or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", reason_code)
+            or not isinstance(reason, str)
+            or not reason.strip()
+            or len(reason) > 512
+        ):
+            raise ValueError("rejection reason is required")
+        reason = redact_secret_text(reason)
+        if type(policy_revision) is not int or policy_revision < 1:
+            raise ValueError("migration policy revision is invalid")
+        now = datetime.now(UTC)
+        created_at = now.isoformat(timespec="milliseconds")
+        cooldown_until = (now + timedelta(seconds=cooldown_seconds)).isoformat(
+            timespec="milliseconds"
+        )
+        rejection_id = new_id("migrationrejection")
+        proposal_id = new_id("migrationproposal")
+        with self.database.transaction() as connection:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM subject_identity WHERE subject_id=?", (subject_id,)
+                ).fetchone()
+                is None
+            ):
+                raise NotFoundError(f"subject not found: {subject_id}")
+            if (
+                connection.execute(
+                    "SELECT 1 FROM migration_targets WHERE target_id=? AND subject_id=?",
+                    (target_id, subject_id),
+                ).fetchone()
+                is None
+            ):
+                raise NotFoundError(f"migration target not found: {target_id}")
+            connection.execute(
+                """INSERT INTO migration_proposals(
+                   proposal_id,subject_id,target_id,policy_revision,status,reason_code,reason,
+                   evidence_json,benefit_score,risk_score,expires_at,created_at,decided_at,
+                   decision_reason,state_hash
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    proposal_id,
+                    subject_id,
+                    target_id,
+                    policy_revision,
+                    "rejected",
+                    reason_code.strip(),
+                    reason.strip(),
+                    "{}",
+                    0.0,
+                    1.0,
+                    cooldown_until,
+                    created_at,
+                    created_at,
+                    reason.strip(),
+                    self._proposal_hash(
+                        {
+                            "evidence_json": "{}",
+                            "benefit_score": 0.0,
+                            "risk_score": 1.0,
+                            "expires_at": cooldown_until,
+                            "decided_at": created_at,
+                            "decision_reason": reason.strip(),
+                            "proposal_id": proposal_id,
+                            "subject_id": subject_id,
+                            "target_id": target_id,
+                            "status": "rejected",
+                            "reason_code": reason_code.strip(),
+                            "reason": reason.strip(),
+                            "policy_revision": policy_revision,
+                            "created_at": created_at,
+                        }
+                    ),
+                ),
+            )
+            connection.execute(
+                """INSERT INTO migration_rejections(rejection_id,subject_id,proposal_id,target_id,reason_code,reason,cooldown_until,policy_revision,actor,created_at,state_hash)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    rejection_id,
+                    subject_id,
+                    proposal_id,
+                    target_id,
+                    reason_code.strip(),
+                    reason.strip(),
+                    cooldown_until,
+                    policy_revision,
+                    actor.strip(),
+                    created_at,
+                    content_hash(
+                        {
+                            "rejection_id": rejection_id,
+                            "proposal_id": proposal_id,
+                            "subject_id": subject_id,
+                            "target_id": target_id,
+                            "reason_code": reason_code.strip(),
+                            "reason": reason.strip(),
+                            "cooldown_until": cooldown_until,
+                            "policy_revision": policy_revision,
+                            "actor": actor.strip(),
+                        }
+                    ),
+                ),
+            )
+            MigrationStore._append_audit(
+                connection,
+                subject_id,
+                "migration_proposal_rejected",
+                actor,
+                {
+                    "proposal_id": proposal_id,
+                    "rejection_id": rejection_id,
+                    "cooldown_until": cooldown_until,
+                },
+            )
+        return rejection_id
 
     def transition_task(
         self,
@@ -552,6 +692,36 @@ class MigrationManager:
         TargetRegistry._assert_row_integrity(target)
         if target["status"] != "active" or not target["attested_at"]:
             raise ValueError("migration target has not completed trust attestation")
+
+    @staticmethod
+    def cooldown_until(connection: Any, subject_id: str, target_id: str) -> str | None:
+        rows = connection.execute(
+            "SELECT * FROM migration_rejections WHERE subject_id=? AND target_id=? "
+            "ORDER BY cooldown_until DESC LIMIT 1",
+            (subject_id, target_id),
+        ).fetchall()
+        for row in rows:
+            expected = content_hash(
+                {
+                    key: row[key]
+                    for key in (
+                        "rejection_id",
+                        "proposal_id",
+                        "subject_id",
+                        "target_id",
+                        "reason_code",
+                        "reason",
+                        "cooldown_until",
+                        "policy_revision",
+                        "actor",
+                    )
+                }
+            )
+            if row["state_hash"] != expected:
+                raise ValueError("migration rejection integrity check failed")
+            if MigrationManager._parse_timestamp(row["cooldown_until"]) > datetime.now(UTC):
+                return str(row["cooldown_until"])
+        return None
 
     @staticmethod
     def _policy_revision(connection: Any, subject_id: str) -> int | None:

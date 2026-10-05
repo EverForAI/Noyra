@@ -26,6 +26,7 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar, Concatenate, Literal, ParamSpec, TypeVar, cast
 from urllib.parse import parse_qs, urlsplit
 
@@ -65,6 +66,7 @@ from noyra.core.operator_controls import (
 )
 from noyra.core.provider_health import ProviderHealthStore
 from noyra.core.redaction import redact_secrets
+from noyra.core.release_assurance import activation_status, upgrade_channel
 from noyra.core.retention import RetentionManager, RetentionSettings
 from noyra.core.runtime import SubjectKernel
 from noyra.core.runtime_export import RuntimeLogExporter
@@ -125,6 +127,8 @@ from noyra.migration import (
     TargetChallenge,
     TargetRegistry,
 )
+from noyra.migration.discovery import MigrationDiscovery, TargetObservationProvider
+from noyra.migration.runtime import MigrationRuntime
 from noyra.model import (
     CognitiveResourceGroupInput,
     CognitiveResourceGroupRecord,
@@ -1383,6 +1387,7 @@ class NoyraHTTPServer:
             ),
             github_owner=os.getenv("NOYRA_UPGRADE_GITHUB_OWNER", "EverForAI"),
             github_repo=os.getenv("NOYRA_UPGRADE_GITHUB_REPO", "Noyra"),
+            channel=upgrade_channel(),
         )
         self.admission = kernel.admission
         self.quarantine_checker: Any = None
@@ -1394,7 +1399,11 @@ class NoyraHTTPServer:
         self.operator_controls: OperatorControlService | None = None
         self.projection = PublicProjection(kernel.database)
         self.provider_health = ProviderHealthStore(kernel.database)
-        self.retention = RetentionManager(kernel.database, RetentionSettings.from_env())
+        self.retention = RetentionManager(
+            kernel.database,
+            RetentionSettings.from_env(),
+            minimum_free_bytes=settings.minimum_free_storage_bytes,
+        )
         self.capabilities = CapabilityStore(kernel.database)
         self.common_knowledge = CommonKnowledgeStore(
             kernel.database,
@@ -1433,7 +1442,9 @@ class NoyraHTTPServer:
             repair_on_init=repair_secrets_on_init,
         )
         self.wallets = WalletStore(kernel.database)
-        self.wallet_economy = WalletEconomyStore(kernel.database)
+        self.wallet_economy = WalletEconomyStore(
+            kernel.database, production=settings.profile == "production"
+        )
         self.wallet_acquisitions = WalletBalanceAcquisitionLedger(kernel.database)
         self.wallet_acquisition_runner = WalletBalanceAcquisitionRunner(self.wallet_acquisitions)
         # Signing is opt-in: production deployments inject an isolated signer;
@@ -1494,7 +1505,9 @@ class NoyraHTTPServer:
         self.self_modification = ControlledSelfModification(
             kernel.database, kernel.subject_id, CognitionSettings()
         )
-        self.migration_store = MigrationStore(kernel.database)
+        self.migration_store = MigrationStore(
+            kernel.database, production=settings.profile == "production"
+        )
         self.migration_targets = TargetRegistry(kernel.database, self.migration_store)
         self.migration_proposals = MigrationProposalStore(kernel.database)
         self.migration_manager = MigrationManager(kernel.database, self.migration_store)
@@ -1504,17 +1517,33 @@ class NoyraHTTPServer:
             token_resolver=self._migration_http_token,
             artifact_resolver=SQLiteArtifactProvider(
                 database_path,
-                settings.data_dir / "migration" / "outgoing",
+                settings.data_dir / "migration" / "source" / "outgoing",
             ),
             source_fence=self._migration_http_source_fence,
             source_unfence=self._migration_http_source_unfence,
         )
         self.migration_cutover = CutoverCoordinator(
             kernel.database,
+            production=settings.profile == "production",
             admission=kernel.admission,
             executor=self.migration_http_executor,
         )
         self.migration_recovery = RecoveryCoordinator(kernel.database)
+        observation_provider = TargetObservationProvider(
+            lambda target_id: self._migration_http_target(
+                SimpleNamespace(target_id=target_id, subject_id=kernel.subject_id)
+            ),
+            lambda target_id: self._migration_http_token(SimpleNamespace(target_id=target_id)),
+            self.migration_http_executor.transport,
+        )
+        self.migration_runtime = MigrationRuntime(
+            self,
+            MigrationDiscovery(kernel.database, observation_provider),
+            gateway=lambda: self.cognition_gateway,
+            to_thread=asyncio.to_thread,
+        )
+        self._migration_worker: threading.Thread | None = None
+        self._migration_worker_lock = threading.Lock()
         handler = self._handler_type()
         self._rate_lock = threading.Lock()
         self._request_times: dict[str, deque[float]] = defaultdict(deque)
@@ -1533,6 +1562,34 @@ class NoyraHTTPServer:
     def address(self) -> tuple[str, int]:
         host, port = self.server.server_address[:2]
         return str(host), int(port)
+
+    def start_migration(self, task_id: str) -> None:
+        task = self.migration_manager.get_task(task_id)
+        if task.subject_id != self.kernel.subject_id or task.status != "approved":
+            raise ValueError("migration task is not approved")
+        with self._migration_worker_lock:
+            if self._closed or (self._migration_worker and self._migration_worker.is_alive()):
+                raise ValueError("migration execution is already active or draining")
+
+            def execute() -> None:
+                if not self.migration_runtime._lock.acquire(blocking=False):
+                    return
+                try:
+                    self.migration_runtime.status = "executing"
+                    self.migration_runtime.execute(task_id)
+                    self.migration_runtime.status = "committed"
+                except Exception as error:
+                    self.migration_runtime.status = "reconciliation_required"
+                    LOGGER.warning("migration execution deferred: %s", type(error).__name__)
+                finally:
+                    self.migration_runtime._lock.release()
+
+            self._migration_worker = threading.Thread(
+                target=execute,
+                name="noyra-migration",
+                daemon=False,
+            )
+            self._migration_worker.start()
 
     def _migration_http_target(self, task: Any) -> Mapping[str, Any]:
         with self.kernel.database.connection() as connection:
@@ -1654,6 +1711,8 @@ class NoyraHTTPServer:
         else:
             self.server.wait_handlers()
         self.wait_async_handlers()
+        if self._migration_worker is not None:
+            self._migration_worker.join()
         self.server.server_close()
         self.wallet_acquisition_runner.close()
         self.export_jobs.close()
@@ -2538,7 +2597,15 @@ class NoyraHTTPServer:
                 if parsed.path == "/health/live":
                     self._json(HTTPStatus.OK, {"status": "ok", "service": "noyra"})
                     return
-                if parsed.path == "/health/ready":
+                if parsed.path in {
+                    "/health/ready",
+                    "/api/admin/readiness",
+                    "/api/v1/admin/readiness",
+                }:
+                    detailed = parsed.path != "/health/ready"
+                    if detailed and not self._authorized("operator"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
                     try:
                         lifecycle = owner.kernel.lifecycle.current().state
                         at_rest = None if owner.at_rest is None else owner.at_rest.health()
@@ -2563,6 +2630,8 @@ class NoyraHTTPServer:
                             "at_rest": at_rest,
                             "cloud_archive": owner.cloud_archive_status,
                         }
+                        if not detailed:
+                            payload = {"status": payload["status"], "service": "noyra"}
                         self._json(
                             HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE,
                             payload,
@@ -2570,14 +2639,14 @@ class NoyraHTTPServer:
                     except Exception:
                         self._json(
                             HTTPStatus.SERVICE_UNAVAILABLE,
-                            {"status": "degraded", "service": "noyra", "reason": "unavailable"},
+                            {"status": "degraded", "service": "noyra"},
                         )
                     return
                 if parsed.path == "/health":
                     cached_health = owner._cached_health()
                     if cached_health is not None:
                         cached_status, cached_payload = cached_health
-                        self._json(cached_status, cached_payload)
+                        self._json(cached_status, self._health_projection(cached_payload))
                         return
                 if parsed.path.startswith("/api/v1/"):
                     self.path = self.path.replace("/api/v1/", "/api/", 1)
@@ -2608,6 +2677,7 @@ class NoyraHTTPServer:
                             (owner.kernel.subject_id,),
                         ).fetchone()
                     projection["active_epoch"] = None if epoch is None else dict(epoch)
+                    projection["assessment_status"] = owner.migration_runtime.status
                     self._json(
                         HTTPStatus.OK,
                         projection,
@@ -2664,43 +2734,14 @@ class NoyraHTTPServer:
                     if not self._authorized("operator"):
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
-                    policy = owner.migration_store.read_policy(owner.kernel.subject_id)
-                    if not policy.enabled or policy.approval_mode == "disabled":
-                        self._json(HTTPStatus.OK, [])
-                        return
-                    with owner.kernel.database.connection() as connection:
-                        rows = connection.execute(
-                            "SELECT * FROM migration_targets WHERE subject_id=? "
-                            "AND status='active' AND attested_at IS NOT NULL "
-                            "ORDER BY updated_at DESC LIMIT ?",
-                            (owner.kernel.subject_id, limit),
-                        ).fetchall()
-                    candidates = []
-                    for row in rows:
-                        try:
-                            owner.migration_targets._assert_row_integrity(row)
-                        except ValueError:
-                            self._json(
-                                HTTPStatus.SERVICE_UNAVAILABLE,
-                                {"error": "migration_target_integrity_unavailable"},
-                            )
-                            return
-                        reasons = ["resource_observation_unavailable"]
-                        if (
-                            policy.allowed_target_ids
-                            and row["target_id"] not in policy.allowed_target_ids
-                        ):
-                            reasons.insert(0, "target_not_allowlisted")
-                        candidates.append(
-                            {
-                                "target_id": row["target_id"],
-                                "status": row["status"],
-                                "trusted": True,
-                                "resources_verified": False,
-                                "eligible": False,
-                                "reasons": reasons,
-                            }
+                    try:
+                        candidates = owner.migration_runtime.refresh_candidates()
+                    except Exception:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "migration_discovery_unavailable"},
                         )
+                        return
                     self._json(HTTPStatus.OK, candidates)
                     return
                 if parsed.path == "/api/admin/migration/proposals":
@@ -2881,7 +2922,7 @@ class NoyraHTTPServer:
                         "health": operator_health,
                     }
                     owner._store_health(health_status, health_payload)
-                    self._json(health_status, health_payload)
+                    self._json(health_status, self._health_projection(health_payload))
                 elif parsed.path == "/api/state":
                     state = owner.projection.state(owner.kernel.subject_id)
                     self._json(HTTPStatus.OK, state, public_contract=True)
@@ -3449,6 +3490,9 @@ class NoyraHTTPServer:
                             },
                             "estimate": owner.retention.estimate(owner.kernel.subject_id),
                             "latest": owner.retention.latest(owner.kernel.subject_id),
+                            "evidence_capacity": owner.retention.evidence_capacity(
+                                owner.kernel.subject_id
+                            ),
                         },
                     )
                 elif parsed.path == "/api/admin/wallet-ledger":
@@ -4328,6 +4372,27 @@ class NoyraHTTPServer:
                     except Exception:
                         self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_migration_target"})
                         return
+                    if payload.get("channel_token"):
+                        from noyra.migration.settings import write_target_token
+
+                        try:
+                            write_target_token(
+                                Path(
+                                    os.getenv(
+                                        "NOYRA_MIGRATION_TARGET_TOKEN_DIR",
+                                        str(
+                                            owner.settings.data_dir
+                                            / "secrets"
+                                            / "migration-targets"
+                                        ),
+                                    )
+                                ),
+                                target.target_id,
+                                payload["channel_token"],
+                            )
+                        except ValueError:
+                            self._json(HTTPStatus.BAD_REQUEST, {"error": "migration_token_invalid"})
+                            return
                     self._json(HTTPStatus.CREATED, target.__dict__)
                     return
                 if self.path.startswith("/api/admin/migration/targets/") and self.path.endswith(
@@ -4360,6 +4425,35 @@ class NoyraHTTPServer:
                             HTTPStatus.CONFLICT,
                             {"error": "migration_target_challenge_failed"},
                         )
+                        return
+                    if payload.get("automatic") is True:
+                        try:
+                            with owner.kernel.database.connection() as connection:
+                                target_row = connection.execute(
+                                    "SELECT endpoint FROM migration_targets WHERE target_id=? "
+                                    "AND subject_id=?",
+                                    (target_id, owner.kernel.subject_id),
+                                ).fetchone()
+                            if target_row is None:
+                                raise ValueError("unknown target")
+                            response = owner.migration_http_executor.transport.request(
+                                str(target_row["endpoint"]).rstrip("/") + "/v1/challenge",
+                                asdict(challenge),
+                                owner._migration_http_token(SimpleNamespace(target_id=target_id)),
+                            )
+                            evidence = owner.migration_targets.attest(
+                                target_id,
+                                challenge,
+                                str(response["signature"]),
+                                actor=self._actor(),
+                            )
+                        except (KeyError, ValueError, MigrationExecutionError):
+                            self._json(
+                                HTTPStatus.CONFLICT,
+                                {"error": "migration_target_attestation_failed"},
+                            )
+                            return
+                        self._json(HTTPStatus.OK, asdict(evidence))
                         return
                     self._json(HTTPStatus.OK, challenge.__dict__)
                     return
@@ -4498,6 +4592,58 @@ class NoyraHTTPServer:
                     self._json(HTTPStatus.OK, rejected.__dict__)
                     return
                 if self.path.startswith("/api/admin/migration/tasks/") and self.path.endswith(
+                    "/wallet-approval"
+                ):
+                    if not self._authorized("operator"):
+                        self._discard_small_request_body()
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    payload = self._request_json()
+                    if payload is None:
+                        return
+                    task_id = self.path.split("/")[-2]
+                    try:
+                        task = owner.migration_manager.get_task(task_id)
+                        policy = owner.migration_store.read_policy(owner.kernel.subject_id)
+                        if (
+                            task.subject_id != owner.kernel.subject_id
+                            or task.status != "approved"
+                            or not policy.local_wallet_transfer_enabled
+                            or policy.wallet_mode != "local_wallet_transfer"
+                            or task.policy_revision != policy.revision
+                            or owner.wallet_signer is None
+                            or payload.get("authorize_local_wallet") is not True
+                        ):
+                            raise ValueError("local wallet approval unavailable")
+                        approval = {
+                            "approval_id": secrets.token_hex(24),
+                            "task_id": task_id,
+                            "address": getattr(owner.wallet_signer, "address", None),
+                            "channel_id": f"recipient-{task.target_id}",
+                            "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                        }
+                        with owner.kernel.database.transaction() as connection:
+                            owner.migration_store._append_audit(
+                                connection,
+                                task.subject_id,
+                                "migration_local_wallet_approved",
+                                self._actor(),
+                                {
+                                    "task_id": task_id,
+                                    "policy_revision": policy.revision,
+                                    "approval": approval,
+                                },
+                            )
+                    except (ValueError, NotFoundError):
+                        self._json(
+                            HTTPStatus.CONFLICT, {"error": "migration_wallet_approval_failed"}
+                        )
+                        return
+                    self._json(
+                        HTTPStatus.OK, {"status": "approved", "expires_at": approval["expires_at"]}
+                    )
+                    return
+                if self.path.startswith("/api/admin/migration/tasks/") and self.path.endswith(
                     "/cancel"
                 ):
                     if not self._authorized("operator"):
@@ -4544,6 +4690,14 @@ class NoyraHTTPServer:
                     )
                     payload = self._request_json()
                     if payload is None:
+                        return
+                    if not payload:
+                        try:
+                            owner.start_migration(task_id)
+                        except (ValueError, NotFoundError):
+                            self._json(HTTPStatus.CONFLICT, {"error": "migration_cutover_rejected"})
+                            return
+                        self._json(HTTPStatus.ACCEPTED, {"task_id": task_id, "status": "queued"})
                         return
                     proof = payload.get("proof")
                     if not isinstance(proof, dict):
@@ -5911,10 +6065,15 @@ class NoyraHTTPServer:
                         )
                 except Exception:
                     pass
+                evidence = activation_status()
+                evidence_blocked = (
+                    owner.settings.profile == "production" and evidence["status"] != "verified"
+                )
                 return {
                     "automation_enabled": bool(policy.automation_enabled),
                     "mode": policy.mode,
                     "emergency_paused": bool(policy.emergency_paused),
+                    "release_evidence": evidence,
                     "policy_version": policy.policy_version,
                     "per_order_limit": policy.per_order_limit,
                     "daily_limit": policy.daily_limit,
@@ -5924,6 +6083,10 @@ class NoyraHTTPServer:
                     "status": (
                         "paused"
                         if policy.emergency_paused
+                        else "evidence_required"
+                        if evidence_blocked
+                        and policy.automation_enabled
+                        and policy.mode == "automatic"
                         else "enabled"
                         if policy.automation_enabled and policy.mode == "automatic"
                         else "disabled"
@@ -5939,29 +6102,35 @@ class NoyraHTTPServer:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_wallet_automation"})
                     return
                 try:
-                    expected = int(payload.pop("expected_version"))
-                    reason = str(payload.pop("reason", "管理员更新自动付款设置")).strip()
-                    if not reason or len(reason) > 2000:
+                    payload = dict(payload)
+                    expected = payload.pop("expected_version")
+                    if type(expected) is not int or expected < 1:
+                        raise ValueError("version")
+                    reason = payload.pop("reason", "管理员更新自动付款设置")
+                    if not isinstance(reason, str) or not reason.strip() or len(reason) > 2000:
                         raise ValueError("reason")
-                    idem = str(payload.pop("idempotency_key", "")).strip()
-                    if not idem or len(idem) > 128:
+                    reason = reason.strip()
+                    idem = payload.pop("idempotency_key", "")
+                    if not isinstance(idem, str) or not idem.strip() or len(idem) > 128:
                         raise ValueError("idempotency_key")
-                    with owner.kernel.database.read_transaction() as connection:
-                        duplicate = connection.execute(
-                            "SELECT payload_json FROM audit_records WHERE subject_id=? "
-                            "AND action='wallet_automation_updated' ORDER BY occurred_at DESC",
-                            (owner.kernel.subject_id,),
-                        ).fetchall()
-                    for row in duplicate:
-                        try:
-                            if (
-                                strict_json_loads(row["payload_json"]).get("idempotency_key")
-                                == idem
-                            ):
-                                self._json(HTTPStatus.OK, self._wallet_automation_projection())
-                                return
-                        except (TypeError, ValueError, AttributeError):
-                            continue
+                    idem = idem.strip()
+                    if not payload or set(payload) - {
+                        "mode",
+                        "automation_enabled",
+                        "emergency_paused",
+                    }:
+                        raise ValueError("unknown fields")
+                    for key in ("automation_enabled", "emergency_paused"):
+                        if key in payload and type(payload[key]) is not bool:
+                            raise ValueError(key)
+                    digest = content_hash(
+                        {
+                            "actor": self._actor(),
+                            "expected_version": expected,
+                            "reason": reason,
+                            **payload,
+                        }
+                    )
                     current = owner.wallet_economy.get_policy(owner.kernel.subject_id)
                     allowed = {
                         "mode": current.mode,
@@ -5976,10 +6145,12 @@ class NoyraHTTPServer:
                         "max_observation_age_seconds": current.max_observation_age_seconds,
                         "automatic_max_amount": current.automatic_max_amount,
                         "anomaly_block": current.anomaly_block,
-                        "emergency_paused": bool(
-                            payload.pop("emergency_paused", current.emergency_paused)
+                        "emergency_paused": payload.pop(
+                            "emergency_paused", current.emergency_paused
                         ),
-                        "automation_enabled": bool(payload.pop("automation_enabled")),
+                        "automation_enabled": payload.pop(
+                            "automation_enabled", current.automation_enabled
+                        ),
                         "recipient_allowlist_enabled": current.recipient_allowlist_enabled,
                         "allowed_recipient_addresses": list(current.allowed_recipient_addresses),
                     }
@@ -5987,29 +6158,26 @@ class NoyraHTTPServer:
                         allowed["mode"] = payload.pop("mode")
                     if payload:
                         raise ValueError("unknown fields")
-                    record = owner.wallet_economy.update_policy(
+                    owner.wallet_economy.update_policy(
                         owner.kernel.subject_id,
                         PaymentPolicyInput.model_validate(allowed),
                         expected_version=expected,
                         actor=self._actor(),
+                        automation_request={
+                            "idempotency_key": idem,
+                            "reason": reason,
+                            "request_digest": digest,
+                        },
                     )
-                    with owner.kernel.database.transaction() as connection:
-                        owner.wallet_economy._audit(
-                            connection,
-                            owner.kernel.subject_id,
-                            "wallet_automation_updated",
-                            self._actor(),
-                            {
-                                "idempotency_key": idem,
-                                "reason": reason,
-                                "policy_version": record.policy_version,
-                            },
-                        )
                     self._json(HTTPStatus.OK, self._wallet_automation_projection())
                 except Exception as error:
                     self._json(
-                        HTTPStatus.CONFLICT if "version" in str(error) else HTTPStatus.BAD_REQUEST,
-                        {"error": "invalid_wallet_automation"},
+                        HTTPStatus.CONFLICT if "conflict" in str(error) else HTTPStatus.BAD_REQUEST,
+                        {
+                            "error": "production_release_evidence_required"
+                            if str(error) == "production_release_evidence_required"
+                            else "invalid_wallet_automation"
+                        },
                     )
 
             def _set_wallet_automation_pause(self, paused: bool) -> None:
@@ -6019,35 +6187,12 @@ class NoyraHTTPServer:
                 if not isinstance(payload, dict):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_wallet_automation"})
                     return
+                if set(payload) - {"expected_version", "reason", "idempotency_key"}:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_wallet_automation"})
+                    return
                 payload["emergency_paused"] = paused
-                payload["automation_enabled"] = owner.wallet_economy.get_policy(
-                    owner.kernel.subject_id
-                ).automation_enabled
-                payload.setdefault(
-                    "mode", owner.wallet_economy.get_policy(owner.kernel.subject_id).mode
-                )
                 payload.setdefault("idempotency_key", f"pause-{paused}-{time.time_ns()}")
                 payload.setdefault("reason", "管理员紧急暂停" if paused else "管理员解除紧急暂停")
-                # Pause/resume is an explicit policy update; keep all unrelated
-                # policy fields from the durable record.
-                current = owner.wallet_economy.get_policy(owner.kernel.subject_id)
-                payload.update(
-                    {
-                        "allowed_network_ids": list(current.allowed_network_ids),
-                        "allowed_asset_ids": list(current.allowed_asset_ids),
-                        "per_order_limit": current.per_order_limit,
-                        "daily_limit": current.daily_limit,
-                        "monthly_limit": current.monthly_limit,
-                        "daily_order_limit": current.daily_order_limit,
-                        "monthly_order_limit": current.monthly_order_limit,
-                        "min_balance": current.min_balance,
-                        "max_observation_age_seconds": current.max_observation_age_seconds,
-                        "automatic_max_amount": current.automatic_max_amount,
-                        "anomaly_block": current.anomaly_block,
-                        "recipient_allowlist_enabled": current.recipient_allowlist_enabled,
-                        "allowed_recipient_addresses": list(current.allowed_recipient_addresses),
-                    }
-                )
                 self._update_wallet_automation(payload)
 
             def _configure_wallet_network(self) -> None:
@@ -6929,7 +7074,12 @@ class NoyraHTTPServer:
                 payload = self._request_json()
                 if payload is None:
                     return
-                if not isinstance(payload, dict) or payload:
+                if (
+                    not isinstance(payload, dict)
+                    or set(payload) - {"presentation"}
+                    or not isinstance(payload.get("presentation", "image"), str)
+                    or payload.get("presentation", "image") not in {"image", "audio"}
+                ):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_captcha_request"})
                     return
                 try:
@@ -6942,6 +7092,7 @@ class NoyraHTTPServer:
                         ttl_seconds=controls["captcha_ttl_seconds"],
                         max_attempts=controls["captcha_max_attempts"],
                         mode=controls["captcha_mode"],
+                        presentation=payload.get("presentation", "image"),
                         issue_limit_per_hour=controls["captcha_issue_limit_per_hour"],
                         global_rate_per_minute=controls["captcha_global_rate_per_minute"],
                         queue_cap=controls["queue_cap"],
@@ -7958,6 +8109,12 @@ class NoyraHTTPServer:
                 )
                 self._json(HTTPStatus.ACCEPTED, started)
 
+            def _health_projection(self, payload: dict[str, Any]) -> dict[str, Any]:
+                # Apply the access boundary on every read, including cache hits.
+                if self._authorized("operator"):
+                    return payload
+                return {"status": payload["status"], "service": "noyra"}
+
             def _authorized(self, required_role: str = "operator") -> bool:
                 allowed: dict[str, tuple[SecretStr | None, ...]] = {
                     "read": (
@@ -8930,7 +9087,8 @@ class NoyraHTTPServer:
                     )
                 self.send_header(
                     "Content-Security-Policy",
-                    "default-src 'self'; img-src 'self' data:; base-uri 'none'; object-src 'none'; "
+                    "default-src 'self'; img-src 'self' data:; media-src 'self' data:; "
+                    "base-uri 'none'; object-src 'none'; "
                     "frame-ancestors 'none'; "
                     "script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'none'",
                 )
@@ -9080,6 +9238,7 @@ class NoyraService:
         self.http.at_rest = self.at_rest
         self._initialize_common_key_after_integrity = initialize_common_key_after_integrity
         self.cognition: CognitionCycle | None = None
+        self.http.migration_runtime.to_thread = self._tracked_to_thread
         self.cognitive_resources = self.http.cognitive_resources
         self.cognition_gateway: RoutedModelGateway | None = None
         self.cloud_archives: CloudArchiveCoordinator | _UnavailableCloudArchiveCoordinator
@@ -9704,8 +9863,22 @@ class NoyraService:
             # still run when cognition is blocked by storage pressure; placing
             # it after the pressure decision made a freelist-heavy database
             # unable to clean its own reclaimable aggregates.
-            await self._tracked_to_thread(self._run_retention_if_due)
+            if hasattr(storage, "write_amplification_allowed"):
+                await self._tracked_to_thread(
+                    self._run_retention_if_due,
+                    allow_compaction=storage.write_amplification_allowed,
+                )
+            else:
+                await self._tracked_to_thread(self._run_retention_if_due)
             return "storage_pressure" if not storage.cognition_allowed else None
+        migration_runtime = getattr(self.http, "migration_runtime", None)
+        if migration_runtime is not None:
+            try:
+                result = await migration_runtime.tick()
+                if result:
+                    return str(result)
+            except Exception as error:
+                LOGGER.warning("migration assessment deferred: %s", type(error).__name__)
         try:
             lease = self.kernel.admission.begin("active_tick")
         except OperationInvalidated:
@@ -9745,10 +9918,22 @@ class NoyraService:
                 )
             lease.assert_current()
             with bind_lease(lease):
-                await self._tracked_to_thread(self._run_retention_if_due)
+                if hasattr(storage, "write_amplification_allowed"):
+                    await self._tracked_to_thread(
+                        self._run_retention_if_due,
+                        allow_compaction=storage.write_amplification_allowed,
+                    )
+                else:
+                    await self._tracked_to_thread(self._run_retention_if_due)
             lease.assert_current()
             if not storage.cognition_allowed:
                 return "storage_pressure"
+            with bind_lease(lease):
+                evidence_status = await self._tracked_to_thread(
+                    self.http.retention.evidence_capacity, self.kernel.subject_id
+                )
+            lease.assert_current()
+            evidence_exhausted = evidence_status["blocked"]
             try:
                 with bind_lease(lease):
                     await self._tracked_to_thread(
@@ -9769,11 +9954,12 @@ class NoyraService:
             lease.assert_current()
             if self.http.wallet_execution is not None:
                 with bind_lease(lease):
-                    await self._tracked_to_thread(
-                        self._advance_autonomous_reward_workflows,
-                        self.kernel.subject_id,
-                        limit=4,
-                    )
+                    if not evidence_exhausted:
+                        await self._tracked_to_thread(
+                            self._advance_autonomous_reward_workflows,
+                            self.kernel.subject_id,
+                            limit=4,
+                        )
                     await self._tracked_to_thread(
                         self.http.wallet_rewards.execute_ready,
                         self.kernel.subject_id,
@@ -9781,14 +9967,13 @@ class NoyraService:
                         limit=20,
                     )
                 lease.assert_current()
-            if self.cognition is None:
-                with bind_lease(lease):
-                    await self.http.deliveries.deliver_pending(self.kernel.subject_id)
-                lease.assert_current()
-                return None
             with bind_lease(lease):
                 await self.http.deliveries.deliver_pending(self.kernel.subject_id)
             lease.assert_current()
+            if evidence_exhausted:
+                return "evidence_capacity_reached"
+            if self.cognition is None:
+                return None
             if self.cognition_gateway is not None:
                 pool_status = self.cognition_gateway.pool_status()
                 with self.kernel.admission.commit_scope(lease):
@@ -9808,7 +9993,7 @@ class NoyraService:
         finally:
             self.kernel.admission.finish(lease)
 
-    def _run_retention_if_due(self) -> None:
+    def _run_retention_if_due(self, *, allow_compaction: bool = True) -> None:
         """Prune derived aggregates at a low frequency without blocking cognition."""
         http = getattr(self, "http", None)
         manager = getattr(http, "retention", None)
@@ -9820,7 +10005,9 @@ class NoyraService:
             return
         self._last_retention_run_at = now
         try:
-            result = manager.run_batch(self.kernel.subject_id, now=now)
+            result = manager.run_batch(
+                self.kernel.subject_id, now=now, allow_compaction=allow_compaction
+            )
             LOGGER.info("retention batch completed: %s", result.get("deleted_by_table", {}))
         except Exception as error:
             LOGGER.warning("retention batch deferred: %s", type(error).__name__)

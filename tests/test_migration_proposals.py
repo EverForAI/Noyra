@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import base64
+from datetime import UTC, datetime
 from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from noyra.migration.discovery import DiscoveryResult, ResourceObservation
 from noyra.migration.policy import MigrationPolicy, MigrationStore
 from noyra.migration.proposals import MigrationProposalBuilder, MigrationProposalStore
 from noyra.migration.targets import TargetRegistry
@@ -16,18 +18,30 @@ def _policy(**changes: Any) -> Any:
     return policy.with_updates(**changes) if changes else policy
 
 
-def _candidate(**changes: Any) -> Any:
-    values = {
-        "target_id": "target-1",
-        "status": "active",
-        "region": "us-east",
-        "encrypted_volume": True,
-        "free_bytes": 10_000_000_000,
-        "release_sha": "a" * 40,
-        "trust_level": 5,
-    }
-    values.update(changes)
-    return type("Candidate", (), values)()
+def _candidate(**changes: Any) -> DiscoveryResult:
+    observation = ResourceObservation.create_signed_payload(
+        target_id="target-1",
+        observed_at=datetime.now(UTC).isoformat(),
+        capacity={"free_bytes": 8_000_000_000},
+        latency_ms=40,
+        cost_microusd_month=0,
+        region="test",
+        enrollment_generation=1,
+    )
+    return DiscoveryResult(
+        target_id="target-1",
+        status="active",
+        trusted=True,
+        resources_verified=True,
+        eligible=True,
+        reasons=(),
+        observation=observation,
+        encrypted_volume=True,
+        trust_level=5,
+        release_sha="a" * 40,
+        endpoint="https://target.example",
+        **changes,
+    )
 
 
 def test_resources_alone_do_not_create_proposal() -> None:
