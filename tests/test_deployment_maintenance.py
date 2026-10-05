@@ -8,12 +8,38 @@ from unittest.mock import patch
 import pytest
 
 
-def _helper() -> Any:
+def _helper(*, root_markers: bool = False) -> Any:
     path = Path(__file__).resolve().parents[1] / "scripts" / "deployment-maintenance.py"
     spec = importlib.util.spec_from_file_location("deployment_maintenance", path)
     assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
+    module: Any = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if root_markers and os.name == "posix":
+        original = module.read_marker
+
+        def read_test_marker(path: Path) -> Any:
+            try:
+                actual = path.lstat()
+            except OSError:
+                return original(path)
+            root_stat = os.stat_result(
+                (
+                    actual.st_mode & ~0o022,
+                    actual.st_ino,
+                    actual.st_dev,
+                    actual.st_nlink,
+                    0,
+                    actual.st_gid,
+                    actual.st_size,
+                    actual.st_atime,
+                    actual.st_mtime,
+                    actual.st_ctime,
+                )
+            )
+            with patch.object(Path, "lstat", return_value=root_stat):
+                return original(path)
+
+        module.read_marker = read_test_marker
     return module
 
 
@@ -29,7 +55,7 @@ def test_volume_preflight_groups_requirements_on_same_device(tmp_path: Path) -> 
 
 
 def test_gc_ignores_unmanaged_releases_and_requires_verified_replacement(tmp_path: Path) -> None:
-    helper = _helper()
+    helper = _helper(root_markers=True)
     releases, backups = tmp_path / "releases", tmp_path / "backups"
     releases.mkdir()
     backups.mkdir()
@@ -64,7 +90,7 @@ def test_gc_ignores_unmanaged_releases_and_requires_verified_replacement(tmp_pat
 
 
 def _releases(tmp_path: Path) -> tuple[Any, Path, Path]:
-    helper = _helper()
+    helper = _helper(root_markers=True)
     releases, backups = tmp_path / "releases", tmp_path / "backups"
     releases.mkdir()
     backups.mkdir()
@@ -140,6 +166,31 @@ def test_gc_refuses_pointer_outside_releases(tmp_path: Path) -> None:
         pytest.skip("directory symlink permission unavailable")
     with pytest.raises(ValueError, match="unsafe_release_pointer"):
         helper.gc_plan(releases, backups, proc_root=tmp_path / "no-proc")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX marker ownership contract")
+def test_marker_rejects_unprivileged_owner_and_group_write(tmp_path: Path) -> None:
+    helper = _helper()
+    marker = tmp_path / "marker.json"
+    marker.write_text(json.dumps({"format": "noyra-verified-install/v1"}))
+    actual = marker.stat()
+    for owner, mode in ((1001, 0o100644), (0, 0o100664)):
+        metadata = os.stat_result(
+            (
+                mode,
+                actual.st_ino,
+                actual.st_dev,
+                actual.st_nlink,
+                owner,
+                actual.st_gid,
+                actual.st_size,
+                actual.st_atime,
+                actual.st_mtime,
+                actual.st_ctime,
+            )
+        )
+        with patch.object(Path, "lstat", return_value=metadata):
+            assert helper.read_marker(marker) is None
 
 
 def test_installer_preflights_before_stopping_and_gc_follows_readiness() -> None:

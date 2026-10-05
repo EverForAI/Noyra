@@ -3,10 +3,12 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import urllib.request
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -168,10 +170,31 @@ def test_current_release_evidence_is_sha_bound_and_pointer_controlled(
     monkeypatch.setattr(assurance, "CURRENT_PATH", pointer)
     monkeypatch.setattr(assurance, "PUBLIC_KEY_PATH", public_key)
     monkeypatch.setattr(assurance, "controlled_text", lambda path, **_: path.read_text())
-    assert assurance.current_evidence()["commit_sha"] == "a" * 40
-    (release / ".noyra-source-sha").write_text("b" * 40)
-    with pytest.raises(ValueError, match="commit_sha"):
-        assurance.current_evidence()
+    actual = pointer.lstat()
+    root_pointer = os.stat_result(
+        (
+            actual.st_mode,
+            actual.st_ino,
+            actual.st_dev,
+            actual.st_nlink,
+            0,
+            actual.st_gid,
+            actual.st_size,
+            actual.st_atime,
+            actual.st_mtime,
+            actual.st_ctime,
+        )
+    )
+    original = Path.lstat
+
+    def metadata(path: Path) -> os.stat_result:
+        return root_pointer if path == pointer else original(path)
+
+    with patch.object(Path, "lstat", metadata):
+        assert assurance.current_evidence()["commit_sha"] == "a" * 40
+        (release / ".noyra-source-sha").write_text("b" * 40)
+        with pytest.raises(ValueError, match="commit_sha"):
+            assurance.current_evidence()
 
 
 def test_production_payment_gate_allows_pause_and_disable_without_evidence(tmp_path: Path) -> None:
