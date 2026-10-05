@@ -118,3 +118,10 @@ B01–B11 的确认代码问题已按模块修复、复审和提交。B12 是外
 - Windows 全量回归和独立复现确认：B08–B10 新计数检查在不存在的主体上先抛出内部计数完整性错误，改变原 ModelLedger 的 SQLite 外键错误类型。非法写入一直拒绝，没有新增准入绕过；但原调用方错误合同需要保留。
 - 修复：仅在计数不完整分支中查询主体是否存在；不存在维持 sqlite3.IntegrityError，已有主体缺失计数仍是内部 IntegrityError，不创建/补全计数、不放行工作。正常路径仍只查八个计数。
 - 验证：既有未知主体拒绝测试，加上完整容量/并发/损坏/迁移/一万行查询成本组合 **10 通过**，Ruff/严格 mypy 通过。临时 Linux pytest-xdist 对 unittest memoryview 子测试的序列化错误属于测试工具兼容问题；已移除该插件，最终用独立进程分组运行原测试，避免改业务或删断言适配工具。
+
+
+### 安装权限边界复审
+
+- 真正以服务账户执行安装目录权限复现时发现，安装器创建的 root 管理迁移目录会被 at-rest 通用硬化逻辑当成服务账户目录 `chmod`，导致 required 模式启动失败。这不是迁移协议问题，而是部署权限合同冲突。
+- 修复：at-rest 只对安装器认可的 root:noyra 迁移控制布局做专门、严格的结构/设备/所有权/模式校验；只纳入可由服务账户读取的 `source`/`requests`，不复制 root-only fences/status/activation state，不改变其权限。任何额外目录、链接、错 owner/group/mode 或跨设备均拒绝。普通 root-owned 条目继续 fail-closed。
+- 验证：WSL root 创建真实 root/service 目录后，以 uid/gid 65534 启动 required `NoyraService`、完成加密备份和恢复，读取 source/fence 且排除 root-only activation 状态，**1 通过**；owner、可写、state、额外项和 symlink 篡改 **5 通过**；at-rest 原有回归 **45 通过、2 Windows ACL 跳过**。设备探测仅注入测试状态，其余访问、权限、服务启动和备份均真实。
