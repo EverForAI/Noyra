@@ -16,6 +16,7 @@ from noyra.core.retention import (
     validate_retention_run_row,
 )
 from noyra.core.types import content_hash
+from noyra.model.ledger import ModelLedger
 from noyra.research.provider import SearchProviderStore
 from noyra.research.types import SearchProviderInput
 
@@ -82,6 +83,83 @@ def test_retention_compacts_cold_model_payloads_without_deleting_ledger_rows(
         ).fetchone()
     assert row is not None
     assert row["request_json"] != payload
+
+
+def test_compaction_advances_past_small_rows_and_survives_restart(tmp_path: Any) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-compaction-progress"
+    IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
+    ledger = ModelLedger(db)
+    old = (datetime.now(UTC) - timedelta(days=120)).isoformat()
+    calls = []
+    for index, prompt in enumerate(("small", "x" * 5000, "y" * 5000)):
+        call, _ = ledger.prepare_call(
+            subject,
+            "provider",
+            "model",
+            "test",
+            content_hash({"prompt": prompt}),
+            f"progress-{index}",
+            request={"prompt": prompt},
+        )
+        with db.transaction() as connection:
+            connection.execute(
+                "UPDATE model_calls SET call_id=?,status='failed',created_at=? WHERE call_id=?",
+                (f"mcall_ordered_{index}", old, call.call_id),
+            )
+        calls.append(f"mcall_ordered_{index}")
+    assert ledger.compress_cold_payloads(subject, limit=1) == 0
+    restarted = ModelLedger(Database(db.path))
+    assert restarted.compress_cold_payloads(subject, limit=1) == 1
+    assert restarted.compress_cold_payloads(subject, limit=1) == 1
+    with db.connection() as connection:
+        rows = connection.execute(
+            "SELECT request_json FROM model_calls ORDER BY call_id"
+        ).fetchall()
+    assert rows[1][0].startswith("noyra-zlib-b64:")
+    assert rows[2][0].startswith("noyra-zlib-b64:")
+    # A finite sweep restarts, including records backdated behind its old cursor.
+    with db.transaction() as connection:
+        connection.execute(
+            "UPDATE model_calls SET request_json=? WHERE call_id=?",
+            ('{"prompt":"' + "z" * 5000 + '"}', calls[0]),
+        )
+    assert restarted.compress_cold_payloads(subject, limit=1) == 1
+
+
+def test_compaction_failure_is_durable_and_does_not_block_cleanup(tmp_path: Any) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-compaction-failure"
+    IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
+    ProviderHealthStore(db).record_attempt(subject, "model", "provider", "old", True, 1, None)
+    with db.transaction() as connection:
+        connection.execute(
+            "UPDATE provider_health_buckets SET bucket_start=?",
+            ((datetime.now(UTC) - timedelta(days=60)).isoformat(),),
+        )
+    manager = RetentionManager(db)
+    with patch.object(ModelLedger, "compress_cold_payloads", side_effect=RuntimeError("injected")):
+        result = manager.run_batch(subject)
+    assert result["failure_stage"] == "compaction"
+    assert result["deleted_by_table"]["provider_health_buckets"] == 1
+    with db.connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM retention_runs WHERE run_id=?", (result["run_id"],)
+        ).fetchone()
+    validate_retention_run_row(row)
+    assert row["failure_count"] == 1
+    assert row["retry_at"]
+
+
+def test_pressure_retention_skips_compaction(tmp_path: Any) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-compaction-pressure"
+    IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
+    with patch.object(ModelLedger, "compress_cold_payloads") as compact:
+        result = RetentionManager(db, minimum_free_bytes=2**63).run_batch(subject)
+    compact.assert_not_called()
+    assert result["compaction_skipped"] is True
+    assert result["failed_reason"] is None
 
 
 def test_run_batch_is_bounded_and_removes_old_health_rows(tmp_path: Any) -> None:

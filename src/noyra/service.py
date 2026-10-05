@@ -1394,7 +1394,11 @@ class NoyraHTTPServer:
         self.operator_controls: OperatorControlService | None = None
         self.projection = PublicProjection(kernel.database)
         self.provider_health = ProviderHealthStore(kernel.database)
-        self.retention = RetentionManager(kernel.database, RetentionSettings.from_env())
+        self.retention = RetentionManager(
+            kernel.database,
+            RetentionSettings.from_env(),
+            minimum_free_bytes=settings.minimum_free_storage_bytes,
+        )
         self.capabilities = CapabilityStore(kernel.database)
         self.common_knowledge = CommonKnowledgeStore(
             kernel.database,
@@ -9682,7 +9686,13 @@ class NoyraService:
             # still run when cognition is blocked by storage pressure; placing
             # it after the pressure decision made a freelist-heavy database
             # unable to clean its own reclaimable aggregates.
-            await self._tracked_to_thread(self._run_retention_if_due)
+            if hasattr(storage, "write_amplification_allowed"):
+                await self._tracked_to_thread(
+                    self._run_retention_if_due,
+                    allow_compaction=storage.write_amplification_allowed,
+                )
+            else:
+                await self._tracked_to_thread(self._run_retention_if_due)
             return "storage_pressure" if not storage.cognition_allowed else None
         try:
             lease = self.kernel.admission.begin("active_tick")
@@ -9723,7 +9733,13 @@ class NoyraService:
                 )
             lease.assert_current()
             with bind_lease(lease):
-                await self._tracked_to_thread(self._run_retention_if_due)
+                if hasattr(storage, "write_amplification_allowed"):
+                    await self._tracked_to_thread(
+                        self._run_retention_if_due,
+                        allow_compaction=storage.write_amplification_allowed,
+                    )
+                else:
+                    await self._tracked_to_thread(self._run_retention_if_due)
             lease.assert_current()
             if not storage.cognition_allowed:
                 return "storage_pressure"
@@ -9786,7 +9802,7 @@ class NoyraService:
         finally:
             self.kernel.admission.finish(lease)
 
-    def _run_retention_if_due(self) -> None:
+    def _run_retention_if_due(self, *, allow_compaction: bool = True) -> None:
         """Prune derived aggregates at a low frequency without blocking cognition."""
         http = getattr(self, "http", None)
         manager = getattr(http, "retention", None)
@@ -9798,7 +9814,9 @@ class NoyraService:
             return
         self._last_retention_run_at = now
         try:
-            result = manager.run_batch(self.kernel.subject_id, now=now)
+            result = manager.run_batch(
+                self.kernel.subject_id, now=now, allow_compaction=allow_compaction
+            )
             LOGGER.info("retention batch completed: %s", result.get("deleted_by_table", {}))
         except Exception as error:
             LOGGER.warning("retention batch deferred: %s", type(error).__name__)
