@@ -32,6 +32,7 @@ grep -q '^set -euo pipefail$' scripts/noyra-migration-runner.sh
 grep -q 'No arbitrary command execution' scripts/noyra-migration-runner.sh
 ! grep -Eq '(^|[[:space:]])(eval|ssh|scp)[[:space:]]' scripts/noyra-migration-runner.sh
 ! grep -Eq 'EnvironmentFile=.*noyra\.env' deploy/systemd/noyra-migration-agent.service
+grep -q 'EnvironmentFile=-/etc/noyra/migration/agent.env' deploy/systemd/noyra-migration-agent.service
 grep -q 'NoNewPrivileges=true' deploy/systemd/noyra-migration-agent.service
 grep -q 'NoNewPrivileges=true' deploy/systemd/noyra-migration-runner.service
 grep -q 'ReadWritePaths=/var/lib/noyra/migration-agent' deploy/systemd/noyra-migration-agent.service

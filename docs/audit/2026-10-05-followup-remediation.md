@@ -62,7 +62,7 @@
 - 钱包：本地 keystore、解锁文件和 RPC 设置只在明确 task 授权下进入接收方加密包；目标实际解密核对地址，root 暂存固定私密目录并写受控 EnvironmentFile，旧运行配置可恢复。来源保留隔离副本，不谎称擦除了磁盘历史。外部 signer 增加 `/migration-identity` 的 EIP-191 领域隔离挑战，恢复签名者地址，证明绑定 task/manifest/target；不产生付款。目标 provider 密钥和归档密钥仍须预配；root 核对实际凭据后才激活。
 - 复审补强：钱包批准回执需返回完整 approval 以满足源端严格合同；incoming 预检包含分块数量、合并双份与恢复暂存空间；Windows 钱包暂存 ACL 显式加固。接口返回中不含连接令牌/钱包密码。模型不能选择未登记端点或绕过审批。
 - 验证：迁移及 API 合同组合首轮 220 通过、2 跳过，唯一失败为旧 UI 测试仍要求禁用按钮，已按新托管执行合同更新。签名器使用真实 EIP-191 签名和地址恢复、仅 HTTP 传输夹具；新认知拒绝/人工提案/频率限制/管理 API 后台执行均验证。完整本地钱包串联验证使用真实 keystore 加解密、recipient 加密、CLI/bridge/root/来源回执；仅 systemd/卷探测模拟。具体最终组合结果追加在下方。
-- 运维合同：目标 `/etc/noyra/noyra.env` 设置 `NOYRA_MIGRATION_COST_MICROUSD_MONTH`（允许显式 0）、`NOYRA_MIGRATION_REGION` 与注册一致；目标 API/归档密钥按既有受控路径预配。可选 `secrets/migration-bindings/<target-id>.json` 只配置 credential_binding 的 references/fingerprints 和 signer_id；无配置时空凭据映射，不把缺失的实际密钥视为可用。独立 signer 须实现上述只签身份挑战端点；不支持时明确拒绝迁移。
+- 运维合同：目标 `/etc/noyra/migration/agent.env` 设置 `NOYRA_MIGRATION_COST_MICROUSD_MONTH`（允许显式 0）、`NOYRA_MIGRATION_REGION` 与注册一致；目标 API/归档密钥按既有受控路径预配。可选 `secrets/migration-bindings/<target-id>.json` 只配置 credential_binding 的 references/fingerprints 和 signer_id；无配置时空凭据映射，不把缺失的实际密钥视为可用。独立 signer 须实现上述只签身份挑战端点；不支持时明确拒绝迁移。
 - 限制：本模块的本地/模拟系统测试不是 B12 真机验收。默认关闭状态不自动解除。
 
 - 后续回归：activation/binding/runtime/admin UI/agent CLI **56 通过、1 跳过**；RPC 完整迁移补强后真实完整串联 **2 通过**；agent CLI/http executor/runtime **24 通过**。迁移/service/wallet 严格 mypy、Ruff 及 admin.js 语法通过。
@@ -88,3 +88,16 @@
 - 安全边界：不依赖 IP 作为管理身份，不降低就绪判定，不改变已有健康 HTTP 状态；只收敛公开字段。已有通过 SSH 或 HTTPS 的 operator 管理仍可获得诊断详情。
 
 - 验证：公开/认证健康、缓存隔离、真实 HTTP root 就绪、托管令牌文件/系统凭据、目标切换/回滚、API 合同组合 **47 通过、1 POSIX 跳过**；代理/重定向泄露专项 **1 通过**。全项目 Ruff/mypy 通过。
+
+
+### 最终部署接线复审
+
+- 发现 B05 的 agent signer 接线直接继承普通 noyra.env，与既有最小权限及 shell 检查冲突。改用可选私密 `/etc/noyra/migration/agent.env`，显式成本/地区和所需 signer、归档引用，普通管理员/模型/搜索凭据不注入 agent 环境；提供专用模板与运维说明。
+- WSL Ubuntu shell 验证通过：静态部署合同、迁移安装/runner/组件回滚、升级 runner/组件回滚。仅脚本及临时夹具，未改动真实服务或卷，不计入 B12。
+
+
+### 模块 7：B12 最终真实环境证据
+
+B01–B11 的确认代码问题已按模块修复、复审和提交。B12 是外部环境证据缺口，仍然待验收：本机/WSL 测试不替代真实 Linux/LUKS 双机切换、独立 KMS、测试链和 72 小时运行。新增 `docs/deployment/2026-10-05-final-acceptance.md` 明确同 SHA 流程、八项门禁、双机故障矩阵、系统凭据分配、signer 身份挑战和失败处理。
+
+最终提交验证采用 `scripts/verify-committed.py` 的独立临时 clone，排除原有未跟踪审计、动画和 output 文件；结果另存 output JSON。完成后为该 SHA 生成 unsigned/pending 外部门禁记录，不改写为 passed，不解除迁移默认关闭或生产自动执行门禁，不推送 GitHub。所有提交后续如有修复，最终 SHA 验证与 pending 记录会重新绑定。

@@ -71,8 +71,8 @@ enabled and active state and restore the previous files if readiness fails.
 Before registering a standby target, verify all of the following:
 
 1. The standby uses an encrypted volume and the same compatible release.
-2. Its identity file is a root-owned regular file with mode `0600`; the private
-   Ed25519 key is never placed in the source database or ordinary environment
+2. Its identity file is a root:noyra regular file with mode `0640`; the private
+   Ed25519/X25519 keys is never placed in the source database or ordinary environment
    file.
 3. The target agent is reachable only through its authenticated loopback or
    mutually authenticated proxy channel and has a private data root.
