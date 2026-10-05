@@ -124,4 +124,4 @@ B01–B11 的确认代码问题已按模块修复、复审和提交。B12 是外
 
 - 真正以服务账户执行安装目录权限复现时发现，安装器创建的 root 管理迁移目录会被 at-rest 通用硬化逻辑当成服务账户目录 `chmod`，导致 required 模式启动失败。这不是迁移协议问题，而是部署权限合同冲突。
 - 修复：at-rest 只对安装器认可的 root:noyra 迁移控制布局做专门、严格的结构/设备/所有权/模式校验；通用硬化遍历只纳入服务账户拥有的 `source`/`requests`，对 root 管理目录和可见控制文件只核对元数据，不修改其权限。备份保留 source 和 fences，排除机器本地的请求/状态队列与 root-only activation state；无法读取的 fence 明确使备份失败，绝不静默丢弃。任何额外目录、链接、错 owner/group/mode 或跨设备均拒绝。普通 root-owned 条目继续 fail-closed。
-- 验证：WSL root 创建真实 root/service 目录后，以 uid/gid 65534 启动 required `NoyraService`、完成加密备份和恢复，读取 source/fence 且排除 root-only activation 状态，**1 通过**；owner、可写、state、额外项和 symlink 篡改 **5 通过**；at-rest 原有回归 **40 通过、2 Windows ACL 跳过**。设备探测仅注入测试状态，其余访问、权限、服务启动和备份均真实。
+- 验证：WSL root 创建真实 root/service 目录后，以 uid/gid 65534 启动 required `NoyraService`、完成加密备份和恢复，读取 source/fence 且排除 root-only activation 状态，**1 通过**；owner、可写、state、额外项和 symlink 篡改 **5 通过**；at-rest 与权限边界组合 **45 通过、2 Windows ACL 跳过**。设备探测仅注入测试状态，其余访问、权限、服务启动和备份均真实。
