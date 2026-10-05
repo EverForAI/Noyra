@@ -48,3 +48,33 @@ from another commit. Until the real environment has produced and independently
 reviewed this artifact, the external release gate remains open and production
 automatic payment, unattended migration, and long-lived public deployment
 must remain disabled or in manual-approval mode.
+
+## Final-Commit Preparation
+
+After all repair commits are complete, verify an isolated clone of that commit:
+
+```bash
+python scripts/verify-committed.py --commit HEAD --scope all --output output/committed-verification.json
+python scripts/prepare-external-validation.py --commit HEAD --output output/external-gates-pending.json
+```
+
+The first command tests committed files and preserves unrelated local files. Its
+report includes the exact SHA and executed commands; local success is not an
+external-gate pass. The second creates an unsigned **pending** template which
+the verifier intentionally rejects. Never change its statuses to passed without
+executing and reviewing the actual tests. Recreate it after any source change.
+
+Use the eight-gate matrix above and the migration gate runbook, with two
+disposable Ubuntu/LUKS hosts, an isolated signer or KMS, a test chain/RPC and
+HTTPS proxy. Record source/target installed SHA, dependency lock hashes, host
+class and UTC windows. Require denied/wrong-key/tamper/replay/interruption
+cases, not just a happy-path cutover. Run both local-wallet opt-in and external
+signer binding scenarios; local mode remains supported by the product.
+
+During acceptance, use explicit development-main on staging hosts if no stable
+release exists. Keep production automation disabled until signed evidence for
+that final SHA is provisioned. Evidence is signed independently with the key
+whose public half is preconfigured on both deployment hosts and the protected
+GitHub environment. The runtime checks SHA/signature on activation and new
+automatic authorization, while 72-hour freshness is checked at publication.
+An old accepted SHA does not stop merely because 72 hours have elapsed.
