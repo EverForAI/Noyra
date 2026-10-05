@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import urllib.request
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -139,7 +140,7 @@ def test_stable_artifact_signature_verified_before_target_is_returned(
     )
     monkeypatch.setattr(assurance, "controlled_text", lambda *_, **__: key)
     monkeypatch.setattr(
-        assurance.urllib.request,
+        urllib.request,
         "urlopen",
         lambda *_, **__: io.BytesIO(json.dumps(record).encode()),
     )
