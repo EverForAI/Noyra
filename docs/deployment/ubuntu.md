@@ -550,7 +550,7 @@ Run the deployment audit before an update. The installer also creates an encrypt
 outside `/var/lib/noyra` before replacing an existing release:
 
 ```bash
-./scripts/audit-deployment.sh
+bash ./scripts/audit-deployment.sh --static
 sudo ./scripts/install-ubuntu.sh --profile base --release-id "$(git rev-parse --short=12 HEAD)-$(date -u +%Y%m%d%H%M%S)"
 ```
 
@@ -559,6 +559,22 @@ backup itself through `runuser` as `noyra`. The backup keyring therefore remains
 `0640`; do not change it to a root-only `0600` file or make it globally readable. A per-upgrade
 staging directory is temporarily `root:noyra` mode `1770` so the service account can create the
 encrypted file and fsync its parent directory; root-owned marker and lock files remain mode `0600`.
+
+Static deployment contracts do not need pytest or a repository venv. For the
+full developer audit, prepare a separate environment once, as the checkout
+owner (do not install tools into the running release):
+
+```bash
+bash /srv/noyra/scripts/prepare-audit-environment.sh
+bash /srv/noyra/scripts/audit-deployment.sh --full
+bash /srv/noyra/scripts/audit-release.sh
+```
+
+The scripts work from any current directory, prefer `.audit-venv`, and accept an
+explicit `NOYRA_PYTHON` executable path. `NOYRA_AUDIT_BOOTSTRAP_PYTHON` selects
+the Python used to create the audit venv. Missing tools print the exact setup
+command. Full audit requires developer dependencies and is separate from
+service readiness or real-host acceptance.
 Root validates the artifact, publishes it as `root:root` mode `0600`, and restores
 `/var/backups/noyra` to root-only mode `0700` before continuing.
 The staging directory carries root-owned marker and lock files and is accepted only with the

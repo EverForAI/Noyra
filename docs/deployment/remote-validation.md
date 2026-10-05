@@ -68,13 +68,18 @@ Install the base profile and start the service:
 
 ```bash
 cd /srv/noyra
-sudo ./scripts/audit-deployment.sh
+bash ./scripts/audit-deployment.sh --static
 sudo ./scripts/install-ubuntu.sh --profile base \
   --release-id "$(git rev-parse --short=12 HEAD)-$(date -u +%Y%m%d%H%M%S)"
 sudoedit /etc/noyra/noyra.env
 sudo systemctl enable --now noyra
 sudo systemctl status noyra --no-pager
 ```
+
+For full source tests, as the checkout owner run
+`bash /srv/noyra/scripts/prepare-audit-environment.sh` once, then
+`bash /srv/noyra/scripts/audit-deployment.sh --full`. This isolated `.audit-venv`
+uses `requirements-dev.lock`; the deployed runtime is not modified.
 
 The installer creates a versioned release and requires `/health/ready` after a live upgrade. If the
 service is already active, keep the installer-created encrypted cold backup until the validation
