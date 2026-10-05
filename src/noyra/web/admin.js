@@ -54,10 +54,16 @@ function setStatus(target, message, error = false) { const node = $(target); nod
 function showSection(section) { activeSection = section; document.querySelectorAll("[data-section-panel]").forEach((panel) => { panel.hidden = panel.dataset.sectionPanel !== section; }); document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.section === section)); $("#page-title").textContent = { overview: "总览", conversation: "私密交流", "public-posts": "内容审核", models: "认知资源", search: "搜索配置", capabilities: "能力授权", channels: "通讯渠道", wallet: "钱包采集", migration: "迁移与庇护所", runtime: "运行防护" }[section]; }
 async function loadMigration() {
   const [policy, targets, proposals, tasks] = await Promise.all([request("/api/v1/admin/migration/policy"), request("/api/v1/admin/migration/targets"), request("/api/v1/admin/migration/proposals"), request("/api/v1/admin/migration/tasks")]);
-  $("#migration-enabled").checked = Boolean(policy.enabled); $("#migration-approval-mode").value = policy.approval_mode; $("#migration-cooldown").value = Math.round((policy.rejection_cooldown_seconds || 0) / 86400); $("#migration-wallet-mode").value = policy.wallet_mode; $("#migration-local-wallet").checked = Boolean(policy.local_wallet_transfer_enabled); $("#migration-policy-summary").innerHTML = summaryRows([["当前状态", policy.enabled ? "已开启" : "已关闭"], ["策略版本", policy.revision], ["审批模式", policy.approval_mode], ["钱包模式", policy.wallet_mode], ["活动 epoch", policy.active_epoch ? `${policy.active_epoch.epoch_number} · ${policy.active_epoch.target_id}` : "无"]]);
+  $("#migration-enabled").checked = Boolean(policy.enabled); $("#migration-approval-mode").value = policy.approval_mode; $("#migration-cooldown").value = Math.round((policy.rejection_cooldown_seconds || 0) / 86400); $("#migration-wallet-mode").value = policy.wallet_mode; $("#migration-local-wallet").checked = Boolean(policy.local_wallet_transfer_enabled); $("#migration-policy-summary").innerHTML = summaryRows([["当前状态", policy.enabled ? "已开启" : "已关闭"], ["评估状态", ({ disabled: "已关闭", deferred: "评估延后", no_actionable_need: "无需迁移", cognition_unavailable: "等待认知资源", awaiting_approval: "等待审批", approved: "已批准", executing: "执行中", committed: "已迁移", reconciliation_required: "需核对或回滚", cognition_declined: "认知评估未建议迁移", hard_gate_rejected: "未通过策略检查" })[policy.assessment_status] || "等待评估"], ["策略版本", policy.revision], ["审批模式", policy.approval_mode], ["钱包模式", policy.wallet_mode], ["活动 epoch", policy.active_epoch ? `${policy.active_epoch.epoch_number} · ${policy.active_epoch.target_id}` : "无"]]);
+  $("#migration-allowed-targets").value = (policy.allowed_target_ids || []).join(",");
+  $("#migration-allowed-regions").value = (policy.allowed_regions || []).join(",");
+  $("#migration-max-cost").value = policy.max_cost_microusd;
+  $("#migration-min-free").value = policy.min_free_bytes;
+  $("#migration-trust").value = policy.trust_level;
+  $("#migration-downtime").value = policy.max_downtime_seconds;
   $("#migration-target-list").innerHTML = targets.length ? targets.map((item) => `<article class="resource-item"><div><h3>${esc(item.target_id)}</h3><p>${item.status === "active" ? "已验证" : "等待验证"} · ${esc(item.region || "未设置区域")}</p><small>${esc(item.endpoint)} · ${esc(item.key_fingerprint)}</small></div><div class="resource-actions"><button type="button" data-migration-challenge="${esc(item.target_id)}">${item.status === "active" ? "重新验证" : "发起验证"}</button>${item.status !== "revoked" ? `<button class="text-button" type="button" data-migration-revoke="${esc(item.target_id)}">撤销</button>` : ""}</div></article>`).join("") : '<div class="muted">尚未注册迁移目标</div>';
   $("#migration-proposal-list").innerHTML = proposals.length ? proposals.map((item) => `<article class="resource-item"><div><h3>${esc(item.reason_code)}</h3><p>${esc(item.status)} · 目标 ${esc(item.target_id)} · 策略版本 ${esc(item.policy_revision)}</p><small>${esc(item.reason)}</small><small>收益 ${esc(item.benefit_score)} · 风险 ${esc(item.risk_score)} · 过期 ${esc(item.expires_at)}</small><small>证据：${esc(JSON.stringify(item.evidence || {}))}</small></div>${["awaiting_approval", "planned"].includes(item.status) ? `<div class="resource-actions"><button type="button" data-migration-approve="${esc(item.proposal_id)}">批准</button><button class="text-button" type="button" data-migration-reject="${esc(item.proposal_id)}">拒绝</button></div>` : ""}</article>`).join("") : '<div class="muted">暂无迁移提案</div>';
-  $("#migration-task-list").innerHTML = tasks.length ? tasks.map((item) => `<article class="resource-item"><div><h3>${esc(item.task_id)}</h3><p>${esc(item.status)} · 目标 ${esc(item.target_id)}</p><small>${esc(item.updated_at || item.created_at)}</small></div>${["preparing", "validating", "cutover"].includes(item.status) ? `<div class="resource-actions"><button type="button" disabled title="等待加密迁移包和目标恢复证明接线">执行切换（等待安全证明）</button></div>` : ""}${["approved", "preflight", "awaiting_approval"].includes(item.status) ? `<div class="resource-actions"><button class="text-button" type="button" data-migration-cancel="${esc(item.task_id)}">取消任务</button></div>` : ""}${!["committed", "rolled_back", "cancelled"].includes(item.status) ? `<div class="resource-actions"><button class="text-button" type="button" data-migration-rollback="${esc(item.task_id)}">回滚</button></div>` : ""}</article>`).join("") : '<div class="muted">暂无迁移任务</div>';
+  $("#migration-task-list").innerHTML = tasks.length ? tasks.map((item) => `<article class="resource-item"><div><h3>${esc(item.task_id)}</h3><p>${esc(item.status)} · 目标 ${esc(item.target_id)}</p><small>${esc(item.updated_at || item.created_at)}</small>${item.error_code ? `<small>执行受阻：${esc(item.error_code)}</small>` : ""}</div>${["approved"].includes(item.status) ? `<div class="resource-actions"><button type="button" data-migration-cutover="${esc(item.task_id)}">执行迁移</button></div>` : ""}${["approved", "preflight", "awaiting_approval"].includes(item.status) ? `<div class="resource-actions"><button class="text-button" type="button" data-migration-cancel="${esc(item.task_id)}">取消任务</button></div>` : ""}${!["committed", "rolled_back", "cancelled"].includes(item.status) ? `<div class="resource-actions"><button class="text-button" type="button" data-migration-rollback="${esc(item.task_id)}">回滚</button></div>` : ""}</article>`).join("") : '<div class="muted">暂无迁移任务</div>';
 }
 function summaryRows(items) { return items.map(([label, value]) => `<div class="summary-row"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join(""); }
 const integerFormatter = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 });
@@ -1117,7 +1123,7 @@ $("#migration-target-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
     await request("/api/v1/admin/migration/targets", { method: "POST", body: JSON.stringify({
-      target_id: $("#migration-target-id").value.trim(), endpoint: $("#migration-target-endpoint").value.trim(), public_key: $("#migration-target-key").value.trim(), release_sha: $("#migration-target-release").value.trim(), os_arch: $("#migration-target-arch").value.trim(), region: $("#migration-target-region").value.trim() || null, provider: $("#migration-target-provider").value.trim() || null, capabilities: {}, encrypted_volume: $("#migration-target-encrypted").checked,
+      target_id: $("#migration-target-id").value.trim(), endpoint: $("#migration-target-endpoint").value.trim(), public_key: $("#migration-target-key").value.trim(), recipient_public_key: $("#migration-target-recipient").value.trim(), channel_token: $("#migration-target-token").value.trim(), release_sha: $("#migration-target-release").value.trim(), os_arch: $("#migration-target-arch").value.trim(), region: $("#migration-target-region").value.trim() || null, provider: $("#migration-target-provider").value.trim() || null, capabilities: {}, encrypted_volume: $("#migration-target-encrypted").checked,
     }) });
     event.currentTarget.reset(); $("#migration-target-arch").value = "linux-amd64"; setStatus("#migration-target-status", "迁移目标已注册"); await loadMigration();
   } catch (error) { setStatus("#migration-target-status", errorText(error), true); }
@@ -1128,10 +1134,7 @@ $("#migration-target-list").addEventListener("click", async (event) => {
   try {
     if (challengeButton) {
       const targetId = challengeButton.dataset.migrationChallenge;
-      const challenge = await request(`/api/v1/admin/migration/targets/${encodeURIComponent(targetId)}/challenge`, { method: "POST", body: JSON.stringify({}) });
-      const signature = window.prompt(`请让目标 ${targetId} 对以下挑战签名，然后粘贴签名：\nnonce=${challenge.nonce}\nexpires_at=${challenge.expires_at}\nsource_epoch=${challenge.source_epoch}`);
-      if (!signature) return;
-      await request(`/api/v1/admin/migration/targets/${encodeURIComponent(targetId)}/attest`, { method: "POST", body: JSON.stringify({ ...challenge, signature: signature.trim() }) });
+      await request(`/api/v1/admin/migration/targets/${encodeURIComponent(targetId)}/challenge`, { method: "POST", body: JSON.stringify({ automatic: true }) });
       setStatus("#migration-target-status", "目标验证成功"); await loadMigration();
     } else if (revokeButton) {
       const targetId = revokeButton.dataset.migrationRevoke;
@@ -1162,7 +1165,14 @@ $("#migration-task-list").addEventListener("click", async (event) => {
   const cancel = event.target.closest("[data-migration-cancel]");
   try {
     if (cutover) {
-      setStatus("#migration-status", "迁移切换需要目标恢复证明和加密迁移包，当前功能已安全暂停", true);
+      const policy = await request("/api/v1/admin/migration/policy");
+      if (policy.wallet_mode === "local_wallet_transfer") {
+        if (!window.confirm("本次迁移将通过接收方加密包转移本地钱包及解锁文件。目标必须是您信任的设备。确认授权本次任务吗？")) return;
+        await request(`/api/v1/admin/migration/tasks/${encodeURIComponent(cutover.dataset.migrationCutover)}/wallet-approval`, { method: "POST", body: JSON.stringify({ authorize_local_wallet: true }) });
+      }
+      await request(`/api/v1/admin/migration/tasks/${encodeURIComponent(cutover.dataset.migrationCutover)}/cutover`, { method: "POST", body: JSON.stringify({}) });
+      setStatus("#migration-status", "迁移执行已启动；传输和验证在服务器后台继续，请更新任务状态");
+      await loadMigration();
     } else if (cancel) {
       const reason = window.prompt("请输入取消迁移的原因：");
       if (!reason?.trim()) return;
@@ -1218,6 +1228,12 @@ $("#migration-policy-form").addEventListener("submit", async (event) => {
       enabled: $("#migration-enabled").checked,
       approval_mode: approvalMode,
       rejection_cooldown_seconds: Number($("#migration-cooldown").value) * 86400,
+      allowed_target_ids: $("#migration-allowed-targets").value.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
+      allowed_regions: $("#migration-allowed-regions").value.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
+      max_cost_microusd: Number($("#migration-max-cost").value),
+      min_free_bytes: Number($("#migration-min-free").value),
+      trust_level: Number($("#migration-trust").value),
+      max_downtime_seconds: Number($("#migration-downtime").value),
       wallet_mode: walletMode,
       local_wallet_transfer_enabled: localWalletEnabled,
       ...(enteringPolicyAuto ? { confirm_policy_auto: true } : {}),

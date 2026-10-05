@@ -237,6 +237,7 @@ class TargetRuntimeActivator:
             _atomic_json(marker, journal, 0o600)
             self._validate_restored_database(staged, values)
             self._finalize_target_database(staged, values)
+            wallet_directory = self._stage_local_wallet(staged.parent, values)
             cutover_started = True
             self.systemd.stop()
             if values["inventory_sha256"] is not None:
@@ -245,7 +246,7 @@ class TargetRuntimeActivator:
             os.replace(staged, active_database)
             _chown_service(active_database)
             os.chmod(active_database, 0o600)
-            self._write_target_dropin(target_id)
+            self._write_target_dropin(target_id, wallet_directory=wallet_directory)
             self.systemd.daemon_reload()
             self.systemd.start()
             if not self.systemd.wait_ready(
@@ -535,8 +536,15 @@ class TargetRuntimeActivator:
             or task["subject_id"] != request["subject_id"]
             or task["target_id"] != request["target_id"]
             or task["source_epoch"] != request["source_epoch"]
-            or task["status"] not in {"validating", "cutover"}
-            or task["manifest_digest"] != request["manifest_digest"]
+            or task["status"] not in {"preparing", "validating", "cutover"}
+            or (
+                task["manifest_digest"] != request["manifest_digest"]
+                and not (
+                    task["status"] == "preparing"
+                    and task["manifest_digest"] is None
+                    and request["inventory_sha256"] is not None
+                )
+            )
             or task["artifact_id"] != request["artifact_id"]
             or epoch is None
             or epoch["target_id"] != request["target_id"]
@@ -563,9 +571,19 @@ class TargetRuntimeActivator:
                 "SELECT status,target_epoch_id FROM migration_tasks WHERE task_id=?",
                 (request["task_id"],),
             ).fetchone()
-            if task is None or task["status"] not in {"validating", "cutover"}:
+            if task is None or task["status"] not in {"preparing", "validating", "cutover"}:
                 raise TargetActivationError("restored_migration_task_changed")
-            if task["status"] == "validating":
+            if task["status"] == "preparing":
+                manager.transition_task_in_transaction(
+                    connection,
+                    request["task_id"],
+                    "validating",
+                    actor="migration-target",
+                    expected_status="preparing",
+                    manifest_digest=request["manifest_digest"],
+                    artifact_id=request["artifact_id"],
+                )
+            if task["status"] in {"preparing", "validating"}:
                 manager.transition_task_in_transaction(
                     connection,
                     request["task_id"],
@@ -638,14 +656,78 @@ class TargetRuntimeActivator:
         except Exception:
             return "previous_runtime_restore_failed"
 
-    def _write_target_dropin(self, target_id: str) -> None:
+    def _stage_local_wallet(self, staging: Path, request: Mapping[str, Any]) -> Path | None:
+        if request["wallet_mode"] != "local_wallet_transfer":
+            if (staging / "migration-wallet").exists():
+                raise TargetActivationError("unexpected_local_wallet_material")
+            return None
+        from .wallet_material import verify_local_wallet
+
+        record = _read_json(
+            self.agent_root / "bindings" / f"{request['task_id']}.json",
+            "wallet_binding_unavailable",
+        )
+        binding = record.get("wallet_binding", {})
+        digest = content_hash(
+            {
+                "task_id": request["task_id"],
+                "manifest_digest": request["manifest_digest"],
+                "binding": binding,
+            }
+        )
+        if digest != request["wallet_proof_digest"]:
+            raise TargetActivationError("wallet_binding_mismatch")
+        address = binding.get("address")
+        if not isinstance(address, str):
+            raise TargetActivationError("wallet_binding_unavailable")
+        verify_local_wallet(staging / "migration-wallet", address)
+        destination = self.data_root / "secrets" / f"migration-{request['task_id']}"
+        if destination.exists():
+            raise TargetActivationError("wallet_destination_exists")
+        _reject_symlink_parents(destination, self.data_root)
+        destination.parent.mkdir(mode=0o700, exist_ok=True)
+        destination.mkdir(mode=0o700)
+        for name in ("wallet.json", "password", "rpc.json"):
+            _copy_private(staging / "migration-wallet" / name, destination / name)
+            _chown_service(destination / name)
+        _chown_service(destination)
+        if os.name == "nt":
+            from noyra.core.at_rest import _harden_tree
+
+            _harden_tree(destination)
+        return destination
+
+    def _write_target_dropin(self, target_id: str, *, wallet_directory: Path | None = None) -> None:
         if not _TARGET_ID.fullmatch(target_id):
             raise TargetActivationError("target_id_invalid")
         _reject_symlink_parents(self.dropin_dir / "migration-target.conf", self.dropin_dir.parent)
         self.dropin_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
+        environment = f"[Service]\nEnvironment=NOYRA_MIGRATION_TARGET_ID={target_id}\n"
+        if wallet_directory is not None:
+            from noyra.wallet.config import _parse_rpc_urls
+
+            rpc = _parse_rpc_urls((wallet_directory / "rpc.json").read_text(encoding="utf-8"))
+            rpc_text = canonical_json({str(key): value for key, value in rpc.items()})
+            rpc_text = rpc_text.replace("\\", "\\\\").replace('"', '\\"')
+            # Fixed root-owned path; escape systemd specifiers and quoted values.
+            wallet_path = str(wallet_directory).replace("\\", "\\\\").replace('"', '\\"')
+            wallet_env = (
+                "NOYRA_WALLET_MODE=local\n"
+                f'NOYRA_WALLET_KEYSTORE_PATH="{wallet_path}/wallet.json"\n'
+                f'NOYRA_WALLET_PASSWORD_FILE="{wallet_path}/password"\n'
+                f'NOYRA_WALLET_RPC_URLS_JSON="{rpc_text}"\n'
+                "NOYRA_WALLET_SIGNER_ENDPOINT=\nNOYRA_WALLET_SIGNER_ID=\n"
+                "NOYRA_WALLET_SIGNER_ADDRESS=\nNOYRA_WALLET_SIGNER_BEARER_TOKEN=\n"
+                "NOYRA_WALLET_SIGNER_BEARER_TOKEN_FILE=\n"
+                "NOYRA_WALLET_SIGNER_BEARER_TOKEN_CREDENTIAL=\n"
+            )
+            _atomic_write(wallet_directory / "runtime.env", wallet_env.encode(), 0o600)
+            _chown_service(wallet_directory / "runtime.env")
+            env_path = str(wallet_directory / "runtime.env").replace("%", "%%")
+            environment += f'EnvironmentFile="{env_path}"\n'
         _atomic_write(
             self.dropin_dir / "migration-target.conf",
-            f"[Service]\nEnvironment=NOYRA_MIGRATION_TARGET_ID={target_id}\n".encode(),
+            environment.encode(),
             0o644,
         )
 

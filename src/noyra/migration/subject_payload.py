@@ -86,7 +86,17 @@ def _name(name: Any) -> str:
             }
             for part in path.parts
         )
-        or (name != "noyra.sqlite3" and path.parts[0] not in STATE_ROOTS)
+        or (
+            name != "noyra.sqlite3"
+            and path.parts[0] not in STATE_ROOTS
+            and name
+            not in {
+                "migration-wallet",
+                "migration-wallet/wallet.json",
+                "migration-wallet/password",
+                "migration-wallet/rpc.json",
+            }
+        )
     ):
         raise ValueError("subject payload path is outside the permitted roots")
     return name
@@ -107,17 +117,35 @@ def stage_payload(source: Path, destination: Path, subject_id: str, expected_dig
         os.chmod(target, 0o600)
     (destination / INVENTORY_NAME).write_text(canonical_json(inventory), encoding="utf-8")
     os.chmod(destination / INVENTORY_NAME, 0o600)
+    if os.name == "nt" and (destination / "migration-wallet").exists():
+        from noyra.core.at_rest import _harden_tree
+
+        _harden_tree(destination / "migration-wallet")
     verify_payload(destination, subject_id)
     verify_archives(destination, subject_id)
 
 
 def create_payload(
-    database: Path, data_root: Path, destination: Path, subject_id: str
+    database: Path,
+    data_root: Path,
+    destination: Path,
+    subject_id: str,
+    *,
+    local_wallet: tuple[Path, Path, Path] | None = None,
 ) -> dict[str, Any]:
     """The caller holds the source fence; preserve the complete SQLite schema."""
     entries: list[dict[str, Any]] = []
     tree_directories: list[str] = []
     sources = {"noyra.sqlite3": database}
+    if local_wallet is not None:
+        sources.update(
+            {
+                "migration-wallet/wallet.json": local_wallet[0],
+                "migration-wallet/password": local_wallet[1],
+                "migration-wallet/rpc.json": local_wallet[2],
+            }
+        )
+        tree_directories.append("migration-wallet")
     for root_name in STATE_ROOTS:
         root = data_root / root_name
         if root.is_symlink() or (
@@ -267,6 +295,10 @@ def restore_payload(source: Path, destination: Path, subject_id: str) -> Path:
                 raise ValueError("subject payload file missing")
         (destination / INVENTORY_NAME).write_bytes(raw)
         os.chmod(destination / INVENTORY_NAME, 0o600)
+        if os.name == "nt" and (destination / "migration-wallet").exists():
+            from noyra.core.at_rest import _harden_tree
+
+            _harden_tree(destination / "migration-wallet")
         verify_payload(destination, subject_id)
         return destination / "noyra.sqlite3"
     except Exception:

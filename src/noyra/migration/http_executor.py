@@ -96,6 +96,7 @@ class SQLiteArtifactProvider:
             raise MigrationExecutionError("artifact_already_exists")
         raw_snapshot = self.output_root / f".{artifact_id}.sqlite"
         raw_payload = self.output_root / f".{artifact_id}.tar"
+        wallet_rpc = self.output_root / f".{artifact_id}.rpc.json"
         if raw_snapshot.exists() or raw_payload.exists():
             raise MigrationExecutionError("artifact_snapshot_already_exists")
         try:
@@ -109,8 +110,18 @@ class SQLiteArtifactProvider:
                 source.close()
                 gc.collect()
             os.chmod(raw_snapshot, 0o600)
+            local_wallet = None
+            wallet = proof.get("wallet_binding")
+            if isinstance(wallet, Mapping) and wallet.get("mode") == "local_wallet_transfer":
+                from .wallet_material import source_wallet_files
+
+                local_wallet = source_wallet_files(task, wallet, wallet_rpc)
             inventory = create_payload(
-                raw_snapshot, self.database_path.parent, raw_payload, task.subject_id
+                raw_snapshot,
+                self.database_path.parent,
+                raw_payload,
+                task.subject_id,
+                local_wallet=local_wallet,
             )
             context = {
                 "task_id": task.task_id,
@@ -137,6 +148,7 @@ class SQLiteArtifactProvider:
             try:
                 raw_snapshot.unlink(missing_ok=True)
                 raw_payload.unlink(missing_ok=True)
+                wallet_rpc.unlink(missing_ok=True)
             except OSError as error:
                 raise MigrationExecutionError("artifact_snapshot_cleanup_failed") from error
         manifest = {
@@ -328,6 +340,8 @@ class HTTPMigrationExecutor:
         *,
         proof: Mapping[str, object],
         source_epoch: str,
+        artifact_ready: Callable[[Mapping[str, Any]], None] | None = None,
+        target_verified: Callable[[dict[str, object]], None] | None = None,
     ) -> MigrationExecutionReceipt:
         if source_epoch != task.source_epoch:
             raise MigrationExecutionError("source_epoch_mismatch")
@@ -362,15 +376,8 @@ class HTTPMigrationExecutor:
                 raise MigrationExecutionError("artifact_manifest_mismatch")
             if path.stat().st_size != manifest["byte_size"]:
                 raise MigrationExecutionError("artifact_size_mismatch")
-            binding_proof = self._request_binding_proof(
-                target, token, task, manifest_digest, manifest, proof
-            )
-            if isinstance(proof, dict):
-                # Keep the verified, target-signed binding evidence attached to
-                # the in-memory execution proof so receipt validation can bind
-                # every digest to the exact response that was verified.
-                proof.update(binding_proof)
-            binding_evidence = self._binding_evidence(binding_proof, task, manifest_digest, target)
+            if artifact_ready is not None:
+                artifact_ready(manifest)
             preflight = self._request(
                 target,
                 token,
@@ -381,6 +388,7 @@ class HTTPMigrationExecutor:
                     "task_id": task.task_id,
                     "subject_id": task.subject_id,
                     "source_epoch": source_epoch,
+                    "chunk_bytes": self.chunk_bytes,
                 },
             )
             if preflight.get("status") != "ready":
@@ -396,6 +404,25 @@ class HTTPMigrationExecutor:
                     "expected_digest": manifest_digest,
                 },
             )
+            binding_proof = self._request_binding_proof(
+                target, token, task, manifest_digest, manifest, proof
+            )
+            if isinstance(proof, dict):
+                # Keep the verified, target-signed binding evidence attached to
+                # the in-memory execution proof so receipt validation can bind
+                # every digest to the exact response that was verified.
+                proof.update(
+                    {
+                        key: binding_proof[key]
+                        for key in (
+                            "recipient_key_fingerprint",
+                            "target_volume_proof",
+                            "credential_binding",
+                            "wallet_binding",
+                        )
+                    }
+                )
+            binding_evidence = self._binding_evidence(binding_proof, task, manifest_digest, target)
             health_with_signature = self._request(
                 target,
                 token,
@@ -424,6 +451,27 @@ class HTTPMigrationExecutor:
                 "database_sha256", manifest.get("plaintext_sha256")
             ):
                 raise MigrationExecutionError("target_restored_database_digest_mismatch")
+            verified_proof: dict[str, object] = {
+                "manifest": manifest,
+                "manifest_digest": manifest_digest,
+                "artifact_id": manifest["artifact_id"],
+                "restore_report": restore,
+                "health_report": health_with_signature,
+                "target_signature": target_signature,
+                **{
+                    key: binding_proof[key]
+                    for key in (
+                        "recipient_key_fingerprint",
+                        "target_volume_proof",
+                        "credential_binding",
+                        "wallet_binding",
+                    )
+                },
+            }
+            if isinstance(proof, dict):
+                proof.update(verified_proof)
+            if target_verified is not None:
+                target_verified(verified_proof)
             activation_request = validate_activation_request(
                 {
                     "format": ACTIVATION_FORMAT,

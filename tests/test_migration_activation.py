@@ -344,6 +344,201 @@ def test_crash_after_subject_directory_switch_restores_old_tree_before_start(
     assert activator.recover_incomplete() == 0
 
 
+@pytest.mark.parametrize("local_wallet", [False, True])
+def test_approved_source_task_runs_real_bundle_cli_bridge_and_root_activation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_wallet: bool
+) -> None:
+    import json
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+    from noyra.core.admission import RuntimeAdmissionGate
+    from noyra.core.at_rest import VolumeEncryptionStatus
+    from noyra.migration.activation import TargetActivationBridge
+    from noyra.migration.agent import MigrationAgent
+    from noyra.migration.cutover import CutoverCoordinator
+    from noyra.migration.http_executor import HTTPMigrationExecutor, SQLiteArtifactProvider
+    from test_migration_agent_cli import _module
+
+    source = Database(tmp_path / "source" / "noyra.sqlite3")
+    IdentityStore(source).ensure(SUBJECT_ID, "a" * 64)
+    LifecycleManager(source, EventStore(source), SUBJECT_ID).ensure_initial()
+    (source.path.parent / "workspace").mkdir()
+    (source.path.parent / "workspace" / "work.txt").write_text("retained")
+    signing, recipient = Ed25519PrivateKey.generate(), X25519PrivateKey.generate()
+    public = base64.urlsafe_b64encode(signing.public_key().public_bytes_raw()).decode()
+    recipient_public = (
+        base64.urlsafe_b64encode(recipient.public_key().public_bytes_raw()).decode().rstrip("=")
+    )
+    store = MigrationStore(source)
+    policy = store.read_policy(SUBJECT_ID)
+    policy = store.update_policy(
+        SUBJECT_ID, policy.revision, {"enabled": True, "wallet_mode": "disabled"}, "operator"
+    )
+    wallet_binding: dict[str, Any] = {"mode": "disabled"}
+    if local_wallet:
+        from noyra.wallet.keystore import create_keystore
+
+        wallet_root = source.path.parent / "secrets" / "wallet"
+        address = create_keystore(wallet_root / "wallet.json", "transfer-test-pass")
+        (wallet_root / "password").write_text("transfer-test-pass")
+        (wallet_root / "password").chmod(0o600)
+        monkeypatch.setenv("NOYRA_WALLET_MODE", "local")
+        monkeypatch.setenv("NOYRA_WALLET_KEYSTORE_PATH", str(wallet_root / "wallet.json"))
+        monkeypatch.setenv("NOYRA_WALLET_PASSWORD_FILE", str(wallet_root / "password"))
+        monkeypatch.setenv("NOYRA_WALLET_RPC_URLS_JSON", '{"11155111":"https://rpc.example"}')
+        policy = store.update_policy(
+            SUBJECT_ID,
+            policy.revision,
+            {"wallet_mode": "local_wallet_transfer", "local_wallet_transfer_enabled": True},
+            "operator",
+        )
+        wallet_binding = {"mode": "local_wallet_transfer", "address": address}
+    registry = TargetRegistry(source, store)
+    target = registry.register(
+        SUBJECT_ID,
+        target_id=TARGET_ID,
+        public_key=public,
+        recipient_public_key=recipient_public,
+        endpoint="https://target.example",
+        capabilities={},
+        region=None,
+        provider=None,
+        release_sha="a" * 40,
+        os_arch="linux-amd64",
+        encrypted_volume=True,
+        actor="operator",
+    )
+    challenge = registry.issue_challenge(TARGET_ID, source_epoch="runtime-0")
+    registry.attest(
+        TARGET_ID,
+        challenge,
+        base64.urlsafe_b64encode(signing.sign(challenge.signing_bytes())).decode(),
+        actor="operator",
+    )
+    manager = MigrationManager(source, store)
+    proposal = manager.create_proposal(
+        subject_id=SUBJECT_ID,
+        target_id=TARGET_ID,
+        policy_revision=policy.revision,
+        reason_code="maintenance",
+        reason="move to trusted resource",
+        expires_at="2099-01-01T00:00:00+00:00",
+    )
+    task = manager.approve(proposal.proposal_id, actor="operator", idempotency_key="full-flow")
+    if local_wallet:
+        wallet_binding["approval"] = {
+            "task_id": task.task_id,
+            "address": address,
+            "approval_id": "approval-local",
+            "channel_id": "recipient-channel",
+            "expires_at": "2099-01-01T00:00:00+00:00",
+        }
+    target_root = tmp_path / "target"
+    target_db = Database(target_root / "noyra.sqlite3")
+    IdentityStore(target_db).ensure("Noyra-standby", "b" * 64)
+    LifecycleManager(target_db, EventStore(target_db), "Noyra-standby").ensure_initial()
+    systemd = _Systemd()
+    activator = TargetRuntimeActivator(target_root, tmp_path / "etc", systemd=systemd)
+    root = activator.state_root.parent
+    identity = tmp_path / "identity.json"
+    identity.write_text(json.dumps({"target_id": TARGET_ID, "public_key": public}))
+    identity.chmod(0o600)
+    bridge = TargetActivationBridge(
+        root / "requests", root / "status", signing, timeout_seconds=15, poll_seconds=0.01
+    )
+    monkeypatch.setattr(
+        "noyra.core.at_rest.VolumeEncryptionProbe.probe",
+        lambda *a, **kw: VolumeEncryptionStatus(True, "test", "fixture", "volume"),
+    )
+    agent = MigrationAgent(
+        target_id=TARGET_ID,
+        key_fingerprint=target.key_fingerprint,
+        signing_key=signing,
+        recipient_private_key=recipient,
+        data_root=activator.agent_root,
+        restore_root=activator.agent_root / "restored",
+        activation_controller=bridge,
+    )
+    cli = _module()
+
+    class Transport:
+        def request(self, url: str, body: dict[str, Any], token: str) -> dict[str, Any]:
+            operation = url.rsplit("/", 1)[-1]
+            if operation == "receive-chunk":
+                operation = "receive"
+            if operation != "activate":
+                return dict(cli.dispatch(agent, operation, dict(body)))
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(cli.dispatch, agent, operation, dict(body))
+                deadline = time.monotonic() + 10
+                while not list((root / "requests").glob("*.json")) and not future.done():
+                    assert time.monotonic() < deadline
+                    time.sleep(0.01)
+                run_target_activation_requests(
+                    root=root,
+                    identity_file=identity,
+                    data_root=target_root,
+                    config_root=activator.config_root,
+                    systemd=systemd,
+                )
+                return dict(future.result(timeout=10))
+
+    admission = RuntimeAdmissionGate(SUBJECT_ID)
+
+    def source_fence(current: Any, epoch: str) -> str:
+        admission.assert_migration_fenced()
+        with source.connection() as connection:
+            row = connection.execute(
+                "SELECT e.* FROM migration_epochs e JOIN migration_tasks t "
+                "ON t.target_epoch_id=e.epoch_id WHERE t.task_id=?",
+                (current.task_id,),
+            ).fetchone()
+        return content_hash(
+            {
+                "task_id": current.task_id,
+                "source_epoch": epoch,
+                "epoch_id": row["epoch_id"],
+                "epoch_number": row["epoch_number"],
+                "status": row["status"],
+            }
+        )
+
+    executor = HTTPMigrationExecutor(
+        target_resolver=lambda t: target.__dict__,
+        token_resolver=lambda t: "t" * 32,
+        artifact_resolver=SQLiteArtifactProvider(source.path, source.path.parent / "outgoing"),
+        source_fence=source_fence,
+        source_unfence=lambda *a: None,
+        transport=Transport(),
+    )
+    coordinator = CutoverCoordinator(source, admission=admission, executor=executor)
+    result = coordinator.run(
+        task.task_id,
+        binding={
+            "credential_binding": {"references": {}, "fingerprints": {}},
+            "wallet_binding": wallet_binding,
+        },
+    )
+    if local_wallet:
+        from noyra.migration.wallet_material import verify_local_wallet
+
+        verify_local_wallet(target_root / "secrets" / f"migration-{task.task_id}", address)
+        assert "EnvironmentFile=" in (activator.dropin_dir / "migration-target.conf").read_text()
+        assert (wallet_root / "wallet.json").is_file()  # source retained and fenced
+    assert result["status"] == "committed"
+    assert not admission.accepting
+    assert (target_root / "workspace" / "work.txt").read_text() == "retained"
+    assert (
+        MigrationManager(Database(target_root / "noyra.sqlite3", initialize=False), store)
+        .get_task(task.task_id)
+        .status
+        == "committed"
+    )
+
+
 def test_controller_recovery_state_is_outside_the_agent_writable_root(tmp_path: Path) -> None:
     data_root = tmp_path / "var-lib-noyra"
     activator = TargetRuntimeActivator(data_root, tmp_path / "etc-noyra", systemd=_Systemd())

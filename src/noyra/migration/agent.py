@@ -29,6 +29,7 @@ from noyra.core.types import canonical_json, content_hash
 
 from .activation_contract import validate_activation_receipt, validate_activation_request
 from .bundle import BUNDLE_FORMAT, decrypt_bundle
+from .discovery import ResourceObservation
 from .trust import (
     RecipientPoPChallenge,
     RecipientPoPProof,
@@ -690,6 +691,29 @@ class MigrationAgent:
                 or address.casefold() != self.wallet_address.casefold()
             ):
                 raise ValueError("target signer binding does not match")
+            from noyra.wallet.config import configured_wallet_signer_from_env
+            from noyra.wallet.execution import HTTPSWalletSigner
+
+            signer = configured_wallet_signer_from_env()
+            if not isinstance(signer, HTTPSWalletSigner):
+                if signer is not None:
+                    close = getattr(signer, "close", None)
+                    if callable(close):
+                        close()
+                raise ValueError("target external signer is not configured")
+            try:
+                if signer.signer_id != signer_id or signer.address != address.casefold():
+                    raise ValueError("target signer runtime identity mismatch")
+                possession = signer.prove_migration_identity(
+                    {
+                        "task_id": task_id,
+                        "target_id": target_id,
+                        "manifest_digest": manifest_digest,
+                        "target_identity": self.host_identity,
+                    }
+                )
+            finally:
+                signer.close()
             proof = content_hash(
                 {
                     "task_id": task_id,
@@ -709,6 +733,7 @@ class MigrationAgent:
                 "manifest_digest": manifest_digest,
                 "signer_id": signer_id,
                 "address": address,
+                "possession_proof": possession,
                 "proof_digest": proof,
             }
         if mode != "local_wallet_transfer" or set(value) != {"mode", "address", "approval"}:
@@ -717,8 +742,10 @@ class MigrationAgent:
         approval = value.get("approval")
         if (
             not isinstance(address, str)
-            or self.wallet_address is None
-            or address.casefold() != self.wallet_address.casefold()
+            or (
+                self.wallet_address is not None
+                and address.casefold() != self.wallet_address.casefold()
+            )
             or not isinstance(approval, Mapping)
             or set(approval) != {"approval_id", "task_id", "address", "channel_id", "expires_at"}
         ):
@@ -744,6 +771,11 @@ class MigrationAgent:
             raise ValueError("target local wallet approval expiry is invalid") from error
         if expiry.tzinfo is None or expiry.astimezone(UTC) <= datetime.now(UTC):
             raise ValueError("target local wallet approval has expired")
+        from .wallet_material import verify_local_wallet
+
+        if self.restore_root is None:
+            raise ValueError("restored wallet unavailable")
+        verify_local_wallet(self.restore_root / task_id / "migration-wallet", address)
         approval_fingerprint = content_hash(
             {
                 "approval_id": approval_id,
@@ -792,6 +824,7 @@ class MigrationAgent:
             "address": address,
             "approval_id": approval_id,
             "approval_fingerprint": approval_fingerprint,
+            "approval": dict(approval),
             "channel_id": channel_id,
             "expires_at": expires_at,
             "proof_digest": proof,
@@ -846,6 +879,43 @@ class MigrationAgent:
         if not isinstance(signing_bytes, bytes) or not signing_bytes:
             raise ValueError("recovery proof bytes are required")
         return base64.urlsafe_b64encode(self._signing_key.sign(signing_bytes)).decode()
+
+    def observe(self, target_id: str | None = None) -> dict[str, Any]:
+        """Return a short-lived, target-signed capacity observation."""
+        if self._signing_key is None or target_id not in {None, self.target_id}:
+            raise ValueError("target observation identity is invalid")
+        root = self.data_root or Path("/")
+        usage = shutil.disk_usage(root)
+        configured_cost = os.environ.get("NOYRA_MIGRATION_COST_MICROUSD_MONTH")
+        if configured_cost is None:
+            raise ValueError("target monthly resource cost is not configured")
+        try:
+            cost_microusd_month = int(configured_cost)
+        except ValueError as error:
+            raise ValueError("target monthly resource cost is invalid") from error
+        observation = ResourceObservation.create_signed_payload(
+            target_id=self.target_id,
+            observed_at=datetime.now(UTC).isoformat(timespec="milliseconds"),
+            capacity={"free_bytes": int(usage.free), "total_bytes": int(usage.total)},
+            latency_ms=0,
+            cost_microusd_month=cost_microusd_month,
+            region=os.getenv("NOYRA_MIGRATION_REGION") or None,
+            enrollment_generation=self.generation,
+        )
+        signed = observation.with_signature(
+            base64.urlsafe_b64encode(self._signing_key.sign(observation.signing_bytes())).decode()
+        )
+        return {
+            "target_id": signed.target_id,
+            "observed_at": signed.observed_at,
+            "capacity": signed.capacity,
+            "latency_ms": signed.latency_ms,
+            "cost_microusd_month": signed.cost_microusd_month,
+            "region": signed.region,
+            "enrollment_generation": signed.enrollment_generation,
+            "evidence_hash": signed.evidence_hash,
+            "signature": signed.signature,
+        }
 
     def receive(
         self,
@@ -1199,9 +1269,13 @@ class MigrationAgent:
             byte_count += size
         return file_count, byte_count
 
-    def preflight(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+    def preflight(
+        self, manifest: Mapping[str, Any], *, chunk_bytes: int = 1024 * 1024
+    ) -> dict[str, Any]:
         """Validate target volume and incoming capacity before transfer begins."""
         values = self._validate_manifest(manifest)
+        if type(chunk_bytes) is not int or not 4096 <= chunk_bytes <= MAX_CHUNK_BYTES:
+            raise ValueError("migration chunk size is invalid")
         if self.data_root is None:
             raise ValueError("migration preflight storage is unavailable")
         self._require_encrypted_volume(self.data_root)
@@ -1212,11 +1286,15 @@ class MigrationAgent:
             self.cleanup_expired()
             file_count, byte_count = self._incoming_usage(incoming)
             manifest_bytes = len(canonical_json(values).encode("utf-8"))
-            required_bytes = manifest_bytes + values["byte_size"]
-            if file_count + 2 > self.max_incoming_files:
+            required_bytes = manifest_bytes * 2 + values["byte_size"] * 2 + 4096
+            required_files = (values["byte_size"] + chunk_bytes - 1) // chunk_bytes + 3
+            if file_count + required_files > self.max_incoming_files:
                 raise ValueError("migration incoming file quota exceeded")
             if byte_count + required_bytes > self.max_incoming_bytes:
                 raise ValueError("migration incoming byte quota exceeded")
+            plaintext_size = values.get("plaintext_size", values["byte_size"])
+            if shutil.disk_usage(self.data_root).free < required_bytes + plaintext_size * 3:
+                raise ValueError("migration restore disk capacity insufficient")
         return {
             "status": "ready",
             "target_id": self.target_id,

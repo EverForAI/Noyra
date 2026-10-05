@@ -15,6 +15,7 @@ from .discovery import (
     MigrationNeed,
     NeedAssessment,
     ResourceObservation,
+    TargetObservationProvider,
 )
 from .executor import MigrationExecutionError, MigrationExecutionReceipt
 from .http_executor import (
@@ -85,6 +86,7 @@ __all__ = [
     "TargetCandidate",
     "TargetChallenge",
     "TargetHealthReport",
+    "TargetObservationProvider",
     "TargetRegistration",
     "TargetRegistry",
     "TransferReceipt",

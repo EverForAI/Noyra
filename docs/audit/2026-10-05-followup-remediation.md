@@ -51,3 +51,18 @@
 - 变更：builder 只接受共享 DiscoveryResult，明确验证 trusted/resources_verified/eligible、时效、卷、信任等级、地区、成本和容量，记录真实观察哈希及目标详情。签名观察反序列化也执行构造时的严格边界。拒绝写入归 manager，使用同一 proposal/hash 合同并追加审计；读取冷却验证拒绝记录完整性。create/approve 在事务内检查目标冷却，变更理由或文字不能绕过。
 - 验证：discovery→builder 真实串联的无效签名、过期及超预算拒绝；辅助 rejection→manager 列表正常读取；改理由新申请失败。discovery/assessment/proposals/manager/service **33 通过**，Ruff、严格 mypy 通过。
 - 限制：以前已写入的不兼容拒绝记录不自动改写或洗白，需显式审核修复；当前生产管理拒绝原本使用正确合同。实际发现网络调用、认知评估和执行调度由 B05 接续完成。
+
+
+### 模块 4b：B05 自主流程及实际执行
+
+- 根因：发现/构造器只有独立库调用；管理台切换按钮禁用；原先 prepare 要求已恢复证明，而 executor 又生成新的随机加密快照，造成阶段循环及摘要无法一致。
+- 变更：新增运行时调度，已登记目标通过认证 HTTPS 返回签名资源观察，成本未配置拒绝、延迟在来源实际测量。来源读取磁盘、近期供应商聚合及系统负载；每小时最多一次认知评估，只有确定需要、高度信任、风险低于收益且全部硬条件通过才持久创建详细申请。默认关闭、开启默认人工审批；拒绝冷却及策略版本持续检查；自动模式仍受同 SHA 验收门禁。普通租约外执行，防止等待自身 drain。
+- 执行：批准后重新观察/挑战，先原子持久隔离与 preparing，再只生成一次完整加密快照；远端接收前记录 manifest，真实恢复及 health 验签后激活、提交。快照不包含自身密文摘要；root 以外层认证 manifest 补齐 staging 中的任务。失败持久错误，保留隔离并等待明确重试/回滚，不反复自动广播。新执行前检查未决付款，避免 nonce/unknown 迁移竞争。
+- 管理台：登记加密接收公钥、私密连接令牌；自动挑战；候选实际观察；审批/执行/回滚、任务错误、费用/容量/允许目标/信任等配置；本地钱包逐任务授权。后台执行加入 shutdown 等待，不依赖浏览器持续连接。
+- 钱包：本地 keystore、解锁文件和 RPC 设置只在明确 task 授权下进入接收方加密包；目标实际解密核对地址，root 暂存固定私密目录并写受控 EnvironmentFile，旧运行配置可恢复。来源保留隔离副本，不谎称擦除了磁盘历史。外部 signer 增加 `/migration-identity` 的 EIP-191 领域隔离挑战，恢复签名者地址，证明绑定 task/manifest/target；不产生付款。目标 provider 密钥和归档密钥仍须预配；root 核对实际凭据后才激活。
+- 复审补强：钱包批准回执需返回完整 approval 以满足源端严格合同；incoming 预检包含分块数量、合并双份与恢复暂存空间；Windows 钱包暂存 ACL 显式加固。接口返回中不含连接令牌/钱包密码。模型不能选择未登记端点或绕过审批。
+- 验证：迁移及 API 合同组合首轮 220 通过、2 跳过，唯一失败为旧 UI 测试仍要求禁用按钮，已按新托管执行合同更新。签名器使用真实 EIP-191 签名和地址恢复、仅 HTTP 传输夹具；新认知拒绝/人工提案/频率限制/管理 API 后台执行均验证。完整本地钱包串联验证使用真实 keystore 加解密、recipient 加密、CLI/bridge/root/来源回执；仅 systemd/卷探测模拟。具体最终组合结果追加在下方。
+- 运维合同：目标 `/etc/noyra/noyra.env` 设置 `NOYRA_MIGRATION_COST_MICROUSD_MONTH`（允许显式 0）、`NOYRA_MIGRATION_REGION` 与注册一致；目标 API/归档密钥按既有受控路径预配。可选 `secrets/migration-bindings/<target-id>.json` 只配置 credential_binding 的 references/fingerprints 和 signer_id；无配置时空凭据映射，不把缺失的实际密钥视为可用。独立 signer 须实现上述只签身份挑战端点；不支持时明确拒绝迁移。
+- 限制：本模块的本地/模拟系统测试不是 B12 真机验收。默认关闭状态不自动解除。
+
+- 后续回归：activation/binding/runtime/admin UI/agent CLI **56 通过、1 跳过**；RPC 完整迁移补强后真实完整串联 **2 通过**；agent CLI/http executor/runtime **24 通过**。迁移/service/wallet 严格 mypy、Ruff 及 admin.js 语法通过。
