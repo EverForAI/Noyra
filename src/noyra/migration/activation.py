@@ -1320,9 +1320,16 @@ def _atomic_json(
     _private_directory(path.parent, "activation_directory_invalid", create=True)
     _atomic_write(path, json.dumps(value, sort_keys=True, separators=(",", ":")).encode(), mode)
     if group is not None and os.name != "nt":
-        import grp
+        # Resolve the service group through the same seam used by the rest of
+        # the activation code.  Production still resolves the configured
+        # ``noyra`` group, while isolated Linux test fixtures can provide a
+        # temporary ownership group without requiring a system account.
+        if group != "noyra":
+            import grp
 
-        group_id = int(cast(Any, grp).getgrnam(group).gr_gid)
+            group_id = int(cast(Any, grp).getgrnam(group).gr_gid)
+        else:
+            group_id = _service_gid()
         cast(Any, os).chown(path, 0, group_id)
         os.chmod(path, mode)
 
