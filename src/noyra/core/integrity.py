@@ -41,6 +41,7 @@ from .errors import (
 )
 from .event_archive import EventArchiveVerificationLimits
 from .events import EventStore
+from .payload_codec import payload_read_budget
 from .resilience import LongRunResilience
 from .secret_cleanup import SecretCleanupQueue
 from .snapshots import SnapshotStore
@@ -932,7 +933,13 @@ class IntegrityRegistry:
         raw_connection.set_progress_handler(progress, limits.sqlite_progress_ops)
         try:
             checkpoint()
-            raw_outcome = spec.runner(context)
+            with payload_read_budget(
+                lambda: min(
+                    limits.max_value_bytes, limits.max_bytes_per_check - budget.external_bytes
+                ),
+                budget.consume_bytes,
+            ):
+                raw_outcome = spec.runner(context)
             checkpoint()
             outcome = (
                 raw_outcome
