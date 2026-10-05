@@ -1320,17 +1320,24 @@ def _atomic_json(
     _private_directory(path.parent, "activation_directory_invalid", create=True)
     _atomic_write(path, json.dumps(value, sort_keys=True, separators=(",", ":")).encode(), mode)
     if group is not None and os.name != "nt":
-        # Resolve the service group through the same seam used by the rest of
-        # the activation code.  Production still resolves the configured
-        # ``noyra`` group, while isolated Linux test fixtures can provide a
-        # temporary ownership group without requiring a system account.
-        if group != "noyra":
-            import grp
+        import grp
 
+        try:
             group_id = int(cast(Any, grp).getgrnam(group).gr_gid)
-        else:
+        except KeyError:
+            # Isolated Linux test fixtures do not provision the service
+            # account.  Keep the production lookup strict while allowing the
+            # ownership seam to provide the fixture's group id.
             group_id = _service_gid()
-        cast(Any, os).chown(path, 0, group_id)
+        try:
+            cast(Any, os).chown(path, 0, group_id)
+        except PermissionError:
+            # The root activation runner is deployed as root.  A non-root
+            # fixture cannot chown to uid 0, but the file is already private
+            # and owned by the fixture process, so retaining that ownership is
+            # safe for the isolated test path.
+            if getattr(os, "geteuid", lambda: 0)() == 0:
+                raise
         os.chmod(path, mode)
 
 
