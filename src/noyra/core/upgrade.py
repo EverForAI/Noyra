@@ -19,6 +19,7 @@ from typing import Any
 from noyra.core.errors import RuntimeOwnershipError
 from noyra.core.locking import ProcessLock
 from noyra.core.redaction import redact_text
+from noyra.core.release_assurance import activation_status, stable_metadata
 
 UPGRADE_ROOT = Path("/var/lib/noyra/upgrade")
 UPGRADE_REQUEST_PATH = UPGRADE_ROOT / "requests" / "pending.json"
@@ -56,6 +57,7 @@ class UpgradeManager:
         github_branch: str = "main",
         github_fetcher: Callable[[], Any] | None = None,
         check_ttl_seconds: int = 900,
+        channel: str = "stable",
     ):
         self.source_path = Path(source_path)
         self.current_release_path = Path(current_release_path)
@@ -65,6 +67,9 @@ class UpgradeManager:
         self.github_owner = self._bounded_name(github_owner)
         self.github_repo = self._bounded_name(github_repo)
         self.github_branch = self._bounded_name(github_branch)
+        if channel not in {"stable", "development-main"}:
+            raise ValueError("upgrade channel is invalid")
+        self.channel = channel
         self.github_fetcher = github_fetcher or self._fetch_github_metadata
         self.check_ttl = timedelta(seconds=max(30, min(int(check_ttl_seconds), 3600)))
         # The installer's state directory is root-owned and shared with the
@@ -164,6 +169,11 @@ class UpgradeManager:
             raise UpgradeError("upgrade_source_dirty")
 
     def _fetch_github_metadata(self) -> Any:
+        if self.channel == "stable":
+            try:
+                return stable_metadata(self.github_owner, self.github_repo)
+            except (OSError, ValueError, KeyError):
+                raise UpgradeError("upgrade_unavailable") from None
         url = (
             f"https://api.github.com/repos/{self.github_owner}/{self.github_repo}"
             f"/commits/{self.github_branch}"
@@ -224,6 +234,11 @@ class UpgradeManager:
             },
             "checked_at": checked_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
             "update_available": current_sha is None or latest["sha"] != current_sha,
+            "channel": self.channel,
+            "current_evidence": activation_status(),
+            "assurance": "signed_release_required"
+            if self.channel == "stable"
+            else "development_not_production_verified",
         }
 
     def status(self) -> dict[str, Any]:

@@ -43,9 +43,10 @@ class CutoverCoordinator:
         *,
         admission: RuntimeAdmissionGate | None = None,
         executor: MigrationExecutor | None = None,
+        production: bool | None = None,
     ):
         self.database = database
-        self.manager = MigrationManager(database, MigrationStore(database))
+        self.manager = MigrationManager(database, MigrationStore(database, production=production))
         self.admission = admission
         self.executor = executor
 
@@ -57,6 +58,9 @@ class CutoverCoordinator:
         proof: dict[str, object] | None = None,
     ) -> CutoverPlan:
         task = self.manager.get_task(task_id)
+        self.manager.policy_store.assert_automation_allowed(
+            self.manager.policy_store.read_policy(task.subject_id)
+        )
         if proof is None:
             raise ValueError("verified target restore and health proof is required")
         if self.executor is None:
@@ -141,6 +145,9 @@ class CutoverCoordinator:
         task = self.manager.get_task(task_id)
         if task.status == "committed":
             return {"task_id": task_id, "status": "committed"}
+        self.manager.policy_store.assert_automation_allowed(
+            self.manager.policy_store.read_policy(task.subject_id)
+        )
         if task.status not in {"validating", "cutover"}:
             raise ValueError("verified target restore and health proof is required before commit")
         if self.executor is None:

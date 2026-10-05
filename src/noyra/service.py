@@ -65,6 +65,7 @@ from noyra.core.operator_controls import (
 )
 from noyra.core.provider_health import ProviderHealthStore
 from noyra.core.redaction import redact_secrets
+from noyra.core.release_assurance import activation_status, upgrade_channel
 from noyra.core.retention import RetentionManager, RetentionSettings
 from noyra.core.runtime import SubjectKernel
 from noyra.core.runtime_export import RuntimeLogExporter
@@ -1383,6 +1384,7 @@ class NoyraHTTPServer:
             ),
             github_owner=os.getenv("NOYRA_UPGRADE_GITHUB_OWNER", "EverForAI"),
             github_repo=os.getenv("NOYRA_UPGRADE_GITHUB_REPO", "Noyra"),
+            channel=upgrade_channel(),
         )
         self.admission = kernel.admission
         self.quarantine_checker: Any = None
@@ -1437,7 +1439,9 @@ class NoyraHTTPServer:
             repair_on_init=repair_secrets_on_init,
         )
         self.wallets = WalletStore(kernel.database)
-        self.wallet_economy = WalletEconomyStore(kernel.database)
+        self.wallet_economy = WalletEconomyStore(
+            kernel.database, production=settings.profile == "production"
+        )
         self.wallet_acquisitions = WalletBalanceAcquisitionLedger(kernel.database)
         self.wallet_acquisition_runner = WalletBalanceAcquisitionRunner(self.wallet_acquisitions)
         # Signing is opt-in: production deployments inject an isolated signer;
@@ -1498,7 +1502,9 @@ class NoyraHTTPServer:
         self.self_modification = ControlledSelfModification(
             kernel.database, kernel.subject_id, CognitionSettings()
         )
-        self.migration_store = MigrationStore(kernel.database)
+        self.migration_store = MigrationStore(
+            kernel.database, production=settings.profile == "production"
+        )
         self.migration_targets = TargetRegistry(kernel.database, self.migration_store)
         self.migration_proposals = MigrationProposalStore(kernel.database)
         self.migration_manager = MigrationManager(kernel.database, self.migration_store)
@@ -1515,6 +1521,7 @@ class NoyraHTTPServer:
         )
         self.migration_cutover = CutoverCoordinator(
             kernel.database,
+            production=settings.profile == "production",
             admission=kernel.admission,
             executor=self.migration_http_executor,
         )
@@ -5918,10 +5925,15 @@ class NoyraHTTPServer:
                         )
                 except Exception:
                     pass
+                evidence = activation_status()
+                evidence_blocked = (
+                    owner.settings.profile == "production" and evidence["status"] != "verified"
+                )
                 return {
                     "automation_enabled": bool(policy.automation_enabled),
                     "mode": policy.mode,
                     "emergency_paused": bool(policy.emergency_paused),
+                    "release_evidence": evidence,
                     "policy_version": policy.policy_version,
                     "per_order_limit": policy.per_order_limit,
                     "daily_limit": policy.daily_limit,
@@ -5931,6 +5943,10 @@ class NoyraHTTPServer:
                     "status": (
                         "paused"
                         if policy.emergency_paused
+                        else "evidence_required"
+                        if evidence_blocked
+                        and policy.automation_enabled
+                        and policy.mode == "automatic"
                         else "enabled"
                         if policy.automation_enabled and policy.mode == "automatic"
                         else "disabled"
@@ -6017,7 +6033,11 @@ class NoyraHTTPServer:
                 except Exception as error:
                     self._json(
                         HTTPStatus.CONFLICT if "conflict" in str(error) else HTTPStatus.BAD_REQUEST,
-                        {"error": "invalid_wallet_automation"},
+                        {
+                            "error": "production_release_evidence_required"
+                            if str(error) == "production_release_evidence_required"
+                            else "invalid_wallet_automation"
+                        },
                     )
 
             def _set_wallet_automation_pause(self, paused: bool) -> None:

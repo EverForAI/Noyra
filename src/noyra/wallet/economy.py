@@ -14,6 +14,7 @@ from noyra.core.database import (
 from noyra.core.errors import IntegrityError, InvalidTransitionError, NotFoundError
 from noyra.core.identity import validate_subject_id
 from noyra.core.redaction import redact_secret_text
+from noyra.core.release_assurance import require_activation_evidence
 from noyra.core.types import (
     canonical_json,
     content_hash,
@@ -112,8 +113,11 @@ def _row_has_column(row: Any, name: str) -> bool:
 class WalletEconomyStore:
     """Pre-signer bounty, policy, payment-order and append-only ledger domain."""
 
-    def __init__(self, database: Database, *, clock: Callable[[], str] = _now):
+    def __init__(
+        self, database: Database, *, clock: Callable[[], str] = _now, production: bool | None = None
+    ):
         self.database = database
+        self.production = production
         self.clock = clock
         self.wallets = WalletStore(database)
 
@@ -628,6 +632,12 @@ class WalletEconomyStore:
             current = 1 if row is None else int(row["policy_version"])
             if expected_version != current:
                 raise ValueError("wallet payment policy version conflict")
+            if (
+                proposal.mode == "automatic"
+                and proposal.automation_enabled is not False
+                and not proposal.emergency_paused
+            ):
+                require_activation_evidence(production=self.production)
             # Preserve the pre-switch API contract for callers that only set
             # mode=automatic. New management clients send an explicit bool.
             if proposal.automation_enabled is None:
@@ -1165,6 +1175,11 @@ class WalletEconomyStore:
             return False
         if row["payment_mode"] == "automatic" and not bool(policy["automation_enabled"]):
             return False
+        if row["payment_mode"] == "automatic":
+            try:
+                require_activation_evidence(production=self.production)
+            except ValueError:
+                return False
         # Network and asset allowlists are retained as durable policy metadata
         # for compatibility and reporting.  A payment still needs a currently
         # active registered network/asset pair; only the recipient itself is

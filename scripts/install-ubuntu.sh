@@ -825,6 +825,25 @@ if [[ "$profile" == cloud ]]; then
 fi
 "$staging/.venv/bin/python" -m pip install --no-deps --no-build-isolation "$SOURCE_DIR"
 "$staging/.venv/bin/python" -m pip check
+install -d -o root -g root -m 0755 "$staging/scripts"
+install -o root -g root -m 0644 "$SOURCE_DIR/scripts/preflight-production.py" \
+  "$staging/scripts/preflight-production.py"
+"$staging/.venv/bin/python" - "$INSTALL_DIR" "$source_sha" "$staging" <<'PY'
+import sys
+from pathlib import Path
+from noyra.core.release_assurance import controlled_text, verify_evidence
+from noyra.core.types import strict_json_loads
+
+install_root, sha, staging = sys.argv[1:]
+evidence = Path(install_root) / "upgrade/verified" / sha / "external-gates.json"
+if sha and evidence.exists():
+    raw = controlled_text(evidence, maximum=256_000)
+    key = controlled_text(Path("/etc/noyra/release-evidence-public-key"), maximum=128).strip()
+    verify_evidence(strict_json_loads(raw), sha, key)
+    output = Path(staging) / ".noyra-external-gates.json"
+    output.write_text(raw, encoding="utf-8")
+    output.chmod(0o644)
+PY
 "$staging/.venv/bin/python" - <<'PY'
 import noyra
 from noyra.service import ServiceSettings

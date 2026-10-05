@@ -512,7 +512,7 @@ pre-update backup before the old release can safely run.
 ### Upgrade from the management page
 
 After a native Ubuntu installation that includes the upgrade runner, open the HTTPS management page
-and use **总览 → Noyra 版本与升级**. Select **检查最新版本** to read the official GitHub `main`
+and use **总览 → Noyra 版本与升级**. Select **检查最新版本** to read the official GitHub stable release
 commit, then review its short SHA, commit time, and title before selecting **升级到最新版** and
 confirming. The check is read-only. A confirmed task runs in a separate root-owned systemd service,
 so closing the tab, losing the SSH session, or restarting the browser does not cancel it. Reopen the
@@ -520,10 +520,27 @@ management page to see its status and bounded progress summary.
 
 The Ubuntu installer provisions the fixed systemd path trigger and recovery unit, keeps the runner
 source checkout root-owned, and gives the Noyra service access only to submit a fixed SHA request and
-read the redacted status. The runner accepts only the current tip of the official repository's `main`
-branch and preserves the installed `base` or `cloud` profile. It delegates backups, atomic release
+read the redacted status. The stable runner verifies the latest non-draft,
+non-prerelease tag, the latest successful quality workflow for its exact SHA,
+and independently signed eight-gate evidence with the installed verifier before
+running fetched installation code. It preserves the installed `base` or `cloud` profile.
+It delegates backups, atomic release
 switching, readiness checks, and code rollback to the existing installer. If the checked commit
 changes before the runner fetches it, the request is rejected and the page asks you to check again.
+
+Stable is the default. Provision the release reviewer's **public** Ed25519 key
+(base64 raw 32 bytes, independently obtained) as root-owned mode 0644 at
+`/etc/noyra/release-evidence-public-key`; never download the trust key together
+with the artifact being verified. Missing key/evidence/quality rejects the
+upgrade and leaves the current service running. Evidence is copied into the
+release directory, so rollback also selects the matching evidence.
+
+For a staging host, root may explicitly write `development-main` plus a newline
+to `/etc/noyra/upgrade-channel` (root-owned mode 0644). The management page labels
+this channel as unverified for production. Set the file to `stable` or remove it
+to restore the default. The application cannot choose a channel, URL, ref, or
+command through the upgrade request. Development upgrades do not grant
+production automatic payment or policy-auto migration authorization.
 
 This workflow currently applies to the native Ubuntu/systemd installation. Docker and other deployment
 types continue to use their deployment-specific update process. An older Ubuntu installation must be

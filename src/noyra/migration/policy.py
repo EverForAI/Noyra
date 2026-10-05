@@ -140,9 +140,7 @@ class MigrationPolicy:
             raise ValueError("policy_auto requires a non-empty target allowlist")
         if self.approval_mode == "emergency_recovery" and not self.emergency_recovery_enabled:
             raise ValueError("emergency recovery approval requires explicit enablement")
-        if self.wallet_mode == "local_wallet_transfer" and not (
-            self.enabled and self.local_wallet_transfer_enabled
-        ):
+        if self.wallet_mode == "local_wallet_transfer" and not self.local_wallet_transfer_enabled:
             raise ValueError("local wallet transfer requires explicit local wallet opt-in")
         if len(self.allowed_target_ids) > 256 or any(
             not isinstance(item, str) or not item.strip() for item in self.allowed_target_ids
@@ -214,8 +212,15 @@ _POLICY_FIELDS = frozenset(
 class MigrationStore:
     """Durable migration policy and append-only audit boundary."""
 
-    def __init__(self, database: Database):
+    def __init__(self, database: Database, *, production: bool | None = None):
         self.database = database
+        self.production = production
+
+    def assert_automation_allowed(self, policy: MigrationPolicy) -> None:
+        from noyra.core.release_assurance import require_activation_evidence
+
+        if policy.enabled and policy.approval_mode == "policy_auto":
+            require_activation_evidence(production=self.production)
 
     def read_policy(self, subject_id: str) -> MigrationPolicy:
         validate_subject_id(subject_id)
@@ -249,6 +254,7 @@ class MigrationStore:
                     f"migration policy revision changed: expected {expected_revision}, found {current.revision}"
                 )
             updated = current.with_updates(**dict(patch))
+            self.assert_automation_allowed(updated)
             result = connection.execute(
                 """UPDATE migration_policies SET enabled=?, approval_mode=?, emergency_recovery_enabled=?, local_wallet_transfer_enabled=?, wallet_mode=?, allowed_target_ids_json=?, allowed_regions_json=?, min_free_bytes=?, max_cost_microusd=?, max_downtime_seconds=?, maintenance_window_start_minute=?, maintenance_window_duration_minutes=?, trust_level=?, rejection_cooldown_seconds=?, proposal_expiry_seconds=?, revision=?, updated_at=?, state_hash=? WHERE subject_id=? AND revision=?""",
                 (*self._row_values(updated, False), subject_id, current.revision),

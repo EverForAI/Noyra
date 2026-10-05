@@ -276,6 +276,32 @@ phase=fetching
 write_status running "$phase" "" "" '已安全接收升级请求。' || exit 1
 flock -u 8
 
+# Use only the installed verifier before executing newly fetched code.
+channel=development-main
+fetch_ref="$GITHUB_BRANCH"
+if [[ "$TEST_MODE" != true ]]; then
+  trusted_python="$INSTALL_ROOT/current/.venv/bin/python"
+  [[ -x "$trusted_python" ]] || { error_code=upgrade_unavailable; exit 1; }
+  channel="$("$trusted_python" -I -m noyra.core.release_assurance --channel)" || {
+    error_code=upgrade_release_unverified; exit 1;
+  }
+  if [[ "$channel" == stable ]]; then
+    evidence_dir="$INSTALL_ROOT/upgrade/verified/$target_sha"
+    [[ ! -L "$INSTALL_ROOT/upgrade/verified" && ! -L "$evidence_dir" ]] || exit 1
+    install -d -o root -g root -m 0755 "$INSTALL_ROOT/upgrade/verified" "$evidence_dir"
+    evidence_file="$evidence_dir/external-gates.json"
+    [[ ! -L "$evidence_file" && ( ! -e "$evidence_file" || -f "$evidence_file" ) ]] || exit 1
+    rm -f -- "$evidence_file"
+    fetch_ref="$("$trusted_python" -I -m noyra.core.release_assurance \
+      --verify-target "$target_sha" --output "$evidence_file")" || {
+      error_code=upgrade_release_unverified; exit 1;
+    }
+    [[ "$fetch_ref" =~ ^v[0-9][A-Za-z0-9._-]{0,99}$ ]] || exit 1
+  elif [[ "$channel" != development-main ]]; then
+    error_code=upgrade_release_unverified; exit 1
+  fi
+fi
+
 if [[ "$TEST_MODE" == true ]]; then
   if [[ ! -e "$SOURCE_DIR" && ! -L "$SOURCE_DIR" ]]; then
     git clone --quiet --branch "$GITHUB_BRANCH" --single-branch "$REMOTE_URL" "$SOURCE_DIR" \
@@ -318,7 +344,7 @@ remote_url="$(git -C "$SOURCE_DIR" remote get-url origin 2>/dev/null || true)"
   error_code=upgrade_source_dirty
   exit 1
 }
-git -C "$SOURCE_DIR" fetch --quiet --depth=1 origin "$GITHUB_BRANCH" \
+git -C "$SOURCE_DIR" fetch --quiet --depth=1 origin "$fetch_ref" \
   >/dev/null 2>&1 || { error_code=upgrade_unavailable; exit 1; }
 latest_sha="$(git -C "$SOURCE_DIR" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null || true)"
 [[ "$latest_sha" =~ ^[0-9a-f]{40,64}$ && "$target_sha" == "$latest_sha" ]] || {
@@ -356,7 +382,7 @@ release_id="github-${target_sha:0:7}-$(date -u +%Y%m%d%H%M%S)"
 }
 phase=installing
 write_status running "$phase" "" "" \
-  '已验证官方 main 版本。' '正在安装并执行健康检查。' || exit 1
+  "已验证官方版本；升级通道：$channel。" '正在安装并执行健康检查。' || exit 1
 if ! bash "$SOURCE_DIR/scripts/install-ubuntu.sh" \
   --profile "$profile" --release-id "$release_id" >/dev/null 2>&1; then
   error_code=upgrade_install_failed
