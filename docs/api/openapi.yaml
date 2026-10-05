@@ -249,6 +249,15 @@ paths:
                   wallet: { $ref: '#/components/schemas/WalletDiagnostics' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/readiness:
+    get:
+      tags: [operator]
+      operationId: adminReadiness
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { description: Authenticated startup readiness and runtime identity }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { description: Runtime is not ready }
   /api/v1/admin/health:
     get:
       tags: [observation]

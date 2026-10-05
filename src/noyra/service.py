@@ -2597,7 +2597,15 @@ class NoyraHTTPServer:
                 if parsed.path == "/health/live":
                     self._json(HTTPStatus.OK, {"status": "ok", "service": "noyra"})
                     return
-                if parsed.path == "/health/ready":
+                if parsed.path in {
+                    "/health/ready",
+                    "/api/admin/readiness",
+                    "/api/v1/admin/readiness",
+                }:
+                    detailed = parsed.path != "/health/ready"
+                    if detailed and not self._authorized("operator"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
                     try:
                         lifecycle = owner.kernel.lifecycle.current().state
                         at_rest = None if owner.at_rest is None else owner.at_rest.health()
@@ -2622,6 +2630,8 @@ class NoyraHTTPServer:
                             "at_rest": at_rest,
                             "cloud_archive": owner.cloud_archive_status,
                         }
+                        if not detailed:
+                            payload = {"status": payload["status"], "service": "noyra"}
                         self._json(
                             HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE,
                             payload,
@@ -2629,14 +2639,14 @@ class NoyraHTTPServer:
                     except Exception:
                         self._json(
                             HTTPStatus.SERVICE_UNAVAILABLE,
-                            {"status": "degraded", "service": "noyra", "reason": "unavailable"},
+                            {"status": "degraded", "service": "noyra"},
                         )
                     return
                 if parsed.path == "/health":
                     cached_health = owner._cached_health()
                     if cached_health is not None:
                         cached_status, cached_payload = cached_health
-                        self._json(cached_status, cached_payload)
+                        self._json(cached_status, self._health_projection(cached_payload))
                         return
                 if parsed.path.startswith("/api/v1/"):
                     self.path = self.path.replace("/api/v1/", "/api/", 1)
@@ -2912,7 +2922,7 @@ class NoyraHTTPServer:
                         "health": operator_health,
                     }
                     owner._store_health(health_status, health_payload)
-                    self._json(health_status, health_payload)
+                    self._json(health_status, self._health_projection(health_payload))
                 elif parsed.path == "/api/state":
                     state = owner.projection.state(owner.kernel.subject_id)
                     self._json(HTTPStatus.OK, state, public_contract=True)
@@ -8098,6 +8108,12 @@ class NoyraHTTPServer:
                     },
                 )
                 self._json(HTTPStatus.ACCEPTED, started)
+
+            def _health_projection(self, payload: dict[str, Any]) -> dict[str, Any]:
+                # Apply the access boundary on every read, including cache hits.
+                if self._authorized("operator"):
+                    return payload
+                return {"status": payload["status"], "service": "noyra"}
 
             def _authorized(self, required_role: str = "operator") -> bool:
                 allowed: dict[str, tuple[SecretStr | None, ...]] = {

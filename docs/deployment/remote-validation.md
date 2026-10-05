@@ -96,8 +96,14 @@ ssh -N -L 8765:127.0.0.1:8765 user@server
 
 In a second local terminal, use `curl http://127.0.0.1:8765/health/live` and
 `curl http://127.0.0.1:8765/health/ready`. `/health/live` only proves that the process can answer;
-`/health/ready` includes startup integrity, lifecycle, at-rest, and recorded cloud readiness. The
-authenticated `/api/v1/admin/health` endpoint is for operators and must stay inside the tunnel.
+`/health/ready` evaluates startup integrity, at-rest, and recorded cloud readiness, but returns
+only status/service publicly. Operator-authenticated `/api/v1/admin/readiness` includes the
+subject, migration target and storage details; `/health` also returns detailed diagnostics only
+with operator authentication. Use the tunnel or the configured HTTPS management domain.
+The target activation unit reads the operator token from its EnvironmentFile, private token
+file, or systemd credential. For LoadCredential deployments, provision the same credential
+name for both `noyra.service` and `noyra-target-activation.service`; missing credentials prevent
+activation, with no anonymous identity-check fallback.
 
 ## Repeatable evidence collection
 

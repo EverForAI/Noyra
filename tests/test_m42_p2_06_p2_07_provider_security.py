@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Self, cast
 from urllib.error import HTTPError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import httpx
 import pytest
@@ -190,6 +190,7 @@ def test_embedding_secret_delete_failure_is_repaired_and_degrades_health(
     settings = ServiceSettings(
         data_dir=tmp_path,
         subject_id="Noyra-p206-secret-repair",
+        operator_token=SecretStr("health-detail-test-operator-token-123456"),
         genesis_hash=content_hash({"seed": "p206-secret-repair"}),
         host="127.0.0.1",
         port=0,
@@ -257,7 +258,13 @@ def test_embedding_secret_delete_failure_is_repaired_and_degrades_health(
     server.start()
     _, port = server.address
     with pytest.raises(HTTPError) as caught:
-        urlopen(f"http://127.0.0.1:{port}/health", timeout=5)
+        urlopen(
+            Request(
+                f"http://127.0.0.1:{port}/health",
+                headers={"Authorization": "Bearer health-detail-test-operator-token-123456"},
+            ),
+            timeout=5,
+        )
     assert caught.value.code == 503
     payload = json.loads(caught.value.read())
     assert payload["status"] == "degraded"

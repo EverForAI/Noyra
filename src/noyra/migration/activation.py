@@ -102,15 +102,19 @@ class _Systemd:
 
     def wait_ready(self, subject_id: str, target_id: str | None, timeout: float) -> bool:
         port = _configured_port(Path("/etc/noyra/noyra.env"))
+        token = _readiness_token()
+        if not token:
+            return False
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
         deadline = time.monotonic() + max(0.0, timeout)
         while time.monotonic() < deadline:
             if self.is_active():
                 try:
                     request = urllib.request.Request(
-                        f"http://127.0.0.1:{port}/health/ready",
-                        headers={"Cache-Control": "no-cache"},
+                        f"http://127.0.0.1:{port}/api/v1/admin/readiness",
+                        headers={"Cache-Control": "no-cache", "Authorization": f"Bearer {token}"},
                     )
-                    with urllib.request.urlopen(request, timeout=2) as response:
+                    with opener.open(request, timeout=2) as response:
                         payload = json.loads(response.read(64 * 1024))
                     if (
                         response.status == 200
@@ -124,6 +128,67 @@ class _Systemd:
                     pass
             time.sleep(0.5)
         return False
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        # A readiness token must never leave the fixed loopback endpoint.
+        return None
+
+
+def _readiness_token() -> str:
+    """Resolve the same operator credential as the service, from the root bridge.
+
+    systemd loads the bridge's EnvironmentFile. When using LoadCredential,
+    provision the same credential for both noyra and the activation unit.
+    """
+    file_name = os.getenv("NOYRA_OPERATOR_TOKEN_FILE", "").strip()
+    credential = os.getenv("NOYRA_OPERATOR_TOKEN_CREDENTIAL", "").strip()
+    try:
+        if file_name and credential:
+            return ""
+        if credential:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", credential):
+                return ""
+            directory = os.getenv("CREDENTIALS_DIRECTORY", "")
+            if not directory or not Path(directory).is_absolute():
+                return ""
+            file_name = str(Path(directory) / credential)
+        if file_name:
+            path = Path(file_name)
+            if not path.is_absolute():
+                return ""
+            _reject_symlink_parents(path, Path(path.anchor))
+            before = path.lstat()
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(descriptor, "rb") as stream:
+                metadata = os.fstat(stream.fileno())
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_nlink != 1
+                    or (before.st_dev, before.st_ino) != (metadata.st_dev, metadata.st_ino)
+                ):
+                    return ""
+                if os.name == "posix" and (
+                    metadata.st_uid not in {0, _service_uid()}
+                    or metadata.st_mode & 0o027
+                    or (metadata.st_mode & 0o040 and metadata.st_gid not in {0, _service_gid()})
+                ):
+                    return ""
+                raw = stream.read(16 * 1024 + 1)
+                if len(raw) > 16 * 1024:
+                    return ""
+                token = raw.decode("utf-8").strip()
+        else:
+            token = (
+                os.getenv("NOYRA_OPERATOR_TOKEN", "").strip()
+                or os.getenv("NOYRA_ADMIN_TOKEN", "").strip()
+            )
+        if not token or any(ord(char) < 0x20 or ord(char) > 0x7E for char in token):
+            return ""
+        return token
+    except (OSError, UnicodeError, TargetActivationError, KeyError):
+        return ""
 
 
 class TargetRuntimeActivator:
