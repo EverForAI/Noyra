@@ -82,6 +82,16 @@ def evidence_counts(connection: Any, subject_id: str) -> dict[str, int]:
     if set(counts) != set(EVIDENCE_TABLES) or any(
         type(value) is not int or value < 0 for value in counts.values()
     ):
+        # Preserve the writer's foreign-key error contract for absent subjects.
+        # An existing identity without its counters is instead durable corruption;
+        # neither case may create counters or admit work implicitly.
+        if (
+            connection.execute(
+                "SELECT 1 FROM subject_identity WHERE subject_id=?", (subject_id,)
+            ).fetchone()
+            is None
+        ):
+            raise sqlite3.IntegrityError("evidence subject does not exist")
         raise IntegrityError("evidence counter contract is incomplete")
     return counts
 
