@@ -6934,7 +6934,12 @@ class NoyraHTTPServer:
                 payload = self._request_json()
                 if payload is None:
                     return
-                if not isinstance(payload, dict) or payload:
+                if (
+                    not isinstance(payload, dict)
+                    or set(payload) - {"presentation"}
+                    or not isinstance(payload.get("presentation", "image"), str)
+                    or payload.get("presentation", "image") not in {"image", "audio"}
+                ):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_captcha_request"})
                     return
                 try:
@@ -6947,6 +6952,7 @@ class NoyraHTTPServer:
                         ttl_seconds=controls["captcha_ttl_seconds"],
                         max_attempts=controls["captcha_max_attempts"],
                         mode=controls["captcha_mode"],
+                        presentation=payload.get("presentation", "image"),
                         issue_limit_per_hour=controls["captcha_issue_limit_per_hour"],
                         global_rate_per_minute=controls["captcha_global_rate_per_minute"],
                         queue_cap=controls["queue_cap"],
@@ -8935,7 +8941,8 @@ class NoyraHTTPServer:
                     )
                 self.send_header(
                     "Content-Security-Policy",
-                    "default-src 'self'; img-src 'self' data:; base-uri 'none'; object-src 'none'; "
+                    "default-src 'self'; img-src 'self' data:; media-src 'self' data:; "
+                    "base-uri 'none'; object-src 'none'; "
                     "frame-ancestors 'none'; "
                     "script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'none'",
                 )
