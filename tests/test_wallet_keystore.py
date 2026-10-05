@@ -49,7 +49,11 @@ def test_import_pads_leading_zero_iv_from_eth_keyfile(
 
     from noyra.wallet.keystore import create_keystore, load_account
 
-    monkeypatch.setattr(keyfile.Random, "get_random_bytes", lambda size: b"\x00" * size)
+    # ``Random`` is a private helper in eth-keyfile and is not exported by its
+    # type stubs. Resolve it dynamically so the regression test remains
+    # compatible with both the runtime package and mypy's public surface.
+    random_helper = keyfile.__dict__["Random"]
+    monkeypatch.setattr(random_helper, "get_random_bytes", lambda size: b"\x00" * size)
     path = tmp_path / "wallet" / "account.json"
     assert create_keystore(path, PASSWORD, private_key=PRIVATE_KEY) == ADDRESS
     payload = json.loads(path.read_text(encoding="utf-8"))
