@@ -22,6 +22,8 @@ python scripts/prepare-external-validation.py --commit HEAD --output output/fina
 
 目标 agent 配置在 `/etc/noyra/migration/agent.env`（参考 `deploy/migration-agent.env.example`），成本缺失会拒绝观察。目标运行时、agent、root activation 若使用 systemd credentials，分别配置所需 `LoadCredential`；这些 unit 不会自动共享 credential namespace。root activation 必须能解析目标 operator 令牌以访问 `/api/v1/admin/readiness`。目标身份切换配置由 root 控制器写入任务专属 EnvironmentFile 并通过 migration-target.conf 引用；不要追加覆盖主体、genesis 或 target_id 的后置 systemd drop-in。回滚同时恢复原 drop-in 引用。
 
+备份保留主体数据库、内容、源 epoch 和 fence；机器本地迁移请求/状态队列及 root-only 激活/回滚目录不进入可移植备份。活动 fence 若不能由服务账户读取，备份会失败而不会丢弃隔离。升级前应完成或明确回滚未决迁移；故障恢复保留原目标的 root 控制目录，不把普通主体备份当作 root 激活日志副本。
+
 ## 八项必须执行的验收
 
 | 门禁 | 实际操作和故障注入 | 通过证据 |
