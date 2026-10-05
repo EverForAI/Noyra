@@ -41,7 +41,7 @@ def _installed_layout(root: Path) -> Path:
         chown(path, owner, group)
         path.chmod(mode)
     fence = data / "migration/fences/active.json"
-    fence.write_text('{"task_id":"migration-task","status":"active"}')
+    fence.write_text('{"subject_id":"Noyra-other","task_id":"migration-task","status":"active"}')
     chown(fence, 0, service_gid)
     fence.chmod(0o640)
     (data / "migration/target-activation/state/root-journal").write_text("machine-local")
@@ -87,13 +87,27 @@ try:
     assert service.at_rest.health()['ready']
 finally:
     service.close()
+import base64, hashlib
+from types import SimpleNamespace
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+public=X25519PrivateKey.generate().public_key().public_bytes_raw()
+artifact=service.http.migration_http_executor.artifact_resolver(
+    SimpleNamespace(task_id='task-fixture', target_id='target-fixture',
+                    source_epoch='runtime-0', subject_id='Noyra-installed'),
+    {'recipient_public_key':base64.urlsafe_b64encode(public).decode(),
+     'recipient_key_fingerprint':hashlib.sha256(public).hexdigest()},
+)
+assert artifact.path.is_relative_to(root/'data/migration/source/outgoing')
+assert service.at_rest.health()['ready']
 manager=EncryptedBackupManager(root/'data',root/'keyring.json')
 backup=root/'output/subject.backup'
 manager.create(backup)
 restored=manager.restore(backup,root/'output/restored')
 assert (restored/'migration/source/epoch').is_file()
 assert (restored/'migration/fences').is_dir()
-assert (restored/'migration/fences/active.json').read_text() == '{"task_id":"migration-task","status":"active"}'
+assert (restored/'migration/fences/active.json').read_text() == (
+    '{"subject_id":"Noyra-other","task_id":"migration-task","status":"active"}'
+)
 assert not (restored/'migration/target-activation').exists()
 assert (root/'data/migration/target-activation/state').stat().st_uid == 0
 print('boot_and_backup_ok')

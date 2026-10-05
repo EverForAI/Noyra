@@ -1517,7 +1517,7 @@ class NoyraHTTPServer:
             token_resolver=self._migration_http_token,
             artifact_resolver=SQLiteArtifactProvider(
                 database_path,
-                settings.data_dir / "migration" / "outgoing",
+                settings.data_dir / "migration" / "source" / "outgoing",
             ),
             source_fence=self._migration_http_source_fence,
             source_unfence=self._migration_http_source_unfence,
