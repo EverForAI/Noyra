@@ -128,3 +128,5 @@ B01–B11 的确认代码问题已按模块修复、复审和提交。B12 是外
 
 
 - 部署权限后续检查：HTTP executor 的默认产物目录原为 root 管理目录下的 migration/outgoing，服务账户无法新建；改至已安装的 service-owned migration/source/outgoing。真实非 root 测试串联实际 SQLite 备份、recipient 加密产物、at-rest 复核、保留 fence 的加密备份及恢复，六项权限边界测试全部通过。此补强不更改 root 控制权限，也不把控制队列复制到恢复主体。
+
+- 独立提交临时 checkout 为 0700，真实服务账户测试不能读取其中源码。测试夹具现复制同一份源码到单独的可读临时目录，仅测试目录放行，不放宽业务数据或仓库权限；再次运行权限边界六项通过。

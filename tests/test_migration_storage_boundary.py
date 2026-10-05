@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -61,6 +62,12 @@ def test_installed_permissions_allow_real_service_boot_and_encrypted_backup() ->
         output = root / "output"
         output.mkdir(mode=0o700)
         chown(output, 65534, 65534)
+        # verify-committed uses a mode-0700 temporary checkout. Give only this
+        # fixture's service process a readable copy of the exact tested sources.
+        source = root / "src"
+        shutil.copytree(Path(__file__).resolve().parents[1] / "src", source)
+        for path in (source, *source.rglob("*")):
+            path.chmod(0o755 if path.is_dir() else 0o644)
         program = """
 import sys
 from pathlib import Path
@@ -118,6 +125,7 @@ print('boot_and_backup_ok')
             capture_output=True,
             text=True,
             timeout=60,
+            env=dict(os.environ, PYTHONPATH=str(source)),
             **credentials,
         )
         assert result.returncode == 0, result.stdout + result.stderr
