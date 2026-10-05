@@ -197,8 +197,14 @@ def test_root_activation_uses_authenticated_readiness_with_managed_token(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import os
+
     from noyra.migration import activation
 
+    # CI need not have an installed noyra service account; model its ownership
+    # with the current test user while retaining real file-mode checks.
+    monkeypatch.setattr(activation, "_service_uid", lambda: getattr(os, "getuid", lambda: 0)())
+    monkeypatch.setattr(activation, "_service_gid", lambda: getattr(os, "getgid", lambda: 0)())
     token = "activation-readiness-token-with-entropy-12345"
     token_path = tmp_path / "operator.token"
     token_path.write_text(token, encoding="utf-8")
