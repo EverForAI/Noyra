@@ -84,6 +84,7 @@ API_ROUTE_CONTRACTS: tuple[APIRouteContract, ...] = (
     _get("/api/v1/runtime-logs", "read", 200, 400, 401),
     _get("/api/v1/diagnostics", "read", 200, 401),
     _get("/api/v1/admin/health", "operator", 200, 401, 503),
+    _get("/api/v1/admin/readiness", "operator", 200, 401, 503),
     _get("/api/v1/admin/migration/policy", "operator", 200, 401, 503),
     _put("/api/v1/admin/migration/policy", "operator", 200, 400, 401, 409, 415, 503),
     _get("/api/v1/admin/migration/targets", "operator", 200, 400, 401, 503),

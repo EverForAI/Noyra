@@ -712,6 +712,9 @@ if [[ -n "$old_current" || -n "$legacy_venv" ]]; then
   }
   assert_absolute_backup_dir
 fi
+assert_absolute_backup_dir
+python3 "$SOURCE_DIR/scripts/deployment-maintenance.py" preflight \
+  --releases "$RELEASES_DIR" --backups "$backup_dir" --data "$DATA_DIR"
 stop_old_service
 
 # A cold encrypted backup is mandatory before replacing an active release.
@@ -810,6 +813,8 @@ if [[ -n "$old_current" || -n "$legacy_venv" ]]; then
   restore_backup_dir
   backup_dir_exposed=false
   sync -d "$backup_dir" 2>/dev/null || sync 2>/dev/null || true
+  "$backup_python" "$SOURCE_DIR/scripts/deployment-maintenance.py" verify-backup \
+    --releases "$RELEASES_DIR" --backups "$backup_dir" --data "$DATA_DIR" --backup "$backup_path"
 fi
 
 staging="$RELEASES_DIR/.staging-${release_id}-$$-$RANDOM"
@@ -820,6 +825,25 @@ if [[ "$profile" == cloud ]]; then
 fi
 "$staging/.venv/bin/python" -m pip install --no-deps --no-build-isolation "$SOURCE_DIR"
 "$staging/.venv/bin/python" -m pip check
+install -d -o root -g root -m 0755 "$staging/scripts"
+install -o root -g root -m 0644 "$SOURCE_DIR/scripts/preflight-production.py" \
+  "$staging/scripts/preflight-production.py"
+"$staging/.venv/bin/python" - "$INSTALL_DIR" "$source_sha" "$staging" <<'PY'
+import sys
+from pathlib import Path
+from noyra.core.release_assurance import controlled_text, verify_evidence
+from noyra.core.types import strict_json_loads
+
+install_root, sha, staging = sys.argv[1:]
+evidence = Path(install_root) / "upgrade/verified" / sha / "external-gates.json"
+if sha and evidence.exists():
+    raw = controlled_text(evidence, maximum=256_000)
+    key = controlled_text(Path("/etc/noyra/release-evidence-public-key"), maximum=128).strip()
+    verify_evidence(strict_json_loads(raw), sha, key)
+    output = Path(staging) / ".noyra-external-gates.json"
+    output.write_text(raw, encoding="utf-8")
+    output.chmod(0o644)
+PY
 "$staging/.venv/bin/python" - <<'PY'
 import noyra
 from noyra.service import ServiceSettings
@@ -1057,3 +1081,14 @@ echo 'Edit /etc/noyra/noyra.env, then run: systemctl enable --now noyra'
 rm -f -- "$profile_dropin_backup"
 noyra_upgrade_components_commit
 noyra_migration_components_commit
+if [[ "$service_active" == true ]]; then
+  maintenance_backup=()
+  if [[ -n "$backup_path" ]]; then maintenance_backup=(--backup "$backup_path"); fi
+  python3 "$SOURCE_DIR/scripts/deployment-maintenance.py" mark-release \
+    --releases "$RELEASES_DIR" --backups "$backup_dir" --release "$release_id" "${maintenance_backup[@]}" || \
+    echo 'Release retention marker deferred; no unmarked artifacts will be removed.' >&2
+  # Retention failures do not turn a successfully installed release into a rollback.
+  python3 "$SOURCE_DIR/scripts/deployment-maintenance.py" gc \
+    --releases "$RELEASES_DIR" --backups "$backup_dir" --apply --lock-fd 9 || \
+    echo 'Deployment retention deferred; current and previous releases remain available.' >&2
+fi

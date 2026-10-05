@@ -15,6 +15,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 ARG NOYRA_INSTALL_PROFILE=base
 ENV NOYRA_INSTALL_PROFILE=${NOYRA_INSTALL_PROFILE}
+ARG NOYRA_SOURCE_SHA=""
+LABEL org.opencontainers.image.revision=${NOYRA_SOURCE_SHA}
 
 RUN groupadd --system noyra && useradd --system --gid noyra --home /opt/noyra noyra
 WORKDIR /opt/noyra
@@ -28,6 +30,10 @@ RUN python -m pip install --no-cache-dir --require-hashes -r requirements.lock \
          echo 'NOYRA_INSTALL_PROFILE must be base or cloud' >&2; exit 2; \
        fi \
     && python -m pip install --no-cache-dir --no-deps --no-build-isolation .
+
+# An unset source allows manual deployments, but cannot authorize production
+# automation. The build operator must use the exact reviewed source checkout.
+RUN python -c 'import pathlib,re,sys; sha=sys.argv[1]; assert not sha or re.fullmatch("[0-9a-f]{40}",sha), "invalid source SHA"; path=pathlib.Path("/opt/noyra/.noyra-source-sha"); path.write_text(sha+"\n",encoding="utf-8"); path.chmod(0o444)' "$NOYRA_SOURCE_SHA"
 
 RUN install -d -o noyra -g noyra -m 0700 /var/lib/noyra
 USER noyra

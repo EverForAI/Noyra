@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Self, cast
 from urllib.error import HTTPError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import pytest
 from pydantic import SecretStr
@@ -65,6 +65,7 @@ _CHECK_IDS = (
     "core.archive_dead_letter",
     "core.event_causal_order",
     "core.storage_boundary",
+    "core.evidence_counts",
     "core.actions",
     "operations.provider_health",
     "operations.retention",
@@ -1692,6 +1693,7 @@ def test_alert_mode_health_is_degraded_without_exposing_private_findings(
         host="127.0.0.1",
         port=0,
         integrity_mode="alert",
+        operator_token=SecretStr("health-detail-test-operator-token-123456"),
     )
     service = NoyraService(settings)
 
@@ -1726,7 +1728,13 @@ def test_alert_mode_health_is_degraded_without_exposing_private_findings(
         service.http.start()
         _, port = service.http.address
         with pytest.raises(HTTPError) as error:
-            urlopen(f"http://127.0.0.1:{port}/health", timeout=5)
+            urlopen(
+                Request(
+                    f"http://127.0.0.1:{port}/health",
+                    headers={"Authorization": "Bearer health-detail-test-operator-token-123456"},
+                ),
+                timeout=5,
+            )
         assert error.value.code == 503
         health = json.loads(error.value.read())
         assert health["status"] == "degraded"

@@ -2,10 +2,31 @@ from __future__ import annotations
 
 import base64
 import zlib
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from .errors import IntegrityError, PayloadLimitError
 
 PREFIX = "noyra-zlib-b64:"
+# Historical model I/O is bounded before JSON parsing in every consumer. A
+# caller with a smaller integrity or export budget can tighten this value.
+DEFAULT_TEXT_LIMIT = 64_000_000
+_READ_BUDGET: ContextVar[tuple[int | Callable[[], int], Callable[[int], None]] | None] = ContextVar(
+    "payload_read_budget", default=None
+)
+
+
+@contextmanager
+def payload_read_budget(
+    max_bytes: int | Callable[[], int], consume: Callable[[int], None]
+) -> Iterator[None]:
+    """Apply an audit's limit to nested consumers sharing this execution context."""
+    token = _READ_BUDGET.set((max_bytes, consume))
+    try:
+        yield
+    finally:
+        _READ_BUDGET.reset(token)
 
 
 def compress_text(value: str, *, minimum_bytes: int = 1_024) -> str:
@@ -35,28 +56,31 @@ def decompress_bytes(value: bytes, *, max_bytes: int) -> bytes:
     return raw
 
 
-def decompress_text(value: str | None, *, max_bytes: int | None = None) -> str | None:
-    if max_bytes is not None and max_bytes < 1:
+def decompress_text(value: str | None, *, max_bytes: int = DEFAULT_TEXT_LIMIT) -> str | None:
+    if type(max_bytes) is not int or max_bytes < 1:
         raise ValueError("decompression limit must be positive")
+    budget = _READ_BUDGET.get()
+    if budget is not None:
+        available = budget[0]() if callable(budget[0]) else budget[0]
+        max_bytes = min(max_bytes, available)
+        if max_bytes < 1:
+            raise PayloadLimitError("payload read budget exhausted")
     if value is None:
         return value
     if not value.startswith(PREFIX):
-        if max_bytes is not None and len(value.encode("utf-8")) > max_bytes:
+        if len(value.encode("utf-8")) > max_bytes:
             raise PayloadLimitError("persisted text exceeds the configured byte limit")
         return value
     try:
         encoded = value[len(PREFIX) :]
-        if max_bytes is not None:
-            # A valid zlib stream cannot be materially larger than its output.
-            # Reject oversized base64 before allocating its decoded form.
-            max_encoded = 4 * ((max_bytes + 1_024 + 2) // 3)
-            if len(encoded) > max_encoded:
-                raise PayloadLimitError("compressed text exceeds the configured byte limit")
+        # Reject oversized base64 before allocating its decoded form.
+        max_encoded = 4 * ((max_bytes + 1_024 + 2) // 3)
+        if len(encoded) > max_encoded:
+            raise PayloadLimitError("compressed text exceeds the configured byte limit")
         compressed = base64.b64decode(encoded, altchars=b"-_", validate=True)
-        if max_bytes is None:
-            raw = zlib.decompress(compressed)
-        else:
-            raw = decompress_bytes(compressed, max_bytes=max_bytes)
+        raw = decompress_bytes(compressed, max_bytes=max_bytes)
+        if budget is not None:
+            budget[1](len(raw))
         return raw.decode("utf-8")
     except PayloadLimitError:
         raise

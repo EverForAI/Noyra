@@ -127,17 +127,12 @@ class AutonomyLoop:
             )
         self._clear_sleep_conflict()
         hook_result = await self.active_hook() if self.active_hook is not None else None
-        event = self.events.append(
-            self.kernel.subject_id,
-            "autonomy_tick",
-            "runtime",
-            {"hook_result": hook_result, "occurred_at": utc_now()},
-            privacy_level="private",
-        )
+        # Work producers own meaningful evidence. Idle heartbeats are bounded
+        # runtime control state, not permanent events or training examples.
         return TickResult(
             self.kernel.lifecycle.current().state,
             hook_result or "heartbeat",
-            event.event_id,
+            None,
             self.config.active_interval_seconds,
         )
 

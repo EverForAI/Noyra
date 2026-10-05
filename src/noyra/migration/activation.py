@@ -26,8 +26,11 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from noyra.core.database import Database
+from noyra.core.errors import RuntimeOwnershipError
+from noyra.core.locking import ProcessLock
 from noyra.core.types import canonical_json, content_hash
 
+from .activation_contract import ACTIVATION_RECEIPT_KEYS, validate_activation_request
 from .fencing import EpochLease
 from .manager import MigrationManager
 from .policy import MigrationStore
@@ -99,15 +102,19 @@ class _Systemd:
 
     def wait_ready(self, subject_id: str, target_id: str | None, timeout: float) -> bool:
         port = _configured_port(Path("/etc/noyra/noyra.env"))
+        token = _readiness_token()
+        if not token:
+            return False
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
         deadline = time.monotonic() + max(0.0, timeout)
         while time.monotonic() < deadline:
             if self.is_active():
                 try:
                     request = urllib.request.Request(
-                        f"http://127.0.0.1:{port}/health/ready",
-                        headers={"Cache-Control": "no-cache"},
+                        f"http://127.0.0.1:{port}/api/v1/admin/readiness",
+                        headers={"Cache-Control": "no-cache", "Authorization": f"Bearer {token}"},
                     )
-                    with urllib.request.urlopen(request, timeout=2) as response:
+                    with opener.open(request, timeout=2) as response:
                         payload = json.loads(response.read(64 * 1024))
                     if (
                         response.status == 200
@@ -121,6 +128,67 @@ class _Systemd:
                     pass
             time.sleep(0.5)
         return False
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        # A readiness token must never leave the fixed loopback endpoint.
+        return None
+
+
+def _readiness_token() -> str:
+    """Resolve the same operator credential as the service, from the root bridge.
+
+    systemd loads the bridge's EnvironmentFile. When using LoadCredential,
+    provision the same credential for both noyra and the activation unit.
+    """
+    file_name = os.getenv("NOYRA_OPERATOR_TOKEN_FILE", "").strip()
+    credential = os.getenv("NOYRA_OPERATOR_TOKEN_CREDENTIAL", "").strip()
+    try:
+        if file_name and credential:
+            return ""
+        if credential:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", credential):
+                return ""
+            directory = os.getenv("CREDENTIALS_DIRECTORY", "")
+            if not directory or not Path(directory).is_absolute():
+                return ""
+            file_name = str(Path(directory) / credential)
+        if file_name:
+            path = Path(file_name)
+            if not path.is_absolute():
+                return ""
+            _reject_symlink_parents(path, Path(path.anchor))
+            before = path.lstat()
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(descriptor, "rb") as stream:
+                metadata = os.fstat(stream.fileno())
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_nlink != 1
+                    or (before.st_dev, before.st_ino) != (metadata.st_dev, metadata.st_ino)
+                ):
+                    return ""
+                if os.name == "posix" and (
+                    metadata.st_uid not in {0, _service_uid()}
+                    or metadata.st_mode & 0o027
+                    or (metadata.st_mode & 0o040 and metadata.st_gid not in {0, _service_gid()})
+                ):
+                    return ""
+                raw = stream.read(16 * 1024 + 1)
+                if len(raw) > 16 * 1024:
+                    return ""
+                token = raw.decode("utf-8").strip()
+        else:
+            token = (
+                os.getenv("NOYRA_OPERATOR_TOKEN", "").strip()
+                or os.getenv("NOYRA_ADMIN_TOKEN", "").strip()
+            )
+        if not token or any(ord(char) < 0x20 or ord(char) > 0x7E for char in token):
+            return ""
+        return token
+    except (OSError, UnicodeError, TargetActivationError, KeyError):
+        return ""
 
 
 class TargetRuntimeActivator:
@@ -152,6 +220,22 @@ class TargetRuntimeActivator:
             self.dropin_dir = self.config_root.parent / "systemd" / "noyra.service.d"
 
     def activate(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        lock = self._control_lock()
+        try:
+            return self._activate(request)
+        finally:
+            lock.release()
+
+    def _control_lock(self) -> ProcessLock:
+        self._ensure_dirs()
+        path = self.state_root / "control.lock"
+        if path.is_symlink():
+            raise TargetActivationError("activation_path_invalid")
+        lock = ProcessLock(path)
+        lock.acquire()
+        return lock
+
+    def _activate(self, request: Mapping[str, Any]) -> dict[str, Any]:
         values = _validate_activation_request(request)
         self._ensure_dirs()
         target_id = values["target_id"]
@@ -198,9 +282,17 @@ class TargetRuntimeActivator:
         _secure_root_directory(staged.parent, "activation_staging_directory_invalid", create=True)
         cutover_started = False
         try:
-            _copy_private(restored, staged)
+            if values["inventory_sha256"] is not None:
+                from .subject_payload import stage_payload, verify_runtime_credentials
+
+                stage_payload(
+                    restored.parent, staged.parent, values["subject_id"], values["inventory_sha256"]
+                )
+                verify_runtime_credentials(staged, self.data_root / "secrets", values["subject_id"])
+            else:
+                _copy_private(restored, staged)
             staged_digest = _sha256_file(staged)
-            if staged_digest != values["artifact_sha256"]:
+            if staged_digest != values["restored_database_sha256"]:
                 raise TargetActivationError("restored_artifact_digest_mismatch")
             journal = {
                 **journal,
@@ -208,15 +300,21 @@ class TargetRuntimeActivator:
                 "root_staged_database_sha256": staged_digest,
             }
             _atomic_json(marker, journal, 0o600)
-            self._validate_restored_database(staged, values)
+            genesis_hash = self._validate_restored_database(staged, values)
             self._finalize_target_database(staged, values)
+            wallet_directory = self._stage_local_wallet(staged.parent, values)
+            runtime_environment = self._prepare_runtime_environment(
+                values, genesis_hash, wallet_directory=wallet_directory
+            )
             cutover_started = True
             self.systemd.stop()
+            if values["inventory_sha256"] is not None:
+                self._switch_subject_trees(staged.parent, rollback)
             self._move_database_set(active_database, rollback)
             os.replace(staged, active_database)
             _chown_service(active_database)
             os.chmod(active_database, 0o600)
-            self._write_target_dropin(target_id)
+            self._write_target_dropin(target_id, runtime_environment)
             self.systemd.daemon_reload()
             self.systemd.start()
             if not self.systemd.wait_ready(
@@ -276,15 +374,47 @@ class TargetRuntimeActivator:
             raise TargetActivationError("target_activation_failed") from error
 
     def deactivate(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        lock = self._control_lock()
+        try:
+            return self._deactivate(request)
+        finally:
+            lock.release()
+
+    def _deactivate(self, request: Mapping[str, Any]) -> dict[str, Any]:
         values = _validate_deactivation_request(request)
         self._ensure_dirs()
         task_id = values["task_id"]
         marker = self.activation_root / f"{task_id}.json"
+        receipt = {**values, "status": "deactivated", "activation_revoked": True}
         if not marker.exists():
-            return {"status": "inactive", "task_id": task_id}
+            active_database = self.data_root / "noyra.sqlite3"
+            if active_database.is_file() and self._database_owns_runtime(
+                active_database, task_id, values["target_id"]
+            ):
+                raise TargetActivationError("activation_record_missing_for_active_runtime")
+            # A persistent tombstone also rejects an activation request which
+            # was delayed in transit and arrives after this cancellation.
+            _atomic_json(marker, receipt, 0o600)
+            return receipt
         state = _read_json(marker, "activation_record_invalid")
+        if state.get("status") in {"activating", "deactivating", "recovery_required"}:
+            if not _request_binding_matches(state, values):
+                raise TargetActivationError("activation_record_binding_invalid")
+            self._recover_incomplete()
+            state = _read_json(marker, "activation_record_invalid")
         if state.get("status") == "deactivated" and _request_binding_matches(state, values):
-            return {"status": "deactivated", "task_id": task_id}
+            return receipt
+        if state.get("status") in {
+            "failed",
+            "failed_reverted",
+            "recovered",
+        } and _request_binding_matches(state, values):
+            if self._database_owns_runtime(
+                self.data_root / "noyra.sqlite3", task_id, values["target_id"]
+            ):
+                raise TargetActivationError("active_runtime_ownership_mismatch")
+            _atomic_json(marker, {**state, **receipt}, 0o600)
+            return receipt
         if state.get("status") != "active" or not _request_binding_matches(state, values):
             raise TargetActivationError("activation_record_binding_invalid")
         rollback = self.rollback_root / task_id
@@ -305,6 +435,7 @@ class TargetRuntimeActivator:
         try:
             _atomic_json(marker, {**state, "status": "deactivating"}, 0o600)
             self.systemd.stop()
+            self._restore_subject_trees(rollback)
             self._move_database_set(active_database, self.state_root / "failed-target" / task_id)
             self._move_database_set(rollback / "noyra.sqlite3", self.data_root)
             _chown_service(active_database)
@@ -322,7 +453,7 @@ class TargetRuntimeActivator:
             _atomic_json(
                 marker, {**state, "status": "deactivated", "deactivated_at": _now()}, 0o600
             )
-            return {"status": "deactivated", "task_id": task_id}
+            return receipt
         except TargetActivationError as error:
             _atomic_json(
                 marker,
@@ -343,6 +474,18 @@ class TargetRuntimeActivator:
             raise TargetActivationError("target_deactivation_failed") from error
 
     def recover_incomplete(self) -> int:
+        try:
+            lock = self._control_lock()
+        except RuntimeOwnershipError:
+            # systemd starts this prerequisite during an intentional switch.
+            # The live root controller owns recovery until it exits/crashes.
+            return 0
+        try:
+            return self._recover_incomplete()
+        finally:
+            lock.release()
+
+    def _recover_incomplete(self) -> int:
         """Restore the former DB before normal service startup after a crash mid-cutover."""
         self._ensure_dirs()
         recovered = 0
@@ -372,6 +515,7 @@ class TargetRuntimeActivator:
             ):
                 if self.systemd.is_active():
                     self.systemd.stop()
+                self._restore_subject_trees(rollback)
                 self._restore_dropin(rollback, bool(value.get("previous_dropin_present")))
                 self.systemd.daemon_reload()
                 self._restore_current_runtime_owner(value.get("previous_runtime_owner"))
@@ -386,6 +530,11 @@ class TargetRuntimeActivator:
                 and _sha256_file(active_database) == value.get("previous_database_sha256")
                 and not backup_database.exists()
             ):
+                if (
+                    rollback / "subject-state" / "roots.json"
+                ).exists() and self.systemd.is_active():
+                    self.systemd.stop()
+                self._restore_subject_trees(rollback)
                 _atomic_json(
                     marker,
                     {**value, "status": "recovered", "recovered_at": _now()},
@@ -397,6 +546,7 @@ class TargetRuntimeActivator:
                 raise TargetActivationError("rollback_database_unavailable")
             if self.systemd.is_active():
                 self.systemd.stop()
+            self._restore_subject_trees(rollback)
             if active_database.exists():
                 failed = self.state_root / "failed-target" / task_id
                 self._move_database_set(active_database, failed)
@@ -410,17 +560,24 @@ class TargetRuntimeActivator:
             recovered += 1
         return recovered
 
-    def _validate_restored_database(self, path: Path, request: Mapping[str, Any]) -> None:
+    def _validate_restored_database(self, path: Path, request: Mapping[str, Any]) -> str:
         if path.is_symlink() or not path.is_file():
             raise TargetActivationError("restored_database_unavailable")
+        wal = Path(f"{path}-wal")
+        if wal.is_symlink() or (wal.exists() and wal.stat().st_size):
+            raise TargetActivationError("restored_database_has_uncheckpointed_wal")
         try:
             with closing(
-                sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+                sqlite3.connect(f"{path.as_uri()}?mode=ro&immutable=1", uri=True)
             ) as connection:
                 connection.row_factory = sqlite3.Row
                 check = connection.execute("PRAGMA quick_check").fetchone()
                 subject = connection.execute(
                     "SELECT subject_id FROM runtime_state LIMIT 1"
+                ).fetchone()
+                identity = connection.execute(
+                    "SELECT genesis_hash FROM subject_identity WHERE subject_id=?",
+                    (request["subject_id"],),
                 ).fetchone()
                 task = connection.execute(
                     "SELECT subject_id,target_id,status,manifest_digest,artifact_id,"
@@ -444,6 +601,9 @@ class TargetRuntimeActivator:
             or check[0] != "ok"
             or subject is None
             or subject[0] != request["subject_id"]
+            or identity is None
+            or not isinstance(identity[0], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", identity[0])
         ):
             raise TargetActivationError("restored_database_identity_invalid")
         if (
@@ -451,8 +611,15 @@ class TargetRuntimeActivator:
             or task["subject_id"] != request["subject_id"]
             or task["target_id"] != request["target_id"]
             or task["source_epoch"] != request["source_epoch"]
-            or task["status"] not in {"validating", "cutover"}
-            or task["manifest_digest"] != request["manifest_digest"]
+            or task["status"] not in {"preparing", "validating", "cutover"}
+            or (
+                task["manifest_digest"] != request["manifest_digest"]
+                and not (
+                    task["status"] == "preparing"
+                    and task["manifest_digest"] is None
+                    and request["inventory_sha256"] is not None
+                )
+            )
             or task["artifact_id"] != request["artifact_id"]
             or epoch is None
             or epoch["target_id"] != request["target_id"]
@@ -470,6 +637,7 @@ class TargetRuntimeActivator:
             != request["source_fence_digest"]
         ):
             raise TargetActivationError("restored_migration_epoch_invalid")
+        return str(identity[0])
 
     def _finalize_target_database(self, path: Path, request: Mapping[str, Any]) -> None:
         database = Database(path, initialize=False)
@@ -479,9 +647,19 @@ class TargetRuntimeActivator:
                 "SELECT status,target_epoch_id FROM migration_tasks WHERE task_id=?",
                 (request["task_id"],),
             ).fetchone()
-            if task is None or task["status"] not in {"validating", "cutover"}:
+            if task is None or task["status"] not in {"preparing", "validating", "cutover"}:
                 raise TargetActivationError("restored_migration_task_changed")
-            if task["status"] == "validating":
+            if task["status"] == "preparing":
+                manager.transition_task_in_transaction(
+                    connection,
+                    request["task_id"],
+                    "validating",
+                    actor="migration-target",
+                    expected_status="preparing",
+                    manifest_digest=request["manifest_digest"],
+                    artifact_id=request["artifact_id"],
+                )
+            if task["status"] in {"preparing", "validating"}:
                 manager.transition_task_in_transaction(
                     connection,
                     request["task_id"],
@@ -526,6 +704,7 @@ class TargetRuntimeActivator:
         try:
             if self.systemd.is_active():
                 self.systemd.stop()
+            self._restore_subject_trees(rollback)
             backup_database = rollback / "noyra.sqlite3"
             if backup_database.exists():
                 failed = self.state_root / "failed-target" / rollback.name
@@ -553,16 +732,157 @@ class TargetRuntimeActivator:
         except Exception:
             return "previous_runtime_restore_failed"
 
-    def _write_target_dropin(self, target_id: str) -> None:
+    def _stage_local_wallet(self, staging: Path, request: Mapping[str, Any]) -> Path | None:
+        if request["wallet_mode"] != "local_wallet_transfer":
+            if (staging / "migration-wallet").exists():
+                raise TargetActivationError("unexpected_local_wallet_material")
+            return None
+        from .wallet_material import verify_local_wallet
+
+        record = _read_json(
+            self.agent_root / "bindings" / f"{request['task_id']}.json",
+            "wallet_binding_unavailable",
+        )
+        binding = record.get("wallet_binding", {})
+        digest = content_hash(
+            {
+                "task_id": request["task_id"],
+                "manifest_digest": request["manifest_digest"],
+                "binding": binding,
+            }
+        )
+        if digest != request["wallet_proof_digest"]:
+            raise TargetActivationError("wallet_binding_mismatch")
+        address = binding.get("address")
+        if not isinstance(address, str):
+            raise TargetActivationError("wallet_binding_unavailable")
+        verify_local_wallet(staging / "migration-wallet", address)
+        destination = self.data_root / "secrets" / f"migration-{request['task_id']}"
+        if destination.exists():
+            raise TargetActivationError("wallet_destination_exists")
+        _reject_symlink_parents(destination, self.data_root)
+        destination.parent.mkdir(mode=0o700, exist_ok=True)
+        destination.mkdir(mode=0o700)
+        for name in ("wallet.json", "password", "rpc.json"):
+            _copy_private(staging / "migration-wallet" / name, destination / name)
+            _chown_service(destination / name)
+        _chown_service(destination)
+        if os.name == "nt":
+            from noyra.core.at_rest import _harden_tree
+
+            _harden_tree(destination)
+        return destination
+
+    def _prepare_runtime_environment(
+        self, request: Mapping[str, Any], genesis_hash: str, *, wallet_directory: Path | None
+    ) -> Path:
+        # Values come from the authenticated request and the root-staged database,
+        # never from a source-supplied unit or environment file. EnvironmentFile
+        # overrides the target's original identity in noyra.env, unlike Environment.
+        runtime_env = (
+            f"NOYRA_SUBJECT_ID={request['subject_id']}\n"
+            f"NOYRA_GENESIS_HASH={genesis_hash}\n"
+            f"NOYRA_MIGRATION_TARGET_ID={request['target_id']}\n"
+        )
+        if request["wallet_mode"] == "disabled":
+            runtime_env += "NOYRA_WALLET_MODE=disabled\n"
+        if wallet_directory is not None:
+            from noyra.wallet.config import _parse_rpc_urls
+
+            rpc = _parse_rpc_urls((wallet_directory / "rpc.json").read_text(encoding="utf-8"))
+            rpc_text = canonical_json({str(key): value for key, value in rpc.items()})
+            rpc_text = rpc_text.replace("\\", "\\\\").replace('"', '\\"')
+            # EnvironmentFile contents have no variable/specifier expansion.
+            wallet_path = str(wallet_directory).replace("\\", "\\\\").replace('"', '\\"')
+            runtime_env += (
+                "NOYRA_WALLET_MODE=local\n"
+                f'NOYRA_WALLET_KEYSTORE_PATH="{wallet_path}/wallet.json"\n'
+                f'NOYRA_WALLET_PASSWORD_FILE="{wallet_path}/password"\n'
+                f'NOYRA_WALLET_RPC_URLS_JSON="{rpc_text}"\n'
+                "NOYRA_WALLET_SIGNER_ENDPOINT=\nNOYRA_WALLET_SIGNER_ID=\n"
+                "NOYRA_WALLET_SIGNER_ADDRESS=\nNOYRA_WALLET_SIGNER_BEARER_TOKEN=\n"
+                "NOYRA_WALLET_SIGNER_BEARER_TOKEN_FILE=\n"
+                "NOYRA_WALLET_SIGNER_BEARER_TOKEN_CREDENTIAL=\n"
+            )
+        directory = self.state_root / "runtime-environment"
+        _secure_root_directory(
+            directory,
+            "runtime_environment_directory_invalid",
+            create=True,
+            trusted_root=self.state_root,
+        )
+        env_path = directory / f"{request['task_id']}.env"
+        _atomic_write(env_path, runtime_env.encode("utf-8"), 0o600)
+        return env_path
+
+    def _write_target_dropin(self, target_id: str, runtime_environment: Path) -> None:
         if not _TARGET_ID.fullmatch(target_id):
             raise TargetActivationError("target_id_invalid")
         _reject_symlink_parents(self.dropin_dir / "migration-target.conf", self.dropin_dir.parent)
         self.dropin_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
+        env_path = str(runtime_environment)
+        if any(ord(char) < 32 for char in env_path):
+            raise TargetActivationError("runtime_environment_path_invalid")
+        env_path = env_path.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+        environment = (
+            f"[Service]\nEnvironment=NOYRA_MIGRATION_TARGET_ID={target_id}\n"
+            f'EnvironmentFile="{env_path}"\n'
+        )
         _atomic_write(
             self.dropin_dir / "migration-target.conf",
-            f"[Service]\nEnvironment=NOYRA_MIGRATION_TARGET_ID={target_id}\n".encode(),
+            environment.encode(),
             0o644,
         )
+
+    def _switch_subject_trees(self, staging: Path, rollback: Path) -> None:
+        from .subject_payload import STATE_ROOTS
+
+        saved = rollback / "subject-state"
+        saved.mkdir(mode=0o700)
+        presence = {}
+        for name in STATE_ROOTS:
+            current = self.data_root / name
+            if current.is_symlink() or (current.exists() and not current.is_dir()):
+                raise TargetActivationError("subject_state_directory_invalid")
+            presence[name] = current.exists()
+        # Write ahead before any move. A saved directory is itself the durable
+        # evidence of a completed rename; recovery can repeat after any move.
+        _atomic_json(saved / "roots.json", presence, 0o600)
+        for name in STATE_ROOTS:
+            current = self.data_root / name
+            if presence[name]:
+                os.replace(current, saved / name)
+            prepared = staging / name
+            if prepared.exists():
+                os.replace(prepared, current)
+            else:
+                current.mkdir(mode=0o700)
+            for path in (current, *current.rglob("*")):
+                _chown_service(path)
+                os.chmod(path, 0o700 if path.is_dir() else 0o600)
+
+    def _restore_subject_trees(self, rollback: Path) -> None:
+        from .subject_payload import STATE_ROOTS
+
+        saved = rollback / "subject-state"
+        if not (saved / "roots.json").exists():
+            return
+        presence = _read_json(saved / "roots.json", "subject_state_rollback_invalid")
+        if set(presence) != set(STATE_ROOTS) or any(type(v) is not bool for v in presence.values()):
+            raise TargetActivationError("subject_state_rollback_invalid")
+        failed = self.state_root / "failed-target" / rollback.name
+        failed.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for name in STATE_ROOTS:
+            previous, current = saved / name, self.data_root / name
+            if previous.is_symlink() or current.is_symlink():
+                raise TargetActivationError("subject_state_rollback_invalid")
+            if previous.exists() or not presence[name]:
+                if current.exists():
+                    if (failed / name).exists():
+                        raise TargetActivationError("subject_state_rollback_conflict")
+                    os.replace(current, failed / name)
+                if previous.exists():
+                    os.replace(previous, current)
 
     def _restore_dropin(self, rollback: Path, present: bool) -> None:
         path = self.dropin_dir / "migration-target.conf"
@@ -714,6 +1034,14 @@ class TargetActivationBridge:
         _private_directory(self.status_root, "activation_status_directory_invalid", create=True)
         request_path = self.request_root / f"{task_id}.{operation}.json"
         status_path = self.status_root / f"{task_id}.{operation}.json"
+        if operation == "activate":
+            cancelled = self.status_root / f"{task_id}.deactivate.json"
+            if (
+                cancelled.is_file()
+                and _read_json(cancelled, "activation_status_invalid").get("activation_revoked")
+                is True
+            ):
+                raise TargetActivationError("activation_revoked")
         if request_path.exists() or request_path.is_symlink():
             raise TargetActivationError("activation_request_already_pending")
         payload = dict(request)
@@ -727,7 +1055,10 @@ class TargetActivationBridge:
             previous = _read_json(status_path, "activation_status_invalid")
             if previous.get("request_digest") != request_digest:
                 raise TargetActivationError("activation_request_conflicts_with_existing_task")
-            return self._status_result(previous, operation)
+            if operation != "deactivate" or previous.get("status") != "failed":
+                return self._status_result(previous, operation)
+            # A transient root/systemd failure must not permanently prevent
+            # cancellation. The runner replaces this result after a retry.
         _atomic_json(
             request_path,
             {"payload": payload, "signature": signature, "request_digest": request_digest},
@@ -741,6 +1072,13 @@ class TargetActivationBridge:
                 result = _read_json(status_path, "activation_status_invalid")
                 if result.get("request_digest") != request_digest:
                     raise TargetActivationError("activation_status_binding_invalid")
+                if (
+                    operation == "deactivate"
+                    and request_path.exists()
+                    and result.get("status") == "failed"
+                ):
+                    time.sleep(self.poll_seconds)
+                    continue
                 return self._status_result(result, operation)
             time.sleep(self.poll_seconds)
         raise TargetActivationError("activation_runner_timeout")
@@ -849,60 +1187,14 @@ def recover_incomplete_target_activations(
     return TargetRuntimeActivator(data_root, config_root, systemd=systemd).recover_incomplete()
 
 
-_ACTIVATION_RECEIPT_KEYS = (
-    "task_id",
-    "subject_id",
-    "target_id",
-    "source_epoch",
-    "manifest_digest",
-    "artifact_id",
-    "artifact_sha256",
-    "health_report_digest",
-    "source_fence_digest",
-    "status",
-    "service_unit",
-    "active_database_sha256",
-    "activated_at",
-)
+_ACTIVATION_RECEIPT_KEYS = ACTIVATION_RECEIPT_KEYS
 
 
 def _validate_activation_request(request: Mapping[str, Any]) -> dict[str, Any]:
-    required = {
-        "task_id",
-        "subject_id",
-        "target_id",
-        "source_epoch",
-        "manifest_digest",
-        "artifact_id",
-        "artifact_sha256",
-        "health_report_digest",
-        "source_fence_digest",
-    }
-    if set(request) != required:
-        raise TargetActivationError("activation_request_invalid")
-    values = dict(request)
-    for key in ("task_id", "source_epoch"):
-        if not isinstance(values[key], str) or not _SAFE_ID.fullmatch(values[key]):
-            raise TargetActivationError("activation_request_invalid")
-    if not isinstance(values["subject_id"], str) or not re.fullmatch(
-        r"Noyra-[A-Za-z0-9_-]{1,120}", values["subject_id"]
-    ):
-        raise TargetActivationError("activation_request_invalid")
-    if not isinstance(values["target_id"], str) or not _TARGET_ID.fullmatch(values["target_id"]):
-        raise TargetActivationError("activation_request_invalid")
-    if not isinstance(values["artifact_id"], str) or not re.fullmatch(
-        r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", values["artifact_id"]
-    ):
-        raise TargetActivationError("activation_request_invalid")
-    for key in (
-        "manifest_digest",
-        "artifact_sha256",
-        "health_report_digest",
-        "source_fence_digest",
-    ):
-        if not isinstance(values[key], str) or not _DIGEST.fullmatch(values[key]):
-            raise TargetActivationError("activation_request_invalid")
-    return values
+    try:
+        return validate_activation_request(request)
+    except ValueError as error:
+        raise TargetActivationError("activation_request_invalid") from error
 
 
 def _validate_deactivation_request(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -1131,7 +1423,9 @@ def _previous_target_id(rollback: Path, present: bool) -> str | None:
     if path.is_symlink() or not path.is_file():
         return None
     match = re.search(
-        r"^Environment=NOYRA_MIGRATION_TARGET_ID=([A-Za-z0-9_-]{3,128})$", path.read_text()
+        r"^Environment=NOYRA_MIGRATION_TARGET_ID=([A-Za-z0-9_-]{3,128})$",
+        path.read_text(),
+        re.MULTILINE,
     )
     return None if match is None else match.group(1)
 

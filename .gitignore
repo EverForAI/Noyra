@@ -11,6 +11,7 @@ htmlcov/
 
 # Project-local environment and runtime state
 .venv/
+.audit-venv/
 .runtime/
 .cache/
 data/

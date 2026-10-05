@@ -72,4 +72,4 @@ target key 签名，并且证明摘要出现在 activation receipt 和 execution
 - 在管理台确认迁移开关仍为关闭，审批模式为人工批准。
 - 确认 source 和 target 的 rollback 联系人、恢复时限和 operator token 轮换时间已记录。
 - 只在八项 gate 的签名 artifact 已绑定待发布 SHA 后，才建立正式 release tag。
-- 任一外部门禁过期、撤销或无法复核时，立即关闭迁移和自动付款，并保留源端 fence/target activation 的审计记录以便恢复。
+- 72 小时新鲜度是发布时规则，不是每 72 小时停机规则。同 SHA 已验收版本可离线重启。若发生实际证据撤销、安全事件、代码 SHA 或信任公钥变化，应关闭迁移和自动付款，并保留 source fence/target activation 审计以便恢复。

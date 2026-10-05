@@ -3,15 +3,17 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import sqlite3
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+from eth_account import Account
+from eth_account.messages import encode_defunct
 
 from noyra.core.at_rest import VolumeEncryptionStatus
 from noyra.core.types import canonical_json, content_hash
@@ -27,6 +29,28 @@ from noyra.migration.http_executor import (
     SQLiteArtifactProvider,
 )
 from noyra.migration.manager import MigrationTask
+from noyra.wallet.execution import HTTPSWalletSigner
+
+WALLET_ACCOUNT = Account.from_key("11" * 32)
+WALLET_ADDRESS = WALLET_ACCOUNT.address.lower()
+
+
+@pytest.fixture(autouse=True)
+def real_signer_proof(monkeypatch: pytest.MonkeyPatch) -> None:
+    def response(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        signed = WALLET_ACCOUNT.sign_message(encode_defunct(text=body["challenge"]))
+        return httpx.Response(200, json={"signature": signed.signature.hex()})
+
+    def factory() -> HTTPSWalletSigner:
+        return HTTPSWalletSigner(
+            "https://signer.example",
+            signer_id="kms-prod",
+            wallet_address=WALLET_ADDRESS,
+            client=httpx.Client(transport=httpx.MockTransport(response)),
+        )
+
+    monkeypatch.setattr("noyra.wallet.config.configured_wallet_signer_from_env", factory)
 
 
 def _agent(tmp_path: Path) -> tuple[MigrationAgent, Ed25519PrivateKey]:
@@ -56,7 +80,7 @@ def _agent(tmp_path: Path) -> tuple[MigrationAgent, Ed25519PrivateKey]:
         credential_references={"model": "systemd:model"},
         credential_fingerprints={"model": "a" * 64},
         signer_id="kms-prod",
-        wallet_address="0xabc",
+        wallet_address=WALLET_ADDRESS,
         activation_controller=ActivationController(),
     )
     return agent, signing
@@ -78,7 +102,7 @@ def _request(recipient_key_fingerprint: str) -> dict[str, object]:
         "wallet_binding": {
             "mode": "external_signer_rebind",
             "signer_id": "kms-prod",
-            "address": "0xabc",
+            "address": WALLET_ADDRESS,
         },
     }
 
@@ -159,16 +183,22 @@ def test_agent_consumes_local_wallet_approval_once(
     request = _request(str(agent.recipient_key_fingerprint))
     request["wallet_binding"] = {
         "mode": "local_wallet_transfer",
-        "address": "0xabc",
+        "address": WALLET_ADDRESS,
         "approval": {
             "approval_id": "approval-1",
             "task_id": "task-bind-1",
-            "address": "0xabc",
+            "address": WALLET_ADDRESS,
             "channel_id": "channel-1",
             "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
         },
     }
 
+    from noyra.wallet.keystore import create_keystore
+
+    wallet_root = tmp_path / "restore" / "task-bind-1" / "migration-wallet"
+    create_keystore(wallet_root / "wallet.json", "test-pass-123", private_key="11" * 32)
+    (wallet_root / "password").write_text("test-pass-123")
+    (wallet_root / "password").chmod(0o600)
     response = agent.binding_proof(request)
     assert response["wallet_binding"]["status"] == "verified"
     assert response["wallet_binding"]["approval_fingerprint"]
@@ -197,7 +227,7 @@ def test_agent_rejects_binding_context_or_configuration_mismatch(
     request["wallet_binding"] = {
         "mode": "external_signer_rebind",
         "signer_id": "wrong-kms",
-        "address": "0xabc",
+        "address": WALLET_ADDRESS,
     }
     with pytest.raises(ValueError, match="signer"):
         agent.binding_proof(request)
@@ -228,6 +258,9 @@ def test_activation_rejects_a_binding_digest_mismatch(
         "artifact_sha256": "d" * 64,
         "health_report_digest": "e" * 64,
         "source_fence_digest": "f" * 64,
+        "format": "noyra-target-activation/v2",
+        "restored_database_sha256": "e" * 64,
+        "inventory_sha256": None,
         "recipient_key_fingerprint": request["recipient_key_fingerprint"],
         "target_volume_proof_digest": content_hash(
             {
@@ -340,9 +373,12 @@ def test_http_executor_requires_and_records_agent_binding_proofs(
     )
     agent, signing = _agent(tmp_path)
     source_db = tmp_path / "source.sqlite3"
-    with sqlite3.connect(source_db) as connection:
-        connection.execute("CREATE TABLE runtime_state(subject_id TEXT NOT NULL)")
-        connection.execute("INSERT INTO runtime_state VALUES ('Noyra-0001')")
+    from noyra.core import Database, EventStore, IdentityStore
+    from noyra.core.lifecycle import LifecycleManager
+
+    database = Database(source_db)
+    IdentityStore(database).ensure("Noyra-0001", "a" * 64)
+    LifecycleManager(database, EventStore(database), "Noyra-0001").ensure_initial()
     task = MigrationTask(
         task_id="task-bind-executor",
         proposal_id="proposal-1",
@@ -392,7 +428,7 @@ def test_http_executor_requires_and_records_agent_binding_proofs(
         source_fence=fence,
         source_unfence=unfence,
         transport=_AgentTransport(agent, signing),
-        chunk_bytes=4096,
+        chunk_bytes=64 * 1024,
     )
     receipt = executor.execute(
         task,
@@ -405,7 +441,7 @@ def test_http_executor_requires_and_records_agent_binding_proofs(
             "wallet_binding": {
                 "mode": "external_signer_rebind",
                 "signer_id": "kms-prod",
-                "address": "0xabc",
+                "address": WALLET_ADDRESS,
             },
         },
         source_epoch=task.source_epoch,

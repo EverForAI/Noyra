@@ -251,6 +251,15 @@ h1 em, h2 em { color: #8b6c3c; }
 .captcha-image-wrap { border-color: #c8d8cc; border-radius: 9px; }
 .captcha-status, .form-status { color: #725021; }
 .captcha-status.error, .form-status.error { color: #9a3d2e; }
+.captcha-modes { display: flex; gap: 0; margin-bottom: 10px; }
+.captcha-modes button { min-height: 36px; padding: 6px 16px; border: 1px solid #c8d8cc; background: #fff; color: #40594c; }
+.captcha-modes button[aria-pressed="true"] { background: #183a30; color: #fff; }
+.captcha-modes button:focus-visible { outline: 2px solid #547b61; outline-offset: 3px; }
+.captcha-row.audio-mode { grid-template-columns: minmax(0, 1fr); }
+#captcha-audio-wrap { min-width: 0; }
+#public-post-captcha-audio { display: block; width: 100%; height: 44px; }
+.captcha-row.audio-mode .captcha-input { min-height: 44px; }
+.captcha-row [hidden] { display: none !important; }
 .privacy-note { color: #526a5d; }
 .privacy-note span { color: #805b2f; }
 .submit-action { margin-top: 4px; }

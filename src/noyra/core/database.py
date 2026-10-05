@@ -13,6 +13,7 @@ from typing import Any
 
 from .admission import current_commit_scope
 from .errors import RuntimeOwnershipError
+from .evidence_schema import migration_v80
 from .locking import ProcessLock
 from .types import canonical_json, content_hash, new_id, strict_int, utc_now
 from .wallet_schema import (
@@ -288,7 +289,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 79
+CURRENT_SCHEMA_VERSION = 80
 
 # The schema DDL fingerprint is checked after every successful initialization.
 # Update this value only alongside a reviewed schema migration and its tests.
@@ -296,6 +297,7 @@ CURRENT_SCHEMA_VERSION = 79
 # installations persist this value in ``schema_meta`` and therefore require
 # the value to remain stable across compatible runtime fixes.
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
+    80: "70e0fcbd9ee1929f64bd9869d7070496ff45b0f14dee7d0bb9db316e62d12326",
     77: "2487f1a2703fc940178b2c77f2b3982a37b4a526de37b9b253204be71f4a6d1f",
     78: "895ea957c9befde841e2c665c1cae4d47d9f90c9b37a9f6341e2cea339bbd5d5",
     79: "af5da5087bbb8cac85b14699d10fa2e706d07b2eb225e3a22b19ed87ea08e7c6",
@@ -306,6 +308,7 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 # auditable P0 finding.  Tables, indexes, and views still fail closed during
 # database construction because they define the storage contract itself.
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
+    80: "840bae4d215def4cb6425ac5977c2a093fdaf90cfd7f2b5ec841c27ba0afd9dd",
     77: "03eae2bf8cdb2379f5a7271801044ce1920e0805018827d3661184b2a9fca896",
     78: "d8cc66309f41f32f3c7a7f05954ac237ad3826cfcdf6cf178c07538aa30fe828",
     79: "d7b6e06f229327411a7862d6b65fd452a3cd88ab3f1034f6e3002d9f4d4e32d4",
@@ -6844,6 +6847,7 @@ CREATE INDEX IF NOT EXISTS idx_migration_backup_registry_subject_status
 -- migration bundles were introduced.
 SELECT 1;
 """,
+    80: migration_v80(),
 }
 
 

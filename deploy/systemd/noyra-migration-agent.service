@@ -11,6 +11,7 @@ Type=simple
 User=noyra
 Group=noyra
 WorkingDirectory=/opt/noyra/current
+EnvironmentFile=-/etc/noyra/migration/agent.env
 LoadCredential=backup-keyring:/etc/noyra/backup-keyring.json
 ExecStart=/opt/noyra/current/.venv/bin/python /opt/noyra/current/scripts/noyra-migration-agent.py --identity-file /etc/noyra/migration/identity.json --data-root /var/lib/noyra/migration-agent --restore-root /var/lib/noyra/migration-agent/restored --backup-keyring %d/backup-keyring --listen 127.0.0.1:8876
 Restart=on-failure

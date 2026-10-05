@@ -11,11 +11,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from noyra.core.database import Database
-from noyra.core.errors import NotFoundError
 from noyra.core.redaction import redact_secret_text, redact_secrets
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 
-from .discovery import MigrationNeed, NeedAssessment
+from .discovery import DiscoveryResult, MigrationNeed, NeedAssessment
 from .policy import MigrationPolicy
 from .trust import TrustDecision
 
@@ -75,27 +74,33 @@ class MigrationProposalBuilder:
         if not trust.accepted:
             return None
         need = self._need(need)
-        target_id = getattr(candidate, "target_id", "")
-        if not target_id:
+        if (
+            not isinstance(candidate, DiscoveryResult)
+            or candidate.trusted is not True
+            or candidate.resources_verified is not True
+            or candidate.eligible is not True
+            or candidate.reasons
+            or candidate.observation is None
+            or not candidate.observation.is_fresh()
+        ):
             return None
+        target_id = candidate.target_id
         if policy.allowed_target_ids and target_id not in policy.allowed_target_ids:
-            return None
-        if getattr(candidate, "observation_verified", True) is False:
             return None
         benefit = float(need.benefit_score)
         if not 0.0 <= benefit <= 1.0 or not need.actionable:
             return None
         if need.payment_in_flight or need.maintenance_conflict:
             return None
-        if getattr(candidate, "status", "active") != "active":
+        if candidate.status != "active":
             return None
-        if not bool(getattr(candidate, "encrypted_volume", True)):
+        if candidate.encrypted_volume is not True or candidate.trust_level < policy.trust_level:
             return None
-        if int(getattr(candidate, "free_bytes", 0)) < policy.min_free_bytes:
+        if candidate.free_bytes < policy.min_free_bytes:
             return None
-        candidate_cost = int(
-            getattr(candidate, "cost_microusd_month", getattr(candidate, "cost", 0)) or 0
-        )
+        if policy.allowed_regions and candidate.region not in policy.allowed_regions:
+            return None
+        candidate_cost = candidate.cost_microusd_month
         if candidate_cost > policy.max_cost_microusd:
             return None
         downtime = estimated_downtime_seconds
@@ -123,9 +128,10 @@ class MigrationProposalBuilder:
         hard_gates = {
             "migration_enabled": True,
             "target_trusted": bool(trust.accepted),
-            "target_active": getattr(candidate, "status", "active") == "active",
-            "target_volume_encrypted": bool(getattr(candidate, "encrypted_volume", True)),
-            "target_capacity": int(getattr(candidate, "free_bytes", 0)) >= policy.min_free_bytes,
+            "target_active": candidate.status == "active",
+            "target_resources_verified": True,
+            "target_volume_encrypted": candidate.encrypted_volume,
+            "target_capacity": candidate.free_bytes >= policy.min_free_bytes,
             "source_need": need.actionable,
             "no_payment_in_flight": not need.payment_in_flight,
             "no_maintenance_conflict": not need.maintenance_conflict,
@@ -138,20 +144,22 @@ class MigrationProposalBuilder:
                 "hard_gates": hard_gates,
                 "evidence_hashes": {
                     "source_need": content_hash(need.evidence),
-                    "target_resources": str(
-                        getattr(candidate, "observation_evidence_hash", "")
-                        or content_hash(
-                            {
-                                "target_id": target_id,
-                                "free_bytes": int(getattr(candidate, "free_bytes", 0)),
-                                "region": getattr(candidate, "region", None),
-                            }
-                        )
-                    ),
+                    "target_resources": candidate.observation.evidence_hash,
                 },
                 "estimated_downtime_seconds": downtime,
                 "key_plan": policy.wallet_mode,
                 "migration_execution_ready": True,
+                "target": {
+                    "target_id": target_id,
+                    "endpoint": candidate.endpoint,
+                    "region": candidate.region,
+                    "release_sha": candidate.release_sha,
+                    "free_bytes": candidate.free_bytes,
+                    "cost_microusd_month": candidate_cost,
+                    "latency_ms": candidate.latency_ms,
+                    "trust_level": candidate.trust_level,
+                    "observed_at": candidate.observation.observed_at,
+                },
                 "data_plan": (
                     "recipient-encrypted bundle; target wallet/credential binding and "
                     "volume proof required before activation"
@@ -192,8 +200,8 @@ class MigrationProposalBuilder:
             storage_pressure=float(need.get("storage_pressure", 0.0)),
             provider_health=float(need.get("provider_health", 1.0)),
             evidence=need.get("evidence", {}),
-            payment_in_flight=bool(need.get("payment_in_flight", False)),
-            maintenance_conflict=bool(need.get("maintenance_conflict", False)),
+            payment_in_flight=need.get("payment_in_flight", False),
+            maintenance_conflict=need.get("maintenance_conflict", False),
             reason_code=need.get("reason_code"),
             reason=need.get("reason"),
         )
@@ -237,106 +245,21 @@ class MigrationProposalStore:
         cooldown_seconds: int,
         actor: str,
     ) -> str:
-        if cooldown_seconds < 0 or cooldown_seconds > 31_536_000:
-            raise ValueError("cooldown is outside safety bounds")
-        if not reason_code.strip() or not reason.strip():
-            raise ValueError("rejection reason is required")
-        now = datetime.now(UTC)
-        created_at = now.isoformat(timespec="milliseconds")
-        cooldown_until = (now + timedelta(seconds=cooldown_seconds)).isoformat(
-            timespec="milliseconds"
+        from .manager import MigrationManager
+        from .policy import MigrationStore
+
+        return MigrationManager(self.database, MigrationStore(self.database)).record_rejection(
+            subject_id=subject_id,
+            target_id=target_id,
+            reason_code=reason_code,
+            reason=reason,
+            policy_revision=policy_revision,
+            cooldown_seconds=cooldown_seconds,
+            actor=actor,
         )
-        rejection_id = new_id("migrationrejection")
-        proposal_id = new_id("migrationproposal")
-        with self.database.transaction() as connection:
-            if (
-                connection.execute(
-                    "SELECT 1 FROM subject_identity WHERE subject_id=?", (subject_id,)
-                ).fetchone()
-                is None
-            ):
-                raise NotFoundError(f"subject not found: {subject_id}")
-            if (
-                connection.execute(
-                    "SELECT 1 FROM migration_targets WHERE target_id=? AND subject_id=?",
-                    (target_id, subject_id),
-                ).fetchone()
-                is None
-            ):
-                raise NotFoundError(f"migration target not found: {target_id}")
-            connection.execute(
-                """INSERT INTO migration_proposals(
-                   proposal_id,subject_id,target_id,policy_revision,status,reason_code,reason,
-                   evidence_json,benefit_score,risk_score,expires_at,created_at,decided_at,
-                   decision_reason,state_hash
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    proposal_id,
-                    subject_id,
-                    target_id,
-                    policy_revision,
-                    "rejected",
-                    reason_code.strip(),
-                    reason.strip(),
-                    "{}",
-                    0.0,
-                    1.0,
-                    cooldown_until,
-                    created_at,
-                    created_at,
-                    reason.strip(),
-                    content_hash(
-                        {
-                            "proposal_id": proposal_id,
-                            "subject_id": subject_id,
-                            "target_id": target_id,
-                            "status": "rejected",
-                            "reason_code": reason_code.strip(),
-                            "reason": reason.strip(),
-                            "policy_revision": policy_revision,
-                            "created_at": created_at,
-                        }
-                    ),
-                ),
-            )
-            connection.execute(
-                """INSERT INTO migration_rejections(rejection_id,subject_id,proposal_id,target_id,reason_code,reason,cooldown_until,policy_revision,actor,created_at,state_hash)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    rejection_id,
-                    subject_id,
-                    proposal_id,
-                    target_id,
-                    reason_code.strip(),
-                    reason.strip(),
-                    cooldown_until,
-                    policy_revision,
-                    actor.strip(),
-                    created_at,
-                    content_hash(
-                        {
-                            "rejection_id": rejection_id,
-                            "subject_id": subject_id,
-                            "target_id": target_id,
-                            "reason_code": reason_code.strip(),
-                            "reason": reason.strip(),
-                            "cooldown_until": cooldown_until,
-                            "policy_revision": policy_revision,
-                            "actor": actor.strip(),
-                            "created_at": created_at,
-                        }
-                    ),
-                ),
-            )
-        return rejection_id
 
     def next_eligible_at(self, subject_id: str, target_id: str, reason_code: str) -> str | None:
+        from .manager import MigrationManager
+
         with self.database.connection() as connection:
-            row = connection.execute(
-                "SELECT cooldown_until FROM migration_rejections WHERE subject_id=? AND target_id=? AND reason_code=? ORDER BY cooldown_until DESC LIMIT 1",
-                (subject_id, target_id, reason_code),
-            ).fetchone()
-        if row is None:
-            return None
-        value = str(row["cooldown_until"])
-        return value if value > utc_now() else None
+            return MigrationManager.cooldown_until(connection, subject_id, target_id)

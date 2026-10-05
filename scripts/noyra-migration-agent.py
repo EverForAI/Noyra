@@ -221,11 +221,13 @@ def dispatch(agent: MigrationAgent, operation: str, payload: dict[str, Any]) -> 
         return asdict(agent.recipient_pop(payload))
     if operation == "bindings":
         return agent.binding_proof(payload)
+    if operation == "observe":
+        return agent.observe(payload.get("target_id"))
     if operation == "preflight":
         manifest = payload.get("manifest")
         if not isinstance(manifest, dict):
             raise ValueError("migration manifest is invalid")
-        return agent.preflight(manifest)
+        return agent.preflight(manifest, chunk_bytes=payload.get("chunk_bytes", 1024 * 1024))
     if operation == "receive":
         if "chunk_index" in payload:
             encoded_chunk = payload.pop("chunk_b64", None)
@@ -271,7 +273,7 @@ def dispatch(agent: MigrationAgent, operation: str, payload: dict[str, Any]) -> 
         from noyra.migration.agent import RestoreReport
 
         task_id = payload.pop("task_id", None)
-        subject_id = payload.pop("subject_id", None)
+        subject_id = payload.get("subject_id")
         source_epoch = payload.pop("source_epoch", None)
         restore_report_digest = payload.pop("restore_report_digest", None)
         expected_digest = payload.pop("expected_digest", None)
@@ -315,6 +317,7 @@ class Handler(BaseHTTPRequestHandler):
             "/v1/challenge": "challenge",
             "/v1/recipient-pop": "recipient-pop",
             "/v1/bindings": "bindings",
+            "/v1/observe": "observe",
             "/v1/preflight": "preflight",
             "/v1/receive": "receive",
             "/v1/receive-chunk": "receive",
@@ -396,6 +399,7 @@ def main(argv: list[str] | None = None) -> int:
             "challenge",
             "recipient-pop",
             "bindings",
+            "observe",
             "preflight",
             "receive",
             "restore",

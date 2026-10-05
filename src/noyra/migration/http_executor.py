@@ -24,7 +24,6 @@ import ssl
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
@@ -36,9 +35,15 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
 from noyra.core.database import CURRENT_SCHEMA_VERSION
 from noyra.core.types import canonical_json, content_hash
 
+from .activation_contract import (
+    ACTIVATION_FORMAT,
+    validate_activation_receipt,
+    validate_activation_request,
+)
 from .bundle import BUNDLE_FORMAT, encrypt_bundle
 from .executor import MigrationExecutionError, MigrationExecutionReceipt
 from .manager import MigrationTask
+from .subject_payload import PAYLOAD_FORMAT, create_payload, file_digest
 from .trust import (
     RecipientPoPProof,
     create_recipient_pop_challenge,
@@ -58,7 +63,7 @@ class ArtifactBundle:
 
 
 class SQLiteArtifactProvider:
-    """Create a redacted SQLite snapshot and encrypt it to the target key."""
+    """Preserve immutable metadata and encrypt a complete subject snapshot."""
 
     def __init__(self, database_path: Path | str, output_root: Path | str):
         self.database_path = Path(database_path).resolve()
@@ -90,29 +95,34 @@ class SQLiteArtifactProvider:
         if destination.exists():
             raise MigrationExecutionError("artifact_already_exists")
         raw_snapshot = self.output_root / f".{artifact_id}.sqlite"
-        raw_snapshot.unlink(missing_ok=True)
+        raw_payload = self.output_root / f".{artifact_id}.tar"
+        wallet_rpc = self.output_root / f".{artifact_id}.rpc.json"
+        if raw_snapshot.exists() or raw_payload.exists():
+            raise MigrationExecutionError("artifact_snapshot_already_exists")
         try:
             source = sqlite3.connect(self.database_path)
             target = sqlite3.connect(raw_snapshot)
             try:
                 source.backup(target)
-                target.execute("PRAGMA foreign_keys=OFF")
-                for table in (
-                    "search_provider_configs",
-                    "cognitive_resource_keys",
-                    "interaction_transports",
-                    "embedding_resources",
-                    "secret_file_intents",
-                ):
-                    if target.execute(
-                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-                    ).fetchone():
-                        target.execute(f'DELETE FROM "{table}"')
-                target.commit()
+                target.execute("PRAGMA journal_mode=DELETE")
             finally:
                 target.close()
                 source.close()
                 gc.collect()
+            os.chmod(raw_snapshot, 0o600)
+            local_wallet = None
+            wallet = proof.get("wallet_binding")
+            if isinstance(wallet, Mapping) and wallet.get("mode") == "local_wallet_transfer":
+                from .wallet_material import source_wallet_files
+
+                local_wallet = source_wallet_files(task, wallet, wallet_rpc)
+            inventory = create_payload(
+                raw_snapshot,
+                self.database_path.parent,
+                raw_payload,
+                task.subject_id,
+                local_wallet=local_wallet,
+            )
             context = {
                 "task_id": task.task_id,
                 "target_id": task.target_id,
@@ -121,19 +131,24 @@ class SQLiteArtifactProvider:
                 "subject_id": task.subject_id,
                 "schema_version": str(CURRENT_SCHEMA_VERSION),
                 "artifact_format": BUNDLE_FORMAT,
+                "payload_format": PAYLOAD_FORMAT,
+                "database_sha256": file_digest(raw_snapshot),
+                "inventory_sha256": content_hash(inventory),
             }
             encrypted = encrypt_bundle(
-                raw_snapshot,
+                raw_payload,
                 destination,
                 recipient_public_key=recipient_public,
                 context=context,
             )
-        except (OSError, sqlite3.DatabaseError) as error:
+        except (OSError, ValueError, sqlite3.DatabaseError) as error:
             raw_snapshot.unlink(missing_ok=True)
             raise MigrationExecutionError("artifact_snapshot_failed") from error
         finally:
             try:
                 raw_snapshot.unlink(missing_ok=True)
+                raw_payload.unlink(missing_ok=True)
+                wallet_rpc.unlink(missing_ok=True)
             except OSError as error:
                 raise MigrationExecutionError("artifact_snapshot_cleanup_failed") from error
         manifest = {
@@ -325,6 +340,8 @@ class HTTPMigrationExecutor:
         *,
         proof: Mapping[str, object],
         source_epoch: str,
+        artifact_ready: Callable[[Mapping[str, Any]], None] | None = None,
+        target_verified: Callable[[dict[str, object]], None] | None = None,
     ) -> MigrationExecutionReceipt:
         if source_epoch != task.source_epoch:
             raise MigrationExecutionError("source_epoch_mismatch")
@@ -359,15 +376,8 @@ class HTTPMigrationExecutor:
                 raise MigrationExecutionError("artifact_manifest_mismatch")
             if path.stat().st_size != manifest["byte_size"]:
                 raise MigrationExecutionError("artifact_size_mismatch")
-            binding_proof = self._request_binding_proof(
-                target, token, task, manifest_digest, manifest, proof
-            )
-            if isinstance(proof, dict):
-                # Keep the verified, target-signed binding evidence attached to
-                # the in-memory execution proof so receipt validation can bind
-                # every digest to the exact response that was verified.
-                proof.update(binding_proof)
-            binding_evidence = self._binding_evidence(binding_proof, task, manifest_digest, target)
+            if artifact_ready is not None:
+                artifact_ready(manifest)
             preflight = self._request(
                 target,
                 token,
@@ -378,6 +388,7 @@ class HTTPMigrationExecutor:
                     "task_id": task.task_id,
                     "subject_id": task.subject_id,
                     "source_epoch": source_epoch,
+                    "chunk_bytes": self.chunk_bytes,
                 },
             )
             if preflight.get("status") != "ready":
@@ -393,6 +404,25 @@ class HTTPMigrationExecutor:
                     "expected_digest": manifest_digest,
                 },
             )
+            binding_proof = self._request_binding_proof(
+                target, token, task, manifest_digest, manifest, proof
+            )
+            if isinstance(proof, dict):
+                # Keep the verified, target-signed binding evidence attached to
+                # the in-memory execution proof so receipt validation can bind
+                # every digest to the exact response that was verified.
+                proof.update(
+                    {
+                        key: binding_proof[key]
+                        for key in (
+                            "recipient_key_fingerprint",
+                            "target_volume_proof",
+                            "credential_binding",
+                            "wallet_binding",
+                        )
+                    }
+                )
+            binding_evidence = self._binding_evidence(binding_proof, task, manifest_digest, target)
             health_with_signature = self._request(
                 target,
                 token,
@@ -417,11 +447,34 @@ class HTTPMigrationExecutor:
                 health_with_signature,
                 target_signature,
             )
-            activation = self._request(
-                target,
-                token,
-                "/v1/activate",
+            if restore.get("restored_database_sha256") != manifest.get(
+                "database_sha256", manifest.get("plaintext_sha256")
+            ):
+                raise MigrationExecutionError("target_restored_database_digest_mismatch")
+            verified_proof: dict[str, object] = {
+                "manifest": manifest,
+                "manifest_digest": manifest_digest,
+                "artifact_id": manifest["artifact_id"],
+                "restore_report": restore,
+                "health_report": health_with_signature,
+                "target_signature": target_signature,
+                **{
+                    key: binding_proof[key]
+                    for key in (
+                        "recipient_key_fingerprint",
+                        "target_volume_proof",
+                        "credential_binding",
+                        "wallet_binding",
+                    )
+                },
+            }
+            if isinstance(proof, dict):
+                proof.update(verified_proof)
+            if target_verified is not None:
+                target_verified(verified_proof)
+            activation_request = validate_activation_request(
                 {
+                    "format": ACTIVATION_FORMAT,
                     "task_id": task.task_id,
                     "subject_id": task.subject_id,
                     "target_id": task.target_id,
@@ -429,6 +482,8 @@ class HTTPMigrationExecutor:
                     "manifest_digest": manifest_digest,
                     "artifact_id": manifest["artifact_id"],
                     "artifact_sha256": manifest["artifact_sha256"],
+                    "restored_database_sha256": restore.get("restored_database_sha256"),
+                    "inventory_sha256": manifest.get("inventory_sha256"),
                     "health_report_digest": content_hash(health_with_signature),
                     "source_fence_digest": source_fence_digest,
                     "recipient_key_fingerprint": target["recipient_key_fingerprint"],
@@ -437,18 +492,10 @@ class HTTPMigrationExecutor:
                     "signer_binding_digest": binding_evidence["signer_digest"],
                     "wallet_mode": binding_evidence["wallet_mode"],
                     "wallet_proof_digest": binding_evidence["wallet_digest"],
-                },
+                }
             )
-            activation = self._verify_activation_receipt(
-                target,
-                task,
-                manifest_digest,
-                str(manifest["artifact_id"]),
-                str(manifest["artifact_sha256"]),
-                content_hash(health_with_signature),
-                source_fence_digest,
-                activation,
-            )
+            activation = self._request(target, token, "/v1/activate", activation_request)
+            activation = self._verify_activation_receipt(target, activation_request, activation)
             activation_digest = content_hash(activation)
             self._active[task.task_id] = (target, token, source_epoch)
             return MigrationExecutionReceipt(
@@ -470,39 +517,44 @@ class HTTPMigrationExecutor:
                 binding_evidence["wallet_digest"],
             )
         except Exception:
-            try:
-                self.source_unfence(task, source_epoch)
-            except Exception as error:
-                raise MigrationExecutionError("source_unfence_failed") from error
+            # Target activation may have succeeded without a reply. The
+            # coordinator alone releases admission after verified cancellation.
             raise
 
     def rollback(
         self,
         task: MigrationTask,
         *,
-        receipt: MigrationExecutionReceipt,
+        receipt: MigrationExecutionReceipt | None = None,
         reason: str,
-    ) -> None:
-        del reason
-        target, token, source_epoch = self._active.pop(
-            task.task_id,
-            (self._target(task), self._token(task), task.source_epoch),
-        )
+    ) -> dict[str, Any]:
+        del reason, receipt
+        target, token, source_epoch = self._target(task), self._token(task), task.source_epoch
+        binding = {
+            "task_id": task.task_id,
+            "target_id": task.target_id,
+            "source_epoch": source_epoch,
+            "manifest_digest": task.manifest_digest,
+        }
         try:
-            result = self._request(
-                target,
-                token,
-                "/v1/deactivate",
-                {
-                    "task_id": receipt.task_id,
-                    "target_id": receipt.target_id,
-                    "source_epoch": source_epoch,
-                    "manifest_digest": receipt.manifest_digest,
-                },
-            )
-            if result.get("status") not in {"deactivated", "inactive"}:
-                raise MigrationExecutionError("target_deactivation_failed")
-            self.source_unfence(task, source_epoch)
+            result = self._request(target, token, "/v1/deactivate", binding)
+            signature = result.get("target_signature")
+            signed = {key: value for key, value in result.items() if key != "target_signature"}
+            if signed != {**binding, "status": "deactivated", "activation_revoked": True}:
+                raise MigrationExecutionError("target_deactivation_proof_invalid")
+            try:
+                if not isinstance(signature, str):
+                    raise ValueError("signature missing")
+                encoded_key = str(target["public_key"])
+                public = base64.urlsafe_b64decode(encoded_key + "=" * (-len(encoded_key) % 4))
+                raw = base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
+                Ed25519PublicKey.from_public_bytes(public).verify(
+                    raw, canonical_json(signed).encode()
+                )
+            except _SIGNATURE_ERROR as error:
+                raise MigrationExecutionError("target_deactivation_signature_invalid") from error
+            self._active.pop(task.task_id, None)
+            return dict(result)
         except MigrationExecutionError:
             raise
         except Exception as error:
@@ -1077,82 +1129,16 @@ class HTTPMigrationExecutor:
     @staticmethod
     def _verify_activation_receipt(
         target: Mapping[str, Any],
-        task: MigrationTask,
-        manifest_digest: str,
-        artifact_id: str,
-        artifact_sha256: str,
-        health_report_digest: str,
-        source_fence_digest: str,
+        request: Mapping[str, Any],
         receipt: Mapping[str, Any],
     ) -> dict[str, Any]:
         if not isinstance(receipt, Mapping) or not isinstance(receipt.get("target_signature"), str):
             raise MigrationExecutionError("target_activation_signature_missing")
-        required = {
-            "task_id": task.task_id,
-            "subject_id": task.subject_id,
-            "target_id": task.target_id,
-            "source_epoch": task.source_epoch,
-            "manifest_digest": manifest_digest,
-            "artifact_id": artifact_id,
-            "artifact_sha256": artifact_sha256,
-            "health_report_digest": health_report_digest,
-            "source_fence_digest": source_fence_digest,
-            "recipient_key_fingerprint": target["recipient_key_fingerprint"],
-            "target_volume_proof_digest": None,
-            "credential_binding_digest": None,
-            "signer_binding_digest": None,
-            "wallet_mode": None,
-            "wallet_proof_digest": None,
-            "status": "active",
-            "service_unit": "noyra.service",
-        }
-        for key in ("target_volume_proof_digest", "credential_binding_digest"):
-            value = receipt.get(key)
-            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
-                raise MigrationExecutionError("target_activation_receipt_invalid")
-            required[key] = value
-        wallet_mode = receipt.get("wallet_mode")
-        if wallet_mode not in {"external_signer_rebind", "local_wallet_transfer", "disabled"}:
-            raise MigrationExecutionError("target_activation_receipt_invalid")
-        required["wallet_mode"] = wallet_mode
-        for key in ("signer_binding_digest", "wallet_proof_digest"):
-            value = receipt.get(key)
-            if value is not None and (
-                not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
-            ):
-                raise MigrationExecutionError("target_activation_receipt_invalid")
-            required[key] = value
-        if wallet_mode == "external_signer_rebind" and (
-            required["signer_binding_digest"] is None
-            or required["wallet_proof_digest"] is None
-            or required["signer_binding_digest"] != required["wallet_proof_digest"]
-        ):
-            raise MigrationExecutionError("target_activation_receipt_invalid")
-        if wallet_mode == "local_wallet_transfer" and required["wallet_proof_digest"] is None:
-            raise MigrationExecutionError("target_activation_receipt_invalid")
-        if wallet_mode == "disabled" and any(
-            required[key] is not None for key in ("signer_binding_digest", "wallet_proof_digest")
-        ):
-            raise MigrationExecutionError("target_activation_receipt_invalid")
-        if any(receipt.get(key) != value for key, value in required.items()):
-            raise MigrationExecutionError("target_activation_receipt_invalid")
-        if not isinstance(receipt.get("active_database_sha256"), str) or not re.fullmatch(
-            r"[0-9a-f]{64}", receipt["active_database_sha256"]
-        ):
-            raise MigrationExecutionError("target_activation_receipt_invalid")
-        activated_at = receipt.get("activated_at")
-        if not isinstance(activated_at, str):
-            raise MigrationExecutionError("target_activation_receipt_invalid")
+        signed = {key: value for key, value in receipt.items() if key != "target_signature"}
         try:
-            timestamp = datetime.fromisoformat(activated_at.replace("Z", "+00:00"))
+            validate_activation_receipt(request, signed)
         except ValueError as error:
             raise MigrationExecutionError("target_activation_receipt_invalid") from error
-        if timestamp.tzinfo is None:
-            raise MigrationExecutionError("target_activation_receipt_invalid")
-        receipt_fields = {*required, "active_database_sha256", "activated_at", "target_signature"}
-        if set(receipt) != receipt_fields:
-            raise MigrationExecutionError("target_activation_receipt_invalid")
-        signed = {key: value for key, value in receipt.items() if key != "target_signature"}
         try:
             encoded_key = str(target["public_key"])
             raw_key = base64.urlsafe_b64decode(encoded_key + "=" * (-len(encoded_key) % 4))

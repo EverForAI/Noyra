@@ -8,6 +8,7 @@ from typing import Any
 from noyra.core.admission import accounting_scope
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError
+from noyra.core.evidence_capacity import require_evidence_capacity
 from noyra.core.types import content_hash, new_id, strict_bool, strict_int, utc_now
 
 from .embedding import EmbeddingBudgetLimits, EmbeddingCircuitPolicy
@@ -139,6 +140,7 @@ class EmbeddingLedger:
                     raise ValueError("embedding idempotency key identifies another request")
                 return record, False
 
+            require_evidence_capacity(connection, subject_id, "embedding_usage_entries")
             circuit = self._ensure_circuit(connection, subject_id, resource_id, now)
             half_open = False
             if circuit.status == "open":

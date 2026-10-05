@@ -57,10 +57,18 @@ class _FakeExecutor:
         self,
         task: MigrationTask,
         *,
-        receipt: MigrationExecutionReceipt,
+        receipt: MigrationExecutionReceipt | None = None,
         reason: str,
-    ) -> None:
-        del task, receipt, reason
+    ) -> dict[str, Any]:
+        del receipt, reason
+        return {
+            "task_id": task.task_id,
+            "target_id": task.target_id,
+            "source_epoch": task.source_epoch,
+            "manifest_digest": task.manifest_digest,
+            "status": "deactivated",
+            "activation_revoked": True,
+        }
 
 
 def _task(tmp_path: Any) -> tuple[Database, MigrationTask, dict[str, object]]:
@@ -190,3 +198,80 @@ def test_cutover_executes_before_committing_and_returns_bound_receipt(tmp_path: 
     assert result["task_id"] == task.task_id
     assert result["status"] == "committed"
     assert executor.calls == [task.task_id]
+
+
+def test_lost_activation_reply_requires_target_cancellation_after_source_restart(
+    tmp_path: Any,
+) -> None:
+    from noyra.core.admission import RuntimeAdmissionGate
+    from noyra.migration.executor import MigrationExecutionError
+
+    database, task, proof = _task(tmp_path)
+
+    class LostReplyExecutor(_FakeExecutor):
+        active = False
+        unreachable = True
+        cancellations = 0
+
+        def execute(
+            self, task: MigrationTask, *, proof: Mapping[str, object], source_epoch: str
+        ) -> MigrationExecutionReceipt:
+            self.active = True
+            raise MigrationExecutionError("activation_reply_lost")
+
+        def rollback(
+            self,
+            task: MigrationTask,
+            *,
+            receipt: MigrationExecutionReceipt | None = None,
+            reason: str,
+        ) -> dict[str, Any]:
+            self.cancellations += 1
+            if self.unreachable:
+                raise MigrationExecutionError("target_unreachable")
+            self.active = False
+            return super().rollback(task, receipt=receipt, reason=reason)
+
+    executor = LostReplyExecutor()
+    gate = RuntimeAdmissionGate(task.subject_id)
+    gate.open(epoch=1)
+    coordinator = CutoverCoordinator(database, executor=executor, admission=gate)
+    coordinator.prepare(task.task_id, proof=proof)
+    with pytest.raises(MigrationExecutionError, match="activation_reply_lost"):
+        coordinator.commit(task.task_id)
+    assert executor.active and gate.migration_fenced
+    # Recreate the coordinator: recovery must not depend on a receipt in RAM.
+    coordinator = CutoverCoordinator(database, executor=executor, admission=gate)
+    with pytest.raises(MigrationExecutionError, match="target_unreachable"):
+        coordinator.rollback(task.task_id, "recover lost reply")
+    assert executor.active and gate.migration_fenced
+    assert coordinator._epoch_for_task(task.task_id) is not None
+    executor.unreachable = False
+    assert coordinator.rollback(task.task_id, "retry")["status"] == "rolled_back"
+    assert not executor.active and not gate.migration_fenced
+    assert executor.cancellations == 2
+    # Replaying an older rollback must not reopen a new migration fence.
+    with gate.migration_control_scope():
+        gate.fence_for_migration()
+    coordinator.rollback(task.task_id, "duplicate")
+    assert gate.migration_fenced
+
+
+def test_rollback_audit_failure_cannot_revoke_source_epoch(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database, task, proof = _task(tmp_path)
+    coordinator = CutoverCoordinator(database, executor=_FakeExecutor())
+    coordinator.prepare(task.task_id, proof=proof)
+    original = MigrationStore._append_audit
+
+    def fail_terminal(connection: Any, subject: str, action: str, actor: str, payload: Any) -> Any:
+        if action == "migration_task_transitioned" and payload.get("to") == "rolled_back":
+            raise RuntimeError("audit unavailable")
+        return original(connection, subject, action, actor, payload)
+
+    monkeypatch.setattr(MigrationStore, "_append_audit", staticmethod(fail_terminal))
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        coordinator.rollback(task.task_id, "test")
+    assert coordinator._epoch_for_task(task.task_id) is not None
+    assert coordinator.manager.get_task(task.task_id).status == "rolling_back"

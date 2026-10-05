@@ -5,8 +5,11 @@ from __future__ import annotations
 import base64
 import binascii
 import re
-from contextlib import nullcontext, suppress
+from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -43,11 +46,115 @@ class CutoverCoordinator:
         *,
         admission: RuntimeAdmissionGate | None = None,
         executor: MigrationExecutor | None = None,
+        production: bool | None = None,
     ):
         self.database = database
-        self.manager = MigrationManager(database, MigrationStore(database))
+        self.manager = MigrationManager(database, MigrationStore(database, production=production))
         self.admission = admission
         self.executor = executor
+
+    def run(
+        self, task_id: str, *, binding: dict[str, object], actor: str = "operator"
+    ) -> dict[str, str]:
+        """Execute an approved task using one fenced snapshot and real target proofs."""
+        from .http_executor import HTTPMigrationExecutor
+        from .policy import MigrationPolicy
+        from .runtime import payment_in_flight
+
+        if not isinstance(self.executor, HTTPMigrationExecutor):
+            raise ValueError("managed migration executor unavailable")
+        task = self.manager.get_task(task_id)
+        if task.status == "committed":
+            return {"task_id": task_id, "status": "committed"}
+        policy = self.manager.policy_store.read_policy(task.subject_id)
+        self.manager.policy_store.assert_automation_allowed(policy)
+        if not policy.enabled or policy.revision != task.policy_revision:
+            raise ValueError("migration policy is disabled or stale")
+        if task.status != "approved":
+            raise ValueError("migration task requires rollback or reconciliation")
+        if self.manager._parse_timestamp(task.expires_at) <= datetime.now(UTC):
+            raise ValueError("migration task is expired")
+        if policy.allowed_target_ids and task.target_id not in policy.allowed_target_ids:
+            raise ValueError("migration target is not allowed")
+        wallet = binding.get("wallet_binding")
+        if not isinstance(wallet, dict) or wallet.get("mode") != policy.wallet_mode:
+            raise ValueError("wallet migration policy binding mismatch")
+        minute = datetime.now(UTC).hour * 60 + datetime.now(UTC).minute
+        if (
+            minute - policy.maintenance_window_start_minute
+        ) % 1440 >= policy.maintenance_window_duration_minutes:
+            raise ValueError("migration maintenance window is closed")
+        admission = self.admission
+        with admission.migration_control_scope() if admission is not None else nullcontext():
+            fence_epoch = admission.fence_for_migration() if admission is not None else None
+            try:
+                with self.database.transaction() as connection:
+                    current_policy = MigrationPolicy.from_record(
+                        connection.execute(
+                            "SELECT * FROM migration_policies WHERE subject_id=?",
+                            (task.subject_id,),
+                        ).fetchone()
+                    )
+                    if current_policy != policy:
+                        raise ValueError("migration policy changed before fencing")
+                    if payment_in_flight(connection, task.subject_id):
+                        raise ValueError("migration blocked by unresolved wallet payments")
+                    self.manager._ensure_target(connection, task.subject_id, task.target_id)
+                    if self.manager.cooldown_until(connection, task.subject_id, task.target_id):
+                        raise ValueError("migration rejection cooldown is active")
+                    epoch = EpochLease._acquire_in_transaction(
+                        self.database,
+                        connection,
+                        task.subject_id,
+                        task.target_id,
+                        expected_source_epoch=task.source_epoch,
+                        actor=actor,
+                    )
+                    task = self.manager.transition_task_in_transaction(
+                        connection,
+                        task_id,
+                        "preparing",
+                        expected_status="approved",
+                        actor=actor,
+                        target_epoch_id=epoch.epoch_id,
+                        artifact_id=f"migration-{task.task_id}",
+                    )
+                    MigrationStore._append_audit(
+                        connection,
+                        task.subject_id,
+                        "migration_execution_started",
+                        actor,
+                        {"task_id": task_id, "epoch_id": epoch.epoch_id},
+                    )
+            except Exception:
+                # No remote side effect is possible before this reservation commits.
+                if admission is not None and fence_epoch is not None:
+                    admission.clear_migration_fence(fence_epoch)
+                raise
+            proof = {**binding, "artifact_id": task.artifact_id}
+
+            def artifact_ready(manifest: Mapping[str, Any]) -> None:
+                self.manager.transition_task(
+                    task_id,
+                    "transferring",
+                    actor=actor,
+                    expected_status="preparing",
+                    manifest_digest=content_hash(manifest),
+                    artifact_id=str(manifest["artifact_id"]),
+                )
+
+            def target_verified(verified: dict[str, object]) -> None:
+                self.prepare(task_id, actor=actor, proof=verified)
+
+            receipt = self.executor.execute(
+                task,
+                proof=proof,
+                source_epoch=task.source_epoch,
+                artifact_ready=artifact_ready,
+                target_verified=target_verified,
+            )
+            current = self.manager.get_task(task_id)
+            return self._commit_receipt(current, epoch, receipt, proof, actor)
 
     def prepare(
         self,
@@ -57,6 +164,9 @@ class CutoverCoordinator:
         proof: dict[str, object] | None = None,
     ) -> CutoverPlan:
         task = self.manager.get_task(task_id)
+        self.manager.policy_store.assert_automation_allowed(
+            self.manager.policy_store.read_policy(task.subject_id)
+        )
         if proof is None:
             raise ValueError("verified target restore and health proof is required")
         if self.executor is None:
@@ -74,7 +184,7 @@ class CutoverCoordinator:
             raise ValueError("migration task is not ready for target validation")
         elif task.manifest_digest != verified["manifest_digest"]:
             raise ValueError("verified target proof manifest binding is invalid")
-        epoch = EpochLease.acquire(
+        epoch = self._epoch_for_task(task_id) or EpochLease.acquire(
             self.database,
             task.subject_id,
             task.target_id,
@@ -141,6 +251,9 @@ class CutoverCoordinator:
         task = self.manager.get_task(task_id)
         if task.status == "committed":
             return {"task_id": task_id, "status": "committed"}
+        self.manager.policy_store.assert_automation_allowed(
+            self.manager.policy_store.read_policy(task.subject_id)
+        )
         if task.status not in {"validating", "cutover"}:
             raise ValueError("verified target restore and health proof is required before commit")
         if self.executor is None:
@@ -160,6 +273,19 @@ class CutoverCoordinator:
                     # leases, and wait for them to drain before any side effect.
                     admission.fence_for_migration()
                 proof = self._proof_for_task(task_id)
+                with self.database.transaction() as connection:
+                    MigrationStore._append_audit(
+                        connection,
+                        task.subject_id,
+                        "migration_execution_started",
+                        actor,
+                        {
+                            "task_id": task.task_id,
+                            "target_id": task.target_id,
+                            "source_epoch": task.source_epoch,
+                            "manifest_digest": task.manifest_digest,
+                        },
+                    )
                 receipt = execution_receipt_from(
                     self.executor.execute(
                         task,
@@ -167,63 +293,65 @@ class CutoverCoordinator:
                         source_epoch=task.source_epoch,
                     )
                 )
-                receipt.validate(task, proof)
-                with self.database.transaction() as connection:
-                    if task.status == "validating":
-                        task = self.manager.transition_task_in_transaction(
-                            connection,
-                            task_id,
-                            "cutover",
-                            actor=actor,
-                            expected_status="validating",
-                        )
-                    epoch.assert_current_in_transaction(connection)
-                    task = self.manager.transition_task_in_transaction(
-                        connection,
-                        task_id,
-                        "committed",
-                        actor=actor,
-                        expected_status="cutover",
-                    )
-                    MigrationStore._append_audit(
-                        connection,
-                        task.subject_id,
-                        "migration_execution_completed",
-                        actor,
-                        {
-                            "task_id": receipt.task_id,
-                            "target_id": receipt.target_id,
-                            "source_epoch": receipt.source_epoch,
-                            "manifest_digest": receipt.manifest_digest,
-                            "artifact_id": receipt.artifact_id,
-                            "restore_report_digest": receipt.restore_report_digest,
-                            "health_report_digest": receipt.health_report_digest,
-                            "source_fence_digest": receipt.source_fence_digest,
-                            "target_activation_digest": receipt.target_activation_digest,
-                            "recipient_key_fingerprint": receipt.recipient_key_fingerprint,
-                            "target_volume_proof_digest": receipt.target_volume_proof_digest,
-                            "credential_binding_digest": receipt.credential_binding_digest,
-                            "signer_binding_digest": receipt.signer_binding_digest,
-                            "wallet_mode": receipt.wallet_mode,
-                            "wallet_proof_digest": receipt.wallet_proof_digest,
-                        },
-                    )
-                    epoch.complete_in_transaction(connection, actor)
-                return {"task_id": task_id, "status": task.status}
-            except (MigrationExecutionError, ValueError):
-                if receipt is not None:
-                    with suppress(Exception):
-                        self.executor.rollback(
-                            task, receipt=receipt, reason="durable commit failed"
-                        )
-                raise
+                return self._commit_receipt(task, epoch, receipt, proof, actor)
             except Exception:
-                if receipt is not None:
-                    with suppress(Exception):
-                        self.executor.rollback(
-                            task, receipt=receipt, reason="durable commit failed"
-                        )
+                # A lost reply is indistinguishable from successful activation.
+                # Leave the durable epoch and admission fence in place until an
+                # explicit rollback obtains persistent target cancellation.
                 raise
+
+    def _commit_receipt(
+        self,
+        task: MigrationTask,
+        epoch: EpochLease,
+        receipt: MigrationExecutionReceipt,
+        proof: dict[str, object],
+        actor: str,
+    ) -> dict[str, str]:
+        task_id = task.task_id
+        receipt.validate(task, proof)
+        with self.database.transaction() as connection:
+            if task.status == "validating":
+                task = self.manager.transition_task_in_transaction(
+                    connection,
+                    task_id,
+                    "cutover",
+                    actor=actor,
+                    expected_status="validating",
+                )
+            epoch.assert_current_in_transaction(connection)
+            task = self.manager.transition_task_in_transaction(
+                connection,
+                task_id,
+                "committed",
+                actor=actor,
+                expected_status="cutover",
+            )
+            MigrationStore._append_audit(
+                connection,
+                task.subject_id,
+                "migration_execution_completed",
+                actor,
+                {
+                    "task_id": receipt.task_id,
+                    "target_id": receipt.target_id,
+                    "source_epoch": receipt.source_epoch,
+                    "manifest_digest": receipt.manifest_digest,
+                    "artifact_id": receipt.artifact_id,
+                    "restore_report_digest": receipt.restore_report_digest,
+                    "health_report_digest": receipt.health_report_digest,
+                    "source_fence_digest": receipt.source_fence_digest,
+                    "target_activation_digest": receipt.target_activation_digest,
+                    "recipient_key_fingerprint": receipt.recipient_key_fingerprint,
+                    "target_volume_proof_digest": receipt.target_volume_proof_digest,
+                    "credential_binding_digest": receipt.credential_binding_digest,
+                    "signer_binding_digest": receipt.signer_binding_digest,
+                    "wallet_mode": receipt.wallet_mode,
+                    "wallet_proof_digest": receipt.wallet_proof_digest,
+                },
+            )
+            epoch.complete_in_transaction(connection, actor)
+        return {"task_id": task_id, "status": task.status}
 
     def _proof_for_task(self, task_id: str) -> dict[str, object]:
         """Load the proof digests recorded when the task entered validation."""
@@ -254,33 +382,55 @@ class CutoverCoordinator:
         with control:
             task = self.manager.get_task(task_id)
             if task.status == "rolled_back":
-                if admission is not None and admission.migration_fenced:
-                    fence_epoch = admission.migration_fence_epoch
-                    if fence_epoch is not None:
-                        admission.clear_migration_fence(fence_epoch)
+                # An old task must never clear a newer migration's fence.
                 return {"task_id": task_id, "status": "rolled_back"}
             if task.status == "committed":
                 raise ValueError("migration task cannot be rolled back")
             epoch = self._epoch_for_task(task_id)
-            if task.status == "rolling_back" and epoch is None:
-                self.manager.transition_task(
-                    task_id, "rolled_back", actor=actor, error_code=reason.strip()[:256]
-                )
-                if admission is not None and admission.migration_fenced:
-                    fence_epoch = admission.migration_fence_epoch
-                    if fence_epoch is not None:
-                        admission.clear_migration_fence(fence_epoch)
-                return {"task_id": task_id, "status": "rolled_back"}
             if task.status != "rolling_back":
                 self.manager.transition_task(
                     task_id, "rolling_back", actor=actor, error_code=reason.strip()[:256]
                 )
             if epoch is not None:
-                epoch.revoke(reason.strip()[:256], actor)
-            self.manager.transition_task(
-                task_id, "rolled_back", actor=actor, error_code=reason.strip()[:256]
-            )
-            if admission is not None and admission.migration_fenced:
+                epoch.assert_current()
+            if task.manifest_digest is not None:
+                if self.executor is None:
+                    raise MigrationExecutionError("target_deactivation_unavailable")
+                cancellation = self.executor.rollback(task, reason=reason)
+                expected = {
+                    "task_id": task.task_id,
+                    "target_id": task.target_id,
+                    "source_epoch": task.source_epoch,
+                    "manifest_digest": task.manifest_digest,
+                    "status": "deactivated",
+                    "activation_revoked": True,
+                }
+                if not isinstance(cancellation, dict) or any(
+                    cancellation.get(key) != value for key, value in expected.items()
+                ):
+                    raise MigrationExecutionError("target_deactivation_proof_invalid")
+                with self.database.transaction() as connection:
+                    MigrationStore._append_audit(
+                        connection,
+                        task.subject_id,
+                        "migration_target_deactivated",
+                        actor,
+                        dict(cancellation),
+                    )
+            # Epoch revocation and terminal task status are one durable change.
+            # An audit/transition failure leaves the source fenced on restart.
+            with self.database.transaction() as connection:
+                if epoch is not None:
+                    epoch.revoke_in_transaction(connection, reason.strip()[:256], actor)
+                self.manager.transition_task_in_transaction(
+                    connection,
+                    task_id,
+                    "rolled_back",
+                    actor=actor,
+                    error_code=reason.strip()[:256],
+                    expected_status="rolling_back",
+                )
+            if epoch is not None and admission is not None and admission.migration_fenced:
                 fence_epoch = admission.migration_fence_epoch
                 if fence_epoch is not None:
                     admission.clear_migration_fence(fence_epoch)
