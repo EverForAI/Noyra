@@ -271,6 +271,16 @@ def create_keystore(path: Path, password: str, *, private_key: str | None = None
             _hex_field(encoded, 32, "wallet private key")
             account = Account.from_key(bytes.fromhex(encoded))
         payload = Account.encrypt(account.key, password, kdf="scrypt", iterations=SCRYPT_N)
+        # eth-keyfile encodes the AES-CTR IV as an integer and can therefore
+        # drop leading zero bytes.  Restore the fixed 16-byte representation
+        # required by the V3 keystore contract before validating and writing it.
+        crypto = payload.get("crypto")
+        if isinstance(crypto, dict):
+            cipherparams = crypto.get("cipherparams")
+            if isinstance(cipherparams, dict):
+                iv = cipherparams.get("iv")
+                if isinstance(iv, str) and 0 < len(iv) <= 32:
+                    cipherparams["iv"] = iv.rjust(32, "0")
         # Validate our assumptions about dependency output before persisting it.
         _validate_kdf(payload)
         _write_exclusive(target, _canonical_payload(payload))
