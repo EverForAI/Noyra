@@ -1581,6 +1581,8 @@ class MigrationAgent:
             raise ValueError("migration activation storage is unavailable")
         if self.activation_controller is None:
             raise ValueError("target runtime activation controller is unavailable")
+        if self._signing_key is None:
+            raise ValueError("target signing identity is not configured")
         if not isinstance(request.get("task_id"), str) or not re.fullmatch(
             r"[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}", str(request["task_id"])
         ):
@@ -1588,8 +1590,10 @@ class MigrationAgent:
         result = self.activation_controller.deactivate(dict(request))
         if (
             not isinstance(result, Mapping)
-            or result.get("status") not in {"deactivated", "inactive"}
+            or result.get("status") != "deactivated"
             or result.get("task_id") != request["task_id"]
+            or result.get("activation_revoked") is not True
+            or any(result.get(key) != value for key, value in request.items())
         ):
             raise ValueError("target service deactivation proof is invalid")
         path = self.data_root / "activations" / f"{request['task_id']}.json"
@@ -1597,7 +1601,11 @@ class MigrationAgent:
             if path.is_symlink() or not path.is_file():
                 raise ValueError("migration activation record is invalid")
             path.unlink()
-        return {"status": "deactivated", "task_id": request["task_id"]}
+        receipt = {**dict(request), "status": "deactivated", "activation_revoked": True}
+        receipt["target_signature"] = base64.urlsafe_b64encode(
+            self._signing_key.sign(canonical_json(receipt).encode())
+        ).decode()
+        return receipt
 
     def _read_manifest(self, receipt: ReceiveReceipt) -> dict[str, Any]:
         if self.data_root is None or receipt.manifest_path is None:

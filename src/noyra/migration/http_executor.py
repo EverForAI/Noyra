@@ -470,39 +470,44 @@ class HTTPMigrationExecutor:
                 binding_evidence["wallet_digest"],
             )
         except Exception:
-            try:
-                self.source_unfence(task, source_epoch)
-            except Exception as error:
-                raise MigrationExecutionError("source_unfence_failed") from error
+            # Target activation may have succeeded without a reply. The
+            # coordinator alone releases admission after verified cancellation.
             raise
 
     def rollback(
         self,
         task: MigrationTask,
         *,
-        receipt: MigrationExecutionReceipt,
+        receipt: MigrationExecutionReceipt | None = None,
         reason: str,
-    ) -> None:
-        del reason
-        target, token, source_epoch = self._active.pop(
-            task.task_id,
-            (self._target(task), self._token(task), task.source_epoch),
-        )
+    ) -> dict[str, Any]:
+        del reason, receipt
+        target, token, source_epoch = self._target(task), self._token(task), task.source_epoch
+        binding = {
+            "task_id": task.task_id,
+            "target_id": task.target_id,
+            "source_epoch": source_epoch,
+            "manifest_digest": task.manifest_digest,
+        }
         try:
-            result = self._request(
-                target,
-                token,
-                "/v1/deactivate",
-                {
-                    "task_id": receipt.task_id,
-                    "target_id": receipt.target_id,
-                    "source_epoch": source_epoch,
-                    "manifest_digest": receipt.manifest_digest,
-                },
-            )
-            if result.get("status") not in {"deactivated", "inactive"}:
-                raise MigrationExecutionError("target_deactivation_failed")
-            self.source_unfence(task, source_epoch)
+            result = self._request(target, token, "/v1/deactivate", binding)
+            signature = result.get("target_signature")
+            signed = {key: value for key, value in result.items() if key != "target_signature"}
+            if signed != {**binding, "status": "deactivated", "activation_revoked": True}:
+                raise MigrationExecutionError("target_deactivation_proof_invalid")
+            try:
+                if not isinstance(signature, str):
+                    raise ValueError("signature missing")
+                encoded_key = str(target["public_key"])
+                public = base64.urlsafe_b64decode(encoded_key + "=" * (-len(encoded_key) % 4))
+                raw = base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
+                Ed25519PublicKey.from_public_bytes(public).verify(
+                    raw, canonical_json(signed).encode()
+                )
+            except _SIGNATURE_ERROR as error:
+                raise MigrationExecutionError("target_deactivation_signature_invalid") from error
+            self._active.pop(task.task_id, None)
+            return dict(result)
         except MigrationExecutionError:
             raise
         except Exception as error:

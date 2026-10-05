@@ -163,10 +163,14 @@ class MigrationExecutor(Protocol):
         self,
         task: MigrationTask,
         *,
-        receipt: MigrationExecutionReceipt,
+        receipt: MigrationExecutionReceipt | None = None,
         reason: str,
-    ) -> None:
-        """Undo completed external steps when durable commit cannot finish."""
+    ) -> Mapping[str, Any]:
+        """Persistently cancel target activation, even when its reply was lost.
+
+        Return verified task/epoch/manifest-bound deactivation evidence. Never
+        restore source admission here; only the durable coordinator may do so.
+        """
 
 
 def execution_receipt_from(value: Any) -> MigrationExecutionReceipt:

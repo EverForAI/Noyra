@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import re
-from contextlib import nullcontext, suppress
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 from cryptography.exceptions import InvalidSignature
@@ -167,6 +167,19 @@ class CutoverCoordinator:
                     # leases, and wait for them to drain before any side effect.
                     admission.fence_for_migration()
                 proof = self._proof_for_task(task_id)
+                with self.database.transaction() as connection:
+                    MigrationStore._append_audit(
+                        connection,
+                        task.subject_id,
+                        "migration_execution_started",
+                        actor,
+                        {
+                            "task_id": task.task_id,
+                            "target_id": task.target_id,
+                            "source_epoch": task.source_epoch,
+                            "manifest_digest": task.manifest_digest,
+                        },
+                    )
                 receipt = execution_receipt_from(
                     self.executor.execute(
                         task,
@@ -217,19 +230,10 @@ class CutoverCoordinator:
                     )
                     epoch.complete_in_transaction(connection, actor)
                 return {"task_id": task_id, "status": task.status}
-            except (MigrationExecutionError, ValueError):
-                if receipt is not None:
-                    with suppress(Exception):
-                        self.executor.rollback(
-                            task, receipt=receipt, reason="durable commit failed"
-                        )
-                raise
             except Exception:
-                if receipt is not None:
-                    with suppress(Exception):
-                        self.executor.rollback(
-                            task, receipt=receipt, reason="durable commit failed"
-                        )
+                # A lost reply is indistinguishable from successful activation.
+                # Leave the durable epoch and admission fence in place until an
+                # explicit rollback obtains persistent target cancellation.
                 raise
 
     def _proof_for_task(self, task_id: str) -> dict[str, object]:
@@ -261,33 +265,55 @@ class CutoverCoordinator:
         with control:
             task = self.manager.get_task(task_id)
             if task.status == "rolled_back":
-                if admission is not None and admission.migration_fenced:
-                    fence_epoch = admission.migration_fence_epoch
-                    if fence_epoch is not None:
-                        admission.clear_migration_fence(fence_epoch)
+                # An old task must never clear a newer migration's fence.
                 return {"task_id": task_id, "status": "rolled_back"}
             if task.status == "committed":
                 raise ValueError("migration task cannot be rolled back")
             epoch = self._epoch_for_task(task_id)
-            if task.status == "rolling_back" and epoch is None:
-                self.manager.transition_task(
-                    task_id, "rolled_back", actor=actor, error_code=reason.strip()[:256]
-                )
-                if admission is not None and admission.migration_fenced:
-                    fence_epoch = admission.migration_fence_epoch
-                    if fence_epoch is not None:
-                        admission.clear_migration_fence(fence_epoch)
-                return {"task_id": task_id, "status": "rolled_back"}
             if task.status != "rolling_back":
                 self.manager.transition_task(
                     task_id, "rolling_back", actor=actor, error_code=reason.strip()[:256]
                 )
             if epoch is not None:
-                epoch.revoke(reason.strip()[:256], actor)
-            self.manager.transition_task(
-                task_id, "rolled_back", actor=actor, error_code=reason.strip()[:256]
-            )
-            if admission is not None and admission.migration_fenced:
+                epoch.assert_current()
+            if task.manifest_digest is not None:
+                if self.executor is None:
+                    raise MigrationExecutionError("target_deactivation_unavailable")
+                cancellation = self.executor.rollback(task, reason=reason)
+                expected = {
+                    "task_id": task.task_id,
+                    "target_id": task.target_id,
+                    "source_epoch": task.source_epoch,
+                    "manifest_digest": task.manifest_digest,
+                    "status": "deactivated",
+                    "activation_revoked": True,
+                }
+                if not isinstance(cancellation, dict) or any(
+                    cancellation.get(key) != value for key, value in expected.items()
+                ):
+                    raise MigrationExecutionError("target_deactivation_proof_invalid")
+                with self.database.transaction() as connection:
+                    MigrationStore._append_audit(
+                        connection,
+                        task.subject_id,
+                        "migration_target_deactivated",
+                        actor,
+                        dict(cancellation),
+                    )
+            # Epoch revocation and terminal task status are one durable change.
+            # An audit/transition failure leaves the source fenced on restart.
+            with self.database.transaction() as connection:
+                if epoch is not None:
+                    epoch.revoke_in_transaction(connection, reason.strip()[:256], actor)
+                self.manager.transition_task_in_transaction(
+                    connection,
+                    task_id,
+                    "rolled_back",
+                    actor=actor,
+                    error_code=reason.strip()[:256],
+                    expected_status="rolling_back",
+                )
+            if epoch is not None and admission is not None and admission.migration_fenced:
                 fence_epoch = admission.migration_fence_epoch
                 if fence_epoch is not None:
                     admission.clear_migration_fence(fence_epoch)

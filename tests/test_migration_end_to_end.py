@@ -73,10 +73,18 @@ class _ProofExecutor:
         self,
         task: MigrationTask,
         *,
-        receipt: MigrationExecutionReceipt,
+        receipt: MigrationExecutionReceipt | None = None,
         reason: str,
-    ) -> None:
-        del task, receipt, reason
+    ) -> dict[str, Any]:
+        del receipt, reason
+        return {
+            "task_id": task.task_id,
+            "target_id": task.target_id,
+            "source_epoch": task.source_epoch,
+            "manifest_digest": task.manifest_digest,
+            "status": "deactivated",
+            "activation_revoked": True,
+        }
 
 
 def _add_disabled_binding_proof(

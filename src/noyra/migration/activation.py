@@ -26,6 +26,8 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from noyra.core.database import Database
+from noyra.core.errors import RuntimeOwnershipError
+from noyra.core.locking import ProcessLock
 from noyra.core.types import canonical_json, content_hash
 
 from .fencing import EpochLease
@@ -152,6 +154,22 @@ class TargetRuntimeActivator:
             self.dropin_dir = self.config_root.parent / "systemd" / "noyra.service.d"
 
     def activate(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        lock = self._control_lock()
+        try:
+            return self._activate(request)
+        finally:
+            lock.release()
+
+    def _control_lock(self) -> ProcessLock:
+        self._ensure_dirs()
+        path = self.state_root / "control.lock"
+        if path.is_symlink():
+            raise TargetActivationError("activation_path_invalid")
+        lock = ProcessLock(path)
+        lock.acquire()
+        return lock
+
+    def _activate(self, request: Mapping[str, Any]) -> dict[str, Any]:
         values = _validate_activation_request(request)
         self._ensure_dirs()
         target_id = values["target_id"]
@@ -276,15 +294,47 @@ class TargetRuntimeActivator:
             raise TargetActivationError("target_activation_failed") from error
 
     def deactivate(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        lock = self._control_lock()
+        try:
+            return self._deactivate(request)
+        finally:
+            lock.release()
+
+    def _deactivate(self, request: Mapping[str, Any]) -> dict[str, Any]:
         values = _validate_deactivation_request(request)
         self._ensure_dirs()
         task_id = values["task_id"]
         marker = self.activation_root / f"{task_id}.json"
+        receipt = {**values, "status": "deactivated", "activation_revoked": True}
         if not marker.exists():
-            return {"status": "inactive", "task_id": task_id}
+            active_database = self.data_root / "noyra.sqlite3"
+            if active_database.is_file() and self._database_owns_runtime(
+                active_database, task_id, values["target_id"]
+            ):
+                raise TargetActivationError("activation_record_missing_for_active_runtime")
+            # A persistent tombstone also rejects an activation request which
+            # was delayed in transit and arrives after this cancellation.
+            _atomic_json(marker, receipt, 0o600)
+            return receipt
         state = _read_json(marker, "activation_record_invalid")
+        if state.get("status") in {"activating", "deactivating", "recovery_required"}:
+            if not _request_binding_matches(state, values):
+                raise TargetActivationError("activation_record_binding_invalid")
+            self._recover_incomplete()
+            state = _read_json(marker, "activation_record_invalid")
         if state.get("status") == "deactivated" and _request_binding_matches(state, values):
-            return {"status": "deactivated", "task_id": task_id}
+            return receipt
+        if state.get("status") in {
+            "failed",
+            "failed_reverted",
+            "recovered",
+        } and _request_binding_matches(state, values):
+            if self._database_owns_runtime(
+                self.data_root / "noyra.sqlite3", task_id, values["target_id"]
+            ):
+                raise TargetActivationError("active_runtime_ownership_mismatch")
+            _atomic_json(marker, {**state, **receipt}, 0o600)
+            return receipt
         if state.get("status") != "active" or not _request_binding_matches(state, values):
             raise TargetActivationError("activation_record_binding_invalid")
         rollback = self.rollback_root / task_id
@@ -322,7 +372,7 @@ class TargetRuntimeActivator:
             _atomic_json(
                 marker, {**state, "status": "deactivated", "deactivated_at": _now()}, 0o600
             )
-            return {"status": "deactivated", "task_id": task_id}
+            return receipt
         except TargetActivationError as error:
             _atomic_json(
                 marker,
@@ -343,6 +393,18 @@ class TargetRuntimeActivator:
             raise TargetActivationError("target_deactivation_failed") from error
 
     def recover_incomplete(self) -> int:
+        try:
+            lock = self._control_lock()
+        except RuntimeOwnershipError:
+            # systemd starts this prerequisite during an intentional switch.
+            # The live root controller owns recovery until it exits/crashes.
+            return 0
+        try:
+            return self._recover_incomplete()
+        finally:
+            lock.release()
+
+    def _recover_incomplete(self) -> int:
         """Restore the former DB before normal service startup after a crash mid-cutover."""
         self._ensure_dirs()
         recovered = 0
@@ -714,6 +776,14 @@ class TargetActivationBridge:
         _private_directory(self.status_root, "activation_status_directory_invalid", create=True)
         request_path = self.request_root / f"{task_id}.{operation}.json"
         status_path = self.status_root / f"{task_id}.{operation}.json"
+        if operation == "activate":
+            cancelled = self.status_root / f"{task_id}.deactivate.json"
+            if (
+                cancelled.is_file()
+                and _read_json(cancelled, "activation_status_invalid").get("activation_revoked")
+                is True
+            ):
+                raise TargetActivationError("activation_revoked")
         if request_path.exists() or request_path.is_symlink():
             raise TargetActivationError("activation_request_already_pending")
         payload = dict(request)
@@ -727,7 +797,10 @@ class TargetActivationBridge:
             previous = _read_json(status_path, "activation_status_invalid")
             if previous.get("request_digest") != request_digest:
                 raise TargetActivationError("activation_request_conflicts_with_existing_task")
-            return self._status_result(previous, operation)
+            if operation != "deactivate" or previous.get("status") != "failed":
+                return self._status_result(previous, operation)
+            # A transient root/systemd failure must not permanently prevent
+            # cancellation. The runner replaces this result after a retry.
         _atomic_json(
             request_path,
             {"payload": payload, "signature": signature, "request_digest": request_digest},
@@ -741,6 +814,13 @@ class TargetActivationBridge:
                 result = _read_json(status_path, "activation_status_invalid")
                 if result.get("request_digest") != request_digest:
                     raise TargetActivationError("activation_status_binding_invalid")
+                if (
+                    operation == "deactivate"
+                    and request_path.exists()
+                    and result.get("status") == "failed"
+                ):
+                    time.sleep(self.poll_seconds)
+                    continue
                 return self._status_result(result, operation)
             time.sleep(self.poll_seconds)
         raise TargetActivationError("activation_runner_timeout")

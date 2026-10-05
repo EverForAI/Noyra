@@ -172,34 +172,37 @@ class EpochLease:
             raise ValueError("migration epoch integrity check failed")
 
     def revoke(self, reason: str, actor: str) -> None:
+        with self.database.transaction() as connection:
+            self.revoke_in_transaction(connection, reason, actor)
+
+    def revoke_in_transaction(self, c: Any, reason: str, actor: str) -> None:
         if not reason.strip() or not actor.strip():
             raise ValueError("epoch revoke metadata is required")
-        self.assert_current()
-        with self.database.transaction() as c:
-            revoked_at = utc_now()
-            row = c.execute(
-                "SELECT * FROM migration_epochs WHERE epoch_id=? AND status='active'",
-                (self.epoch_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("migration epoch is already inactive")
-            updated = c.execute(
-                "UPDATE migration_epochs SET status='revoked', revoked_at=?, state_hash=? WHERE epoch_id=? AND status='active'",
-                (
-                    revoked_at,
-                    self._state_hash({**dict(row), "status": "revoked", "revoked_at": revoked_at}),
-                    self.epoch_id,
-                ),
-            )
-            if updated.rowcount != 1:
-                raise ValueError("migration epoch is already inactive")
-            MigrationStore._append_audit(
-                c,
-                self.subject_id,
-                "migration_epoch_revoked",
-                actor.strip(),
-                {"epoch_id": self.epoch_id, "reason": reason.strip()},
-            )
+        self.assert_current_in_transaction(c)
+        revoked_at = utc_now()
+        row = c.execute(
+            "SELECT * FROM migration_epochs WHERE epoch_id=? AND status='active'",
+            (self.epoch_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("migration epoch is already inactive")
+        updated = c.execute(
+            "UPDATE migration_epochs SET status='revoked', revoked_at=?, state_hash=? WHERE epoch_id=? AND status='active'",
+            (
+                revoked_at,
+                self._state_hash({**dict(row), "status": "revoked", "revoked_at": revoked_at}),
+                self.epoch_id,
+            ),
+        )
+        if updated.rowcount != 1:
+            raise ValueError("migration epoch is already inactive")
+        MigrationStore._append_audit(
+            c,
+            self.subject_id,
+            "migration_epoch_revoked",
+            actor.strip(),
+            {"epoch_id": self.epoch_id, "reason": reason.strip()},
+        )
 
     def complete(self, actor: str) -> None:
         if not actor.strip():

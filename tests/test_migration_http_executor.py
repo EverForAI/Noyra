@@ -433,3 +433,46 @@ def test_http_executor_refuses_unsafe_bundle_before_any_target_work(tmp_path: Pa
         executor.execute(_task(), proof=proof, source_epoch="runtime-1")
     assert fenced == []
     assert transport.calls == []
+
+
+def test_rollback_verifies_signed_cancellation_without_activation_receipt(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from noyra.migration.executor import MigrationExecutionError
+
+    private = Ed25519PrivateKey.generate()
+    public = base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode()
+    task = replace(_task(), manifest_digest="b" * 64)
+
+    class CancellationTransport:
+        tamper = False
+
+        def request(self, url: str, body: dict[str, Any], token: str) -> dict[str, Any]:
+            assert url.endswith("/v1/deactivate")
+            result = {**body, "status": "deactivated", "activation_revoked": True}
+            result["target_signature"] = base64.urlsafe_b64encode(
+                private.sign(canonical_json(result).encode())
+            ).decode()
+            if self.tamper:
+                result["source_epoch"] = "wrong-epoch"
+            return result
+
+    transport = CancellationTransport()
+    unfenced: list[str] = []
+    executor = HTTPMigrationExecutor(
+        target_resolver=lambda task: {
+            "target_id": task.target_id,
+            "endpoint": "https://target.example",
+            "public_key": public,
+        },
+        token_resolver=lambda task: "t" * 32,
+        artifact_resolver=lambda task, proof: ArtifactBundle(tmp_path / "unused", {}),
+        source_fence=lambda task, epoch: "f" * 64,
+        source_unfence=lambda task, epoch: unfenced.append(epoch),
+        transport=transport,
+    )
+    assert executor.rollback(task, reason="lost reply")["activation_revoked"] is True
+    assert unfenced == []  # Admission belongs to the durable source coordinator.
+    transport.tamper = True
+    with pytest.raises(MigrationExecutionError, match="proof_invalid"):
+        executor.rollback(task, reason="replayed wrong epoch")

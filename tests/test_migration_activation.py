@@ -375,6 +375,34 @@ def test_duplicate_activation_returns_same_receipt_without_restarting(tmp_path: 
     assert systemd.calls == calls
 
 
+def test_cancellation_before_activation_persists_across_restart_and_rejects_late_request(
+    tmp_path: Path,
+) -> None:
+    task_id, fence_digest, _, _, systemd, activator = _runtime_fixture(tmp_path)
+    request = _request(task_id, fence_digest)
+    cancel = {
+        key: request[key] for key in ("task_id", "target_id", "source_epoch", "manifest_digest")
+    }
+    result = activator.deactivate(cancel)
+    assert result["activation_revoked"] is True
+    restarted = TargetRuntimeActivator(activator.data_root, activator.config_root, systemd=systemd)
+    assert restarted.deactivate(cancel) == result
+    with pytest.raises(TargetActivationError, match="conflicts"):
+        restarted.activate(request)
+    assert systemd.calls == []
+
+
+def test_live_activation_lock_prevents_recovery_from_undoing_intentional_restart(
+    tmp_path: Path,
+) -> None:
+    _, _, _, _, _, activator = _runtime_fixture(tmp_path)
+    lock = activator._control_lock()
+    try:
+        assert activator.recover_incomplete() == 0
+    finally:
+        lock.release()
+
+
 def test_deactivation_is_idempotent_and_restores_previous_database(tmp_path: Path) -> None:
     task_id, fence_digest, active_database, old_digest, systemd, activator = _runtime_fixture(
         tmp_path
@@ -391,7 +419,7 @@ def test_deactivation_is_idempotent_and_restores_previous_database(tmp_path: Pat
     calls = list(systemd.calls)
     second = activator.deactivate(deactivate_request)
 
-    assert first == {"status": "deactivated", "task_id": task_id}
+    assert first == {**deactivate_request, "status": "deactivated", "activation_revoked": True}
     assert second == first
     assert hashlib.sha256(active_database.read_bytes()).hexdigest() == old_digest
     assert systemd.calls == calls
@@ -413,7 +441,8 @@ def test_deactivation_allows_database_changes_since_activation(tmp_path: Path) -
         }
     )
 
-    assert result == {"status": "deactivated", "task_id": task_id}
+    assert result["status"] == "deactivated" and result["activation_revoked"] is True
+    assert result["task_id"] == task_id
 
 
 def test_deactivation_readiness_failure_leaves_durable_recovery_state(tmp_path: Path) -> None:
@@ -525,7 +554,8 @@ def test_deactivation_of_later_activation_restores_previous_runtime_owner(tmp_pa
         }
     )
 
-    assert result == {"status": "deactivated", "task_id": second_task_id}
+    assert result["status"] == "deactivated" and result["activation_revoked"] is True
+    assert result["task_id"] == second_task_id
     assert json.loads(current_path.read_text()) == first_owner
 
 
