@@ -591,7 +591,13 @@ class WalletEconomyStore:
             return self._policy_from_row(row)
 
     def update_policy(
-        self, subject_id: str, proposal: PaymentPolicyInput, *, expected_version: int, actor: str
+        self,
+        subject_id: str,
+        proposal: PaymentPolicyInput,
+        *,
+        expected_version: int,
+        actor: str,
+        automation_request: Mapping[str, str] | None = None,
     ) -> PaymentPolicyRecord:
         actor = self._operator(actor)
         validate_subject_id(subject_id)
@@ -605,6 +611,20 @@ class WalletEconomyStore:
             row = c.execute(
                 "SELECT * FROM wallet_payment_policies WHERE subject_id=?", (subject_id,)
             ).fetchone()
+            if automation_request is not None:
+                duplicate = c.execute(
+                    "SELECT payload_json FROM audit_records WHERE subject_id=? "
+                    "AND action='wallet_automation_updated' "
+                    "AND json_extract(payload_json, '$.idempotency_key')=? LIMIT 1",
+                    (subject_id, automation_request["idempotency_key"]),
+                ).fetchone()
+                if duplicate is not None:
+                    recorded = strict_json_loads(duplicate["payload_json"])
+                    if recorded.get("request_digest") != automation_request["request_digest"]:
+                        raise ValueError("wallet automation idempotency conflict")
+                    if row is None:
+                        raise IntegrityError("wallet payment policy is missing")
+                    return self._policy_from_row(row)
             current = 1 if row is None else int(row["policy_version"])
             if expected_version != current:
                 raise ValueError("wallet payment policy version conflict")
@@ -623,6 +643,14 @@ class WalletEconomyStore:
                 actor,
                 {"policy_version": current + 1, "mode": proposal.mode},
             )
+            if automation_request is not None:
+                self._audit(
+                    c,
+                    subject_id,
+                    "wallet_automation_updated",
+                    actor,
+                    {**automation_request, "policy_version": current + 1},
+                )
             return self._policy_from_row(
                 c.execute(
                     "SELECT * FROM wallet_payment_policies WHERE subject_id=?", (subject_id,)

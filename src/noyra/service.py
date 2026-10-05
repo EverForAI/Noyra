@@ -5939,29 +5939,35 @@ class NoyraHTTPServer:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_wallet_automation"})
                     return
                 try:
-                    expected = int(payload.pop("expected_version"))
-                    reason = str(payload.pop("reason", "管理员更新自动付款设置")).strip()
-                    if not reason or len(reason) > 2000:
+                    payload = dict(payload)
+                    expected = payload.pop("expected_version")
+                    if type(expected) is not int or expected < 1:
+                        raise ValueError("version")
+                    reason = payload.pop("reason", "管理员更新自动付款设置")
+                    if not isinstance(reason, str) or not reason.strip() or len(reason) > 2000:
                         raise ValueError("reason")
-                    idem = str(payload.pop("idempotency_key", "")).strip()
-                    if not idem or len(idem) > 128:
+                    reason = reason.strip()
+                    idem = payload.pop("idempotency_key", "")
+                    if not isinstance(idem, str) or not idem.strip() or len(idem) > 128:
                         raise ValueError("idempotency_key")
-                    with owner.kernel.database.read_transaction() as connection:
-                        duplicate = connection.execute(
-                            "SELECT payload_json FROM audit_records WHERE subject_id=? "
-                            "AND action='wallet_automation_updated' ORDER BY occurred_at DESC",
-                            (owner.kernel.subject_id,),
-                        ).fetchall()
-                    for row in duplicate:
-                        try:
-                            if (
-                                strict_json_loads(row["payload_json"]).get("idempotency_key")
-                                == idem
-                            ):
-                                self._json(HTTPStatus.OK, self._wallet_automation_projection())
-                                return
-                        except (TypeError, ValueError, AttributeError):
-                            continue
+                    idem = idem.strip()
+                    if not payload or set(payload) - {
+                        "mode",
+                        "automation_enabled",
+                        "emergency_paused",
+                    }:
+                        raise ValueError("unknown fields")
+                    for key in ("automation_enabled", "emergency_paused"):
+                        if key in payload and type(payload[key]) is not bool:
+                            raise ValueError(key)
+                    digest = content_hash(
+                        {
+                            "actor": self._actor(),
+                            "expected_version": expected,
+                            "reason": reason,
+                            **payload,
+                        }
+                    )
                     current = owner.wallet_economy.get_policy(owner.kernel.subject_id)
                     allowed = {
                         "mode": current.mode,
@@ -5976,10 +5982,12 @@ class NoyraHTTPServer:
                         "max_observation_age_seconds": current.max_observation_age_seconds,
                         "automatic_max_amount": current.automatic_max_amount,
                         "anomaly_block": current.anomaly_block,
-                        "emergency_paused": bool(
-                            payload.pop("emergency_paused", current.emergency_paused)
+                        "emergency_paused": payload.pop(
+                            "emergency_paused", current.emergency_paused
                         ),
-                        "automation_enabled": bool(payload.pop("automation_enabled")),
+                        "automation_enabled": payload.pop(
+                            "automation_enabled", current.automation_enabled
+                        ),
                         "recipient_allowlist_enabled": current.recipient_allowlist_enabled,
                         "allowed_recipient_addresses": list(current.allowed_recipient_addresses),
                     }
@@ -5987,28 +5995,21 @@ class NoyraHTTPServer:
                         allowed["mode"] = payload.pop("mode")
                     if payload:
                         raise ValueError("unknown fields")
-                    record = owner.wallet_economy.update_policy(
+                    owner.wallet_economy.update_policy(
                         owner.kernel.subject_id,
                         PaymentPolicyInput.model_validate(allowed),
                         expected_version=expected,
                         actor=self._actor(),
+                        automation_request={
+                            "idempotency_key": idem,
+                            "reason": reason,
+                            "request_digest": digest,
+                        },
                     )
-                    with owner.kernel.database.transaction() as connection:
-                        owner.wallet_economy._audit(
-                            connection,
-                            owner.kernel.subject_id,
-                            "wallet_automation_updated",
-                            self._actor(),
-                            {
-                                "idempotency_key": idem,
-                                "reason": reason,
-                                "policy_version": record.policy_version,
-                            },
-                        )
                     self._json(HTTPStatus.OK, self._wallet_automation_projection())
                 except Exception as error:
                     self._json(
-                        HTTPStatus.CONFLICT if "version" in str(error) else HTTPStatus.BAD_REQUEST,
+                        HTTPStatus.CONFLICT if "conflict" in str(error) else HTTPStatus.BAD_REQUEST,
                         {"error": "invalid_wallet_automation"},
                     )
 
@@ -6019,35 +6020,12 @@ class NoyraHTTPServer:
                 if not isinstance(payload, dict):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_wallet_automation"})
                     return
+                if set(payload) - {"expected_version", "reason", "idempotency_key"}:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_wallet_automation"})
+                    return
                 payload["emergency_paused"] = paused
-                payload["automation_enabled"] = owner.wallet_economy.get_policy(
-                    owner.kernel.subject_id
-                ).automation_enabled
-                payload.setdefault(
-                    "mode", owner.wallet_economy.get_policy(owner.kernel.subject_id).mode
-                )
                 payload.setdefault("idempotency_key", f"pause-{paused}-{time.time_ns()}")
                 payload.setdefault("reason", "管理员紧急暂停" if paused else "管理员解除紧急暂停")
-                # Pause/resume is an explicit policy update; keep all unrelated
-                # policy fields from the durable record.
-                current = owner.wallet_economy.get_policy(owner.kernel.subject_id)
-                payload.update(
-                    {
-                        "allowed_network_ids": list(current.allowed_network_ids),
-                        "allowed_asset_ids": list(current.allowed_asset_ids),
-                        "per_order_limit": current.per_order_limit,
-                        "daily_limit": current.daily_limit,
-                        "monthly_limit": current.monthly_limit,
-                        "daily_order_limit": current.daily_order_limit,
-                        "monthly_order_limit": current.monthly_order_limit,
-                        "min_balance": current.min_balance,
-                        "max_observation_age_seconds": current.max_observation_age_seconds,
-                        "automatic_max_amount": current.automatic_max_amount,
-                        "anomaly_block": current.anomaly_block,
-                        "recipient_allowlist_enabled": current.recipient_allowlist_enabled,
-                        "allowed_recipient_addresses": list(current.allowed_recipient_addresses),
-                    }
-                )
                 self._update_wallet_automation(payload)
 
             def _configure_wallet_network(self) -> None:
