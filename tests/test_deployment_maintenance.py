@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -35,11 +36,20 @@ def test_gc_ignores_unmanaged_releases_and_requires_verified_replacement(tmp_pat
     for index in range(8):
         release = releases / f"release-{index}"
         release.mkdir()
-        (release / helper.MARKER).write_text(json.dumps({"format": "noyra-verified-install/v1"}))
+        (release / helper.MARKER).write_text(
+            json.dumps({"format": "noyra-verified-install/v1", "readiness": "passed"})
+        )
         backup = backups / f"noyra-release-{index}.noyra-backup"
         backup.write_bytes(b"backup")
         backup.with_name(backup.name + ".verified.json").write_text(
-            json.dumps({"restore_verified": True, "sha256": helper.file_hash(backup)})
+            json.dumps(
+                {
+                    "format": "noyra-verified-upgrade-backup/v1",
+                    "backup": backup.name,
+                    "restore_verified": True,
+                    "sha256": helper.file_hash(backup),
+                }
+            )
         )
     unmanaged = releases / "unmanaged"
     unmanaged.mkdir()
@@ -51,6 +61,85 @@ def test_gc_ignores_unmanaged_releases_and_requires_verified_replacement(tmp_pat
     )
     newest.write_bytes(b"tampered")
     assert helper.gc_plan(releases, backups, keep=3)["backups"] == []
+
+
+def _releases(tmp_path: Path) -> tuple[Any, Path, Path]:
+    helper = _helper()
+    releases, backups = tmp_path / "releases", tmp_path / "backups"
+    releases.mkdir()
+    backups.mkdir()
+    for index in range(8):
+        release = releases / f"release-{index}"
+        release.mkdir()
+        (release / helper.MARKER).write_text(
+            json.dumps({"format": "noyra-verified-install/v1", "readiness": "passed"})
+        )
+        # Filesystem timestamp precision must not decide which fixtures are old.
+        os.utime(release, (index + 1, index + 1))
+    return helper, releases, backups
+
+
+def test_gc_protects_current_previous_and_process_references(tmp_path: Path) -> None:
+    helper, releases, backups = _releases(tmp_path)
+    try:
+        (tmp_path / "current").symlink_to(releases / "release-0", target_is_directory=True)
+        (tmp_path / "previous").symlink_to(releases / "release-1", target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink permission unavailable")
+    proc = tmp_path / "proc" / "123"
+    proc.mkdir(parents=True)
+    (proc / "maps").write_text(f"12345 {releases / 'release-2'}/library.so\n", encoding="utf-8")
+    (proc / "cmdline").write_bytes(str(releases / "release-3" / "python").encode() + b"\0")
+    plan = helper.gc_plan(releases, backups, keep=3, proc_root=proc.parent)
+    assert plan["releases"] == ["release-4"]
+
+
+@pytest.mark.parametrize("reference", ["maps", "cmdline"])
+def test_gc_defers_release_deletion_when_process_reference_is_oversized(
+    tmp_path: Path, reference: str
+) -> None:
+    helper, releases, backups = _releases(tmp_path)
+    proc = tmp_path / "proc" / "123"
+    proc.mkdir(parents=True)
+    (proc / "maps").write_bytes(b"")
+    (proc / "cmdline").write_bytes(b"")
+    (proc / reference).write_bytes(b"x" * (helper.PROCESS_REFERENCE_BYTES + 1))
+    assert helper.gc_plan(releases, backups, keep=3, proc_root=proc.parent)["releases"] == []
+
+
+def test_gc_ignores_incomplete_markers(tmp_path: Path) -> None:
+    helper, releases, backups = _releases(tmp_path)
+    (releases / "release-0" / helper.MARKER).write_text(
+        json.dumps({"format": "noyra-verified-install/v1", "readiness": "failed"})
+    )
+    for index, changes in enumerate(
+        ({"format": "other"}, {"backup": "different"}, {"sha256": "not-a-digest"})
+    ):
+        backup = backups / f"noyra-invalid-{index}.noyra-backup"
+        backup.write_bytes(b"backup")
+        marker = {
+            "format": "noyra-verified-upgrade-backup/v1",
+            "backup": backup.name,
+            "restore_verified": True,
+            "sha256": helper.file_hash(backup),
+            **changes,
+        }
+        backup.with_name(backup.name + ".verified.json").write_text(json.dumps(marker))
+    plan = helper.gc_plan(releases, backups, keep=3, proc_root=tmp_path / "no-proc")
+    assert "release-0" not in plan["releases"]
+    assert plan["backups"] == []
+
+
+def test_gc_refuses_pointer_outside_releases(tmp_path: Path) -> None:
+    helper, releases, backups = _releases(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        (tmp_path / "current").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink permission unavailable")
+    with pytest.raises(ValueError, match="unsafe_release_pointer"):
+        helper.gc_plan(releases, backups, proc_root=tmp_path / "no-proc")
 
 
 def test_installer_preflights_before_stopping_and_gc_follows_readiness() -> None:

@@ -72,6 +72,7 @@ A01 需要真实环境执行，不能通过代码提交自动关闭。目标是�
 - 新冷备份实际解密恢复并验证清单/SQLite 后生成验证标记；通过 readiness 的新发布生成标记。只对已标记产物执行保留策略，不删除未知历史产物。
 - 安装锁内执行 GC，默认至少保留 5 个已验证发布/备份，另保护 current/previous、运行进程引用及绑定备份；备份替代物哈希失配时不清理旧备份。诊断/清理失败不会触发健康新发布回滚。
 - 验证：maintenance 3 项、upgrade manager/deployment/storage lifecycle 32 项、shell upgrade component rollback 通过；Bash 语法、Ruff、mypy 通过。真实安装/恢复和多卷空间验证仍属于 A01。
+- 最终复核补强：清理候选必须同时具有正确格式、通过 readiness 的发布标记或与备份文件名绑定的完整恢复标记。进程 maps/cmdline 读取限制为 1 MiB，无法完整检查时推迟发布删除。当前/previous、进程引用、越界指针、无效标记及超限检查共 8 项通过。
 
 ### 模块 6A：发布保证与生产自动化
 

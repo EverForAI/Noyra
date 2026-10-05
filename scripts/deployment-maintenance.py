@@ -17,6 +17,7 @@ from typing import Any
 
 SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 MARKER = ".noyra-verified-install.json"
+PROCESS_REFERENCE_BYTES = 1_048_576
 
 
 def safe_directory(path: Path, *, owned: bool = True) -> Path:
@@ -104,6 +105,32 @@ def atomic_marker(path: Path, payload: dict[str, Any]) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
+def verified_release(path: Path) -> bool:
+    marker = read_marker(path / MARKER) or {}
+    return (
+        marker.get("format") == "noyra-verified-install/v1" and marker.get("readiness") == "passed"
+    )
+
+
+def verified_backup(path: Path) -> bool:
+    marker = read_marker(path.with_name(path.name + ".verified.json")) or {}
+    return (
+        marker.get("format") == "noyra-verified-upgrade-backup/v1"
+        and marker.get("backup") == path.name
+        and marker.get("restore_verified") is True
+        and isinstance(marker.get("sha256"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", marker["sha256"]) is not None
+    )
+
+
+def process_reference(path: Path) -> str:
+    with path.open("rb") as stream:
+        raw = stream.read(PROCESS_REFERENCE_BYTES + 1)
+    if len(raw) > PROCESS_REFERENCE_BYTES:
+        raise ValueError("process_reference_oversized")
+    return raw.decode("utf-8", errors="replace")
+
+
 def verify_backup(backup: Path, data: Path, keyring: Path) -> None:
     from noyra.core.at_rest import EncryptedBackupManager
 
@@ -125,7 +152,9 @@ def verify_backup(backup: Path, data: Path, keyring: Path) -> None:
         shutil.rmtree(scratch)
 
 
-def gc_plan(releases: Path, backups: Path, *, keep: int = 5) -> dict[str, list[str]]:
+def gc_plan(
+    releases: Path, backups: Path, *, keep: int = 5, proc_root: Path = Path("/proc")
+) -> dict[str, list[str]]:
     if keep < 3 or keep > 100:
         raise ValueError("deployment_retention_out_of_range")
     protected: set[str] = set()
@@ -146,15 +175,15 @@ def gc_plan(releases: Path, backups: Path, *, keep: int = 5) -> dict[str, list[s
             if p.is_dir()
             and not p.is_symlink()
             and SEGMENT.fullmatch(p.name)
-            and (read_marker(p / MARKER) or {}).get("format") == "noyra-verified-install/v1"
+            and verified_release(p)
         ),
         key=lambda p: (p.stat().st_mtime_ns, p.name),
         reverse=True,
     )
     retained = {p.name for p in candidates[:keep]} | protected
     # Never remove a release still referenced by a running process.
-    if Path("/proc").is_dir():
-        for process in Path("/proc").iterdir():
+    if proc_root.is_dir():
+        for process in proc_root.iterdir():
             if not process.name.isdigit():
                 continue
             for member in ("exe", "cwd"):
@@ -165,24 +194,21 @@ def gc_plan(releases: Path, backups: Path, *, keep: int = 5) -> dict[str, list[s
                 except (OSError, ValueError):
                     pass
             try:
-                mapped = (process / "maps").read_text(encoding="utf-8", errors="replace")
-                command = (process / "cmdline").read_bytes().decode("utf-8", errors="replace")
+                mapped = process_reference(process / "maps")
+                command = process_reference(process / "cmdline")
                 for candidate in candidates:
                     if str(candidate) in mapped or str(candidate) in command:
                         retained.add(candidate.name)
             except FileNotFoundError:
                 continue
-            except OSError:
+            except (OSError, ValueError):
                 # If process references cannot be inspected, defer release GC.
                 retained.update(p.name for p in candidates)
     backup_candidates = sorted(
         (
             p
             for p in backups.glob("noyra-*.noyra-backup")
-            if not p.is_symlink()
-            and p.is_file()
-            and (read_marker(p.with_name(p.name + ".verified.json")) or {}).get("restore_verified")
-            is True
+            if not p.is_symlink() and p.is_file() and verified_backup(p)
         ),
         key=lambda p: (p.stat().st_mtime_ns, p.name),
         reverse=True,
