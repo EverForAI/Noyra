@@ -5,6 +5,7 @@ from typing import Any
 from noyra.core.admission import accounting_scope
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
+from noyra.core.evidence_capacity import require_evidence_capacity
 from noyra.core.payload_codec import compress_text, decompress_text
 from noyra.core.types import (
     canonical_json,
@@ -86,6 +87,7 @@ class ModelLedger:
                         "idempotency key already identifies a different model call"
                     )
                 return self._call_from_row(existing), False
+            require_evidence_capacity(connection, subject_id, "model_calls")
             call_id = new_id("mcall")
             connection.execute(
                 """INSERT INTO model_calls(
@@ -208,6 +210,7 @@ class ModelLedger:
                 )
                 + 1
             )
+            require_evidence_capacity(connection, str(call["subject_id"]), "model_attempts")
             attempt_id = new_id("matt")
             connection.execute(
                 """INSERT INTO model_attempts(

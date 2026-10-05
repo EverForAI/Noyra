@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .database import Database
+from .evidence_capacity import evidence_capacity_status
 from .types import canonical_json, content_hash, new_id, strict_json_loads, utc_now
 
 LOGGER = logging.getLogger(__name__)
@@ -410,6 +411,10 @@ class RetentionManager:
             ).fetchone()
             is not None
         )
+
+    def evidence_capacity(self, subject_id: str) -> dict[str, Any]:
+        with self.database.connection() as connection:
+            return evidence_capacity_status(connection, subject_id)
 
     def estimate(self, subject_id: str, *, now: datetime | None = None) -> dict[str, int]:
         moment = now or datetime.now(UTC)

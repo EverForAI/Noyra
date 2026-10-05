@@ -3453,6 +3453,9 @@ class NoyraHTTPServer:
                             },
                             "estimate": owner.retention.estimate(owner.kernel.subject_id),
                             "latest": owner.retention.latest(owner.kernel.subject_id),
+                            "evidence_capacity": owner.retention.evidence_capacity(
+                                owner.kernel.subject_id
+                            ),
                         },
                     )
                 elif parsed.path == "/api/admin/wallet-ledger":
@@ -9743,6 +9746,8 @@ class NoyraService:
             lease.assert_current()
             if not storage.cognition_allowed:
                 return "storage_pressure"
+            if self.http.retention.evidence_capacity(self.kernel.subject_id)["blocked"]:
+                return "evidence_capacity_reached"
             try:
                 with bind_lease(lease):
                     await self._tracked_to_thread(
