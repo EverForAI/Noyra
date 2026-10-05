@@ -40,6 +40,10 @@ def _installed_layout(root: Path) -> Path:
         path.mkdir(parents=True, exist_ok=True)
         chown(path, owner, group)
         path.chmod(mode)
+    fence = data / "migration/fences/active.json"
+    fence.write_text('{"task_id":"migration-task","status":"active"}')
+    chown(fence, 0, service_gid)
+    fence.chmod(0o640)
     (data / "migration/target-activation/state/root-journal").write_text("machine-local")
     return data
 
@@ -89,6 +93,7 @@ manager.create(backup)
 restored=manager.restore(backup,root/'output/restored')
 assert (restored/'migration/source/epoch').is_file()
 assert (restored/'migration/fences').is_dir()
+assert (restored/'migration/fences/active.json').read_text() == '{"task_id":"migration-task","status":"active"}'
 assert not (restored/'migration/target-activation').exists()
 assert (root/'data/migration/target-activation/state').stat().st_uid == 0
 print('boot_and_backup_ok')
