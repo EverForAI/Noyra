@@ -27,6 +27,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from noyra.core.at_rest import AtRestConfig, VolumeEncryptionProbe, VolumeEncryptionStatus
 from noyra.core.types import canonical_json, content_hash
 
+from .activation_contract import validate_activation_receipt, validate_activation_request
 from .bundle import BUNDLE_FORMAT, decrypt_bundle
 from .trust import (
     RecipientPoPChallenge,
@@ -141,6 +142,7 @@ class RestoreReport:
     event_chain_tip: str | None = None
     artifact_sha256: str | None = None
     restore_path: str | None = None
+    restored_database_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1320,6 +1322,7 @@ class MigrationAgent:
             tip,
             artifact_sha256,
             str(restore_path) if restore_path is not None else None,
+            _file_digest(restore_path) if restore_path is not None else None,
         )
 
     def validate(
@@ -1356,6 +1359,10 @@ class MigrationAgent:
             ),
         }
         if report.restore_path:
+            if report.restored_database_sha256 is not None:
+                checks["restored_database_digest"] = (
+                    _file_digest(Path(report.restore_path)) == report.restored_database_sha256
+                )
             checks["database_quick_check"] = self._database_quick_check(Path(report.restore_path))
             if report.subject_id is not None:
                 checks["subject_identity"] = self._database_subject_matches(
@@ -1375,66 +1382,9 @@ class MigrationAgent:
 
     def activate(self, request: Mapping[str, Any]) -> dict[str, Any]:
         """Activate the installed service and return a target-signed receipt."""
-        required = {
-            "task_id",
-            "subject_id",
-            "target_id",
-            "source_epoch",
-            "manifest_digest",
-            "artifact_id",
-            "artifact_sha256",
-            "health_report_digest",
-            "source_fence_digest",
-            "recipient_key_fingerprint",
-            "target_volume_proof_digest",
-            "credential_binding_digest",
-            "signer_binding_digest",
-            "wallet_mode",
-            "wallet_proof_digest",
-        }
-        if set(request) != required or request.get("target_id") != self.target_id:
+        request = validate_activation_request(request)
+        if request["target_id"] != self.target_id:
             raise ValueError("migration activation request is invalid")
-        for key in (
-            "manifest_digest",
-            "artifact_sha256",
-            "health_report_digest",
-            "source_fence_digest",
-            "recipient_key_fingerprint",
-            "target_volume_proof_digest",
-            "credential_binding_digest",
-            "wallet_proof_digest",
-        ):
-            value = request.get(key)
-            if value is None and key in {
-                "signer_binding_digest",
-                "wallet_proof_digest",
-            }:
-                continue
-            if not isinstance(value, str) or not _HEX64.fullmatch(value):
-                raise ValueError("migration activation digest is invalid")
-        if request.get("signer_binding_digest") is not None and not _HEX64.fullmatch(
-            str(request["signer_binding_digest"])
-        ):
-            raise ValueError("migration activation digest is invalid")
-        if request.get("wallet_mode") not in {
-            "external_signer_rebind",
-            "local_wallet_transfer",
-            "disabled",
-        }:
-            raise ValueError("migration activation wallet mode is invalid")
-        for key in ("task_id", "source_epoch"):
-            if not isinstance(request.get(key), str) or not re.fullmatch(
-                r"[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}", str(request[key])
-            ):
-                raise ValueError("migration activation identity is invalid")
-        if not isinstance(request.get("subject_id"), str) or not re.fullmatch(
-            r"Noyra-[A-Za-z0-9_-]{1,120}", str(request["subject_id"])
-        ):
-            raise ValueError("migration activation identity is invalid")
-        if not isinstance(request.get("artifact_id"), str) or not _ARTIFACT_ID.fullmatch(
-            str(request["artifact_id"])
-        ):
-            raise ValueError("migration activation identity is invalid")
         if self.data_root is None:
             raise ValueError("migration activation storage is unavailable")
         self._require_encrypted_volume(self.data_root)
@@ -1521,35 +1471,9 @@ class MigrationAgent:
             if expiry.tzinfo is None or expiry.astimezone(UTC) <= datetime.now(UTC):
                 raise ValueError("target local wallet approval has expired")
         active = self.activation_controller.activate(dict(request))
-        expected = {
-            key: request[key]
-            for key in (
-                "task_id",
-                "subject_id",
-                "target_id",
-                "source_epoch",
-                "manifest_digest",
-                "artifact_id",
-                "artifact_sha256",
-                "health_report_digest",
-                "source_fence_digest",
-                "recipient_key_fingerprint",
-                "target_volume_proof_digest",
-                "credential_binding_digest",
-                "signer_binding_digest",
-                "wallet_mode",
-                "wallet_proof_digest",
-            )
-        }
-        if (
-            not isinstance(active, Mapping)
-            or any(active.get(key) != value for key, value in expected.items())
-            or active.get("status") != "active"
-            or active.get("service_unit") != "noyra.service"
-            or not isinstance(active.get("active_database_sha256"), str)
-            or not re.fullmatch(r"[0-9a-f]{64}", str(active["active_database_sha256"]))
-        ):
+        if not isinstance(active, Mapping):
             raise ValueError("target service activation proof is invalid")
+        validate_activation_receipt(request, active)
         receipt = dict(active)
         receipt.pop("target_signature", None)
         receipt["target_signature"] = base64.urlsafe_b64encode(

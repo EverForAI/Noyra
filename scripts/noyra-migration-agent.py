@@ -271,7 +271,7 @@ def dispatch(agent: MigrationAgent, operation: str, payload: dict[str, Any]) -> 
         from noyra.migration.agent import RestoreReport
 
         task_id = payload.pop("task_id", None)
-        subject_id = payload.pop("subject_id", None)
+        subject_id = payload.get("subject_id")
         source_epoch = payload.pop("source_epoch", None)
         restore_report_digest = payload.pop("restore_report_digest", None)
         expected_digest = payload.pop("expected_digest", None)

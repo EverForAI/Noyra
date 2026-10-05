@@ -24,7 +24,6 @@ import ssl
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
@@ -36,6 +35,11 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
 from noyra.core.database import CURRENT_SCHEMA_VERSION
 from noyra.core.types import canonical_json, content_hash
 
+from .activation_contract import (
+    ACTIVATION_FORMAT,
+    validate_activation_receipt,
+    validate_activation_request,
+)
 from .bundle import BUNDLE_FORMAT, encrypt_bundle
 from .executor import MigrationExecutionError, MigrationExecutionReceipt
 from .manager import MigrationTask
@@ -417,11 +421,11 @@ class HTTPMigrationExecutor:
                 health_with_signature,
                 target_signature,
             )
-            activation = self._request(
-                target,
-                token,
-                "/v1/activate",
+            if restore.get("restored_database_sha256") != manifest.get("plaintext_sha256"):
+                raise MigrationExecutionError("target_restored_database_digest_mismatch")
+            activation_request = validate_activation_request(
                 {
+                    "format": ACTIVATION_FORMAT,
                     "task_id": task.task_id,
                     "subject_id": task.subject_id,
                     "target_id": task.target_id,
@@ -429,6 +433,7 @@ class HTTPMigrationExecutor:
                     "manifest_digest": manifest_digest,
                     "artifact_id": manifest["artifact_id"],
                     "artifact_sha256": manifest["artifact_sha256"],
+                    "restored_database_sha256": restore.get("restored_database_sha256"),
                     "health_report_digest": content_hash(health_with_signature),
                     "source_fence_digest": source_fence_digest,
                     "recipient_key_fingerprint": target["recipient_key_fingerprint"],
@@ -437,18 +442,10 @@ class HTTPMigrationExecutor:
                     "signer_binding_digest": binding_evidence["signer_digest"],
                     "wallet_mode": binding_evidence["wallet_mode"],
                     "wallet_proof_digest": binding_evidence["wallet_digest"],
-                },
+                }
             )
-            activation = self._verify_activation_receipt(
-                target,
-                task,
-                manifest_digest,
-                str(manifest["artifact_id"]),
-                str(manifest["artifact_sha256"]),
-                content_hash(health_with_signature),
-                source_fence_digest,
-                activation,
-            )
+            activation = self._request(target, token, "/v1/activate", activation_request)
+            activation = self._verify_activation_receipt(target, activation_request, activation)
             activation_digest = content_hash(activation)
             self._active[task.task_id] = (target, token, source_epoch)
             return MigrationExecutionReceipt(
@@ -1082,82 +1079,16 @@ class HTTPMigrationExecutor:
     @staticmethod
     def _verify_activation_receipt(
         target: Mapping[str, Any],
-        task: MigrationTask,
-        manifest_digest: str,
-        artifact_id: str,
-        artifact_sha256: str,
-        health_report_digest: str,
-        source_fence_digest: str,
+        request: Mapping[str, Any],
         receipt: Mapping[str, Any],
     ) -> dict[str, Any]:
         if not isinstance(receipt, Mapping) or not isinstance(receipt.get("target_signature"), str):
             raise MigrationExecutionError("target_activation_signature_missing")
-        required = {
-            "task_id": task.task_id,
-            "subject_id": task.subject_id,
-            "target_id": task.target_id,
-            "source_epoch": task.source_epoch,
-            "manifest_digest": manifest_digest,
-            "artifact_id": artifact_id,
-            "artifact_sha256": artifact_sha256,
-            "health_report_digest": health_report_digest,
-            "source_fence_digest": source_fence_digest,
-            "recipient_key_fingerprint": target["recipient_key_fingerprint"],
-            "target_volume_proof_digest": None,
-            "credential_binding_digest": None,
-            "signer_binding_digest": None,
-            "wallet_mode": None,
-            "wallet_proof_digest": None,
-            "status": "active",
-            "service_unit": "noyra.service",
-        }
-        for key in ("target_volume_proof_digest", "credential_binding_digest"):
-            value = receipt.get(key)
-            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
-                raise MigrationExecutionError("target_activation_receipt_invalid")
-            required[key] = value
-        wallet_mode = receipt.get("wallet_mode")
-        if wallet_mode not in {"external_signer_rebind", "local_wallet_transfer", "disabled"}:
-            raise MigrationExecutionError("target_activation_receipt_invalid")
-        required["wallet_mode"] = wallet_mode
-        for key in ("signer_binding_digest", "wallet_proof_digest"):
-            value = receipt.get(key)
-            if value is not None and (
-                not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
-            ):
-                raise MigrationExecutionError("target_activation_receipt_invalid")
-            required[key] = value
-        if wallet_mode == "external_signer_rebind" and (
-            required["signer_binding_digest"] is None
-            or required["wallet_proof_digest"] is None
-            or required["signer_binding_digest"] != required["wallet_proof_digest"]
-        ):
-            raise MigrationExecutionError("target_activation_receipt_invalid")
-        if wallet_mode == "local_wallet_transfer" and required["wallet_proof_digest"] is None:
-            raise MigrationExecutionError("target_activation_receipt_invalid")
-        if wallet_mode == "disabled" and any(
-            required[key] is not None for key in ("signer_binding_digest", "wallet_proof_digest")
-        ):
-            raise MigrationExecutionError("target_activation_receipt_invalid")
-        if any(receipt.get(key) != value for key, value in required.items()):
-            raise MigrationExecutionError("target_activation_receipt_invalid")
-        if not isinstance(receipt.get("active_database_sha256"), str) or not re.fullmatch(
-            r"[0-9a-f]{64}", receipt["active_database_sha256"]
-        ):
-            raise MigrationExecutionError("target_activation_receipt_invalid")
-        activated_at = receipt.get("activated_at")
-        if not isinstance(activated_at, str):
-            raise MigrationExecutionError("target_activation_receipt_invalid")
+        signed = {key: value for key, value in receipt.items() if key != "target_signature"}
         try:
-            timestamp = datetime.fromisoformat(activated_at.replace("Z", "+00:00"))
+            validate_activation_receipt(request, signed)
         except ValueError as error:
             raise MigrationExecutionError("target_activation_receipt_invalid") from error
-        if timestamp.tzinfo is None:
-            raise MigrationExecutionError("target_activation_receipt_invalid")
-        receipt_fields = {*required, "active_database_sha256", "activated_at", "target_signature"}
-        if set(receipt) != receipt_fields:
-            raise MigrationExecutionError("target_activation_receipt_invalid")
-        signed = {key: value for key, value in receipt.items() if key != "target_signature"}
         try:
             encoded_key = str(target["public_key"])
             raw_key = base64.urlsafe_b64decode(encoded_key + "=" * (-len(encoded_key) % 4))

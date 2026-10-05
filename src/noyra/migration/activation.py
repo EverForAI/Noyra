@@ -30,6 +30,7 @@ from noyra.core.errors import RuntimeOwnershipError
 from noyra.core.locking import ProcessLock
 from noyra.core.types import canonical_json, content_hash
 
+from .activation_contract import ACTIVATION_RECEIPT_KEYS, validate_activation_request
 from .fencing import EpochLease
 from .manager import MigrationManager
 from .policy import MigrationStore
@@ -218,7 +219,7 @@ class TargetRuntimeActivator:
         try:
             _copy_private(restored, staged)
             staged_digest = _sha256_file(staged)
-            if staged_digest != values["artifact_sha256"]:
+            if staged_digest != values["restored_database_sha256"]:
                 raise TargetActivationError("restored_artifact_digest_mismatch")
             journal = {
                 **journal,
@@ -929,60 +930,14 @@ def recover_incomplete_target_activations(
     return TargetRuntimeActivator(data_root, config_root, systemd=systemd).recover_incomplete()
 
 
-_ACTIVATION_RECEIPT_KEYS = (
-    "task_id",
-    "subject_id",
-    "target_id",
-    "source_epoch",
-    "manifest_digest",
-    "artifact_id",
-    "artifact_sha256",
-    "health_report_digest",
-    "source_fence_digest",
-    "status",
-    "service_unit",
-    "active_database_sha256",
-    "activated_at",
-)
+_ACTIVATION_RECEIPT_KEYS = ACTIVATION_RECEIPT_KEYS
 
 
 def _validate_activation_request(request: Mapping[str, Any]) -> dict[str, Any]:
-    required = {
-        "task_id",
-        "subject_id",
-        "target_id",
-        "source_epoch",
-        "manifest_digest",
-        "artifact_id",
-        "artifact_sha256",
-        "health_report_digest",
-        "source_fence_digest",
-    }
-    if set(request) != required:
-        raise TargetActivationError("activation_request_invalid")
-    values = dict(request)
-    for key in ("task_id", "source_epoch"):
-        if not isinstance(values[key], str) or not _SAFE_ID.fullmatch(values[key]):
-            raise TargetActivationError("activation_request_invalid")
-    if not isinstance(values["subject_id"], str) or not re.fullmatch(
-        r"Noyra-[A-Za-z0-9_-]{1,120}", values["subject_id"]
-    ):
-        raise TargetActivationError("activation_request_invalid")
-    if not isinstance(values["target_id"], str) or not _TARGET_ID.fullmatch(values["target_id"]):
-        raise TargetActivationError("activation_request_invalid")
-    if not isinstance(values["artifact_id"], str) or not re.fullmatch(
-        r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", values["artifact_id"]
-    ):
-        raise TargetActivationError("activation_request_invalid")
-    for key in (
-        "manifest_digest",
-        "artifact_sha256",
-        "health_report_digest",
-        "source_fence_digest",
-    ):
-        if not isinstance(values[key], str) or not _DIGEST.fullmatch(values[key]):
-            raise TargetActivationError("activation_request_invalid")
-    return values
+    try:
+        return validate_activation_request(request)
+    except ValueError as error:
+        raise TargetActivationError("activation_request_invalid") from error
 
 
 def _validate_deactivation_request(request: Mapping[str, Any]) -> dict[str, Any]:

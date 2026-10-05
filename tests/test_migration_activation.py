@@ -208,7 +208,7 @@ def _prepared_target_database(path: Path) -> tuple[str, str]:
     )
 
 
-def _request(task_id: str, source_fence_digest: str) -> dict[str, str]:
+def _request(task_id: str, source_fence_digest: str) -> dict[str, Any]:
     return {
         "task_id": task_id,
         "subject_id": SUBJECT_ID,
@@ -216,7 +216,15 @@ def _request(task_id: str, source_fence_digest: str) -> dict[str, str]:
         "source_epoch": "runtime-0",
         "manifest_digest": MANIFEST_DIGEST,
         "artifact_id": ARTIFACT_ID,
-        "artifact_sha256": _ARTIFACT_HASHES.get(task_id, "e" * 64),
+        "format": "noyra-target-activation/v2",
+        "artifact_sha256": "f" * 64,
+        "restored_database_sha256": _ARTIFACT_HASHES.get(task_id, "e" * 64),
+        "recipient_key_fingerprint": "c" * 64,
+        "target_volume_proof_digest": "e" * 64,
+        "credential_binding_digest": "f" * 64,
+        "signer_binding_digest": None,
+        "wallet_mode": "disabled",
+        "wallet_proof_digest": None,
         "health_report_digest": "b" * 64,
         "source_fence_digest": source_fence_digest,
     }
@@ -732,7 +740,7 @@ def test_root_activation_rejects_manifest_artifact_digest_mismatch(tmp_path: Pat
         tmp_path
     )
     request = _request(task_id, fence_digest)
-    request["artifact_sha256"] = "c" * 64
+    request["restored_database_sha256"] = "c" * 64
 
     with pytest.raises(TargetActivationError, match="restored_artifact_digest_mismatch"):
         activator.activate(request)
@@ -825,3 +833,101 @@ def test_activation_systemd_units_use_fixed_entrypoint_and_recovery_precedes_ser
         'install -d -o root -g root -m 0700 "$DATA_DIR/migration/target-activation/state"'
         in installer
     )
+
+
+def test_real_agent_bridge_root_and_source_receipt_share_activation_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+    from noyra.core.at_rest import VolumeEncryptionStatus
+    from noyra.migration.activation import TargetActivationBridge
+    from noyra.migration.agent import MigrationAgent
+    from noyra.migration.http_executor import HTTPMigrationExecutor
+
+    task_id, fence, _, _, systemd, activator = _runtime_fixture(tmp_path)
+    private = Ed25519PrivateKey.generate()
+    public = base64.urlsafe_b64encode(private.public_key().public_bytes_raw()).decode()
+    identity = tmp_path / "identity.json"
+    identity.write_text(json.dumps({"target_id": TARGET_ID, "public_key": public}))
+    root = activator.state_root.parent
+    bridge = TargetActivationBridge(
+        root / "requests", root / "status", private, timeout_seconds=15, poll_seconds=0.01
+    )
+    monkeypatch.setattr(
+        "noyra.core.at_rest.VolumeEncryptionProbe.probe",
+        lambda *args, **kwargs: VolumeEncryptionStatus(True, "test", "fixture", "volume"),
+    )
+    agent = MigrationAgent(
+        target_id=TARGET_ID,
+        key_fingerprint=hashlib.sha256(private.public_key().public_bytes_raw()).hexdigest(),
+        signing_key=private,
+        recipient_private_key=X25519PrivateKey.generate(),
+        data_root=activator.agent_root,
+        activation_controller=bridge,
+    )
+    request = _request(task_id, fence)
+    request["recipient_key_fingerprint"] = agent.recipient_key_fingerprint
+    binding = agent.binding_proof(
+        {
+            **{
+                key: request[key]
+                for key in (
+                    "task_id",
+                    "subject_id",
+                    "target_id",
+                    "source_epoch",
+                    "manifest_digest",
+                    "artifact_id",
+                    "recipient_key_fingerprint",
+                )
+            },
+            "credential_binding": {"references": {}, "fingerprints": {}},
+            "wallet_binding": {"mode": "disabled"},
+        }
+    )
+    request["target_volume_proof_digest"] = content_hash(
+        {
+            "task_id": task_id,
+            "manifest_digest": MANIFEST_DIGEST,
+            "proof": binding["target_volume_proof"],
+        }
+    )
+    request["credential_binding_digest"] = content_hash(
+        {
+            "task_id": task_id,
+            "manifest_digest": MANIFEST_DIGEST,
+            "binding": binding["credential_binding"],
+        }
+    )
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(agent.activate, request)
+        deadline = time.monotonic() + 10
+        while not list((root / "requests").glob("*.json")) and not pending.done():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert (
+            run_target_activation_requests(
+                root=root,
+                identity_file=identity,
+                data_root=activator.data_root,
+                config_root=activator.config_root,
+                systemd=systemd,
+            )
+            == 1
+        )
+        receipt = pending.result(timeout=10)
+    assert (
+        HTTPMigrationExecutor._verify_activation_receipt({"public_key": public}, request, receipt)
+        == receipt
+    )
+    assert receipt["restored_database_sha256"] != receipt["artifact_sha256"]
+    assert receipt["active_database_sha256"] != receipt["restored_database_sha256"]
+    # A valid target signature cannot excuse mismatched binding fields.
+    wrong = {**receipt, "credential_binding_digest": "0" * 64}
+    with pytest.raises(Exception, match="receipt_invalid"):
+        HTTPMigrationExecutor._verify_activation_receipt({"public_key": public}, request, wrong)

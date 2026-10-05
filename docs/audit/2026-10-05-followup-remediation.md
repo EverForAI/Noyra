@@ -27,3 +27,11 @@
 - 复审补强：目标切换、停用、崩溃恢复共用 root 状态目录中的跨进程锁，避免 systemd 启动前恢复程序把正在执行的切换误判为崩溃；控制器故障退出后锁自动释放。停用的瞬时失败允许重试，不再永久缓存失败结果。
 - 验证：executor/cutover/activation/end-to-end/HTTP 首轮 46 通过、1 跳过，新增测试夹具一次错误已修正；修正后 executor/activation/HTTP/agent/service 组合 **65 通过、1 跳过**。迁移及修改测试的 Ruff、严格 mypy 通过。覆盖丢失激活回复、重建 coordinator、目标不可达、重试停用、签名错绑、迟到激活、重复回滚、原子审计失败及正常切换恢复。
 - 限制：Windows 跳过 POSIX 所有权检查；真实 systemd/LUKS/双机故障仍属 B12。本模块不宣称 B02–B07 已完成。
+
+### 模块 2：B03 激活协议和摘要
+
+- 根因：agent/源端与 root 控制器分别维护字段集合；密文 SHA 被 root 当作恢复数据库 SHA；源端回执验证没有将所有 binding 与原请求逐项比较。
+- 变更：新增共享严格 `noyra-target-activation/v2` 请求/回执合同，明确传输文件摘要、恢复数据库摘要、激活后数据库摘要。agent 恢复报告返回明文数据库摘要；源端核对认证 manifest，root 再校验暂存副本。回执必须与原请求全部字段匹配。旧格式明确拒绝，升级需要两端同时更新。
+- 复审：CLI health 原先 pop 掉 subject_id 导致数据库主体匹配检查未执行，现保留该字段；新增恢复摘要检查。上一模块停用合同的旧 CLI mock 已同步修正。
+- 验证：activation/agent/CLI/binding/HTTP 组合 71 通过、1 跳过，唯一旧停用 mock 失败修正后受影响 CLI、binding 和真实 agent→桥接文件→root runner→源端验签组合 18 通过。Ruff 和严格 mypy 通过。新增串联测试使用真实协议，只有卷探测和 systemd 操作采用夹具；密文/恢复/运行摘要不同仍正确激活，绑定错配拒绝。
+- 限制：此处验证单个已准备任务的激活；B02/B04 数据产物和 B05 自主端到端仍在后续模块。

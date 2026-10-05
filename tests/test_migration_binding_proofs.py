@@ -228,6 +228,8 @@ def test_activation_rejects_a_binding_digest_mismatch(
         "artifact_sha256": "d" * 64,
         "health_report_digest": "e" * 64,
         "source_fence_digest": "f" * 64,
+        "format": "noyra-target-activation/v2",
+        "restored_database_sha256": "e" * 64,
         "recipient_key_fingerprint": request["recipient_key_fingerprint"],
         "target_volume_proof_digest": content_hash(
             {
