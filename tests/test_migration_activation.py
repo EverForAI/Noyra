@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
+import shlex
 import shutil
 import sqlite3
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -130,6 +133,60 @@ class _Systemd:
     def wait_ready(self, subject_id: str, target_id: str | None, timeout: float) -> bool:
         self.calls.append(f"ready:{subject_id}:{target_id}")
         return bool(self.ready(subject_id, target_id))
+
+
+def _boot_runtime_from_dropin(
+    activator: TargetRuntimeActivator, initial_environment: dict[str, str]
+) -> dict[str, Any]:
+    """Real application boot; only unit orchestration is replaced in this fixture."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("NOYRA_")}
+    environment.update(
+        NOYRA_PROFILE="test",
+        NOYRA_PORT="0",
+        NOYRA_DATA_DIR=str(activator.data_root),
+        NOYRA_WALLET_MODE="disabled",
+        NOYRA_INTEGRITY_MODE="pause",
+        PYTHONUTF8="1",
+    )
+    environment.update(initial_environment)
+    dropin = activator.dropin_dir / "migration-target.conf"
+    if dropin.exists():
+        for line in dropin.read_text(encoding="utf-8").splitlines():
+            if line.startswith("EnvironmentFile="):
+                path = Path(shlex.split(line.partition("=")[2])[0].replace("%%", "%"))
+                for assignment in path.read_text(encoding="utf-8").splitlines():
+                    key, _, value = shlex.split(assignment)[0].partition("=")
+                    environment[key] = value
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-X",
+            "utf8",
+            "-c",
+            """
+import json
+from noyra.service import NoyraService
+service = NoyraService.from_env()
+try:
+    service.boot()
+    assert service.kernel.admission.accepting, service.integrity.summary()
+    print(json.dumps({
+        'subject_id': service.settings.subject_id,
+        'genesis_hash': service.settings.genesis_hash,
+        'target_id': service.kernel.migration_target_id,
+    }))
+finally:
+    service.close()
+""",
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    return dict(json.loads(completed.stdout.strip().splitlines()[-1]))
 
 
 def _prepared_target_database(path: Path) -> tuple[str, str]:
@@ -442,12 +499,25 @@ def test_approved_source_task_runs_real_bundle_cli_bridge_and_root_activation(
     LifecycleManager(target_db, EventStore(target_db), "Noyra-standby").ensure_initial()
     systemd = _Systemd()
     activator = TargetRuntimeActivator(target_root, tmp_path / "etc", systemd=systemd)
+    initial_environment = {
+        "NOYRA_SUBJECT_ID": "Noyra-standby",
+        "NOYRA_GENESIS_HASH": "b" * 64,
+        "NOYRA_MIGRATION_TARGET_ID": "obsolete-target",
+    }
+    boots: list[dict[str, Any]] = []
+
+    def boot_ready(subject: str, target: str | None) -> bool:
+        boot = _boot_runtime_from_dropin(activator, initial_environment)
+        boots.append(boot)
+        return bool(boot["subject_id"] == subject and boot["target_id"] == target)
+
+    systemd.ready = boot_ready
     root = activator.state_root.parent
     identity = tmp_path / "identity.json"
     identity.write_text(json.dumps({"target_id": TARGET_ID, "public_key": public}))
     identity.chmod(0o600)
     bridge = TargetActivationBridge(
-        root / "requests", root / "status", signing, timeout_seconds=15, poll_seconds=0.01
+        root / "requests", root / "status", signing, timeout_seconds=60, poll_seconds=0.01
     )
     monkeypatch.setattr(
         "noyra.core.at_rest.VolumeEncryptionProbe.probe",
@@ -529,6 +599,7 @@ def test_approved_source_task_runs_real_bundle_cli_bridge_and_root_activation(
         assert "EnvironmentFile=" in (activator.dropin_dir / "migration-target.conf").read_text()
         assert (wallet_root / "wallet.json").is_file()  # source retained and fenced
     assert result["status"] == "committed"
+    assert boots == [{"subject_id": SUBJECT_ID, "genesis_hash": "a" * 64, "target_id": TARGET_ID}]
     assert not admission.accepting
     assert (target_root / "workspace" / "work.txt").read_text() == "retained"
     assert (
@@ -588,6 +659,78 @@ def test_activation_rejects_wrong_subject_before_touching_current_runtime(tmp_pa
 
     assert hashlib.sha256(active_database.read_bytes()).hexdigest() == old_digest
     assert systemd.calls == []
+
+
+@pytest.mark.parametrize("reject_new_runtime", [False, True])
+def test_runtime_identity_survives_real_boot_and_restores_previous_dropin(
+    tmp_path: Path, reject_new_runtime: bool
+) -> None:
+    task_id, fence, active, _, systemd, activator = _runtime_fixture(tmp_path)
+    active.unlink()
+    standby = Database(active)
+    IdentityStore(standby).ensure("Noyra-standby", "b" * 64)
+    LifecycleManager(standby, EventStore(standby), "Noyra-standby").ensure_initial()
+    activator.dropin_dir.mkdir(parents=True)
+    previous_env = tmp_path / "previous.env"
+    previous_env.write_text(
+        "NOYRA_SUBJECT_ID=Noyra-standby\nNOYRA_GENESIS_HASH="
+        + "b" * 64
+        + "\nNOYRA_MIGRATION_TARGET_ID=prior-target\n"
+    )
+    activator._write_target_dropin("prior-target", previous_env)
+    dropin = activator.dropin_dir / "migration-target.conf"
+    original_dropin = dropin.read_bytes()
+    initial_environment = {"NOYRA_SUBJECT_ID": "Noyra-unused", "NOYRA_GENESIS_HASH": "c" * 64}
+    boots: list[dict[str, Any]] = []
+
+    def boot_ready(subject: str, target: str | None) -> bool:
+        boot = _boot_runtime_from_dropin(activator, initial_environment)
+        boots.append(boot)
+        assert boot["subject_id"] == subject and boot["target_id"] == target
+        return not (reject_new_runtime and target == TARGET_ID)
+
+    systemd.ready = boot_ready
+    request = _request(task_id, fence)
+    if reject_new_runtime:
+        with pytest.raises(TargetActivationError, match="target_runtime_readiness_failed"):
+            activator.activate(request)
+    else:
+        activator.activate(request)
+        cancel = {
+            key: request[key] for key in ("task_id", "target_id", "source_epoch", "manifest_digest")
+        }
+        assert activator.deactivate(cancel)["status"] == "deactivated"
+    assert boots == [
+        {
+            "subject_id": SUBJECT_ID,
+            "genesis_hash": content_hash({"subject": SUBJECT_ID}),
+            "target_id": TARGET_ID,
+        },
+        {"subject_id": "Noyra-standby", "genesis_hash": "b" * 64, "target_id": "prior-target"},
+    ]
+    assert dropin.read_bytes() == original_dropin
+    runtime_env = activator.state_root / "runtime-environment" / f"{task_id}.env"
+    assert runtime_env.is_file()
+    if os.name == "posix":
+        assert stat.S_IMODE(runtime_env.stat().st_mode) == 0o600
+
+
+def test_invalid_genesis_cannot_be_injected_into_runtime_environment(tmp_path: Path) -> None:
+    task_id, fence, active, digest, systemd, activator = _runtime_fixture(tmp_path)
+    restored = activator.agent_root / "restored" / task_id / "noyra.sqlite3"
+    with sqlite3.connect(restored) as connection:
+        connection.execute(
+            "UPDATE subject_identity SET genesis_hash=?", ("a" * 64 + "\nNOYRA_PROFILE=test",)
+        )
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    request = _request(task_id, fence) | {
+        "restored_database_sha256": hashlib.sha256(restored.read_bytes()).hexdigest()
+    }
+    with pytest.raises(TargetActivationError, match="restored_database_identity_invalid"):
+        activator.activate(request)
+    assert systemd.calls == []
+    assert hashlib.sha256(active.read_bytes()).hexdigest() == digest
 
 
 def test_activation_rejects_mismatched_source_fence_before_switch(tmp_path: Path) -> None:

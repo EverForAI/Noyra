@@ -101,3 +101,13 @@
 B01–B11 的确认代码问题已按模块修复、复审和提交。B12 是外部环境证据缺口，仍然待验收：本机/WSL 测试不替代真实 Linux/LUKS 双机切换、独立 KMS、测试链和 72 小时运行。新增 `docs/deployment/2026-10-05-final-acceptance.md` 明确同 SHA 流程、八项门禁、双机故障矩阵、系统凭据分配、signer 身份挑战和失败处理。
 
 最终提交验证采用 `scripts/verify-committed.py` 的独立临时 clone，排除原有未跟踪审计、动画和 output 文件；结果另存 output JSON。完成后为该 SHA 生成 unsigned/pending 外部门禁记录，不改写为 passed，不解除迁移默认关闭或生产自动执行门禁，不推送 GitHub。所有提交后续如有修复，最终 SHA 验证与 pending 记录会重新绑定。
+
+
+### 最终启动与回滚复审补强
+
+- 实际应用启动复审发现：仅设置 target_id 不会覆盖目标原 noyra.env 中的 subject_id/genesis；目标曾运行其他主体时会拒绝启动。此前 systemd 就绪夹具未调用真实服务构造/boot，未覆盖这一边界。
+- 由 root 从摘要已认证的暂存数据库读取并校验 genesis，生成 root 私有的逐任务 EnvironmentFile，覆盖主体 ID、genesis、target_id。钱包关闭模式显式覆盖旧钱包配置；本地钱包设置合并进同一 root 文件，不再由服务账户持有可修改的运行环境文件。生成和验证在停止旧服务之前完成，不导入源端任意环境/命令。
+- 回滚恢复原 drop-in 及其引用的原环境文件。发现旧 target_id 的多行配置解析遗漏 MULTILINE，已修正，避免迁回原已迁入主体时错误地要求 target_id 为空。
+- 新测试启动真实 NoyraService.from_env()/boot 并断言完整性通过和准入开放，覆盖普通/本地钱包完整加密传输、不同主体与 genesis 的目标切换、切换后就绪失败恢复、主动停用恢复、旧 target_id、非法 genesis 环境注入拒绝。操作系统服务调度和加密卷仍是夹具，不宣称真实 systemd 已验收。
+
+- 验证：activation/binding/agent CLI 组合 **50 通过、1 Windows/POSIX 跳过**；受影响源码和测试 Ruff、严格 mypy 通过。新增夹具最初的缺失辅助函数和 Any 返回标注已修正；随后组合全部通过。最终 SHA 全量验证另行记录。

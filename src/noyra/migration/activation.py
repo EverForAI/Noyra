@@ -300,9 +300,12 @@ class TargetRuntimeActivator:
                 "root_staged_database_sha256": staged_digest,
             }
             _atomic_json(marker, journal, 0o600)
-            self._validate_restored_database(staged, values)
+            genesis_hash = self._validate_restored_database(staged, values)
             self._finalize_target_database(staged, values)
             wallet_directory = self._stage_local_wallet(staged.parent, values)
+            runtime_environment = self._prepare_runtime_environment(
+                values, genesis_hash, wallet_directory=wallet_directory
+            )
             cutover_started = True
             self.systemd.stop()
             if values["inventory_sha256"] is not None:
@@ -311,7 +314,7 @@ class TargetRuntimeActivator:
             os.replace(staged, active_database)
             _chown_service(active_database)
             os.chmod(active_database, 0o600)
-            self._write_target_dropin(target_id, wallet_directory=wallet_directory)
+            self._write_target_dropin(target_id, runtime_environment)
             self.systemd.daemon_reload()
             self.systemd.start()
             if not self.systemd.wait_ready(
@@ -557,7 +560,7 @@ class TargetRuntimeActivator:
             recovered += 1
         return recovered
 
-    def _validate_restored_database(self, path: Path, request: Mapping[str, Any]) -> None:
+    def _validate_restored_database(self, path: Path, request: Mapping[str, Any]) -> str:
         if path.is_symlink() or not path.is_file():
             raise TargetActivationError("restored_database_unavailable")
         wal = Path(f"{path}-wal")
@@ -571,6 +574,10 @@ class TargetRuntimeActivator:
                 check = connection.execute("PRAGMA quick_check").fetchone()
                 subject = connection.execute(
                     "SELECT subject_id FROM runtime_state LIMIT 1"
+                ).fetchone()
+                identity = connection.execute(
+                    "SELECT genesis_hash FROM subject_identity WHERE subject_id=?",
+                    (request["subject_id"],),
                 ).fetchone()
                 task = connection.execute(
                     "SELECT subject_id,target_id,status,manifest_digest,artifact_id,"
@@ -594,6 +601,9 @@ class TargetRuntimeActivator:
             or check[0] != "ok"
             or subject is None
             or subject[0] != request["subject_id"]
+            or identity is None
+            or not isinstance(identity[0], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", identity[0])
         ):
             raise TargetActivationError("restored_database_identity_invalid")
         if (
@@ -627,6 +637,7 @@ class TargetRuntimeActivator:
             != request["source_fence_digest"]
         ):
             raise TargetActivationError("restored_migration_epoch_invalid")
+        return str(identity[0])
 
     def _finalize_target_database(self, path: Path, request: Mapping[str, Any]) -> None:
         database = Database(path, initialize=False)
@@ -762,21 +773,28 @@ class TargetRuntimeActivator:
             _harden_tree(destination)
         return destination
 
-    def _write_target_dropin(self, target_id: str, *, wallet_directory: Path | None = None) -> None:
-        if not _TARGET_ID.fullmatch(target_id):
-            raise TargetActivationError("target_id_invalid")
-        _reject_symlink_parents(self.dropin_dir / "migration-target.conf", self.dropin_dir.parent)
-        self.dropin_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
-        environment = f"[Service]\nEnvironment=NOYRA_MIGRATION_TARGET_ID={target_id}\n"
+    def _prepare_runtime_environment(
+        self, request: Mapping[str, Any], genesis_hash: str, *, wallet_directory: Path | None
+    ) -> Path:
+        # Values come from the authenticated request and the root-staged database,
+        # never from a source-supplied unit or environment file. EnvironmentFile
+        # overrides the target's original identity in noyra.env, unlike Environment.
+        runtime_env = (
+            f"NOYRA_SUBJECT_ID={request['subject_id']}\n"
+            f"NOYRA_GENESIS_HASH={genesis_hash}\n"
+            f"NOYRA_MIGRATION_TARGET_ID={request['target_id']}\n"
+        )
+        if request["wallet_mode"] == "disabled":
+            runtime_env += "NOYRA_WALLET_MODE=disabled\n"
         if wallet_directory is not None:
             from noyra.wallet.config import _parse_rpc_urls
 
             rpc = _parse_rpc_urls((wallet_directory / "rpc.json").read_text(encoding="utf-8"))
             rpc_text = canonical_json({str(key): value for key, value in rpc.items()})
             rpc_text = rpc_text.replace("\\", "\\\\").replace('"', '\\"')
-            # Fixed root-owned path; escape systemd specifiers and quoted values.
+            # EnvironmentFile contents have no variable/specifier expansion.
             wallet_path = str(wallet_directory).replace("\\", "\\\\").replace('"', '\\"')
-            wallet_env = (
+            runtime_env += (
                 "NOYRA_WALLET_MODE=local\n"
                 f'NOYRA_WALLET_KEYSTORE_PATH="{wallet_path}/wallet.json"\n'
                 f'NOYRA_WALLET_PASSWORD_FILE="{wallet_path}/password"\n'
@@ -786,10 +804,30 @@ class TargetRuntimeActivator:
                 "NOYRA_WALLET_SIGNER_BEARER_TOKEN_FILE=\n"
                 "NOYRA_WALLET_SIGNER_BEARER_TOKEN_CREDENTIAL=\n"
             )
-            _atomic_write(wallet_directory / "runtime.env", wallet_env.encode(), 0o600)
-            _chown_service(wallet_directory / "runtime.env")
-            env_path = str(wallet_directory / "runtime.env").replace("%", "%%")
-            environment += f'EnvironmentFile="{env_path}"\n'
+        directory = self.state_root / "runtime-environment"
+        _secure_root_directory(
+            directory,
+            "runtime_environment_directory_invalid",
+            create=True,
+            trusted_root=self.state_root,
+        )
+        env_path = directory / f"{request['task_id']}.env"
+        _atomic_write(env_path, runtime_env.encode("utf-8"), 0o600)
+        return env_path
+
+    def _write_target_dropin(self, target_id: str, runtime_environment: Path) -> None:
+        if not _TARGET_ID.fullmatch(target_id):
+            raise TargetActivationError("target_id_invalid")
+        _reject_symlink_parents(self.dropin_dir / "migration-target.conf", self.dropin_dir.parent)
+        self.dropin_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
+        env_path = str(runtime_environment)
+        if any(ord(char) < 32 for char in env_path):
+            raise TargetActivationError("runtime_environment_path_invalid")
+        env_path = env_path.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+        environment = (
+            f"[Service]\nEnvironment=NOYRA_MIGRATION_TARGET_ID={target_id}\n"
+            f'EnvironmentFile="{env_path}"\n'
+        )
         _atomic_write(
             self.dropin_dir / "migration-target.conf",
             environment.encode(),
@@ -1385,7 +1423,9 @@ def _previous_target_id(rollback: Path, present: bool) -> str | None:
     if path.is_symlink() or not path.is_file():
         return None
     match = re.search(
-        r"^Environment=NOYRA_MIGRATION_TARGET_ID=([A-Za-z0-9_-]{3,128})$", path.read_text()
+        r"^Environment=NOYRA_MIGRATION_TARGET_ID=([A-Za-z0-9_-]{3,128})$",
+        path.read_text(),
+        re.MULTILINE,
     )
     return None if match is None else match.group(1)
 

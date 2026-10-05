@@ -20,7 +20,7 @@ python scripts/prepare-external-validation.py --commit HEAD --output output/fina
 - 使用测试钱包与测试链；外部 signer/KMS 和本地钱包两条路线分别验收。本地钱包必须显式 opt-in 和 task 授权。
 - 原生 HTTPS 反向代理。agent 监听本机 8876，经其独立连接令牌认证；管理台经 HTTPS、operator 会话和 CSRF。不要将 signer、云账户、源端管理员令牌放进迁移申请。
 
-目标 agent 配置在 `/etc/noyra/migration/agent.env`（参考 `deploy/migration-agent.env.example`），成本缺失会拒绝观察。目标运行时、agent、root activation 若使用 systemd credentials，分别配置所需 `LoadCredential`；这些 unit 不会自动共享 credential namespace。root activation 必须能解析目标 operator 令牌以访问 `/api/v1/admin/readiness`。
+目标 agent 配置在 `/etc/noyra/migration/agent.env`（参考 `deploy/migration-agent.env.example`），成本缺失会拒绝观察。目标运行时、agent、root activation 若使用 systemd credentials，分别配置所需 `LoadCredential`；这些 unit 不会自动共享 credential namespace。root activation 必须能解析目标 operator 令牌以访问 `/api/v1/admin/readiness`。目标身份切换配置由 root 控制器写入任务专属 EnvironmentFile 并通过 migration-target.conf 引用；不要追加覆盖主体、genesis 或 target_id 的后置 systemd drop-in。回滚同时恢复原 drop-in 引用。
 
 ## 八项必须执行的验收
 
@@ -45,7 +45,7 @@ python scripts/prepare-external-validation.py --commit HEAD --output output/fina
 | 批准后策略变更/目标撤销/出现未决付款 | 执行前拒绝，不能沿用旧批准绕过新条件 |
 | recipient 公钥/PoP/密文/完整文件清单错绑 | 拒绝恢复或激活，保留原目标数据 |
 | 目标缺 API 密钥、归档密钥或 signer 身份不符 | 拒绝激活；不能删除历史配置来制造成功 |
-| 正常迁移 | 来源先持久隔离，目标完整恢复后激活；检查数据库外文件和真实钱包 |
+| 正常迁移 | 来源先持久隔离，目标完整恢复后激活；目标预先运行不同主体/不同 genesis，确认 root 生成的 EnvironmentFile 覆盖身份配置；检查数据库外文件和真实钱包 |
 | 来源收到激活成功前断网/超时，再重启来源 | 来源仍不可写；不能推断远端未激活 |
 | 回滚时目标不可达 | 保持隔离；恢复网络后显式重试回滚 |
 | 目标确认持久停用，再放行迟到 activate | 迟到激活被永久撤销记录拒绝，来源可以恢复 |
