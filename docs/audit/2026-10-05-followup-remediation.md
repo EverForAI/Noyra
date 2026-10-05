@@ -44,3 +44,10 @@
 - 复审：只读 SQLite 连接使用 immutable，避免生成额外 WAL/SHM 污染清单；root 对未 checkpoint WAL 明确拒绝，避免忽略已提交写入。恢复临时明文正常及失败均清理；已有暂存目录冲突保留并拒绝。目标业务只在完整目录切换后启动。
 - 验证：真实 schema+搜索配置+secret intents 的加密往返；真实冷事件读取、中文文件和空目录保留、缺归档拒绝；实际密钥缺失/匹配/错配；root 启动失败、正常停用和目录切换后进程崩溃恢复。组合回归 81 通过、1 跳过，发现旧测试 WAL 未 checkpoint 后已修正；对应 artifact mismatch、agent、bundle 回归 29 通过、1 跳过。新增凭据检查 1 通过；受影响 agent/payload/deployment 32 通过。Ruff 和严格 mypy 通过。
 - 限制：目标凭据和归档密钥须先预配，缺失不会静默丢弃配置；真实卷/systemd/双机仍是 B12。默认完整包已接入 executor；自主调度及 prepare/commit 的跨阶段接线仍属下一模块 B05，不能把此阶段测试当作全部迁移已通过。
+
+### 模块 4a：B06/B07 发现合同与拒绝状态
+
+- 根因：builder 读取不存在的字段且缺省通过，漏掉真实 discovery 的失败信号及成本/延迟；辅助 rejection writer 与 manager 使用不同规范哈希。
+- 变更：builder 只接受共享 DiscoveryResult，明确验证 trusted/resources_verified/eligible、时效、卷、信任等级、地区、成本和容量，记录真实观察哈希及目标详情。签名观察反序列化也执行构造时的严格边界。拒绝写入归 manager，使用同一 proposal/hash 合同并追加审计；读取冷却验证拒绝记录完整性。create/approve 在事务内检查目标冷却，变更理由或文字不能绕过。
+- 验证：discovery→builder 真实串联的无效签名、过期及超预算拒绝；辅助 rejection→manager 列表正常读取；改理由新申请失败。discovery/assessment/proposals/manager/service **33 通过**，Ruff、严格 mypy 通过。
+- 限制：以前已写入的不兼容拒绝记录不自动改写或洗白，需显式审核修复；当前生产管理拒绝原本使用正确合同。实际发现网络调用、认知评估和执行调度由 B05 接续完成。

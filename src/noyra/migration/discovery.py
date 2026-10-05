@@ -94,6 +94,20 @@ class ResourceObservation:
         ).encode()
 
     def verify(self, *, public_key: str, expected_target_id: str, expected_generation: int) -> None:
+        # Direct deserialization must satisfy the same bounds as construction.
+        if (
+            self._validated_values(
+                self.target_id,
+                self.observed_at,
+                self.capacity,
+                self.latency_ms,
+                self.cost_microusd_month,
+                self.region,
+                self.enrollment_generation,
+            )
+            != self._unsigned_values()
+        ):
+            raise ValueError("resource observation payload is not canonical")
         if self.target_id != expected_target_id:
             raise ValueError("resource observation target mismatch")
         if self.enrollment_generation != expected_generation:
@@ -288,6 +302,10 @@ class DiscoveryResult:
     eligible: bool
     reasons: tuple[str, ...]
     observation: ResourceObservation | None = None
+    encrypted_volume: bool = False
+    trust_level: int = 0
+    release_sha: str = ""
+    endpoint: str = ""
 
     @property
     def free_bytes(self) -> int:
@@ -296,6 +314,14 @@ class DiscoveryResult:
     @property
     def region(self) -> str | None:
         return None if self.observation is None else self.observation.region
+
+    @property
+    def cost_microusd_month(self) -> int:
+        return 0 if self.observation is None else self.observation.cost_microusd_month
+
+    @property
+    def latency_ms(self) -> int:
+        return 0 if self.observation is None else self.observation.latency_ms
 
 
 class MigrationDiscovery:
@@ -379,8 +405,20 @@ class MigrationDiscovery:
                     reasons.append("resource_observation_region_mismatch")
                 if observation.free_bytes < policy.min_free_bytes:
                     reasons.append("target_storage_insufficient")
-            except ValueError:
+                if observation.cost_microusd_month > policy.max_cost_microusd:
+                    reasons.append("target_cost_exceeded")
+                if policy.allowed_regions and observation.region not in policy.allowed_regions:
+                    reasons.append("region_not_allowlisted")
+                if not row["encrypted_volume"]:
+                    reasons.append("target_volume_not_encrypted")
+            except (ValueError, TypeError, AttributeError):
                 reasons.append("resource_observation_invalid")
+            capabilities = json.loads(row["capabilities_json"])
+            trust_level = capabilities.get("trust_level", 3)
+            if type(trust_level) is not int or not 1 <= trust_level <= 5:
+                trust_level = 0
+            if trust_level < policy.trust_level:
+                reasons.append("trust_level_insufficient")
             results.append(
                 DiscoveryResult(
                     target_id,
@@ -390,6 +428,10 @@ class MigrationDiscovery:
                     not reasons,
                     tuple(reasons),
                     observation,
+                    bool(row["encrypted_volume"]),
+                    trust_level,
+                    str(row["release_sha"]),
+                    str(row["endpoint"]),
                 )
             )
         return results
