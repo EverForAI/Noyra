@@ -18,7 +18,10 @@ at `/etc/noyra/release-evidence-public-key` and the current release's
 `.noyra-external-gates.json`, bound to its `.noyra-source-sha`. An environment
 assertion alone cannot enable production automation. Disabling and emergency
 pause remain available when evidence is missing; receipt query/reconciliation
-for already-broadcast transactions remains available. A
+for already-broadcast transactions remains available. Container deployments instead bind
+the image's `/opt/noyra/.noyra-source-sha` to an independently provisioned, read-only
+`/run/noyra/release-assurance` directory containing `public-key` and `external-gates.json`;
+see the optional Compose overlay in the Ubuntu deployment guide. A
 release must carry a signed `external-gates.json` with format
 `noyra-external-gates/v1`, the exact release commit SHA, all fixed gate IDs,
 reviewer identity, UTC test windows, and evidence references. The release job

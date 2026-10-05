@@ -19,6 +19,8 @@ CHANNEL_PATH = Path("/etc/noyra/upgrade-channel")
 PUBLIC_KEY_PATH = Path("/etc/noyra/release-evidence-public-key")
 CURRENT_PATH = Path("/opt/noyra/current")
 EVIDENCE_NAME = ".noyra-external-gates.json"
+CONTAINER_SOURCE_PATH = Path("/opt/noyra/.noyra-source-sha")
+CONTAINER_EVIDENCE_PATH = Path("/run/noyra/release-assurance")
 
 
 def controlled_text(path: Path, *, maximum: int) -> str:
@@ -64,15 +66,24 @@ def verify_evidence(
 
 
 def current_evidence() -> dict[str, Any]:
-    pointer = CURRENT_PATH.lstat()
-    if not CURRENT_PATH.is_symlink() or (os.name == "posix" and pointer.st_uid != 0):
-        raise ValueError("release_pointer_unsafe")
-    release = CURRENT_PATH.resolve(strict=True)
-    if release.parent != CURRENT_PATH.parent / "releases":
-        raise ValueError("release_pointer_unsafe")
-    sha = controlled_text(release / ".noyra-source-sha", maximum=65).strip()
-    record = strict_json_loads(controlled_text(release / EVIDENCE_NAME, maximum=256_000))
-    public_key = controlled_text(PUBLIC_KEY_PATH, maximum=128).strip()
+    if os.getenv("NOYRA_DEPLOYMENT_PROFILE", "").strip().lower() == "container_internal":
+        # The source marker is baked into the read-only image independently of
+        # the mounted evidence; an environment claim cannot replace either.
+        sha = controlled_text(CONTAINER_SOURCE_PATH, maximum=65).strip()
+        evidence = CONTAINER_EVIDENCE_PATH / "external-gates.json"
+        public_key_path = CONTAINER_EVIDENCE_PATH / "public-key"
+    else:
+        pointer = CURRENT_PATH.lstat()
+        if not CURRENT_PATH.is_symlink() or (os.name == "posix" and pointer.st_uid != 0):
+            raise ValueError("release_pointer_unsafe")
+        release = CURRENT_PATH.resolve(strict=True)
+        if release.parent != CURRENT_PATH.parent / "releases":
+            raise ValueError("release_pointer_unsafe")
+        sha = controlled_text(release / ".noyra-source-sha", maximum=65).strip()
+        evidence = release / EVIDENCE_NAME
+        public_key_path = PUBLIC_KEY_PATH
+    record = strict_json_loads(controlled_text(evidence, maximum=256_000))
+    public_key = controlled_text(public_key_path, maximum=128).strip()
     verify_evidence(record, sha, public_key)
     return {"status": "verified", "commit_sha": sha, "reviewed_at": record["reviewed_at"]}
 

@@ -206,6 +206,49 @@ def test_production_payment_gate_allows_pause_and_disable_without_evidence(tmp_p
     )
 
 
+def test_container_acceptance_binds_signed_evidence_to_image_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record, key = signed_evidence()
+    source = tmp_path / "image-source-sha"
+    bundle = tmp_path / "acceptance"
+    bundle.mkdir()
+    source.write_text("a" * 40, encoding="utf-8")
+    (bundle / "external-gates.json").write_text(json.dumps(record), encoding="utf-8")
+    (bundle / "public-key").write_text(key, encoding="utf-8")
+    monkeypatch.setenv("NOYRA_DEPLOYMENT_PROFILE", "container_internal")
+    monkeypatch.setattr(assurance, "CONTAINER_SOURCE_PATH", source)
+    monkeypatch.setattr(assurance, "CONTAINER_EVIDENCE_PATH", bundle)
+    monkeypatch.setattr(assurance, "controlled_text", lambda path, **_: path.read_text())
+    assert assurance.current_evidence()["commit_sha"] == "a" * 40
+    source.write_text("b" * 40)
+    with pytest.raises(ValueError, match="commit_sha"):
+        assurance.current_evidence()
+    with pytest.raises(ValueError, match="production_release_evidence_required"):
+        assurance.require_activation_evidence(production=True)
+    source.write_text("a" * 40)
+    record["gates"][0]["evidence_refs"] = ["tampered.json"]
+    (bundle / "external-gates.json").write_text(json.dumps(record))
+    assert assurance.activation_status()["status"] == "unverified"
+    source.unlink()
+    monkeypatch.setenv("NOYRA_SOURCE_SHA", "a" * 40)
+    assert assurance.activation_status()["status"] == "unverified"
+
+
+def test_container_automation_evidence_mount_is_optional_and_read_only() -> None:
+    root = Path(__file__).resolve().parents[1]
+    compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+    overlay = (root / "docker-compose.assurance.yml").read_text(encoding="utf-8")
+    dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
+    assert "NOYRA_SOURCE_SHA: ${NOYRA_SOURCE_SHA:-}" in compose
+    assert "release-assurance" not in compose
+    assert "read_only: true" in overlay
+    assert "create_host_path: false" in overlay
+    assert "target: /run/noyra/release-assurance" in overlay
+    assert 'pathlib.Path("/opt/noyra/.noyra-source-sha")' in dockerfile
+    assert "path.chmod(0o444)" in dockerfile
+
+
 def test_production_migration_gate_preserves_manual_and_local_wallet_choice(tmp_path: Path) -> None:
     database = Database(tmp_path / "noyra.sqlite3")
     IdentityStore(database).ensure("Noyra-release", "a" * 64)

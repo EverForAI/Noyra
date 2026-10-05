@@ -409,6 +409,36 @@ explicit deployment decision that must be paired with a TLS reverse proxy and au
 read-only root filesystem, drops Linux capabilities, disables privilege escalation, limits process
 creation, and stores the subject database in the `noyra-data` volume.
 
+### Container production automation acceptance
+
+Production automatic payment and policy-auto migration use the same signed acceptance
+as native installations. Manual deployments need no additional mount. To enable production
+automation after real environment acceptance:
+
+1. Build from the exact reviewed clean source commit. Set `NOYRA_SOURCE_SHA` in `.env`
+   to that full 40-character commit before building; it is baked into the image as a
+   root-owned, read-only source marker. Setting a runtime environment value alone has no effect.
+2. Independently provision the trusted base64 Ed25519 public key as `public-key` and the
+   signed matching acceptance as `external-gates.json` in an absolute root-controlled host
+   directory, for example `/etc/noyra/container-acceptance`. All ancestors must be root-owned
+   and not writable by group/others. Use mode `0755` for directories and `0644` for these
+   non-secret files so the unprivileged container can verify them. Never obtain the trust key
+   from the same untrusted download as the evidence.
+3. Set `NOYRA_RELEASE_ASSURANCE_HOST_PATH` to that directory in `.env`, then use:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.assurance.yml build
+docker compose -f docker-compose.yml -f docker-compose.assurance.yml up -d
+```
+
+The optional overlay mounts the existing directory read-only and refuses to create missing
+host paths. Missing, mismatched, unsigned or tampered evidence keeps production automation
+blocked. Pause, disable, manual approval and reconciliation remain available. After changing
+source commits, provision matching reviewed evidence and rebuild; a previous release's evidence
+does not authorize a different image. The source marker is a trusted build operator statement,
+not proof that an arbitrary third-party image was built correctly. Verify source/image provenance
+before deployment. Real image build and host ownership checks remain part of external acceptance.
+
 ## Backup and recovery
 
 Noyra backups are offline, bounded, and encrypted with the separate versioned backup keyring. The

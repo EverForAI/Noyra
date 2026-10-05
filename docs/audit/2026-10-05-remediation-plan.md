@@ -80,6 +80,8 @@ A01 需要真实环境执行，不能通过代码提交自动关闭。目标是�
 - 门禁校验器统一到运行库，发布与运行使用同一字段/签名/敏感字段合同。72 小时仅在发布时校验；运行重启不会定时撤销有效证据。证据与 SHA 同在 root 发布目录，代码回滚同步选择对应证据。
 - production 的自动付款策略和每次新授权、policy-auto 迁移策略与切换前均验证证据。禁用、紧急暂停、手动迁移、本地钱包 opt-in 及已广播回执恢复保留。补修本地钱包模式阻止关闭迁移总开关的关联校验缺陷。
 - 补齐安装器遗漏的 production preflight 脚本复制。
+- 容器使用独立构建 SHA 标记与可选只读验收目录，同样验证签名及 SHA；运行环境声明不能代替镜像标记。补齐 Compose overlay 与 root 预配指引，普通手工容器部署无需新挂载。真实镜像构建与宿主权限仍需 A01。
+- 容器补强验收：签名/SHA/缺失标记、部署与 setup 62 项通过；release/wallet gate/upgrade deployment 22 项通过；Compose overlay 配置解析、修改文件 Ruff/format/mypy 通过。本机未把容器合同测试表述为 Linux Docker 真机验收。
 - 验证：existing external-gates/upgrade/control/policy/cutover 61 项；assurance/供应链/发布合同 21 项；policy 组合 18 项；Ruff、mypy、JS/Bash 语法与 shell upgrade runner 合同通过。网络、真实 root 权限与 tag 发布仍需 A01。
 
 ### 模块 6B：隔离审计环境
