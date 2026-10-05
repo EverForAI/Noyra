@@ -9773,8 +9773,9 @@ class NoyraService:
             lease.assert_current()
             if not storage.cognition_allowed:
                 return "storage_pressure"
-            if self.http.retention.evidence_capacity(self.kernel.subject_id)["blocked"]:
-                return "evidence_capacity_reached"
+            evidence_exhausted = self.http.retention.evidence_capacity(self.kernel.subject_id)[
+                "blocked"
+            ]
             try:
                 with bind_lease(lease):
                     await self._tracked_to_thread(
@@ -9795,11 +9796,12 @@ class NoyraService:
             lease.assert_current()
             if self.http.wallet_execution is not None:
                 with bind_lease(lease):
-                    await self._tracked_to_thread(
-                        self._advance_autonomous_reward_workflows,
-                        self.kernel.subject_id,
-                        limit=4,
-                    )
+                    if not evidence_exhausted:
+                        await self._tracked_to_thread(
+                            self._advance_autonomous_reward_workflows,
+                            self.kernel.subject_id,
+                            limit=4,
+                        )
                     await self._tracked_to_thread(
                         self.http.wallet_rewards.execute_ready,
                         self.kernel.subject_id,
@@ -9807,6 +9809,8 @@ class NoyraService:
                         limit=20,
                     )
                 lease.assert_current()
+            if evidence_exhausted:
+                return "evidence_capacity_reached"
             if self.cognition is None:
                 with bind_lease(lease):
                     await self.http.deliveries.deliver_pending(self.kernel.subject_id)
