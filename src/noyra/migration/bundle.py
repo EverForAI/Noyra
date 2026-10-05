@@ -47,6 +47,9 @@ _MANIFEST_FIELDS = frozenset(
         "artifact_format",
         "byte_size",
         "artifact_sha256",
+        "payload_format",
+        "database_sha256",
+        "inventory_sha256",
     }
 )
 _REQUIRED_MANIFEST_FIELDS = _MANIFEST_FIELDS - {
@@ -56,6 +59,9 @@ _REQUIRED_MANIFEST_FIELDS = _MANIFEST_FIELDS - {
     "artifact_format",
     "byte_size",
     "artifact_sha256",
+    "payload_format",
+    "database_sha256",
+    "inventory_sha256",
 }
 
 
@@ -302,6 +308,19 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     values = dict(manifest)
     if values["format"] != BUNDLE_FORMAT:
         raise ValueError("migration bundle format is unsupported")
+    if any(key in values for key in ("payload_format", "database_sha256", "inventory_sha256")):
+        from .subject_payload import PAYLOAD_FORMAT
+
+        if values.get("payload_format") != PAYLOAD_FORMAT:
+            raise ValueError("migration subject payload format is unsupported")
+        for key in ("database_sha256", "inventory_sha256"):
+            digest = values.get(key)
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(c not in "0123456789abcdef" for c in digest)
+            ):
+                raise ValueError("migration subject payload digest is invalid")
     _validate_context({key: values[key] for key in ("task_id", "target_id", "source_epoch")})
     if (
         type(values["plaintext_size"]) is not int

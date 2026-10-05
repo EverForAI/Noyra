@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import sqlite3
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -230,6 +229,7 @@ def test_activation_rejects_a_binding_digest_mismatch(
         "source_fence_digest": "f" * 64,
         "format": "noyra-target-activation/v2",
         "restored_database_sha256": "e" * 64,
+        "inventory_sha256": None,
         "recipient_key_fingerprint": request["recipient_key_fingerprint"],
         "target_volume_proof_digest": content_hash(
             {
@@ -342,9 +342,12 @@ def test_http_executor_requires_and_records_agent_binding_proofs(
     )
     agent, signing = _agent(tmp_path)
     source_db = tmp_path / "source.sqlite3"
-    with sqlite3.connect(source_db) as connection:
-        connection.execute("CREATE TABLE runtime_state(subject_id TEXT NOT NULL)")
-        connection.execute("INSERT INTO runtime_state VALUES ('Noyra-0001')")
+    from noyra.core import Database, EventStore, IdentityStore
+    from noyra.core.lifecycle import LifecycleManager
+
+    database = Database(source_db)
+    IdentityStore(database).ensure("Noyra-0001", "a" * 64)
+    LifecycleManager(database, EventStore(database), "Noyra-0001").ensure_initial()
     task = MigrationTask(
         task_id="task-bind-executor",
         proposal_id="proposal-1",
@@ -394,7 +397,7 @@ def test_http_executor_requires_and_records_agent_binding_proofs(
         source_fence=fence,
         source_unfence=unfence,
         transport=_AgentTransport(agent, signing),
-        chunk_bytes=4096,
+        chunk_bytes=64 * 1024,
     )
     receipt = executor.execute(
         task,

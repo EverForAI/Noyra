@@ -290,6 +290,7 @@ def test_cli_dispatch_signs_health_and_persists_activation(tmp_path: Path) -> No
             "source_fence_digest": "d" * 64,
             "format": "noyra-target-activation/v2",
             "restored_database_sha256": "e" * 64,
+            "inventory_sha256": None,
             "recipient_key_fingerprint": agent.recipient_key_fingerprint,
             "target_volume_proof_digest": content_hash(
                 {

@@ -219,6 +219,7 @@ def _request(task_id: str, source_fence_digest: str) -> dict[str, Any]:
         "format": "noyra-target-activation/v2",
         "artifact_sha256": "f" * 64,
         "restored_database_sha256": _ARTIFACT_HASHES.get(task_id, "e" * 64),
+        "inventory_sha256": None,
         "recipient_key_fingerprint": "c" * 64,
         "target_volume_proof_digest": "e" * 64,
         "credential_binding_digest": "f" * 64,
@@ -272,6 +273,75 @@ def test_target_activation_switches_to_the_restored_subject_database(tmp_path: P
             "SELECT status FROM migration_tasks WHERE task_id=?", (task_id,)
         ).fetchone()
     assert task == ("committed",)
+
+
+def _prepare_complete_subject(
+    tmp_path: Path, activator: Any, task_id: str, fence: str
+) -> dict[str, Any]:
+    from noyra.migration.subject_payload import create_payload, restore_payload
+
+    restored = activator.agent_root / "restored" / task_id
+    source_tree = tmp_path / "source-tree"
+    (source_tree / "workspace" / "empty").mkdir(parents=True)
+    (source_tree / "workspace" / "new.txt").write_text("source work")
+    (activator.data_root / "workspace").mkdir()
+    (activator.data_root / "workspace" / "old.txt").write_text("target work")
+    payload = tmp_path / "subject.tar"
+    inventory = create_payload(restored / "noyra.sqlite3", source_tree, payload, SUBJECT_ID)
+    prepared = tmp_path / "prepared"
+    restore_payload(payload, prepared, SUBJECT_ID)
+    shutil.rmtree(restored)
+    prepared.rename(restored)
+    return {**_request(task_id, fence), "inventory_sha256": content_hash(inventory)}
+
+
+@pytest.mark.parametrize("fail_start", [False, True])
+def test_complete_subject_directories_follow_database_activation_and_rollback(
+    tmp_path: Path, fail_start: bool
+) -> None:
+    task_id, fence, _, _, systemd, activator = _runtime_fixture(tmp_path)
+    request = _prepare_complete_subject(tmp_path, activator, task_id, fence)
+    systemd.start_error = fail_start
+    if fail_start:
+        with pytest.raises(TargetActivationError, match="service_start_failed"):
+            activator.activate(request)
+    else:
+        receipt = activator.activate(request)
+        assert receipt["inventory_sha256"] == request["inventory_sha256"]
+        assert (activator.data_root / "workspace" / "new.txt").read_text() == "source work"
+        assert (activator.data_root / "workspace" / "empty").is_dir()
+        assert not (activator.data_root / "workspace" / "old.txt").exists()
+        activator.deactivate(
+            {
+                key: request[key]
+                for key in ("task_id", "target_id", "source_epoch", "manifest_digest")
+            }
+        )
+    assert (activator.data_root / "workspace" / "old.txt").read_text() == "target work"
+    assert not (activator.data_root / "workspace" / "new.txt").exists()
+    assert systemd.active
+
+
+def test_crash_after_subject_directory_switch_restores_old_tree_before_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task_id, fence, _, _, _, activator = _runtime_fixture(tmp_path)
+    request = _prepare_complete_subject(tmp_path, activator, task_id, fence)
+
+    class Crash(BaseException):
+        pass
+
+    def crash(*args: Any) -> None:
+        raise Crash()
+
+    monkeypatch.setattr(activator, "_move_database_set", crash)
+    with pytest.raises(Crash):
+        activator.activate(request)
+    assert (activator.data_root / "workspace" / "new.txt").is_file()
+    assert activator.recover_incomplete() == 1
+    assert (activator.data_root / "workspace" / "old.txt").read_text() == "target work"
+    assert not (activator.data_root / "workspace" / "new.txt").exists()
+    assert activator.recover_incomplete() == 0
 
 
 def test_controller_recovery_state_is_outside_the_agent_writable_root(tmp_path: Path) -> None:
@@ -697,6 +767,8 @@ def test_activation_rejects_artifact_id_mismatch_in_restored_migration_task(
             "UPDATE migration_tasks SET artifact_id=? WHERE task_id=?",
             ("artifact-other", task_id),
         )
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     with pytest.raises(TargetActivationError, match="restored_migration_epoch_invalid"):
         activator.activate(_request(task_id, fence_digest))

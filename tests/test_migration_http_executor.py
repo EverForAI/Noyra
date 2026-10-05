@@ -88,14 +88,23 @@ def test_transport_connects_to_the_validated_dns_address(
 
 
 def test_sqlite_artifact_provider_emits_recipient_encrypted_bundle(tmp_path: Path) -> None:
+    from noyra.core import Database, IdentityStore
     from noyra.migration.http_executor import SQLiteArtifactProvider
+    from noyra.migration.subject_payload import restore_payload
+    from noyra.research.provider import SearchProviderStore
+    from noyra.research.types import SearchProviderInput
 
     database = tmp_path / "source.sqlite3"
-    with __import__("sqlite3").connect(database) as connection:
-        connection.execute("CREATE TABLE runtime_state(subject_id TEXT NOT NULL)")
-        connection.execute("INSERT INTO runtime_state VALUES ('Noyra-0001')")
-        connection.execute("CREATE TABLE search_provider_configs(key_reference TEXT)")
-        connection.execute("INSERT INTO search_provider_configs VALUES ('secret:search')")
+    db = Database(database)
+    IdentityStore(db).ensure("Noyra-0001", "a" * 64)
+    provider_config = SearchProviderStore(db, tmp_path / "secrets").configure(
+        "Noyra-0001",
+        SearchProviderInput(provider_type="brave", label="migration", api_key="test-api-secret"),
+        actor="operator",
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "note.txt").write_text("preserved subject work", encoding="utf-8")
     recipient = X25519PrivateKey.generate()
     task = _task()
     provider = SQLiteArtifactProvider(database, tmp_path / "outgoing")
@@ -132,8 +141,17 @@ def test_sqlite_artifact_provider_emits_recipient_encrypted_bundle(tmp_path: Pat
             "artifact_format": BUNDLE_FORMAT,
         },
     )
-    with __import__("sqlite3").connect(plaintext) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM search_provider_configs").fetchone()[0] == 0
+    restored = restore_payload(plaintext, tmp_path / "restored", task.subject_id)
+    with __import__("sqlite3").connect(restored) as connection:
+        assert (
+            connection.execute("SELECT config_id FROM search_provider_configs").fetchone()[0]
+            == provider_config.config_id
+        )
+        assert connection.execute("SELECT COUNT(*) FROM secret_file_intents").fetchone()[0] > 0
+        assert connection.execute("PRAGMA foreign_key_check").fetchone() is None
+    assert (restored.parent / "workspace" / "note.txt").read_text() == "preserved subject work"
+    assert not (restored.parent / "secrets").exists()
+    assert not list((tmp_path / "outgoing").glob(".*"))
 
 
 class _Transport:

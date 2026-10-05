@@ -217,7 +217,15 @@ class TargetRuntimeActivator:
         _secure_root_directory(staged.parent, "activation_staging_directory_invalid", create=True)
         cutover_started = False
         try:
-            _copy_private(restored, staged)
+            if values["inventory_sha256"] is not None:
+                from .subject_payload import stage_payload, verify_runtime_credentials
+
+                stage_payload(
+                    restored.parent, staged.parent, values["subject_id"], values["inventory_sha256"]
+                )
+                verify_runtime_credentials(staged, self.data_root / "secrets", values["subject_id"])
+            else:
+                _copy_private(restored, staged)
             staged_digest = _sha256_file(staged)
             if staged_digest != values["restored_database_sha256"]:
                 raise TargetActivationError("restored_artifact_digest_mismatch")
@@ -231,6 +239,8 @@ class TargetRuntimeActivator:
             self._finalize_target_database(staged, values)
             cutover_started = True
             self.systemd.stop()
+            if values["inventory_sha256"] is not None:
+                self._switch_subject_trees(staged.parent, rollback)
             self._move_database_set(active_database, rollback)
             os.replace(staged, active_database)
             _chown_service(active_database)
@@ -356,6 +366,7 @@ class TargetRuntimeActivator:
         try:
             _atomic_json(marker, {**state, "status": "deactivating"}, 0o600)
             self.systemd.stop()
+            self._restore_subject_trees(rollback)
             self._move_database_set(active_database, self.state_root / "failed-target" / task_id)
             self._move_database_set(rollback / "noyra.sqlite3", self.data_root)
             _chown_service(active_database)
@@ -435,6 +446,7 @@ class TargetRuntimeActivator:
             ):
                 if self.systemd.is_active():
                     self.systemd.stop()
+                self._restore_subject_trees(rollback)
                 self._restore_dropin(rollback, bool(value.get("previous_dropin_present")))
                 self.systemd.daemon_reload()
                 self._restore_current_runtime_owner(value.get("previous_runtime_owner"))
@@ -449,6 +461,11 @@ class TargetRuntimeActivator:
                 and _sha256_file(active_database) == value.get("previous_database_sha256")
                 and not backup_database.exists()
             ):
+                if (
+                    rollback / "subject-state" / "roots.json"
+                ).exists() and self.systemd.is_active():
+                    self.systemd.stop()
+                self._restore_subject_trees(rollback)
                 _atomic_json(
                     marker,
                     {**value, "status": "recovered", "recovered_at": _now()},
@@ -460,6 +477,7 @@ class TargetRuntimeActivator:
                 raise TargetActivationError("rollback_database_unavailable")
             if self.systemd.is_active():
                 self.systemd.stop()
+            self._restore_subject_trees(rollback)
             if active_database.exists():
                 failed = self.state_root / "failed-target" / task_id
                 self._move_database_set(active_database, failed)
@@ -476,9 +494,12 @@ class TargetRuntimeActivator:
     def _validate_restored_database(self, path: Path, request: Mapping[str, Any]) -> None:
         if path.is_symlink() or not path.is_file():
             raise TargetActivationError("restored_database_unavailable")
+        wal = Path(f"{path}-wal")
+        if wal.is_symlink() or (wal.exists() and wal.stat().st_size):
+            raise TargetActivationError("restored_database_has_uncheckpointed_wal")
         try:
             with closing(
-                sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+                sqlite3.connect(f"{path.as_uri()}?mode=ro&immutable=1", uri=True)
             ) as connection:
                 connection.row_factory = sqlite3.Row
                 check = connection.execute("PRAGMA quick_check").fetchone()
@@ -589,6 +610,7 @@ class TargetRuntimeActivator:
         try:
             if self.systemd.is_active():
                 self.systemd.stop()
+            self._restore_subject_trees(rollback)
             backup_database = rollback / "noyra.sqlite3"
             if backup_database.exists():
                 failed = self.state_root / "failed-target" / rollback.name
@@ -626,6 +648,56 @@ class TargetRuntimeActivator:
             f"[Service]\nEnvironment=NOYRA_MIGRATION_TARGET_ID={target_id}\n".encode(),
             0o644,
         )
+
+    def _switch_subject_trees(self, staging: Path, rollback: Path) -> None:
+        from .subject_payload import STATE_ROOTS
+
+        saved = rollback / "subject-state"
+        saved.mkdir(mode=0o700)
+        presence = {}
+        for name in STATE_ROOTS:
+            current = self.data_root / name
+            if current.is_symlink() or (current.exists() and not current.is_dir()):
+                raise TargetActivationError("subject_state_directory_invalid")
+            presence[name] = current.exists()
+        # Write ahead before any move. A saved directory is itself the durable
+        # evidence of a completed rename; recovery can repeat after any move.
+        _atomic_json(saved / "roots.json", presence, 0o600)
+        for name in STATE_ROOTS:
+            current = self.data_root / name
+            if presence[name]:
+                os.replace(current, saved / name)
+            prepared = staging / name
+            if prepared.exists():
+                os.replace(prepared, current)
+            else:
+                current.mkdir(mode=0o700)
+            for path in (current, *current.rglob("*")):
+                _chown_service(path)
+                os.chmod(path, 0o700 if path.is_dir() else 0o600)
+
+    def _restore_subject_trees(self, rollback: Path) -> None:
+        from .subject_payload import STATE_ROOTS
+
+        saved = rollback / "subject-state"
+        if not (saved / "roots.json").exists():
+            return
+        presence = _read_json(saved / "roots.json", "subject_state_rollback_invalid")
+        if set(presence) != set(STATE_ROOTS) or any(type(v) is not bool for v in presence.values()):
+            raise TargetActivationError("subject_state_rollback_invalid")
+        failed = self.state_root / "failed-target" / rollback.name
+        failed.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for name in STATE_ROOTS:
+            previous, current = saved / name, self.data_root / name
+            if previous.is_symlink() or current.is_symlink():
+                raise TargetActivationError("subject_state_rollback_invalid")
+            if previous.exists() or not presence[name]:
+                if current.exists():
+                    if (failed / name).exists():
+                        raise TargetActivationError("subject_state_rollback_conflict")
+                    os.replace(current, failed / name)
+                if previous.exists():
+                    os.replace(previous, current)
 
     def _restore_dropin(self, rollback: Path, present: bool) -> None:
         path = self.dropin_dir / "migration-target.conf"

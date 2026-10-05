@@ -43,6 +43,7 @@ from .activation_contract import (
 from .bundle import BUNDLE_FORMAT, encrypt_bundle
 from .executor import MigrationExecutionError, MigrationExecutionReceipt
 from .manager import MigrationTask
+from .subject_payload import PAYLOAD_FORMAT, create_payload, file_digest
 from .trust import (
     RecipientPoPProof,
     create_recipient_pop_challenge,
@@ -62,7 +63,7 @@ class ArtifactBundle:
 
 
 class SQLiteArtifactProvider:
-    """Create a redacted SQLite snapshot and encrypt it to the target key."""
+    """Preserve immutable metadata and encrypt a complete subject snapshot."""
 
     def __init__(self, database_path: Path | str, output_root: Path | str):
         self.database_path = Path(database_path).resolve()
@@ -94,29 +95,23 @@ class SQLiteArtifactProvider:
         if destination.exists():
             raise MigrationExecutionError("artifact_already_exists")
         raw_snapshot = self.output_root / f".{artifact_id}.sqlite"
-        raw_snapshot.unlink(missing_ok=True)
+        raw_payload = self.output_root / f".{artifact_id}.tar"
+        if raw_snapshot.exists() or raw_payload.exists():
+            raise MigrationExecutionError("artifact_snapshot_already_exists")
         try:
             source = sqlite3.connect(self.database_path)
             target = sqlite3.connect(raw_snapshot)
             try:
                 source.backup(target)
-                target.execute("PRAGMA foreign_keys=OFF")
-                for table in (
-                    "search_provider_configs",
-                    "cognitive_resource_keys",
-                    "interaction_transports",
-                    "embedding_resources",
-                    "secret_file_intents",
-                ):
-                    if target.execute(
-                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-                    ).fetchone():
-                        target.execute(f'DELETE FROM "{table}"')
-                target.commit()
+                target.execute("PRAGMA journal_mode=DELETE")
             finally:
                 target.close()
                 source.close()
                 gc.collect()
+            os.chmod(raw_snapshot, 0o600)
+            inventory = create_payload(
+                raw_snapshot, self.database_path.parent, raw_payload, task.subject_id
+            )
             context = {
                 "task_id": task.task_id,
                 "target_id": task.target_id,
@@ -125,19 +120,23 @@ class SQLiteArtifactProvider:
                 "subject_id": task.subject_id,
                 "schema_version": str(CURRENT_SCHEMA_VERSION),
                 "artifact_format": BUNDLE_FORMAT,
+                "payload_format": PAYLOAD_FORMAT,
+                "database_sha256": file_digest(raw_snapshot),
+                "inventory_sha256": content_hash(inventory),
             }
             encrypted = encrypt_bundle(
-                raw_snapshot,
+                raw_payload,
                 destination,
                 recipient_public_key=recipient_public,
                 context=context,
             )
-        except (OSError, sqlite3.DatabaseError) as error:
+        except (OSError, ValueError, sqlite3.DatabaseError) as error:
             raw_snapshot.unlink(missing_ok=True)
             raise MigrationExecutionError("artifact_snapshot_failed") from error
         finally:
             try:
                 raw_snapshot.unlink(missing_ok=True)
+                raw_payload.unlink(missing_ok=True)
             except OSError as error:
                 raise MigrationExecutionError("artifact_snapshot_cleanup_failed") from error
         manifest = {
@@ -421,7 +420,9 @@ class HTTPMigrationExecutor:
                 health_with_signature,
                 target_signature,
             )
-            if restore.get("restored_database_sha256") != manifest.get("plaintext_sha256"):
+            if restore.get("restored_database_sha256") != manifest.get(
+                "database_sha256", manifest.get("plaintext_sha256")
+            ):
                 raise MigrationExecutionError("target_restored_database_digest_mismatch")
             activation_request = validate_activation_request(
                 {
@@ -434,6 +435,7 @@ class HTTPMigrationExecutor:
                     "artifact_id": manifest["artifact_id"],
                     "artifact_sha256": manifest["artifact_sha256"],
                     "restored_database_sha256": restore.get("restored_database_sha256"),
+                    "inventory_sha256": manifest.get("inventory_sha256"),
                     "health_report_digest": content_hash(health_with_signature),
                     "source_fence_digest": source_fence_digest,
                     "recipient_key_fingerprint": target["recipient_key_fingerprint"],

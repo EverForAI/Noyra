@@ -19,6 +19,7 @@ ACTIVATION_REQUEST_KEYS = frozenset(
         "artifact_id",
         "artifact_sha256",
         "restored_database_sha256",
+        "inventory_sha256",
         "health_report_digest",
         "source_fence_digest",
         "recipient_key_fingerprint",
@@ -53,7 +54,11 @@ def validate_activation_request(request: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("migration activation identity is invalid")
     for key in ACTIVATION_REQUEST_KEYS - {*patterns, "format", "wallet_mode"}:
         value = request[key]
-        if value is None and key in {"signer_binding_digest", "wallet_proof_digest"}:
+        if value is None and key in {
+            "signer_binding_digest",
+            "wallet_proof_digest",
+            "inventory_sha256",
+        }:
             continue
         if not isinstance(value, str) or not _DIGEST.fullmatch(value):
             raise ValueError("migration activation digest is invalid")

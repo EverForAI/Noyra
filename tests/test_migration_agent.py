@@ -260,6 +260,7 @@ def test_target_activation_fails_closed_without_a_runtime_handoff_controller(
         "source_fence_digest": "d" * 64,
         "format": "noyra-target-activation/v2",
         "restored_database_sha256": "e" * 64,
+        "inventory_sha256": None,
     }
     request.update(
         _disabled_activation_binding(
@@ -306,6 +307,7 @@ def test_target_activation_returns_agent_signed_service_receipt(tmp_path: Any) -
         "source_fence_digest": "d" * 64,
         "format": "noyra-target-activation/v2",
         "restored_database_sha256": "e" * 64,
+        "inventory_sha256": None,
     }
     request.update(
         _disabled_activation_binding(
@@ -674,6 +676,7 @@ def test_agent_checks_encrypted_volume_before_activation_side_effect(tmp_path: A
         "source_fence_digest": "d" * 64,
         "format": "noyra-target-activation/v2",
         "restored_database_sha256": "e" * 64,
+        "inventory_sha256": None,
         "recipient_key_fingerprint": "c" * 64,
         "target_volume_proof_digest": "e" * 64,
         "credential_binding_digest": "f" * 64,

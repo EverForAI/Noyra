@@ -14,7 +14,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Mapping
-from contextlib import suppress
+from contextlib import closing, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1280,10 +1280,10 @@ class MigrationAgent:
                 raise ValueError("recipient-encrypted restore is not configured")
             if task_id is None:
                 raise ValueError("migration restore task identity is required")
+            if values.get("task_id") != task_id or values.get("target_id") != self.target_id:
+                raise ValueError("migration restore bundle identity mismatch")
             task_root = self.restore_root / task_id
-            task_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-            self._assert_private_directory(task_root)
-            plaintext = task_root / ".noyra.sqlite3.bundle-plaintext"
+            plaintext = self.restore_root / f".{task_id}.bundle-plaintext"
             if plaintext.exists() or plaintext.is_symlink():
                 raise ValueError("migration restore target is not empty")
             decrypt_bundle(
@@ -1304,6 +1304,41 @@ class MigrationAgent:
                     )
                 },
             )
+            if values.get("payload_format") is not None:
+                from .subject_payload import restore_payload, verify_archives, verify_payload
+
+                staging = self.restore_root / f".{task_id}.restoring"
+                if staging.exists() or staging.is_symlink():
+                    plaintext.unlink(missing_ok=True)
+                    raise ValueError("migration restore staging already exists")
+                try:
+                    database = restore_payload(plaintext, staging, str(subject_id))
+                    if (
+                        _file_digest(database) != values["database_sha256"]
+                        or content_hash(verify_payload(staging, str(subject_id)))
+                        != values["inventory_sha256"]
+                    ):
+                        raise ValueError("subject payload digest mismatch")
+                    verify_archives(staging, str(subject_id))
+                    if task_root.exists():
+                        raise ValueError("migration restore target is not empty")
+                    staging.rename(task_root)
+                finally:
+                    plaintext.unlink(missing_ok=True)
+                    if staging.exists():
+                        shutil.rmtree(staging)
+                return RestoreReport(
+                    self.target_id,
+                    self.generation,
+                    receipt.artifact_id,
+                    receipt.manifest_digest,
+                    "restored",
+                    subject_id,
+                    tip,
+                    artifact_sha256,
+                    str(task_root / "noyra.sqlite3"),
+                    values["database_sha256"],
+                )
             restore_source = plaintext
             restore_values = {
                 **values,
@@ -1311,7 +1346,11 @@ class MigrationAgent:
                 "byte_size": values["plaintext_size"],
                 "artifact_sha256": values["plaintext_sha256"],
             }
-        restore_path = self._restore_artifact(restore_source, restore_values, task_id=task_id)
+        try:
+            restore_path = self._restore_artifact(restore_source, restore_values, task_id=task_id)
+        finally:
+            if restore_source != artifact_path:
+                restore_source.unlink(missing_ok=True)
         return RestoreReport(
             self.target_id,
             self.generation,
@@ -1641,7 +1680,9 @@ class MigrationAgent:
     @staticmethod
     def _database_quick_check(path: Path) -> bool:
         try:
-            with sqlite3.connect(path) as connection:
+            with closing(
+                sqlite3.connect(f"{path.as_uri()}?mode=ro&immutable=1", uri=True)
+            ) as connection:
                 result = connection.execute("PRAGMA quick_check").fetchone()
             return result is not None and result[0] == "ok"
         except (OSError, sqlite3.DatabaseError):
@@ -1650,7 +1691,9 @@ class MigrationAgent:
     @staticmethod
     def _database_subject_matches(path: Path, subject_id: str) -> bool:
         try:
-            with sqlite3.connect(path) as connection:
+            with closing(
+                sqlite3.connect(f"{path.as_uri()}?mode=ro&immutable=1", uri=True)
+            ) as connection:
                 row = connection.execute("SELECT subject_id FROM runtime_state LIMIT 1").fetchone()
             return row is not None and row[0] == subject_id
         except (OSError, sqlite3.DatabaseError):
