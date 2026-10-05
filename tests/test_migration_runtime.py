@@ -22,6 +22,7 @@ async def test_cognitive_review_persists_only_trusted_needed_manual_proposals(
     recommend: bool,
     trust: bool,
     expected: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from noyra.core.admission import RuntimeAdmissionGate
     from noyra.migration.manager import MigrationManager
@@ -68,7 +69,11 @@ async def test_cognitive_review_persists_only_trusted_needed_manual_proposals(
         gateway=Gateway,
         to_thread=asyncio.to_thread,
     )
-    runtime.source_need = lambda: MigrationNeed.assess(source_health=1.0, storage_pressure=0.95)
+    monkeypatch.setattr(
+        runtime,
+        "source_need",
+        lambda: MigrationNeed.assess(source_health=1.0, storage_pressure=0.95),
+    )
     await runtime.tick()
     proposals = manager.list_proposals("Noyra-0001")
     assert len(proposals) == expected
@@ -125,6 +130,7 @@ def test_target_observation_requires_explicit_cost_and_verifies_signature(
     from noyra.migration.discovery import ResourceObservation
 
     observation = ResourceObservation(**agent.observe())
+    assert agent.public_key is not None
     observation.verify(
         public_key=agent.public_key,
         expected_target_id=agent.target_id,

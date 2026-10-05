@@ -1321,6 +1321,9 @@ def _default_checks() -> tuple[IntegrityCheckSpec, ...]:
         IntegrityCheckSpec(
             "core.storage_boundary", 1, "core", _DEEP_PROFILES, _check_storage_boundary
         ),
+        IntegrityCheckSpec(
+            "core.evidence_counts", 1, "core", _DEEP_PROFILES, _check_evidence_counts
+        ),
         IntegrityCheckSpec("core.actions", 1, "core", _DEEP_PROFILES, _check_actions),
         IntegrityCheckSpec(
             "operations.provider_health",
@@ -1560,6 +1563,24 @@ def _check_schema_contract(context: IntegrityContext) -> IntegrityCheckOutcome:
             {"schema_version": version, "expected": expected, "found": actual},
         )
     return IntegrityCheckOutcome(details={"schema_version": version, "status": "ok"})
+
+
+def _check_evidence_counts(context: IntegrityContext) -> IntegrityCheckOutcome:
+    from .evidence_capacity import evidence_counts
+
+    counts = evidence_counts(context.connection, context.subject_id)
+    for table, expected in counts.items():
+        # Iteration charges the integrity row/time budget; this scan runs only
+        # in scheduled deep verification, never ordinary admission or status.
+        actual = sum(
+            1
+            for _ in context.connection.execute(
+                f"SELECT subject_id FROM {table} WHERE subject_id=?", (context.subject_id,)
+            )
+        )
+        if actual != expected:
+            raise IntegrityError("evidence row counter mismatch: " + table)
+    return IntegrityCheckOutcome(details={"tables": len(counts)})
 
 
 def _check_provider_health(context: IntegrityContext) -> IntegrityCheckOutcome:

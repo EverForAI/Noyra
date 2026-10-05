@@ -108,7 +108,8 @@ def test_bounded_history_survives_cleanup_export_and_authenticated_restore(
     for _ in range(3):
         assert retention.run_batch(subject)["failed_reason"] is None
     status = retention.evidence_capacity(subject)
-    assert status["blocked"] and status["lifecycle"]["model_calls"]["count_is_lower_bound"]
+    assert status["blocked"]
+    assert not status["lifecycle"]["model_calls"]["count_is_lower_bound"]
     with zipfile.ZipFile(
         io.BytesIO(RuntimeLogExporter(database).export(subject, actor="operator").content)
     ) as archive:
@@ -167,3 +168,206 @@ def test_capacity_exhaustion_preserves_wallet_maintenance(
     finally:
         service.http.close()
         service.kernel.close()
+
+
+@pytest.mark.asyncio
+async def test_capacity_allows_real_queued_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx
+    from pydantic import SecretStr
+
+    from noyra.interaction import InteractionStore
+    from noyra.interaction.transport import DeliveryDispatcher, TransportInput
+
+    monkeypatch.setenv("NOYRA_EVIDENCE_MAX_ROWS_PER_TABLE", "1")
+    service = NoyraService(
+        ServiceSettings(
+            data_dir=tmp_path,
+            subject_id="Noyra-cap-delivery",
+            genesis_hash="a" * 64,
+            port=0,
+            integrity_mode="off",
+        )
+    )
+    service.boot()
+    subject = service.kernel.subject_id
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"id": "delivered-once"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        dispatcher = DeliveryDispatcher(
+            service.kernel.database, service.http.transports, client=client
+        )
+        monkeypatch.setattr(service.http, "deliveries", dispatcher)
+        try:
+            service.http.transports.configure(
+                subject,
+                TransportInput(
+                    channel="qq",
+                    label="fixture",
+                    endpoint="https://api.sgroup.qq.com",
+                    settings={"target_type": "group"},
+                    credentials={"access_token": SecretStr("test")},
+                ),
+                actor="operator",
+            )
+            InteractionStore(service.kernel.database).send(subject, "qq", "recipient", "accepted")
+            assert dispatcher.enqueue_pending(subject) == 1
+            ModelLedger(service.kernel.database).prepare_call(
+                subject, "p", "m", "test", "a" * 64, "full"
+            )
+            assert await service._active_tick() == "evidence_capacity_reached"
+            assert await service._active_tick() == "evidence_capacity_reached"
+            assert len(requests) == 1
+            with service.kernel.database.connection() as c:
+                assert (
+                    c.execute("SELECT status FROM interaction_deliveries").fetchone()[0]
+                    == "delivered"
+                )
+        finally:
+            service.http.close()
+            service.kernel.close()
+
+
+def test_embedding_cap_preserves_replay_recovery_and_circuit_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from noyra.model import EmbeddingBudgetLimits, EmbeddingCircuitPolicy, EmbeddingLedger
+    from noyra.model.embedding_ledger import EmbeddingUsageRecord
+
+    monkeypatch.setenv("NOYRA_EVIDENCE_MAX_ROWS_PER_TABLE", "2")
+    db = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-embedding-cap"
+    IdentityStore(db).ensure(subject, "a" * 64)
+    ledger = EmbeddingLedger(db)
+    policy = EmbeddingCircuitPolicy(1, 1)
+
+    def authorize(key: str, resource: str = "resource") -> tuple[EmbeddingUsageRecord, bool]:
+        return ledger.authorize(
+            subject,
+            resource,
+            "provider",
+            "model",
+            "test",
+            "a" * 64,
+            key,
+            EmbeddingBudgetLimits(100, 10000, 10000),
+            policy,
+            text_count=1,
+            reserved_tokens=10,
+            reserved_cost_microusd=10,
+        )
+
+    first, _ = authorize("one")
+    ledger.start(first.usage_id)
+    ledger.fail(
+        first.usage_id, error_code="unavailable", usage_unknown=False, circuit_policy=policy
+    )
+    second, _ = authorize("two", "another-resource")
+    ledger.start(second.usage_id)
+    with pytest.raises(InvalidTransitionError, match="evidence_capacity_reached"):
+        authorize("three", "third-resource")
+    assert authorize("one")[1] is False
+    restarted = EmbeddingLedger(Database(db.path))
+    assert restarted.recover_interrupted(subject) == 1
+    assert restarted.recover_interrupted(subject) == 0
+    counts = RetentionManager(db).evidence_capacity(subject)["counts"]
+    assert counts["embedding_usage_entries"] == 2
+    assert counts["embedding_circuit_transitions"] == 4
+    assert restarted.verify_integrity(subject)["embedding_circuit_transitions"] == 4
+    with db.connection() as c:
+        assert c.execute("SELECT count(*) FROM embedding_circuit_states").fetchone()[0] == 2
+
+
+def test_counter_migration_backfill_rollback_and_tamper_detection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import noyra.core.database as schema
+    from noyra.core import IntegrityRegistry
+    from noyra.core.errors import IntegrityError
+
+    subject = "Noyra-counter-upgrade"
+    with monkeypatch.context() as old:
+        old.setattr(schema, "CURRENT_SCHEMA_VERSION", 79)
+        db = Database(tmp_path / "noyra.sqlite3")
+        IdentityStore(db).ensure(subject, "a" * 64)
+        for i in range(3):
+            ModelLedger(db).prepare_call(subject, "p", "m", "test", "a" * 64, str(i))
+    db = Database(db.path)
+    assert RetentionManager(db).evidence_capacity(subject)["counts"]["model_calls"] == 3
+    with pytest.raises(RuntimeError, match="rollback"), db.transaction() as c:
+        c.execute(
+            "INSERT INTO model_calls(call_id,subject_id,provider,model,purpose,request_hash,"
+            "idempotency_key,status,created_at) VALUES(?,?,'p','m','test',?,?,'prepared',?)",
+            ("rolled-back", subject, "a" * 64, "rolled-back", "2026-10-05T00:00:00+00:00"),
+        )
+        assert (
+            c.execute(
+                "SELECT row_count FROM evidence_row_counts WHERE table_name='model_calls'"
+            ).fetchone()[0]
+            == 4
+        )
+        raise RuntimeError("rollback")
+    assert (
+        RetentionManager(Database(db.path)).evidence_capacity(subject)["counts"]["model_calls"] == 3
+    )
+    with db.transaction() as c:
+        c.execute("UPDATE evidence_row_counts SET row_count=0 WHERE table_name='model_calls'")
+    db = Database(db.path)
+    report = IntegrityRegistry().run(
+        db,
+        subject,
+        tmp_path,
+        profile="manual",
+        policy_mode="alert",
+        deadline_seconds=10,
+        check_ids=("core.evidence_counts",),
+    )
+    assert report.status == "corrupt"
+    with db.transaction() as c:
+        c.execute("DELETE FROM evidence_row_counts WHERE table_name='model_calls'")
+    with pytest.raises(IntegrityError, match="counter contract"):
+        ModelLedger(db).prepare_call(subject, "p", "m", "test", "a" * 64, "missing-counter")
+
+
+def test_capacity_query_cost_does_not_grow_with_history(tmp_path: Path) -> None:
+    from noyra.core.evidence_capacity import evidence_capacity_status, require_evidence_capacity
+
+    db = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-counter-cost"
+    IdentityStore(db).ensure(subject, "a" * 64)
+
+    def query_steps() -> int:
+        steps = 0
+
+        def progress() -> int:
+            nonlocal steps
+            steps += 1
+            return 0
+
+        with db.transaction() as c:
+            c.set_progress_handler(progress, 1)
+            require_evidence_capacity(c, subject, "model_calls")
+            evidence_capacity_status(c, subject)
+            c.set_progress_handler(None, 0)
+        return steps
+
+    empty_steps = query_steps()
+    with db.transaction() as c:
+        # Real historical rows and triggers; one transaction keeps this fixture fast.
+        c.executemany(
+            "INSERT INTO model_calls(call_id,subject_id,provider,model,purpose,request_hash,"
+            "idempotency_key,status,created_at) VALUES(?,?,'p','m','test',?,?,'prepared',?)",
+            (
+                (str(i), subject, "a" * 64, str(i), "2026-10-05T00:00:00+00:00")
+                for i in range(10000)
+            ),
+        )
+    assert RetentionManager(db).evidence_capacity(subject)["counts"]["model_calls"] == 10000
+    assert query_steps() <= empty_steps + 20

@@ -7,21 +7,23 @@ import sqlite3
 from collections.abc import Mapping
 from typing import Any
 
-from .errors import InvalidTransitionError
+from .errors import IntegrityError, InvalidTransitionError
+from .evidence_schema import TABLES_V80
 
-EVIDENCE_TABLES = (
-    "model_calls",
-    "model_attempts",
-    "actions",
-    "behavior_logs",
-    "research_search_runs",
-    "action_deliberation_runs",
-)
+EVIDENCE_TABLES = TABLES_V80
 DEFAULT_EVIDENCE_ROWS = 250_000
 
 # Persistent idempotency and causal evidence is deliberately retained. The
 # admission boundary, not age-based deletion, bounds these tables.
 EVIDENCE_LIFECYCLE = {
+    "embedding_usage_entries": (
+        "embedding_usage_entries",
+        "permanent embedding budgets and recovery",
+    ),
+    "embedding_circuit_transitions": (
+        "embedding_usage_entries",
+        "at most three transitions per admitted embedding, including recovery",
+    ),
     "model_calls": ("model_calls", "permanent request idempotency, budgets and causal references"),
     "model_attempts": ("model_attempts", "reserved and settled model usage; unknown-call recovery"),
     "actions": ("actions", "permanent action idempotency and external-effect recovery"),
@@ -49,42 +51,60 @@ def evidence_row_limit(environ: Mapping[str, str] | None = None) -> int:
     return limit
 
 
+def _limits() -> dict[str, int]:
+    limit = evidence_row_limit()
+    # Initial circuit + probe + terminal/recovery transitions are reserved by
+    # usage admission. Completion must never be blocked at the capacity limit.
+    return {
+        table: limit * (3 if table == "embedding_circuit_transitions" else 1)
+        for table in EVIDENCE_TABLES
+    }
+
+
+def evidence_counts(connection: Any, subject_id: str) -> dict[str, int]:
+    version = connection.execute(
+        "SELECT value FROM schema_meta WHERE key='schema_version'"
+    ).fetchone()
+    if version is not None and int(version[0]) < 80:
+        # Historical migration fixtures only; production always migrates first.
+        return {
+            table: int(
+                connection.execute(
+                    f"SELECT count(*) FROM {table} WHERE subject_id=?", (subject_id,)
+                ).fetchone()[0]
+            )
+            for table in EVIDENCE_TABLES
+        }
+    rows = connection.execute(
+        "SELECT table_name,row_count FROM evidence_row_counts WHERE subject_id=?", (subject_id,)
+    ).fetchall()
+    counts = {str(row[0]): row[1] for row in rows}
+    if set(counts) != set(EVIDENCE_TABLES) or any(
+        type(value) is not int or value < 0 for value in counts.values()
+    ):
+        raise IntegrityError("evidence counter contract is incomplete")
+    return counts
+
+
 def require_evidence_capacity(connection: Any, subject_id: str, table: str) -> None:
     """Call inside the writer transaction, after any idempotent replay lookup."""
     if table not in EVIDENCE_TABLES:
         raise ValueError("unknown evidence table")
-    limit = evidence_row_limit()
-    protected = [table]
-    if table in {"model_calls", "actions"}:
-        protected.extend(
-            name
-            for name, (source, _) in EVIDENCE_LIFECYCLE.items()
-            if source == table and name != table
-        )
-    for protected_table in protected:
-        row = connection.execute(
-            f"SELECT 1 FROM {protected_table} WHERE subject_id=? LIMIT 1 OFFSET ?",
-            (subject_id, limit - 1),
-        ).fetchone()
-        if row is not None:
-            raise InvalidTransitionError("evidence_capacity_reached")
+    counts, limits = evidence_counts(connection, subject_id), _limits()
+    protected = {table} | {
+        name for name, (source, _) in EVIDENCE_LIFECYCLE.items() if source == table
+    }
+    if any(counts[name] >= limits[name] for name in protected):
+        raise InvalidTransitionError("evidence_capacity_reached")
 
 
 def evidence_capacity_status(connection: sqlite3.Connection, subject_id: str) -> dict[str, Any]:
-    limit = evidence_row_limit()
-    counts = {
-        table: int(
-            connection.execute(
-                f"SELECT count(*) FROM (SELECT 1 FROM {table} WHERE subject_id=? LIMIT ?)",
-                (subject_id, limit),
-            ).fetchone()[0]
-        )
-        for table in EVIDENCE_TABLES
-    }
+    counts, limits = evidence_counts(connection, subject_id), _limits()
     return {
-        "limit_per_table": limit,
+        "limit_per_table": evidence_row_limit(),
+        "limits": limits,
         "counts": counts,
-        "blocked": any(value >= limit for value in counts.values()),
+        "blocked": any(value >= limits[table] for table, value in counts.items()),
         "policy": "preserve_required_evidence_stop_new_work",
         "lifecycle": {
             table: {
@@ -93,7 +113,7 @@ def evidence_capacity_status(connection: sqlite3.Connection, subject_id: str) ->
                 "reason": reason,
                 "recovery": "authenticated_backup",
                 "historical_export": "runtime_export",
-                "count_is_lower_bound": counts[table] == limit,
+                "count_is_lower_bound": False,
             }
             for table, (source, reason) in EVIDENCE_LIFECYCLE.items()
         },

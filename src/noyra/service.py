@@ -9912,9 +9912,12 @@ class NoyraService:
             lease.assert_current()
             if not storage.cognition_allowed:
                 return "storage_pressure"
-            evidence_exhausted = self.http.retention.evidence_capacity(self.kernel.subject_id)[
-                "blocked"
-            ]
+            with bind_lease(lease):
+                evidence_status = await self._tracked_to_thread(
+                    self.http.retention.evidence_capacity, self.kernel.subject_id
+                )
+            lease.assert_current()
+            evidence_exhausted = evidence_status["blocked"]
             try:
                 with bind_lease(lease):
                     await self._tracked_to_thread(
@@ -9948,16 +9951,13 @@ class NoyraService:
                         limit=20,
                     )
                 lease.assert_current()
-            if evidence_exhausted:
-                return "evidence_capacity_reached"
-            if self.cognition is None:
-                with bind_lease(lease):
-                    await self.http.deliveries.deliver_pending(self.kernel.subject_id)
-                lease.assert_current()
-                return None
             with bind_lease(lease):
                 await self.http.deliveries.deliver_pending(self.kernel.subject_id)
             lease.assert_current()
+            if evidence_exhausted:
+                return "evidence_capacity_reached"
+            if self.cognition is None:
+                return None
             if self.cognition_gateway is not None:
                 pool_status = self.cognition_gateway.pool_status()
                 with self.kernel.admission.commit_scope(lease):

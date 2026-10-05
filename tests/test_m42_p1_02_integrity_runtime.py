@@ -65,6 +65,7 @@ _CHECK_IDS = (
     "core.archive_dead_letter",
     "core.event_causal_order",
     "core.storage_boundary",
+    "core.evidence_counts",
     "core.actions",
     "operations.provider_health",
     "operations.retention",

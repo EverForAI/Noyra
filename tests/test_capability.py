@@ -235,10 +235,23 @@ class CapabilityTestCase(unittest.TestCase):
             config=LoopConfig(active_interval_seconds=1, sleep_interval_seconds=2),
             active_hook=active_hook,
         )
+        with self.kernel.database.connection() as connection:
+            before = tuple(
+                connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                for table in ("events", "training_records")
+            )
         result = asyncio.run(loop.tick())
         self.assertEqual(result.action, "observed")
         self.assertEqual(hook_calls, ["tick"])
-        self.assertIsNotNone(result.event_id)
+        self.assertIsNone(result.event_id)
+        for _ in range(20):
+            asyncio.run(loop.tick())
+        with self.kernel.database.connection() as connection:
+            after = tuple(
+                connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                for table in ("events", "training_records")
+            )
+        self.assertEqual(before, after)
         FatigueTracker(self.kernel.database).assess(
             self.subject_id,
             FatigueInputs(
