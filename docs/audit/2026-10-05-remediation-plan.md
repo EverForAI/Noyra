@@ -75,7 +75,7 @@ A01 需要真实环境执行，不能通过代码提交自动关闭。目标是�
 - 修正容量耗尽时提前跳过已有钱包维护的问题：维护和已开始工作允许完成，新认知/悬赏工作不再创建。已接受工作完成后的补齐记录由已经有界的来源约束。
 - 新增并发准入上限、retention 后历史导出和认证备份恢复、永久幂等重放与外键检查。必要历史仍不删除，避免破坏不可变触发器与跨模块恢复。
 - 这一方案解决审计的无界增长与生命周期合同缺失，采用“有限空间满时停止新增”语义；没有声称完成“固定空间中无限期运行且全部历史随时在线”的另一套归档功能。该能力需要新的跨层引用协议，不属于本次容量修复已具备的能力。
-- evidence/retention/storage pressure 组合 37 项通过；严格 mypy 通过。已有钱包维护独立验证结果将在最终验收补入。
+- evidence/retention/storage pressure 组合 37 项通过；严格 mypy 通过。包含已有钱包维护在内的 evidence capacity 5 项独立验证通过，并纳入最终全量回归。
 
 ### 模块 8：提交级验证与外部验收准备
 
@@ -114,3 +114,15 @@ A01 需要真实环境执行，不能通过代码提交自动关闭。目标是�
 - 继续共用同一 IP hash、全局/客户端速率、容量、TTL、错误次数和一次性消费事务；切换形式不能获得另一套限额。生成失败回滚数据库，不发布无效挑战。
 - 原生音频控件、明确标签、可按键切换的分段按钮和 live status；避免自动播放，跨切换取消旧请求；手机音频与输入分行，CSP 仅增加同源/data 音频源。
 - 验证：audio 4 项通过；public posts/web existing 42 项在组合中通过；Ruff、mypy、JS 语法通过。Playwright 390×844 与 1440×1000 截图、WAV readyState 4/合法 duration、零控制台错误、手机横向宽度 390px。未声称读屏器实机听读已验收。
+
+## 最终提交验证
+
+- 业务代码最终提交：`dff0204815703373e9af745042754f830dd5141d`。后续补入本节验证结果的提交只修改文档，不改变已测试代码。
+- 全量隔离回归基线：`2ca9dc59ee930f2626d3fe0b70a5185f026f70e1`。Python 3.12.10 / Windows 结果：**1865 passed, 26 skipped, 259 subtests passed**，耗时 3881.67 秒，退出码 0。这不等同于直接对后续全部提交重跑全量测试。
+- 基线之后的部署清理、容器签名证据和跨平台夹具变更，在 `dff0204` 的独立提交副本中完成专项回归：**92 passed, 1 skipped**。跳过项是 Windows 不具备的 POSIX marker 所有权检查。
+- 同一最终代码的 deployment maintenance/release assurance，在本机 WSL Ubuntu 24.04 的独立锁定开发环境、非 root 用户下执行：**25 passed**，包含上述 POSIX 所有权用例。WSL 不等于真实 LUKS/云主机/双机验收，临时开发环境已清理。
+- 全量中的 26 项跳过涉及当前卷不提供 Windows 8.3 alias，以及 POSIX 权限、目录模式与部分跨平台 symlink 合同；不能标为已执行通过。新增清理/证据的 POSIX 验证如上一项所述。
+- 最终代码提交 Ruff check、538 文件格式检查、352 文件严格 mypy 和 pip check 均通过；依赖锁文件 pip-audit 返回 **No known vulnerabilities found**。部署 static 与 audit-environment shell 合同通过，Compose assurance overlay 解析通过。
+- 音频挑战使用真实浏览器验证媒体可解码、布局无横向溢出和控制台无异常；不把 headless 播放请求成功当作人工听读或读屏器体验通过。
+- 提交隔离报告：`output/committed-full-verification.json`、`output/committed-final-code-verification.json`。这些是本地验证产物，不是已经执行并签名的外部门禁。
+- 原有用户未跟踪文件保留。修复修改均逐模块提交，没有推送 GitHub，没有连接或改变云服务器。
