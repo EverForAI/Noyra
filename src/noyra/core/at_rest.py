@@ -13,6 +13,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -832,6 +833,10 @@ class EncryptedBackupManager:
         for source in _private_root_entries(self.data_root):
             if source == work_root or source.name in skipped_names:
                 continue
+            if _installed_upgrade_control(self.data_root, source):
+                # Upgrade queues describe this machine, not durable subject state.
+                list(_upgrade_service_paths(self.data_root, source))
+                continue
             if _installed_migration_control(self.data_root, source):
                 # Machine-local activation journals and request queues must not
                 # be replayed on a restored host. Preserve the source epoch and
@@ -1333,11 +1338,11 @@ def _keyring_permission_error(path: Path) -> str | None:
     mode = stat.st_mode & 0o777
     # The installer verifies backups as root, while the long-running service
     # reads the same keyring through its read-only group. Root does not need
-    # to be a member of that service group to validate the fixed 0640 layout.
+    # to be a member of that service group. Root-only keys remain valid too.
     if effective_uid == 0 and stat.st_uid == 0:
-        if mode & 0o077 == 0o040:
+        if mode in {0o600, 0o640}:
             return None
-        return "root-owned backup keyring must use mode 0640"
+        return "root-owned backup keyring must use mode 0600 or 0640"
     if stat.st_uid == effective_uid:
         if mode & 0o077:
             return "backup keyring owned by the service account must use mode 0600"
@@ -1481,6 +1486,9 @@ def _private_paths(data_root: Path) -> Iterator[Path]:
     # can all contain private material and must obey the same contract.
     for path in _private_root_entries(data_root):
         try:
+            if _installed_upgrade_control(data_root, path):
+                yield from _upgrade_service_paths(data_root, path)
+                continue
             if _installed_migration_control(data_root, path):
                 yield from _migration_service_paths(data_root, path)
                 continue
@@ -1491,6 +1499,51 @@ def _private_paths(data_root: Path) -> Iterator[Path]:
                 yield path
         except OSError as error:
             raise AtRestError("private storage metadata is unavailable") from error
+
+
+def _installed_upgrade_control(data_root: Path, path: Path) -> bool:
+    if os.name != "posix" or path != data_root / "upgrade":
+        return False
+    metadata = path.lstat()
+    return metadata.st_uid == 0 and stat.S_IMODE(metadata.st_mode) != 0o700
+
+
+def _upgrade_service_paths(data_root: Path, root: Path) -> Iterator[Path]:
+    """Keep the root runner's state privileged; audit only the service spool."""
+    data = data_root.stat()
+
+    def check(path: Path, owner: int, group: int, mode: int, *, directory: bool) -> None:
+        metadata = path.lstat()
+        if (
+            not (stat.S_ISDIR(metadata.st_mode) if directory else stat.S_ISREG(metadata.st_mode))
+            or metadata.st_dev != data.st_dev
+            or metadata.st_uid != owner
+            or metadata.st_gid != group
+            or stat.S_IMODE(metadata.st_mode) != mode
+            or (not directory and metadata.st_nlink != 1)
+        ):
+            raise AtRestError("upgrade control permissions are invalid")
+
+    check(root, 0, data.st_gid, 0o750, directory=True)
+    check(root / "processing", 0, 0, 0o700, directory=True)
+    check(root / "manager.lock", 0, data.st_gid, 0o660, directory=False)
+    requests = root / "requests"
+    check(requests, data.st_uid, data.st_gid, 0o700, directory=True)
+    for path in root.iterdir():
+        if path.name in {"requests", "processing", "manager.lock"}:
+            continue
+        if path.name == "status.json":
+            check(path, 0, data.st_gid, 0o640, directory=False)
+        elif re.fullmatch(r"\.status-[0-9a-f]{24}\.tmp", path.name):
+            metadata = path.lstat()
+            mode = stat.S_IMODE(metadata.st_mode)
+            if metadata.st_gid not in {0, data.st_gid} or mode not in {0o600, 0o640}:
+                raise AtRestError("upgrade control permissions are invalid")
+            check(path, 0, metadata.st_gid, mode, directory=False)
+        else:
+            raise AtRestError("upgrade control layout is invalid")
+    yield requests
+    yield from _walk_private_tree(requests)
 
 
 def _installed_migration_control(data_root: Path, path: Path) -> bool:
