@@ -1239,10 +1239,11 @@ def test_activation_systemd_units_use_fixed_entrypoint_and_recovery_precedes_ser
     assert "--recover" in recovery
     assert "noyra-target-activation.path" in installer
     assert "enable --now noyra-target-activation.path" in installer
-    assert (
-        'install -d -o root -g root -m 0700 "$DATA_DIR/migration/target-activation/state"'
-        in installer
+    assert 'noyra_control_layout_prepare_activation_state "$DATA_DIR"' in installer
+    control_layout = (deploy.parents[1] / "scripts/lib/control-layout.sh").read_text(
+        encoding="utf-8"
     )
+    assert 'install -d -o root -g root -m 0700 "$path"' in control_layout
 
 
 def test_real_agent_bridge_root_and_source_receipt_share_activation_contract(

@@ -1,8 +1,49 @@
 from __future__ import annotations
 
+import configparser
+import re
+import shlex
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_release_manifest_covers_every_systemd_python_entrypoint() -> None:
+    helper = (ROOT / "scripts" / "lib" / "release-scripts.sh").read_text(encoding="utf-8")
+    manifest = dict(
+        (name, int(mode, 8))
+        for mode, name in re.findall(r"'([0-7]{4}):([A-Za-z0-9_.-]+\.py)'", helper)
+    )
+    assert manifest["preflight-production.py"] == 0o644
+    referenced = set()
+    prefix = "/opt/noyra/current/scripts/"
+    for path in (ROOT / "deploy" / "systemd").glob("*.service"):
+        unit = configparser.ConfigParser(interpolation=None, strict=False)
+        unit.read(path, encoding="utf-8")
+        for key, command in unit.items("Service"):
+            if not key.startswith("exec"):
+                continue
+            for argument in shlex.split(command):
+                if not argument.startswith(prefix):
+                    continue
+                name = argument.removeprefix(prefix)
+                assert name in manifest, f"{path.name} references an unpackaged script: {name}"
+                assert (ROOT / "scripts" / name).is_file()
+                if unit.get("Service", "User", fallback="root") != "root":
+                    assert manifest[name] & 0o004, f"{path.name} cannot read {name}"
+                assert manifest[name] & 0o022 == 0, f"{name} is writable by a non-root user"
+                referenced.add(name)
+    assert referenced == {"noyra-target-activation-runner.py", "noyra-migration-agent.py"}
+
+
+def test_installer_checks_packaged_entrypoints_before_stopping_old_service() -> None:
+    installer = (ROOT / "scripts" / "install-ubuntu.sh").read_text(encoding="utf-8")
+    assert 'source "$SOURCE_DIR/scripts/lib/release-scripts.sh"' in installer
+    prepare = installer.index('noyra_install_release_scripts "$SOURCE_DIR" "$staging"')
+    stop = installer.index("\nstop_old_service\n", prepare)
+    publish = installer.index('mv -- "$staging" "$release_root"', stop)
+    switch = installer.index('atomic_pointer "$CURRENT_LINK" "$release_id"', publish)
+    assert prepare < stop < publish < switch
 
 
 def test_native_installer_provisions_root_runner_and_source_sha_marker() -> None:
