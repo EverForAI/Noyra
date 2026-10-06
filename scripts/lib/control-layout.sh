@@ -32,6 +32,24 @@ noyra_control_layout_record_file() {
   CONTROL_LAYOUT_NEW_FILES["$path"]="$(stat -c '%d:%i' -- "$path"):$(sha256sum -- "$path" | cut -d' ' -f1)"
 }
 
+noyra_control_layout_prepare_activation_state() {
+  local state_root="$1/migration/target-activation/state" path
+  for path in "$state_root" "$state_root/rollback" "$state_root/activations"; do
+    [[ ! -L "$path" && ( ! -e "$path" || -d "$path" ) ]] || return 1
+    install -d -o root -g root -m 0700 "$path" || return 1
+  done
+  path="$state_root/control.lock"
+  [[ ! -L "$path" && ( ! -e "$path" || ( -f "$path" && "$(stat -c '%h' -- "$path")" == 1 ) ) ]] || return 1
+  if [[ ! -e "$path" ]]; then
+    # ProcessLock initializes an empty lock with one NUL byte. Provision that
+    # same content so an idle recovery run leaves its rollback identity intact.
+    printf '\0' | install -o root -g root -m 0600 /dev/stdin "$path" || return 1
+  else
+    chown root:root -- "$path" && chmod 0600 -- "$path" || return 1
+  fi
+  noyra_control_layout_record_file "$path"
+}
+
 noyra_control_layout_restore() {
   [[ "$CONTROL_LAYOUT_CHANGED" == true ]] || return 0
   local index path metadata current failed=false
