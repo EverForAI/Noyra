@@ -65,6 +65,7 @@ command -v curl >/dev/null 2>&1 || { echo 'curl is required for the readiness ch
 
 SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SOURCE_DIR/scripts/lib/upgrade-components.sh"
+source "$SOURCE_DIR/scripts/lib/control-layout.sh"
 INSTALL_DIR=/opt/noyra
 RELEASES_DIR="$INSTALL_DIR/releases"
 UPGRADE_INSTALL_DIR="$INSTALL_DIR/upgrade"
@@ -385,6 +386,7 @@ noyra_uid=""
 noyra_gid=""
 staging=""
 cleanup_failed=false
+failure_handled=false
 upgrade_components_restored=true
 migration_components_restored=true
 legacy_venv=""
@@ -476,7 +478,14 @@ cleanup_staging() {
     cleanup_failed=true
   fi
 }
-trap cleanup_staging EXIT
+on_exit() {
+  local status=$?
+  if [[ "$status" != 0 && "$failure_handled" == false ]]; then
+    on_error "$status"
+  fi
+  cleanup_staging
+}
+trap on_exit EXIT
 
 validate_native_config_paths() {
   local configured_data configured_keyring
@@ -554,7 +563,11 @@ restore_profile_dropin_after_failure() {
 
 on_error() {
   local status=${1:-$?}
+  failure_handled=true
   trap - ERR
+  if [[ "$CONTROL_LAYOUT_CHANGED" == true ]]; then
+    systemctl stop noyra >/dev/null 2>&1 || true
+  fi
   # Revoke service-account access before any failure recovery restarts Noyra.
   cleanup_staging
   if [[ "$cleanup_failed" == true ]]; then
@@ -564,7 +577,7 @@ on_error() {
   fi
   if [[ "$UPGRADE_COMPONENTS_CHANGED" == true ]]; then
     if ! noyra_upgrade_components_restore \
-      "$UPGRADE_RUNNER" "$UPGRADE_PATH_UNIT" "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT"; then
+      "$UPGRADE_RUNNER" "$UPGRADE_PATH_UNIT" "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT" "$UNIT_FILE"; then
       upgrade_components_restored=false
       echo 'Failed to restore root upgrade components; Noyra will remain stopped.' >&2
       status=1
@@ -579,6 +592,12 @@ on_error() {
       echo 'Failed to restore migration agent components; Noyra will remain stopped.' >&2
       status=1
     fi
+  fi
+  if ! noyra_control_layout_restore; then
+    cleanup_failed=true
+    service_was_stopped=false
+    echo 'Control state could not be safely restored; retaining data and leaving Noyra stopped.' >&2
+    status=1
   fi
   if [[ "$switched" == true ]]; then
     systemctl stop noyra >/dev/null 2>&1 || true
@@ -720,6 +739,18 @@ fi
 assert_absolute_backup_dir
 python3 "$SOURCE_DIR/scripts/deployment-maintenance.py" preflight \
   --releases "$RELEASES_DIR" --backups "$backup_dir" --data "$DATA_DIR"
+
+# Prepare and import-check the new code while the old service is still running.
+# Its installed backup reader, never the old release's reader, verifies restore.
+staging="$RELEASES_DIR/.staging-${release_id}-$$-$RANDOM"
+python3 -m venv "$staging/.venv"
+"$staging/.venv/bin/python" -m pip install --require-hashes --requirement "$SOURCE_DIR/requirements.lock"
+if [[ "$profile" == cloud ]]; then
+  "$staging/.venv/bin/python" -m pip install --require-hashes --requirement "$SOURCE_DIR/requirements-cloud.lock"
+fi
+"$staging/.venv/bin/python" -m pip install --no-deps --no-build-isolation "$SOURCE_DIR"
+"$staging/.venv/bin/python" -m pip check
+"$staging/.venv/bin/python" -c 'from noyra.service import ServiceSettings; assert ServiceSettings'
 stop_old_service
 
 # A cold encrypted backup is mandatory before replacing an active release.
@@ -818,20 +849,10 @@ if [[ -n "$old_current" || -n "$legacy_venv" ]]; then
   restore_backup_dir
   backup_dir_exposed=false
   sync -d "$backup_dir" 2>/dev/null || sync 2>/dev/null || true
-  "$backup_python" "$SOURCE_DIR/scripts/deployment-maintenance.py" verify-backup \
+  "$staging/.venv/bin/python" -I "$SOURCE_DIR/scripts/deployment-maintenance.py" verify-backup \
     --releases "$RELEASES_DIR" --backups "$backup_dir" --data "$DATA_DIR" --backup "$backup_path"
 fi
 
-ensure_upgrade_state_layout
-
-staging="$RELEASES_DIR/.staging-${release_id}-$$-$RANDOM"
-python3 -m venv "$staging/.venv"
-"$staging/.venv/bin/python" -m pip install --require-hashes --requirement "$SOURCE_DIR/requirements.lock"
-if [[ "$profile" == cloud ]]; then
-  "$staging/.venv/bin/python" -m pip install --require-hashes --requirement "$SOURCE_DIR/requirements-cloud.lock"
-fi
-"$staging/.venv/bin/python" -m pip install --no-deps --no-build-isolation "$SOURCE_DIR"
-"$staging/.venv/bin/python" -m pip check
 install -d -o root -g root -m 0755 "$staging/scripts"
 install -o root -g root -m 0644 "$SOURCE_DIR/scripts/preflight-production.py" \
   "$staging/scripts/preflight-production.py"
@@ -890,14 +911,24 @@ chmod 0755 "$release_root" "$release_root/.venv" "$release_root/.venv/bin"
 
 ensure_backup_keyring "$release_root/.venv/bin/python"
 
-install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra.service" "$UNIT_FILE"
+noyra_control_layout_snapshot "$DATA_DIR" \
+  "$DATA_DIR/upgrade" "$DATA_DIR/upgrade/requests" "$DATA_DIR/upgrade/processing" \
+  "$UPGRADE_HANDOFF_LOCK" "$DATA_DIR/upgrade/status.json" \
+  "$DATA_DIR/migration" "$DATA_DIR/migration/source" "$DATA_DIR/migration/source/epoch" \
+  "$DATA_DIR/migration/fences" "$DATA_DIR/migration/requests" "$DATA_DIR/migration/status" \
+  "$DATA_DIR/migration/target-activation" "$DATA_DIR/migration/target-activation/requests" \
+  "$DATA_DIR/migration/target-activation/status" "$DATA_DIR/migration/target-activation/state"
+ensure_upgrade_state_layout
+noyra_control_layout_record_file "$UPGRADE_HANDOFF_LOCK"
+
 LIBEXEC_DIR=/usr/local/libexec
 UPGRADE_RUNNER="$LIBEXEC_DIR/noyra-upgrade-runner.sh"
 UPGRADE_COMPONENT_BACKUP_DIR="$INSTALL_DIR/.upgrade-components.$$.$RANDOM"
 noyra_upgrade_components_snapshot \
   "$UPGRADE_COMPONENT_BACKUP_DIR" "$UPGRADE_RUNNER" "$UPGRADE_PATH_UNIT" \
-  "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT"
+  "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT" "$UNIT_FILE"
 noyra_upgrade_components_mark_changed
+install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra.service" "$UNIT_FILE"
 for upgrade_file in \
   "$UPGRADE_RUNNER" \
   "$UPGRADE_PATH_UNIT" \
@@ -971,6 +1002,7 @@ else
   chown noyra:noyra "$source_epoch_file"
   chmod 0600 "$source_epoch_file"
 fi
+noyra_control_layout_record_file "$source_epoch_file"
 if [[ -e "$CONFIG_DIR/migration/identity.json" || -L "$CONFIG_DIR/migration/identity.json" ]]; then
   if [[ -L "$CONFIG_DIR/migration/identity.json" || ! -f "$CONFIG_DIR/migration/identity.json" ]]; then
     echo 'Migration identity must be a regular file and not a symlink' >&2
@@ -1088,6 +1120,7 @@ echo 'Edit /etc/noyra/noyra.env, then run: systemctl enable --now noyra'
 rm -f -- "$profile_dropin_backup"
 noyra_upgrade_components_commit
 noyra_migration_components_commit
+CONTROL_LAYOUT_CHANGED=false
 if [[ "$service_active" == true ]]; then
   maintenance_backup=()
   if [[ -n "$backup_path" ]]; then maintenance_backup=(--backup "$backup_path"); fi

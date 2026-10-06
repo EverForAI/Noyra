@@ -16,8 +16,8 @@ MIGRATION_AGENT_WAS_ACTIVE=false
 TARGET_ACTIVATION_PATH_WAS_ENABLED=false
 
 noyra_upgrade_components_snapshot() {
-  if [[ $# -ne 5 ]]; then
-    echo 'Expected backup directory, runner and three unit paths.' >&2
+  if [[ $# -ne 5 && $# -ne 6 ]]; then
+    echo 'Expected backup directory, runner, three units and optional main unit.' >&2
     return 2
   fi
   local backup_dir="$1"
@@ -74,9 +74,10 @@ noyra_upgrade_components_mark_changed() {
 
 noyra_upgrade_components_restore() {
   [[ "$UPGRADE_COMPONENTS_CHANGED" == true ]] || return 0
-  [[ $# -eq 4 ]] || return 2
+  [[ $# -eq 4 || $# -eq 5 ]] || return 2
   local runner_path="$1" path_unit_path="$2" service_unit_path="$3" recover_unit_path="$4"
   local -a paths=("$runner_path" "$path_unit_path" "$service_unit_path" "$recover_unit_path")
+  if [[ $# -eq 5 ]]; then paths+=("$5"); fi
   local index=0 path temporary state
 
   state="$(systemctl is-active noyra-upgrade.path 2>/dev/null || true)"
