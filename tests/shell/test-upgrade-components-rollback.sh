@@ -15,6 +15,7 @@ runner="$test_root/libexec/noyra-upgrade-runner.sh"
 path_unit="$test_root/systemd/noyra-upgrade.path"
 service_unit="$test_root/systemd/noyra-upgrade.service"
 recover_unit="$test_root/systemd/noyra-upgrade-recover.service"
+main_unit="$test_root/systemd/noyra.service"
 backup="$test_root/backup"
 calls="$test_root/systemctl.log"
 mkdir -p "$(dirname "$runner")" "$(dirname "$path_unit")"
@@ -50,20 +51,23 @@ systemctl() {
 printf 'old runner\n' > "$runner"
 printf 'old path\n' > "$path_unit"
 printf 'old recovery\n' > "$recover_unit"
+printf 'old main\n' > "$main_unit"
 noyra_upgrade_components_snapshot \
-  "$backup" "$runner" "$path_unit" "$service_unit" "$recover_unit"
+  "$backup" "$runner" "$path_unit" "$service_unit" "$recover_unit" "$main_unit"
 noyra_upgrade_components_mark_changed
 printf 'new runner\n' > "$runner"
 printf 'new path\n' > "$path_unit"
 printf 'new service\n' > "$service_unit"
 printf 'new recovery\n' > "$recover_unit"
+printf 'new main\n' > "$main_unit"
 noyra_upgrade_components_restore \
-  "$runner" "$path_unit" "$service_unit" "$recover_unit" || fail 'component restore failed'
+  "$runner" "$path_unit" "$service_unit" "$recover_unit" "$main_unit" || fail 'component restore failed'
 
 [[ "$(cat "$runner")" == 'old runner' ]] || fail 'runner was not restored'
 [[ "$(cat "$path_unit")" == 'old path' ]] || fail 'path unit was not restored'
 [[ ! -e "$service_unit" ]] || fail 'new service unit remained after rollback'
 [[ "$(cat "$recover_unit")" == 'old recovery' ]] || fail 'recovery unit was not restored'
+[[ "$(cat "$main_unit")" == 'old main' ]] || fail 'main unit was not restored'
 [[ "$path_enabled:$path_active:$recover_enabled" == 'enabled:active:enabled' ]] || \
   fail 'systemd activation state was not restored'
 
