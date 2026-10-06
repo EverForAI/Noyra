@@ -66,6 +66,7 @@ command -v curl >/dev/null 2>&1 || { echo 'curl is required for the readiness ch
 SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SOURCE_DIR/scripts/lib/upgrade-components.sh"
 source "$SOURCE_DIR/scripts/lib/control-layout.sh"
+source "$SOURCE_DIR/scripts/lib/release-scripts.sh"
 INSTALL_DIR=/opt/noyra
 RELEASES_DIR="$INSTALL_DIR/releases"
 UPGRADE_INSTALL_DIR="$INSTALL_DIR/upgrade"
@@ -751,6 +752,7 @@ fi
 "$staging/.venv/bin/python" -m pip install --no-deps --no-build-isolation "$SOURCE_DIR"
 "$staging/.venv/bin/python" -m pip check
 "$staging/.venv/bin/python" -c 'from noyra.service import ServiceSettings; assert ServiceSettings'
+noyra_install_release_scripts "$SOURCE_DIR" "$staging"
 stop_old_service
 
 # A cold encrypted backup is mandatory before replacing an active release.
@@ -853,9 +855,6 @@ if [[ -n "$old_current" || -n "$legacy_venv" ]]; then
     --releases "$RELEASES_DIR" --backups "$backup_dir" --data "$DATA_DIR" --backup "$backup_path"
 fi
 
-install -d -o root -g root -m 0755 "$staging/scripts"
-install -o root -g root -m 0644 "$SOURCE_DIR/scripts/preflight-production.py" \
-  "$staging/scripts/preflight-production.py"
 "$staging/.venv/bin/python" - "$INSTALL_DIR" "$source_sha" "$staging" <<'PY'
 import sys
 from pathlib import Path
@@ -917,7 +916,10 @@ noyra_control_layout_snapshot "$DATA_DIR" \
   "$DATA_DIR/migration" "$DATA_DIR/migration/source" "$DATA_DIR/migration/source/epoch" \
   "$DATA_DIR/migration/fences" "$DATA_DIR/migration/requests" "$DATA_DIR/migration/status" \
   "$DATA_DIR/migration/target-activation" "$DATA_DIR/migration/target-activation/requests" \
-  "$DATA_DIR/migration/target-activation/status" "$DATA_DIR/migration/target-activation/state"
+  "$DATA_DIR/migration/target-activation/status" "$DATA_DIR/migration/target-activation/state" \
+  "$DATA_DIR/migration/target-activation/state/rollback" \
+  "$DATA_DIR/migration/target-activation/state/activations" \
+  "$DATA_DIR/migration/target-activation/state/control.lock"
 ensure_upgrade_state_layout
 noyra_control_layout_record_file "$UPGRADE_HANDOFF_LOCK"
 
@@ -973,7 +975,7 @@ install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/status"
 install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/target-activation"
 install -d -o root -g noyra -m 0730 "$DATA_DIR/migration/target-activation/requests"
 install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/target-activation/status"
-install -d -o root -g root -m 0700 "$DATA_DIR/migration/target-activation/state"
+noyra_control_layout_prepare_activation_state "$DATA_DIR"
 source_epoch_file="$DATA_DIR/migration/source/epoch"
 if [[ -L "$source_epoch_file" || ( -e "$source_epoch_file" && ! -f "$source_epoch_file" ) ]]; then
   echo 'Migration source epoch must be a regular file and not a symlink' >&2
