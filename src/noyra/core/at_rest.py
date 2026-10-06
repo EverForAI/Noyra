@@ -1331,6 +1331,13 @@ def _keyring_permission_error(path: Path) -> str | None:
     effective_uid = _effective_uid()
     effective_groups = {_effective_gid(), *_effective_groups()}
     mode = stat.st_mode & 0o777
+    # The installer verifies backups as root, while the long-running service
+    # reads the same keyring through its read-only group. Root does not need
+    # to be a member of that service group to validate the fixed 0640 layout.
+    if effective_uid == 0 and stat.st_uid == 0:
+        if mode & 0o077 == 0o040:
+            return None
+        return "root-owned backup keyring must use mode 0640"
     if stat.st_uid == effective_uid:
         if mode & 0o077:
             return "backup keyring owned by the service account must use mode 0600"

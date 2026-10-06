@@ -606,6 +606,21 @@ def test_keyring_rejects_hard_links(tmp_path: Path) -> None:
         validate_keyring_path(keyring_path)
 
 
+def test_root_backup_verifier_accepts_service_group_keyring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if not _posix_root_available():
+        pytest.skip("requires POSIX root to model the installer verifier")
+    keyring_path = _keyring(tmp_path)
+    _chown(keyring_path, 0, 0)
+    keyring_path.chmod(0o640)
+    monkeypatch.setattr("noyra.core.at_rest._effective_uid", lambda: 0)
+    monkeypatch.setattr("noyra.core.at_rest._effective_gid", lambda: 0)
+    monkeypatch.setattr("noyra.core.at_rest._effective_groups", lambda: ())
+
+    assert validate_keyring_path(keyring_path) == keyring_path.resolve()
+
+
 def test_required_guard_rejects_unencrypted_volume_before_database_creation(tmp_path: Path) -> None:
     class UnencryptedProbe:
         def probe(self: Self, *args: object, **kwargs: object) -> VolumeEncryptionStatus:
