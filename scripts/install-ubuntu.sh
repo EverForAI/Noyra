@@ -250,6 +250,10 @@ for upgrade_path in "$UPGRADE_INSTALL_DIR" "$UPGRADE_SOURCE_DIR"; do
   fi
 done
 install -d -o root -g root -m 0755 "$UPGRADE_INSTALL_DIR"
+ensure_upgrade_state_layout() {
+# The upgrade state is root-owned control data. Defer creating it until after
+# the mandatory backup so an older release can still traverse the data root
+# while its at-rest guard runs as the service account.
 upgrade_state_dir="$DATA_DIR/upgrade"
 upgrade_request_dir="$upgrade_state_dir/requests"
 upgrade_processing_dir="$upgrade_state_dir/processing"
@@ -280,6 +284,7 @@ if [[ -e "$upgrade_state_dir/status.json" ]]; then
   chown root:noyra "$upgrade_state_dir/status.json"
   chmod 0640 "$upgrade_state_dir/status.json"
 fi
+}
 install -d -o noyra -g noyra -m 0700 "$DATA_DIR"
 install -d -o root -g noyra -m 0750 "$CONFIG_DIR"
 install -d -o root -g noyra -m 0750 "$CREDENTIALS_DIR"
@@ -816,6 +821,8 @@ if [[ -n "$old_current" || -n "$legacy_venv" ]]; then
   "$backup_python" "$SOURCE_DIR/scripts/deployment-maintenance.py" verify-backup \
     --releases "$RELEASES_DIR" --backups "$backup_dir" --data "$DATA_DIR" --backup "$backup_path"
 fi
+
+ensure_upgrade_state_layout
 
 staging="$RELEASES_DIR/.staging-${release_id}-$$-$RANDOM"
 python3 -m venv "$staging/.venv"
