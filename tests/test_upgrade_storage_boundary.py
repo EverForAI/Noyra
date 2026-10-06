@@ -99,16 +99,28 @@ def test_real_service_can_harden_backup_and_root_can_verify_restore(
     output.mkdir(mode=0o700)
     _chown(output, account.pw_uid, account.pw_gid)
     backup = output / "cold.noyra-backup"
+    # Hosted CI checkouts can live below a private runner home. Give the
+    # service an independent, read-only code tree without changing that home.
+    service_code = root / "code"
+    shutil.copytree(
+        ROOT / "src" / "noyra",
+        service_code / "noyra",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    for path in (service_code, *service_code.rglob("*")):
+        path.chmod(0o755 if path.is_dir() else 0o644)
     code = """
 import sys
 from pathlib import Path
+from noyra.core import at_rest
 from noyra.core.at_rest import (
     _harden_private_paths, _private_permission_error, EncryptedBackupManager,
 )
 from noyra.core.database import Database
 from noyra.core.identity import IdentityStore
 from noyra.core.types import content_hash
-data, key, backup = map(Path, sys.argv[1:])
+data, key, backup, source = map(Path, sys.argv[1:])
+assert Path(at_rest.__file__).resolve().is_relative_to(source)
 database = Database(data / 'noyra.sqlite3')
 IdentityStore(database).ensure('upgrade-boundary', content_hash({'seed': 'upgrade'}))
 (data / 'secret').write_text('private-data')
@@ -129,8 +141,9 @@ EncryptedBackupManager(data, key).create(backup)
             str(data),
             str(keyring),
             str(backup),
+            str(service_code),
         ],
-        env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
+        env={**os.environ, "PYTHONPATH": str(service_code)},
         capture_output=True,
         text=True,
         timeout=60,
