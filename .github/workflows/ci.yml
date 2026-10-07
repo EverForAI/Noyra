@@ -38,7 +38,9 @@ jobs:
           sudo bash tests/shell/test-control-layout-rollback.sh
           sudo bash tests/shell/test-upgrade-components-rollback.sh
           sudo bash tests/shell/test-migration-components-rollback.sh
-          sudo "$(command -v python)" -m pytest tests/test_upgrade_storage_boundary.py tests/test_release_scripts.py -q
+          sudo "$(command -v python)" -m pytest \
+            tests/test_upgrade_storage_boundary.py tests/test_release_scripts.py \
+            tests/test_migration_storage_boundary.py tests/test_migration_activation.py -q
       - run: python -m ruff check .
       - run: python -m ruff format --check .
       - run: python -m mypy src tests
