@@ -929,7 +929,13 @@ class TargetRuntimeActivator:
             (self.rollback_root, "rollback_directory_invalid"),
             (self.activation_root, "activation_directory_invalid"),
         ):
-            _secure_root_directory(path, code, create=True, trusted_root=self.data_root)
+            _secure_root_directory(
+                path,
+                code,
+                create=True,
+                trusted_root=self.data_root,
+                allow_service_owned_root=True,
+            )
 
     def _current_runtime_owner(self, active_database: Path) -> dict[str, str] | None:
         path = self.state_root / "current.json"
@@ -1291,26 +1297,41 @@ def _secure_root_directory(
     *,
     create: bool = False,
     trusted_root: Path | None = None,
+    allow_service_owned_root: bool = False,
 ) -> None:
-    if create:
-        path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if path.is_symlink() or not path.is_dir():
+    if allow_service_owned_root and trusted_root is None:
         raise TargetActivationError(error_code)
-    if os.name != "nt":
+    if trusted_root is None:
         directories = [path]
-        parent = path.parent
-        while trusted_root is not None and parent != trusted_root.parent:
-            directories.append(parent)
-            if parent == trusted_root:
-                break
-            parent = parent.parent
-        if trusted_root is not None and trusted_root not in directories:
+    else:
+        try:
+            relative = path.relative_to(trusted_root)
+        except ValueError as error:
+            raise TargetActivationError(error_code) from error
+        if ".." in relative.parts:
             raise TargetActivationError(error_code)
-        for directory in directories:
-            if directory.is_symlink() or not directory.is_dir():
-                raise TargetActivationError(error_code)
+        directories = [trusted_root]
+        for part in relative.parts:
+            directories.append(directories[-1] / part)
+    # Validate the boundary before creating privileged descendants. Only the
+    # installed service data root may be service-owned; control state stays root-owned.
+    for directory in directories:
+        if create and directory != trusted_root:
+            directory.mkdir(mode=0o700, parents=trusted_root is None, exist_ok=True)
+        if directory.is_symlink() or not directory.is_dir():
+            raise TargetActivationError(error_code)
+        if os.name != "nt":
             metadata = directory.stat(follow_symlinks=False)
-            if metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022:
+            mode = stat.S_IMODE(metadata.st_mode)
+            if metadata.st_uid == 0 and not mode & 0o022:
+                continue
+            if not (
+                allow_service_owned_root
+                and directory == trusted_root
+                and metadata.st_uid == _service_uid()
+                and metadata.st_gid == _service_gid()
+                and mode == 0o700
+            ):
                 raise TargetActivationError(error_code)
 
 
