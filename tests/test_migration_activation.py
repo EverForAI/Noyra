@@ -55,6 +55,8 @@ def _allow_current_user_owned_test_roots(tmp_path: Path, monkeypatch: pytest.Mon
     test_owner = test_root.stat()
     monkeypatch.setattr(activation_module, "_service_uid", lambda: test_owner.st_uid)
     monkeypatch.setattr(activation_module, "_service_gid", lambda: test_owner.st_gid)
+    if test_owner.st_uid == 0:
+        return
 
     def validate_test_root(
         path: Path,
@@ -62,6 +64,7 @@ def _allow_current_user_owned_test_roots(tmp_path: Path, monkeypatch: pytest.Mon
         *,
         create: bool = False,
         trusted_root: Path | None = None,
+        allow_service_owned_root: bool = False,
     ) -> None:
         candidate = Path(path)
         try:
@@ -74,6 +77,7 @@ def _allow_current_user_owned_test_roots(tmp_path: Path, monkeypatch: pytest.Mon
                 error_code,
                 create=create,
                 trusted_root=trusted_root,
+                allow_service_owned_root=allow_service_owned_root,
             )
             return
 

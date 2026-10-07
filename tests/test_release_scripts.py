@@ -8,9 +8,13 @@ import sysconfig
 import tempfile
 import venv
 from collections.abc import Iterator
+from importlib import import_module
 from pathlib import Path
+from typing import Any
 
 import pytest
+
+from noyra.migration import activation
 
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.skipif(
@@ -114,9 +118,13 @@ import functools
 import runpy
 import sys
 from pathlib import Path
+import pwd
 from noyra.migration import activation
 
 release = Path(sys.argv[1])
+service = pwd.getpwnam("nobody")
+activation._service_uid = lambda: service.pw_uid
+activation._service_gid = lambda: service.pw_gid
 activation.recover_incomplete_target_activations = functools.partial(
     activation.recover_incomplete_target_activations,
     data_root=release.parent / "data",
@@ -127,7 +135,12 @@ sys.argv = [str(runner), "--recover"]
 runpy.run_path(str(runner), run_name="__main__")
 """
     data_root = release.parent / "data"
-    data_root.mkdir()
+    data_root.mkdir(mode=0o700)
+    accounts: Any = import_module("pwd")
+    service = accounts.getpwnam("nobody")
+    chown = getattr(os, "chown", None)
+    assert callable(chown)
+    chown(data_root, service.pw_uid, service.pw_gid)
     recovery_path = release.parent / "recover.py"
     recovery_path.write_text(recovery_code, encoding="utf-8")
     recovery = subprocess.run(
@@ -141,6 +154,8 @@ data="$2"
 state="$data/migration/target-activation/state"
 noyra_control_layout_snapshot "$data" "$data/migration" "$data/migration/target-activation" \
   "$state" "$state/rollback" "$state/activations" "$state/control.lock"
+install -d -o root -g "$(stat -c '%g' "$data")" -m 0750 \
+  "$data/migration" "$data/migration/target-activation"
 noyra_control_layout_prepare_activation_state "$data"
 "$3/.venv/bin/python" -I "$4" "$3"
 noyra_control_layout_restore
@@ -158,6 +173,98 @@ noyra_control_layout_restore
         check=False,
     )
     assert recovery.returncode == 0, recovery.stderr
+    assert data_root.stat().st_uid == service.pw_uid
+    assert stat.S_IMODE(data_root.stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "data_owner",
+        "data_group",
+        "data_readable",
+        "data_writable",
+        "control_owner",
+        "control_writable",
+        "state_owner",
+        "control_symlink",
+    ],
+)
+def test_recovery_rejects_unsafe_installed_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tamper: str
+) -> None:
+    accounts: Any = import_module("pwd")
+    service = accounts.getpwnam("nobody")
+    chown = getattr(os, "chown", None)
+    assert callable(chown)
+    monkeypatch.setattr(activation, "_service_uid", lambda: service.pw_uid)
+    monkeypatch.setattr(activation, "_service_gid", lambda: service.pw_gid)
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    chown(data, service.pw_uid, service.pw_gid)
+    control = data / "migration"
+    bridge = control / "target-activation"
+    for directory in (control, bridge):
+        directory.mkdir(mode=0o750)
+        chown(directory, 0, service.pw_gid)
+    state = bridge / "state"
+    state.mkdir(mode=0o700)
+    if tamper == "data_owner":
+        chown(data, service.pw_uid + 1, service.pw_gid)
+    elif tamper == "data_group":
+        chown(data, service.pw_uid, 0)
+    elif tamper == "data_readable":
+        data.chmod(0o750)
+    elif tamper == "data_writable":
+        data.chmod(0o770)
+    elif tamper == "control_owner":
+        chown(control, service.pw_uid, service.pw_gid)
+    elif tamper == "control_writable":
+        control.chmod(0o770)
+    elif tamper == "state_owner":
+        chown(state, service.pw_uid, service.pw_gid)
+    else:
+        control.rename(data / "original-migration")
+        control.symlink_to(data / "original-migration", target_is_directory=True)
+
+    activator = activation.TargetRuntimeActivator(data, tmp_path / "config")
+    with pytest.raises(
+        activation.TargetActivationError, match="activation_state_directory_invalid"
+    ):
+        activator.recover_incomplete()
+    assert not (state / "control.lock").exists()
+    assert not (state / "rollback").exists()
+
+
+def test_service_owned_boundary_is_explicit_and_cannot_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    accounts: Any = import_module("pwd")
+    service = accounts.getpwnam("nobody")
+    chown = getattr(os, "chown", None)
+    assert callable(chown)
+    monkeypatch.setattr(activation, "_service_uid", lambda: service.pw_uid)
+    monkeypatch.setattr(activation, "_service_gid", lambda: service.pw_gid)
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    chown(data, service.pw_uid, service.pw_gid)
+    state = data / "state"
+    state.mkdir(mode=0o700)
+
+    with pytest.raises(activation.TargetActivationError, match="invalid"):
+        activation._secure_root_directory(state, "invalid", trusted_root=data)
+    for path in (tmp_path / "outside", data / ".." / "outside"):
+        with pytest.raises(activation.TargetActivationError, match="invalid"):
+            activation._secure_root_directory(
+                path, "invalid", create=True, trusted_root=data, allow_service_owned_root=True
+            )
+    assert not (tmp_path / "outside").exists()
+    link = tmp_path / "data-link"
+    link.symlink_to(data, target_is_directory=True)
+    with pytest.raises(activation.TargetActivationError, match="invalid"):
+        activation._secure_root_directory(
+            link / "state", "invalid", trusted_root=link, allow_service_owned_root=True
+        )
 
 
 def test_idle_recovery_scaffolding_does_not_discard_runtime_records(
