@@ -55,6 +55,31 @@
       "subject_id": "Noyra-m41-historical-v31",
       "anchor_event_id": "evt_m41_historical_v31",
       "expected_migration_error": null
+    },
+    {
+      "name": "schema-v71",
+      "schema_version": 71,
+      "source_commit": "4d988c5af19f72e3751755ca7331d5e1a0e1b4cd",
+      "archive": "schema-v71.sqlite3.gz",
+      "archive_sha256": "6255f1f158261b694da5a2bd7e6e18a415e3acbb75a80f977828236fc1a0dcfa",
+      "database_sha256": "dca16ccd3db59c3dfffb1240a7e006b495c9b664c93d820ded28e4295354561a",
+      "subject_id": "Noyra-m41-historical-v71",
+      "anchor_event_id": "evt_m41_historical_v71",
+      "expected_migration_error": null
+    },
+    {
+      "name": "schema-v71-from-v63",
+      "schema_version": 71,
+      "source_commit": "4d988c5af19f72e3751755ca7331d5e1a0e1b4cd",
+      "upgrade_from": [
+        "f564c5b6a0b62d9a2112592f55fe907d612d7a89"
+      ],
+      "archive": "schema-v71-from-v63.sqlite3.gz",
+      "archive_sha256": "813533902429d7bebdf2d1bc58127f598f7441493c36402abcf095c128ad7836",
+      "database_sha256": "6ec6dfb147cc29f32a786c44428a9c13252d545816e369a6f76ddf1716dfad88",
+      "subject_id": "Noyra-m41-historical-v71",
+      "anchor_event_id": "evt_m41_historical_v71",
+      "expected_migration_error": null
     }
   ]
 }

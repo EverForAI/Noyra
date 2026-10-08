@@ -1,6 +1,7 @@
 # ruff: noqa: E501
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
@@ -9960,6 +9961,116 @@ END;
             )
 
     @staticmethod
+    def _upgrade_wallet_payment_policy_layout(connection: sqlite3.Connection) -> None:
+        """Reconcile the exact v63 ALTER layout without changing policy values."""
+        definitions: tuple[str, ...] = (
+            "subject_id TEXT PRIMARY KEY REFERENCES subject_identity(subject_id)",
+            "mode TEXT NOT NULL CHECK(mode IN ('disabled','conditional_confirmation','automatic'))",
+            "allowed_network_ids_json TEXT NOT NULL",
+            "allowed_asset_ids_json TEXT NOT NULL",
+            "per_order_limit TEXT NOT NULL",
+            "daily_limit TEXT NOT NULL",
+            "monthly_limit TEXT NOT NULL",
+            "daily_order_limit INTEGER NOT NULL CHECK(daily_order_limit >= 0)",
+            "monthly_order_limit INTEGER NOT NULL CHECK(monthly_order_limit >= 0)",
+            "min_balance TEXT NOT NULL",
+            "max_observation_age_seconds INTEGER NOT NULL CHECK(max_observation_age_seconds >= 0)",
+            "automatic_max_amount TEXT NOT NULL",
+            "anomaly_block INTEGER NOT NULL CHECK(anomaly_block IN (0,1))",
+            "emergency_paused INTEGER NOT NULL CHECK(emergency_paused IN (0,1))",
+            "recipient_allowlist_enabled INTEGER NOT NULL DEFAULT 0 CHECK(recipient_allowlist_enabled IN (0,1))",
+            "allowed_recipient_addresses_json TEXT NOT NULL DEFAULT '[]'",
+            "policy_version INTEGER NOT NULL CHECK(policy_version > 0)",
+            "updated_at TEXT NOT NULL",
+            "state_hash TEXT NOT NULL",
+        )
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(wallet_payment_policies)")
+        }
+        if "automation_enabled" in columns:
+            definitions += (
+                "automation_enabled INTEGER NOT NULL DEFAULT 0 CHECK(automation_enabled IN (0,1))",
+            )
+        expected = "CREATE TABLE wallet_payment_policies (" + ",\n".join(definitions) + ")"
+        legacy_order = definitions[:14] + definitions[16:19] + definitions[14:16] + definitions[19:]
+        legacy = "CREATE TABLE wallet_payment_policies (" + ",\n".join(legacy_order) + ")"
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='wallet_payment_policies'"
+        ).fetchone()
+        actual = _canonical_schema_sql(str(row["sql"])) if row else None
+        if actual not in {_canonical_schema_sql(expected), _canonical_schema_sql(legacy)}:
+            raise RuntimeError("wallet payment policy layout contract mismatch")
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE tbl_name='wallet_payment_policies' "
+            "AND sql IS NOT NULL AND type IN ('trigger','index')"
+        ).fetchone():
+            raise RuntimeError("wallet payment policy layout has unexpected dependent objects")
+        if actual == _canonical_schema_sql(expected):
+            return
+        for table in connection.execute("PRAGMA table_list"):
+            name = str(table["name"]).replace('"', '""')
+            if any(
+                reference["table"] == "wallet_payment_policies"
+                for reference in connection.execute(f'PRAGMA foreign_key_list("{name}")')
+            ):
+                raise RuntimeError("wallet payment policy layout has unexpected foreign keys")
+        connection.execute(
+            "CREATE TEMP TABLE noyra_v80_payment_policy_layout AS SELECT * FROM wallet_payment_policies"
+        )
+        connection.execute("DROP TABLE wallet_payment_policies")
+        connection.execute(expected)
+        names = ",".join(definition.split()[0] for definition in definitions)
+        connection.execute(
+            f"INSERT INTO wallet_payment_policies ({names}) "
+            f"SELECT {names} FROM temp.noyra_v80_payment_policy_layout"
+        )
+        connection.execute("DROP TABLE temp.noyra_v80_payment_policy_layout")
+
+    @staticmethod
+    def _upgrade_provider_health_bucket_hashes(connection: sqlite3.Connection) -> None:
+        """Authenticate the pre-unknown-outcome format before changing its hash."""
+        from .errors import IntegrityError
+        from .provider_health import ProviderHealthStore
+
+        for row in connection.execute("SELECT * FROM provider_health_buckets"):
+            try:
+                payload = {
+                    "subject_id": row["subject_id"],
+                    "provider_kind": row["provider_kind"],
+                    "provider_id": row["provider_id"],
+                    "bucket_start": row["bucket_start"],
+                    "attempt_count": int(row["attempt_count"]),
+                    "success_count": int(row["success_count"]),
+                    "failure_count": int(row["failure_count"]),
+                    "latency_total_ms": int(row["latency_total_ms"]),
+                    "last_success_at": row["last_success_at"],
+                    "last_failure_at": row["last_failure_at"],
+                    "error_counts": json.loads(row["error_counts_json"] or "{}") or {},
+                    "latency_samples": list(json.loads(row["latency_samples_json"] or "[]") or []),
+                }
+            except (TypeError, ValueError) as error:
+                raise IntegrityError("provider health detail counters are invalid") from error
+            if int(row["unknown_count"]) == 0 and row["state_hash"] == content_hash(payload):
+                payload["unknown_count"] = 0
+                migrated = dict(row)
+                migrated["state_hash"] = content_hash(payload)
+                ProviderHealthStore._verify_bucket(migrated)
+                connection.execute(
+                    """UPDATE provider_health_buckets SET state_hash=?
+                       WHERE subject_id=? AND provider_kind=? AND provider_id=? AND bucket_start=?""",
+                    (
+                        migrated["state_hash"],
+                        row["subject_id"],
+                        row["provider_kind"],
+                        row["provider_id"],
+                        row["bucket_start"],
+                    ),
+                )
+            else:
+                ProviderHealthStore._verify_bucket(row)
+
+    @staticmethod
     def _ensure_migration_target_attestation_columns(connection: sqlite3.Connection) -> None:
         """Add target attestation columns without making migration replay unsafe."""
         table = connection.execute(
@@ -10243,6 +10354,23 @@ END;
                     try:
                         connection.execute("BEGIN IMMEDIATE")
                         self._ensure_migration_target_recipient_columns(connection)
+                        connection.execute(
+                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                            (str(target_version),),
+                        )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
+                if target_version == 80:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        # Existing v71 installations never replay schema 69.
+                        self._upgrade_provider_health_metrics(connection)
+                        self._upgrade_provider_health_bucket_hashes(connection)
+                        self._upgrade_wallet_payment_policy_layout(connection)
+                        self._execute_sql_script(connection, migration)
                         connection.execute(
                             "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                             (str(target_version),),

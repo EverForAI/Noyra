@@ -259,10 +259,15 @@ def test_optional_feature_install_rolls_back_partial_sql_script(
 
 
 def test_historical_fixture_range_covers_major_schema_eras() -> None:
-    assert [fixture.schema_version for fixture in HISTORICAL_FIXTURES] == [6, 16, 21, 27, 31]
-    assert len({fixture.source_commit for fixture in HISTORICAL_FIXTURES}) == len(
-        HISTORICAL_FIXTURES
-    )
+    assert sorted({fixture.schema_version for fixture in HISTORICAL_FIXTURES}) == [
+        6,
+        16,
+        21,
+        27,
+        31,
+        71,
+    ]
+    assert len({fixture.name for fixture in HISTORICAL_FIXTURES}) == len(HISTORICAL_FIXTURES)
 
 
 def test_synthetic_history_profile_is_deterministic_and_integrity_valid(tmp_path: Path) -> None:
