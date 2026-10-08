@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from collections.abc import AsyncIterator
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any, Self, cast
 
 import httpcore
@@ -69,25 +69,107 @@ class _CloseProbe:
         self.closed = True
 
 
-def test_sync_http_timeout_hook_closes_active_and_late_registered_resources() -> None:
+def test_sync_http_timeout_hook_closes_active_and_late_registered_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     active = _CloseProbe()
     hook = SyncHTTPTimeoutHook()
     hook.register(active)
+    release = threading.Event()
+    workers: list[threading.Thread] = []
+
+    class _TrackedThread(threading.Thread):
+        def __init__(self: Self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            workers.append(self)
+
+    monkeypatch.setattr(http_boundary, "threading", SimpleNamespace(Thread=_TrackedThread))
 
     def blocked() -> None:
-        time.sleep(0.05)
+        release.wait()
 
-    with pytest.raises(TimeoutError):
+    try:
+        with pytest.raises(TimeoutError):
+            http_boundary.call_sync_http_with_deadline(
+                blocked,
+                timeout=0.01,
+                on_timeout=hook.cancel,
+            )
+        assert active.closed is True
+
+        late = _CloseProbe()
+        hook.register(late)
+        assert late.closed is True
+    finally:
+        release.set()
+        for worker in workers:
+            worker.join(timeout=5)
+            assert not worker.is_alive()
+
+
+def test_sync_http_timeout_hook_closes_when_worker_capacity_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _UnavailableGate:
+        def acquire(self: Self, *, timeout: float) -> bool:
+            del timeout
+            return False
+
+        def release(self: Self) -> None:
+            raise AssertionError("capacity gate must not be released when acquire fails")
+
+    active = _CloseProbe()
+    hook = SyncHTTPTimeoutHook()
+    hook.register(active)
+    monkeypatch.setattr(http_boundary, "_SYNC_HTTP_GATE", _UnavailableGate())
+    started = threading.Event()
+
+    with pytest.raises(TimeoutError, match="capacity"):
         http_boundary.call_sync_http_with_deadline(
-            blocked,
+            started.set,
             timeout=0.01,
             on_timeout=hook.cancel,
         )
-    assert active.closed is True
 
+    assert active.closed is True
+    assert not started.is_set()
     late = _CloseProbe()
     hook.register(late)
     assert late.closed is True
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_sync_http_timeout_hook_closes_when_capacity_wait_uses_deadline(
+    monkeypatch: pytest.MonkeyPatch, cleanup_fails: bool
+) -> None:
+    gate = threading.BoundedSemaphore(1)
+    clock = iter((0.0, 2.0))
+    monkeypatch.setattr(http_boundary, "_SYNC_HTTP_GATE", gate)
+    monkeypatch.setattr(http_boundary, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    active = _CloseProbe()
+    hook = SyncHTTPTimeoutHook()
+    hook.register(active)
+    started = threading.Event()
+    notifications = 0
+
+    def cancel() -> None:
+        nonlocal notifications
+        notifications += 1
+        hook.cancel()
+        if cleanup_fails:
+            raise OSError("cleanup failed")
+
+    with pytest.raises(TimeoutError, match="HTTP operation deadline exceeded"):
+        http_boundary.call_sync_http_with_deadline(started.set, timeout=1, on_timeout=cancel)
+
+    assert active.closed is True
+    assert notifications == 1
+    assert not started.is_set()
+    late = _CloseProbe()
+    hook.register(late)
+    assert late.closed is True
+    assert gate.acquire(blocking=False)
+    gate.release()
 
 
 def _model_request() -> CompletionRequest:

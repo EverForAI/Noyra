@@ -181,12 +181,20 @@ def call_sync_http_with_deadline(
     """
     if timeout <= 0:
         raise ValueError("HTTP operation timeout must be positive")
+
+    def notify_timeout() -> None:
+        if on_timeout is not None:
+            with suppress(BaseException):
+                on_timeout()
+
     started = time.monotonic()
     if not _SYNC_HTTP_GATE.acquire(timeout=timeout):
+        notify_timeout()
         raise TimeoutError("HTTP operation capacity deadline exceeded")
     remaining = timeout - (time.monotonic() - started)
     if remaining <= 0:
         _SYNC_HTTP_GATE.release()
+        notify_timeout()
         raise TimeoutError("HTTP operation deadline exceeded")
     outcome: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
 
@@ -207,9 +215,7 @@ def call_sync_http_with_deadline(
     try:
         succeeded, value = outcome.get(timeout=remaining)
     except queue.Empty as error:
-        if on_timeout is not None:
-            with suppress(BaseException):
-                on_timeout()
+        notify_timeout()
         raise TimeoutError("HTTP operation deadline exceeded") from error
     if succeeded:
         return value
