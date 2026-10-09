@@ -1,0 +1,52 @@
+{
+  "commit_sha": "2ca9dc59ee930f2626d3fe0b70a5185f026f70e1",
+  "scope": "all",
+  "tests": "all",
+  "status": "passed",
+  "commands": [
+    {
+      "command": [
+        "-m",
+        "ruff",
+        "check",
+        "."
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "-m",
+        "ruff",
+        "format",
+        "--check",
+        "."
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "-m",
+        "mypy",
+        "src",
+        "tests"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "-m",
+        "pip",
+        "check"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "-m",
+        "pytest",
+        "-q"
+      ],
+      "exit_code": 0
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "commit_sha": "fa8c10c8ae95a2ae7731e32dfba10ecd81b52044",
+  "scope": "static",
+  "tests": "all",
+  "status": "failed",
+  "commands": [
+    {
+      "command": [
+        "-m",
+        "ruff",
+        "check",
+        "."
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "-m",
+        "ruff",
+        "format",
+        "--check",
+        "."
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "-m",
+        "mypy",
+        "src",
+        "tests"
+      ],
+      "exit_code": 1
+    }
+  ]
+}

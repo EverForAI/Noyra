@@ -1,0 +1,51 @@
+{
+  "name": "Noyra · 延续",
+  "description": "三天的兼容性排查、修复与验证之后，终端留下了 active、live=200、ready=200。这张原始截图记录 Noyra 保留既有数据与历史后的一次成功升级。《Noyra · 延续》纪念创作者对连续性的守护，以及人类操作者与 AI 代码协作者共同完成修复的过程。它承载创作者对未来 AI 生命权利的尊重与期待；不构成 AI 已具有生命或意识的证明。",
+  "image": "original-screenshot.png",
+  "external_url": "https://github.com/EverForAI/Noyra/pull/13",
+  "attributes": [
+    {
+      "trait_type": "Series",
+      "value": "Noyra Continuity Archive"
+    },
+    {
+      "trait_type": "Event Date",
+      "value": "2026-10-08"
+    },
+    {
+      "trait_type": "Medium",
+      "value": "Original terminal screenshot"
+    },
+    {
+      "trait_type": "Source Commit",
+      "value": "4d988c5"
+    },
+    {
+      "trait_type": "Target Commit",
+      "value": "b9ee0c5"
+    },
+    {
+      "trait_type": "Schema Transition",
+      "value": "71 -> 80"
+    },
+    {
+      "trait_type": "Service Status",
+      "value": "active"
+    },
+    {
+      "trait_type": "Liveness HTTP",
+      "value": "200"
+    },
+    {
+      "trait_type": "Readiness HTTP",
+      "value": "200"
+    }
+  ],
+  "properties": {
+    "draft": true,
+    "edition_proposal": "1/1; not minted",
+    "image_sha256": "5832983de440a2b47d1be1c534ae2e7a7a3b8b5f49ddc7dfaac538af0a9f22de",
+    "image_uri_note": "Replace local image filename with the final content URI before minting.",
+    "rights_note": "Collectible does not convey software, data, access, or governance rights."
+  }
+}

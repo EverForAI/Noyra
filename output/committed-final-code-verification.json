@@ -1,0 +1,67 @@
+{
+  "commit_sha": "dff0204815703373e9af745042754f830dd5141d",
+  "scope": "all",
+  "tests": [
+    "tests/test_release_assurance.py",
+    "tests/test_deployment_maintenance.py",
+    "tests/test_deployment_contract.py",
+    "tests/test_release_workflow_contract.py",
+    "tests/test_wallet_release_gates.py",
+    "tests/test_upgrade_deployment.py",
+    "tests/test_deployment_setup.py"
+  ],
+  "status": "passed",
+  "commands": [
+    {
+      "command": [
+        "-m",
+        "ruff",
+        "check",
+        "."
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "-m",
+        "ruff",
+        "format",
+        "--check",
+        "."
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "-m",
+        "mypy",
+        "src",
+        "tests"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "-m",
+        "pip",
+        "check"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_release_assurance.py",
+        "tests/test_deployment_maintenance.py",
+        "tests/test_deployment_contract.py",
+        "tests/test_release_workflow_contract.py",
+        "tests/test_wallet_release_gates.py",
+        "tests/test_upgrade_deployment.py",
+        "tests/test_deployment_setup.py"
+      ],
+      "exit_code": 0
+    }
+  ]
+}

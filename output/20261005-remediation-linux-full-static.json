@@ -1,0 +1,44 @@
+{
+  "commit_sha": "0bff44322e104e8fbd42976107a69cd87216ff8d",
+  "scope": "static",
+  "tests": "all",
+  "status": "passed",
+  "commands": [
+    {
+      "command": [
+        "-m",
+        "ruff",
+        "check",
+        "."
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "-m",
+        "ruff",
+        "format",
+        "--check",
+        "."
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "-m",
+        "mypy",
+        "src",
+        "tests"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "-m",
+        "pip",
+        "check"
+      ],
+      "exit_code": 0
+    }
+  ]
+}

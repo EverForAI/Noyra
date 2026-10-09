@@ -1,0 +1,32 @@
+{
+  "title": "Noyra · 延续",
+  "status": "local design; not uploaded or minted",
+  "event_date": "2026-10-08",
+  "screenshot_capture_timestamp": null,
+  "reported_upgrade_duration": "approximately three days, as stated by the creator",
+  "sources": [
+    "User-supplied screenshot and server output in this conversation",
+    "GitHub PR #13"
+  ],
+  "source_commit": "4d988c5af19f72e3751755ca7331d5e1a0e1b4cd",
+  "target_commit": "b9ee0c56ed4da1a21d2d500525f4fe0ffc673ea3",
+  "schema": {
+    "from": 71,
+    "to": 80
+  },
+  "installation_completion_utc": "2026-10-08T08:00:31Z",
+  "screenshot_scope": "Displays active service and HTTP 200 liveness/readiness only.",
+  "screenshot_preservation": "Original file bytes retained; poster embeds a 4x nearest-neighbor copy.",
+  "files": {
+    "original-screenshot.png": {
+      "sha256": "5832983de440a2b47d1be1c534ae2e7a7a3b8b5f49ddc7dfaac538af0a9f22de",
+      "width": 266,
+      "height": 144
+    },
+    "noyra-continuity-poster.png": {
+      "sha256": "1dad2e6b7bde37d263b061b52ded48bad89beec1098a7413dd20fc8c7a901541",
+      "width": 1600,
+      "height": 2000
+    }
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "final_sha": "005e86702c20fd49c7740266b3841b85d5bc16f1",
+  "full_suite_sha": "0bff44322e104e8fbd42976107a69cd87216ff8d",
+  "final_delta_files": [
+    "docs/audit/2026-10-05-followup-remediation.md",
+    "src/noyra/service.py",
+    "tests/test_migration_storage_boundary.py"
+  ],
+  "external_gates": "8 pending; validation correctly refuses activation",
+  "tracked_worktree_clean": true,
+  "test_status": "passed",
+  "full_suite": {
+    "commit_sha": "0bff44322e104e8fbd42976107a69cd87216ff8d",
+    "passed": 1932,
+    "skipped": 11,
+    "subtests_passed": 259
+  },
+  "final_affected_suite": {
+    "commit_sha": "005e86702c20fd49c7740266b3841b85d5bc16f1",
+    "passed": 97,
+    "skipped": 0,
+    "subtests_passed": 8
+  },
+  "windows_suite": {
+    "commit_sha": "0bff44322e104e8fbd42976107a69cd87216ff8d",
+    "passed": 122,
+    "skipped": 7,
+    "subtests_passed": 172
+  },
+  "final_static": "ruff, format, strict mypy (361 files), pip check all passed",
+  "final_shell": "6 checks passed",
+  "note": "Full-suite baseline plus exact final-commit affected suites; not a claim of a full-suite run on the final SHA. Real external gates remain pending."
+}

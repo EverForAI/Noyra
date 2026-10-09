@@ -1,0 +1,9 @@
+Verifying exact committed source: d93e3ed9682927b33a5d297fd59bcd54e593c7f3
+Running -m ruff check .
+All checks passed!
+Running -m ruff format --check .
+548 files already formatted
+Running -m mypy src tests
+Success: no issues found in 360 source files
+Running -m pip check
+No broken requirements found.

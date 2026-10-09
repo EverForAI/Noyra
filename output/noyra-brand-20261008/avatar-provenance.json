@@ -1,0 +1,36 @@
+{
+  "status": "Local design only; not uploaded to X",
+  "provider": "ikunai-imagegen",
+  "source": "ikunai-20261008-215635-1.png",
+  "source_dimensions": [
+    1254,
+    1254
+  ],
+  "source_sha256": "06542a219793f15de81a6efc7db0042dafa899035dfbd6055289a5a280e17b27",
+  "prompt": "avatar-prompt.txt",
+  "transform": "Centered crop with original mark preserved, resized using Lanczos",
+  "crop": [
+    200,
+    200,
+    1053,
+    1053
+  ],
+  "exports": [
+    {
+      "file": "noyra-x-avatar-1024.png",
+      "dimensions": [
+        1024,
+        1024
+      ],
+      "sha256": "19fe1dd445e7f0db9eeb9f3de0af7088f6191f17b4721a53cb8569f0250e5b3e"
+    },
+    {
+      "file": "noyra-x-avatar-400.png",
+      "dimensions": [
+        400,
+        400
+      ],
+      "sha256": "090cc9803d2291e8c98762d21fc809864a948ea449f0d6843a7492040bcce8b4"
+    }
+  ]
+}
