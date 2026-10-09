@@ -578,6 +578,11 @@ _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
     78: _OWNERSHIP_GRAPH_V78,
     79: _OWNERSHIP_GRAPH_V79,
     80: _OWNERSHIP_GRAPH_V80,
+    81: {
+        **_OWNERSHIP_GRAPH_V80,
+        "cognitive_resource_limit_policies": _subject_rule(),
+        "cognitive_resource_limit_revisions": _subject_rule(),
+    },
 }
 
 

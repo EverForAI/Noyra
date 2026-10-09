@@ -59,8 +59,11 @@ class BudgetLimits:
     daily_input_tokens: int
     daily_output_tokens: int
     daily_cost_microusd: int
+    enabled: tuple[bool, ...] = (True, True, True, True)
 
     def __post_init__(self) -> None:
+        if len(self.enabled) != 4 or any(type(value) is not bool for value in self.enabled):
+            raise ValueError("budget switches must contain four booleans")
         if (
             min(
                 self.daily_attempts,
@@ -169,7 +172,17 @@ class BudgetStatus:
             if self.limits.daily_cost_microusd
             else 1.0,
         ]
-        return min(1.0, max(ratios))
+        return min(
+            1.0,
+            max(
+                (
+                    ratio
+                    for ratio, enabled in zip(ratios, self.limits.enabled, strict=True)
+                    if enabled
+                ),
+                default=0.0,
+            ),
+        )
 
 
 OutputT = TypeVar("OutputT", bound=BaseModel)

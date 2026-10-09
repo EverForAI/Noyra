@@ -29,6 +29,8 @@ let runtimeLogVersion = 0;
 let runtimeLogTimer = null;
 let runtimeLogController = null;
 let runtimeLogBrowsingHistory = false;
+let modelPageOffset = 0;
+let modelLoadVersion = 0;
 const lifecycleLabels = { booting: "启动中", orienting: "初始化", active: "活跃", paused: "已暂停", winding_down: "准备休眠", reflective_sleep: "反思休眠", deep_sleep: "深度休眠", waking: "唤醒中", resetting: "重置中", stopped: "已停止" };
 const logCategoryLabels = { event: "运行事件", model_call: "模型调用", action: "行为执行", routing: "资源路由", audit: "管理审计", metacognition: "元认知", epistemic_review: "知识复核", relationship_social: "关系交流", self_model: "自我模型", intrinsic_thought: "思考", motivation: "动机", consciousness: "意识框架", autonomous_project: "自主项目" };
 const logStatusLabels = { succeeded: "成功", failed: "失败", unknown: "结果未知", executing: "执行中", prepared: "已准备", recorded: "已记录", processed: "已处理", deferred: "暂缓", accepted: "接受", rejected: "拒绝", silent: "选择沉默", completed: "已完成" };
@@ -150,6 +152,47 @@ const integerFormatter = new Intl.NumberFormat("zh-CN", { maximumFractionDigits:
 const modelResourceStatusLabels = { active: "可用", disabled: "已停用", revoked: "已撤销" };
 const modelKeyStatusLabels = { active: "可用", cooldown: "冷却中", revoked: "已撤销" };
 const modelPoolLabels = { economy: "经济池", deep: "深度池" };
+const parameterHelp = {
+  pool: ["认知池", "经济池用于常规认知，深度池用于复杂推理。两池可以使用同一个稳定模型，资源和额度分别统计。"],
+  label: ["资源名称", "用于识别此配置。同一认知池内名称必须唯一。"],
+  base_url: ["API 基础地址", "填写供应商的公网 HTTPS API 地址，例如 https://api.example.com/v1。不要填写聊天网页地址。"],
+  model: ["模型名称", "填写供应商 API 的模型标识。模型列表只作辅助，供应商可能不支持发现接口。"],
+  api_keys: ["API 密钥", "每行一个密钥。同一资源的密钥轮流使用且共享额度。保存后不回显原文；撤销不可恢复。"],
+  priority: ["调度优先级", "0 至 1000，数值越小越先被选择。故障或额度不足时会尝试同池其他可用资源。"],
+  weight: ["调度权重", "1 至 1000。同一优先级内，较大权重获得较多选择机会，并非固定调用顺序。"],
+  daily_attempts: ["每日尝试上限", "每一次供应商尝试都计数，重试也计数。零代表不允许尝试；关闭开关仅取消此资源的次数上限。每日按 UTC 重置。"],
+  daily_input_tokens: ["每日输入 Token 上限", "限制发送给模型的 Token，包括提示、上下文和历史。调用前预留，完成后按已知实际用量结算；结果未知保留预留。零是零额度。"],
+  daily_output_tokens: ["每日输出 Token 上限", "限制模型输出用量。调用前按最大输出预留，可能在实际额度用完前阻止超额调用。零是零额度。"],
+  daily_cost_limit_usd: ["每日成本上限", "以 USD 计，精确至六位小数。根据输入输出单价估算和预留。供应商单价未填或填零时，成本可能显示零，不能据此判断实际免费。"],
+  input_usd_per_million: ["输入单价", "供应商每一百万输入 Token 的 USD 价格，用于成本预算和统计，不会向供应商修改收费。"],
+  output_usd_per_million: ["输出单价", "供应商每一百万输出 Token 的 USD 价格。应与实际模型价格一致。"],
+  max_attempts: ["单次调用最大尝试", "1 至 10。失败重试会消耗每日次数和费用；结果未知不会自动重试。"],
+  pricing_status: ["价格依据", "价格未知不会被当作免费。仅在确认供应商免费且两项单价均为零时选择确认免费；已填写价格用于估算，不是供应商账单。"],
+};
+const limitFields = { attempts: "daily_attempts", input_tokens: "daily_input_tokens", output_tokens: "daily_output_tokens", cost: "daily_cost_limit_usd" };
+function addParameterHelp(root) {
+  root.querySelectorAll("label").forEach((label) => {
+    const input = label.querySelector("input:not([type=checkbox]), select, textarea");
+    const names = { "admin-model-pool": "pool", "admin-model-label": "label", "admin-model-url": "base_url", "admin-model-name": "model", "admin-model-keys": "api_keys" };
+    const name = input?.name || names[input?.id];
+    if (!parameterHelp[name] || label.querySelector("[data-parameter-help]")) return;
+    const button = document.createElement("button");
+    button.type = "button"; button.className = "help-button"; button.dataset.parameterHelp = name;
+    button.textContent = "?"; button.title = `${parameterHelp[name][0]}解释`; button.setAttribute("aria-label", button.title);
+    input.setAttribute("aria-label", parameterHelp[name][0]);
+    const heading = document.createElement("span"); heading.className = "parameter-label";
+    while (label.firstChild && label.firstChild !== input && label.firstChild.nodeName !== "INPUT") heading.append(label.firstChild);
+    heading.append(button); label.prepend(heading);
+  });
+}
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-parameter-help]");
+  if (!button) return;
+  event.preventDefault();
+  const info = parameterHelp[button.dataset.parameterHelp];
+  $("#parameter-help-title").textContent = info[0]; $("#parameter-help-copy").textContent = info[1];
+  $("#parameter-help").showModal();
+});
 const SQLITE_INT64_MAX = 9223372036854775807n;
 const budgetIntegerRules = {
   priority: { label: "调度优先级", min: 0n, max: 1000n },
@@ -463,7 +506,7 @@ function renderModelKey(item, key) {
 }
 
 async function login(event) { event.preventDefault(); const form = event.currentTarget; const token = $("#login-token").value.trim(); if (!token) return; const button = submitButton(form, event); if (button) button.disabled = true; setStatus("#login-status", "正在建立会话"); try { const result = await request("/admin/session", { method: "POST", body: JSON.stringify({ token }) }); stopUpgradePolling(); upgradeTaskId = null; upgradeStatusAvailable = false; upgradeCheckResult = null; csrfToken = result.csrf_token; $("#login-token").value = ""; $("#login-shell").hidden = true; $("#admin-shell").hidden = false; await loadAll(); } catch (error) { setStatus("#login-status", errorText(error), true); } finally { if (button) button.disabled = false; } }
-async function logout() { stopUpgradePolling(); stopRuntimeLogPolling(); runtimeLogCursor = null; runtimeLogBrowsingHistory = false; $("#runtime-log-list").replaceChildren(); $("#lifecycle-summary").replaceChildren(); $("#lifecycle-timeline").replaceChildren(); try { await request("/admin/session/logout", { method: "POST" }); } catch { /* session is already unusable */ } csrfToken = ""; upgradeTaskId = null; upgradeStatusAvailable = false; upgradeCheckResult = null; publicPostCursor = ""; publicPostRows = []; publicPostActionKeys.clear(); $("#public-post-review-list").replaceChildren(); $("#admin-shell").hidden = true; $("#login-shell").hidden = false; }
+async function logout() { stopUpgradePolling(); stopRuntimeLogPolling(); modelLoadVersion += 1; $("#model-list").replaceChildren(); $("#admin-model-form").reset(); $("#admin-model-keys").value = ""; runtimeLogCursor = null; runtimeLogBrowsingHistory = false; $("#runtime-log-list").replaceChildren(); $("#lifecycle-summary").replaceChildren(); $("#lifecycle-timeline").replaceChildren(); try { await request("/admin/session/logout", { method: "POST" }); } catch { /* session is already unusable */ } csrfToken = ""; upgradeTaskId = null; upgradeStatusAvailable = false; upgradeCheckResult = null; publicPostCursor = ""; publicPostRows = []; publicPostActionKeys.clear(); $("#public-post-review-list").replaceChildren(); $("#admin-shell").hidden = true; $("#login-shell").hidden = false; }
 
 async function loadOverview() {
   latestDiagnostics = null;
@@ -1107,8 +1150,25 @@ async function loadPublicPosts({ append = false } = {}) {
     }
   }
 }
+let renderedModelQuery = null;
+function restoreModelFilters() {
+  if (!renderedModelQuery) return;
+  $("#model-pool-filter").value = renderedModelQuery.pool;
+  $("#model-status-filter").value = renderedModelQuery.status;
+  $("#model-search").value = renderedModelQuery.search;
+  modelPageOffset = renderedModelQuery.offset;
+  document.querySelectorAll("[data-model-pool]").forEach((button) => button.setAttribute("aria-selected", String(button.dataset.modelPool === renderedModelQuery.pool)));
+}
+function confirmUnlimitedLimits(enabled) {
+  return Object.values(enabled).some(Boolean) || window.confirm("四项资源级每日限制均已关闭。该资源不再受这些每日上限约束，仍可能产生供应商费用。确认保存吗？");
+}
 async function loadModels() {
-  const rows = await request("/api/config/model-resources");
+  if ($("#model-list").querySelector("form[data-dirty]") && !window.confirm("资源有未保存的修改。放弃这些修改并刷新吗？")) { restoreModelFilters(); return; }
+  const generation = ++modelLoadVersion;
+  const selectedQuery = { pool: $("#model-pool-filter").value, status: $("#model-status-filter").value, search: $("#model-search").value.trim(), offset: modelPageOffset };
+  const query = new URLSearchParams({ view: "management", limit: "50", offset: String(modelPageOffset), pool: $("#model-pool-filter").value, search: $("#model-search").value.trim() });
+  if ($("#model-status-filter").value !== "all") query.set("status", $("#model-status-filter").value);
+  const rows = await request(`/api/config/model-resources?${query}`);
   const withKeys = await mapWithConcurrency(rows, MODEL_KEY_REQUEST_CONCURRENCY, async (item) => {
     try {
       const keys = await request(`/api/config/model-resources/${encodeURIComponent(item.group_id)}/keys`);
@@ -1119,6 +1179,8 @@ async function loadModels() {
       return { item, keys: [], keyError: "密钥详情加载失败，请重试" };
     }
   });
+  if (generation !== modelLoadVersion || !csrfToken) return;
+  renderedModelQuery = selectedQuery;
   $("#model-list").innerHTML = withKeys.length ? withKeys.map(({ item, keys, keyError }) => {
     const revoked = item.status === "revoked";
     const status = modelResourceStatusLabels[item.status] || item.status || "未知";
@@ -1139,8 +1201,56 @@ async function loadModels() {
       <label for="budget-${esc(item.group_id)}-daily-cost">每日成本上限（USD）<input id="budget-${esc(item.group_id)}-daily-cost" data-budget-field name="daily_cost_limit_usd" type="text" inputmode="decimal" pattern="[0-9]+(?:\\.[0-9]{1,6})?" maxlength="26" value="${esc(formatMicroUsd(exactBudget.daily_cost_microusd))}" aria-describedby="budget-${esc(item.group_id)}-daily-cost-error"><small class="field-hint">非负数字，最多 6 位小数</small><small class="field-error" data-budget-error="daily_cost_limit_usd" id="budget-${esc(item.group_id)}-daily-cost-error" role="alert"></small></label>
       <button type="submit">保存限制</button>
     </form>`;
-    return `<article class="resource-item model-resource-item"><div class="model-resource-main"><div class="model-resource-title"><h3>${esc(item.label)}</h3><span class="status-chip status-${esc(item.status)}">${esc(status)}</span></div><p class="model-resource-identity">${esc(pool)} · ${esc(item.model)}</p><dl class="model-resource-facts"><div><dt>可用密钥</dt><dd>${esc(formatInteger(item.available_key_count))} / ${esc(formatInteger(item.key_count))}</dd></div><div><dt>最大尝试</dt><dd>${esc(formatInteger(exactBudget.max_attempts))}</dd></div><div><dt>优先级</dt><dd>${esc(formatInteger(exactBudget.priority))}</dd></div><div><dt>权重</dt><dd>${esc(formatInteger(exactBudget.weight))}</dd></div></dl><div class="model-keys"><strong>密钥状态与非秘密元数据</strong>${keyMarkup}</div>${limits}</div><div class="resource-actions model-resource-actions">${item.status === "active" ? `<button class="primary" data-model-action="test" data-id="${esc(item.group_id)}" type="button">测试连接</button><button data-model-action="disable" data-id="${esc(item.group_id)}" type="button">停用</button>` : item.status === "disabled" ? `<button data-model-action="enable" data-id="${esc(item.group_id)}" type="button">启用</button>` : ""}</div></article>`;
+    return `<article class="resource-item model-resource-item" data-pool="${esc(item.pool)}" data-resource-id="${esc(item.group_id)}"><div class="model-resource-main"><div class="model-resource-title"><h3>${esc(item.label)}</h3><span class="status-chip status-${esc(item.status)}">${esc(status)}</span></div><p class="model-resource-identity">${esc(pool)} · ${esc(item.model)}</p><dl class="model-resource-facts"><div><dt>可用密钥</dt><dd>${esc(formatInteger(item.available_key_count))} / ${esc(formatInteger(item.key_count))}</dd></div><div><dt>最大尝试</dt><dd>${esc(formatInteger(exactBudget.max_attempts))}</dd></div><div><dt>优先级</dt><dd>${esc(formatInteger(exactBudget.priority))}</dd></div><div><dt>权重</dt><dd>${esc(formatInteger(exactBudget.weight))}</dd></div></dl><details class="model-keys"><summary>密钥管理</summary>${keyMarkup}${revoked ? "" : `<form data-add-model-keys data-id="${esc(item.group_id)}"><label>添加密钥<textarea name="api_keys" autocomplete="new-password" required maxlength="20000"></textarea></label><button type="submit">添加密钥</button></form>`}</details>${revoked ? "" : `<details><summary>额度与路由设置</summary>${limits}</details>`}</div><div class="resource-actions model-resource-actions">${item.status === "active" ? `<button class="primary" data-model-action="test" data-id="${esc(item.group_id)}" type="button">测试连接</button><button data-model-action="disable" data-id="${esc(item.group_id)}" type="button">停用</button>` : item.status === "disabled" ? `<button data-model-action="enable" data-id="${esc(item.group_id)}" type="button">启用</button>` : ""}${revoked ? "" : `<button data-model-action="revoke" data-id="${esc(item.group_id)}" type="button">删除资源</button>`}</div></article>`;
   }).join("") : '<div class="empty-state">尚未配置认知资源</div>';
+  for (const { item } of withKeys) {
+    const exactBudget = item.exact_budget || item;
+    const card = Array.from($("#model-list").children).find((node) => node.dataset.resourceId === item.group_id);
+    const form = card?.querySelector("[data-model-budget-form]");
+    if (form) {
+    for (const [dimension, field] of Object.entries(limitFields)) {
+      const input = form.elements[field];
+      const toggle = document.createElement("input");
+      toggle.type = "checkbox"; toggle.dataset.limitDimension = dimension;
+      toggle.checked = item.limit_enabled?.[dimension] !== false;
+      toggle.setAttribute("aria-label", `启用${parameterHelp[field][0]}`);
+      input.before(toggle); input.disabled = !toggle.checked;
+      toggle.addEventListener("change", () => { input.disabled = !toggle.checked; });
+    }
+    for (const [field, value] of [["input_usd_per_million", formatMicroUsd(exactBudget.input_microusd_per_million)], ["output_usd_per_million", formatMicroUsd(exactBudget.output_microusd_per_million)], ["max_attempts", exactBudget.max_attempts]]) {
+      form.querySelector("button[type=submit]").insertAdjacentHTML("beforebegin", `<label>${parameterHelp[field][0]}<input name="${field}" value="${esc(value)}" inputmode="${field === "max_attempts" ? "numeric" : "decimal"}" required></label>`);
+    }
+    form.dataset.updatedAt = item.updated_at;
+    form.dataset.limitRevision = item.limit_revision;
+    form.querySelector("button[type=submit]").insertAdjacentHTML("beforebegin", `<label>价格依据<select name="pricing_status"><option value="unknown">尚未确认价格</option><option value="priced">已填写单价（估算）</option><option value="free">确认免费</option></select></label>`);
+    form.elements.pricing_status.value = item.pricing_status;
+    }
+    const usage = item.today_usage || {}; const reserved = item.reserved || {};
+    const facts = card.querySelector(".model-resource-facts");
+    for (const [dimension, field] of Object.entries(limitFields)) {
+      const amount = dimension === "cost" ? usage.cost_microusd : usage[dimension];
+      const reserve = dimension === "cost" ? reserved.cost_microusd : reserved[dimension];
+      const maximum = dimension === "cost" ? exactBudget.daily_cost_microusd : exactBudget[field];
+      const displayAmount = (value) => dimension === "cost" ? `$${formatMicroUsd(value || "0")}` : formatInteger(value);
+      const remaining = item.limit_enabled?.[dimension] === false ? "未设资源级上限" : displayAmount(BigInt(maximum) > BigInt(amount || 0) ? BigInt(maximum) - BigInt(amount || 0) : 0n);
+      facts.insertAdjacentHTML("beforeend", `<div><dt>${parameterHelp[field][0]}</dt><dd>已计 ${esc(displayAmount(amount))} / 预留 ${esc(displayAmount(reserve))}<br>剩余 ${esc(remaining)}</dd></div>`);
+    }
+    facts.insertAdjacentHTML("beforeend", `<div><dt>价格依据</dt><dd>${esc(({unknown:"价格未知",priced:"填写单价估算",free:"已确认免费"})[item.pricing_status] || "价格未知")}</dd></div>`);
+    card.querySelector(".model-resource-identity").insertAdjacentHTML("afterend", `<small>UTC 重置 ${esc(formatTimestamp(item.reset_at_utc))}${item.cleanup_pending ? ` · 密钥清理待完成 ${item.cleanup_pending}` : ""}</small>`);
+  }
+  const cards = Array.from($("#model-list").querySelectorAll("[data-pool]"));
+  $("#model-list").replaceChildren();
+  for (const pool of ["economy", "deep"]) {
+    const section = document.createElement("section"); section.className = "model-pool-section";
+    section.innerHTML = `<h3>${modelPoolLabels[pool]} · ${cards.filter((card) => card.dataset.pool === pool).length}</h3>`;
+    section.append(...cards.filter((card) => card.dataset.pool === pool));
+    if (!section.querySelector("article")) section.insertAdjacentHTML("beforeend", '<p class="muted">此筛选下暂无资源</p>');
+    $("#model-list").append(section);
+  }
+  addParameterHelp($("#model-list"));
+  $("#model-page-label").textContent = `第 ${Math.floor(modelPageOffset / 50) + 1} 页 · ${rows.length} 条 · 最多 50 条/页`;
+  $("#model-page-prev").disabled = modelPageOffset === 0;
+  $("#model-page-next").disabled = rows.length < 50;
 }
 function draftModelPayload(includeModel = true) {
   const keys = $("#admin-model-keys").value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
@@ -1454,13 +1564,22 @@ $("#model-list").addEventListener("submit", async (event) => {
   if (button) button.disabled = true;
   clearBudgetErrors(form);
   try {
-    const payload = { reason: "admin budget update" };
+    const payload = { reason: "admin budget update", expected_updated_at: form.dataset.updatedAt, expected_limit_revision: Number(form.dataset.limitRevision), limit_enabled: {} };
+    for (const toggle of form.querySelectorAll("[data-limit-dimension]")) payload.limit_enabled[toggle.dataset.limitDimension] = toggle.checked;
+    if (!confirmUnlimitedLimits(payload.limit_enabled)) return;
+    payload.pricing_status = form.elements.pricing_status.value;
     for (const name of Object.keys(budgetIntegerRules)) payload[name] = normalizeBudgetInteger(name, form.elements[name].value);
     payload.daily_cost_limit_usd = normalizeBudgetCost(form.elements.daily_cost_limit_usd.value);
+    payload.input_usd_per_million = normalizeBudgetCost(form.elements.input_usd_per_million.value);
+    payload.output_usd_per_million = normalizeBudgetCost(form.elements.output_usd_per_million.value);
+    const attempts = form.elements.max_attempts.value.trim();
+    if (!/^[1-9][0-9]*$/.test(attempts) || BigInt(attempts) > 10n) throw new Error("最大尝试应为 1 至 10");
+    payload.max_attempts = attempts;
     Object.keys(payload).forEach((name) => { if (payload[name] === null) delete payload[name]; });
     await request(`/api/config/model-resources/${encodeURIComponent(form.dataset.id)}/update`, { method: "POST", body: JSON.stringify(payload) });
+    delete form.dataset.dirty;
     setStatus("#model-status", "模型资源限制已更新");
-    await Promise.all([loadModels(), loadOverview()]);
+    try { await loadModels(); } catch { setStatus("#model-status", "模型资源限制已保存；列表刷新失败，请点击更新", true); }
   } catch (error) {
     showBudgetError(form, error);
     setStatus("#model-status", errorText(error), true);
@@ -1674,7 +1793,29 @@ $("#admin-binding-form").addEventListener("submit", async (event) => { event.pre
 $("#channel-list").addEventListener("click", async (event) => { const button = event.target.closest("[data-channel-action]"); if (!button) return; button.disabled = true; try { const operation = button.dataset.channelAction; await request(`/api/config/transports/${button.dataset.id}/${operation}`, { method: "POST", body: JSON.stringify({ reason: `admin ${operation} transport` }) }); await loadChannels(); } catch (error) { setStatus("#channel-status", errorText(error), true); } finally { button.disabled = false; } });
 $("#binding-list").addEventListener("click", async (event) => { const button = event.target.closest("[data-binding-action]"); if (!button) return; button.disabled = true; try { const operation = button.dataset.bindingAction; await request(`/api/config/inbound-bindings/${button.dataset.id}/${operation}`, { method: "POST", body: JSON.stringify({ reason: `admin ${operation} inbound binding` }) }); await loadChannels(); } catch (error) { setStatus("#binding-status", errorText(error), true); } finally { button.disabled = false; } });
 $("#refresh-channels").addEventListener("click", loadChannels);
-$("#model-list").addEventListener("click", async (event) => { const button = event.target.closest("[data-model-action]"); if (!button) return; button.disabled = true; try { const action = button.dataset.modelAction; if (action === "test" && !window.confirm("测试会消耗一次模型额度，继续吗？")) return; const groupId = encodeURIComponent(button.dataset.id || ""); await request(`/api/config/model-resources/${groupId}/${action === "test" ? "test" : action}`, { method: "POST", body: JSON.stringify({ reason: `admin ${action} model resource` }) }); setStatus("#model-status", action === "test" ? "模型测试请求已完成" : "资源状态已更新"); await Promise.all([loadModels(), loadOverview()]); } catch (error) { setStatus("#model-status", errorText(error), true); } finally { button.disabled = false; } });
+$("#model-list").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-model-action]"); if (!button) return;
+  const action = button.dataset.modelAction;
+  if (action === "test" && !window.confirm("测试会调用供应商并消耗模型额度，继续吗？")) return;
+  if (action === "revoke" && !window.confirm("删除资源会永久撤销其所有密钥，停止后续调用；用量和必要审计记录保留。正在进行的供应商请求无法撤回。继续吗？")) return;
+  button.disabled = true;
+  try {
+    await request(`/api/config/model-resources/${encodeURIComponent(button.dataset.id)}/${action}`, { method: "POST", body: JSON.stringify({ reason: `admin ${action} model resource` }) });
+    setStatus("#model-status", action === "test" ? "模型测试请求已完成" : "资源状态已更新");
+    try { await loadModels(); } catch { setStatus("#model-status", "操作已完成；列表刷新失败，请点击更新", true); }
+  } catch (error) { setStatus("#model-status", errorText(error), true); }
+  finally { button.disabled = false; }
+});
+$("#model-list").addEventListener("submit", async (event) => {
+  const form = event.target.closest("[data-add-model-keys]"); if (!form) return;
+  event.preventDefault(); const button = form.querySelector("button[type=submit]"); button.disabled = true;
+  try {
+    await request(`/api/config/model-resources/${encodeURIComponent(form.dataset.id)}/keys`, { method: "POST", body: JSON.stringify({ api_keys: form.elements.api_keys.value.split(/\r?\n/).map((v) => v.trim()).filter(Boolean) }) });
+    form.reset(); setStatus("#model-status", "密钥已添加");
+    try { await loadModels(); } catch { setStatus("#model-status", "密钥已添加；列表刷新失败", true); }
+  } catch (error) { setStatus("#model-status", errorText(error), true); }
+  finally { button.disabled = false; }
+});
 $("#model-list").addEventListener("click", async (event) => { const button = event.target.closest("[data-model-key-action]"); if (!button) return; if (!window.confirm("撤销后该密钥立即失效，且不可恢复。继续吗？")) return; button.disabled = true; try { await request(`/api/config/model-resources/${encodeURIComponent(button.dataset.groupId)}/keys/${encodeURIComponent(button.dataset.keyId)}/revoke`, { method: "POST", body: JSON.stringify({ reason: "admin revoked model key" }) }); setStatus("#model-status", "模型密钥已撤销"); await loadModels(); } catch (error) { setStatus("#model-status", errorText(error), true); } finally { button.disabled = false; } });
 $("#wallet-order-list").addEventListener("click", async (event) => {
   const button = event.target.closest('[data-wallet-order-action="execute"]');
@@ -1693,11 +1834,26 @@ $("#admin-model-form").addEventListener("submit", async (event) => {
   const button = submitButton(form, event);
   if (button) button.disabled = true;
   try {
-    await request("/api/config/model-resources", { method: "POST", body: JSON.stringify({ pool: $("#admin-model-pool").value, label: $("#admin-model-label").value.trim(), base_url: $("#admin-model-url").value.trim(), model: $("#admin-model-name").value.trim(), api_keys: $("#admin-model-keys").value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean) }) });
+    const payload = { pool: $("#admin-model-pool").value, label: $("#admin-model-label").value.trim(), base_url: $("#admin-model-url").value.trim(), model: $("#admin-model-name").value.trim(), api_keys: $("#admin-model-keys").value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean), limit_enabled: {} };
+    for (const [dimension, field] of Object.entries(limitFields)) {
+      payload.limit_enabled[dimension] = form.querySelector(`[data-draft-limit="${dimension}"]`).checked;
+      payload[field] = field === "daily_cost_limit_usd" ? normalizeBudgetCost(form.elements[field].value) : normalizeBudgetInteger(field, form.elements[field].value);
+      if (payload[field] === null) throw new Error("请填写额度，零代表零额度");
+    }
+    if (!confirmUnlimitedLimits(payload.limit_enabled)) return;
+    payload.input_usd_per_million = normalizeBudgetCost(form.elements.input_usd_per_million.value);
+    payload.output_usd_per_million = normalizeBudgetCost(form.elements.output_usd_per_million.value);
+    payload.pricing_status = form.elements.pricing_status.value;
+    const maxAttempts = form.elements.max_attempts.value.trim();
+    if (!/^[1-9][0-9]*$/.test(maxAttempts) || BigInt(maxAttempts) > 10n) throw new Error("最大尝试应为 1 至 10");
+    payload.max_attempts = maxAttempts;
+    await request("/api/config/model-resources", { method: "POST", body: JSON.stringify(payload) });
     form.reset();
+    delete form.dataset.dirty;
+    for (const toggle of form.querySelectorAll("[data-draft-limit]")) form.elements[limitFields[toggle.dataset.draftLimit]].disabled = !toggle.checked;
     $("#admin-model-options").hidden = true;
     setStatus("#model-status", "认知资源已保存");
-    await Promise.all([loadModels(), loadOverview()]);
+    try { await loadModels(); } catch { setStatus("#model-status", "认知资源已保存；列表刷新失败，请点击更新", true); }
   } catch (error) { setStatus("#model-status", errorText(error), true); }
   finally { if (button) button.disabled = false; }
 });
@@ -1894,4 +2050,31 @@ $("#recover-wallet-executions").addEventListener("click", async () => {
   catch (error) { setStatus("#wallet-execution-status", errorText(error), true); }
   finally { button.disabled = false; }
 });
+const modelFilter = document.createElement("select"); modelFilter.id = "model-status-filter"; modelFilter.setAttribute("aria-label", "资源状态筛选");
+modelFilter.innerHTML = '<option value="active">启用的资源</option><option value="disabled">停用的资源</option><option value="revoked">已删除的记录</option><option value="all">全部记录</option>';
+$("#refresh-models").before(modelFilter);
+modelFilter.addEventListener("change", () => { modelPageOffset = 0; void loadModels().catch((error) => { restoreModelFilters(); setStatus("#model-status", errorText(error), true); }); });
+const poolFilter = document.createElement("select"); poolFilter.id = "model-pool-filter"; poolFilter.setAttribute("aria-label", "认知池筛选"); poolFilter.innerHTML = '<option value="economy">经济池</option><option value="deep">深度池</option>';
+const modelSearch = document.createElement("input"); modelSearch.id = "model-search"; modelSearch.type = "search"; modelSearch.placeholder = "名称或模型"; modelSearch.maxLength = 128; modelSearch.setAttribute("aria-label", "搜索认知资源");
+modelFilter.before(poolFilter, modelSearch);
+for (const control of [poolFilter, modelSearch]) control.addEventListener("change", () => { modelPageOffset = 0; void loadModels().catch((error) => { restoreModelFilters(); setStatus("#model-status", errorText(error), true); }); });
+const poolTabs = document.createElement("div"); poolTabs.className = "pool-tabs"; poolTabs.setAttribute("role", "tablist"); poolTabs.setAttribute("aria-label", "认知池");
+poolTabs.innerHTML = '<button type="button" role="tab" data-model-pool="economy" aria-selected="true">经济池</button><button type="button" role="tab" data-model-pool="deep" aria-selected="false">深度池</button>';
+poolFilter.before(poolTabs); poolFilter.hidden = true;
+poolTabs.addEventListener("click", (event) => { const button = event.target.closest("[data-model-pool]"); if (!button) return; poolFilter.value = button.dataset.modelPool; poolTabs.querySelectorAll("button").forEach((item) => item.setAttribute("aria-selected", String(item === button))); poolFilter.dispatchEvent(new Event("change")); });
+const modelPaging = document.createElement("div"); modelPaging.className = "resource-actions";
+modelPaging.innerHTML = '<button type="button" id="model-page-prev" aria-label="上一页" title="上一页">←</button><span id="model-page-label"></span><button type="button" id="model-page-next" aria-label="下一页" title="下一页">→</button>';
+$("#model-list").after(modelPaging);
+for (const [id, step] of [["model-page-prev", -50], ["model-page-next", 50]]) $("#" + id).addEventListener("click", () => { modelPageOffset = Math.max(0, modelPageOffset + step); void loadModels().catch((error) => { restoreModelFilters(); setStatus("#model-status", errorText(error), true); }); });
+$("#model-list").addEventListener("input", (event) => { const form = event.target.closest("form"); if (form) form.dataset.dirty = "true"; });
+const draftLimits = document.createElement("details"); draftLimits.className = "draft-limits";
+draftLimits.innerHTML = '<summary>每日限制</summary>' + Object.entries(limitFields).map(([dimension, field]) => `<label><input type="checkbox" data-draft-limit="${dimension}" checked>${parameterHelp[field][0]}<input name="${field}" value="${({ attempts: "100", input_tokens: "100000", output_tokens: "20000", cost: "5" })[dimension]}" inputmode="${dimension === "cost" ? "decimal" : "numeric"}"></label>`).join("");
+$("#admin-model-form .resource-actions").before(draftLimits);
+draftLimits.addEventListener("change", (event) => { const toggle = event.target.closest("[data-draft-limit]"); if (toggle) $("#admin-model-form").elements[limitFields[toggle.dataset.draftLimit]].disabled = !toggle.checked; });
+const draftPricing = document.createElement("details"); draftPricing.className = "draft-limits";
+draftPricing.innerHTML = '<summary>价格与重试</summary><label>输入 USD／百万 Token<input name="input_usd_per_million" value="0" inputmode="decimal" required></label><label>输出 USD／百万 Token<input name="output_usd_per_million" value="0" inputmode="decimal" required></label><label>价格依据<select name="pricing_status"><option value="unknown">尚未确认价格</option><option value="priced">已填写单价（估算）</option><option value="free">确认免费</option></select></label><label>最大尝试<input name="max_attempts" value="3" inputmode="numeric" required></label>';
+$("#admin-model-form .resource-actions").before(draftPricing);
+$("#admin-model-form").addEventListener("input", () => { $("#admin-model-form").dataset.dirty = "true"; });
+window.addEventListener("beforeunload", (event) => { if (document.querySelector("form[data-dirty]")) { event.preventDefault(); event.returnValue = ""; } });
+addParameterHelp($("#admin-model-form"));
 restoreSession();

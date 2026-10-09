@@ -127,6 +127,8 @@ class ModelLedger:
         resource_group_id: str | None = None,
         pool_limits: BudgetLimits | None = None,
         continuation: bool = False,
+        expected_resource_revision: int | None = None,
+        refresh_pool_limits: bool = False,
     ) -> AttemptRecord:
         if min(reserved_input_tokens, reserved_output_tokens, reserved_cost_microusd) < 0:
             raise ValueError("model attempt reservations cannot be negative")
@@ -148,6 +150,48 @@ class ModelLedger:
             group_id = call["resource_group_id"]
             if resource_group_id is not None and resource_group_id != group_id:
                 raise ModelCallStateError("model attempt resource group does not match its call")
+            group_exists = group_id is not None and connection.execute(
+                "SELECT 1 FROM cognitive_resource_groups WHERE group_id=? AND subject_id=?",
+                (group_id, call["subject_id"]),
+            ).fetchone() is not None
+            if expected_resource_revision is not None and not group_exists:
+                raise ModelCallStateError("model resource is unavailable")
+            if group_exists:
+                from .resources import CognitiveResourceStore, RoutedModelGateway
+
+                group_row = CognitiveResourceStore._get_group_row(
+                    connection, group_id, subject_id=call["subject_id"]
+                )
+                group = CognitiveResourceStore._from_group_row(connection, group_row)
+                if group.status != "active":
+                    raise ModelCallStateError("model resource is not active")
+                if (
+                    expected_resource_revision is not None
+                    and group.limit_revision != expected_resource_revision
+                ):
+                    raise ModelCallStateError("model resource changed before authorization")
+                limits = RoutedModelGateway._limits_for_group(group)
+                if pool_limits is not None and refresh_pool_limits:
+                    groups = [
+                        CognitiveResourceStore._from_group_row(connection, row)
+                        for row in connection.execute(
+                            "SELECT * FROM cognitive_resource_groups WHERE subject_id=? "
+                            "AND pool=? AND status='active'",
+                            (call["subject_id"], call["resource_pool"]),
+                        )
+                    ]
+                    from noyra.core.resource_policy import LIMIT_DIMENSIONS
+
+                    pool_limits = BudgetLimits(
+                        sum(item.daily_attempts for item in groups),
+                        sum(item.daily_input_tokens for item in groups),
+                        sum(item.daily_output_tokens for item in groups),
+                        sum(item.daily_cost_microusd for item in groups),
+                        enabled=tuple(
+                            all(item.limit_enabled[name] for item in groups)
+                            for name in LIMIT_DIMENSIONS
+                        ),
+                    )
             status = self._budget_status_connection(
                 connection,
                 call["subject_id"],
@@ -169,8 +213,10 @@ class ModelLedger:
                 limits.daily_cost_microusd,
             )
             dimensions = ("attempts", "input_tokens", "output_tokens", "cost")
-            for name, value, limit in zip(dimensions, projected, maximum, strict=True):
-                if value > limit:
+            for name, value, limit, enabled in zip(
+                dimensions, projected, maximum, limits.enabled, strict=True
+            ):
+                if enabled and value > limit:
                     raise BudgetExhaustedError(f"daily model {name} budget exhausted")
 
             # The per-pool aggregate reservation must be checked while this
@@ -198,7 +244,10 @@ class ModelLedger:
                     pool_limits.daily_cost_microusd,
                 )
                 if any(
-                    value > limit for value, limit in zip(pool_projected, pool_maximum, strict=True)
+                    enabled and value > limit
+                    for value, limit, enabled in zip(
+                        pool_projected, pool_maximum, pool_limits.enabled, strict=True
+                    )
                 ):
                     raise BudgetExhaustedError("daily model pool budget exhausted")
 

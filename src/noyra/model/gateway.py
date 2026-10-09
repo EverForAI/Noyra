@@ -51,6 +51,7 @@ class ModelGateway:
         capture_model_io: bool = False,
         capture_model_io_getter: Callable[[], bool] | None = None,
         enforce_training_policy: bool = False,
+        resource_revision: int | None = None,
     ):
         if not model.strip():
             raise ValueError("model name is required")
@@ -70,6 +71,7 @@ class ModelGateway:
         self.capture_model_io = capture_model_io
         self.capture_model_io_getter = capture_model_io_getter
         self.enforce_training_policy = enforce_training_policy
+        self.resource_revision = resource_revision
 
     async def complete_structured(
         self,
@@ -151,6 +153,8 @@ class ModelGateway:
                     resource_group_id=self.resource_group_id,
                     pool_limits=self.pool_limits,
                     continuation=attempt_index > 1,
+                    expected_resource_revision=self.resource_revision,
+                    refresh_pool_limits=self.resource_revision is not None,
                 )
             except BudgetExhaustedError:
                 self.ledger.finish_call(

@@ -3936,8 +3936,18 @@ class NoyraHTTPServer:
                         return
                     try:
                         model_resource_records = owner.cognitive_resources.list(
-                            owner.kernel.subject_id
+                            owner.kernel.subject_id,
+                            pool=query.get("pool", [None])[0],
+                            status=query.get("status", [None])[0],
+                            search=query.get("search", [None])[0],
+                            limit=limit if query.get("view", [""])[0] == "management" else None,
+                            offset=int(query.get("offset", ["0"])[0]),
                         )
+                    except (ValueError, TypeError):
+                        self._json(
+                            HTTPStatus.BAD_REQUEST, {"error": "invalid_model_resource_query"}
+                        )
+                        return
                     except IntegrityError:
                         self._json(
                             HTTPStatus.SERVICE_UNAVAILABLE,
@@ -3945,10 +3955,23 @@ class NoyraHTTPServer:
                             retry_after=60,
                         )
                         return
-                    self._json(
-                        HTTPStatus.OK,
-                        [_cognitive_resource_payload(record) for record in model_resource_records],
-                    )
+                    model_payloads = [
+                        _cognitive_resource_payload(group) for group in model_resource_records
+                    ]
+                    if query.get("view", [""])[0] == "management":
+                        try:
+                            for group, model_item in zip(
+                                model_resource_records, model_payloads, strict=True
+                            ):
+                                model_item.update(owner.cognitive_resources.budget_summary(group))
+                        except IntegrityError:
+                            self._json(
+                                HTTPStatus.SERVICE_UNAVAILABLE,
+                                {"error": "model_resource_integrity_unavailable"},
+                                retry_after=60,
+                            )
+                            return
+                    self._json(HTTPStatus.OK, model_payloads)
                 elif parsed.path == "/api/config/embedding-resources":
                     if not self._authorized():
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -7886,6 +7909,10 @@ class NoyraHTTPServer:
                         "input_usd_per_million",
                         "output_usd_per_million",
                         "max_attempts",
+                        "limit_enabled",
+                        "expected_updated_at",
+                        "expected_limit_revision",
+                        "pricing_status",
                     }
                 ):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_model_resource_update"})
