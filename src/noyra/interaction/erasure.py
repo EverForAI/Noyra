@@ -25,6 +25,21 @@ ERASED = "[erased]"
 ERASED_MODEL = {"privacy_erased": True}
 MAX_ERASURE_ROWS = 20_000
 MAX_REVIEW_SECONDS = 5
+_REVIEW_CODES = frozenset(
+    {
+        "private_erasure_scope_exceeds_limit",
+        "private_calls_in_flight",
+        "cross_window_derivative_review_required",
+        "private_event_derivative_review_required",
+        "private_erasure_review_deadline",
+        "legacy_private_provenance_review_required",
+        "reflection_derivative_review_required",
+        "private_memory_derivative_review_required",
+        "private_exports_in_flight",
+        "private_legacy_export_review_required",
+        "multi_source_memory_review_required",
+    }
+)
 
 # This foundation deliberately excludes rich/transitive provenance. It has no
 # public endpoint until each domain has its own reviewed deletion contract.
@@ -76,6 +91,37 @@ class ConversationErasure:
     def __init__(self, database: Database):
         self.database = database
         self.root = database.path.parent / "privacy-deletions"
+
+    def assess(self, subject_id: str, conversation_id: str) -> dict[str, Any]:
+        """Explain the first prototype blocker without accepting a deletion intent."""
+        counts = None
+        with self.database.read_transaction() as connection:
+            connection.execute("PRAGMA query_only=ON")
+            state = _row(connection, subject_id, conversation_id)
+            try:
+                messages, calls, events = self._review(connection, subject_id, conversation_id)
+            except ErasureReviewRequired as error:
+                reason = str(error)
+                if reason not in _REVIEW_CODES:
+                    raise IntegrityError("private erasure assessment reason is invalid") from error
+                status = "review_required"
+            else:
+                reason = "private_erasure_full_contract_pending"
+                status = "full_contract_pending"
+                counts = {
+                    "messages": len(messages),
+                    "model_copies": len(calls),
+                    "events": len(events),
+                }
+        return {
+            "status": status,
+            "deletion_available": False,
+            "reason_code": reason,
+            "conversation_revision": state["revision"],
+            "counts": counts,
+            "checked_at": utc_now(),
+            "coverage": "first_prototype_blocker",
+        }
 
     def get(self, subject_id: str, conversation_id: str) -> dict[str, Any] | None:
         with self.database.connection() as connection:
