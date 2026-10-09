@@ -10,8 +10,10 @@ from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, RuntimeOwnershipError
 from noyra.core.locking import ProcessLock
 from noyra.core.payload_codec import decompress_text
+from noyra.core.private_sources import private_input_scope
 from noyra.core.types import canonical_json, utc_now
 from noyra.interaction import InteractionDecision, InteractionStore
+from noyra.interaction.conversations import ConversationStore
 from noyra.interaction.types import InteractionRecord
 from noyra.mind import AffectImpulse, MemoryStore, MindEngine, RelationshipStore
 from noyra.model import ModelGateway, ModelMessage
@@ -45,6 +47,8 @@ class InteractionCognition:
         self.settings = settings
         self.clock = clock
         self.interactions = InteractionStore(database)
+        self.conversations = ConversationStore(database)
+        self._private_sources: tuple[str, ...] = ()
         self.mind = MindEngine(database, clock=clock)
         self.memories = MemoryStore(database, clock=clock)
         self.relationships = RelationshipStore(database)
@@ -85,18 +89,20 @@ class InteractionCognition:
             if calls_today >= self.settings.max_interaction_model_calls_per_day:
                 return None
             try:
-                result = await self.gateway.complete_structured(
-                    self.subject_id,
-                    purpose,
-                    self._messages(interaction),
-                    InteractionCognitionProposal,
-                    idempotency_key=(
-                        f"interaction-cognition:{interaction.interaction_id}:"
-                        f"{round_number}:{budget_day}:{calls_today + 1}"
-                    ),
-                    max_output_tokens=min(1_500, self.settings.max_output_tokens),
-                    temperature=self.settings.temperature,
-                )
+                messages = self._messages(interaction)
+                with private_input_scope(self._private_sources):
+                    result = await self.gateway.complete_structured(
+                        self.subject_id,
+                        purpose,
+                        messages,
+                        InteractionCognitionProposal,
+                        idempotency_key=(
+                            f"interaction-cognition:{interaction.interaction_id}:"
+                            f"{round_number}:{budget_day}:{calls_today + 1}"
+                        ),
+                        max_output_tokens=min(1_500, self.settings.max_output_tokens),
+                        temperature=self.settings.temperature,
+                    )
             except BudgetExhaustedError:
                 self.fatigue.assess(
                     self.subject_id,
@@ -219,6 +225,11 @@ class InteractionCognition:
         return self.interactions.get(row[0]) if row is not None else None
 
     def _messages(self, interaction: InteractionRecord) -> tuple[ModelMessage, ...]:
+        history = self.conversations.authorized_history(self.subject_id, interaction.interaction_id)
+        self._private_sources = (
+            interaction.interaction_id,
+            *(row["interaction_id"] for row in history),
+        )
         allowed_affect_targets = {
             ("subject", None),
             ("human", interaction.counterparty),
@@ -260,6 +271,16 @@ class InteractionCognition:
                 "counterparty": interaction.counterparty,
                 "current_affect": affect,
                 "recalled_memories": recalled_memories,
+                "authorized_recent_private_history": [
+                    {
+                        "interaction_id": row["interaction_id"],
+                        "conversation_id": row["conversation_id"],
+                        "direction": row["direction"],
+                        "content": row["content"][:600],
+                        "created_at": row["created_at"],
+                    }
+                    for row in history
+                ],
             }
         )
         system = (

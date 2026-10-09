@@ -121,6 +121,32 @@ class InteractionIntegrity:
                         if source and source[0] != window[0]:
                             raise IntegrityError("conversation reply window mismatch")
 
+            for source in connection.execute(
+                "SELECT s.*, i.content_hash, i.subject_id AS interaction_subject, "
+                "m.conversation_id AS linked_window, c.subject_id AS call_subject "
+                "FROM private_model_sources s LEFT JOIN interactions i "
+                "ON i.interaction_id=s.interaction_id LEFT JOIN model_calls c "
+                "ON c.call_id=s.call_id LEFT JOIN private_conversation_messages m "
+                "ON m.interaction_id=s.interaction_id WHERE s.subject_id=?",
+                (subject_id,),
+            ):
+                expected = content_hash(
+                    {
+                        "call_id": source["call_id"],
+                        "interaction_id": source["interaction_id"],
+                        "conversation_id": source["conversation_id"],
+                        "subject_id": subject_id,
+                        "content_hash": source["content_hash"],
+                    }
+                )
+                if (
+                    source["interaction_subject"] != subject_id
+                    or source["call_subject"] != subject_id
+                    or source["linked_window"] != source["conversation_id"]
+                    or source["source_hash"] != expected
+                ):
+                    raise IntegrityError("private model source mismatch")
+
             bindings = connection.execute(
                 "SELECT b.*, t.subject_id AS transport_subject, t.channel AS transport_channel "
                 "FROM interaction_bindings b LEFT JOIN interaction_transports t "

@@ -7,6 +7,7 @@ from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.evidence_capacity import require_evidence_capacity
 from noyra.core.payload_codec import compress_text, decompress_text
+from noyra.core.private_sources import record_private_sources
 from noyra.core.types import (
     canonical_json,
     content_hash,
@@ -86,6 +87,7 @@ class ModelLedger:
                     raise ModelCallConflictError(
                         "idempotency key already identifies a different model call"
                     )
+                record_private_sources(connection, subject_id, existing["call_id"])
                 return self._call_from_row(existing), False
             require_evidence_capacity(connection, subject_id, "model_calls")
             call_id = new_id("mcall")
@@ -113,6 +115,7 @@ class ModelLedger:
                     capture_policy_version,
                 ),
             )
+            record_private_sources(connection, subject_id, call_id)
             return self._load_call_connection(connection, call_id), True
 
     def authorize_attempt(

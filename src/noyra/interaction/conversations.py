@@ -126,6 +126,48 @@ class ConversationStore:
     def __init__(self, database: Database):
         self.database = database
 
+    def authorized_history(
+        self, subject_id: str, interaction_id: str, *, limit: int = 16
+    ) -> list[dict[str, Any]]:
+        if type(limit) is not int or not 1 <= limit <= 32:
+            raise ValueError("invalid private history limit")
+        with self.database.read_transaction() as connection:
+            current = connection.execute(
+                "SELECT c.principal_id, m.author_verified FROM private_conversation_messages m "
+                "JOIN private_conversations c ON c.conversation_id=m.conversation_id "
+                "WHERE m.interaction_id=? AND m.subject_id=? AND c.subject_id=? "
+                "AND c.status IN ('active','archived')",
+                (interaction_id, subject_id, subject_id),
+            ).fetchone()
+            if current is None or not current["author_verified"]:
+                return []
+            rows = connection.execute(
+                "SELECT i.*, m.conversation_id FROM interactions i "
+                "JOIN private_conversation_messages m ON m.interaction_id=i.interaction_id "
+                "JOIN private_conversations c ON c.conversation_id=m.conversation_id "
+                "WHERE i.subject_id=? AND m.subject_id=? AND c.subject_id=? "
+                "AND c.principal_id=? AND c.status IN ('active','archived') "
+                "AND m.author_verified=1 AND i.interaction_id!=? "
+                "ORDER BY i.created_at DESC,i.interaction_id DESC LIMIT ?",
+                (
+                    subject_id,
+                    subject_id,
+                    subject_id,
+                    current["principal_id"],
+                    interaction_id,
+                    limit,
+                ),
+            ).fetchall()
+            from .store import InteractionStore
+
+            return [
+                {
+                    **InteractionStore._from_row(row).__dict__,
+                    "conversation_id": row["conversation_id"],
+                }
+                for row in reversed(rows)
+            ]
+
     def create(self, subject_id: str, title: str) -> dict[str, Any]:
         if not isinstance(title, str) or not 1 <= len(title.strip()) <= 120:
             raise ValueError("invalid conversation title")

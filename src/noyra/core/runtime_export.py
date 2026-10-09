@@ -614,6 +614,16 @@ _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
         "private_conversations": _subject_rule(),
         "private_conversation_messages": _subject_rule(),
     },
+    86: {
+        **_OWNERSHIP_GRAPH_V80,
+        "cognitive_resource_limit_policies": _subject_rule(),
+        "cognitive_resource_limit_revisions": _subject_rule(),
+        "public_post_length_policies": _subject_rule(),
+        "retention_policies": _subject_rule(),
+        "private_conversations": _subject_rule(),
+        "private_conversation_messages": _subject_rule(),
+        "private_model_sources": _subject_rule(),
+    },
 }
 
 

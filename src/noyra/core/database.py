@@ -17,6 +17,7 @@ from .conversation_schema import MIGRATION_V84, MIGRATION_V85
 from .errors import RuntimeOwnershipError
 from .evidence_schema import migration_v80
 from .locking import ProcessLock
+from .private_sources import MIGRATION_V86
 from .public_policy import MIGRATION_V82
 from .resource_policy import (
     LIMIT_DIMENSIONS,
@@ -299,7 +300,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 85
+CURRENT_SCHEMA_VERSION = 86
 
 # The schema DDL fingerprint is checked after every successful initialization.
 # Update this value only alongside a reviewed schema migration and its tests.
@@ -307,6 +308,7 @@ CURRENT_SCHEMA_VERSION = 85
 # installations persist this value in ``schema_meta`` and therefore require
 # the value to remain stable across compatible runtime fixes.
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
+    86: "43368f8885f52e6fc915a25f60ad983dd6f55a0de28007f18b6603f4cf55fbd3",
     85: "1866b81f3fbe8104021f130564d175b61961100a4524c84d3ef3a7ffd1c012e4",
     84: "a3a27655b433d22d0b2148267592067c724e17f37622fa95c1c69b0bd88496a4",
     83: "ad714681e3e85d60a20ab14ebabc4106285df457bfd8fc633c002097b12c2505",
@@ -323,6 +325,7 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 # auditable P0 finding.  Tables, indexes, and views still fail closed during
 # database construction because they define the storage contract itself.
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
+    86: "d54e6742307c5ec757afc98430368d0e11c3dfe0b87d1a3372f141dc9f2c292f",
     85: "57ef8566669d777860b4c97c3cf4f58e2050d3ca40bae05972094d564e7501a6",
     84: "60389656a9820b16ef4321937a04c139e068c4416189544938017ab586d017b5",
     83: "a9e34bb9c15d3499f211d315fde416314012a9754fee7fe535e87f59d4ff731f",
@@ -6873,6 +6876,7 @@ SELECT 1;
     83: MIGRATION_V83,
     84: MIGRATION_V84,
     85: MIGRATION_V85,
+    86: MIGRATION_V86,
 }
 
 
