@@ -53,6 +53,18 @@ _UNREVIEWED_DOMAINS = (
     "snapshot_archives",
     "storage_archives",
     "archive_transfer_queue",
+    "value_profiles",
+    "mission_candidates",
+    "motivation_reviews",
+    "epistemic_review_runs",
+    "goal_governance_runs",
+    "thought_agenda_items",
+    "self_modification_proposals",
+    "workflow_checkpoints",
+    "causal_links",
+    "event_payload_segments",
+    "world_claims",
+    "predictions",
 )
 
 
@@ -126,6 +138,54 @@ class ConversationErasure:
         result = self.get(subject_id, conversation_id)
         assert result is not None
         return result
+
+    def resume(self, subject_id: str, *, limit: int = 16) -> list[dict[str, Any]]:
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("invalid erasure recovery limit")
+        markers = _journal_markers(self.root)
+        with self.database.connection() as connection:
+            jobs = connection.execute(
+                "SELECT job_id,conversation_id,status FROM private_erasure_jobs "
+                "WHERE subject_id=? ORDER BY created_at,job_id LIMIT 10001",
+                (subject_id,),
+            ).fetchall()
+        if len(jobs) > 10_000:
+            raise IntegrityError("privacy journal exceeds recovery limit")
+        pending = {
+            window: marker for (subject, window), marker in markers.items() if subject == subject_id
+        }
+        for job in jobs:
+            actual = self._write_marker(subject_id, job["conversation_id"], job["job_id"])
+            if actual != job["job_id"]:
+                raise IntegrityError("privacy deletion job and journal mismatch")
+            if job["status"] == "completed":
+                pending.pop(job["conversation_id"], None)
+            else:
+                pending[job["conversation_id"]] = {
+                    "subject_id": subject_id,
+                    "conversation_id": job["conversation_id"],
+                    "job_id": job["job_id"],
+                }
+        results: list[dict[str, Any]] = []
+        # Journal entries can outlive a conversation (for example after an
+        # already completed restore). They must not consume the bounded
+        # recovery budget or starve real pending jobs later in the journal.
+        for window, marker in pending.items():
+            if len(results) >= limit:
+                break
+            with self.database.connection() as connection:
+                state = connection.execute(
+                    "SELECT revision FROM private_conversations WHERE subject_id=? "
+                    "AND conversation_id=?",
+                    (subject_id, window),
+                ).fetchone()
+            if state is None:
+                continue
+            job = self.request(subject_id, window, expected_revision=state[0], confirmed=True)
+            if job["job_id"] != marker["job_id"]:
+                raise IntegrityError("privacy deletion recovery identity mismatch")
+            results.append(self.run(subject_id, window))
+        return results
 
     def run(self, subject_id: str, conversation_id: str) -> dict[str, Any]:
         result = self.get(subject_id, conversation_id)
@@ -203,8 +263,8 @@ class ConversationErasure:
                         "WHERE call_id=?",
                         (canonical_json(ERASED_MODEL), content_hash(ERASED_MODEL), row["call_id"]),
                     )
-                counts["exclusive_memories"] = self._erase_exclusive_memories(
-                    connection, result["job_id"], subject_id, events
+                counts.update(
+                    self._erase_affected_memories(connection, result["job_id"], subject_id, events)
                 )
                 state = _row(connection, subject_id, conversation_id)
                 state.update(
@@ -348,6 +408,20 @@ class ConversationErasure:
                 raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
             if any(row["status"] in {"prepared", "executing"} for row in calls):
                 raise ErasureReviewRequired("private_calls_in_flight")
+            if connection.execute(
+                "SELECT 1 FROM private_model_sources other JOIN private_model_sources affected "
+                "ON affected.call_id=other.call_id WHERE affected.subject_id=? "
+                "AND affected.conversation_id=? AND other.conversation_id!=? LIMIT 1",
+                (subject, window, window),
+            ).fetchone():
+                raise ErasureReviewRequired("cross_window_derivative_review_required")
+            for event in events:
+                if connection.execute(
+                    "SELECT 1 FROM events e,json_each(e.causal_parent_ids_json) parent "
+                    "WHERE e.subject_id=? AND parent.value=? LIMIT 1",
+                    (subject, event),
+                ).fetchone():
+                    raise ErasureReviewRequired("private_event_derivative_review_required")
             self._check_derivatives(connection, subject, events, calls)
             return messages, calls, events
         except sqlite3.OperationalError as error:
@@ -400,17 +474,58 @@ class ConversationErasure:
             sources_by_memory.setdefault(revision["memory_id"], set()).update(
                 _memory_sources(revision["source_event_ids_json"])
             )
-        for sources in sources_by_memory.values():
+        for memory_id, sources in sources_by_memory.items():
             if sources & events and not sources <= events:
-                raise ErasureReviewRequired("multi_source_memory_review_required")
+                ConversationErasure._independent_memory_revision(connection, memory_id, events)
 
     @staticmethod
-    def _erase_exclusive_memories(
-        connection: Any, job_id: str, subject: str, events: set[str]
-    ) -> int:
-        erased = 0
+    def _independent_memory_revision(connection: Any, memory_id: str, events: set[str]) -> Any:
+        earliest = min(
+            str(
+                connection.execute(
+                    "SELECT observed_at FROM events WHERE event_id=?", (event,)
+                ).fetchone()[0]
+            )
+            for event in events
+        )
+        # A later revision may copy older private content despite citing a new
+        # event. Only a version recorded before any withdrawn input is evidence.
+        for revision in connection.execute(
+            "SELECT * FROM memory_revisions WHERE memory_id=? ORDER BY revision_number DESC",
+            (memory_id,),
+        ).fetchall():
+            sources = set(_memory_sources(revision["source_event_ids_json"]))
+            if sources and not sources & events and revision["created_at"] < earliest:
+                independent_sources = connection.execute(
+                    "SELECT e.event_id FROM events e JOIN memories m ON m.subject_id=e.subject_id "
+                    "WHERE m.memory_id=? AND e.event_id IN ("
+                    + ",".join("?" for _ in sources)
+                    + ") AND e.observed_at<=?",
+                    (memory_id, *sources, revision["created_at"]),
+                ).fetchall()
+                if len(independent_sources) != len(sources):
+                    continue
+                from noyra.mind.memory import MemoryStore
+
+                if revision["content_hash"] != content_hash(revision["content"]) or revision[
+                    "state_hash"
+                ] != MemoryStore._state_hash(
+                    revision["content"],
+                    float(revision["salience"]),
+                    float(revision["confidence"]),
+                    revision["status"],
+                ):
+                    raise IntegrityError("independent memory revision content mismatch")
+                return revision
+        raise ErasureReviewRequired("multi_source_memory_review_required")
+
+    def _erase_affected_memories(
+        self, connection: Any, job_id: str, subject: str, events: set[str]
+    ) -> dict[str, int]:
+        erased = rebuilt = 0
         for memory in connection.execute(
-            "SELECT memory_id,current_revision,content_hash,salience,confidence "
+            "SELECT memory_id,current_revision,content_hash,salience,confidence,"
+            "memory_type,privacy_level,status "
             "FROM memories WHERE subject_id=? LIMIT ?",
             (subject, MAX_ERASURE_ROWS + 1),
         ).fetchall():
@@ -424,8 +539,39 @@ class ConversationErasure:
                 for revision in revisions
                 for source in _memory_sources(revision["source_event_ids_json"])
             }
-            if not sources or not sources <= events:
+            if not sources & events:
                 continue
+            if not sources <= events:
+                independent = ConversationErasure._independent_memory_revision(
+                    connection, memory["memory_id"], events
+                )
+                from noyra.mind.memory import MemoryStore
+
+                rebuilder = MemoryStore(self.database)
+                replacement = rebuilder._create_connection(
+                    connection,
+                    subject,
+                    memory["memory_type"],
+                    independent["content"],
+                    salience=float(independent["salience"]),
+                    confidence=float(independent["confidence"]),
+                    source_event_ids=_memory_sources(independent["source_event_ids_json"]),
+                    privacy_level=memory["privacy_level"],
+                    reason="independent memory reconstruction after privacy erasure",
+                )
+                if independent["status"] == "archived" or memory["status"] == "archived":
+                    # Reconstructed archived facts must not become active knowledge.
+                    rebuilder._revise_connection(
+                        connection,
+                        replacement.memory_id,
+                        content=independent["content"],
+                        salience=float(independent["salience"]),
+                        confidence=float(independent["confidence"]),
+                        status="archived",
+                        reason="preserve independent archived state",
+                        source_event_ids=_memory_sources(independent["source_event_ids_json"]),
+                    )
+                rebuilt += 1
             for revision in revisions:
                 digest = content_hash(ERASED)
                 state_hash = content_hash(
@@ -501,8 +647,8 @@ class ConversationErasure:
                 connection.execute(
                     "DELETE FROM memory_embeddings WHERE memory_id=?", (memory["memory_id"],)
                 )
-            erased += 1
-        return erased
+            erased += int(sources <= events)
+        return {"exclusive_memories": erased, "reconstructed_memories": rebuilt}
 
     def _write_marker(self, subject: str, window: str, job: str) -> str:
         from noyra.core.at_rest import _contains_reparse_component, _fsync_directory
@@ -588,20 +734,11 @@ def _read_marker(path: Path) -> dict[str, str]:
 
 
 def replay_privacy_deletions(current_root: Path, restored_root: Path) -> None:
-    from noyra.core.at_rest import _contains_reparse_component
     from noyra.core.database import Database
 
     markers: dict[tuple[str, str], dict[str, str]] = {}
     for root in (restored_root / "privacy-deletions", current_root / "privacy-deletions"):
-        if not root.exists() and not root.is_symlink():
-            continue
-        if _contains_reparse_component(root) or not root.is_dir():
-            raise IntegrityError("privacy journal root is unsafe")
-        for index, path in enumerate(root.iterdir()):
-            if index >= 10_000:
-                raise IntegrityError("privacy journal exceeds restore limit")
-            marker = _read_marker(path)
-            markers[(marker["subject_id"], marker["conversation_id"])] = marker
+        markers.update(_journal_markers(root))
     if not markers:
         return
     database = Database(restored_root / "noyra.sqlite3")
@@ -619,3 +756,19 @@ def replay_privacy_deletions(current_root: Path, restored_root: Path) -> None:
         erasure.request(subject, window, expected_revision=row[0], confirmed=True)
         if erasure.run(subject, window)["status"] != "completed":
             raise ErasureReviewRequired("backup_private_deletion_replay_requires_review")
+
+
+def _journal_markers(root: Path) -> dict[tuple[str, str], dict[str, str]]:
+    from noyra.core.at_rest import _contains_reparse_component
+
+    if not root.exists() and not root.is_symlink():
+        return {}
+    if _contains_reparse_component(root) or not root.is_dir():
+        raise IntegrityError("privacy journal root is unsafe")
+    markers = {}
+    for index, path in enumerate(root.iterdir()):
+        if index >= 10_000:
+            raise IntegrityError("privacy journal exceeds recovery limit")
+        marker = _read_marker(path)
+        markers[(marker["subject_id"], marker["conversation_id"])] = marker
+    return markers

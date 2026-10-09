@@ -12,6 +12,26 @@ from .types import content_hash
 _SOURCES: ContextVar[tuple[str, ...]] = ContextVar("noyra_private_interaction_sources", default=())
 
 
+def assert_event_sources_available(connection: Any, subject_id: str, event_id: str) -> None:
+    if (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND "
+            "name='private_conversation_messages'"
+        ).fetchone()
+        is None
+    ):
+        return
+    withdrawn = connection.execute(
+        "SELECT 1 FROM events e JOIN private_conversation_messages m "
+        "ON json_extract(e.payload_json,'$.interaction_id')=m.interaction_id "
+        "JOIN private_conversations c ON c.conversation_id=m.conversation_id "
+        "WHERE e.subject_id=? AND e.event_id=? AND c.status IN ('deleting','deleted') LIMIT 1",
+        (subject_id, event_id),
+    ).fetchone()
+    if withdrawn is not None:
+        raise PermissionError("private event source has been withdrawn")
+
+
 def assert_private_inputs_available(connection: Any) -> None:
     for interaction_id in _SOURCES.get():
         state = connection.execute(

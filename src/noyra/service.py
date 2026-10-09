@@ -109,6 +109,7 @@ from noyra.interaction import (
     WeChatInboundAdapter,
 )
 from noyra.interaction.conversations import ConversationConflict, ConversationStore
+from noyra.interaction.erasure import ConversationErasure, ErasureReviewRequired
 from noyra.interaction.errors import InteractionStateConflictError
 from noyra.interaction.public_contract import (
     PUBLIC_CACHE_CONTROL,
@@ -9877,6 +9878,11 @@ class NoyraService:
     def _complete_boot_after_integrity(self) -> None:
         if not self._boot_recovery_pending:
             return
+        # Replay accepted privacy intents before exports or cognition can read them.
+        erasure = ConversationErasure(self.kernel.database)
+        while results := erasure.resume(self.kernel.subject_id):
+            if any(result["status"] != "completed" for result in results):
+                raise ErasureReviewRequired("private_deletion_boot_replay_requires_review")
         state = self.kernel.recover_after_integrity()
         # A prior process may have stopped while an external RPC read was in
         # flight.  Preserve the ambiguous outcome as ``unknown`` and require
