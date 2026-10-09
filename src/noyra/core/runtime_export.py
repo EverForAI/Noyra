@@ -645,6 +645,9 @@ _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
 }
 
 
+_OWNERSHIP_GRAPHS[88] = _OWNERSHIP_GRAPHS[87]
+
+
 @dataclass(frozen=True)
 class RuntimeExportArtifact:
     filename: str

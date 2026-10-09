@@ -346,7 +346,7 @@ def test_schema86_migration_preserves_content_and_installs_erasure_contract(
     with migrated.connection() as connection:
         assert (
             Database.schema_ddl_fingerprint(connection)
-            == database_module._SCHEMA_DDL_FINGERPRINTS[87]
+            == database_module._SCHEMA_DDL_FINGERPRINTS[database_module.CURRENT_SCHEMA_VERSION]
         )
         assert not connection.execute("PRAGMA foreign_key_check").fetchall()
     erasure = ConversationErasure(migrated)
@@ -402,3 +402,56 @@ def test_inflight_model_call_is_rejected_without_closing_window(tmp_path: Path) 
             reserved_cost_microusd=1,
         )
     assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+
+
+def test_job_and_receipt_guards_preserve_owner_and_provenance(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, _ = _private_message(db)
+    IdentityStore(db).ensure("other", content_hash("other"))
+    with pytest.raises(sqlite3.IntegrityError), db.transaction() as connection:
+        connection.execute(
+            "INSERT INTO private_erasure_jobs VALUES(?,?,?,'pending','fence',NULL,'{}',?,?)",
+            (new_id("erase"), "other", window["conversation_id"], utc_now(), utc_now()),
+        )
+    erasure = ConversationErasure(db)
+    job = erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    with pytest.raises(sqlite3.IntegrityError), db.transaction() as connection:
+        connection.execute(
+            "INSERT INTO private_erasure_receipts VALUES(?,'memories','fake','old','new')",
+            (job["job_id"],),
+        )
+    assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+    for statement in (
+        "UPDATE private_erasure_jobs SET subject_id='other' WHERE job_id=?",
+        "UPDATE private_erasure_jobs SET status='running' WHERE job_id=?",
+        "DELETE FROM private_erasure_jobs WHERE job_id=?",
+    ):
+        with pytest.raises(sqlite3.IntegrityError), db.transaction() as connection:
+            connection.execute(statement, (job["job_id"],))
+
+
+def test_schema87_migration_installs_job_guards_without_changing_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with monkeypatch.context() as historical:
+        historical.setattr(database_module, "CURRENT_SCHEMA_VERSION", 87)
+        db = Database(tmp_path / "noyra.sqlite3")
+        window, _, _ = _private_message(db)
+        erasure = ConversationErasure(db)
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+        assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+        with db.connection() as connection:
+            original = [
+                tuple(row) for row in connection.execute("SELECT * FROM private_erasure_receipts")
+            ]
+    migrated = Database(db.path)
+    with migrated.connection() as connection:
+        assert [
+            tuple(row) for row in connection.execute("SELECT * FROM private_erasure_receipts")
+        ] == original
+        assert (
+            Database.schema_ddl_fingerprint(connection)
+            == database_module._SCHEMA_DDL_FINGERPRINTS[88]
+        )
+    with pytest.raises(sqlite3.IntegrityError), migrated.transaction() as connection:
+        connection.execute("UPDATE private_erasure_jobs SET status='running'")

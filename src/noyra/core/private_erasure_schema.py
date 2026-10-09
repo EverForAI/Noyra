@@ -88,3 +88,30 @@ WHEN EXISTS(SELECT 1 FROM private_conversations c WHERE c.conversation_id=NEW.co
  AND c.status IN ('deleting','deleted'))
 BEGIN SELECT RAISE(ABORT,'conversation is unavailable'); END;
 """
+
+MIGRATION_V88 = """
+CREATE TRIGGER IF NOT EXISTS validate_private_erasure_job_owner
+BEFORE INSERT ON private_erasure_jobs
+WHEN NOT EXISTS(SELECT 1 FROM private_conversations c
+ WHERE c.conversation_id=NEW.conversation_id AND c.subject_id=NEW.subject_id)
+BEGIN SELECT RAISE(ABORT,'privacy deletion subject mismatch'); END;
+CREATE TRIGGER IF NOT EXISTS prevent_private_erasure_job_identity_update
+BEFORE UPDATE ON private_erasure_jobs
+WHEN NEW.job_id!=OLD.job_id OR NEW.subject_id!=OLD.subject_id
+ OR NEW.conversation_id!=OLD.conversation_id OR NEW.created_at!=OLD.created_at
+ OR (OLD.status='completed' AND (NEW.status!='completed'
+ OR NEW.stage!='verified' OR NEW.counts_json!=OLD.counts_json OR NEW.error_code IS NOT NULL))
+BEGIN SELECT RAISE(ABORT,'privacy deletion identity and completion are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS prevent_private_erasure_job_delete
+BEFORE DELETE ON private_erasure_jobs
+BEGIN SELECT RAISE(ABORT,'privacy deletion intent cannot be deleted'); END;
+CREATE TRIGGER IF NOT EXISTS validate_private_erasure_receipt_job
+BEFORE INSERT ON private_erasure_receipts
+WHEN NOT EXISTS(SELECT 1 FROM private_erasure_jobs j
+ WHERE j.job_id=NEW.job_id AND j.status='running')
+BEGIN SELECT RAISE(ABORT,'privacy erasure receipt requires running intent'); END;
+CREATE TRIGGER IF NOT EXISTS prevent_memory_revision_source_erasure_change
+BEFORE UPDATE ON memory_revisions
+WHEN NEW.source_event_ids_json!=OLD.source_event_ids_json
+BEGIN SELECT RAISE(ABORT,'memory erasure cannot change provenance'); END;
+"""
