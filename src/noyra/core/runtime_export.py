@@ -646,6 +646,11 @@ _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
 
 
 _OWNERSHIP_GRAPHS[88] = _OWNERSHIP_GRAPHS[87]
+_OWNERSHIP_GRAPHS[89] = {
+    **_OWNERSHIP_GRAPHS[88],
+    "inbound_identity_challenges": _subject_rule(),
+    "private_channel_routes": _subject_rule(),
+}
 
 
 @dataclass(frozen=True)

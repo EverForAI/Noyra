@@ -602,7 +602,7 @@ async function loadSetupGuide() {
 }
 const chat = {current:null,windows:[],nextOffset:null,before:null,rows:[],drafts:new Map(),keys:new Map(),generation:0,listGeneration:0,timer:null,history:false,failures:0};
 const chatStatus = {offered:"已记录，等待处理",accepted:"接受",rejected:"拒绝",deferred:"暂缓",silent:"选择沉默",sent:"已生成回复",expired:"已过期"};
-function clearChat() { clearTimeout(chat.timer); chat.generation++; chat.listGeneration++; chat.current=null; chat.windows=[]; chat.rows=[]; chat.drafts.clear(); chat.keys.clear(); $("#admin-message").value=""; $("#mailbox-list").replaceChildren(); $("#conversation-list").replaceChildren(); $("#message-status").textContent=""; $("#conversation-title").textContent="选择一个会话"; }
+function clearChat() { clearQQIdentity(); clearTimeout(chat.timer); chat.generation++; chat.listGeneration++; chat.current=null; chat.windows=[]; chat.rows=[]; chat.drafts.clear(); chat.keys.clear(); $("#admin-message").value=""; $("#mailbox-list").replaceChildren(); $("#conversation-list").replaceChildren(); $("#message-status").textContent=""; $("#conversation-title").textContent="选择一个会话"; }
 async function loadMailbox({append=false}={}) {
   const generation=++chat.listGeneration;
   const page=await request(`/api/admin/conversations?limit=50&archived=${$("#conversation-filter").value === "archived"}&offset=${append ? chat.nextOffset || 0 : 0}`);
@@ -1407,9 +1407,30 @@ async function loadChannels() {
   const [transports, bindings] = await Promise.all([request("/api/config/transports"), request("/api/config/inbound-bindings")]);
   const transportMap = new Map(transports.map((item) => [item.transport_id, item]));
   $("#admin-binding-transport").innerHTML = transports.filter((item) => item.status === "active").map((item) => `<option value="${esc(item.transport_id)}">${esc(item.channel)} · ${esc(item.label)}</option>`).join("") || '<option value="">先添加渠道</option>';
+  const selected = $("#qq-identity-transport").value;
+  $("#qq-identity-transport").innerHTML = transports.filter(item => item.channel === "qq" && item.status === "active").map(item => `<option value="${esc(item.transport_id)}">${esc(item.label)}</option>`).join("") || '<option value="">尚无启用的 QQ 机器人</option>';
+  if ([...$("#qq-identity-transport").options].some(option => option.value === selected)) $("#qq-identity-transport").value = selected;
   $("#channel-list").innerHTML = transports.length ? transports.map((item) => `<article class="resource-item"><div><h3>${esc(item.label)}</h3><p>${esc(item.channel)} · ${esc(item.status)}</p><small>${esc(item.endpoint)}</small></div><div class="resource-actions">${item.status === "active" ? `<button data-channel-action="disable" data-id="${esc(item.transport_id)}" type="button">停用</button>` : item.status === "disabled" ? `<button data-channel-action="enable" data-id="${esc(item.transport_id)}" type="button">启用</button>` : ""}</div></article>`).join("") : '<div class="muted">尚未配置通讯渠道</div>';
   $("#binding-list").innerHTML = bindings.length ? bindings.map((item) => `<article class="resource-item"><div><h3>${esc(item.label || item.external_sender_id)}</h3><p>${esc(item.channel)} · ${esc(item.role)} · ${esc(item.status)}</p><small>${esc(item.external_account_id)} / ${esc(item.external_sender_id)}</small></div><div class="resource-actions">${item.status === "active" ? `<button data-binding-action="disable" data-id="${esc(item.binding_id)}" type="button">停用</button>` : item.status === "disabled" ? `<button data-binding-action="enable" data-id="${esc(item.binding_id)}" type="button">启用</button>` : ""}</div></article>`).join("") : '<div class="muted">暂无入站账号绑定</div>';
   void transportMap;
+}
+let qqIdentity = null;
+function clearQQIdentity() {
+  qqIdentity = null;
+  $("#qq-identity-summary").replaceChildren();
+  $("#qq-identity-challenge").hidden = true;
+  $("#qq-chat-route-form").hidden = true;
+  $("#qq-share-history").checked = false;
+}
+async function checkQQIdentity() {
+  if (!qqIdentity) return;
+  const challenge = qqIdentity;
+  const state = await request(`/api/config/identity-challenges/${encodeURIComponent(challenge.challenge_id)}`);
+  if (qqIdentity !== challenge || !csrfToken) return;
+  const labels = {pending:"等待 QQ 私聊验证码",observed:"已收到验证，请核对账号",confirmed:"已确认身份",expired:"验证码已过期",revoked:"验证已取消"};
+  $("#qq-identity-confirm").disabled = state.status !== "observed";
+  setStatus("#qq-identity-status", `${labels[state.status] || "未知状态"}${state.external_sender_id ? " · 账号 " + state.external_sender_id : ""}`);
+  if (state.binding_id) qqIdentity.binding_id = state.binding_id;
 }
 async function loadRuntime() {
   const results = await Promise.allSettled([request("/api/diagnostics"), request("/api/admin/public-post-controls")]);
@@ -1849,6 +1870,11 @@ function updateChannelForm() {
     webhook: "https://example.com/webhook",
   };
   $("#admin-channel-endpoint").placeholder = placeholders[channel] || "HTTPS API 地址";
+  const endpoint = $("#admin-channel-endpoint");
+  if (endpoint.dataset.default === endpoint.value || !endpoint.value) {
+    endpoint.value = channel === "qq" ? placeholders.qq : "";
+    endpoint.dataset.default = endpoint.value;
+  }
   const accountPlaceholders = {
     telegram: "默认 Chat ID（可选）",
     qq: "默认用户 / 群 / 频道 OpenID（可选）",
@@ -1965,6 +1991,45 @@ $("#admin-channel-form").addEventListener("submit", async (event) => {
   } finally {
     if (button) button.disabled = false;
   }
+});
+$("#qq-identity-form").addEventListener("submit", async event => {
+  event.preventDefault(); const button = submitButton(event.currentTarget, event); button.disabled = true;
+  const session = csrfToken;
+  try {
+    const result = await request("/api/config/identity-challenges", {method:"POST",body:JSON.stringify({transport_id:$("#qq-identity-transport").value})});
+    if (!session || csrfToken !== session) return;
+    clearQQIdentity(); qqIdentity = result;
+    $("#qq-identity-challenge").hidden = false;
+    $("#qq-identity-summary").innerHTML = summaryRows([["QQ 私聊验证码",result.code],["有效至",formatTimestamp(result.expires_at)],["验证范围","当前机器人私聊；不触发认知调用"]]);
+    setStatus("#qq-identity-status","等待收到验证码");
+  } catch(error) {setStatus("#qq-identity-status",errorText(error),true);} finally {button.disabled=false;}
+});
+$("#qq-identity-transport").addEventListener("change",clearQQIdentity);
+$("#logout").addEventListener("click",clearQQIdentity);
+$("#qq-identity-check").addEventListener("click",async event => {
+  const button=event.currentTarget; button.disabled=true;
+  try {await checkQQIdentity();} catch(error) {setStatus("#qq-identity-status",errorText(error),true);} finally {button.disabled=false;}
+});
+$("#qq-identity-confirm").addEventListener("click",async event => {
+  const button=event.currentTarget;button.disabled=true;const identity=qqIdentity;
+  if(!identity)return;
+  try {
+    const result=await request(`/api/config/identity-challenges/${encodeURIComponent(identity.challenge_id)}/confirm`,{method:"POST",body:JSON.stringify({label:"我的 QQ"})});
+    if(qqIdentity!==identity || !csrfToken)return;
+    identity.binding_id=result.binding_id;$("#qq-identity-summary").replaceChildren();
+    setStatus("#qq-identity-status","身份已确认；网页历史共享尚未开启");
+    const page=await request("/api/admin/conversations?limit=100");
+    if(qqIdentity!==identity || !csrfToken)return;
+    $("#qq-chat-window").innerHTML=page.items.filter(item=>item.principal_id==="operator:web-user").map(item=>`<option value="${esc(item.conversation_id)}">${esc(item.title)}</option>`).join("");
+    $("#qq-chat-route-form").hidden=false;await loadChannels();
+  } catch(error) {setStatus("#qq-identity-status",errorText(error),true);button.disabled=false;}
+});
+$("#qq-chat-route-form").addEventListener("submit",async event => {
+  event.preventDefault();if(!qqIdentity?.binding_id)return;const button=submitButton(event.currentTarget,event);button.disabled=true;
+  try {
+    await request(`/api/config/inbound-bindings/${encodeURIComponent(qqIdentity.binding_id)}/route`,{method:"POST",body:JSON.stringify({conversation_id:$("#qq-chat-window").value,share_web_history:$("#qq-share-history").checked,reason:"operator verified private history association"})});
+    setStatus("#qq-identity-status","后续 QQ 私聊已同步到选定会话；QQ 回复回到原 QQ，网页回复保留在网页");await loadChannels();
+  } catch(error) {setStatus("#qq-identity-status",errorText(error),true);} finally {button.disabled=false;}
 });
 $("#admin-binding-form").addEventListener("submit", async (event) => { event.preventDefault(); const form = event.currentTarget; const button = submitButton(form, event); if (button) button.disabled = true; try { await request("/api/config/inbound-bindings", { method: "POST", body: JSON.stringify({ transport_id: $("#admin-binding-transport").value, external_account_id: $("#admin-binding-account").value.trim(), external_sender_id: $("#admin-binding-sender").value.trim(), role: $("#admin-binding-role").value, label: $("#admin-binding-label").value.trim() }) }); form.reset(); setStatus("#binding-status", "入站账号已绑定"); await loadChannels(); } catch (error) { setStatus("#binding-status", errorText(error), true); } finally { if (button) button.disabled = false; } });
 $("#channel-list").addEventListener("click", async (event) => { const button = event.target.closest("[data-channel-action]"); if (!button) return; button.disabled = true; try { const operation = button.dataset.channelAction; await request(`/api/config/transports/${button.dataset.id}/${operation}`, { method: "POST", body: JSON.stringify({ reason: `admin ${operation} transport` }) }); await loadChannels(); } catch (error) { setStatus("#channel-status", errorText(error), true); } finally { button.disabled = false; } });

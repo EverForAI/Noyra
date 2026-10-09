@@ -31,6 +31,7 @@ class InteractionStore:
         related_interaction_id: str | None = None,
         idempotency_key: str | None = None,
         conversation_id: str | None = None,
+        verified_binding_id: str | None = None,
     ) -> InteractionRecord:
         self._validate_message(channel, counterparty, content)
         if kind == "subject_message":
@@ -45,6 +46,17 @@ class InteractionStore:
             }
         )
         with self.database.transaction() as connection:
+            if verified_binding_id is not None:
+                route = connection.execute(
+                    "SELECT 1 FROM private_channel_routes r JOIN interaction_bindings b "
+                    "ON b.binding_id=r.binding_id JOIN interaction_transports t "
+                    "ON t.transport_id=b.transport_id WHERE r.subject_id=? AND r.binding_id=? "
+                    "AND r.conversation_id=? AND r.share_web_history=1 "
+                    "AND b.status='active' AND t.status='active' AND b.channel=?",
+                    (subject_id, verified_binding_id, conversation_id, channel),
+                ).fetchone()
+                if route is None:
+                    raise PermissionError("private identity association is unavailable")
             record = self._create_connection(
                 connection,
                 subject_id,
@@ -59,6 +71,12 @@ class InteractionStore:
                 None,
                 conversation_id=conversation_id,
             )
+            if verified_binding_id is not None:
+                connection.execute(
+                    "UPDATE private_conversation_messages SET author_verified=1 "
+                    "WHERE interaction_id=? AND conversation_id=? AND subject_id=?",
+                    (record.interaction_id, conversation_id, subject_id),
+                )
             return record
 
     def send(

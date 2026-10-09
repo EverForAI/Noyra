@@ -115,3 +115,75 @@ BEFORE UPDATE ON memory_revisions
 WHEN NEW.source_event_ids_json!=OLD.source_event_ids_json
 BEGIN SELECT RAISE(ABORT,'memory erasure cannot change provenance'); END;
 """
+
+MIGRATION_V89 = """
+CREATE TABLE IF NOT EXISTS inbound_identity_challenges (
+ challenge_id TEXT PRIMARY KEY,
+ subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+ transport_id TEXT NOT NULL REFERENCES interaction_transports(transport_id),
+ code_hash TEXT NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('pending','observed','confirmed','expired','revoked')),
+ external_account_id TEXT,
+ external_sender_id TEXT,
+ attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+ expires_at TEXT NOT NULL,
+ created_at TEXT NOT NULL,
+ observed_at TEXT,
+ confirmed_at TEXT,
+ observed_event_hash TEXT,
+ binding_id TEXT REFERENCES interaction_bindings(binding_id),
+ UNIQUE(subject_id, transport_id, code_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_inbound_identity_challenges_lookup
+ ON inbound_identity_challenges(subject_id, transport_id, status, expires_at);
+CREATE TRIGGER IF NOT EXISTS validate_inbound_identity_challenge_owner
+ BEFORE INSERT ON inbound_identity_challenges WHEN NOT EXISTS(
+ SELECT 1 FROM interaction_transports t WHERE t.transport_id=NEW.transport_id
+ AND t.subject_id=NEW.subject_id AND t.channel='qq' AND t.status='active')
+ BEGIN SELECT RAISE(ABORT,'identity challenge transport mismatch'); END;
+CREATE TRIGGER IF NOT EXISTS prevent_inbound_identity_challenge_update
+ BEFORE UPDATE ON inbound_identity_challenges
+ WHEN NEW.challenge_id!=OLD.challenge_id OR NEW.subject_id!=OLD.subject_id
+ OR NEW.transport_id!=OLD.transport_id OR NEW.code_hash!=OLD.code_hash
+ OR NEW.expires_at!=OLD.expires_at OR NEW.created_at!=OLD.created_at
+ OR NEW.attempts<OLD.attempts OR NEW.attempts>5
+ OR (OLD.status IN ('confirmed','revoked','expired') AND NEW.status!=OLD.status)
+ OR (OLD.status='observed' AND NEW.status='pending')
+ OR (OLD.status='pending' AND NEW.status='confirmed')
+ OR (OLD.status='confirmed' AND (NEW.binding_id IS NOT OLD.binding_id
+ OR NEW.confirmed_at IS NOT OLD.confirmed_at))
+ OR (OLD.status!='pending' AND (NEW.external_account_id IS NOT OLD.external_account_id
+ OR NEW.external_sender_id IS NOT OLD.external_sender_id
+ OR NEW.observed_event_hash IS NOT OLD.observed_event_hash))
+BEGIN SELECT RAISE(ABORT,'terminal identity challenge cannot change'); END;
+CREATE TRIGGER IF NOT EXISTS validate_inbound_identity_challenge_confirmation
+ BEFORE UPDATE ON inbound_identity_challenges WHEN NEW.status='confirmed'
+ AND NOT EXISTS(SELECT 1 FROM interaction_bindings b WHERE b.binding_id=NEW.binding_id
+ AND b.subject_id=NEW.subject_id AND b.transport_id=NEW.transport_id
+ AND b.external_account_id=NEW.external_account_id
+ AND b.external_sender_id=NEW.external_sender_id)
+ BEGIN SELECT RAISE(ABORT,'identity confirmation binding mismatch'); END;
+CREATE TRIGGER IF NOT EXISTS prevent_inbound_identity_challenge_delete
+ BEFORE DELETE ON inbound_identity_challenges BEGIN
+ SELECT RAISE(ABORT,'identity challenges are audit evidence'); END;
+CREATE TABLE IF NOT EXISTS private_channel_routes (
+ binding_id TEXT PRIMARY KEY REFERENCES interaction_bindings(binding_id),
+ subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+ conversation_id TEXT NOT NULL REFERENCES private_conversations(conversation_id),
+ share_web_history INTEGER NOT NULL CHECK(share_web_history IN (0,1)),
+ updated_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS validate_private_channel_route_insert
+ BEFORE INSERT ON private_channel_routes
+ WHEN NOT EXISTS(SELECT 1 FROM interaction_bindings b JOIN private_conversations c
+ ON c.subject_id=b.subject_id WHERE b.binding_id=NEW.binding_id
+ AND b.subject_id=NEW.subject_id AND c.conversation_id=NEW.conversation_id
+ AND c.status='active')
+ BEGIN SELECT RAISE(ABORT,'private route subject mismatch'); END;
+CREATE TRIGGER IF NOT EXISTS validate_private_channel_route_update
+ BEFORE UPDATE ON private_channel_routes
+ WHEN NEW.binding_id!=OLD.binding_id OR NEW.subject_id!=OLD.subject_id
+ OR NOT EXISTS(SELECT 1 FROM private_conversations c WHERE c.subject_id=NEW.subject_id
+ AND c.conversation_id=NEW.conversation_id AND c.status='active')
+ BEGIN SELECT RAISE(ABORT,'private route subject mismatch'); END;
+"""

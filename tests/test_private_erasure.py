@@ -451,7 +451,7 @@ def test_schema87_migration_installs_job_guards_without_changing_receipts(
         ] == original
         assert (
             Database.schema_ddl_fingerprint(connection)
-            == database_module._SCHEMA_DDL_FINGERPRINTS[88]
+            == database_module._SCHEMA_DDL_FINGERPRINTS[database_module.CURRENT_SCHEMA_VERSION]
         )
     with pytest.raises(sqlite3.IntegrityError), migrated.transaction() as connection:
         connection.execute("UPDATE private_erasure_jobs SET status='running'")

@@ -217,7 +217,23 @@
           <div class="field-group" data-channel-field="admin-channel-smtp-password"><label for="admin-channel-smtp-password">SMTP 密码</label><input id="admin-channel-smtp-password" type="password" autocomplete="new-password" maxlength="4096"></div>
           <button type="submit">保存渠道</button>
         </form><p class="form-status" id="channel-status" role="status"></p></article><article class="surface-card"><div class="card-heading"><h2>已配置渠道</h2><button class="text-button" id="refresh-channels" type="button">更新</button></div><div id="channel-list" class="resource-list"></div></article></div>
-        <article class="surface-card channel-binding-card"><div class="card-heading"><h2>入站账号绑定</h2><span class="muted">创建者绑定只影响调度优先级，不强制回复</span></div><form id="admin-binding-form" class="model-grid"><div class="field-group"><label for="admin-binding-transport">渠道</label><select id="admin-binding-transport"></select></div><div class="field-group"><label for="admin-binding-account">平台账号 ID</label><input id="admin-binding-account" maxlength="512" required></div><div class="field-group"><label for="admin-binding-sender">发送者 ID</label><input id="admin-binding-sender" maxlength="512" required></div><div class="field-group"><label for="admin-binding-role">角色</label><select id="admin-binding-role"><option value="participant">普通参与者</option><option value="creator">创建者</option></select></div><div class="field-group"><label for="admin-binding-label">备注（可选）</label><input id="admin-binding-label" maxlength="512"></div><button type="submit">绑定账号</button></form><p class="form-status" id="binding-status" role="status"></p><div id="binding-list" class="resource-list"></div></article>
+        <article class="channel-binding-card"><div class="card-heading"><h2>允许谁与 Noyra 聊天</h2></div>
+          <form id="qq-identity-form" class="model-grid">
+            <div class="field-group"><label for="qq-identity-transport">我的 QQ 机器人</label><select id="qq-identity-transport"></select></div>
+            <button type="submit">关联我的 QQ</button>
+          </form>
+          <div id="qq-identity-challenge" hidden>
+            <div class="summary-list" id="qq-identity-summary"></div>
+            <div class="resource-actions"><button id="qq-identity-check" type="button">检查验证状态</button><button id="qq-identity-confirm" type="button" disabled>确认这是我的 QQ</button></div>
+          </div>
+          <form id="qq-chat-route-form" class="model-grid" hidden>
+            <div class="field-group"><label for="qq-chat-window">私聊所在窗口</label><select id="qq-chat-window"></select></div>
+            <label class="checkbox-field"><input type="checkbox" id="qq-share-history" required>允许已验证的 QQ 私聊使用我的网页聊天历史</label>
+            <button type="submit">同步到此会话</button>
+          </form>
+          <p class="form-status" id="qq-identity-status" role="status"></p>
+          <details><summary>其他联系人及高级手动关联</summary><form id="admin-binding-form" class="model-grid"><div class="field-group"><label for="admin-binding-transport">渠道</label><select id="admin-binding-transport"></select></div><div class="field-group"><label for="admin-binding-account">平台账号 ID</label><input id="admin-binding-account" maxlength="512" required></div><div class="field-group"><label for="admin-binding-sender">发送者 ID</label><input id="admin-binding-sender" maxlength="512" required></div><div class="field-group"><label for="admin-binding-role">角色</label><select id="admin-binding-role"><option value="participant">普通参与者</option><option value="creator">创建者</option></select></div><div class="field-group"><label for="admin-binding-label">备注（可选）</label><input id="admin-binding-label" maxlength="512"></div><button type="submit">允许此账号</button></form></details><p class="form-status" id="binding-status" role="status"></p><div id="binding-list" class="resource-list"></div>
+        </article>
       </section>
       <section class="admin-section" data-section-panel="wallet" hidden>
         <div class="section-intro"><div><p class="eyebrow">CONTROLLED WALLET EXECUTION</p><h2>钱包与转账</h2><p>余额采集与任务赏金转账分开管理。签名凭据不进入此界面；未配置独立签名器时，转账接口保持关闭。</p></div></div>

@@ -94,13 +94,15 @@ def link_message(
     channel: str,
     counterparty: str,
 ) -> None:
+    author_verified = channel == "web"
     if conversation_id is None and related_id:
         source = connection.execute(
-            "SELECT conversation_id FROM private_conversation_messages "
+            "SELECT conversation_id,author_verified FROM private_conversation_messages "
             "WHERE interaction_id=? AND subject_id=?",
             (related_id, subject_id),
         ).fetchone()
         conversation_id = source[0] if source else None
+        author_verified = bool(source[1]) if source else False
     if conversation_id is None and channel == "web" and counterparty == "web-user":
         conversation_id = default_window(connection, subject_id)
     if conversation_id is None:
@@ -118,7 +120,7 @@ def link_message(
         raise ConversationConflict("message belongs to another conversation")
     connection.execute(
         "INSERT OR IGNORE INTO private_conversation_messages VALUES(?,?,?,?)",
-        (interaction_id, conversation_id, subject_id, int(channel == "web")),
+        (interaction_id, conversation_id, subject_id, int(author_verified)),
     )
 
 

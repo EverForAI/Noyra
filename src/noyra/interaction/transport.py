@@ -1443,6 +1443,27 @@ class DeliveryDispatcher:
                     if context is not None and context["transport_id"] != record.transport_id:
                         raise IntegrityError("reply delivery uses a different source transport")
                     if context is not None:
+                        permitted = connection.execute(
+                            "SELECT 1 FROM interaction_bindings b WHERE b.subject_id=? "
+                            "AND b.transport_id=? AND b.channel=? AND b.external_account_id=? "
+                            "AND b.external_sender_id=? AND b.status='active'",
+                            (
+                                delivery.subject_id,
+                                context["transport_id"],
+                                context["channel"],
+                                context["external_account_id"],
+                                context["external_sender_id"],
+                            ),
+                        ).fetchone()
+                        withdrawn = connection.execute(
+                            "SELECT 1 FROM private_conversation_messages m "
+                            "JOIN private_conversations c "
+                            "ON c.conversation_id=m.conversation_id WHERE m.interaction_id=? "
+                            "AND c.status IN ('deleting','deleted')",
+                            (interaction["interaction_id"],),
+                        ).fetchone()
+                        if permitted is None or withdrawn is not None:
+                            raise PermissionError("reply recipient or private content withdrawn")
                         expected_counterparty = (
                             context["external_sender_id"]
                             if context["channel"] == "email"

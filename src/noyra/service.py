@@ -91,6 +91,7 @@ from noyra.interaction import (
     DeliveryDispatcher,
     InboundAuthenticationError,
     InboundChallenge,
+    InboundIdentityObserved,
     InboundIgnored,
     InboundStore,
     InteractionStore,
@@ -3988,6 +3989,18 @@ class NoyraHTTPServer:
                         )
                     else:
                         self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+                elif parsed.path.startswith("/api/config/identity-challenges/"):
+                    if not self._authorized():
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    try:
+                        result = owner.inbound.identity_challenge(
+                            owner.kernel.subject_id, parsed.path.rsplit("/", 1)[-1]
+                        )
+                    except NotFoundError:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "identity_challenge_not_found"})
+                        return
+                    self._json(HTTPStatus.OK, result)
                 elif parsed.path == "/api/config/inbound-bindings":
                     if not self._authorized():
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -5082,6 +5095,11 @@ class NoyraHTTPServer:
                     "/routing"
                 ):
                     self._set_search_provider_routing()
+                    return
+                if self.path == "/api/config/identity-challenges" or self.path.startswith(
+                    "/api/config/identity-challenges/"
+                ):
+                    self._identity_challenge()
                     return
                 if self.path == "/api/config/inbound-bindings":
                     self._configure_inbound_binding()
@@ -8919,6 +8937,9 @@ class NoyraHTTPServer:
                             update={"external_account_id": str(configured_account).strip()}
                         )
                     accepted = owner.inbound.ingest(envelope)
+                    if isinstance(accepted, InboundIdentityObserved):
+                        self._inbound_ack(channel, {"status": "identity_observed"})
+                        return
                     try:
                         owner.wallet_rewards.submit_inbound(
                             accepted,
@@ -9110,6 +9131,48 @@ class NoyraHTTPServer:
                     return
                 self._json(HTTPStatus.CREATED, {"binding_id": binding_id, "status": "active"})
 
+            def _identity_challenge(self) -> None:
+                if not self._authorized():
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+                    return
+                payload = self._request_json()
+                if payload is None:
+                    return
+                try:
+                    if self.path == "/api/config/identity-challenges":
+                        if set(payload) != {"transport_id"} or not isinstance(
+                            payload["transport_id"], str
+                        ):
+                            raise ValueError("invalid challenge")
+                        result = owner.inbound.issue_identity_challenge(
+                            owner.kernel.subject_id, payload["transport_id"]
+                        )
+                    else:
+                        parts = self.path.removeprefix(
+                            "/api/config/identity-challenges/"
+                        ).split("/")
+                        if len(parts) != 2 or parts[1] != "confirm" or set(payload) - {"label"}:
+                            raise ValueError("invalid challenge confirmation")
+                        label = payload.get("label", "我的 QQ")
+                        if not isinstance(label, str):
+                            raise ValueError("invalid challenge label")
+                        binding = owner.inbound.confirm_identity_challenge(
+                            owner.kernel.subject_id, parts[0], label=label
+                        )
+                        result = {"binding_id": binding, "status": "confirmed"}
+                except NotFoundError:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "identity_challenge_not_found"})
+                    return
+                except (ValueError, TypeError):
+                    self._json(HTTPStatus.CONFLICT, {"error": "identity_challenge_unavailable"})
+                    return
+                self._json(HTTPStatus.OK, result)
+
             def _change_inbound_binding(self) -> None:
                 if not self._authorized():
                     self._discard_small_request_body()
@@ -9130,6 +9193,21 @@ class NoyraHTTPServer:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_inbound_binding"})
                     return
                 binding_id, operation = parts
+                if operation == "route":
+                    try:
+                        conversation_id = payload.get("conversation_id")
+                        share = payload.get("share_web_history")
+                        if not isinstance(conversation_id, str) or type(share) is not bool:
+                            raise ValueError("invalid conversation route")
+                        owner.inbound.route_private_chat(
+                            owner.kernel.subject_id, binding_id, conversation_id,
+                            share_web_history=share,
+                        )
+                    except (ValueError, TypeError, NotFoundError):
+                        self._json(HTTPStatus.CONFLICT, {"error": "private_chat_route_unavailable"})
+                        return
+                    self._json(HTTPStatus.OK, {"status": "linked"})
+                    return
                 status = {"enable": "active", "disable": "disabled", "revoke": "revoked"}.get(
                     operation
                 )

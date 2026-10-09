@@ -2034,6 +2034,46 @@ paths:
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/identity-challenges:
+    post:
+      tags: [configuration]
+      operationId: issueInboundIdentityChallenge
+      security: [{ operatorBearer: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [transport_id], properties: { transport_id: { type: string } }, additionalProperties: false } } }
+      responses:
+        '200': { description: One-time code and expiration; never returned again by status }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/config/identity-challenges/{challengeId}:
+    parameters:
+      - { name: challengeId, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [configuration]
+      operationId: getInboundIdentityChallenge
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { description: Verification status without code or hash }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/config/identity-challenges/{challengeId}/confirm:
+    parameters:
+      - { name: challengeId, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [configuration]
+      operationId: confirmInboundIdentityChallenge
+      security: [{ operatorBearer: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, properties: { label: { type: string, maxLength: 512 } }, additionalProperties: false } } }
+      responses:
+        '200': { description: Confirmed binding; no administrative permission granted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
   /api/v1/config/inbound-bindings:
     get:
       tags: [configuration]
@@ -2067,7 +2107,7 @@ paths:
       security: [{ operatorBearer: [] }]
       parameters:
         - { name: bindingId, in: path, required: true, schema: { type: string } }
-        - { name: operation, in: path, required: true, schema: { type: string, enum: [enable, disable, revoke] } }
+        - { name: operation, in: path, required: true, schema: { type: string, enum: [enable, disable, revoke, route] } }
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/ReasonInput' } } }
@@ -2076,6 +2116,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '411': { $ref: '#/components/responses/LengthRequired' }
         '413': { $ref: '#/components/responses/RequestTooLarge' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
