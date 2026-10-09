@@ -1187,7 +1187,9 @@ $("#retention-settings-form").addEventListener("submit", async (event) => {
   try {
     const settings = Object.fromEntries([...form.querySelectorAll("input[name]")].map((input) => [input.name,Number(input.value)]));
     await request("/api/admin/retention/settings", {method:"POST",body:JSON.stringify({settings,expected_revision:Number(form.dataset.revision)})});
-    delete form.dataset.dirty; await loadRetention(); setStatus("#retention-status","设置已保存，尚未执行清理");
+    delete form.dataset.dirty;
+    try { await loadRetention(); setStatus("#retention-status","设置已保存，尚未执行清理"); }
+    catch { setStatus("#retention-status","设置已保存；读取失败，请刷新",true); }
   } catch (error) { setStatus("#retention-status",error.status === 409 ? "设置已被修改，请刷新后核对版本" : errorText(error),true); }
   finally { button.disabled = false; }
 });

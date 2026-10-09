@@ -1249,29 +1249,6 @@ class PublicPostStore:
                                 )
             cursor += 45 + secrets.randbelow(4)
 
-        def line(
-            x0: int, y0: int, x1: int, y1: int, color: tuple[int, int, int], width_: int
-        ) -> None:
-            steps = max(abs(x1 - x0), abs(y1 - y0), 1)
-            for step in range(steps + 1):
-                x = round(x0 + (x1 - x0) * step / steps)
-                y = round(y0 + (y1 - y0) * step / steps)
-                for offset_y in range(-width_, width_ + 1):
-                    for offset_x in range(-width_, width_ + 1):
-                        if offset_x * offset_x + offset_y * offset_y <= width_ * width_ + 1:
-                            put(x + offset_x, y + offset_y, color)
-
-        # Crossing strokes are drawn after glyphs so a single dark threshold
-        # no longer cleanly separates six independent templates.
-        for _ in range(2):
-            line(
-                -5,
-                8 + secrets.randbelow(height - 16),
-                width + 5,
-                8 + secrets.randbelow(height - 16),
-                secrets.choice(((150, 167, 180), (178, 152, 168), (151, 177, 163))),
-                1,
-            )
         for _ in range(45):
             put(
                 secrets.randbelow(width),
