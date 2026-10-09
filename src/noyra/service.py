@@ -4278,6 +4278,7 @@ class NoyraHTTPServer:
                             path,
                             filename=job.filename or f"{job_id}.zip",
                             digest=job.sha256 or "",
+                            export_job_id=job_id,
                         )
                     else:
                         try:
@@ -9154,9 +9155,9 @@ class NoyraHTTPServer:
                             owner.kernel.subject_id, payload["transport_id"]
                         )
                     else:
-                        parts = self.path.removeprefix(
-                            "/api/config/identity-challenges/"
-                        ).split("/")
+                        parts = self.path.removeprefix("/api/config/identity-challenges/").split(
+                            "/"
+                        )
                         if len(parts) != 2 or parts[1] != "confirm" or set(payload) - {"label"}:
                             raise ValueError("invalid challenge confirmation")
                         label = payload.get("label", "我的 QQ")
@@ -9201,7 +9202,9 @@ class NoyraHTTPServer:
                         if not isinstance(conversation_id, str) or type(share) is not bool:
                             raise ValueError("invalid conversation route")
                         owner.inbound.route_private_chat(
-                            owner.kernel.subject_id, binding_id, conversation_id,
+                            owner.kernel.subject_id,
+                            binding_id,
+                            conversation_id,
                             share_web_history=share,
                         )
                     except (ValueError, TypeError, NotFoundError):
@@ -9359,7 +9362,9 @@ class NoyraHTTPServer:
                 self.end_headers()
                 self.wfile.write(body)
 
-            def _send_file(self, path: Path, *, filename: str, digest: str) -> None:
+            def _send_file(
+                self, path: Path, *, filename: str, digest: str, export_job_id: str | None = None
+            ) -> None:
                 length = path.stat().st_size
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
@@ -9368,6 +9373,14 @@ class NoyraHTTPServer:
                 self.end_headers()
                 with path.open("rb") as stream:
                     while chunk := stream.read(1024 * 1024):
+                        if export_job_id is not None:
+                            try:
+                                owner.export_jobs.download_path(
+                                    export_job_id, subject_id=owner.kernel.subject_id
+                                )
+                            except (RuntimeError, FileNotFoundError):
+                                self.close_connection = True
+                                return
                         self.wfile.write(chunk)
 
             def _inbound_ack(self, channel: str, payload: Mapping[str, Any]) -> None:

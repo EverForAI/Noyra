@@ -20,6 +20,40 @@ ARTIFACT_PRUNING_ERROR = "artifact_pruning"
 ARTIFACT_PRUNED_ERROR = "artifact_pruned"
 
 
+def private_erasure_epoch(connection: sqlite3.Connection, subject_id: str) -> int:
+    installed = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='private_erasure_jobs'"
+    ).fetchone()
+    if installed is None:
+        return 0
+    return int(
+        connection.execute(
+            "SELECT count(*) FROM private_erasure_jobs WHERE subject_id=?",
+            (subject_id,),
+        ).fetchone()[0]
+    )
+
+
+def assert_no_private_erasure(
+    connection: sqlite3.Connection,
+    subject_id: str,
+    *,
+    epoch: int | None = None,
+) -> None:
+    if epoch is not None and private_erasure_epoch(connection, subject_id) != epoch:
+        raise ExportCancelledError("private content changed during export")
+    installed = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='private_conversations'"
+    ).fetchone()
+    if installed is None:
+        return
+    if connection.execute(
+        "SELECT 1 FROM private_conversations WHERE subject_id=? AND status='deleting' LIMIT 1",
+        (subject_id,),
+    ).fetchone():
+        raise ExportCancelledError("private content erasure is in progress")
+
+
 def _path_is_link_or_reparse(path: Path) -> bool:
     try:
         metadata = path.lstat()
@@ -141,6 +175,8 @@ class ExportControl:
         self.max_artifact_bytes = max_artifact_bytes
         self._cancelled = threading.Event()
         self._decision_lock = threading.Lock()
+        with self.database.connection() as connection:
+            self._privacy_epoch = private_erasure_epoch(connection, subject_id)
 
     @staticmethod
     def _is_link_or_reparse(path: Path) -> bool:
@@ -169,6 +205,8 @@ class ExportControl:
     def checkpoint(self) -> None:
         if self._cancelled.is_set():
             raise ExportCancelledError("export was cancelled before publication")
+        with self.database.connection() as connection:
+            assert_no_private_erasure(connection, self.subject_id, epoch=self._privacy_epoch)
 
     def request_stop(self) -> None:
         """Wake cooperative checkpoints even if durable cancellation cannot be recorded."""
@@ -196,6 +234,7 @@ class ExportControl:
             self.checkpoint()
             self.validate_target()
             with self.database.transaction() as connection:
+                assert_no_private_erasure(connection, self.subject_id, epoch=self._privacy_epoch)
                 row = connection.execute(
                     "SELECT status FROM export_jobs WHERE job_id = ? AND subject_id = ?",
                     (self.job_id, self.subject_id),
@@ -361,6 +400,7 @@ class ExportJobManager:
             now = utc_now()
             target = self.root / f"{job_id}.zip"
             with self.database.transaction() as connection:
+                assert_no_private_erasure(connection, subject_id)
                 connection.execute(
                     "INSERT INTO export_jobs(job_id, subject_id, export_kind, status, created_at) "
                     "VALUES (?, ?, ?, 'queued', ?)",
@@ -459,11 +499,14 @@ class ExportJobManager:
         return [self.get(str(row["job_id"]), subject_id=subject_id) for row in rows]
 
     def download_path(self, job_id: str, *, subject_id: str) -> tuple[ExportJob, Path]:
+        with self.database.connection() as connection:
+            assert_no_private_erasure(connection, subject_id)
         job = self.get(job_id, subject_id=subject_id)
         if (
             job.status != "completed"
             or not job.artifact_path
-            or job.error_code == ARTIFACT_PRUNING_ERROR
+            or job.error_code
+            in {ARTIFACT_PRUNING_ERROR, "privacy_erasure_retiring", "privacy_erasure_retired"}
         ):
             raise RuntimeError("export artifact is not ready")
         path = Path(job.artifact_path).resolve()

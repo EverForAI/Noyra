@@ -8,6 +8,7 @@ import re
 import sqlite3
 import stat
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -42,7 +43,6 @@ _UNREVIEWED_DOMAINS = (
     "entities",
     "entity_relations",
     "entity_evidence_links",
-    "training_exports",
     "public_diary_entries",
     "consciousness_frames",
     "actions",
@@ -194,6 +194,7 @@ class ConversationErasure:
         if result["status"] == "completed":
             return result
         try:
+            retired_exports = self._retire_exports(subject_id)
             with self.database.transaction() as connection:
                 messages, calls, events = self._review(connection, subject_id, conversation_id)
                 connection.execute(
@@ -201,7 +202,11 @@ class ConversationErasure:
                     "error_code=NULL,updated_at=? WHERE job_id=?",
                     (utc_now(), result["job_id"]),
                 )
-                counts = {"messages": len(messages), "model_copies": len(calls)}
+                counts = {
+                    "messages": len(messages),
+                    "model_copies": len(calls),
+                    "retired_exports": retired_exports,
+                }
                 for row in messages:
                     digest = InteractionStore._state_hash_values(
                         ERASED,
@@ -457,10 +462,7 @@ class ConversationErasure:
             (subject,),
         ).fetchone():
             raise ErasureReviewRequired("reflection_derivative_review_required")
-        if connection.execute(
-            "SELECT 1 FROM export_jobs WHERE subject_id=? LIMIT 1", (subject,)
-        ).fetchone():
-            raise ErasureReviewRequired("private_export_cleanup_required")
+        ConversationErasure._review_exports(connection, subject)
 
         revisions = connection.execute(
             "SELECT r.memory_id,r.source_event_ids_json FROM memory_revisions r "
@@ -479,9 +481,89 @@ class ConversationErasure:
                 ConversationErasure._independent_memory_revision(connection, memory_id, events)
 
     @staticmethod
+    def _review_exports(connection: Any, subject: str) -> None:
+        if connection.execute(
+            "SELECT 1 FROM export_jobs WHERE subject_id=? AND status IN ('queued','running') "
+            "LIMIT 1",
+            (subject,),
+        ).fetchone():
+            raise ErasureReviewRequired("private_exports_in_flight")
+        # Legacy exports can have arbitrary destinations with no job ownership.
+        # Retiring the managed job directory cannot prove those copies are gone.
+        if connection.execute(
+            "SELECT 1 FROM training_exports WHERE subject_id=? LIMIT 1",
+            (subject,),
+        ).fetchone():
+            raise ErasureReviewRequired("private_legacy_export_review_required")
+
+    def _retire_exports(self, subject: str) -> int:
+        from noyra.core.at_rest import _contains_reparse_component
+
+        root = self.database.path.parent / "exports" / "jobs"
+        with self.database.transaction() as connection:
+            self._review_exports(connection, subject)
+            rows = connection.execute(
+                "SELECT job_id,artifact_path FROM export_jobs WHERE subject_id=? LIMIT ?",
+                (subject, MAX_ERASURE_ROWS + 1),
+            ).fetchall()
+            if len(rows) > MAX_ERASURE_ROWS:
+                raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
+            # Persist retirement before unlinking. Readers reject this state,
+            # and a crash leaves enough ownership metadata to retry cleanup.
+            for row in rows:
+                connection.execute(
+                    "UPDATE export_jobs SET error_code='privacy_erasure_retiring' "
+                    "WHERE job_id=? AND subject_id=?",
+                    (row["job_id"], subject),
+                )
+        if rows and _contains_reparse_component(root):
+            raise IntegrityError("private export root is unsafe")
+        for row in rows:
+            expected = f"{row['job_id']}.zip"
+            saved = Path(row["artifact_path"]) if row["artifact_path"] else None
+            if re.fullmatch(r"export-job_[a-f0-9]{32}", row["job_id"]) is None or (
+                saved is not None
+                and (
+                    saved.name != expected
+                    or saved.parent.name != "jobs"
+                    or saved.parent.parent.name != "exports"
+                )
+            ):
+                raise ErasureReviewRequired("private_unmanaged_export_review_required")
+            # Backups retain the old absolute path. Always clean the owned
+            # artifact in this data root, never follow the stored destination.
+            candidates = [root / expected]
+            if root.exists():
+                for index, candidate in enumerate(root.iterdir()):
+                    if index >= MAX_ERASURE_ROWS:
+                        raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
+                    if candidate.name.startswith(f".{expected}.") and candidate.name.endswith(
+                        (".tmp", ".pending")
+                    ):
+                        candidates.append(candidate)
+            for target in candidates:
+                if not target.exists() and not target.is_symlink():
+                    continue
+                metadata = target.lstat()
+                if (
+                    _contains_reparse_component(target)
+                    or not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_nlink != 1
+                ):
+                    raise IntegrityError("private export artifact is unsafe")
+                target.unlink()
+            with self.database.transaction() as connection:
+                connection.execute(
+                    "UPDATE export_jobs SET artifact_path=NULL,filename=NULL,byte_size=NULL,"
+                    "error_code='privacy_erasure_retired' WHERE job_id=? AND subject_id=?",
+                    (row["job_id"], subject),
+                )
+        return len(rows)
+
+    @staticmethod
     def _independent_memory_revision(connection: Any, memory_id: str, events: set[str]) -> Any:
         earliest = min(
-            str(
+            _timestamp(
                 connection.execute(
                     "SELECT observed_at FROM events WHERE event_id=?", (event,)
                 ).fetchone()[0]
@@ -495,15 +577,19 @@ class ConversationErasure:
             (memory_id,),
         ).fetchall():
             sources = set(_memory_sources(revision["source_event_ids_json"]))
-            if sources and not sources & events and revision["created_at"] < earliest:
+            created_at = _timestamp(revision["created_at"])
+            if sources and not sources & events and created_at < earliest:
                 independent_sources = connection.execute(
-                    "SELECT e.event_id FROM events e JOIN memories m ON m.subject_id=e.subject_id "
+                    "SELECT e.event_id,e.observed_at FROM events e "
+                    "JOIN memories m ON m.subject_id=e.subject_id "
                     "WHERE m.memory_id=? AND e.event_id IN ("
                     + ",".join("?" for _ in sources)
-                    + ") AND e.observed_at<=?",
-                    (memory_id, *sources, revision["created_at"]),
+                    + ")",
+                    (memory_id, *sources),
                 ).fetchall()
-                if len(independent_sources) != len(sources):
+                if len(independent_sources) != len(sources) or any(
+                    _timestamp(source["observed_at"]) > created_at for source in independent_sources
+                ):
                     continue
                 from noyra.mind.memory import MemoryStore
 
@@ -697,6 +783,16 @@ def _memory_sources(value: str) -> tuple[str, ...]:
     ):
         raise IntegrityError("memory source list is invalid")
     return tuple(sources)
+
+
+def _timestamp(value: str) -> datetime:
+    try:
+        timestamp = datetime.fromisoformat(value)
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ValueError("timezone missing")
+        return timestamp.astimezone(UTC)
+    except (TypeError, ValueError) as error:
+        raise IntegrityError("private provenance timestamp is invalid") from error
 
 
 def _read_marker(path: Path) -> dict[str, str]:

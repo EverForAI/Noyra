@@ -395,6 +395,42 @@ def test_mixed_memory_reconstructs_only_a_version_preceding_private_input(
     assert MindEngine(db).verify_integrity("owner")["memories"] == 2
 
 
+def test_mixed_memory_cannot_use_later_revision_hidden_by_timezone_offset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from noyra.core.events import EventStore
+
+    db = Database(tmp_path / "noyra.sqlite3")
+    IdentityStore(db).ensure("owner", content_hash("owner"))
+    with monkeypatch.context() as prior:
+        prior.setattr("noyra.core.events.utc_now", lambda: "1999-01-01T00:00:00.000+00:00")
+        independent = EventStore(db).append("owner", "independent", "test", {"fact": "safe"})
+    with monkeypatch.context() as private:
+        private.setattr("noyra.core.events.utc_now", lambda: "2000-01-01T00:00:00.000+00:00")
+        window, _, event = _private_message(db)
+    memory = MemoryStore(db, clock=lambda: "1999-12-31T23:30:00.000-01:00").create(
+        "owner",
+        "episodic",
+        "private copied text",
+        salience=0.5,
+        confidence=0.7,
+        source_event_ids=(independent.event_id,),
+    )
+    MemoryStore(db).revise(
+        memory.memory_id,
+        content="mixed private",
+        salience=0.5,
+        confidence=0.7,
+        status="active",
+        reason="private",
+        source_event_ids=(independent.event_id, event),
+    )
+    with pytest.raises(ErasureReviewRequired, match="multi_source_memory_review_required"):
+        ConversationErasure(db).request(
+            "owner", window["conversation_id"], expected_revision=1, confirmed=True
+        )
+
+
 def test_cross_window_model_derivatives_require_review(tmp_path: Path) -> None:
     db = Database(tmp_path / "noyra.sqlite3")
     window, message, _ = _private_message(db)
@@ -495,6 +531,104 @@ def test_recovery_does_not_admit_an_unreviewed_orphan_intent(tmp_path: Path) -> 
         erasure.resume("owner")
     assert erasure.get("owner", window["conversation_id"]) is None
     assert InteractionStore(db).get(message).content == "private original"
+
+
+def test_managed_export_retirement_is_retryable_and_blocks_late_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from noyra.core.export_jobs import ExportCancelledError, ExportControl
+
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, _ = _private_message(db)
+    root = tmp_path / "exports" / "jobs"
+    root.mkdir(parents=True)
+    job_id = new_id("export-job")
+    target = root / f"{job_id}.zip"
+    target.write_bytes(b"private exported content")
+    partial = root / f".{job_id}.zip.partial.tmp"
+    partial.write_bytes(b"private partial content")
+    with db.transaction() as connection:
+        connection.execute(
+            "INSERT INTO export_jobs(job_id,subject_id,export_kind,status,artifact_path,"
+            "created_at) "
+            "VALUES(?,?,'runtime','completed',?,?)",
+            (job_id, "owner", str(target), utc_now()),
+        )
+    stale = ExportControl(db, job_id, "owner", target, max_artifact_bytes=1000)
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    unlink = Path.unlink
+    with monkeypatch.context() as fault:
+
+        def fail_unlink(path: Path, *args: object, **kwargs: object) -> None:
+            if path == target:
+                raise OSError("simulated busy artifact")
+            unlink(path, *args, **kwargs)
+
+        fault.setattr(Path, "unlink", fail_unlink)
+        assert erasure.run("owner", window["conversation_id"])["status"] == "failed"
+    assert InteractionStore(db).get(message).content == "private original"
+    with db.connection() as connection:
+        assert connection.execute("SELECT error_code FROM export_jobs").fetchone()[0] == (
+            "privacy_erasure_retiring"
+        )
+    assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+    assert not target.exists() and not partial.exists()
+    with pytest.raises(ExportCancelledError, match="changed"):
+        stale.checkpoint()
+    with db.connection() as connection:
+        row = connection.execute("SELECT artifact_path,error_code FROM export_jobs").fetchone()
+        assert row[0] is None and row[1] == "privacy_erasure_retired"
+
+
+def test_inflight_exports_are_not_accepted_as_clearable(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, _ = _private_message(db)
+    with db.transaction() as connection:
+        connection.execute(
+            "INSERT INTO export_jobs(job_id,subject_id,export_kind,status,created_at) "
+            "VALUES(?,'owner','runtime','running',?)",
+            (new_id("export-job"), utc_now()),
+        )
+    erasure = ConversationErasure(db)
+    with pytest.raises(ErasureReviewRequired, match="private_exports_in_flight"):
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert not erasure.root.exists()
+    assert InteractionStore(db).get(message).content == "private original"
+
+
+def test_restore_retires_managed_export_in_restored_root(tmp_path: Path) -> None:
+    current = tmp_path / "current"
+    db = Database(current / "noyra.sqlite3")
+    window, message, _ = _private_message(db)
+    root = current / "exports" / "jobs"
+    root.mkdir(parents=True)
+    job_id = new_id("export-job")
+    target = root / f"{job_id}.zip"
+    target.write_bytes(b"private snapshot")
+    with db.transaction() as connection:
+        connection.execute(
+            "INSERT INTO export_jobs(job_id,subject_id,export_kind,status,artifact_path,"
+            "created_at) VALUES(?,'owner','runtime','completed',?,?)",
+            (job_id, str(target), utc_now()),
+        )
+    keyring = tmp_path / "keyring.json"
+    BackupKeyring.initialize(keyring)
+    manager = EncryptedBackupManager(current, keyring)
+    backup = tmp_path / "before.noyra-backup"
+    manager.create(backup)
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    restored_root = tmp_path / "restored"
+
+    manager.restore(backup, restored_root)
+
+    assert target.exists()
+    assert not (restored_root / "exports" / "jobs" / target.name).exists()
+    restored = Database(restored_root / "noyra.sqlite3")
+    assert InteractionStore(restored).get(message).content == ERASED
+    with restored.connection() as connection:
+        assert connection.execute("SELECT artifact_path FROM export_jobs").fetchone()[0] is None
 
 
 def test_service_boot_replays_privacy_before_runtime_recovery(
