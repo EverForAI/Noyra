@@ -9,7 +9,7 @@ import unittest
 import zlib
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -177,7 +177,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
 
     def test_length_policy_is_versioned_and_preserves_existing_posts(self: Self) -> None:
         original = self._submit("existing", self._challenge())
-        options = dict(
+        options: dict[str, Any] = dict(
             rate_limit_per_hour=30,
             queue_cap=100,
             captcha_ttl_seconds=300,

@@ -804,10 +804,20 @@ class CognitiveResourceStore:
                 "JOIN cognitive_resource_keys k ON k.key_id=q.resource_id "
                 "WHERE k.group_id=? AND q.status != 'removed'", (group.group_id,),
             ).fetchone()[0]
+            pool_counts = connection.execute(
+                "SELECT COUNT(*) active_resources, COALESCE(SUM(CASE WHEN EXISTS ("
+                "SELECT 1 FROM cognitive_resource_keys k WHERE k.group_id=g.group_id "
+                "AND k.subject_id=g.subject_id AND (k.status='active' OR "
+                "(k.status='cooldown' AND k.cooldown_until<=?))) THEN 1 ELSE 0 END),0) "
+                "available_resources FROM cognitive_resource_groups g "
+                "WHERE g.subject_id=? AND g.pool=? AND g.status='active'",
+                (utc_now(), group.subject_id, group.pool),
+            ).fetchone()
         return {
             "today_usage": {field: str(getattr(usage, field)) for field in fields},
             "reserved": {field: str(reserved[field]) for field in fields},
             "cleanup_pending": pending,
+            "pool_summary": dict(pool_counts),
             "reset_at_utc": (now + timedelta(days=1)).replace(
                 hour=0, minute=0, second=0, microsecond=0
             ).isoformat(),

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -119,7 +120,7 @@ def test_opaque_legacy_provenance_fails_without_claiming_erasure(tmp_path: Path)
     assert InteractionIntegrity(db).verify("owner")["interactions"] == 1
 
 
-def _private_message(db: Database) -> tuple[dict, str, str]:
+def _private_message(db: Database) -> tuple[dict[str, Any], str, str]:
     IdentityStore(db).ensure("owner", content_hash("owner"))
     window = ConversationStore(db).create("owner", "private title")
     message = InteractionStore(db).receive(
@@ -560,10 +561,10 @@ def test_managed_export_retirement_is_retryable_and_blocks_late_publication(
     unlink = Path.unlink
     with monkeypatch.context() as fault:
 
-        def fail_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        def fail_unlink(path: Path, missing_ok: bool = False) -> None:
             if path == target:
                 raise OSError("simulated busy artifact")
-            unlink(path, *args, **kwargs)
+            unlink(path, missing_ok=missing_ok)
 
         fault.setattr(Path, "unlink", fail_unlink)
         assert erasure.run("owner", window["conversation_id"])["status"] == "failed"

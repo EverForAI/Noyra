@@ -52,6 +52,118 @@ test("wallet amounts retain exact values across zero and maximum precision", () 
   assert.ok(!sandbox.walletAmount("1e18", "eth").includes("ETH"));
 });
 
+function modelContext(extra = {}) {
+  const { sandbox, nodes } = context({ integerFormatter: { format: String }, ...extra });
+  vm.runInContext(functionsBetween("const parameterHelp =", "function addParameterHelp("), sandbox);
+  vm.runInContext(functionsBetween("const SQLITE_INT64_MAX =", "function submitButton("), sandbox);
+  vm.runInContext(functionsBetween("function readModelLimits(", "async function loadModels("), sandbox);
+  return { sandbox, nodes };
+}
+
+test("each model limit combination ignores disabled values and requires enabled values", () => {
+  const { sandbox } = modelContext();
+  const fields = { attempts:"daily_attempts", input_tokens:"daily_input_tokens", output_tokens:"daily_output_tokens", cost:"daily_cost_limit_usd" };
+  for (const attribute of ["data-draft-limit", "data-limit-dimension"]) {
+    for (let mask = 0; mask < 16; mask++) {
+      const enabled = Object.fromEntries(Object.keys(fields).map((name, i) => [name, Boolean(mask & (1 << i))]));
+      const form = { elements:{}, querySelector:selector => ({ checked:enabled[selector.match(/="([^"]+)"/)[1]] }) };
+      for (const [dimension, field] of Object.entries(fields)) form.elements[field] = { value:enabled[dimension] ? "0":"invalid ignored value" };
+      const result = sandbox.readModelLimits(form, attribute);
+      assert.deepEqual(JSON.parse(JSON.stringify(result.limit_enabled)), enabled);
+      for (const [dimension, field] of Object.entries(fields)) {
+        assert.equal(field in result, enabled[dimension]);
+        if (enabled[dimension]) {
+          form.elements[field].value = "";
+          assert.throws(() => sandbox.readModelLimits(form, attribute), error => error.budgetField === field);
+          form.elements[field].value = "0";
+        }
+      }
+    }
+  }
+});
+
+test("model remaining allowance is exact and includes reservation only once", () => {
+  const { sandbox } = modelContext();
+  assert.equal(sandbox.modelBudgetRemaining("100", "35"), "65");
+  assert.equal(sandbox.modelBudgetRemaining("10", "35"), "0");
+  assert.equal(sandbox.modelBudgetRemaining("9223372036854775807", "1"), "9223372036854775806");
+});
+
+test("model deletion warning uses complete pool summary rather than filtered page size", () => {
+  const { sandbox } = modelContext();
+  const item={pool:"economy",label:"resource",status:"active",key_count:2,available_key_count:1,
+    pool_summary:{active_resources:1,available_resources:1}};
+  assert.ok(sandbox.modelDeletionMessage(item).includes("最后一个启用资源"));
+  item.pool_summary.active_resources=3;
+  assert.ok(sandbox.modelDeletionMessage(item).includes("没有其他具有可用密钥"));
+  item.pool_summary.available_resources=2;
+  assert.ok(!sandbox.modelDeletionMessage(item).includes("可能无法"));
+});
+
+function modelDetails() {
+  const content={innerHTML:"",insertAdjacentHTML:(_position,html)=>{content.innerHTML+=html;}};
+  return { dataset:{id:"resource",loadVersion:"1"}, isConnected:true,
+    querySelector:()=>content, content };
+}
+
+test("model keys are read on expansion, retry locally and reject stale session responses", async () => {
+  let calls=0;
+  let resolve;
+  const { sandbox }=modelContext({modelLoadVersion:1,renderedModels:new Map([["resource",{group_id:"resource",key_count:1}]]),
+    renderModelKey:(_item,key)=>key.key_id,request:async()=>{calls++;if(calls===1)throw new Error("offline");return [{key_id:"metadata"}];}});
+  const details=modelDetails();
+  await sandbox.loadModelKeys(details);
+  assert.ok(details.content.innerHTML.includes("data-model-keys-retry"));
+  await sandbox.loadModelKeys(details);
+  assert.equal(details.content.innerHTML,"metadata");
+  await sandbox.loadModelKeys(details);
+  assert.equal(calls,2);
+  const stale=modelDetails();
+  sandbox.request=()=>new Promise(done=>{resolve=done;});
+  const pending=sandbox.loadModelKeys(stale);
+  await new Promise(done=>setImmediate(done));
+  sandbox.renderedModels.clear();
+  resolve([{key_id:"late private metadata"}]);
+  await pending;
+  assert.ok(!stale.content.innerHTML.includes("late private metadata"));
+  assert.equal(stale.dataset.loaded,undefined);
+});
+
+test("failed list refresh does not disable key details in the preserved list", async () => {
+  const { sandbox }=modelContext({modelLoadVersion:2,renderedModels:new Map([["resource",{group_id:"resource",key_count:1}]]),
+    renderModelKey:(_item,key)=>key.key_id,request:async()=>[{key_id:"preserved metadata"}]});
+  const details=modelDetails();
+  await sandbox.loadModelKeys(details);
+  assert.equal(details.content.innerHTML,"preserved metadata");
+});
+
+test("expanding many key details bounds concurrent requests and skips detached queued panels", async () => {
+  let inFlight=0,max=0;
+  const completions=[];
+  const { sandbox }=modelContext({modelLoadVersion:1,renderedModels:new Map([["resource",{group_id:"resource",key_count:0}]]),
+    request:()=>{max=Math.max(max,++inFlight);return new Promise(resolve=>completions.push(()=>{inFlight--;resolve([]);}));}});
+  const panels=Array.from({length:9},()=>modelDetails());
+  const pending=panels.map(panel=>sandbox.loadModelKeys(panel));
+  await new Promise(done=>setImmediate(done));
+  assert.equal(completions.length,4);
+  for(const panel of panels.slice(4))panel.isConnected=false;
+  for(const complete of completions)complete();
+  await Promise.all(pending);
+  assert.equal(max,4);
+  assert.equal(completions.length,4);
+});
+
+test("declining draft connection test never invokes the provider endpoint", async () => {
+  let handler,writes=0;
+  const { sandbox }=context({$:()=>({addEventListener:(_event,callback)=>{handler=callback;}}),
+    window:{confirm:()=>false},request:async()=>{writes++;}});
+  vm.runInContext(functionsBetween('$("#admin-model-test").addEventListener', '$("#admin-model-discover").addEventListener'), sandbox);
+  const button={disabled:false};
+  await handler({currentTarget:button});
+  assert.equal(writes,0);
+  assert.equal(button.disabled,false);
+});
+
 test("wallet freshness uses the effective server observation threshold", () => {
   const { sandbox } = context({ walletObservationHealth: {
     evaluated_at: "2026-10-10T00:01:00Z", stale_after_seconds: 60,

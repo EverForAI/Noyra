@@ -43,6 +43,7 @@ let runtimeLogController = null;
 let runtimeLogBrowsingHistory = false;
 let modelPageOffset = 0;
 let modelLoadVersion = 0;
+const renderedModels = new Map();
 const lifecycleLabels = { booting: "启动中", orienting: "初始化", active: "活跃", paused: "已暂停", winding_down: "准备休眠", reflective_sleep: "反思休眠", deep_sleep: "深度休眠", waking: "唤醒中", resetting: "重置中", stopped: "已停止" };
 const logCategoryLabels = { event: "运行事件", model_call: "模型调用", action: "行为执行", routing: "资源路由", audit: "管理审计", metacognition: "元认知", epistemic_review: "知识复核", relationship_social: "关系交流", self_model: "自我模型", intrinsic_thought: "思考", motivation: "动机", consciousness: "意识框架", autonomous_project: "自主项目" };
 const logStatusLabels = { succeeded: "成功", failed: "失败", unknown: "结果未知", executing: "执行中", prepared: "已准备", recorded: "已记录", processed: "已处理", deferred: "暂缓", accepted: "接受", rejected: "拒绝", silent: "选择沉默", completed: "已完成" };
@@ -122,7 +123,6 @@ const migrationRiskErrors = {
   migration_policy_confirmation_required: "开启策略自动前必须再次确认风险",
   migration_local_wallet_confirmation_required: "开启本地钱包迁移前必须再次确认风险",
 };
-const MODEL_KEY_REQUEST_CONCURRENCY = 4;
 const upgradeErrorLabels = {
   upgrade_no_stable_release: "尚无可用的正式 Release；当前仍使用正式发布通道",
   upgrade_remote_rate_limited: "GitHub 请求额度已用尽，请稍后重试",
@@ -192,9 +192,9 @@ const parameterHelp = {
   api_keys: ["API 密钥", "每行一个密钥。同一资源的密钥轮流使用且共享额度。保存后不回显原文；撤销不可恢复。"],
   priority: ["调度优先级", "0 至 1000，数值越小越先被选择。故障或额度不足时会尝试同池其他可用资源。"],
   weight: ["调度权重", "1 至 1000。同一优先级内，较大权重获得较多选择机会，并非固定调用顺序。"],
-  daily_attempts: ["每日尝试上限", "每一次供应商尝试都计数，重试也计数。零代表不允许尝试；关闭开关仅取消此资源的次数上限。每日按 UTC 重置。"],
-  daily_input_tokens: ["每日输入 Token 上限", "限制发送给模型的 Token，包括提示、上下文和历史。调用前预留，完成后按已知实际用量结算；结果未知保留预留。零是零额度。"],
-  daily_output_tokens: ["每日输出 Token 上限", "限制模型输出用量。调用前按最大输出预留，可能在实际额度用完前阻止超额调用。零是零额度。"],
+  daily_attempts: ["每日尝试上限", "每一次供应商尝试都计数，重试也计数。零代表不允许尝试；关闭开关仅取消此资源的次数上限。每日按 UTC 重置。只接受非负整数，最大 9223372036854775807。"],
+  daily_input_tokens: ["每日输入 Token 上限", "限制发送给模型的 Token，包括提示、上下文和历史。调用前预留，完成后按已知实际用量结算；结果未知保留预留。零是零额度。只接受非负整数，最大 9223372036854775807。"],
+  daily_output_tokens: ["每日输出 Token 上限", "限制模型输出用量。调用前按最大输出预留，可能在实际额度用完前阻止超额调用。零是零额度。只接受非负整数，最大 9223372036854775807。"],
   daily_cost_limit_usd: ["每日成本上限", "以 USD 计，精确至六位小数。根据输入输出单价估算和预留。供应商单价未填或填零时，成本可能显示零，不能据此判断实际免费。"],
   input_usd_per_million: ["输入单价", "供应商每一百万输入 Token 的 USD 价格，用于成本预算和统计，不会向供应商修改收费。"],
   output_usd_per_million: ["输出单价", "供应商每一百万输出 Token 的 USD 价格。应与实际模型价格一致。"],
@@ -213,7 +213,9 @@ function addParameterHelp(root) {
     button.textContent = "?"; button.title = `${parameterHelp[name][0]}解释`; button.setAttribute("aria-label", button.title);
     input.setAttribute("aria-label", parameterHelp[name][0]);
     const heading = document.createElement("span"); heading.className = "parameter-label";
-    while (label.firstChild && label.firstChild !== input && label.firstChild.nodeName !== "INPUT") heading.append(label.firstChild);
+    const toggle = label.querySelector("input[type=checkbox]");
+    while (label.firstChild && label.firstChild !== input) heading.append(label.firstChild);
+    if (toggle) heading.prepend(toggle);
     heading.append(button); label.prepend(heading);
   });
 }
@@ -300,20 +302,6 @@ function showBudgetError(form, error) {
 }
 function submitButton(form, event) {
   return event.submitter || form.querySelector('button[type="submit"]');
-}
-async function mapWithConcurrency(items, limit, mapper) {
-  const results = new Array(items.length);
-  let nextIndex = 0;
-  async function worker() {
-    while (nextIndex < items.length) {
-      const index = nextIndex;
-      nextIndex += 1;
-      results[index] = await mapper(items[index], index);
-    }
-  }
-  const workerCount = Math.min(Math.max(1, limit), items.length);
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
-  return results;
 }
 function formatTimestamp(value) { if (!value) return "无"; const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString("zh-CN", { hour12: false }); }
 function shortFingerprint(value) { const fingerprint = String(value || ""); return fingerprint ? `${fingerprint.slice(0, 12)}…` : "未知"; }
@@ -542,6 +530,7 @@ async function login(event) { event.preventDefault(); const form = event.current
 async function logout() {
   const previousToken=csrfToken;csrfToken="";
   stopUpgradePolling();stopRuntimeLogPolling();clearChat();clearWallet();overviewLoadVersion++;modelLoadVersion++;
+  renderedModels.clear();
   latestDiagnostics=null;runtimeLogCursor=null;runtimeLogBrowsingHistory=false;upgradeTaskId=null;upgradeStatusAvailable=false;upgradeCheckResult=null;
   publicPostCursor="";publicPostRows=[];publicPostActionKeys.clear();publicPostLoadVersion++;
   for(const id of ["model-list","runtime-log-list","lifecycle-summary","lifecycle-timeline","public-post-review-list","overview-attention","overview-events","overview-lifecycle","overview-metrics","cognition-summary","storage-summary"])$("#"+id).replaceChildren();
@@ -1549,6 +1538,70 @@ async function loadUsage() {
 function confirmUnlimitedLimits(enabled) {
   return Object.values(enabled).some(Boolean) || window.confirm("四项资源级每日限制均已关闭。该资源不再受这些每日上限约束，仍可能产生供应商费用。确认保存吗？");
 }
+function readModelLimits(form, attribute) {
+  const payload = { limit_enabled: {} };
+  for (const [dimension, field] of Object.entries(limitFields)) {
+    const enabled = form.querySelector(`[${attribute}="${dimension}"]`).checked;
+    payload.limit_enabled[dimension] = enabled;
+    if (!enabled) continue;
+    const raw = form.elements[field].value;
+    const value = field === "daily_cost_limit_usd" ? normalizeBudgetCost(raw) : normalizeBudgetInteger(field, raw);
+    if (value === null) throw budgetError(field, `${parameterHelp[field][0]}已启用，请填写数值（零代表零额度）`);
+    payload[field] = value;
+  }
+  return payload;
+}
+function modelBudgetRemaining(maximum, accounted) {
+  // The ledger aggregate already includes executing and unknown reservations.
+  const difference = BigInt(maximum) - BigInt(accounted || "0");
+  return difference > 0n ? difference.toString() : "0";
+}
+function modelDeletionMessage(item) {
+  const pool = modelPoolLabels[item.pool] || "未知池";
+  let warning = "";
+  if (item.status === "active" && item.pool_summary?.active_resources === 1) {
+    warning = "按最近一次刷新，这是此池最后一个启用资源，删除后可能无法继续认知。";
+  } else if (item.status === "active" && item.available_key_count > 0 && item.pool_summary?.available_resources === 1) {
+    warning = "按最近一次刷新，此池没有其他具有可用密钥的资源，删除后可能无法继续认知。";
+  }
+  return `删除“${item.label}” · ${pool} · 共 ${formatInteger(item.key_count)} 个密钥？\n所有密钥永久撤销，历史用量和必要审计保留；在途供应商请求无法撤回。\n${warning}`;
+}
+let modelKeyActive = 0;
+const modelKeyWaiters = [];
+function acquireModelKeySlot() {
+  return new Promise((resolve) => {
+    const start = () => {
+      modelKeyActive++;
+      resolve(() => { modelKeyActive--; modelKeyWaiters.shift()?.(); });
+    };
+    if (modelKeyActive < 4) start();
+    else modelKeyWaiters.push(start);
+  });
+}
+async function loadModelKeys(details) {
+  const session = csrfToken;
+  const item = renderedModels.get(details.dataset.id);
+  if (!item) return;
+  const current = () => details.isConnected && renderedModels.get(details.dataset.id) === item && session && session === csrfToken;
+  if (!current() || details.dataset.loading || details.dataset.loaded) return;
+  details.dataset.loading = "true";
+  const content = details.querySelector("[data-model-key-content]");
+  content.innerHTML = '<p class="muted" role="status">正在读取密钥状态…</p>';
+  const release = await acquireModelKeySlot();
+  try {
+    if (!current()) return;
+    const keys = await request(`/api/config/model-resources/${encodeURIComponent(item.group_id)}/keys`);
+    if (!current()) return;
+    if (!Array.isArray(keys)) throw new Error("密钥状态响应不完整");
+    content.innerHTML = keys.length ? keys.map((key) => renderModelKey(item, key)).join("") : '<p class="muted">没有密钥记录</p>';
+    if (keys.length < item.key_count) content.insertAdjacentHTML("beforeend", `<p class="muted">显示 ${keys.length} / ${esc(formatInteger(item.key_count))} 条密钥记录</p>`);
+    details.dataset.loaded = "true";
+  } catch (error) {
+    if (!current()) return;
+    if (error.status === 401) await logout();
+    else content.innerHTML = '<p class="form-status inline-error" role="status">密钥详情加载失败，已有资源状态不受影响。</p><button type="button" data-model-keys-retry>重试</button>';
+  } finally { release(); delete details.dataset.loading; }
+}
 async function loadModels() {
   if ($("#model-list").querySelector("form[data-dirty]") && !window.confirm("资源有未保存的修改。放弃这些修改并刷新吗？")) { restoreModelFilters(); return; }
   const generation = ++modelLoadVersion;
@@ -1556,41 +1609,29 @@ async function loadModels() {
   const query = new URLSearchParams({ view: "management", limit: "50", offset: String(modelPageOffset), pool: $("#model-pool-filter").value, search: $("#model-search").value.trim() });
   if ($("#model-status-filter").value !== "all") query.set("status", $("#model-status-filter").value);
   const rows = await request(`/api/config/model-resources?${query}`);
-  const withKeys = await mapWithConcurrency(rows, MODEL_KEY_REQUEST_CONCURRENCY, async (item) => {
-    try {
-      const keys = await request(`/api/config/model-resources/${encodeURIComponent(item.group_id)}/keys`);
-      if (!Array.isArray(keys)) return { item, keys: [], keyError: "密钥详情加载失败，请重试" };
-      return { item, keys, keyError: "" };
-    } catch (error) {
-      if (error.status === 401) throw error;
-      return { item, keys: [], keyError: "密钥详情加载失败，请重试" };
-    }
-  });
   if (generation !== modelLoadVersion || !csrfToken) return;
+  if (JSON.stringify(renderedModelQuery) !== JSON.stringify(selectedQuery)) $("#model-list").scrollTop = 0;
   renderedModelQuery = selectedQuery;
-  $("#model-list").innerHTML = withKeys.length ? withKeys.map(({ item, keys, keyError }) => {
+  renderedModels.clear();
+  rows.forEach((item) => renderedModels.set(item.group_id, item));
+  $("#model-list").innerHTML = rows.length ? rows.map((item) => {
     const revoked = item.status === "revoked";
     const status = modelResourceStatusLabels[item.status] || item.status || "未知";
     const pool = modelPoolLabels[item.pool] || item.pool || "未知池";
     const exactBudget = item.exact_budget || item;
-    const keyMarkup = keyError
-      ? `<p class="form-status inline-error" role="status">${esc(keyError)}</p>`
-      : keys.length
-        ? keys.map((key) => renderModelKey(item, key)).join("")
-        : '<div class="empty-state compact">该资源没有密钥记录</div>';
     const limits = revoked ? "" : `<form class="model-limit-form" data-model-budget-form data-id="${esc(item.group_id)}">
-      <div class="model-limit-heading"><strong>调度与每日限制</strong><span class="muted">整数按精确字符串保存；成本最多 6 位小数</span></div>
+      <div class="model-limit-heading"><strong>调度与每日限制</strong></div>
       <label for="budget-${esc(item.group_id)}-priority">调度优先级<input id="budget-${esc(item.group_id)}-priority" data-budget-field name="priority" type="text" inputmode="numeric" pattern="[0-9]*" min="0" max="1000" maxlength="4" value="${esc(exactBudget.priority)}" aria-describedby="budget-${esc(item.group_id)}-priority-error"><small class="field-hint">0 到 1000</small><small class="field-error" data-budget-error="priority" id="budget-${esc(item.group_id)}-priority-error" role="alert"></small></label>
       <label for="budget-${esc(item.group_id)}-weight">调度权重<input id="budget-${esc(item.group_id)}-weight" data-budget-field name="weight" type="text" inputmode="numeric" pattern="[0-9]*" min="1" max="1000" maxlength="4" value="${esc(exactBudget.weight)}" aria-describedby="budget-${esc(item.group_id)}-weight-error"><small class="field-hint">1 到 1000</small><small class="field-error" data-budget-error="weight" id="budget-${esc(item.group_id)}-weight-error" role="alert"></small></label>
-      <label for="budget-${esc(item.group_id)}-daily-attempts">每日尝试上限<input id="budget-${esc(item.group_id)}-daily-attempts" data-budget-field name="daily_attempts" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="19" value="${esc(exactBudget.daily_attempts)}" aria-describedby="budget-${esc(item.group_id)}-daily-attempts-error"><small class="field-hint">非负整数，最大 9223372036854775807</small><small class="field-error" data-budget-error="daily_attempts" id="budget-${esc(item.group_id)}-daily-attempts-error" role="alert"></small></label>
-      <label for="budget-${esc(item.group_id)}-daily-input-tokens">每日输入 Token 上限<input id="budget-${esc(item.group_id)}-daily-input-tokens" data-budget-field name="daily_input_tokens" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="19" value="${esc(exactBudget.daily_input_tokens)}" aria-describedby="budget-${esc(item.group_id)}-daily-input-tokens-error"><small class="field-hint">非负整数，最大 9223372036854775807</small><small class="field-error" data-budget-error="daily_input_tokens" id="budget-${esc(item.group_id)}-daily-input-tokens-error" role="alert"></small></label>
-      <label for="budget-${esc(item.group_id)}-daily-output-tokens">每日输出 Token 上限<input id="budget-${esc(item.group_id)}-daily-output-tokens" data-budget-field name="daily_output_tokens" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="19" value="${esc(exactBudget.daily_output_tokens)}" aria-describedby="budget-${esc(item.group_id)}-daily-output-tokens-error"><small class="field-hint">非负整数，最大 9223372036854775807</small><small class="field-error" data-budget-error="daily_output_tokens" id="budget-${esc(item.group_id)}-daily-output-tokens-error" role="alert"></small></label>
+      <label for="budget-${esc(item.group_id)}-daily-attempts">每日尝试上限<input id="budget-${esc(item.group_id)}-daily-attempts" data-budget-field name="daily_attempts" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="19" value="${esc(exactBudget.daily_attempts)}" aria-describedby="budget-${esc(item.group_id)}-daily-attempts-error"><small class="field-hint">非负整数；零为零额度</small><small class="field-error" data-budget-error="daily_attempts" id="budget-${esc(item.group_id)}-daily-attempts-error" role="alert"></small></label>
+      <label for="budget-${esc(item.group_id)}-daily-input-tokens">每日输入 Token 上限<input id="budget-${esc(item.group_id)}-daily-input-tokens" data-budget-field name="daily_input_tokens" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="19" value="${esc(exactBudget.daily_input_tokens)}" aria-describedby="budget-${esc(item.group_id)}-daily-input-tokens-error"><small class="field-hint">非负整数；零为零额度</small><small class="field-error" data-budget-error="daily_input_tokens" id="budget-${esc(item.group_id)}-daily-input-tokens-error" role="alert"></small></label>
+      <label for="budget-${esc(item.group_id)}-daily-output-tokens">每日输出 Token 上限<input id="budget-${esc(item.group_id)}-daily-output-tokens" data-budget-field name="daily_output_tokens" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="19" value="${esc(exactBudget.daily_output_tokens)}" aria-describedby="budget-${esc(item.group_id)}-daily-output-tokens-error"><small class="field-hint">非负整数；零为零额度</small><small class="field-error" data-budget-error="daily_output_tokens" id="budget-${esc(item.group_id)}-daily-output-tokens-error" role="alert"></small></label>
       <label for="budget-${esc(item.group_id)}-daily-cost">每日成本上限（USD）<input id="budget-${esc(item.group_id)}-daily-cost" data-budget-field name="daily_cost_limit_usd" type="text" inputmode="decimal" pattern="[0-9]+(?:\\.[0-9]{1,6})?" maxlength="26" value="${esc(formatMicroUsd(exactBudget.daily_cost_microusd))}" aria-describedby="budget-${esc(item.group_id)}-daily-cost-error"><small class="field-hint">非负数字，最多 6 位小数</small><small class="field-error" data-budget-error="daily_cost_limit_usd" id="budget-${esc(item.group_id)}-daily-cost-error" role="alert"></small></label>
       <button type="submit">保存限制</button>
     </form>`;
-    return `<article class="resource-item model-resource-item" data-pool="${esc(item.pool)}" data-resource-id="${esc(item.group_id)}"><div class="model-resource-main"><div class="model-resource-title"><h3>${esc(item.label)}</h3><span class="status-chip status-${esc(item.status)}">${esc(status)}</span></div><p class="model-resource-identity">${esc(pool)} · ${esc(item.model)}</p><dl class="model-resource-facts"><div><dt>可用密钥</dt><dd>${esc(formatInteger(item.available_key_count))} / ${esc(formatInteger(item.key_count))}</dd></div><div><dt>最大尝试</dt><dd>${esc(formatInteger(exactBudget.max_attempts))}</dd></div><div><dt>优先级</dt><dd>${esc(formatInteger(exactBudget.priority))}</dd></div><div><dt>权重</dt><dd>${esc(formatInteger(exactBudget.weight))}</dd></div></dl><details class="model-keys"><summary>密钥管理</summary>${keyMarkup}${revoked ? "" : `<form data-add-model-keys data-id="${esc(item.group_id)}"><label>添加密钥<textarea name="api_keys" autocomplete="new-password" required maxlength="20000"></textarea></label><button type="submit">添加密钥</button></form>`}</details>${revoked ? "" : `<details><summary>额度与路由设置</summary>${limits}</details>`}</div><div class="resource-actions model-resource-actions">${item.status === "active" ? `<button class="primary" data-model-action="test" data-id="${esc(item.group_id)}" type="button">测试连接</button><button data-model-action="disable" data-id="${esc(item.group_id)}" type="button">停用</button>` : item.status === "disabled" ? `<button data-model-action="enable" data-id="${esc(item.group_id)}" type="button">启用</button>` : ""}${revoked ? "" : `<button data-model-action="revoke" data-id="${esc(item.group_id)}" type="button">删除资源</button>`}</div></article>`;
+    return `<article class="resource-item model-resource-item" data-pool="${esc(item.pool)}" data-resource-id="${esc(item.group_id)}"><div class="model-resource-main"><div class="model-resource-title"><h3>${esc(item.label)}</h3><span class="status-chip status-${esc(item.status)}">${esc(status)}</span></div><p class="model-resource-identity">${esc(pool)} · ${esc(item.model)}</p><dl class="model-resource-facts"><div><dt>可用密钥</dt><dd>${esc(formatInteger(item.available_key_count))} / ${esc(formatInteger(item.key_count))}</dd></div><div><dt>最大尝试</dt><dd>${esc(formatInteger(exactBudget.max_attempts))}</dd></div><div><dt>优先级</dt><dd>${esc(formatInteger(exactBudget.priority))}</dd></div><div><dt>权重</dt><dd>${esc(formatInteger(exactBudget.weight))}</dd></div></dl><details class="model-keys" data-model-key-details data-id="${esc(item.group_id)}"><summary>密钥管理</summary><div data-model-key-content></div>${revoked ? "" : `<form data-add-model-keys data-id="${esc(item.group_id)}"><label>添加密钥<textarea name="api_keys" autocomplete="new-password" required maxlength="20000"></textarea></label><button type="submit">添加密钥</button></form>`}</details>${revoked ? "" : `<details><summary>额度与路由设置</summary>${limits}</details>`}</div><div class="resource-actions model-resource-actions">${item.status === "active" ? `<button class="primary" data-model-action="test" data-id="${esc(item.group_id)}" type="button">测试连接</button><button data-model-action="disable" data-id="${esc(item.group_id)}" type="button">停用</button>` : item.status === "disabled" ? `<button data-model-action="enable" data-id="${esc(item.group_id)}" type="button">启用</button>` : ""}${revoked ? "" : `<button data-model-action="revoke" data-id="${esc(item.group_id)}" type="button">删除资源</button>`}</div></article>`;
   }).join("") : '<div class="empty-state">尚未配置认知资源</div>';
-  for (const { item } of withKeys) {
+  for (const item of rows) {
     const exactBudget = item.exact_budget || item;
     const card = Array.from($("#model-list").children).find((node) => node.dataset.resourceId === item.group_id);
     const form = card?.querySelector("[data-model-budget-form]");
@@ -1619,15 +1660,15 @@ async function loadModels() {
       const reserve = dimension === "cost" ? reserved.cost_microusd : reserved[dimension];
       const maximum = dimension === "cost" ? exactBudget.daily_cost_microusd : exactBudget[field];
       const displayAmount = (value) => dimension === "cost" ? `$${formatMicroUsd(value || "0")}` : formatInteger(value);
-      const remaining = item.limit_enabled?.[dimension] === false ? "未设资源级上限" : displayAmount(BigInt(maximum) > BigInt(amount || 0) ? BigInt(maximum) - BigInt(amount || 0) : 0n);
-      facts.insertAdjacentHTML("beforeend", `<div><dt>${parameterHelp[field][0]}</dt><dd>已计 ${esc(displayAmount(amount))} / 预留 ${esc(displayAmount(reserve))}<br>剩余 ${esc(remaining)}</dd></div>`);
+      const remaining = item.limit_enabled?.[dimension] === false ? "未设资源级上限" : displayAmount(modelBudgetRemaining(maximum, amount));
+      facts.insertAdjacentHTML("beforeend", `<div><dt>${parameterHelp[field][0]}</dt><dd>已计（含预留）${esc(displayAmount(amount))}<br>其中预留 ${esc(displayAmount(reserve))}<br>剩余 ${esc(remaining)}</dd></div>`);
     }
     facts.insertAdjacentHTML("beforeend", `<div><dt>价格依据</dt><dd>${esc(({unknown:"价格未知",priced:"填写单价估算",free:"已确认免费"})[item.pricing_status] || "价格未知")}</dd></div>`);
     card.querySelector(".model-resource-identity").insertAdjacentHTML("afterend", `<small>UTC 重置 ${esc(formatTimestamp(item.reset_at_utc))}${item.cleanup_pending ? ` · 密钥清理待完成 ${item.cleanup_pending}` : ""}</small>`);
   }
   const cards = Array.from($("#model-list").querySelectorAll("[data-pool]"));
   $("#model-list").replaceChildren();
-  for (const pool of ["economy", "deep"]) {
+  for (const pool of [selectedQuery.pool]) {
     const section = document.createElement("section"); section.className = "model-pool-section";
     section.innerHTML = `<h3>${modelPoolLabels[pool]} · ${cards.filter((card) => card.dataset.pool === pool).length}</h3>`;
     section.append(...cards.filter((card) => card.dataset.pool === pool));
@@ -2021,12 +2062,10 @@ $("#model-list").addEventListener("submit", async (event) => {
   if (button) button.disabled = true;
   clearBudgetErrors(form);
   try {
-    const payload = { reason: "admin budget update", expected_updated_at: form.dataset.updatedAt, expected_limit_revision: Number(form.dataset.limitRevision), limit_enabled: {} };
-    for (const toggle of form.querySelectorAll("[data-limit-dimension]")) payload.limit_enabled[toggle.dataset.limitDimension] = toggle.checked;
+    const payload = { reason: "admin budget update", expected_updated_at: form.dataset.updatedAt, expected_limit_revision: Number(form.dataset.limitRevision), ...readModelLimits(form, "data-limit-dimension") };
     if (!confirmUnlimitedLimits(payload.limit_enabled)) return;
     payload.pricing_status = form.elements.pricing_status.value;
-    for (const name of Object.keys(budgetIntegerRules)) payload[name] = normalizeBudgetInteger(name, form.elements[name].value);
-    payload.daily_cost_limit_usd = normalizeBudgetCost(form.elements.daily_cost_limit_usd.value);
+    for (const name of ["priority", "weight"]) payload[name] = normalizeBudgetInteger(name, form.elements[name].value);
     payload.input_usd_per_million = normalizeBudgetCost(form.elements.input_usd_per_million.value);
     payload.output_usd_per_million = normalizeBudgetCost(form.elements.output_usd_per_million.value);
     const attempts = form.elements.max_attempts.value.trim();
@@ -2324,7 +2363,10 @@ $("#model-list").addEventListener("click", async (event) => {
   const button = event.target.closest("[data-model-action]"); if (!button) return;
   const action = button.dataset.modelAction;
   if (action === "test" && !window.confirm("测试会调用供应商并消耗模型额度，继续吗？")) return;
-  if (action === "revoke" && !window.confirm("删除资源会永久撤销其所有密钥，停止后续调用；用量和必要审计记录保留。正在进行的供应商请求无法撤回。继续吗？")) return;
+  if (action === "revoke") {
+    const item = renderedModels.get(button.dataset.id);
+    if (!item || !window.confirm(modelDeletionMessage(item))) return;
+  }
   button.disabled = true;
   try {
     await request(`/api/config/model-resources/${encodeURIComponent(button.dataset.id)}/${action}`, { method: "POST", body: JSON.stringify({ reason: `admin ${action} model resource` }) });
@@ -2375,12 +2417,7 @@ $("#admin-model-form").addEventListener("submit", async (event) => {
   const button = submitButton(form, event);
   if (button) button.disabled = true;
   try {
-    const payload = { pool: $("#admin-model-pool").value, label: $("#admin-model-label").value.trim(), base_url: $("#admin-model-url").value.trim(), model: $("#admin-model-name").value.trim(), api_keys: $("#admin-model-keys").value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean), limit_enabled: {} };
-    for (const [dimension, field] of Object.entries(limitFields)) {
-      payload.limit_enabled[dimension] = form.querySelector(`[data-draft-limit="${dimension}"]`).checked;
-      payload[field] = field === "daily_cost_limit_usd" ? normalizeBudgetCost(form.elements[field].value) : normalizeBudgetInteger(field, form.elements[field].value);
-      if (payload[field] === null) throw new Error("请填写额度，零代表零额度");
-    }
+    const payload = { pool: $("#admin-model-pool").value, label: $("#admin-model-label").value.trim(), base_url: $("#admin-model-url").value.trim(), model: $("#admin-model-name").value.trim(), api_keys: $("#admin-model-keys").value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean), ...readModelLimits(form, "data-draft-limit") };
     if (!confirmUnlimitedLimits(payload.limit_enabled)) return;
     payload.input_usd_per_million = normalizeBudgetCost(form.elements.input_usd_per_million.value);
     payload.output_usd_per_million = normalizeBudgetCost(form.elements.output_usd_per_million.value);
@@ -2400,6 +2437,7 @@ $("#admin-model-form").addEventListener("submit", async (event) => {
 });
 $("#admin-model-test").addEventListener("click", async (event) => {
   const button = event.currentTarget;
+  if (!window.confirm("测试当前配置会向供应商发送请求，可能产生费用；配置尚未保存，因此不会计入已保存资源的预算。确认测试吗？")) return;
   button.disabled = true;
   try {
     const result = await request("/api/config/model-resources/test", { method: "POST", body: JSON.stringify(draftModelPayload(true)) });
@@ -2613,6 +2651,14 @@ modelPaging.innerHTML = '<button type="button" id="model-page-prev" aria-label="
 $("#model-list").after(modelPaging);
 for (const [id, step] of [["model-page-prev", -50], ["model-page-next", 50]]) $("#" + id).addEventListener("click", () => { modelPageOffset = Math.max(0, modelPageOffset + step); void loadModels().catch((error) => { restoreModelFilters(); setStatus("#model-status", errorText(error), true); }); });
 $("#model-list").addEventListener("input", (event) => { const form = event.target.closest("form"); if (form) form.dataset.dirty = "true"; });
+$("#model-list").addEventListener("toggle", (event) => {
+  const details = event.target;
+  if (details.matches("[data-model-key-details]") && details.open) void loadModelKeys(details);
+}, true);
+$("#model-list").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-model-keys-retry]");
+  if (button) void loadModelKeys(button.closest("[data-model-key-details]"));
+});
 const draftLimits = document.createElement("details"); draftLimits.className = "draft-limits";
 draftLimits.innerHTML = '<summary>每日限制</summary>' + Object.entries(limitFields).map(([dimension, field]) => `<label><input type="checkbox" data-draft-limit="${dimension}" checked>${parameterHelp[field][0]}<input name="${field}" value="${({ attempts: "100", input_tokens: "100000", output_tokens: "20000", cost: "5" })[dimension]}" inputmode="${dimension === "cost" ? "decimal" : "numeric"}"></label>`).join("");
 $("#admin-model-form .resource-actions").before(draftLimits);

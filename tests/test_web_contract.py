@@ -116,15 +116,17 @@ def test_admin_model_resource_controls_are_precise_bounded_and_escaped() -> None
         "/api/config/capabilities/${encodeURIComponent(button.dataset.id)}/revoke",
     ):
         assert path in ADMIN_JS
-    assert "MODEL_KEY_REQUEST_CONCURRENCY = 4" in ADMIN_JS
-    assert "mapWithConcurrency(rows, MODEL_KEY_REQUEST_CONCURRENCY" in ADMIN_JS
+    assert "async function loadModelKeys(details)" in ADMIN_JS
+    assert 'data-model-key-details' in ADMIN_JS
+    assert "renderedModels.get(details.dataset.id) === item" in ADMIN_JS
+    assert "session === csrfToken" in ADMIN_JS
     assert "Promise.all(rows.map" not in ADMIN_JS
     assert "SQLITE_INT64_MAX = 9223372036854775807n" in ADMIN_JS
     assert "return parsed.toString()" in ADMIN_JS
     assert "const exactBudget = item.exact_budget || item" in ADMIN_JS
     assert "exactBudget.daily_input_tokens" in ADMIN_JS
     assert "formatMicroUsd(exactBudget.daily_cost_microusd)" in ADMIN_JS
-    assert "payload.daily_cost_limit_usd = normalizeBudgetCost" in ADMIN_JS
+    assert 'readModelLimits(form, "data-limit-dimension")' in ADMIN_JS
     for escaped_value in (
         "esc(item.label)",
         "esc(item.group_id)",

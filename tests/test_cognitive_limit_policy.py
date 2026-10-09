@@ -308,3 +308,22 @@ def test_pricing_unknown_and_confirmed_free_are_distinct(tmp_path: Path) -> None
             CognitiveResourceGroupUpdate(pricing_status="free", input_usd_per_million=Decimal("1")),
             subject_id=subject, actor="operator", reason="invalid",
         )
+
+
+def test_management_summary_counts_pool_outside_resource_filters(tmp_path: Path) -> None:
+    _, store, subject = resources(tmp_path)
+    first = configure(store, subject)
+    second = configure(store, subject, label="second")
+    configure(store, subject, label="another pool", pool="deep")
+    assert store.budget_summary(first)["pool_summary"] == {
+        "active_resources": 2, "available_resources": 2
+    }
+    key = store.keys(second.group_id, subject_id=subject)[0]
+    store.revoke_key(key.key_id, subject_id=subject, actor="operator", reason="retire")
+    assert store.budget_summary(first)["pool_summary"] == {
+        "active_resources": 2, "available_resources": 1
+    }
+    store.disable(second.group_id, subject_id=subject, actor="operator", reason="stop")
+    assert store.budget_summary(first)["pool_summary"] == {
+        "active_resources": 1, "available_resources": 1
+    }

@@ -1,7 +1,7 @@
 from pathlib import Path
 
 
-def test_pelican_bicycle_page_contains_animation_contract():
+def test_pelican_bicycle_page_contains_animation_contract() -> None:
     page = Path("site/pelican-bike.html")
     assert page.is_file()
     html = page.read_text(encoding="utf-8")

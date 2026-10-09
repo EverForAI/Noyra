@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -121,7 +122,9 @@ def test_conversation_http_auth_revision_and_failed_send_rollback(tmp_path: Path
     server.start()
     base = f"http://127.0.0.1:{server.address[1]}"
 
-    def call(path: str, payload: dict | None = None, *, auth: bool = True) -> tuple[int, dict]:
+    def call(
+        path: str, payload: dict[str, Any] | None = None, *, auth: bool = True
+    ) -> tuple[int, dict[str, Any]]:
         headers = {"Content-Type": "application/json"}
         if auth:
             headers["Authorization"] = "Bearer test-token-sufficient-entropy-for-preview"
