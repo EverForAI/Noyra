@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import signal
+import sqlite3
 import threading
 import time
 from collections import defaultdict, deque
@@ -83,6 +84,7 @@ from noyra.core.upgrade import (
     UpgradeError,
     UpgradeManager,
 )
+from noyra.core.usage_projection import UsageProjection, UsageQueryLimit
 from noyra.interaction import (
     ADAPTERS,
     REPLAY_WINDOW_SECONDS,
@@ -3007,6 +3009,27 @@ class NoyraHTTPServer:
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
                     self._json(HTTPStatus.OK, owner.diagnostics())
+                elif parsed.path == "/api/admin/usage":
+                    if not self._authorized("read"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    try:
+                        usage_payload = UsageProjection(owner.kernel.database).summary(
+                            owner.kernel.subject_id, window=query.get("window", ["7"])[0],
+                            offset_minutes=int(query.get("offset_minutes", ["0"])[0]),
+                            pool=query.get("pool", [None])[0],
+                            resource=query.get("resource", [None])[0],
+                        )
+                    except UsageQueryLimit:
+                        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "usage_query_limit"})
+                        return
+                    except ValueError:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_usage_query"})
+                        return
+                    except sqlite3.OperationalError:
+                        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "usage_unavailable"})
+                        return
+                    self._json(HTTPStatus.OK, usage_payload)
                 elif parsed.path in {
                     "/api/admin/upgrade/check",
                     "/api/admin/upgrade/status",
@@ -3471,9 +3494,41 @@ class NoyraHTTPServer:
                         self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_provider_kind"})
                         return
                     try:
+                        health_offset = int(query.get("offset", ["0"])[0])
+                        if not 0 <= health_offset <= 1_000_000:
+                            raise ValueError("invalid offset")
+                    except ValueError:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_provider_query"})
+                        return
+                    try:
                         providers = owner.provider_health.list_projection(
                             owner.kernel.subject_id, kind
                         )
+                        metadata: dict[str, dict[str, Any]] = {}
+                        if kind == "model":
+                            for group in owner.cognitive_resources.list(owner.kernel.subject_id):
+                                metadata[group.group_id] = {
+                                    "label": group.label, "pool": group.pool, "model": group.model,
+                                    "host": urlsplit(group.base_url).hostname,
+                                    "resource_status": group.status,
+                                }
+                        else:
+                            for provider in owner.search_providers.list(owner.kernel.subject_id):
+                                metadata[provider.config_id] = {
+                                    "label": provider.label, "pool": "search",
+                                    "model": provider.provider_type,
+                                    "host": None, "resource_status": provider.status,
+                                }
+                        observed_ids = {item["provider_id"] for item in providers}
+                        providers.extend(
+                            {"provider_id": identifier, "state": "no_data", "attempt_count": 0}
+                            for identifier in metadata if identifier not in observed_ids
+                        )
+                        for item in providers:
+                            item.update(metadata.get(item["provider_id"], {
+                                "label": "历史资源", "resource_status": "historical",
+                                "pool": kind, "model": None, "host": None,
+                            }))
                     except IntegrityError:
                         self._json(
                             HTTPStatus.SERVICE_UNAVAILABLE,
@@ -3481,11 +3536,17 @@ class NoyraHTTPServer:
                             retry_after=60,
                         )
                         return
+                    except (ValueError, sqlite3.OperationalError):
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE, {"error": "provider_health_unavailable"}
+                        )
+                        return
                     self._json(
                         HTTPStatus.OK,
                         {
                             "provider_kind": kind,
-                            "providers": providers,
+                            "providers": providers[health_offset:health_offset + 50],
+                            "total": len(providers), "page_size": 50,
                         },
                     )
                 elif parsed.path in {"/api/v1/admin/retention", "/api/admin/retention"}:
@@ -3940,7 +4001,9 @@ class NoyraHTTPServer:
                             pool=query.get("pool", [None])[0],
                             status=query.get("status", [None])[0],
                             search=query.get("search", [None])[0],
-                            limit=limit if query.get("view", [""])[0] == "management" else None,
+                            limit=limit if query.get("view", [""])[0] in {
+                                "management", "usage"
+                            } else None,
                             offset=int(query.get("offset", ["0"])[0]),
                         )
                     except (ValueError, TypeError):

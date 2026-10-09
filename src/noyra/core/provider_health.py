@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -486,17 +487,22 @@ class ProviderHealthStore:
 
     def list_projection(self, subject_id: str, provider_kind: str) -> list[dict[str, Any]]:
         with self.database.connection() as connection:
+            deadline = time.monotonic() + 5
+            connection.set_progress_handler(lambda: int(time.monotonic() > deadline), 2_000)
             states = connection.execute(
                 """
                 SELECT * FROM provider_health_state
-                WHERE subject_id=? AND provider_kind=? ORDER BY provider_id
+                WHERE subject_id=? AND provider_kind=? ORDER BY provider_id LIMIT 10001
                 """,
                 (subject_id, provider_kind),
             ).fetchall()
             buckets = connection.execute(
-                "SELECT * FROM provider_health_buckets WHERE subject_id=? AND provider_kind=?",
+                "SELECT * FROM provider_health_buckets WHERE subject_id=? AND provider_kind=? "
+                "LIMIT 200001",
                 (subject_id, provider_kind),
             ).fetchall()
+            if len(states) > 10_000 or len(buckets) > 200_000:
+                raise ValueError("provider health read budget exceeded")
         aggregates: dict[str, dict[str, Any]] = {}
         for bucket in buckets:
             self._verify_bucket(bucket)
@@ -586,6 +592,10 @@ class ProviderHealthStore:
                     "window_start": aggregate["window_start"],
                     "window_end": aggregate["window_end"],
                     "bucket_count": int(aggregate["bucket_count"]),
+                    "latency_sample_count": len(samples),
+                    "last_failure_at": row["last_failure_at"],
+                    "probe_in_progress": bool(row["probe_token"]),
+                    "probe_started_at": row["probe_started_at"],
                 }
             )
         # Unknown outcomes may be recorded before a breaker state is created.
@@ -615,6 +625,9 @@ class ProviderHealthStore:
                     "window_start": aggregate["window_start"],
                     "window_end": aggregate["window_end"],
                     "bucket_count": int(aggregate["bucket_count"]),
+                    "latency_sample_count": len(samples),
+                    "probe_in_progress": False,
+                    "last_failure_at": None,
                 }
             )
         return result

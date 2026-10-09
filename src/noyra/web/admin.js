@@ -522,7 +522,8 @@ async function loadOverview() {
   $("#cognition-summary").innerHTML = summaryRows([["经济池", pools.economy?.status || "未配置"], ["深度池", pools.deep?.status || "未配置"], ["最近调用", cognition.recent_interaction_model_calls?.[0]?.error_code || cognition.recent_interaction_model_calls?.[0]?.status || "暂无"]]);
   const storage = diagnostics.storage || {};
   $("#storage-summary").innerHTML = summaryRows([["认知写入", storage.cognition_allowed === false ? "已暂停" : "允许"], ["完整性", diagnostics.integrity?.status || "未配置"], ["存储状态", diagnostics.storage_health?.status || "正常"]]);
-  renderModelObservability(diagnostics.model_observability);
+  void loadUsage();
+  void loadUsageResources();
   return diagnostics;
 }
 
@@ -542,10 +543,11 @@ function renderModelObservability(observation) {
   const search = observation.search || {};
   const searchRows = Object.entries(search.by_method || {}).map(([method, statuses]) => {
     const total = Object.values(statuses || {}).reduce((sum, count) => sum + (Number(count) || 0), 0);
-    return [methodLabels[method] || method, formatInteger(total) + " 次"];
+    return [methodLabels[method] || method, `${formatInteger(total)} 次 · ${Object.entries(statuses || {}).map(([status,count]) => `${({accepted:"已采用",waited:"等待",no_results:"无结果",failed:"失败",rejected:"未采用"})[status] || status} ${formatInteger(count)}`).join(" / ")}`];
   });
-  const rows = [["统计区间", `最近 ${formatInteger(observation.window_days)} 天`], ["模型调用 / 尝试", `${formatInteger(calls)} / ${formatInteger(attempts)}`], ["模型调用成功率", callSuccessRate], ["单次尝试成功率", attemptSuccessRate], ["输入 / 输出 Token", `${formatInteger(observation.input_tokens)} / ${formatInteger(observation.output_tokens)}`], ["费用（USD）", formatMicroUsd(observation.cost_microusd)], ["估算费用记录", formatInteger(observation.estimated_cost_attempts)], ["搜索次数", formatInteger(search.runs)]];
+  const rows = [["统计区间", `${observation.since ? formatTimestamp(observation.since) : "全部保留历史"} 至 ${formatTimestamp(observation.until)}`], ["模型逻辑调用 / 实际尝试", `${formatInteger(calls)} / ${formatInteger(attempts)}`], ["调用成功 / 失败 / 未知", `${formatInteger(succeededCalls)} / ${formatInteger(observation.failed_calls)} / ${formatInteger(observation.unknown_calls)}`], ["尝试成功 / 失败 / 未知", `${formatInteger(succeededAttempts)} / ${formatInteger(observation.failed_attempts)} / ${formatInteger(observation.unknown_attempts)}`], ["重试尝试", formatInteger(observation.retry_attempts)], ["模型调用成功率", callSuccessRate], ["单次尝试成功率", attemptSuccessRate], ["输入 / 输出 Token", `${formatInteger(observation.input_tokens)} / ${formatInteger(observation.output_tokens)}`], ["已结算费用（USD）", formatMicroUsd(observation.known_cost_microusd)], ["估算与预留（USD）", formatMicroUsd(observation.estimated_cost_microusd)], ["价格无法确认的尝试", formatInteger(observation.unknown_price_attempts)], ["尚未开始的预留（不归属时间窗）", formatInteger(observation.pending_untimed_attempts)], ["搜索次数（所有资源）", formatInteger(search.runs)], ["最早模型记录", formatTimestamp(observation.earliest_model_record_at)], ["最早搜索记录", formatTimestamp(observation.earliest_search_record_at)]];
   summary.innerHTML = summaryRows(rows.concat(searchRows));
+  summary.insertAdjacentHTML("beforeend", summaryRows([["缺少时间证据的历史尝试", formatInteger(observation.untimed_terminal_attempts)], ["显示时区", Intl.DateTimeFormat().resolvedOptions().timeZone], ["每日预算重置时区", "UTC"]]));
   const sampledAt = observation.sampled_at ? `数据更新于 ${formatTimestamp(observation.sampled_at)}` : "";
   summary.insertAdjacentHTML("beforeend", `<p class="muted observability-sampled-at">${esc(sampledAt)}</p>`);
 }
@@ -887,20 +889,27 @@ function renderProviderHealthList(target, rows) {
     return;
   }
   list.innerHTML = rows.map((row) => {
-    const state = providerHealthStateLabels[row.state] || row.state || "未知";
+    const state = row.probe_in_progress ? "恢复探测中" : row.state === "half_open" ? "可尝试恢复" : row.state === "no_data" ? "暂无调用数据" : providerHealthStateLabels[row.state] || row.state || "未知";
     const failureRate = `${Math.round((Number(row.failure_rate) || 0) * 100)}%`;
-    const latency = Number.isFinite(Number(row.average_latency_ms)) ? `${Math.round(Number(row.average_latency_ms))} ms` : "暂无";
-    return `<article class="provider-health-item"><div><strong>${esc(row.provider_id)}</strong><span class="status-chip status-${esc(row.state || "unknown")}">${esc(state)}</span><dl><div><dt>失败率</dt><dd>${esc(failureRate)}</dd></div><div><dt>平均响应</dt><dd>${esc(latency)}</dd></div><div><dt>最近成功</dt><dd>${esc(formatTimestamp(row.last_success_at))}</dd></div><div><dt>统计次数</dt><dd>${esc(formatInteger(row.attempt_count))}</dd></div></dl></div></article>`;
+    const latency = row.attempt_count && Number.isFinite(Number(row.average_latency_ms)) ? `${Math.round(Number(row.average_latency_ms))} ms` : "暂无";
+    const errors = {timeout:"响应超时：检查供应商延迟与请求时限",rate_limited:"限流：核对供应商额度与并发",auth:"凭据或权限错误：核对密钥和模型授权",schema:"输出格式异常：核对兼容协议",server_error:"供应商服务错误：等待恢复",unknown:"未分类错误：查看活动日志"};
+    const advice = Object.entries(row.error_counts || {}).map(([code,count]) => `<li>${esc(errors[code] || code)} · ${esc(formatInteger(count))}</li>`).join("");
+    return `<article class="provider-health-item" data-health-pool="${esc(row.pool)}"><div><strong>${esc(row.label || "历史资源")}</strong><span class="status-chip status-${esc(row.state || "unknown")}">${esc(state)}</span><p>${esc(modelPoolLabels[row.pool] || "搜索")} · ${esc(row.model || "历史配置")} ${row.host ? "· " + esc(row.host) : ""} · ${esc(modelResourceStatusLabels[row.resource_status] || row.resource_status)}</p><dl><div><dt>成功 / 失败 / 未知</dt><dd>${esc(formatInteger(row.success_count || 0))} / ${esc(formatInteger(row.failure_count || 0))} / ${esc(formatInteger(row.unknown_count || 0))}</dd></div><div><dt>历史失败率</dt><dd>${row.attempt_count ? esc(failureRate) : "暂无样本"}</dd></div><div><dt>平均尝试耗时</dt><dd>${esc(latency)}</dd></div><div><dt>最近成功</dt><dd>${esc(formatTimestamp(row.last_success_at))}</dd></div><div><dt>最近失败</dt><dd>${esc(formatTimestamp(row.last_failure_at))}</dd></div><div><dt>冷却截止</dt><dd>${esc(formatTimestamp(row.cooldown_until))}</dd></div></dl><details><summary>统计详情</summary><p>保留窗口 ${esc(formatTimestamp(row.window_start))} 至 ${esc(formatTimestamp(row.window_end))}</p><p>P50 ${esc(row.p50_latency_ms || "暂无")} ms · P95 ${esc(row.p95_latency_ms || "暂无")} ms · 保留样本 ${esc(formatInteger(row.latency_sample_count || 0))} / 总尝试 ${esc(formatInteger(row.attempt_count))}（各小时有界采样，含失败耗时）</p><ul>${advice || "<li>暂无错误类别</li>"}</ul><p>${row.state === "half_open" ? "下一次需要该资源时进行一次恢复请求" : row.probe_in_progress ? "恢复请求已占用探测租约" : row.state === "cooldown" ? "冷却期间暂停新路由，结束后等待恢复请求" : "历史统计不代表当前请求一定成功"}</p><code>${esc(row.provider_id)}</code></details></div></article>`;
   }).join("");
 }
+let healthLoadVersion = 0;
+const healthPages = {model: 0, search: 0};
 async function loadProviderHealth() {
-  const [models, search] = await Promise.all([
-    request("/api/admin/provider-health?kind=model"),
-    request("/api/admin/provider-health?kind=search"),
-  ]);
-  renderProviderHealthList("#model-provider-health-list", models?.providers);
-  renderProviderHealthList("#search-provider-health-list", search?.providers);
-  setStatus("#provider-health-status", `已更新 · ${formatTimestamp(new Date().toISOString())}`);
+  const version = ++healthLoadVersion;
+  const results = await Promise.allSettled(["model", "search"].map((kind) => request(`/api/admin/provider-health?kind=${kind}&offset=${healthPages[kind]}`)));
+  if (version !== healthLoadVersion || !csrfToken) return;
+  for (const [index, kind] of ["model", "search"].entries()) {
+    const result = results[index]; const target = `#${kind}-provider-health-list`;
+    if (result.status === "rejected") { $(target).innerHTML = `<p class="inline-error">${esc(errorText(result.reason))}</p>`; continue; }
+    renderProviderHealthList(target, result.value.providers);
+    $(target).insertAdjacentHTML("beforeend", `<div class="resource-actions"><button type="button" data-health-page="${kind}" data-step="-50" ${healthPages[kind] ? "" : "disabled"} title="上一页" aria-label="${kind}上一页">←</button><span>第 ${healthPages[kind] / 50 + 1} 页 · 总计 ${result.value.total || 0}</span><button type="button" data-health-page="${kind}" data-step="50" ${healthPages[kind] + 50 < result.value.total ? "" : "disabled"} title="下一页" aria-label="${kind}下一页">→</button></div>`);
+  }
+  setStatus("#provider-health-status", results.some((result) => result.status === "rejected") ? "部分资源读取失败" : `已更新 · ${formatTimestamp(new Date().toISOString())}`);
 }
 function renderRetention(payload) {
   const settings = payload?.settings || {};
@@ -1158,6 +1167,38 @@ function restoreModelFilters() {
   $("#model-search").value = renderedModelQuery.search;
   modelPageOffset = renderedModelQuery.offset;
   document.querySelectorAll("[data-model-pool]").forEach((button) => button.setAttribute("aria-selected", String(button.dataset.modelPool === renderedModelQuery.pool)));
+}
+let usageLoadVersion = 0;
+let usageResourcePage = 0;
+let usageResourceVersion = 0;
+async function loadUsageResources() {
+  const version = ++usageResourceVersion;
+  const query = new URLSearchParams({view:"usage", limit:"50", offset:String(usageResourcePage)});
+  if ($("#usage-pool").value) query.set("pool", $("#usage-pool").value);
+  try {
+    const records = await request(`/api/config/model-resources?${query}`);
+    if (version !== usageResourceVersion || !csrfToken) return;
+    const selected = $("#usage-resource").value;
+    $("#usage-resource").innerHTML = '<option value="">全部资源</option>' + records.map((record) => `<option value="${esc(record.group_id)}">${esc(record.label)} · ${esc(modelPoolLabels[record.pool])}</option>`).join("");
+    if (records.some((record) => record.group_id === selected)) $("#usage-resource").value = selected;
+    $("#usage-resource-page").textContent = `资源第 ${usageResourcePage / 50 + 1} 页`;
+    $("#usage-resource-prev").disabled = usageResourcePage === 0;
+    $("#usage-resource-next").disabled = records.length < 50;
+  } catch (error) { setStatus("#usage-status", errorText(error), true); }
+}
+async function loadUsage() {
+  const generation = ++usageLoadVersion;
+  const date = new Date();
+  const clock = $("#usage-window").value === "today" ? new Date(date.getFullYear(), date.getMonth(), date.getDate()) : date;
+  const query = new URLSearchParams({window: $("#usage-window").value, offset_minutes: String(-clock.getTimezoneOffset())});
+  if ($("#usage-pool").value) query.set("pool", $("#usage-pool").value);
+  if ($("#usage-resource").value) query.set("resource", $("#usage-resource").value);
+  try {
+    const payload = await request(`/api/admin/usage?${query}`);
+    if (generation === usageLoadVersion && csrfToken) { renderModelObservability(payload); setStatus("#usage-status", ""); }
+  } catch (error) {
+    if (generation === usageLoadVersion) setStatus("#usage-status", error.code === "usage_query_limit" ? "历史查询超过读取限额，请缩小时间范围" : errorText(error), true);
+  }
 }
 function confirmUnlimitedLimits(enabled) {
   return Object.values(enabled).some(Boolean) || window.confirm("四项资源级每日限制均已关闭。该资源不再受这些每日上限约束，仍可能产生供应商费用。确认保存吗？");
@@ -2078,3 +2119,11 @@ $("#admin-model-form").addEventListener("input", () => { $("#admin-model-form").
 window.addEventListener("beforeunload", (event) => { if (document.querySelector("form[data-dirty]")) { event.preventDefault(); event.returnValue = ""; } });
 addParameterHelp($("#admin-model-form"));
 restoreSession();
+$("#refresh-observability").replaceWith($("#refresh-observability").cloneNode(true));
+$("#refresh-observability").addEventListener("click", () => { void loadUsage(); });
+$("#usage-window").addEventListener("change", () => { void loadUsage(); });
+$("#usage-resource").addEventListener("change", () => { void loadUsage(); });
+$("#usage-pool").addEventListener("change", () => { usageResourcePage = 0; $("#usage-resource").value = ""; void loadUsageResources().then(loadUsage); });
+for (const [id, step] of [["usage-resource-prev",-50],["usage-resource-next",50]]) $("#" + id).addEventListener("click", () => { usageResourcePage = Math.max(0, usageResourcePage + step); void loadUsageResources().then(loadUsage); });
+$("#provider-health").addEventListener("click", (event) => { const button = event.target.closest("[data-health-page]"); if (button) { healthPages[button.dataset.healthPage] = Math.max(0, healthPages[button.dataset.healthPage] + Number(button.dataset.step)); void loadProviderHealth(); } });
+$("#logout").addEventListener("click", () => { usageLoadVersion += 1; usageResourceVersion += 1; healthLoadVersion += 1; $("#model-observability-summary").replaceChildren(); $("#model-provider-health-list").replaceChildren(); $("#search-provider-health-list").replaceChildren(); $("#usage-resource").innerHTML = '<option value="">全部资源</option>'; renderedModelQuery = null; delete $("#admin-model-form").dataset.dirty; });

@@ -757,6 +757,46 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/usage:
+    get:
+      tags: [observation]
+      operationId: adminUsage
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - name: window
+          in: query
+          schema: { type: string, enum: [today, '3', '7', '30', '90', all], default: '7' }
+        - name: offset_minutes
+          in: query
+          schema: { type: integer, minimum: -840, maximum: 840, default: 0 }
+        - name: pool
+          in: query
+          schema: { type: string, enum: [economy, deep] }
+        - name: resource
+          in: query
+          schema: { type: string, maxLength: 128 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/activity-logs:
+    get:
+      tags: [observation]
+      operationId: adminActivityLogs
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/admin/lifecycle-summary:
+    get:
+      tags: [observation]
+      operationId: adminLifecycleSummary
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /api/v1/admin/provider-health:
     get:
       tags: [observation]

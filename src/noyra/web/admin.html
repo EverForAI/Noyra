@@ -82,11 +82,13 @@
         <div class="metric-grid" id="overview-metrics"></div>
         <div class="two-column"><article class="surface-card"><div class="card-heading"><div><p class="eyebrow">COGNITION</p><h2>认知诊断</h2></div><span class="card-state" id="cognition-state">-</span></div><div id="cognition-summary" class="summary-list"></div></article><article class="surface-card"><div class="card-heading"><div><p class="eyebrow">STORAGE</p><h2>运行环境</h2></div></div><div id="storage-summary" class="summary-list"></div></article></div>
         <article class="surface-card observability-card" id="model-observability">
-          <div class="card-heading"><div><h2>模型与搜索用量</h2><p class="muted">汇总最近 7 天已有的记录；不会为每次 API 请求额外写入日志。</p></div><button class="text-button" id="refresh-observability" type="button">更新</button></div>
+          <div class="card-heading"><h2>模型与搜索用量</h2><div class="resource-actions"><select id="usage-window" aria-label="用量时间范围"><option value="today">当天</option><option value="3">最近 3 天</option><option value="7" selected>最近 7 天</option><option value="30">最近 30 天</option><option value="90">最近 90 天</option><option value="all">全部保留历史</option></select><select id="usage-pool" aria-label="用量认知池"><option value="">全部认知池</option><option value="economy">经济池</option><option value="deep">深度池</option></select><button class="text-button" id="refresh-observability" type="button">更新</button></div></div>
           <div id="model-observability-summary" class="summary-list"><div class="muted">正在读取聚合用量…</div></div>
+          <div class="resource-actions"><select id="usage-resource" aria-label="用量资源"><option value="">全部资源</option></select><button type="button" id="usage-resource-prev" title="上一页资源" aria-label="上一页资源">←</button><span id="usage-resource-page"></span><button type="button" id="usage-resource-next" title="下一页资源" aria-label="下一页资源">→</button></div>
+          <p class="form-status" id="usage-status" role="status"></p>
         </article>
         <article class="surface-card provider-health-card" id="provider-health" aria-labelledby="provider-health-title">
-          <div class="card-heading"><div><h2 id="provider-health-title">供应商健康</h2><p class="muted">只保留聚合指标，不记录单次调用。供应商冷却结束后，会在下一次需要时自动进行一次恢复请求。</p></div><div class="resource-actions"><button class="text-button" id="refresh-provider-health" type="button">更新</button></div></div>
+          <div class="card-heading"><h2 id="provider-health-title">供应商健康</h2><div class="resource-actions"><button class="text-button" id="refresh-provider-health" type="button">更新</button></div></div>
           <div class="provider-health-columns">
             <section aria-labelledby="model-health-title"><h3 id="model-health-title">模型供应商</h3><div id="model-provider-health-list" class="provider-health-list" aria-live="polite"><div class="muted">正在读取…</div></div></section>
             <section aria-labelledby="search-health-title"><h3 id="search-health-title">搜索供应商</h3><div id="search-provider-health-list" class="provider-health-list" aria-live="polite"><div class="muted">正在读取…</div></div></section>

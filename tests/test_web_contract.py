@@ -186,7 +186,7 @@ def test_admin_setup_guide_and_observability_are_present_and_localized() -> None
     ):
         assert marker in ADMIN_HTML
     assert "renderSetupGuide" in ADMIN_JS
-    assert "diagnostics.model_observability" in ADMIN_JS
+    assert "/api/admin/usage?" in ADMIN_JS
     assert '"/api/admin/wallet-audits?limit=100"' in ADMIN_JS
     assert 'wallet_reward_workflow_manual_intervention: "奖励流程需要人工处理"' in ADMIN_JS
     assert 'wallet_payment_order_awaiting_confirmation: "等待付款确认"' in ADMIN_JS

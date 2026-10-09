@@ -1099,6 +1099,28 @@ class ServiceTestCase(unittest.TestCase):
         assert isinstance(enabled, dict)
         self.assertTrue(enabled["enabled"])
 
+    def test_usage_endpoint_is_read_only_validated_and_private(self: Self) -> None:
+        with self.assertRaises(HTTPError) as error:
+            urlopen(f"{self.base_url}/api/admin/usage", timeout=5)
+        self.assertEqual(error.exception.code, 401)
+        with self.kernel.database.connection() as connection:
+            before = connection.execute("SELECT COUNT(*) FROM audit_records").fetchone()[0]
+        for window in ("today", "3", "7", "30", "90", "all"):
+            status, result = self.authorized_json(
+                f"/api/admin/usage?window={window}&offset_minutes=480"
+            )
+            self.assertEqual(status, 200)
+            assert isinstance(result, dict)
+            self.assertEqual(result["calls"], "0")
+            self.assertEqual(result["budget_timezone"], "UTC")
+        for path in ("/api/admin/usage?window=1", "/api/admin/provider-health?offset=-1"):
+            with self.assertRaises(HTTPError) as error:
+                self.authorized_json(path)
+            self.assertEqual(error.exception.code, 400)
+        with self.kernel.database.connection() as connection:
+            after = connection.execute("SELECT COUNT(*) FROM audit_records").fetchone()[0]
+        self.assertEqual(before, after)
+
     def test_model_resource_configuration_requires_auth_and_hides_keys(self: Self) -> None:
         secret = "model-resource-secret-that-must-not-leak"
         payload = {
@@ -1124,6 +1146,21 @@ class ServiceTestCase(unittest.TestCase):
         status, records = self.authorized_json("/api/config/model-resources?view=summary")
         self.assertEqual(status, 200)
         assert isinstance(records, list) and records and isinstance(records[0], dict)
+        status, managed = self.authorized_json(
+            "/api/config/model-resources?view=management&pool=economy&status=active&limit=50"
+        )
+        self.assertEqual(status, 200)
+        assert isinstance(managed, list)
+        self.assertEqual(managed[0]["pricing_status"], "unknown")
+        self.assertEqual(managed[0]["today_usage"]["attempts"], "0")
+        self.assertIn("reset_at_utc", managed[0])
+        status, health = self.authorized_json("/api/admin/provider-health?kind=model")
+        self.assertEqual(status, 200)
+        assert isinstance(health, dict)
+        self.assertEqual(health["providers"][0]["label"], "economy-test")
+        self.assertEqual(health["providers"][0]["state"], "no_data")
+        self.assertEqual(health["providers"][0]["host"], "models.example")
+        self.assertNotIn(secret, json.dumps(health))
         self.assertEqual(records[0]["key_count"], 2)
         group_id = str(records[0]["group_id"])
         status, keys_added = self.authorized_json(
