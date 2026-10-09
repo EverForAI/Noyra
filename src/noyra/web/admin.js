@@ -1319,7 +1319,23 @@ async function loadChannels() {
   $("#binding-list").innerHTML = bindings.length ? bindings.map((item) => `<article class="resource-item"><div><h3>${esc(item.label || item.external_sender_id)}</h3><p>${esc(item.channel)} · ${esc(item.role)} · ${esc(item.status)}</p><small>${esc(item.external_account_id)} / ${esc(item.external_sender_id)}</small></div><div class="resource-actions">${item.status === "active" ? `<button data-binding-action="disable" data-id="${esc(item.binding_id)}" type="button">停用</button>` : item.status === "disabled" ? `<button data-binding-action="enable" data-id="${esc(item.binding_id)}" type="button">启用</button>` : ""}</div></article>`).join("") : '<div class="muted">暂无入站账号绑定</div>';
   void transportMap;
 }
-async function loadRuntime() { const [diagnostics, controls] = await Promise.all([request("/api/diagnostics"), request("/api/admin/public-post-controls")]); const cognition = diagnostics.cognition || {}; $("#runtime-summary").innerHTML = summaryRows([["认知状态", cognition.enabled ? "已启用" : "未启用"], ["待处理消息", cognition.pending_interactions?.length || 0], ["认知等待任务", cognition.waiting_interaction_tasks?.length || 0], ["入站去重", JSON.stringify(diagnostics.inbound || {})], ["未知模型调用", diagnostics.unknown?.model_calls || 0], ["外部投递", JSON.stringify(diagnostics.deliveries || {})], ["完整性", diagnostics.integrity?.status || "未配置"]]).replaceAll("summary-row", "runtime-item"); $("#public-post-rate-limit").value = controls.rate_limit_per_hour; $("#public-post-queue-cap").value = controls.queue_cap; $("#public-post-captcha-ttl").value = controls.captcha_ttl_seconds; $("#public-post-captcha-attempts").value = controls.captcha_max_attempts; $("#public-post-captcha-mode").value = controls.captcha_mode; $("#public-post-captcha-issue-limit").value = controls.captcha_issue_limit_per_hour; $("#public-post-captcha-global-rate").value = controls.captcha_global_rate_per_minute; $("#public-post-storage-cap").value = controls.storage_cap_bytes; const usage = controls.usage || {}; $("#public-post-usage").innerHTML = summaryRows([["待审核", usage.pending_count ?? 0], ["帖子总数", usage.post_count ?? 0], ["帖子内容", `${usage.byte_size ?? 0} / ${usage.storage_cap_bytes ?? controls.storage_cap_bytes} 字节`]]); }
+async function loadRuntime() {
+  const results = await Promise.allSettled([request("/api/diagnostics"), request("/api/admin/public-post-controls")]);
+  if (!csrfToken) return;
+  if (results[0].status === "fulfilled") {
+    const diagnostics = results[0].value; const cognition = diagnostics.cognition || {};
+    $("#runtime-summary").innerHTML = summaryRows([["认知状态", cognition.enabled ? "已启用" : "未启用"], ["待处理消息", cognition.pending_interactions?.length || 0], ["认知等待任务", cognition.waiting_interaction_tasks?.length || 0], ["入站去重", JSON.stringify(diagnostics.inbound || {})], ["未知模型调用", diagnostics.unknown?.model_calls || 0], ["外部投递", JSON.stringify(diagnostics.deliveries || {})], ["完整性", diagnostics.integrity?.status || "未配置"]]).replaceAll("summary-row", "runtime-item");
+  }
+  if (results[1].status === "rejected") { setStatus("#public-post-controls-status", errorText(results[1].reason), true); return; }
+  const controls = results[1].value; const form = $("#public-post-controls-form");
+  if (!form.dataset.dirty) {
+    for (const [id,field] of [["rate-limit","rate_limit_per_hour"],["queue-cap","queue_cap"],["captcha-ttl","captcha_ttl_seconds"],["captcha-attempts","captcha_max_attempts"],["captcha-mode","captcha_mode"],["captcha-issue-limit","captcha_issue_limit_per_hour"],["captcha-global-rate","captcha_global_rate_per_minute"],["max-chars","max_content_chars"]]) $("#public-post-" + id).value = controls[field];
+    $("#public-post-storage-unit").value = "1"; $("#public-post-storage-cap").value = controls.storage_cap_bytes;
+    form.dataset.lengthRevision = controls.length_revision;
+  }
+  const usage = controls.usage || {};
+  $("#public-post-usage").innerHTML = summaryRows([["待审核", usage.pending_count ?? 0], ["帖子总数", usage.post_count ?? 0], ["帖子内容", `${usage.byte_size ?? 0} / ${usage.storage_cap_bytes ?? controls.storage_cap_bytes} 字节`], ["正文上限", `${controls.max_content_chars} 字符`]]);
+}
 async function loadAll() {
   const tasks = [
     ["总览", loadOverview], ["版本升级", loadUpgradePanel], ["供应商健康", loadProviderHealth], ["数据保留", loadRetention], ["私密交流", loadMailbox], ["内容审核", loadPublicPosts],
@@ -1595,7 +1611,21 @@ $("#wallet-acquisition-list").addEventListener("click", async (event) => {
   }
 });
 
-$("#public-post-controls-form").addEventListener("submit", async (event) => { event.preventDefault(); const form = event.currentTarget; const button = submitButton(form, event); if (button) button.disabled = true; try { await request("/api/config/public-post-controls", { method: "POST", body: JSON.stringify({ rate_limit_per_hour: Number($("#public-post-rate-limit").value), queue_cap: Number($("#public-post-queue-cap").value), captcha_ttl_seconds: Number($("#public-post-captcha-ttl").value), captcha_max_attempts: Number($("#public-post-captcha-attempts").value), captcha_mode: $("#public-post-captcha-mode").value, storage_cap_bytes: Number($("#public-post-storage-cap").value), captcha_issue_limit_per_hour: Number($("#public-post-captcha-issue-limit").value), captcha_global_rate_per_minute: Number($("#public-post-captcha-global-rate").value) }) }); setStatus("#public-post-controls-status", "公共发帖防护设置已更新"); await loadRuntime(); } catch (error) { setStatus("#public-post-controls-status", errorText(error), true); } finally { if (button) button.disabled = false; } });
+$("#public-post-controls-form").addEventListener("submit", async (event) => {
+  event.preventDefault(); const form = event.currentTarget; const button = submitButton(form, event); if (button) button.disabled = true;
+  try {
+    const raw = $("#public-post-storage-cap").value.trim();
+    if (!/^\d+(\.\d{1,9})?$/.test(raw)) throw new Error("容量应为非负数字，最多九位小数");
+    const [whole,fraction=""] = raw.split("."); const scale = BigInt($("#public-post-storage-unit").value);
+    const numerator = BigInt(whole + fraction) * scale; const divisor = 10n ** BigInt(fraction.length);
+    if (numerator % divisor || numerator / divisor < 1000n || numerator / divisor > 2000000000n) throw new Error("容量须为整数个字节，范围 1 KB 至 2 GB（十进制）");
+    const payload = {rate_limit_per_hour:Number($("#public-post-rate-limit").value),queue_cap:Number($("#public-post-queue-cap").value),captcha_ttl_seconds:Number($("#public-post-captcha-ttl").value),captcha_max_attempts:Number($("#public-post-captcha-attempts").value),captcha_mode:$("#public-post-captcha-mode").value,storage_cap_bytes:Number(numerator/divisor),captcha_issue_limit_per_hour:Number($("#public-post-captcha-issue-limit").value),captcha_global_rate_per_minute:Number($("#public-post-captcha-global-rate").value),max_content_chars:Number($("#public-post-max-chars").value),expected_length_revision:Number(form.dataset.lengthRevision)};
+    await request("/api/config/public-post-controls", {method:"POST",body:JSON.stringify(payload)});
+    delete form.dataset.dirty; setStatus("#public-post-controls-status", "公共发帖防护设置已保存");
+    try { await loadRuntime(); } catch { setStatus("#public-post-controls-status", "设置已保存；读取失败，请刷新",true); }
+  } catch (error) { setStatus("#public-post-controls-status",errorText(error),true); }
+  finally { if (button) button.disabled = false; }
+});
 
 $("#model-list").addEventListener("submit", async (event) => {
   const form = event.target.closest("[data-model-budget-form]");

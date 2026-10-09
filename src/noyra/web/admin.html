@@ -241,7 +241,21 @@
       <section class="admin-section" data-section-panel="runtime" hidden>
         <div class="section-intro"><div><p class="eyebrow">RUNTIME GUARDRAILS</p><h2>运行防护</h2><p>这里展示认知是否被暂停、等待或模型错误阻断，不显示私密模型上下文。</p></div></div>
         <article class="surface-card"><div class="card-heading"><h2>诊断摘要</h2><button class="text-button" id="refresh-runtime" type="button">更新</button></div><div id="runtime-summary" class="runtime-grid"></div></article>
-        <article class="surface-card"><div class="card-heading"><h2>公共发帖防护</h2><span class="muted">修改后立即生效</span></div><form id="public-post-controls-form" class="model-grid"><input id="public-post-rate-limit" type="number" min="1" max="100000" required placeholder="同一来源每小时帖子数"><input id="public-post-queue-cap" type="number" min="1" max="100000" required placeholder="待审核队列上限"><input id="public-post-captcha-ttl" type="number" min="30" max="3600" required placeholder="验证码有效期（秒）"><input id="public-post-captcha-attempts" type="number" min="1" max="20" required placeholder="验证码最大尝试次数"><select id="public-post-captcha-mode" aria-label="验证码字符模式"><option value="alphanumeric">字母 + 数字</option><option value="letters">纯字母</option><option value="digits">纯数字</option></select><input id="public-post-captcha-issue-limit" type="number" min="1" max="100000" required placeholder="同一来源每小时验证码数"><input id="public-post-captcha-global-rate" type="number" min="1" max="100000" required placeholder="全站每分钟验证码数"><input id="public-post-storage-cap" type="number" min="1000000" max="2000000000" required placeholder="帖子内容字节上限"><button type="submit">保存防护设置</button></form><div id="public-post-usage" class="summary-list"></div><p class="form-status" id="public-post-controls-status" role="status"></p></article>
+        <article class="surface-card"><div class="card-heading"><h2>公共发帖防护</h2><span class="muted">修改后立即生效</span></div>
+          <form id="public-post-controls-form" class="model-grid labeled-form">
+            <label>同一来源每小时帖子数<input id="public-post-rate-limit" name="post_rate" type="number" min="1" max="100000" required></label>
+            <label>待审核队列上限<input id="public-post-queue-cap" name="post_queue" type="number" min="1" max="100000" required></label>
+            <label>验证码有效期（秒）<input id="public-post-captcha-ttl" name="captcha_ttl" type="number" min="30" max="3600" required></label>
+            <label>验证码最大尝试<input id="public-post-captcha-attempts" name="captcha_attempts" type="number" min="1" max="20" required></label>
+            <label>验证码字符模式<select id="public-post-captcha-mode" name="captcha_mode"><option value="digits">纯数字</option><option value="letters">纯字母</option><option value="alphanumeric">字母 + 数字</option></select></label>
+            <label>同一来源每小时验证码数<input id="public-post-captcha-issue-limit" name="captcha_issue" type="number" min="1" max="100000" required></label>
+            <label>全站每分钟验证码数<input id="public-post-captcha-global-rate" name="captcha_global" type="number" min="1" max="100000" required></label>
+            <label>单篇正文字符上限<input id="public-post-max-chars" name="post_chars" type="number" min="1" max="20000" required></label>
+            <label>全部帖子容量<input id="public-post-storage-cap" name="post_capacity" type="text" inputmode="decimal" required></label>
+            <label>容量单位<select id="public-post-storage-unit"><option value="1">字节</option><option value="1000">KB</option><option value="1000000">MB</option><option value="1000000000">GB</option></select></label>
+            <button type="submit">保存防护设置</button>
+          </form><div id="public-post-usage" class="summary-list"></div><p class="form-status" id="public-post-controls-status" role="status"></p>
+        </article>
       </section>
       <section class="admin-section" data-section-panel="logs" hidden>
         <div class="section-intro"><div><p class="eyebrow">ACTIVITY LOG</p><h2>活动日志</h2><p>只显示经过授权和脱敏的运行摘要；不会展示令牌、模型正文或私密反思内容。</p></div><button id="refresh-runtime-logs" type="button">刷新</button></div>

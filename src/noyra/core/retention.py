@@ -109,6 +109,10 @@ class RetentionTableSpec:
 # retention policy.
 RETENTION_REGISTRY: tuple[RetentionTableSpec, ...] = (
     RetentionTableSpec(
+        "public_post_length_policies", "required_audit", "preserve", "updated_at",
+        ("subject_id",), None,
+    ),
+    RetentionTableSpec(
         "cognitive_resource_limit_policies",
         "required_audit",
         "preserve",

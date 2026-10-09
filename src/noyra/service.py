@@ -98,6 +98,7 @@ from noyra.interaction import (
     PublicPostCaptchaError,
     PublicPostConflictError,
     PublicPostInput,
+    PublicPostLengthError,
     PublicPostQueueFullError,
     PublicPostRateLimitError,
     PublicPostStore,
@@ -793,8 +794,8 @@ class ServiceSettings(BaseModel):
     public_post_queue_cap: int = Field(default=1_000, ge=1, le=100_000)
     public_post_captcha_ttl_seconds: int = Field(default=300, ge=30, le=3_600)
     public_post_captcha_max_attempts: int = Field(default=5, ge=1, le=20)
-    public_post_captcha_mode: Literal["letters", "digits", "alphanumeric"] = "alphanumeric"
-    public_post_storage_cap_bytes: int = Field(default=250_000_000, ge=1_000_000, le=2_000_000_000)
+    public_post_captcha_mode: Literal["letters", "digits", "alphanumeric"] = "digits"
+    public_post_storage_cap_bytes: int = Field(default=250_000_000, ge=1_000, le=2_000_000_000)
     public_post_captcha_issue_limit_per_hour: int = Field(default=30, ge=1, le=100_000)
     public_post_captcha_global_rate_per_minute: int = Field(default=300, ge=1, le=100_000)
     public_hash_key_file: Path | None = None
@@ -1145,7 +1146,7 @@ class ServiceSettings(BaseModel):
             ),
             public_post_captcha_mode=cast(
                 Literal["letters", "digits", "alphanumeric"],
-                os.getenv("NOYRA_PUBLIC_POST_CAPTCHA_MODE", "alphanumeric").strip().lower(),
+                os.getenv("NOYRA_PUBLIC_POST_CAPTCHA_MODE", "digits").strip().lower(),
             ),
             public_post_storage_cap_bytes=int(
                 os.getenv("NOYRA_PUBLIC_POST_STORAGE_CAP_BYTES", "250000000")
@@ -5160,6 +5161,9 @@ class NoyraHTTPServer:
                             queue_cap=controls["queue_cap"],
                             storage_cap_bytes=controls["storage_cap_bytes"],
                         )
+                    except PublicPostLengthError:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "public_post_too_long"})
+                        return
                     except PublicPostCaptchaError:
                         self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_captcha"})
                         return
@@ -7110,6 +7114,12 @@ class NoyraHTTPServer:
                 ):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_public_post_controls"})
                     return
+                if any(
+                    name in payload and type(payload[name]) is not int
+                    for name in ("max_content_chars", "expected_length_revision")
+                ):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_public_post_controls"})
+                    return
                 try:
                     controls = owner.public_posts.configure_controls(
                         owner.kernel.subject_id,
@@ -7122,6 +7132,8 @@ class NoyraHTTPServer:
                         captcha_issue_limit_per_hour=payload["captcha_issue_limit_per_hour"],
                         captcha_global_rate_per_minute=payload["captcha_global_rate_per_minute"],
                         actor=self._actor(),
+                        max_content_chars=payload.get("max_content_chars"),
+                        expected_length_revision=payload.get("expected_length_revision"),
                     )
                     controls = owner.public_post_controls()
                     owner.audit_admin_event(
@@ -7138,6 +7150,8 @@ class NoyraHTTPServer:
                                 "storage_cap_bytes",
                                 "captcha_issue_limit_per_hour",
                                 "captcha_global_rate_per_minute",
+                                "max_content_chars",
+                                "length_revision",
                             )
                         },
                     )
@@ -7146,6 +7160,11 @@ class NoyraHTTPServer:
                         HTTPStatus.SERVICE_UNAVAILABLE,
                         {"error": "public_post_integrity_unavailable"},
                         retry_after=60,
+                    )
+                    return
+                except PublicPostConflictError:
+                    self._json(
+                        HTTPStatus.CONFLICT, {"error": "public_post_controls_conflict"}
                     )
                     return
                 except (ValueError, TypeError, PermissionError):
@@ -7179,7 +7198,7 @@ class NoyraHTTPServer:
                     not isinstance(payload, dict)
                     or set(payload) - {"presentation"}
                     or not isinstance(payload.get("presentation", "image"), str)
-                    or payload.get("presentation", "image") not in {"image", "audio"}
+                    or payload.get("presentation", "image") != "image"
                 ):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_captcha_request"})
                     return

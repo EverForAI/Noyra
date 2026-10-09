@@ -27,6 +27,7 @@ from noyra.interaction import (
     PublicPostCaptchaError,
     PublicPostConflictError,
     PublicPostInput,
+    PublicPostLengthError,
     PublicPostQueueFullError,
     PublicPostRateLimitError,
     PublicPostRecord,
@@ -174,6 +175,64 @@ class PublicPostAbuseTestCase(unittest.TestCase):
             self.assertTrue(payload.startswith(b"\x89PNG\r\n\x1a\n"))
             self.assertNotIn(b"AAAAAA", payload)
 
+    def test_length_policy_is_versioned_and_preserves_existing_posts(self: Self) -> None:
+        original = self._submit("existing", self._challenge())
+        options = dict(
+            rate_limit_per_hour=30,
+            queue_cap=100,
+            captcha_ttl_seconds=300,
+            captcha_max_attempts=5,
+            captcha_mode="digits",
+            actor="operator",
+            storage_cap_bytes=1_000,
+        )
+        self.store.configure_controls(
+            self.subject_id, **options, max_content_chars=3, expected_length_revision=0
+        )
+        with self.assertRaises(PublicPostConflictError):
+            self.store.configure_controls(
+                self.subject_id, **options, max_content_chars=4, expected_length_revision=0
+            )
+        challenge = self._challenge(ip="192.0.2.9")
+        with self.assertRaises(PublicPostLengthError):
+            self.store.create(
+                self.subject_id,
+                PublicPostInput(kind="post", title="long", content="中文😀a"),
+                client_ip="192.0.2.9",
+                captcha_id=str(challenge["challenge_id"]),
+                captcha_answer="AAAAAA",
+            )
+        # Length rejection does not consume the valid challenge.
+        self.store.create(
+            self.subject_id,
+            PublicPostInput(kind="post", title="edge", content="中文😀"),
+            client_ip="192.0.2.9",
+            captcha_id=str(challenge["challenge_id"]),
+            captcha_answer="AAAAAA",
+        )
+        assert self.store.admin(self.subject_id)[-1].content == original.content
+        reopened = PublicPostStore(Database(self.database.path))
+        assert reopened.length_policy(self.subject_id) == {
+            "max_content_chars": 3,
+            "length_revision": 1,
+        }
+        for invalid in (0, 20_001, True):
+            with self.assertRaises(ValueError):
+                reopened.configure_controls(self.subject_id, **options, max_content_chars=invalid)
+        reopened.configure_controls(self.subject_id, **options, max_content_chars=1)
+        reopened.configure_controls(self.subject_id, **options, max_content_chars=20_000)
+
+    def test_audio_challenges_are_rejected_without_persisting(self: Self) -> None:
+        with self.assertRaises(ValueError):
+            self.store.issue_captcha(self.subject_id, "192.0.2.1", presentation="audio")
+        with self.database.connection() as connection:
+            assert (
+                connection.execute(
+                    "SELECT count(*) FROM public_post_captcha_challenges"
+                ).fetchone()[0]
+                == 0
+            )
+
     def test_captcha_breaks_the_legacy_fixed_grid_template(self: Self) -> None:
         glyph = ("01110", "10001", "10001", "11111", "10001", "10001", "10001")
         for sample in range(12):
@@ -194,7 +253,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
                 offset += 12 + length
             raw = zlib.decompress(bytes(compressed))
             stride = 1 + width * 3
-            self.assertEqual((width, height), (240, 82))
+            self.assertEqual((width, height), (300, 96))
             best = 0.0
             for index in range(6):
                 for y0 in range(13, 21):
@@ -914,6 +973,17 @@ def test_public_post_captcha_http_endpoint_returns_a_challenge(tmp_path: Path) -
         assert response.status == 200
         assert payload["challenge_id"]
         assert payload["image"].startswith("data:image/png;base64,")
+        assert payload["mode"] == "digits"
+        assert payload["max_content_chars"] == 20_000
+        audio_request = Request(
+            f"http://127.0.0.1:{port}/api/public-posts/captcha",
+            data=b'{"presentation":"audio"}',
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with pytest.raises(HTTPError) as audio_rejected:
+            urlopen(audio_request, timeout=5)
+        assert audio_rejected.value.code == 400
         cross_site = Request(
             f"http://127.0.0.1:{port}/api/public-posts/captcha",
             data=b"{}",

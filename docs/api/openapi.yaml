@@ -1938,6 +1938,7 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/JsonObject' }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '411': { $ref: '#/components/responses/LengthRequired' }
         '413': { $ref: '#/components/responses/RequestTooLarge' }

@@ -20,7 +20,6 @@ from noyra.core.database import Database, public_post_identity_hash
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.types import content_hash, new_id, utc_now
 
-from .captcha_audio import audio_challenge
 from .types import PublicPostInput, PublicPostRecord
 
 
@@ -46,6 +45,10 @@ class PublicPostCapacityError(PublicPostAbuseError):
 
 class PublicPostConflictError(PublicPostAbuseError):
     """A moderation precondition or idempotency contract did not match."""
+
+
+class PublicPostLengthError(PublicPostAbuseError):
+    pass
 
 
 # These are deliberately hard upper bounds for ephemeral admission evidence.
@@ -233,6 +236,9 @@ class PublicPostStore:
                     raise ValueError("public post idempotency key identifies different content")
                 return self._record(existing)
             effective_queue_cap = self.queue_cap if queue_cap is None else queue_cap
+            maximum = self.length_policy(subject_id, connection)["max_content_chars"]
+            if len(proposal.content) > maximum:
+                raise PublicPostLengthError("public post content exceeds configured length")
             effective_storage_cap = (
                 self.storage_cap_bytes if storage_cap_bytes is None else storage_cap_bytes
             )
@@ -326,7 +332,7 @@ class PublicPostStore:
         *,
         ttl_seconds: int = 300,
         max_attempts: int = 5,
-        mode: str = "alphanumeric",
+        mode: str = "digits",
         presentation: str = "image",
         issue_limit_per_hour: int | None = None,
         global_rate_per_minute: int | None = None,
@@ -365,10 +371,8 @@ class PublicPostStore:
             "alphanumeric": "ABCDEFGHJKLMNPQRSTUVWXYZ23456789",
         }
         alphabet = alphabets.get(mode)
-        if alphabet is None or presentation not in {"image", "audio"}:
+        if alphabet is None or presentation != "image":
             raise ValueError("invalid CAPTCHA mode")
-        if presentation == "audio":
-            alphabet = alphabets["digits"]
         answer = "".join(secrets.choice(alphabet) for _ in range(6))
         challenge_id = new_id("captcha")
         salt = secrets.token_hex(16)
@@ -450,9 +454,7 @@ class PublicPostStore:
                 storage_cap_bytes=effective_storage_cap,
                 prospective_bytes=0,
             )
-            media = (
-                audio_challenge(answer) if presentation == "audio" else self._captcha_image(answer)
-            )
+            media = self._captcha_image(answer)
             connection.execute(
                 "INSERT INTO public_post_captcha_issue_events("
                 "event_id, subject_id, client_ip, issued_at) VALUES (?, ?, ?, ?)",
@@ -478,6 +480,8 @@ class PublicPostStore:
             "challenge_id": challenge_id,
             "captcha_id": challenge_id,
             "presentation": presentation,
+            "mode": mode,
+            "max_content_chars": self.length_policy(subject_id)["max_content_chars"],
             presentation: media,
             "expires_at": now + ttl_seconds,
         }
@@ -523,6 +527,7 @@ class PublicPostStore:
                 "updated_at": None,
                 "updated_by": None,
                 "source": "environment",
+                **self.length_policy(subject_id),
             }
         state = {
             "subject_id": row["subject_id"],
@@ -553,7 +558,23 @@ class PublicPostStore:
             "updated_at": str(row["updated_at"]),
             "updated_by": str(row["updated_by"]),
             "source": "admin",
+            **self.length_policy(subject_id),
         }
+
+    def length_policy(self, subject_id: str, connection: Any | None = None) -> dict[str, Any]:
+        scope = self.database.connection() if connection is None else nullcontext(connection)
+        with scope as reader:
+            row = reader.execute(
+                "SELECT * FROM public_post_length_policies WHERE subject_id=?",
+                (subject_id,),
+            ).fetchone()
+        if row is None:
+            return {"max_content_chars": 20_000, "length_revision": 0}
+        state = dict(row)
+        state.pop("state_hash")
+        if content_hash(state) != row["state_hash"]:
+            raise IntegrityError("public post length policy mismatch")
+        return {"max_content_chars": row["max_content_chars"], "length_revision": row["revision"]}
 
     def configure_controls(
         self,
@@ -568,6 +589,8 @@ class PublicPostStore:
         captcha_issue_limit_per_hour: int | None = None,
         captcha_global_rate_per_minute: int | None = None,
         actor: str,
+        max_content_chars: int | None = None,
+        expected_length_revision: int | None = None,
     ) -> dict[str, Any]:
         storage_cap_bytes = (
             self.storage_cap_bytes if storage_cap_bytes is None else storage_cap_bytes
@@ -594,8 +617,12 @@ class PublicPostStore:
             raise ValueError("CAPTCHA attempts are invalid")
         if captcha_mode not in {"letters", "digits", "alphanumeric"}:
             raise ValueError("CAPTCHA mode is invalid")
-        if not 1_000_000 <= storage_cap_bytes <= self.storage_cap_bytes:
+        if not 1_000 <= storage_cap_bytes <= self.storage_cap_bytes:
             raise ValueError("public post storage cap is invalid")
+        if max_content_chars is not None and (
+            type(max_content_chars) is not int or not 1 <= max_content_chars <= 20_000
+        ):
+            raise ValueError("public post length limit is invalid")
         if not 1 <= captcha_issue_limit_per_hour <= 100_000:
             raise ValueError("CAPTCHA issue limit is invalid")
         if not 1 <= captcha_global_rate_per_minute <= 100_000:
@@ -615,6 +642,26 @@ class PublicPostStore:
             "updated_by": actor,
         }
         with self.database.transaction() as connection:
+            previous = self.length_policy(subject_id, connection)
+            if expected_length_revision is not None and (
+                expected_length_revision != previous["length_revision"]
+            ):
+                raise PublicPostConflictError("public post control revision conflict")
+            length_state = {
+                "subject_id": subject_id,
+                "max_content_chars": max_content_chars or previous["max_content_chars"],
+                "revision": previous["length_revision"] + 1,
+                "updated_at": now,
+                "updated_by": actor,
+            }
+            connection.execute(
+                "INSERT INTO public_post_length_policies VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(subject_id) DO UPDATE SET "
+                "max_content_chars=excluded.max_content_chars,"
+                "revision=excluded.revision, updated_at=excluded.updated_at, "
+                "updated_by=excluded.updated_by, state_hash=excluded.state_hash",
+                (*length_state.values(), content_hash(length_state)),
+            )
             connection.execute(
                 """INSERT INTO public_post_controls(
                     subject_id, rate_limit_per_hour, queue_cap, captcha_ttl_seconds,
@@ -1150,7 +1197,7 @@ class PublicPostStore:
             "8": ("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
             "9": ("01110", "10001", "10001", "01111", "00001", "00001", "01110"),
         }
-        width, height = 240, 82
+        width, height = 300, 96
         background = secrets.choice(
             ((242, 246, 248), (247, 243, 238), (239, 245, 241), (245, 241, 247))
         )
@@ -1163,7 +1210,7 @@ class PublicPostStore:
 
         # Soft background texture frustrates simple connected-component
         # segmentation without making the challenge hard to read.
-        for _ in range(520):
+        for _ in range(160):
             x = secrets.randbelow(width)
             y = secrets.randbelow(height)
             color = secrets.choice(
@@ -1174,15 +1221,15 @@ class PublicPostStore:
         # Each character receives independent scale, rotation, shear and
         # placement.  The previous fixed 5x7 grid was perfectly recoverable by
         # a trivial threshold/template matcher.
-        cursor = 13 + secrets.randbelow(8)
+        cursor = 18 + secrets.randbelow(4)
         for char in answer:
             glyph = glyphs[char]
-            scale_x = 4.2 + secrets.randbelow(17) / 10
-            scale_y = 4.5 + secrets.randbelow(18) / 10
-            angle = math.radians(secrets.randbelow(35) - 17)
-            shear = (secrets.randbelow(41) - 20) / 100
+            scale_x = 5.4 + secrets.randbelow(7) / 10
+            scale_y = 6.0 + secrets.randbelow(7) / 10
+            angle = math.radians(secrets.randbelow(17) - 8)
+            shear = (secrets.randbelow(11) - 5) / 100
             center_x = cursor + 14 + secrets.randbelow(7) - 3
-            center_y = 39 + secrets.randbelow(13) - 6
+            center_y = 47 + secrets.randbelow(7) - 3
             color = secrets.choice(((28, 43, 60), (40, 35, 68), (24, 62, 65), (67, 38, 47)))
             cosine, sine = math.cos(angle), math.sin(angle)
             for row, bits in enumerate(glyph):
@@ -1200,7 +1247,7 @@ class PublicPostStore:
                                     round(center_y + rotated_y),
                                     color,
                                 )
-            cursor += 34 + secrets.randbelow(8) - 3
+            cursor += 45 + secrets.randbelow(4)
 
         def line(
             x0: int, y0: int, x1: int, y1: int, color: tuple[int, int, int], width_: int
@@ -1216,16 +1263,16 @@ class PublicPostStore:
 
         # Crossing strokes are drawn after glyphs so a single dark threshold
         # no longer cleanly separates six independent templates.
-        for _ in range(5):
+        for _ in range(2):
             line(
                 -5,
                 8 + secrets.randbelow(height - 16),
                 width + 5,
                 8 + secrets.randbelow(height - 16),
-                secrets.choice(((74, 91, 105), (98, 70, 88), (70, 102, 92))),
-                secrets.randbelow(2) + 1,
+                secrets.choice(((150, 167, 180), (178, 152, 168), (151, 177, 163))),
+                1,
             )
-        for _ in range(180):
+        for _ in range(45):
             put(
                 secrets.randbelow(width),
                 secrets.randbelow(height),
