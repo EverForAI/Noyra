@@ -68,7 +68,7 @@ from noyra.core.operator_controls import (
 from noyra.core.provider_health import ProviderHealthStore
 from noyra.core.redaction import redact_secrets
 from noyra.core.release_assurance import activation_status, upgrade_channel
-from noyra.core.retention import RetentionManager, RetentionSettings
+from noyra.core.retention import RetentionManager, RetentionPolicyConflict, RetentionSettings
 from noyra.core.runtime import SubjectKernel
 from noyra.core.runtime_export import RuntimeLogExporter
 from noyra.core.storage import StorageLayout, TrainingStore
@@ -3554,16 +3554,15 @@ class NoyraHTTPServer:
                     if not self._authorized():
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
-                    settings = owner.retention.settings
+                    retention_policy = owner.retention.policy(owner.kernel.subject_id)
+                    settings = retention_policy["settings"]
                     self._json(
                         HTTPStatus.OK,
                         {
                             "settings": {
-                                "health_days": settings.health_days,
-                                "search_use_hours": settings.search_use_hours,
-                                "batch_size": settings.batch_size,
-                                "interval_seconds": settings.interval_seconds,
-                                "run_history": settings.run_history,
+                                **settings,
+                                "revision": retention_policy["revision"],
+                                "source": retention_policy["source"],
                             },
                             "estimate": owner.retention.estimate(owner.kernel.subject_id),
                             "latest": owner.retention.latest(owner.kernel.subject_id),
@@ -4969,6 +4968,9 @@ class NoyraHTTPServer:
                 if self.path in {"/api/v1/admin/retention/run", "/api/admin/retention/run"}:
                     self._run_retention_batch()
                     return
+                if self.path == "/api/admin/retention/settings":
+                    self._configure_retention()
+                    return
                 if self.path == "/api/config/wallet-networks":
                     self._configure_wallet_network()
                     return
@@ -5397,7 +5399,7 @@ class NoyraHTTPServer:
                     return
                 batch_size = payload.get("batch_size")
                 if batch_size is not None and (
-                    isinstance(batch_size, bool) or not isinstance(batch_size, int)
+                    type(batch_size) is not int or not 1 <= batch_size <= 500
                 ):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_retention_run"})
                     return
@@ -5411,6 +5413,36 @@ class NoyraHTTPServer:
                         "protected_rows": result["protected_rows"],
                     },
                 )
+                self._json(HTTPStatus.OK, result)
+
+            def _configure_retention(self) -> None:
+                if not self._authorized():
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+                    return
+                payload = self._request_json()
+                if payload is None:
+                    return
+                try:
+                    if set(payload) != {"settings", "expected_revision"} or not isinstance(
+                        payload["settings"], dict
+                    ):
+                        raise ValueError("invalid fields")
+                    result = owner.retention.configure(
+                        owner.kernel.subject_id, payload["settings"],
+                        expected_revision=payload["expected_revision"], actor=self._actor(),
+                    )
+                except RetentionPolicyConflict:
+                    self._json(HTTPStatus.CONFLICT, {"error": "retention_policy_conflict"})
+                    return
+                except (ValueError, TypeError, PermissionError):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_retention_settings"})
+                    return
+                owner.audit_admin_event("retention_policy_updated", self._actor(), result)
                 self._json(HTTPStatus.OK, result)
 
             def _reconcile_action(self) -> None:
@@ -10124,7 +10156,9 @@ class NoyraService:
         if manager is None:
             return
         now = datetime.now(UTC)
-        interval = timedelta(seconds=manager.settings.interval_seconds)
+        interval = timedelta(
+            seconds=manager.effective_settings(self.kernel.subject_id).interval_seconds
+        )
         if self._last_retention_run_at is not None and now - self._last_retention_run_at < interval:
             return
         self._last_retention_run_at = now

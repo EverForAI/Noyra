@@ -1,4 +1,5 @@
 import json
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
@@ -11,6 +12,7 @@ from noyra.core.provider_health import ProviderHealthStore
 from noyra.core.retention import (
     RETENTION_REGISTRY,
     RetentionManager,
+    RetentionPolicyConflict,
     RetentionSettings,
     retention_registry_diagnostics,
     validate_retention_run_row,
@@ -32,6 +34,89 @@ def test_settings_defaults_and_bounds() -> None:
         RetentionSettings.from_env({"NOYRA_RETENTION_BATCH_SIZE": "501"})
     with pytest.raises(ValueError):
         RetentionSettings.from_env({"NOYRA_RETENTION_SEARCH_USE_HOURS": "1"})
+
+
+def test_saved_policy_survives_restart_and_rejects_conflicts_and_corruption(tmp_path: Any) -> None:
+    from noyra.core.errors import IntegrityError
+
+    db = Database(tmp_path / "policy.sqlite3")
+    subject = "Noyra-retention-policy"
+    IdentityStore(db).ensure(subject, content_hash(subject))
+    manager = RetentionManager(db)
+    settings = asdict(RetentionSettings(health_days=7, batch_size=3))
+    manager.configure(subject, settings, expected_revision=0, actor="operator")
+    with pytest.raises(RetentionPolicyConflict):
+        manager.configure(subject, settings, expected_revision=0, actor="operator")
+    reopened = RetentionManager(Database(db.path), RetentionSettings(health_days=100))
+    assert reopened.effective_settings(subject).health_days == 7
+    assert reopened.run_batch(subject)["policy_revision"] == 1
+    for name, value in (
+        ("batch_size", 501),
+        ("search_use_hours", 1),
+        ("health_days", True),
+        ("interval_seconds", 0),
+        ("runtime_days", 1.5),
+    ):
+        with pytest.raises(ValueError):
+            reopened.configure(
+                subject, {**settings, name: value}, expected_revision=1, actor="operator"
+            )
+    with db.transaction() as connection:
+        connection.execute("UPDATE retention_policies SET settings_json='{}'")
+    with pytest.raises(IntegrityError):
+        reopened.run_batch(subject)
+
+
+def test_retention_settings_http_auth_revision_and_validation(tmp_path: Any) -> None:
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    from pydantic import SecretStr
+
+    from noyra.core import SubjectKernel
+    from noyra.service import NoyraHTTPServer, ServiceSettings
+
+    token = "test-token-sufficient-entropy-for-retention"
+    settings = ServiceSettings(
+        data_dir=tmp_path,
+        subject_id="retention-http",
+        genesis_hash=content_hash("http"),
+        port=0,
+        admin_token=SecretStr(token),
+    )
+    kernel = SubjectKernel(tmp_path / "noyra.sqlite3", settings.subject_id, settings.genesis_hash)
+    kernel.boot()
+    kernel.orient()
+    kernel.activate()
+    http = NoyraHTTPServer(kernel, settings)
+    http.start()
+    try:
+        address = f"http://127.0.0.1:{http.address[1]}/api/admin/retention/settings"
+        payload = {"settings": asdict(RetentionSettings(health_days=14)), "expected_revision": 0}
+        headers = {"Content-Type": "application/json"}
+
+        def submit() -> Any:
+            return urlopen(
+                Request(address, data=json.dumps(payload).encode(), headers=headers), timeout=10
+            )
+
+        with pytest.raises(HTTPError) as unauthorized:
+            submit()
+        assert unauthorized.value.code == 401
+        headers["Authorization"] = "Bearer " + token
+        with submit() as response:
+            result = json.loads(response.read())
+        assert result["revision"] == 1
+        with pytest.raises(HTTPError) as conflict:
+            submit()
+        assert conflict.value.code == 409
+        payload["settings"]["batch_size"] = 501
+        with pytest.raises(HTTPError) as invalid:
+            submit()
+        assert invalid.value.code == 400
+    finally:
+        http.close()
+        kernel.close()
 
 
 def test_retention_run_history_is_bounded(tmp_path: Any) -> None:

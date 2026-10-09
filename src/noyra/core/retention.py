@@ -6,16 +6,21 @@ import logging
 import os
 import shutil
 from collections.abc import Mapping
-from copy import deepcopy
-from dataclasses import dataclass
+from copy import copy, deepcopy
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .database import Database
+from .errors import IntegrityError
 from .evidence_capacity import evidence_capacity_status
 from .types import canonical_json, content_hash, new_id, strict_json_loads, utc_now
 
 LOGGER = logging.getLogger(__name__)
+
+
+class RetentionPolicyConflict(ValueError):
+    pass
 
 
 def _positive(value: Any, name: str, *, maximum: int = 36_500) -> int:
@@ -66,6 +71,23 @@ class RetentionSettings:
             runtime_days=_positive(env.get("NOYRA_RETENTION_RUNTIME_DAYS", "90"), "runtime days"),
         )
 
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> RetentionSettings:
+        bounds = {
+            "health_days": (1, 36500),
+            "search_use_hours": (2, 8760),
+            "batch_size": (1, 500),
+            "interval_seconds": (60, 31536000),
+            "run_history": (1, 10000),
+            "runtime_days": (1, 36500),
+        }
+        if set(payload) != set(bounds):
+            raise ValueError("retention settings fields are invalid")
+        for name, (minimum, maximum) in bounds.items():
+            if type(payload[name]) is not int or not minimum <= payload[name] <= maximum:
+                raise ValueError(f"retention setting {name} is invalid")
+        return cls(**payload)
+
 
 @dataclass(frozen=True)
 class RetentionTableSpec:
@@ -109,8 +131,20 @@ class RetentionTableSpec:
 # retention policy.
 RETENTION_REGISTRY: tuple[RetentionTableSpec, ...] = (
     RetentionTableSpec(
-        "public_post_length_policies", "required_audit", "preserve", "updated_at",
-        ("subject_id",), None,
+        "retention_policies",
+        "required_audit",
+        "preserve",
+        "updated_at",
+        ("subject_id",),
+        None,
+    ),
+    RetentionTableSpec(
+        "public_post_length_policies",
+        "required_audit",
+        "preserve",
+        "updated_at",
+        ("subject_id",),
+        None,
     ),
     RetentionTableSpec(
         "cognitive_resource_limit_policies",
@@ -436,7 +470,66 @@ class RetentionManager:
         with self.database.connection() as connection:
             return evidence_capacity_status(connection, subject_id)
 
+    def policy(self, subject_id: str, connection: Any | None = None) -> dict[str, Any]:
+        from contextlib import nullcontext
+
+        with (
+            self.database.connection() if connection is None else nullcontext(connection) as reader
+        ):
+            row = reader.execute(
+                "SELECT * FROM retention_policies WHERE subject_id=?", (subject_id,)
+            ).fetchone()
+        if row is None:
+            return {"settings": asdict(self.settings), "revision": 0, "source": "environment"}
+        state = dict(row)
+        state.pop("state_hash")
+        if content_hash(state) != row["state_hash"]:
+            raise IntegrityError("retention policy hash mismatch")
+        settings = RetentionSettings.from_payload(strict_json_loads(row["settings_json"]))
+        return {
+            "settings": asdict(settings),
+            "revision": row["revision"],
+            "source": "saved",
+            "updated_at": row["updated_at"],
+        }
+
+    def configure(
+        self, subject_id: str, settings: Mapping[str, Any], *, expected_revision: int, actor: str
+    ) -> dict[str, Any]:
+        validated = RetentionSettings.from_payload(settings)
+        if not actor.strip() or actor.casefold() == "subject":
+            raise PermissionError("operator required")
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError("invalid retention revision")
+        with self.database.transaction() as connection:
+            current = self.policy(subject_id, connection)
+            if current["revision"] != expected_revision:
+                raise RetentionPolicyConflict("retention policy changed")
+            state = {
+                "subject_id": subject_id,
+                "settings_json": canonical_json(asdict(validated)),
+                "revision": expected_revision + 1,
+                "updated_at": utc_now(),
+                "updated_by": actor,
+            }
+            connection.execute(
+                "INSERT INTO retention_policies VALUES(?,?,?,?,?,?) ON CONFLICT(subject_id) "
+                "DO UPDATE SET settings_json=excluded.settings_json, revision=excluded.revision, "
+                "updated_at=excluded.updated_at, updated_by=excluded.updated_by, "
+                "state_hash=excluded.state_hash",
+                (*state.values(), content_hash(state)),
+            )
+        return self.policy(subject_id)
+
+    def effective_settings(self, subject_id: str) -> RetentionSettings:
+        return RetentionSettings(**self.policy(subject_id)["settings"])
+
     def estimate(self, subject_id: str, *, now: datetime | None = None) -> dict[str, int]:
+        snapshot = copy(self)
+        snapshot.settings = self.effective_settings(subject_id)
+        return snapshot._estimate(subject_id, now=now)
+
+    def _estimate(self, subject_id: str, *, now: datetime | None = None) -> dict[str, int]:
         moment = now or datetime.now(UTC)
         with self.database.connection() as connection:
             estimate: dict[str, int] = {}
@@ -477,6 +570,22 @@ class RetentionManager:
         return cutoff.isoformat()
 
     def run_batch(
+        self,
+        subject_id: str,
+        now: datetime | None = None,
+        *,
+        batch_size: int | None = None,
+        allow_compaction: bool = True,
+    ) -> dict[str, Any]:
+        policy = self.policy(subject_id)
+        snapshot = copy(self)
+        snapshot.settings = RetentionSettings(**policy["settings"])
+        result = snapshot._run_batch(
+            subject_id, now=now, batch_size=batch_size, allow_compaction=allow_compaction
+        )
+        return {**result, "policy_revision": policy["revision"], "policy_source": policy["source"]}
+
+    def _run_batch(
         self,
         subject_id: str,
         now: datetime | None = None,

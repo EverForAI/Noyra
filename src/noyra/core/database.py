@@ -23,6 +23,7 @@ from .resource_policy import (
     read_resource_policy,
     write_resource_policy,
 )
+from .retention_policy import MIGRATION_V83
 from .types import canonical_json, content_hash, new_id, strict_int, utc_now
 from .wallet_schema import (
     WalletLegacyApproval,
@@ -297,7 +298,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 82
+CURRENT_SCHEMA_VERSION = 83
 
 # The schema DDL fingerprint is checked after every successful initialization.
 # Update this value only alongside a reviewed schema migration and its tests.
@@ -305,6 +306,7 @@ CURRENT_SCHEMA_VERSION = 82
 # installations persist this value in ``schema_meta`` and therefore require
 # the value to remain stable across compatible runtime fixes.
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
+    83: "ad714681e3e85d60a20ab14ebabc4106285df457bfd8fc633c002097b12c2505",
     82: "5a6031407e2cc1e55da5706c5ab8d0fe749286b8402976eae76fc1f8c71d4288",
     81: "4d82e1926e29d7fd6d01e59149017eab575f50fff949f0827b3dab3918d1beb1",
     80: "70e0fcbd9ee1929f64bd9869d7070496ff45b0f14dee7d0bb9db316e62d12326",
@@ -318,6 +320,7 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 # auditable P0 finding.  Tables, indexes, and views still fail closed during
 # database construction because they define the storage contract itself.
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
+    83: "a9e34bb9c15d3499f211d315fde416314012a9754fee7fe535e87f59d4ff731f",
     82: "c7071ba23a95d0c56f7518ceb6cdd9c2609a58fb9978cd1deb6bc84d04292457",
     81: "34d4cbb66c5433a6cb4614cba22b2a5dd69b55705a56733b1af38b26da297843",
     80: "840bae4d215def4cb6425ac5977c2a093fdaf90cfd7f2b5ec841c27ba0afd9dd",
@@ -6862,6 +6865,7 @@ SELECT 1;
     80: migration_v80(),
     81: MIGRATION_V81,
     82: MIGRATION_V82,
+    83: MIGRATION_V83,
 }
 
 

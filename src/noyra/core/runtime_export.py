@@ -589,6 +589,13 @@ _OWNERSHIP_GRAPHS: dict[int, dict[str, _ExportOwnershipRule]] = {
         "cognitive_resource_limit_revisions": _subject_rule(),
         "public_post_length_policies": _subject_rule(),
     },
+    83: {
+        **_OWNERSHIP_GRAPH_V80,
+        "cognitive_resource_limit_policies": _subject_rule(),
+        "cognitive_resource_limit_revisions": _subject_rule(),
+        "public_post_length_policies": _subject_rule(),
+        "retention_policies": _subject_rule(),
+    },
 }
 
 

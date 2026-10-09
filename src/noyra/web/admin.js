@@ -153,6 +153,12 @@ const modelResourceStatusLabels = { active: "可用", disabled: "已停用", rev
 const modelKeyStatusLabels = { active: "可用", cooldown: "冷却中", revoked: "已撤销" };
 const modelPoolLabels = { economy: "经济池", deep: "深度池" };
 const parameterHelp = {
+  health_days: ["健康聚合保留", "仅清理到期的供应商健康派生统计。不会删除模型账本、行为或审计证据。"],
+  search_use_hours: ["搜索限速记录", "保留至少两小时，保护限速窗口；不会删除搜索执行证据。"],
+  batch_size: ["每批删除上限", "1 至 500 行，仅处理允许清理的派生数据。"],
+  interval_seconds: ["自动清理间隔", "保存不立即清理；周期任务与手动清理使用同一白名单。"],
+  run_history: ["清理历史保留", "保留最近这些次清理记录，不影响管理审计和模型账本。"],
+  runtime_days: ["模型内容压缩年龄", "只压缩旧模型请求和响应，不删除账本、引用、哈希或预算证据。"],
   pool: ["认知池", "经济池用于常规认知，深度池用于复杂推理。两池可以使用同一个稳定模型，资源和额度分别统计。"],
   label: ["资源名称", "用于识别此配置。同一认知池内名称必须唯一。"],
   base_url: ["API 基础地址", "填写供应商的公网 HTTPS API 地址，例如 https://api.example.com/v1。不要填写聊天网页地址。"],
@@ -916,8 +922,11 @@ function renderRetention(payload) {
   const estimate = payload?.estimate || {};
   const latest = payload?.latest;
   const capacity = payload?.evidence_capacity;
-  const latestDeleted = latest?.deleted_by_table ? (() => { try { return JSON.stringify(JSON.parse(latest.deleted_by_table)); } catch { return String(latest.deleted_by_table); } })() : "暂无清理记录";
+  const latestDeleted = latest?.deleted_by_table ? Object.entries(latest.deleted_by_table).map(([key,value]) => `${key}: ${formatInteger(value)}`).join(" · ") : "暂无清理记录";
+  const form = $("#retention-settings-form");
+  if (!form.dataset.dirty) { for (const input of form.querySelectorAll("input[name]")) input.value = settings[input.name]; form.dataset.revision = settings.revision; }
   $("#retention-summary").innerHTML = summaryRows([
+    ["策略来源与版本", `${settings.source === "saved" ? "已保存" : "环境默认"} · ${settings.revision}`],
     ["健康聚合保留", `${formatInteger(settings.health_days)} 天`],
     ["搜索限速记录保留", `${formatInteger(settings.search_use_hours ?? 2)} 小时`],
     ["每批上限", `${formatInteger(settings.batch_size)} 行`],
@@ -935,15 +944,18 @@ function renderRetention(payload) {
 async function loadRetention() {
   const payload = await request("/api/admin/retention");
   renderRetention(payload);
-  setStatus("#retention-status", "保留设置已更新");
+  setStatus("#retention-status", `读取于 ${formatTimestamp(new Date().toISOString())}`);
 }
 async function runRetention() {
   const button = $("#run-retention");
   button.disabled = true;
   try {
+    const preview = await request("/api/admin/retention");
+    if (!confirm(`预计待处理 ${Object.values(preview.estimate || {}).reduce((sum, value) => sum + Number(value || 0), 0)} 行；实际执行受每批上限限制。继续执行一批？`)) return;
     const result = await request("/api/admin/retention/run", { method: "POST", body: JSON.stringify({ reason: "管理员执行聚合数据保留清理" }) });
-    setStatus("#retention-status", `已完成一批清理：${formatInteger(Object.values(result.deleted_by_table || {}).reduce((sum, value) => sum + Number(value || 0), 0))} 行；另清理 ${formatInteger(result.pruned_run_history || 0)} 条旧运行记录`);
     await loadRetention();
+    const deleted = Object.entries(result.deleted_by_table || {}).filter(([key]) => key !== "retention_runs").reduce((sum,[,value]) => sum + Number(value || 0),0);
+    setStatus("#retention-status", result.failed_reason ? `部分失败：${result.failure_stage} / ${result.failed_reason}；已删除 ${formatInteger(deleted)} 行` : `已删除 ${formatInteger(deleted)} 行；压缩 ${formatInteger(result.compacted_by_table?.model_calls || 0)} 条模型内容`, Boolean(result.failed_reason));
   } catch (error) { setStatus("#retention-status", errorText(error), true); }
   finally { button.disabled = false; }
 }
@@ -1168,6 +1180,17 @@ function restoreModelFilters() {
   modelPageOffset = renderedModelQuery.offset;
   document.querySelectorAll("[data-model-pool]").forEach((button) => button.setAttribute("aria-selected", String(button.dataset.modelPool === renderedModelQuery.pool)));
 }
+
+$("#retention-settings-form").addEventListener("input", (event) => { event.currentTarget.dataset.dirty = "1"; });
+$("#retention-settings-form").addEventListener("submit", async (event) => {
+  event.preventDefault(); const form = event.currentTarget; const button = submitButton(form,event); button.disabled = true;
+  try {
+    const settings = Object.fromEntries([...form.querySelectorAll("input[name]")].map((input) => [input.name,Number(input.value)]));
+    await request("/api/admin/retention/settings", {method:"POST",body:JSON.stringify({settings,expected_revision:Number(form.dataset.revision)})});
+    delete form.dataset.dirty; await loadRetention(); setStatus("#retention-status","设置已保存，尚未执行清理");
+  } catch (error) { setStatus("#retention-status",error.status === 409 ? "设置已被修改，请刷新后核对版本" : errorText(error),true); }
+  finally { button.disabled = false; }
+});
 let usageLoadVersion = 0;
 let usageResourcePage = 0;
 let usageResourceVersion = 0;
@@ -2148,6 +2171,7 @@ $("#admin-model-form .resource-actions").before(draftPricing);
 $("#admin-model-form").addEventListener("input", () => { $("#admin-model-form").dataset.dirty = "true"; });
 window.addEventListener("beforeunload", (event) => { if (document.querySelector("form[data-dirty]")) { event.preventDefault(); event.returnValue = ""; } });
 addParameterHelp($("#admin-model-form"));
+addParameterHelp($("#retention-settings-form"));
 restoreSession();
 $("#refresh-observability").replaceWith($("#refresh-observability").cloneNode(true));
 $("#refresh-observability").addEventListener("click", () => { void loadUsage(); });

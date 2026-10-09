@@ -819,6 +819,24 @@ paths:
         '200': { $ref: '#/components/responses/JsonObject' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/retention/settings:
+    post:
+      tags: [configuration]
+      operationId: saveRetentionSettings
+      security: [{ operatorBearer: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '411': { $ref: '#/components/responses/LengthRequired' }
+        '413': { $ref: '#/components/responses/RequestTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/v1/admin/retention/run:
     post:
       tags: [configuration]
