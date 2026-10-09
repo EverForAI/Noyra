@@ -344,7 +344,11 @@ API_ROUTE_CONTRACTS: tuple[APIRouteContract, ...] = (
     _get("/api/v1/admin/export-jobs/{jobId}/download", "export", 200, 401, 404, 409, 410),
     _get("/api/v1/admin/runtime-export", "export", 202, 401, 403, 404, 429),
     _get("/api/v1/admin/training-export", "export", 202, 401, 403, 404, 429),
-    _post("/api/v1/interactions", "operator", 201, 400, 401, 415),
+    _get("/api/v1/admin/conversations", "read", 200, 400, 401),
+    _get("/api/v1/admin/conversations/{conversationId}/messages", "read", 200, 400, 401, 404, 409),
+    _post("/api/v1/admin/conversations", "operator", 200, 400, 401, 415),
+    _post("/api/v1/admin/conversations/{conversationId}", "operator", 200, 400, 401, 404, 409, 415),
+    _post("/api/v1/interactions", "operator", 201, 400, 401, 404, 409, 415),
     _post("/api/v1/config/inbound-bindings", "operator", 201, 400, 401, 415),
     _post(
         "/api/v1/config/inbound-bindings/{bindingId}/{operation}",

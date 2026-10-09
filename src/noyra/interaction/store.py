@@ -8,6 +8,7 @@ from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.events import EventStore
 from noyra.core.types import content_hash, new_id, utc_now
 
+from .conversations import link_message
 from .errors import InteractionStateConflictError
 from .types import InteractionDecision, InteractionKind, InteractionRecord
 
@@ -29,6 +30,7 @@ class InteractionStore:
         kind: InteractionKind = "human_message",
         related_interaction_id: str | None = None,
         idempotency_key: str | None = None,
+        conversation_id: str | None = None,
     ) -> InteractionRecord:
         self._validate_message(channel, counterparty, content)
         if kind == "subject_message":
@@ -43,7 +45,7 @@ class InteractionStore:
             }
         )
         with self.database.transaction() as connection:
-            return self._create_connection(
+            record = self._create_connection(
                 connection,
                 subject_id,
                 "incoming",
@@ -55,7 +57,9 @@ class InteractionStore:
                 resolved_key,
                 "offered",
                 None,
+                conversation_id=conversation_id,
             )
+            return record
 
     def send(
         self,
@@ -202,6 +206,8 @@ class InteractionStore:
         idempotency_key: str,
         status: str,
         rationale: str | None,
+        *,
+        conversation_id: str | None = None,
     ) -> InteractionRecord:
         if not idempotency_key.strip() or len(idempotency_key) > 256:
             raise ValueError("interaction idempotency key is invalid")
@@ -210,6 +216,15 @@ class InteractionStore:
             (subject_id, idempotency_key),
         ).fetchone()
         if existing is not None:
+            link_message(
+                connection,
+                subject_id,
+                existing["interaction_id"],
+                conversation_id=conversation_id,
+                related_id=related_interaction_id,
+                channel=channel,
+                counterparty=counterparty,
+            )
             expected = (direction, kind, channel, counterparty, content, related_interaction_id)
             actual = (
                 existing["direction"],
@@ -260,6 +275,15 @@ class InteractionStore:
             causal_parent_ids=(),
             occurred_at=now,
             event_id=None,
+        )
+        link_message(
+            connection,
+            subject_id,
+            interaction_id,
+            conversation_id=conversation_id,
+            related_id=related_interaction_id,
+            channel=channel,
+            counterparty=counterparty,
         )
         return self._load_connection(connection, interaction_id)
 

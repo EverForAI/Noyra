@@ -232,4 +232,26 @@ textarea { min-height: 112px; resize: vertical; }
 .activity-item time { color: #617168; font-size: 12px; }
 .activity-item details { grid-column: 3; }
 .activity-timeline { padding-left: 20px; line-height: 1.9; }
+.chat-workspace { display:grid; grid-template-columns:240px minmax(0,1fr); min-height:520px; border-top:1px solid #dce4de; }
+.chat-sidebar { padding:16px; border-right:1px solid #dce4de; min-width:0; }
+.chat-current { padding:16px; min-width:0; }
+.chat-current .card-heading { flex-wrap:wrap; }
+.chat-current > .resource-actions { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px; }
+.chat-current > .resource-actions input { flex:1 1 200px; min-width:0; width:auto; }
+.chat-current > .resource-actions select { flex:0 1 170px; width:auto; }
+.chat-current > .resource-actions button { flex:0 0 auto; }
+.chat-message button { padding:4px 8px; font-size:12px; }
+.chat-current h2 { font-size:18px; overflow-wrap:anywhere; }
+.chat-sidebar #conversation-list { display:grid; margin-top:12px; gap:4px; }
+.chat-window { text-align:left; width:100%; border:0; background:transparent; padding:12px; overflow-wrap:anywhere; }
+.chat-window.active { background:#e1ede5; }
+.chat-messages { height:420px; overflow-y:auto; display:flex; flex-direction:column; gap:16px; padding:16px 8px; background:#f4f7f5; }
+.chat-message { width:fit-content; max-width:85%; align-self:flex-start; }
+.chat-message.mine { align-self:flex-end; }
+.chat-message p { margin:5px 0; padding:12px; background:white; border:1px solid #dce4de; border-radius:6px; white-space:pre-wrap; overflow-wrap:anywhere; }
+.chat-message.mine p { background:#dcefe1; }
+.chat-message small { display:block; color:#617168; font-size:12px; }
+.chat-date { text-align:center; font-size:12px; color:#617168; }
+#chat-back { display:none; }
+@media(max-width:680px) { .chat-workspace { grid-template-columns:minmax(0,1fr); }.chat-workspace:not(.has-current) .chat-current { display:none; }.chat-workspace.has-current .chat-sidebar { display:none; }#chat-back { display:inline-block; }.chat-current { padding:8px 0; }.chat-message { max-width:92%; }.chat-messages { height: min(52vh,420px); min-height:200px; } }
 @media (max-width: 680px) { .activity-item { grid-template-columns: 1fr 1fr; } .activity-item .activity-summary, .activity-item details { grid-column: 1 / -1; } .log-toolbar label { min-width: 0; flex: 1 1 150px; } }

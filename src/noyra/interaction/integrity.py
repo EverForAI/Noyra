@@ -83,6 +83,44 @@ class InteractionIntegrity:
             ).fetchall()
             counts["interaction_decisions"] = len(decisions)
 
+            from .conversations import WEB_PRINCIPAL, _row
+
+            conversations = connection.execute(
+                "SELECT conversation_id FROM private_conversations WHERE subject_id=?",
+                (subject_id,),
+            ).fetchall()
+            for window in conversations:
+                state = _row(connection, subject_id, window[0])
+                messages = connection.execute(
+                    "SELECT m.subject_id AS linked_subject, i.*, m.author_verified "
+                    "FROM private_conversation_messages m JOIN interactions i "
+                    "ON i.interaction_id=m.interaction_id WHERE m.conversation_id=?",
+                    (window[0],),
+                ).fetchall()
+                for message in messages:
+                    if (
+                        message["subject_id"] != subject_id
+                        or message["linked_subject"] != subject_id
+                        or (
+                            message["channel"] == "web"
+                            and (
+                                state["principal_id"] != WEB_PRINCIPAL
+                                or message["counterparty"] != "web-user"
+                            )
+                        )
+                        or (message["author_verified"] and message["channel"] != "web")
+                    ):
+                        raise IntegrityError("conversation message ownership mismatch")
+                    related = message["related_interaction_id"]
+                    if related:
+                        source = connection.execute(
+                            "SELECT conversation_id FROM private_conversation_messages "
+                            "WHERE interaction_id=?",
+                            (related,),
+                        ).fetchone()
+                        if source and source[0] != window[0]:
+                            raise IntegrityError("conversation reply window mismatch")
+
             bindings = connection.execute(
                 "SELECT b.*, t.subject_id AS transport_subject, t.channel AS transport_channel "
                 "FROM interaction_bindings b LEFT JOIN interaction_transports t "

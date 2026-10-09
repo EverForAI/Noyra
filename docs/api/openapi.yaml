@@ -114,6 +114,53 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/JsonList' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/admin/conversations:
+    get:
+      operationId: conversations
+      security: [{ readBearer: [] }]
+      responses:
+        '200': { description: Bounded conversation page }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      operationId: createConversation
+      security: [{ operatorBearer: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        '200': { description: Created conversation }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/admin/conversations/{conversationId}:
+    parameters:
+      - { name: conversationId, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: configureConversation
+      security: [{ operatorBearer: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        '200': { description: Updated conversation revision }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: Conversation absent }
+        '409': { description: Revision or state conflict }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/admin/conversations/{conversationId}/messages:
+    parameters:
+      - { name: conversationId, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: conversationMessages
+      security: [{ readBearer: [] }]
+      responses:
+        '200': { description: Original messages and replies with verified author projection }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: Conversation absent }
+        '409': { description: Conversation unavailable }
   /api/v1/interactions:
     get:
       tags: [observation]
@@ -129,6 +176,8 @@ paths:
           application/json: { schema: { $ref: '#/components/schemas/InteractionInput' } }
       responses:
         '201': { description: Interaction recorded }
+        '404': { description: Conversation absent }
+        '409': { description: Idempotency or conversation conflict }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }

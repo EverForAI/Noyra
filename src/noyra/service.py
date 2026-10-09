@@ -107,6 +107,8 @@ from noyra.interaction import (
     TransportStore,
     WeChatInboundAdapter,
 )
+from noyra.interaction.conversations import ConversationConflict, ConversationStore
+from noyra.interaction.errors import InteractionStateConflictError
 from noyra.interaction.public_contract import (
     PUBLIC_CACHE_CONTROL,
     PUBLIC_CONTRACT_ID,
@@ -1421,6 +1423,7 @@ class NoyraHTTPServer:
         }
         self.cloud_archive_provider: Any = None
         self.interactions = InteractionStore(kernel.database)
+        self.conversations = ConversationStore(kernel.database)
         self.inbound = InboundStore(kernel.database, self.interactions)
         self.public_posts = PublicPostStore(
             kernel.database,
@@ -3016,7 +3019,8 @@ class NoyraHTTPServer:
                         return
                     try:
                         usage_payload = UsageProjection(owner.kernel.database).summary(
-                            owner.kernel.subject_id, window=query.get("window", ["7"])[0],
+                            owner.kernel.subject_id,
+                            window=query.get("window", ["7"])[0],
                             offset_minutes=int(query.get("offset_minutes", ["0"])[0]),
                             pool=query.get("pool", [None])[0],
                             resource=query.get("resource", [None])[0],
@@ -3180,6 +3184,46 @@ class NoyraHTTPServer:
                             for record in owner.common_knowledge.published(limit=limit)
                         ],
                     )
+                elif parsed.path == "/api/admin/conversations":
+                    if not self._authorized("read"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    try:
+                        page = owner.conversations.list(
+                            owner.kernel.subject_id,
+                            archived=query.get("archived", ["false"])[0] == "true",
+                            limit=min(limit, 100),
+                            offset=int(query.get("offset", ["0"])[0]),
+                        )
+                    except ValueError:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_conversation_query"})
+                        return
+                    self._json(HTTPStatus.OK, page)
+                elif parsed.path.startswith("/api/admin/conversations/") and parsed.path.endswith(
+                    "/messages"
+                ):
+                    if not self._authorized("read"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    try:
+                        page = owner.conversations.messages(
+                            owner.kernel.subject_id,
+                            parsed.path.split("/")[4],
+                            before=query.get("before", [None])[0],
+                            query=query.get("query", [""])[0],
+                            status=query.get("status", [""])[0],
+                            limit=min(limit, 100),
+                        )
+                    except NotFoundError:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "conversation_not_found"})
+                        return
+                    except ConversationConflict:
+                        self._json(HTTPStatus.CONFLICT, {"error": "conversation_conflict"})
+                        return
+                    except ValueError:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_conversation_query"})
+                        return
+                    self._json(HTTPStatus.OK, page)
                 elif parsed.path == "/api/mailbox":
                     if not self._authorized("read"):
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -3509,27 +3553,40 @@ class NoyraHTTPServer:
                         if kind == "model":
                             for group in owner.cognitive_resources.list(owner.kernel.subject_id):
                                 metadata[group.group_id] = {
-                                    "label": group.label, "pool": group.pool, "model": group.model,
+                                    "label": group.label,
+                                    "pool": group.pool,
+                                    "model": group.model,
                                     "host": urlsplit(group.base_url).hostname,
                                     "resource_status": group.status,
                                 }
                         else:
                             for provider in owner.search_providers.list(owner.kernel.subject_id):
                                 metadata[provider.config_id] = {
-                                    "label": provider.label, "pool": "search",
+                                    "label": provider.label,
+                                    "pool": "search",
                                     "model": provider.provider_type,
-                                    "host": None, "resource_status": provider.status,
+                                    "host": None,
+                                    "resource_status": provider.status,
                                 }
                         observed_ids = {item["provider_id"] for item in providers}
                         providers.extend(
                             {"provider_id": identifier, "state": "no_data", "attempt_count": 0}
-                            for identifier in metadata if identifier not in observed_ids
+                            for identifier in metadata
+                            if identifier not in observed_ids
                         )
                         for item in providers:
-                            item.update(metadata.get(item["provider_id"], {
-                                "label": "历史资源", "resource_status": "historical",
-                                "pool": kind, "model": None, "host": None,
-                            }))
+                            item.update(
+                                metadata.get(
+                                    item["provider_id"],
+                                    {
+                                        "label": "历史资源",
+                                        "resource_status": "historical",
+                                        "pool": kind,
+                                        "model": None,
+                                        "host": None,
+                                    },
+                                )
+                            )
                     except IntegrityError:
                         self._json(
                             HTTPStatus.SERVICE_UNAVAILABLE,
@@ -3546,8 +3603,9 @@ class NoyraHTTPServer:
                         HTTPStatus.OK,
                         {
                             "provider_kind": kind,
-                            "providers": providers[health_offset:health_offset + 50],
-                            "total": len(providers), "page_size": 50,
+                            "providers": providers[health_offset : health_offset + 50],
+                            "total": len(providers),
+                            "page_size": 50,
                         },
                     )
                 elif parsed.path in {"/api/v1/admin/retention", "/api/admin/retention"}:
@@ -4001,9 +4059,9 @@ class NoyraHTTPServer:
                             pool=query.get("pool", [None])[0],
                             status=query.get("status", [None])[0],
                             search=query.get("search", [None])[0],
-                            limit=limit if query.get("view", [""])[0] in {
-                                "management", "usage"
-                            } else None,
+                            limit=limit
+                            if query.get("view", [""])[0] in {"management", "usage"}
+                            else None,
                             offset=int(query.get("offset", ["0"])[0]),
                         )
                     except (ValueError, TypeError):
@@ -5292,6 +5350,11 @@ class NoyraHTTPServer:
                         return
                     self._json(HTTPStatus.OK, record.__dict__)
                     return
+                if self.path == "/api/admin/conversations" or self.path.startswith(
+                    "/api/admin/conversations/"
+                ):
+                    self._configure_conversation()
+                    return
                 if self.path != "/api/interactions":
                     self._discard_small_request_body()
                     self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
@@ -5312,6 +5375,9 @@ class NoyraHTTPServer:
                     counterparty = payload.get("counterparty", "web-user")
                     content = payload.get("content")
                     idempotency_key = payload.get("idempotency_key")
+                    conversation_id = payload.get("conversation_id")
+                    if conversation_id is not None and not isinstance(conversation_id, str):
+                        raise ValueError("invalid conversation id")
                     if not isinstance(channel, str) or not isinstance(counterparty, str):
                         raise TypeError("interaction metadata must be text")
                     if channel != "web" or counterparty != "web-user":
@@ -5326,7 +5392,14 @@ class NoyraHTTPServer:
                         counterparty,
                         content,
                         idempotency_key=idempotency_key,
+                        conversation_id=conversation_id,
                     )
+                except NotFoundError:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "conversation_not_found"})
+                    return
+                except (ConversationConflict, InteractionStateConflictError):
+                    self._json(HTTPStatus.CONFLICT, {"error": "interaction_conflict"})
+                    return
                 except (ValueError, TypeError):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_interaction"})
                     return
@@ -5337,6 +5410,55 @@ class NoyraHTTPServer:
                         "status": interaction_record.status,
                     },
                 )
+
+            def _configure_conversation(self) -> None:
+                if not self._authorized():
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+                    return
+                payload = self._request_json()
+                if payload is None:
+                    return
+                try:
+                    if self.path == "/api/admin/conversations":
+                        if set(payload) != {"title"}:
+                            raise ValueError("invalid fields")
+                        result = owner.conversations.create(
+                            owner.kernel.subject_id, payload["title"]
+                        )
+                    else:
+                        if len(self.path.split("/")) != 5 or set(payload) - {
+                            "title",
+                            "pinned",
+                            "archived",
+                            "expected_revision",
+                        }:
+                            raise ValueError("invalid fields")
+                        revision = payload.get("expected_revision")
+                        if type(revision) is not int:
+                            raise ValueError("invalid revision")
+                        result = owner.conversations.update(
+                            owner.kernel.subject_id,
+                            self.path.split("/")[4],
+                            expected_revision=revision,
+                            title=payload.get("title"),
+                            pinned=payload.get("pinned"),
+                            archived=payload.get("archived"),
+                        )
+                except NotFoundError:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "conversation_not_found"})
+                    return
+                except ConversationConflict:
+                    self._json(HTTPStatus.CONFLICT, {"error": "conversation_conflict"})
+                    return
+                except (ValueError, TypeError, PermissionError):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_conversation"})
+                    return
+                self._json(HTTPStatus.OK, result)
 
             def _lifecycle_control(self) -> None:
                 if not self._authorized():
@@ -5433,8 +5555,10 @@ class NoyraHTTPServer:
                     ):
                         raise ValueError("invalid fields")
                     result = owner.retention.configure(
-                        owner.kernel.subject_id, payload["settings"],
-                        expected_revision=payload["expected_revision"], actor=self._actor(),
+                        owner.kernel.subject_id,
+                        payload["settings"],
+                        expected_revision=payload["expected_revision"],
+                        actor=self._actor(),
                     )
                 except RetentionPolicyConflict:
                     self._json(HTTPStatus.CONFLICT, {"error": "retention_policy_conflict"})
@@ -7195,9 +7319,7 @@ class NoyraHTTPServer:
                     )
                     return
                 except PublicPostConflictError:
-                    self._json(
-                        HTTPStatus.CONFLICT, {"error": "public_post_controls_conflict"}
-                    )
+                    self._json(HTTPStatus.CONFLICT, {"error": "public_post_controls_conflict"})
                     return
                 except (ValueError, TypeError, PermissionError):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_public_post_controls"})

@@ -133,7 +133,7 @@ async function request(path, options = {}) {
 }
 
 function setStatus(target, message, error = false) { const node = $(target); node.textContent = message || ""; node.classList.toggle("error", error); }
-function showSection(section) { stopRuntimeLogPolling(); activeSection = section; document.querySelectorAll("[data-section-panel]").forEach((panel) => { panel.hidden = panel.dataset.sectionPanel !== section; }); document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.section === section)); $("#page-title").textContent = { overview: "总览", conversation: "私密交流", logs: "活动日志", "public-posts": "内容审核", models: "认知资源", search: "搜索配置", capabilities: "能力授权", channels: "通讯渠道", wallet: "钱包采集", migration: "迁移与庇护所", runtime: "运行防护" }[section]; if (section === "logs") { runtimeLogCursor = null; void loadRuntimeLogs(); } }
+function showSection(section) { stopRuntimeLogPolling(); clearTimeout(chat.timer); activeSection = section; document.querySelectorAll("[data-section-panel]").forEach((panel) => { panel.hidden = panel.dataset.sectionPanel !== section; }); document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.section === section)); $("#page-title").textContent = { overview: "总览", conversation: "私密交流", logs: "活动日志", "public-posts": "内容审核", models: "认知资源", search: "搜索配置", capabilities: "能力授权", channels: "通讯渠道", wallet: "钱包采集", migration: "迁移与庇护所", runtime: "运行防护" }[section]; if (section === "logs") { runtimeLogCursor = null; void loadRuntimeLogs(); } if(section==="conversation" && !chat.history) void loadMailbox().catch(error=>setStatus("#message-status",errorText(error),true)); }
 async function loadMigration() {
   const [policy, targets, proposals, tasks] = await Promise.all([request("/api/v1/admin/migration/policy"), request("/api/v1/admin/migration/targets"), request("/api/v1/admin/migration/proposals"), request("/api/v1/admin/migration/tasks")]);
   $("#migration-enabled").checked = Boolean(policy.enabled); $("#migration-approval-mode").value = policy.approval_mode; $("#migration-cooldown").value = Math.round((policy.rejection_cooldown_seconds || 0) / 86400); $("#migration-wallet-mode").value = policy.wallet_mode; $("#migration-local-wallet").checked = Boolean(policy.local_wallet_transfer_enabled); $("#migration-policy-summary").innerHTML = summaryRows([["当前状态", policy.enabled ? "已开启" : "已关闭"], ["评估状态", ({ disabled: "已关闭", deferred: "评估延后", no_actionable_need: "无需迁移", cognition_unavailable: "等待认知资源", awaiting_approval: "等待审批", approved: "已批准", executing: "执行中", committed: "已迁移", reconciliation_required: "需核对或回滚", cognition_declined: "认知评估未建议迁移", hard_gate_rejected: "未通过策略检查" })[policy.assessment_status] || "等待评估"], ["策略版本", policy.revision], ["审批模式", policy.approval_mode], ["钱包模式", policy.wallet_mode], ["活动 epoch", policy.active_epoch ? `${policy.active_epoch.epoch_number} · ${policy.active_epoch.target_id}` : "无"]]);
@@ -512,7 +512,7 @@ function renderModelKey(item, key) {
 }
 
 async function login(event) { event.preventDefault(); const form = event.currentTarget; const token = $("#login-token").value.trim(); if (!token) return; const button = submitButton(form, event); if (button) button.disabled = true; setStatus("#login-status", "正在建立会话"); try { const result = await request("/admin/session", { method: "POST", body: JSON.stringify({ token }) }); stopUpgradePolling(); upgradeTaskId = null; upgradeStatusAvailable = false; upgradeCheckResult = null; csrfToken = result.csrf_token; $("#login-token").value = ""; $("#login-shell").hidden = true; $("#admin-shell").hidden = false; await loadAll(); } catch (error) { setStatus("#login-status", errorText(error), true); } finally { if (button) button.disabled = false; } }
-async function logout() { stopUpgradePolling(); stopRuntimeLogPolling(); modelLoadVersion += 1; $("#model-list").replaceChildren(); $("#admin-model-form").reset(); $("#admin-model-keys").value = ""; runtimeLogCursor = null; runtimeLogBrowsingHistory = false; $("#runtime-log-list").replaceChildren(); $("#lifecycle-summary").replaceChildren(); $("#lifecycle-timeline").replaceChildren(); try { await request("/admin/session/logout", { method: "POST" }); } catch { /* session is already unusable */ } csrfToken = ""; upgradeTaskId = null; upgradeStatusAvailable = false; upgradeCheckResult = null; publicPostCursor = ""; publicPostRows = []; publicPostActionKeys.clear(); $("#public-post-review-list").replaceChildren(); $("#admin-shell").hidden = true; $("#login-shell").hidden = false; }
+async function logout() { stopUpgradePolling(); stopRuntimeLogPolling(); clearChat(); modelLoadVersion += 1; $("#model-list").replaceChildren(); $("#admin-model-form").reset(); $("#admin-model-keys").value = ""; runtimeLogCursor = null; runtimeLogBrowsingHistory = false; $("#runtime-log-list").replaceChildren(); $("#lifecycle-summary").replaceChildren(); $("#lifecycle-timeline").replaceChildren(); try { await request("/admin/session/logout", { method: "POST" }); } catch { /* session is already unusable */ } csrfToken = ""; upgradeTaskId = null; upgradeStatusAvailable = false; upgradeCheckResult = null; publicPostCursor = ""; publicPostRows = []; publicPostActionKeys.clear(); $("#public-post-review-list").replaceChildren(); $("#admin-shell").hidden = true; $("#login-shell").hidden = false; }
 
 async function loadOverview() {
   latestDiagnostics = null;
@@ -600,7 +600,74 @@ async function loadSetupGuide() {
   const unauthorized = results.find((result) => result.status === "rejected" && result.reason?.status === 401);
   if (unauthorized) throw unauthorized.reason;
 }
-async function loadMailbox() { const rows = await request("/api/mailbox?limit=50"); $("#mailbox-list").innerHTML = rows.length ? rows.map((row) => `<article class="message-item"><time>${esc(row.created_at)} <span class="status-chip">${esc(row.status)}</span></time><p>${esc(row.content)}</p></article>`).join("") : '<div class="muted">暂无私密交流</div>'; }
+const chat = {current:null,windows:[],nextOffset:null,before:null,rows:[],drafts:new Map(),keys:new Map(),generation:0,listGeneration:0,timer:null,history:false,failures:0};
+const chatStatus = {offered:"已记录，等待处理",accepted:"接受",rejected:"拒绝",deferred:"暂缓",silent:"选择沉默",sent:"已生成回复",expired:"已过期"};
+function clearChat() { clearTimeout(chat.timer); chat.generation++; chat.listGeneration++; chat.current=null; chat.windows=[]; chat.rows=[]; chat.drafts.clear(); chat.keys.clear(); $("#admin-message").value=""; $("#mailbox-list").replaceChildren(); $("#conversation-list").replaceChildren(); $("#message-status").textContent=""; $("#conversation-title").textContent="选择一个会话"; }
+async function loadMailbox({append=false}={}) {
+  const generation=++chat.listGeneration;
+  const page=await request(`/api/admin/conversations?limit=50&archived=${$("#conversation-filter").value === "archived"}&offset=${append ? chat.nextOffset || 0 : 0}`);
+  if(generation !== chat.listGeneration || !csrfToken) return;
+  chat.windows=append ? chat.windows.concat(page.items) : page.items; chat.nextOffset=page.next_offset;
+  $("#conversation-more").hidden=page.next_offset === null;
+  $("#conversation-list").innerHTML=chat.windows.map(row=>`<button class="chat-window ${row.conversation_id===chat.current?.conversation_id?"active":""}" data-window="${esc(row.conversation_id)}" type="button">${row.pinned?"置顶 · ":""}${esc(row.title)}</button>`).join("") || '<p class="muted">暂无会话</p>';
+  if(chat.current) chat.current=chat.windows.find(row=>row.conversation_id===chat.current.conversation_id) || chat.current;
+  if(!chat.current && chat.windows.length) await selectChat(chat.windows[0]);
+  else if(chat.current && !chat.history) await loadChatMessages();
+}
+async function selectChat(row) {
+  if(!row) return;
+  clearTimeout(chat.timer);
+  if(chat.current) chat.drafts.set(chat.current.conversation_id,$("#admin-message").value);
+  chat.current=row; chat.before=null; chat.rows=[]; chat.history=false; chat.failures=0; $("#chat-search").value=""; $("#chat-status").value="";
+  $("#admin-message").value=chat.drafts.get(row.conversation_id)||"";
+  $(".chat-workspace").classList.add("has-current");
+  await loadChatMessages();
+}
+function renderChatMessages() {
+  let day="";
+  $("#mailbox-list").innerHTML=chat.rows.map(row=>{
+    const date=new Date(row.created_at).toLocaleDateString(); const heading=date!==day?`<div class="chat-date">${esc(date)}</div>`:""; day=date;
+    const mine=row.direction==="incoming" && row.channel==="web" && row.author_verified;
+    const author=row.direction==="outgoing" ? "Noyra" : mine?"我":row.channel==="web"?"历史网页访客（作者未确认）":`${row.channel} · ${row.counterparty}`;
+    const progress=["offered","deferred"].includes(row.status)?({executing:"模型调用中",prepared:"模型调用已准备",failed:"最近调用失败，等待后续处理",unknown:"调用结果未知，等待核对"}[row.model_call_status]||chatStatus[row.status]):chatStatus[row.status];
+    return heading+`<article class="chat-message ${mine?"mine":""}"><small>${esc(author)} · ${esc(formatTimestamp(row.created_at))}</small><p>${esc(row.content)}</p><small>${esc(progress||row.status)}${row.related_interaction_id?" · 回复关联原消息":""}</small><button data-copy-message="${esc(row.interaction_id)}" title="复制消息" type="button">复制</button></article>`;
+  }).join("") || '<p class="muted">暂无消息</p>';
+}
+async function loadChatMessages({older=false}={}) {
+  if(!chat.current || !csrfToken) return;
+  clearTimeout(chat.timer); const generation=++chat.generation; const windowId=chat.current.conversation_id;
+  if(older) chat.history=true;
+  const query=new URLSearchParams({limit:"50",query:$("#chat-search").value,status:$("#chat-status").value}); if(older&&chat.before) query.set("before",chat.before);
+  const list=$("#mailbox-list"); const bottom=list.scrollHeight-list.scrollTop-list.clientHeight<60; const position=list.scrollTop; const previousHeight=list.scrollHeight;
+  try {
+    const page=await request(`/api/admin/conversations/${encodeURIComponent(windowId)}/messages?${query}`);
+    if(generation!==chat.generation||!csrfToken) return;
+    chat.current=page.conversation; chat.rows=older?Array.from(new Map(page.items.concat(chat.rows).map(row=>[row.interaction_id,row])).values()):page.items; chat.before=page.next_before; chat.failures=0;
+    $("#conversation-title").textContent=chat.current.title; $("#pin-conversation").textContent=chat.current.pinned?"取消置顶":"置顶"; $("#archive-conversation").textContent=chat.current.status==="archived"?"恢复会话":"归档";
+    $("#admin-message").disabled=chat.current.status!=="active"; $("#chat-more").hidden=!chat.before;
+    renderChatMessages();
+    if(older) list.scrollTop=position+list.scrollHeight-previousHeight;
+    else if(bottom) list.scrollTop=list.scrollHeight;
+    else {list.scrollTop=position; $("#chat-latest").hidden=false;}
+  } catch(error) {chat.failures++; throw error;}
+  finally { if(generation===chat.generation && activeSection==="conversation" && !document.hidden && !chat.history && !$("#chat-search").value && !$("#chat-status").value) chat.timer=setTimeout(()=>{void loadChatMessages().catch(error=>setStatus("#message-status",errorText(error),true));},Math.min(60000,10000*2**chat.failures)); }
+}
+$("#conversation-list").addEventListener("click",event=>{const button=event.target.closest("[data-window]"); if(button) void selectChat(chat.windows.find(row=>row.conversation_id===button.dataset.window)).catch(error=>setStatus("#message-status",errorText(error),true));});
+$("#conversation-filter").addEventListener("change",()=>{if(chat.current) chat.drafts.set(chat.current.conversation_id,$("#admin-message").value); chat.generation++; clearTimeout(chat.timer); chat.current=null; chat.rows=[]; renderChatMessages(); void loadMailbox().catch(error=>setStatus("#message-status",errorText(error),true));});
+$("#conversation-more").addEventListener("click",()=>{void loadMailbox({append:true});});
+$("#chat-more").addEventListener("click",()=>{void loadChatMessages({older:true}).catch(error=>setStatus("#message-status",errorText(error),true));});
+for(const id of ["chat-search-button","chat-status"]) $("#"+id).addEventListener(id==="chat-status"?"change":"click",()=>{chat.history=false; void loadChatMessages().catch(error=>setStatus("#message-status",errorText(error),true));});
+$("#chat-back").addEventListener("click",()=>{$(".chat-workspace").classList.remove("has-current");});
+$("#chat-latest").addEventListener("click",()=>{chat.history=false; $("#chat-search").value=""; $("#chat-status").value=""; void loadChatMessages().then(()=>{$("#mailbox-list").scrollTop=$("#mailbox-list").scrollHeight; $("#chat-latest").hidden=true;}).catch(error=>setStatus("#message-status",errorText(error),true));});
+$("#mailbox-list").addEventListener("click",async event=>{const button=event.target.closest("[data-copy-message]"); if(button) {try {await navigator.clipboard.writeText(chat.rows.find(row=>row.interaction_id===button.dataset.copyMessage).content);} catch {setStatus("#message-status","复制失败",true);}}});
+$("#new-conversation").addEventListener("click",async()=>{const title=prompt("会话名称", "新会话"); if(!title?.trim()) return; try{const row=await request("/api/admin/conversations",{method:"POST",body:JSON.stringify({title:title.trim()})}); selectChat(row); await loadMailbox();}catch(error){setStatus("#message-status",errorText(error),true);}});
+for(const [id,action] of [["rename-conversation","title"],["pin-conversation","pinned"],["archive-conversation","archived"]]) $("#"+id).addEventListener("click",async()=>{
+  if(!chat.current) return; let value;
+  if(action==="title") {value=prompt("会话名称",chat.current.title); if(!value?.trim()) return;}
+  else value=action==="pinned"?!chat.current.pinned:chat.current.status!=="archived";
+  try {chat.current=await request(`/api/admin/conversations/${encodeURIComponent(chat.current.conversation_id)}`,{method:"POST",body:JSON.stringify({[action]:value,expected_revision:chat.current.revision})}); await loadMailbox();}
+  catch(error){setStatus("#message-status",errorText(error),true);}
+});
 
 const walletRunStatusLabels = { queued: "排队中", running: "执行中", retry_wait: "等待重试", succeeded: "成功", failed: "失败", unknown: "结果未知", cancelled: "已取消" };
 const walletAttemptStatusLabels = { executing: "执行中", succeeded: "成功", failed: "失败", unknown: "结果未知" };
@@ -1524,7 +1591,21 @@ $("#migration-policy-form").addEventListener("submit", async (event) => {
     await loadMigration();
   } catch (error) { setStatus("#migration-status", errorText(error), true); }
 });
-$("#admin-message-form").addEventListener("submit", async (event) => { event.preventDefault(); const form = event.currentTarget; const button = submitButton(form, event); if (button) button.disabled = true; try { await request("/api/interactions", { method: "POST", body: JSON.stringify({ channel: "web", counterparty: "web-user", content: $("#admin-message").value.trim(), idempotency_key: crypto.randomUUID() }) }); $("#admin-message").value = ""; setStatus("#message-status", "消息已记录，正在等待认知处理"); await Promise.all([loadMailbox(), loadOverview()]); } catch (error) { setStatus("#message-status", errorText(error), true); } finally { if (button) button.disabled = false; } });
+$("#admin-message-form").addEventListener("submit", async (event) => {
+  event.preventDefault(); if(event.isComposing || !chat.current || chat.current.status!=="active") return;
+  const button=submitButton(event.currentTarget,event); button.disabled=true;
+  const windowId=chat.current.conversation_id; const content=$("#admin-message").value.trim();
+  const keyId=windowId+":"+content; const key=chat.keys.get(keyId)||crypto.randomUUID(); chat.keys.set(keyId,key);
+  try {
+    await request("/api/interactions", {method:"POST",body:JSON.stringify({channel:"web",counterparty:"web-user",content,idempotency_key:key,conversation_id:windowId})});
+    chat.keys.delete(keyId);
+    if(chat.drafts.get(windowId)?.trim()===content) chat.drafts.delete(windowId);
+    if(chat.current?.conversation_id===windowId && $("#admin-message").value.trim()===content) $("#admin-message").value="";
+    setStatus("#message-status","消息已记录，等待处理");
+    try {await loadChatMessages();} catch {setStatus("#message-status","消息已记录；读取失败，请刷新",true);}
+  } catch(error) {setStatus("#message-status",errorText(error),true);}
+  finally {button.disabled=false;}
+});
 
 $("#wallet-enqueue-asset").addEventListener("change", updateWalletAddressOptions);
 $("#wallet-budget-network").addEventListener("change", () => { void loadWalletBudget().catch(() => {}); });

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .admission import current_commit_scope
+from .conversation_schema import MIGRATION_V84, MIGRATION_V85
 from .errors import RuntimeOwnershipError
 from .evidence_schema import migration_v80
 from .locking import ProcessLock
@@ -298,7 +299,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 83
+CURRENT_SCHEMA_VERSION = 85
 
 # The schema DDL fingerprint is checked after every successful initialization.
 # Update this value only alongside a reviewed schema migration and its tests.
@@ -306,6 +307,8 @@ CURRENT_SCHEMA_VERSION = 83
 # installations persist this value in ``schema_meta`` and therefore require
 # the value to remain stable across compatible runtime fixes.
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
+    85: "1866b81f3fbe8104021f130564d175b61961100a4524c84d3ef3a7ffd1c012e4",
+    84: "a3a27655b433d22d0b2148267592067c724e17f37622fa95c1c69b0bd88496a4",
     83: "ad714681e3e85d60a20ab14ebabc4106285df457bfd8fc633c002097b12c2505",
     82: "5a6031407e2cc1e55da5706c5ab8d0fe749286b8402976eae76fc1f8c71d4288",
     81: "4d82e1926e29d7fd6d01e59149017eab575f50fff949f0827b3dab3918d1beb1",
@@ -320,6 +323,8 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 # auditable P0 finding.  Tables, indexes, and views still fail closed during
 # database construction because they define the storage contract itself.
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
+    85: "57ef8566669d777860b4c97c3cf4f58e2050d3ca40bae05972094d564e7501a6",
+    84: "60389656a9820b16ef4321937a04c139e068c4416189544938017ab586d017b5",
     83: "a9e34bb9c15d3499f211d315fde416314012a9754fee7fe535e87f59d4ff731f",
     82: "c7071ba23a95d0c56f7518ceb6cdd9c2609a58fb9978cd1deb6bc84d04292457",
     81: "34d4cbb66c5433a6cb4614cba22b2a5dd69b55705a56733b1af38b26da297843",
@@ -6866,6 +6871,8 @@ SELECT 1;
     81: MIGRATION_V81,
     82: MIGRATION_V82,
     83: MIGRATION_V83,
+    84: MIGRATION_V84,
+    85: MIGRATION_V85,
 }
 
 
@@ -10181,6 +10188,32 @@ END;
                     connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
             for target_version in range(version + 1, CURRENT_SCHEMA_VERSION + 1):
                 migration = MIGRATIONS[target_version]
+                if target_version == 85 and any(
+                    row[1] == "author_verified"
+                    for row in connection.execute(
+                        "PRAGMA table_info(private_conversation_messages)"
+                    )
+                ):
+                    connection.execute(
+                        "UPDATE schema_meta SET value='85' WHERE key='schema_version'"
+                    )
+                    connection.commit()
+                    continue
+                if target_version == 84:
+                    from noyra.interaction.conversations import migrate_web_history
+
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._execute_sql_script(connection, migration)
+                        migrate_web_history(connection)
+                        connection.execute(
+                            "UPDATE schema_meta SET value='84' WHERE key='schema_version'"
+                        )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
                 if target_version == 21:
                     self._ensure_project_execution_columns(connection)
                 if target_version == 34:
@@ -10390,20 +10423,32 @@ END;
                         self._execute_sql_script(connection, migration)
                         self._ensure_subject_scoped_triggers(connection)
                         if connection.execute("PRAGMA foreign_key_check").fetchall():
-                            raise RuntimeError("resource policy migration introduced foreign-key violations")
-                        for group in connection.execute(
-                            "SELECT group_id, subject_id FROM cognitive_resource_groups"
-                        ).fetchall() if target_version == 81 else []:
+                            raise RuntimeError(
+                                "resource policy migration introduced foreign-key violations"
+                            )
+                        for group in (
+                            connection.execute(
+                                "SELECT group_id, subject_id FROM cognitive_resource_groups"
+                            ).fetchall()
+                            if target_version == 81
+                            else []
+                        ):
                             if connection.execute(
                                 "SELECT 1 FROM cognitive_resource_limit_policies WHERE group_id=?",
                                 (group["group_id"],),
                             ).fetchone():
-                                read_resource_policy(connection, group["group_id"], group["subject_id"])
+                                read_resource_policy(
+                                    connection, group["group_id"], group["subject_id"]
+                                )
                                 continue
                             write_resource_policy(
-                                connection, group["group_id"], group["subject_id"],
+                                connection,
+                                group["group_id"],
+                                group["subject_id"],
                                 dict.fromkeys(LIMIT_DIMENSIONS, True),
-                                actor="schema-migration", reason="preserve existing limits", now=utc_now(),
+                                actor="schema-migration",
+                                reason="preserve existing limits",
+                                now=utc_now(),
                             )
                         connection.execute(
                             "UPDATE schema_meta SET value=? WHERE key='schema_version'",
