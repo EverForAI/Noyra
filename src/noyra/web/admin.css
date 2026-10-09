@@ -7,6 +7,16 @@
 #wallet-tabs [aria-pressed="true"] { background: #e2efe9; color: #175845; border-color: #34735b; }
 [data-section-panel="wallet"] .resource-item { border-radius: 6px; }
 [data-section-panel="wallet"] .card-heading > button { flex-shrink: 0; white-space: nowrap; }
+[data-section-panel="overview"] .surface-card, .overview-band { padding: 18px 0; background: transparent; border: 0; border-radius: 0; box-shadow: none; }
+[data-section-panel="overview"] > details { border-top: 1px solid #d4dfd8; padding: 16px 0; }
+[data-section-panel="overview"] > details > summary { font-weight: 700; cursor: pointer; }
+.overview-notice { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid #d4dfd8; }
+.overview-notice button { flex-shrink: 0; }
+.overview-notice p { margin: 4px 0; }
+.overview-notice[data-priority="blocker"] strong { color: #a43836; }
+.overview-notice[data-priority="risk"] strong { color: #795510; }
+.overview-event { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; padding: 9px 0; border-bottom: 1px solid #d4dfd8; }
+.overview-event time { grid-column: 1 / -1; font-size: 12px; color: #52655c; }
 body { margin: 0; min-width: 320px; }
 button, input, textarea, select { font: inherit; letter-spacing: 0; }
 button { border: 1px solid #9aaba2; border-radius: 7px; background: #fff; color: #17231e; min-height: 40px; padding: 8px 15px; cursor: pointer; }

@@ -26,6 +26,7 @@ let walletPolicyDraftVersion = null;
 let walletPolicyLoadVersion = 0;
 let walletAuditLoadVersion = 0;
 let latestDiagnostics = null;
+let overviewLoadVersion = 0;
 let upgradeCheckResult = null;
 let upgradeTaskId = null;
 let upgradeStatusAvailable = false;
@@ -42,6 +43,13 @@ let modelLoadVersion = 0;
 const lifecycleLabels = { booting: "启动中", orienting: "初始化", active: "活跃", paused: "已暂停", winding_down: "准备休眠", reflective_sleep: "反思休眠", deep_sleep: "深度休眠", waking: "唤醒中", resetting: "重置中", stopped: "已停止" };
 const logCategoryLabels = { event: "运行事件", model_call: "模型调用", action: "行为执行", routing: "资源路由", audit: "管理审计", metacognition: "元认知", epistemic_review: "知识复核", relationship_social: "关系交流", self_model: "自我模型", intrinsic_thought: "思考", motivation: "动机", consciousness: "意识框架", autonomous_project: "自主项目" };
 const logStatusLabels = { succeeded: "成功", failed: "失败", unknown: "结果未知", executing: "执行中", prepared: "已准备", recorded: "已记录", processed: "已处理", deferred: "暂缓", accepted: "接受", rejected: "拒绝", silent: "选择沉默", completed: "已完成" };
+function activityLabel(row) {
+  if(row.category==="audit")return walletAuditActionLabels[row.status] || ({admin_login_succeeded:"管理员登录成功",admin_logout:"管理员退出",model_resource_created:"登记认知资源",private_erasure_requested:"请求会话清除"})[row.status] || "管理操作";
+  const summary=String(row.summary || "");
+  if(summary.startsWith("lifecycle_transition"))return "生命周期发生转换";
+  return logCategoryLabels[summary] || summary;
+}
+function activityStatus(row) { return row.category==="audit" ? "已记录" : logStatusLabels[row.status] || row.status; }
 
 function stopRuntimeLogPolling() {
   clearTimeout(runtimeLogTimer);
@@ -87,7 +95,7 @@ async function loadRuntimeLogs({ append = false } = {}) {
     if (results[1]?.status === "fulfilled") renderLifecycleSummary(results[1].value);
     if (results[0].status === "rejected") throw results[0].reason;
     const page = results[0].value;
-    const html = page.items.map((row) => `<article class="activity-item"><time>${esc(formatTimestamp(row.occurred_at))}</time><span>${esc(logCategoryLabels[row.category] || row.category)}</span><span class="activity-summary">${esc(row.summary)}</span><span>${esc(logStatusLabels[row.status] || row.status)}</span><details><summary>记录编号</summary><code>${esc(row.record_id)}</code></details></article>`).join("");
+    const html = page.items.map((row) => `<article class="activity-item"><time>${esc(formatTimestamp(row.occurred_at))}</time><span>${esc(logCategoryLabels[row.category] || row.category)}</span><span class="activity-summary">${esc(activityLabel(row))}</span><span>${esc(activityStatus(row))}</span><details><summary>技术详情</summary><code>${esc(row.record_id)}</code><p>${esc(row.status)}</p></details></article>`).join("");
     if (append) $("#runtime-log-list").insertAdjacentHTML("beforeend", html);
     else $("#runtime-log-list").innerHTML = html || '<p class="muted">当前条件下没有记录</p>';
     runtimeLogCursor = page.next_cursor;
@@ -141,7 +149,14 @@ async function request(path, options = {}) {
 }
 
 function setStatus(target, message, error = false) { const node = $(target); node.textContent = message || ""; node.classList.toggle("error", error); }
-function showSection(section) { stopRuntimeLogPolling(); clearTimeout(chat.timer); activeSection = section; document.querySelectorAll("[data-section-panel]").forEach((panel) => { panel.hidden = panel.dataset.sectionPanel !== section; }); document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.section === section)); $("#page-title").textContent = { overview: "总览", conversation: "私密交流", logs: "活动日志", "public-posts": "内容审核", models: "认知资源", search: "搜索配置", capabilities: "能力授权", channels: "通讯渠道", wallet: "钱包与付款", migration: "迁移与庇护所", runtime: "运行防护" }[section]; if (section === "logs") { runtimeLogCursor = null; void loadRuntimeLogs(); } if(section==="conversation" && !chat.history) void loadMailbox().catch(error=>setStatus("#message-status",errorText(error),true)); if(section==="wallet")void loadWallet().catch(error=>setStatus("#wallet-read-status",errorText(error),true)); }
+function showSection(section) {
+  stopRuntimeLogPolling();clearTimeout(chat.timer);activeSection=section;
+  document.querySelectorAll("[data-section-panel]").forEach(panel=>{panel.hidden=panel.dataset.sectionPanel!==section;});
+  document.querySelectorAll(".nav-item").forEach(item=>item.classList.toggle("active",item.dataset.section===section));
+  $("#page-title").textContent={overview:"总览",conversation:"私密交流",logs:"活动日志","public-posts":"内容审核",models:"认知资源",search:"搜索配置",capabilities:"能力授权",channels:"通讯渠道",wallet:"钱包与付款",migration:"迁移与庇护所",runtime:"运行防护"}[section];
+  if(section==="logs")runtimeLogCursor=null;
+  void loadAll();
+}
 async function loadMigration() {
   const [policy, targets, proposals, tasks] = await Promise.all([request("/api/v1/admin/migration/policy"), request("/api/v1/admin/migration/targets"), request("/api/v1/admin/migration/proposals"), request("/api/v1/admin/migration/tasks")]);
   $("#migration-enabled").checked = Boolean(policy.enabled); $("#migration-approval-mode").value = policy.approval_mode; $("#migration-cooldown").value = Math.round((policy.rejection_cooldown_seconds || 0) / 86400); $("#migration-wallet-mode").value = policy.wallet_mode; $("#migration-local-wallet").checked = Boolean(policy.local_wallet_transfer_enabled); $("#migration-policy-summary").innerHTML = summaryRows([["当前状态", policy.enabled ? "已开启" : "已关闭"], ["评估状态", ({ disabled: "已关闭", deferred: "评估延后", no_actionable_need: "无需迁移", cognition_unavailable: "等待认知资源", awaiting_approval: "等待审批", approved: "已批准", executing: "执行中", committed: "已迁移", reconciliation_required: "需核对或回滚", cognition_declined: "认知评估未建议迁移", hard_gate_rejected: "未通过策略检查" })[policy.assessment_status] || "等待评估"], ["策略版本", policy.revision], ["审批模式", policy.approval_mode], ["钱包模式", policy.wallet_mode], ["活动 epoch", policy.active_epoch ? `${policy.active_epoch.epoch_number} · ${policy.active_epoch.target_id}` : "无"]]);
@@ -412,7 +427,7 @@ async function loadUpgradeCheck(quiet = false) {
     $("#upgrade-latest-version").textContent = "检查失败";
     $("#upgrade-commit-time").textContent = "-";
     $("#upgrade-checked-time").textContent = "-";
-    $("#upgrade-commit-title").textContent = upgradeErrorLabels[checkResult.reason?.code] || errorText(checkResult.reason);
+    $("#upgrade-commit-title").textContent = errorText(error);
     $("#upgrade-status-label").textContent = "无法检查版本";
     $("#start-upgrade").disabled = true;
     if (!quiet) setStatus("#upgrade-status", errorText(error), true);
@@ -425,14 +440,15 @@ async function loadUpgradePanel() {
     $("#upgrade-current-version").textContent = `${installed.current_release} · ${String(installed.current_sha || "未知提交").slice(0, 12)}`;
   } catch (error) { if (!upgradeCheckResult) $("#upgrade-current-version").textContent = `本地信息不可读（${error.status || "连接失败"}）`; }
   const [checkResult, statusResult] = await Promise.allSettled([
-    request("/api/v1/admin/upgrade/check"),
+    Promise.resolve(null),
     request("/api/v1/admin/upgrade/status"),
   ]);
   if ([checkResult, statusResult].some((entry) => entry.status === "rejected" && entry.reason?.status === 401)) {
     await logout();
     return;
   }
-  if (checkResult.status === "fulfilled") renderUpgradeCheck(checkResult.value);
+  if (checkResult.status === "fulfilled" && checkResult.value) renderUpgradeCheck(checkResult.value);
+  else if (checkResult.status === "fulfilled") { if(!upgradeCheckResult)$("#upgrade-latest-version").textContent="尚未检查"; }
   else {
     upgradeCheckResult = null;
     $("#upgrade-latest-version").textContent = "检查失败";
@@ -520,25 +536,71 @@ function renderModelKey(item, key) {
 }
 
 async function login(event) { event.preventDefault(); const form = event.currentTarget; const token = $("#login-token").value.trim(); if (!token) return; const button = submitButton(form, event); if (button) button.disabled = true; setStatus("#login-status", "正在建立会话"); try { const result = await request("/admin/session", { method: "POST", body: JSON.stringify({ token }) }); stopUpgradePolling(); upgradeTaskId = null; upgradeStatusAvailable = false; upgradeCheckResult = null; csrfToken = result.csrf_token; $("#login-token").value = ""; $("#login-shell").hidden = true; $("#admin-shell").hidden = false; await loadAll(); } catch (error) { setStatus("#login-status", errorText(error), true); } finally { if (button) button.disabled = false; } }
-async function logout() { stopUpgradePolling(); stopRuntimeLogPolling(); clearChat(); modelLoadVersion += 1; $("#model-list").replaceChildren(); $("#admin-model-form").reset(); $("#admin-model-keys").value = ""; runtimeLogCursor = null; runtimeLogBrowsingHistory = false; $("#runtime-log-list").replaceChildren(); $("#lifecycle-summary").replaceChildren(); $("#lifecycle-timeline").replaceChildren(); try { await request("/admin/session/logout", { method: "POST" }); } catch { /* session is already unusable */ } csrfToken = ""; upgradeTaskId = null; upgradeStatusAvailable = false; upgradeCheckResult = null; publicPostCursor = ""; publicPostRows = []; publicPostActionKeys.clear(); $("#public-post-review-list").replaceChildren(); $("#admin-shell").hidden = true; $("#login-shell").hidden = false; }
+async function logout() {
+  const previousToken=csrfToken;csrfToken="";
+  stopUpgradePolling();stopRuntimeLogPolling();clearChat();clearWallet();overviewLoadVersion++;modelLoadVersion++;
+  latestDiagnostics=null;runtimeLogCursor=null;runtimeLogBrowsingHistory=false;upgradeTaskId=null;upgradeStatusAvailable=false;upgradeCheckResult=null;
+  publicPostCursor="";publicPostRows=[];publicPostActionKeys.clear();publicPostLoadVersion++;
+  for(const id of ["model-list","runtime-log-list","lifecycle-summary","lifecycle-timeline","public-post-review-list","overview-attention","overview-events","overview-lifecycle","overview-metrics","cognition-summary","storage-summary"])$("#"+id).replaceChildren();
+  for(const form of document.querySelectorAll("#admin-shell form")){form.reset();delete form.dataset.dirty;}
+  $("#admin-shell").hidden=true;$("#login-shell").hidden=false;activeSection="overview";
+  document.querySelectorAll("[data-section-panel]").forEach(panel=>{panel.hidden=panel.dataset.sectionPanel!=="overview";});
+  try {await request("/admin/session/logout",{method:"POST",headers:{"X-CSRF-Token":previousToken}});} catch { /* session is already unusable */ }
+}
 
 async function loadOverview() {
-  latestDiagnostics = null;
-  const [state, diagnostics] = await Promise.all([request("/api/state"), request("/api/diagnostics")]);
-  latestDiagnostics = diagnostics && typeof diagnostics === "object" ? diagnostics : null;
-  const cognition = diagnostics.cognition || {};
-  $("#subject-name").textContent = state.display_name || state.subject_id || "Noyra";
-  $("#subject-meta").textContent = `${state.lifecycle?.state || "-"} · schema ${state.schema_version ?? "-"}`;
-  $("#health-mark").textContent = state.online ? "●" : "○";
-  $("#overview-metrics").innerHTML = [["生命周期", state.lifecycle?.state], ["公开日记", state.public_diary_count], ["待处理交流", cognition.pending_interactions?.length || 0], ["等待任务", cognition.waiting_interaction_tasks?.length || 0]].map(([label, value]) => `<div class="metric"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join("");
-  const pools = cognition.model_pools || {};
-  $("#cognition-state").textContent = cognition.enabled ? "已启用" : "未启用";
-  $("#cognition-summary").innerHTML = summaryRows([["经济池", pools.economy?.status || "未配置"], ["深度池", pools.deep?.status || "未配置"], ["最近调用", cognition.recent_interaction_model_calls?.[0]?.error_code || cognition.recent_interaction_model_calls?.[0]?.status || "暂无"]]);
-  const storage = diagnostics.storage || {};
-  $("#storage-summary").innerHTML = summaryRows([["认知写入", storage.cognition_allowed === false ? "已暂停" : "允许"], ["完整性", diagnostics.integrity?.status || "未配置"], ["存储状态", diagnostics.storage_health?.status || "正常"]]);
-  void loadUsage();
-  void loadUsageResources();
-  return diagnostics;
+  const version=++overviewLoadVersion;
+  const sources=["公开状态","运行诊断","生命周期","近期活动"];
+  const results=await Promise.allSettled([request("/api/state"),request("/api/diagnostics"),request("/api/admin/lifecycle-summary"),request("/api/admin/activity-logs?limit=10")]);
+  if(version!==overviewLoadVersion || !csrfToken)return;
+  if(results.some(row=>row.status==="rejected" && row.reason.status===401)){await logout();return;}
+  const failures=results.flatMap((row,index)=>row.status==="rejected" ? [{label:sources[index],error:row.reason}] : []);
+  const state=results[0].status==="fulfilled" ? results[0].value : null;
+  const diagnostics=results[1].status==="fulfilled" ? results[1].value : null;
+  latestDiagnostics=diagnostics;
+  if(state){$("#subject-name").textContent=state.display_name || state.subject_id || "Noyra";$("#subject-meta").textContent=lifecycleLabels[state.lifecycle?.state] || "生命周期未知";$("#health-mark").textContent=state.online ? "●":"○";}
+  if(diagnostics){
+    const cognition=diagnostics.cognition || {};const pools=cognition.model_pools || {};
+    const count=rows=>Array.isArray(rows) ? `${rows.length}${rows.length>=50 ? "+":""}` : "未读取";
+    $("#overview-metrics").innerHTML=[["当前阶段",lifecycleLabels[state?.lifecycle?.state] || "未读取"],["待处理交流",count(cognition.pending_interactions)],["等待认知任务",count(cognition.waiting_interaction_tasks)],["未知模型调用",diagnostics.unknown?.model_calls ?? "未读取"]].map(([label,value])=>`<div class="metric"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join("");
+    const poolText=pool=>!pool ? "状态未提供" : `${pool.group_count} 个启用资源 · ${pool.available_key_count} 个可选密钥 · 等待 ${pool.pending_wait_count} 项（配置状态）`;
+    $("#cognition-state").textContent=cognition.enabled ? "认知已启用":"认知未启用";
+    $("#cognition-summary").innerHTML=summaryRows([["经济池",poolText(pools.economy)],["深度池",poolText(pools.deep)],["最近交流调用",logStatusLabels[cognition.recent_interaction_model_calls?.[0]?.status] || "暂无记录"],["资源压力",(diagnostics.resource_pressures || []).length ? `${diagnostics.resource_pressures.length} 项保留记录` : "无记录"]]);
+    const health=diagnostics.operator_health || {};
+    const labels={ok:"正常",incomplete:"检查未完成",degraded:"需要处理",unavailable:"暂不可读",not_configured:"未配置",attention:"需要关注"};
+    const storage=health.storage || diagnostics.storage_health || {};
+    $("#storage-summary").innerHTML=summaryRows([["认知写入",diagnostics.storage?.cognition_allowed===false ? "已暂停" : diagnostics.storage ? "允许" : "状态未提供"],["完整性",labels[diagnostics.integrity?.status] || "状态未提供"],["存储",labels[storage.state || storage.status] || "状态未提供"],["可用空间",storage.free_bytes == null ? "未读取" : `${formatInteger(storage.free_bytes)} 字节`],["加密存储",health.at_rest?.ready===true ? "就绪" : health.at_rest ? "未就绪":"状态未提供"],["数据库版本",health.migration?.schema_version ?? "未读取"],["SQLite 检查",health.wal?.quick_check || "未读取"],["云归档",health.archive_key?.configured===false ? "可选，未配置" : labels[health.archive_key?.state] || "状态未提供"]]);
+  }
+  if(results[2].status==="fulfilled"){
+    const life=results[2].value;const seconds=life.state_elapsed_seconds;
+    $("#overview-lifecycle").innerHTML=summaryRows([["阶段",lifecycleLabels[life.lifecycle.state] || life.lifecycle.state],["进入时间",formatTimestamp(life.lifecycle.changed_at)],["持续时间",seconds==null ? "证据不足" : `${Math.floor(seconds/3600)} 小时 ${Math.floor(seconds%3600/60)} 分`],["休眠原因",(life.sleep?.reason_codes || []).map(code=>({repeated_failure_pressure:"反复调用失败",hard_resource_budget_exhausted:"预算耗尽",fatigue_threshold:"疲劳阈值",goal_conflict_pressure:"目标冲突",information_staleness:"信息陈旧"})[code] || "其他已记录原因").join("、") || "无已记录原因"],["计划唤醒",formatTimestamp(life.sleep?.wake_after)],["循环保护",diagnostics?.loop ? ({closed:"正常",open:"冷却中",half_open:"恢复尝试中"})[diagnostics.loop.circuit_status] || "未知" : "状态未提供"]]);
+  }else $("#overview-lifecycle").innerHTML='<p class="inline-error">生命周期读取失败</p>';
+  if(results[3].status==="fulfilled")$("#overview-events").innerHTML=results[3].value.items.map(row=>`<div class="overview-event"><span>${esc(activityLabel(row))}</span><span>${esc(activityStatus(row))}</span><time>${esc(logCategoryLabels[row.category] || row.category)} · ${esc(formatTimestamp(row.occurred_at))}</time></div>`).join("") || '<p class="muted">暂无活动记录</p>';
+  else $("#overview-events").innerHTML='<p class="inline-error">近期活动读取失败</p>';
+  renderOverviewAttention(diagnostics,failures);
+  setStatus("#overview-updated",`读取于 ${formatTimestamp(new Date().toISOString())}${failures.length ? " · 部分数据未更新，保留旧摘要":""}`,Boolean(failures.length));
+  return failures;
+}
+function renderOverviewAttention(data, failures=[]) {
+  const rows=failures.map(row=>({priority:"risk",title:`${row.label}读取失败`,detail:errorText(row.error),section:"overview"}));
+  if(data){
+    const health=data.operator_health || {};const cognition=data.cognition || {};
+    const add=(priority,title,detail,section)=>rows.push({priority,title,detail,section});
+    if(data.storage?.cognition_allowed===false)add("blocker","认知写入已暂停","检查磁盘或证据容量","runtime");
+    if(data.integrity?.pause_pending || (data.integrity?.p0 || 0)>0)add("blocker","完整性保护要求处理","查看检查结果后再恢复相关工作","runtime");
+    else if(data.integrity && data.integrity.status!=="ok")add("risk","完整性检查未通过或未完成",`P0 ${data.integrity.p0 ?? "未知"} · P1 ${data.integrity.p1 ?? "未知"}`,"runtime");
+    if(health.at_rest && health.at_rest.ready===false)add("blocker","加密存储未就绪","检查数据卷与访问权限","runtime");
+    if(!cognition.enabled)add("blocker","认知尚未启用","核对认知资源与服务配置","models");
+    else for(const pool of ["economy","deep"]){const info=cognition.model_pools?.[pool];if(info && !info.available_key_count)add("risk",`${modelPoolLabels[pool]}暂无可选密钥`,"配置存在不代表供应商请求已成功","models");}
+    if(data.loop?.circuit_status==="open")add("risk","运行循环正在冷却","查看近期失败及下次恢复条件","logs");
+    if(data.unknown?.model_calls)add("risk","有模型调用结果未知",`${data.unknown.model_calls} 个，需要先核对结果与费用`,"logs");
+    if(data.wallet_execution?.counts?.unknown)add("risk","付款结果未知","先核对链上结果，避免重复付款","wallet");
+    if(data.deliveries?.unknown || data.deliveries?.failed)add("risk","外部投递需要核对",`未知 ${data.deliveries.unknown || 0} · 失败 ${data.deliveries.failed || 0}`,"channels");
+    if(cognition.pending_interactions?.length)add("reminder","有待处理交流",`${cognition.pending_interactions.length} 条已读取记录；不代表 Noyra 已阅读或必定回复`,"conversation");
+    if(data.wallet_acquisition?.attention)add("reminder","余额采集需要关注",`${data.wallet_acquisition.attention} 个运行`,"wallet");
+  }
+  const order={blocker:0,risk:1,reminder:2};rows.sort((a,b)=>order[a.priority]-order[b.priority]);
+  $("#overview-attention").innerHTML=rows.map(row=>`<div class="overview-notice" data-priority="${row.priority}"><div><strong>${({blocker:"阻断",risk:"风险",reminder:"提醒"})[row.priority]} · ${esc(row.title)}</strong><p>${esc(row.detail)}</p></div><button type="button" data-setup-go="${row.section}">查看</button></div>`).join("") || '<p class="muted">当前读取结果中没有待处理项</p>';
 }
 
 function renderModelObservability(observation) {
@@ -1534,18 +1596,17 @@ async function loadRuntime() {
   $("#public-post-usage").innerHTML = summaryRows([["待审核", usage.pending_count ?? 0], ["帖子总数", usage.post_count ?? 0], ["帖子内容", `${usage.byte_size ?? 0} / ${usage.storage_cap_bytes ?? controls.storage_cap_bytes} 字节`], ["正文上限", `${controls.max_content_chars} 字符`]]);
 }
 async function loadAll() {
-  const tasks = [
-    ["总览", loadOverview], ["版本升级", loadUpgradePanel], ["供应商健康", loadProviderHealth], ["数据保留", loadRetention], ["私密交流", loadMailbox], ["内容审核", loadPublicPosts],
-    ["认知资源", loadModels], ["搜索配置", loadSearchProviders], ["能力授权", loadCapabilities],
-    ["通讯渠道", loadChannels], ["钱包与转账", loadWallet], ["迁移与庇护所", loadMigration], ["运行防护", loadRuntime],
-  ];
+  if(!csrfToken)return;
+  const section=activeSection;
+  const tasks = {overview:[["总览",loadOverview]],logs:[["活动日志",loadRuntimeLogs]],conversation:[["私密交流",loadMailbox]],"public-posts":[["内容审核",loadPublicPosts]],models:[["认知资源",loadModels]],search:[["搜索配置",loadSearchProviders]],capabilities:[["能力授权",loadCapabilities]],channels:[["通讯渠道",loadChannels]],wallet:[["钱包与付款",loadWallet]],migration:[["迁移与庇护所",loadMigration]],runtime:[["运行防护",loadRuntime]]}[section] || [];
+  if(section==="overview")for(const [id,label,load] of [["overview-setup","配置检查",loadSetupGuide],["overview-version","本地版本",loadUpgradePanel],["overview-usage","用量",async()=>{await Promise.all([loadUsage(),loadUsageResources()]);}],["overview-providers","供应商健康",loadProviderHealth],["overview-retention","数据保留",loadRetention]])if($("#"+id).open)tasks.push([label,load]);
   const results = await Promise.allSettled(tasks.map(([, load]) => load()));
+  if(section!==activeSection || !csrfToken)return;
   const failures = [];
   results.forEach((result, index) => {
     if (result.status === "rejected") failures.push({ label: tasks[index][0], error: result.reason });
     else if (Array.isArray(result.value)) failures.push(...result.value);
   });
-  try { await loadSetupGuide(); } catch (error) { failures.push({ label: "配置向导", error }); }
   if (failures.some(({ error }) => error?.status === 401)) {
     setStatus("#global-status", "登录会话已失效，请重新登录", true);
     await logout();
@@ -1558,6 +1619,7 @@ async function loadAll() {
     setStatus("#global-status", "");
   }
 }
+for(const [id,load] of [["overview-setup",loadSetupGuide],["overview-version",loadUpgradePanel],["overview-usage",async()=>{await Promise.all([loadUsage(),loadUsageResources()]);}],["overview-providers",loadProviderHealth],["overview-retention",loadRetention]])$("#"+id).addEventListener("toggle",()=>{if($("#"+id).open && csrfToken)void load().catch(error=>setStatus("#global-status",errorText(error),true));});
 async function restoreSession() { try { const result = await request("/admin/session"); if (!result.authenticated) return; csrfToken = result.csrf_token; $("#login-shell").hidden = true; $("#admin-shell").hidden = false; await loadAll(); } catch (error) { setStatus("#login-status", errorText(error), true); } }
 
 $("#refresh-runtime-logs").addEventListener("click", () => { runtimeLogCursor = null; void loadRuntimeLogs(); });
@@ -1568,7 +1630,7 @@ $("#logout").addEventListener("click", stopRuntimeLogPolling);
 document.addEventListener("visibilitychange", () => { if (document.hidden) stopRuntimeLogPolling(); else if (activeSection === "logs") { runtimeLogCursor = null; void loadRuntimeLogs(); } });
 
 $("#login-form").addEventListener("submit", login); $("#logout").addEventListener("click", logout); $("#refresh-admin").addEventListener("click", loadAll); $("#check-upgrade-version").addEventListener("click", checkUpgradeVersion); $("#start-upgrade").addEventListener("click", requestUpgradeConfirmation); $("#confirm-upgrade").addEventListener("click", confirmUpgrade); $("#refresh-observability").addEventListener("click", () => { void loadOverview().catch((error) => setStatus("#global-status", errorText(error), true)); }); $("#refresh-provider-health").addEventListener("click", () => { void loadProviderHealth().catch((error) => setStatus("#provider-health-status", errorText(error), true)); }); $("#refresh-retention").addEventListener("click", () => { void loadRetention().catch((error) => setStatus("#retention-status", errorText(error), true)); }); $("#run-retention").addEventListener("click", () => { void runRetention(); }); $("#refresh-mailbox").addEventListener("click", loadMailbox); $("#refresh-models").addEventListener("click", loadModels); $("#refresh-search-providers").addEventListener("click", loadSearchProviders); $("#refresh-capabilities").addEventListener("click", loadCapabilities); $("#refresh-runtime").addEventListener("click", loadRuntime); document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => showSection(button.dataset.section)));
-$("#setup-guide-list").addEventListener("click", (event) => { const button = event.target.closest("[data-setup-go]"); if (button) showSection(button.dataset.setupGo); });
+$("[data-section-panel=overview]").addEventListener("click", (event) => { const button = event.target.closest("[data-setup-go]"); if (button) showSection(button.dataset.setupGo); });
 $("#refresh-wallet-audits").addEventListener("click", () => { void loadWalletAudits().catch(() => {}); });
 $("#refresh-migration").addEventListener("click", () => { void loadMigration().catch((error) => setStatus("#migration-status", errorText(error), true)); });
 $("#refresh-migration-tasks").addEventListener("click", () => { void loadMigration().catch((error) => setStatus("#migration-status", errorText(error), true)); });

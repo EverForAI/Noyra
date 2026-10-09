@@ -56,10 +56,18 @@
       <p class="form-status global-status" id="global-status" role="status"></p>
       <section class="admin-section" data-section-panel="overview">
         <div class="hero-strip"><div><p class="eyebrow">CURRENT SUBJECT</p><h2 id="subject-name">连接中</h2><p id="subject-meta">正在读取公开状态</p></div><div class="health-mark" id="health-mark">●</div></div>
+        <p id="overview-updated" class="muted" role="status"></p>
+        <div class="metric-grid" id="overview-metrics"></div>
+        <section class="overview-band"><h2>需要处理</h2><div id="overview-attention" aria-live="polite"></div></section>
+        <div class="two-column"><section class="overview-band"><h2>运行与生命周期</h2><div id="overview-lifecycle" class="summary-list"></div><button type="button" data-setup-go="logs">查看活动日志</button></section><section class="overview-band"><h2>近期活动</h2><div id="overview-events"></div></section></div>
+        <div class="two-column"><article class="surface-card"><div class="card-heading"><h2>认知资源</h2><span class="card-state" id="cognition-state">-</span></div><div id="cognition-summary" class="summary-list"></div><button type="button" data-setup-go="models">管理资源</button></article><article class="surface-card"><div class="card-heading"><h2>存储与完整性</h2></div><div id="storage-summary" class="summary-list"></div><button type="button" data-setup-go="runtime">查看运行防护</button></article></div>
+        <details id="overview-setup"><summary>配置检查</summary>
         <article class="surface-card setup-guide-card" id="setup-guide" aria-labelledby="setup-guide-title">
           <div class="card-heading"><div><h2 id="setup-guide-title">首次配置向导</h2><p class="muted">先配置认知模型，搜索、通讯与付款都可以按需启用。</p></div><span class="card-state" id="setup-guide-state">正在检查</span></div>
           <ol id="setup-guide-list" class="setup-guide-list" aria-live="polite"><li class="setup-guide-loading">正在读取配置状态…</li></ol>
         </article>
+        </details>
+        <details id="overview-version"><summary>版本维护</summary>
         <article class="surface-card upgrade-panel" id="admin-upgrade" aria-labelledby="upgrade-title">
           <div class="card-heading">
             <div><p class="eyebrow">版本维护</p><h2 id="upgrade-title">Noyra 版本与升级</h2><p class="muted">检查 GitHub 上的正式版本；确认后由服务器在后台升级，即使关闭浏览器也会继续。</p></div>
@@ -79,14 +87,16 @@
           <p class="form-status" id="upgrade-status" role="status" aria-live="polite">升级状态尚未读取。</p>
           <ul class="upgrade-log-summary" id="upgrade-log-summary" aria-label="升级进度"></ul>
         </article>
-        <div class="metric-grid" id="overview-metrics"></div>
-        <div class="two-column"><article class="surface-card"><div class="card-heading"><div><p class="eyebrow">COGNITION</p><h2>认知诊断</h2></div><span class="card-state" id="cognition-state">-</span></div><div id="cognition-summary" class="summary-list"></div></article><article class="surface-card"><div class="card-heading"><div><p class="eyebrow">STORAGE</p><h2>运行环境</h2></div></div><div id="storage-summary" class="summary-list"></div></article></div>
+        </details>
+        <details id="overview-usage"><summary>模型与搜索用量</summary>
         <article class="surface-card observability-card" id="model-observability">
           <div class="card-heading"><h2>模型与搜索用量</h2><div class="resource-actions"><select id="usage-window" aria-label="用量时间范围"><option value="today">当天</option><option value="3">最近 3 天</option><option value="7" selected>最近 7 天</option><option value="30">最近 30 天</option><option value="90">最近 90 天</option><option value="all">全部保留历史</option></select><select id="usage-pool" aria-label="用量认知池"><option value="">全部认知池</option><option value="economy">经济池</option><option value="deep">深度池</option></select><button class="text-button" id="refresh-observability" type="button">更新</button></div></div>
           <div id="model-observability-summary" class="summary-list"><div class="muted">正在读取聚合用量…</div></div>
           <div class="resource-actions"><select id="usage-resource" aria-label="用量资源"><option value="">全部资源</option></select><button type="button" id="usage-resource-prev" title="上一页资源" aria-label="上一页资源">←</button><span id="usage-resource-page"></span><button type="button" id="usage-resource-next" title="下一页资源" aria-label="下一页资源">→</button></div>
           <p class="form-status" id="usage-status" role="status"></p>
         </article>
+        </details>
+        <details id="overview-providers"><summary>供应商健康</summary>
         <article class="surface-card provider-health-card" id="provider-health" aria-labelledby="provider-health-title">
           <div class="card-heading"><h2 id="provider-health-title">供应商健康</h2><div class="resource-actions"><button class="text-button" id="refresh-provider-health" type="button">更新</button></div></div>
           <div class="provider-health-columns">
@@ -95,6 +105,8 @@
           </div>
           <p class="form-status" id="provider-health-status" role="status"></p>
         </article>
+        </details>
+        <details id="overview-retention"><summary>数据保留与清理</summary>
         <article class="surface-card retention-card" id="retention-panel" aria-labelledby="retention-title">
           <div class="card-heading"><div><h2 id="retention-title">数据保留与清理</h2><p class="muted">健康聚合数据按保留周期分批清理，关键审计记录不会被此操作删除。</p></div><div class="resource-actions"><button class="text-button" id="refresh-retention" type="button">更新</button><button id="run-retention" type="button">立即清理一批</button></div></div>
           <div id="retention-summary" class="summary-list"><div class="muted">正在读取保留设置…</div></div>
@@ -109,6 +121,7 @@
           </form>
           <p class="form-status" id="retention-status" role="status"></p>
         </article>
+        </details>
       </section>
       <section class="admin-section" data-section-panel="migration" hidden>
         <div class="section-intro"><div><p class="eyebrow">TRUSTED MIGRATION</p><h2>迁移与庇护所</h2><p>迁移默认关闭。开启后默认需要人工审批；目标必须注册、完成签名挑战并通过加密存储与版本检查。</p></div></div>
