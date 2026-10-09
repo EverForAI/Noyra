@@ -32,7 +32,7 @@ def test_wallet_acquisition_admin_surface_is_observable_and_read_only() -> None:
         assert marker in ADMIN_HTML
     for marker in (
         "/api/config/wallet-networks?limit=100",
-        "/api/config/wallet-balances?limit=100",
+        'readWalletPage("balances"',
         'readWalletPage("acquisitions"',
         "/api/admin/wallet-acquisition-budget?network_id=",
         "/api/admin/wallet-acquisitions/run",
@@ -54,7 +54,7 @@ def test_wallet_execution_admin_surface_can_start_and_manage_transfers() -> None
         assert marker in ADMIN_HTML
     for marker in (
         'data-wallet-order-action="execute"',
-        "/api/admin/wallet-orders/${encodeURIComponent(button.dataset.orderId)}/execute",
+        "/api/admin/wallet-orders/${encodeURIComponent(button.dataset.orderId)}/${action}",
         'data-wallet-execution-action="receipt"',
         'data-wallet-execution-action="retry"',
         'data-wallet-execution-action="refund"',

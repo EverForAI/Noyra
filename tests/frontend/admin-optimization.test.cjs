@@ -96,6 +96,49 @@ test("wallet page responses cannot repopulate a cleared session", async () => {
   assert.equal(sandbox.walletListPages.size,0);
 });
 
+test("wallet order controls recheck the selected page and require a confirmation", async () => {
+  const code=functionsBetween('$("#wallet-order-list").addEventListener("click"', '$("#admin-model-form").addEventListener');
+  for(const action of ["execute","confirm","reject","cancel"]){
+    const calls=[];
+    let handler;
+    const {sandbox}=context({walletOrders:[{order_id:"o",status:action==="execute"||action==="cancel" ? "reserved":"awaiting_confirmation",amount:"10",asset_id:"a",network_id:"n",recipient_address:"recipient"}],
+      $:()=>({addEventListener:(_event,fn)=>{handler=fn;}}),loadWalletEconomy:async options=>{calls.push(options);},
+      request:async path=>{calls.push(path);},walletRefreshAfterWrite:async()=>{},
+      walletAmount:()=>"10 ETH",confirm:()=>false,prompt:()=>"test reason",setStatus:()=>{},
+    });
+    vm.runInContext(code,sandbox);
+    const button={dataset:{walletOrderAction:action,orderId:"o"},disabled:false};
+    await handler({target:{closest:()=>button}});
+    assert.equal(calls.length,1);
+    assert.equal(calls[0].move,"current");
+    assert.equal(button.disabled,false);
+  }
+});
+
+test("wallet order controls reject changed state and submit only the confirmed action", async () => {
+  const code=functionsBetween('$("#wallet-order-list").addEventListener("click"', '$("#admin-model-form").addEventListener');
+  for(const action of ["execute","confirm","reject","cancel"]){
+    for(const changed of [true,false]){
+      const writes=[];
+      let handler;
+      const {sandbox}=context({walletOrders:[],
+        $:()=>({addEventListener:(_event,fn)=>{handler=fn;}}),
+        loadWalletEconomy:async()=>{sandbox.walletOrders=[{order_id:"o",status:changed ? "confirmed":(["execute","cancel"].includes(action) ? "reserved":"awaiting_confirmation"),amount:"10",asset_id:"a",network_id:"n",recipient_address:"recipient"}];},
+        request:async(path,options)=>{writes.push({path,options});},walletRefreshAfterWrite:async()=>{},
+        walletAmount:()=>"10 ETH",confirm:()=>true,prompt:()=>"test reason",setStatus:()=>{},
+      });
+      vm.runInContext(code,sandbox);
+      await handler({target:{closest:()=>({dataset:{walletOrderAction:action,orderId:"o"}})}});
+      assert.equal(writes.length,changed ? 0:1);
+      if(!changed){
+        assert.equal(writes[0].path,`/api/admin/wallet-orders/o/${action}`);
+        assert.equal(writes[0].options.method,"POST");
+        assert.deepEqual(JSON.parse(writes[0].options.body),["reject","cancel"].includes(action) ? {reason:"test reason"}:{});
+      }
+    }
+  }
+});
+
 test("overview reads only summary sources and preserves partial failure visibility", async () => {
   const paths = [];
   const { sandbox, nodes } = context({ request: async path => {

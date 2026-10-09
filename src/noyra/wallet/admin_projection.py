@@ -31,6 +31,7 @@ class WalletAdminProjection:
         "networks": ("wallet_networks", "network_id", "created_at"),
         "assets": ("wallet_assets", "asset_id", "created_at"),
         "addresses": ("wallet_addresses", "address_id", "created_at"),
+        "balances": ("wallet_balance_snapshots", "snapshot_id", "observed_at"),
         "acquisitions": ("wallet_balance_acquisition_runs", "run_id", "created_at"),
         "bounties": ("wallet_bounties", "bounty_id", "created_at"),
         "orders": ("wallet_payment_orders", "order_id", "created_at"),
@@ -108,6 +109,18 @@ class WalletAdminProjection:
                 if network_id is not None:
                     clauses.append("network_id=?")
                     values.append(network_id)
+                if kind == "balances":
+                    clauses.append(
+                        "NOT EXISTS (SELECT 1 FROM wallet_balance_snapshots newer "
+                        "WHERE newer.subject_id=wallet_balance_snapshots.subject_id "
+                        "AND newer.asset_id=wallet_balance_snapshots.asset_id "
+                        "AND newer.address_id=wallet_balance_snapshots.address_id "
+                        "AND newer.rowid<=? "
+                        "AND (newer.observed_at>wallet_balance_snapshots.observed_at OR "
+                        "(newer.observed_at=wallet_balance_snapshots.observed_at AND "
+                        "newer.snapshot_id>wallet_balance_snapshots.snapshot_id)))"
+                    )
+                    values.append(anchor)
                 where = " AND ".join(clauses)
                 total = int(
                     connection.execute(
@@ -198,6 +211,8 @@ class WalletAdminProjection:
             return asdict(WalletStore._asset_from_row(row))
         if kind == "addresses":
             return asdict(WalletStore._address_from_row(row))
+        if kind == "balances":
+            return asdict(WalletStore._balance_from_row(row))
         if kind == "acquisitions":
             WalletBalanceAcquisitionLedger._assert_run_hash(row)
             result = asdict(WalletBalanceAcquisitionLedger._run_from_row(row))

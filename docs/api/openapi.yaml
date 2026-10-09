@@ -929,7 +929,7 @@ paths:
           required: true
           schema:
             type: string
-            enum: [networks, assets, addresses, acquisitions, bounties, orders, executions, audits]
+            enum: [networks, assets, addresses, balances, acquisitions, bounties, orders, executions, audits]
         - name: limit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100, default: 25 }

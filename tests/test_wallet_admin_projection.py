@@ -16,6 +16,7 @@ from noyra.wallet import (
     WalletAddressInput,
     WalletAssetInput,
     WalletBalanceAcquisitionLedger,
+    WalletBalanceSnapshotInput,
     WalletNetworkInput,
     WalletStore,
 )
@@ -166,6 +167,55 @@ def test_registry_and_acquisition_pages_verify_records_and_exclude_leases(tmp_pa
         for kind in ("assets", "addresses", "acquisitions"):
             page = projection.page(kernel.subject_id, kind, network_id=network.network_id)
             assert page["total"] == 1
+        for index in range(3):
+            store.record_balance_snapshot(
+                kernel.subject_id,
+                WalletBalanceSnapshotInput(
+                    asset_id=asset.asset_id,
+                    address_id=address.address_id,
+                    balance=str(index),
+                    observed_at=f"2026-10-09T00:00:0{index}Z",
+                ),
+                actor="operator",
+            )
+        other_address = store.register_address(
+            kernel.subject_id,
+            WalletAddressInput(
+                network_id=network.network_id,
+                label="Other",
+                address="0x" + "b" * 40,
+            ),
+            actor="operator",
+        )
+        store.record_balance_snapshot(
+            kernel.subject_id,
+            WalletBalanceSnapshotInput(
+                asset_id=asset.asset_id,
+                address_id=other_address.address_id,
+                balance="0",
+                observed_at="2026-10-09T00:00:03Z",
+            ),
+            actor="operator",
+        )
+        first = projection.page(kernel.subject_id, "balances", limit=1)
+        assert first["total"] == 2
+        assert first["items"][0]["balance"] == "0"
+        store.record_balance_snapshot(
+            kernel.subject_id,
+            WalletBalanceSnapshotInput(
+                asset_id=asset.asset_id,
+                address_id=address.address_id,
+                balance="99",
+                observed_at="2026-10-09T00:00:04Z",
+            ),
+            actor="operator",
+        )
+        next_page = projection.page(
+            kernel.subject_id, "balances", limit=1, cursor=first["next_cursor"]
+        )
+        assert next_page["items"][0]["balance"] == "2"
+        assert not next_page["has_more"]
+        assert projection.page(kernel.subject_id, "balances")["items"][0]["balance"] == "99"
         page = projection.page(kernel.subject_id, "acquisitions", status="queued")
         assert page["items"][0]["run_id"] == run.run_id
         assert "claim_token" not in page["items"][0]
