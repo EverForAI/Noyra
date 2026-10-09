@@ -11,6 +11,18 @@ from .types import content_hash
 
 _SOURCES: ContextVar[tuple[str, ...]] = ContextVar("noyra_private_interaction_sources", default=())
 
+
+def assert_private_inputs_available(connection: Any) -> None:
+    for interaction_id in _SOURCES.get():
+        state = connection.execute(
+            "SELECT c.status FROM private_conversation_messages m JOIN private_conversations c "
+            "ON c.conversation_id=m.conversation_id WHERE m.interaction_id=?",
+            (interaction_id,),
+        ).fetchone()
+        if state is not None and state[0] in {"deleting", "deleted"}:
+            raise PermissionError("private input has been withdrawn")
+
+
 MIGRATION_V86 = """
 CREATE TABLE IF NOT EXISTS private_model_sources (
  call_id TEXT NOT NULL REFERENCES model_calls(call_id),

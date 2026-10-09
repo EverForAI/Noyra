@@ -343,6 +343,10 @@ def current_lease() -> OperationLease | None:
     return _CURRENT_LEASE.get()
 
 
+def is_accounting_scope() -> bool:
+    return _ALLOW_UNFENCED_COMMITS.get()
+
+
 @contextmanager
 def accounting_scope() -> Iterator[None]:
     """Allow terminal accounting to settle after an operation is fenced.

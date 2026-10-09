@@ -782,6 +782,9 @@ class EncryptedBackupManager:
             tar_path.unlink(missing_ok=True)
             self._verify_manifest(restored)
             self._verify_database(restored / "noyra.sqlite3")
+            from noyra.interaction.erasure import replay_privacy_deletions
+
+            replay_privacy_deletions(self.data_root, restored)
             _harden_tree(restored)
             if target.exists():
                 target.rmdir()

@@ -122,12 +122,15 @@ class InteractionIntegrity:
                             raise IntegrityError("conversation reply window mismatch")
 
             for source in connection.execute(
-                "SELECT s.*, i.content_hash, i.subject_id AS interaction_subject, "
+                "SELECT s.*, COALESCE(r.original_hash,i.content_hash) AS content_hash, "
+                "i.subject_id AS interaction_subject, "
                 "m.conversation_id AS linked_window, c.subject_id AS call_subject "
                 "FROM private_model_sources s LEFT JOIN interactions i "
                 "ON i.interaction_id=s.interaction_id LEFT JOIN model_calls c "
                 "ON c.call_id=s.call_id LEFT JOIN private_conversation_messages m "
-                "ON m.interaction_id=s.interaction_id WHERE s.subject_id=?",
+                "ON m.interaction_id=s.interaction_id LEFT JOIN private_erasure_receipts r "
+                "ON r.record_table='interactions' AND r.record_id=i.interaction_id "
+                "WHERE s.subject_id=?",
                 (subject_id,),
             ):
                 expected = content_hash(

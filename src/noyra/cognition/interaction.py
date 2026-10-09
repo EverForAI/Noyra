@@ -72,14 +72,20 @@ class InteractionCognition:
         if not acquired:
             return "interaction_in_progress"
         try:
-            return await self._run_due_locked()
+            interaction = self._due_interaction()
+            if interaction is None:
+                return None
+            messages = self._messages(interaction)
+            with private_input_scope(self._private_sources):
+                return await self._run_due_locked(interaction, messages)
+        except PermissionError:
+            return "interaction_private_input_withdrawn"
         finally:
             self._processing_lock.release()
 
-    async def _run_due_locked(self) -> str | None:
-        interaction = self._due_interaction()
-        if interaction is None:
-            return None
+    async def _run_due_locked(
+        self, interaction: InteractionRecord, messages: tuple[ModelMessage, ...]
+    ) -> str | None:
         round_number = self._decision_count(interaction.interaction_id)
         purpose = f"interaction_cognition:{interaction.interaction_id}:{round_number}"
         proposal = self._successful_proposal(purpose, interaction)
@@ -89,7 +95,6 @@ class InteractionCognition:
             if calls_today >= self.settings.max_interaction_model_calls_per_day:
                 return None
             try:
-                messages = self._messages(interaction)
                 with private_input_scope(self._private_sources):
                     result = await self.gateway.complete_structured(
                         self.subject_id,
@@ -217,6 +222,10 @@ class InteractionCognition:
                 "LEFT JOIN interaction_inbound_events e "
                 "ON e.interaction_id = i.interaction_id "
                 "WHERE i.subject_id = ? AND i.direction = 'incoming' AND "
+                "NOT EXISTS(SELECT 1 FROM private_conversation_messages m "
+                "JOIN private_conversations c ON c.conversation_id=m.conversation_id "
+                "WHERE m.interaction_id=i.interaction_id "
+                "AND c.status IN ('deleting','deleted')) AND "
                 "(i.status = 'offered' OR (i.status = 'deferred' AND i.decided_at <= ?)) "
                 "ORDER BY COALESCE(e.scheduling_priority, 0) DESC, "
                 "i.created_at, i.interaction_id LIMIT 1",

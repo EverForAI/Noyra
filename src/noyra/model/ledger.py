@@ -138,6 +138,13 @@ class ModelLedger:
         budget_day = budget_day or utc_now()[:10]
         with self.database.transaction() as connection:
             call = self._get_call_row(connection, call_id)
+            if connection.execute(
+                "SELECT 1 FROM private_model_sources s JOIN private_conversations c "
+                "ON c.conversation_id=s.conversation_id WHERE s.call_id=? "
+                "AND c.status IN ('deleting','deleted') LIMIT 1",
+                (call_id,),
+            ).fetchone():
+                raise ModelCallStateError("private source has been withdrawn")
             if call["status"] == "executing" and continuation:
                 previous = connection.execute(
                     "SELECT status FROM model_attempts WHERE call_id = ? "
@@ -153,10 +160,14 @@ class ModelLedger:
             group_id = call["resource_group_id"]
             if resource_group_id is not None and resource_group_id != group_id:
                 raise ModelCallStateError("model attempt resource group does not match its call")
-            group_exists = group_id is not None and connection.execute(
-                "SELECT 1 FROM cognitive_resource_groups WHERE group_id=? AND subject_id=?",
-                (group_id, call["subject_id"]),
-            ).fetchone() is not None
+            group_exists = (
+                group_id is not None
+                and connection.execute(
+                    "SELECT 1 FROM cognitive_resource_groups WHERE group_id=? AND subject_id=?",
+                    (group_id, call["subject_id"]),
+                ).fetchone()
+                is not None
+            )
             if expected_resource_revision is not None and not group_exists:
                 raise ModelCallStateError("model resource is unavailable")
             if group_exists:
@@ -294,6 +305,13 @@ class ModelLedger:
     def start_attempt(self, attempt_id: str) -> AttemptRecord:
         with self.database.transaction() as connection:
             row = self._get_attempt_row(connection, attempt_id)
+            if connection.execute(
+                "SELECT 1 FROM private_model_sources s JOIN private_conversations c "
+                "ON c.conversation_id=s.conversation_id WHERE s.call_id=? "
+                "AND c.status IN ('deleting','deleted') LIMIT 1",
+                (row["call_id"],),
+            ).fetchone():
+                raise ModelCallStateError("private source has been withdrawn")
             if row["status"] != "authorized":
                 raise ModelCallStateError(f"cannot start model attempt in state {row['status']}")
             connection.execute(
@@ -356,6 +374,16 @@ class ModelLedger:
             raise ValueError("successful model call requires a response")
         with accounting_scope(), self.database.transaction() as connection:
             row = self._get_call_row(connection, call_id)
+            if connection.execute(
+                "SELECT 1 FROM private_model_sources s JOIN private_conversations c "
+                "ON c.conversation_id=s.conversation_id WHERE s.call_id=? "
+                "AND c.status IN ('deleting','deleted') LIMIT 1",
+                (call_id,),
+            ).fetchone():
+                from noyra.interaction.erasure import ERASED_MODEL
+
+                response = ERASED_MODEL
+                error_code = "private_content_erased"
             allowed = {"executing"}
             if status == "failed":
                 allowed.add("prepared")

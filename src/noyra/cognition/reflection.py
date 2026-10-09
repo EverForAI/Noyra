@@ -149,6 +149,10 @@ class SleepReflectionCognition:
                 "rationale, "
                 "status, created_at, decided_at FROM interactions WHERE subject_id = ? "
                 "AND created_at > ? AND created_at <= ? "
+                "AND NOT EXISTS(SELECT 1 FROM private_conversation_messages m "
+                "JOIN private_conversations c ON c.conversation_id=m.conversation_id "
+                "WHERE m.interaction_id=interactions.interaction_id "
+                "AND c.status IN ('deleting','deleted')) "
                 "ORDER BY created_at DESC, interaction_id DESC LIMIT 8",
                 (self.subject_id, lower_bound, run.started_at),
             ).fetchall()
