@@ -9195,19 +9195,34 @@ class NoyraHTTPServer:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_inbound_binding"})
                     return
                 binding_id, operation = parts
+                if operation == "unlink":
+                    try:
+                        owner.inbound.unlink_private_chat(owner.kernel.subject_id, binding_id)
+                    except NotFoundError:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "inbound_binding_not_found"})
+                        return
+                    self._json(HTTPStatus.OK, {"status": "unlinked"})
+                    return
                 if operation == "route":
                     try:
                         conversation_id = payload.get("conversation_id")
                         share = payload.get("share_web_history")
-                        if not isinstance(conversation_id, str) or type(share) is not bool:
+                        push = payload.get("push_web_replies", False)
+                        if (
+                            not isinstance(conversation_id, str)
+                            or type(share) is not bool
+                            or type(push) is not bool
+                        ):
                             raise ValueError("invalid conversation route")
                         owner.inbound.route_private_chat(
                             owner.kernel.subject_id,
                             binding_id,
                             conversation_id,
                             share_web_history=share,
+                            push_web_replies=push,
+                            expected_revision=payload.get("expected_revision"),
                         )
-                    except (ValueError, TypeError, NotFoundError):
+                    except (ValueError, TypeError, NotFoundError, sqlite3.IntegrityError):
                         self._json(HTTPStatus.CONFLICT, {"error": "private_chat_route_unavailable"})
                         return
                     self._json(HTTPStatus.OK, {"status": "linked"})

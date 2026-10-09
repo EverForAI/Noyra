@@ -187,3 +187,71 @@ CREATE TRIGGER IF NOT EXISTS validate_private_channel_route_update
  AND c.conversation_id=NEW.conversation_id AND c.status='active')
  BEGIN SELECT RAISE(ABORT,'private route subject mismatch'); END;
 """
+
+PRIVATE_ROUTE_PUSH_COLUMNS = {
+    "push_web_replies": "INTEGER NOT NULL DEFAULT 0 CHECK(push_web_replies IN (0,1))",
+    "revision": "INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1)",
+    "push_since": "TEXT",
+    "push_after_sequence": "INTEGER NOT NULL DEFAULT 0 CHECK(push_after_sequence>=0)",
+}
+
+MIGRATION_V90 = """
+CREATE TABLE IF NOT EXISTS private_message_sequences (
+ sequence INTEGER PRIMARY KEY,
+ interaction_id TEXT NOT NULL UNIQUE REFERENCES interactions(interaction_id)
+);
+INSERT INTO private_message_sequences(interaction_id)
+ SELECT i.interaction_id FROM interactions i
+ WHERE NOT EXISTS(SELECT 1 FROM private_message_sequences s WHERE s.interaction_id=i.interaction_id)
+ ORDER BY i.created_at,i.interaction_id;
+CREATE TRIGGER IF NOT EXISTS allocate_private_message_sequence AFTER INSERT ON interactions
+ BEGIN INSERT INTO private_message_sequences(interaction_id) VALUES(NEW.interaction_id); END;
+CREATE TRIGGER IF NOT EXISTS prevent_private_message_sequence_update
+ BEFORE UPDATE ON private_message_sequences
+ BEGIN SELECT RAISE(ABORT,'private sequence is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS prevent_private_message_sequence_delete
+ BEFORE DELETE ON private_message_sequences
+ BEGIN SELECT RAISE(ABORT,'private sequence is immutable'); END;
+DROP TRIGGER IF EXISTS validate_private_channel_route_update;
+CREATE TRIGGER validate_private_channel_route_update BEFORE UPDATE ON private_channel_routes
+ WHEN NEW.binding_id!=OLD.binding_id OR NEW.subject_id!=OLD.subject_id
+ OR NEW.revision<=OLD.revision
+ OR NOT EXISTS(SELECT 1 FROM private_conversations c WHERE c.subject_id=NEW.subject_id
+ AND c.conversation_id=NEW.conversation_id AND (c.status='active'
+ OR (NEW.push_web_replies=0 AND NEW.share_web_history=0)))
+ BEGIN SELECT RAISE(ABORT,'private route subject or generation mismatch'); END;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_private_route_push_window
+ ON private_channel_routes(subject_id,conversation_id)
+ WHERE push_web_replies=1;
+CREATE TABLE IF NOT EXISTS private_web_deliveries (
+ delivery_id TEXT PRIMARY KEY REFERENCES interaction_deliveries(delivery_id),
+ binding_id TEXT NOT NULL REFERENCES interaction_bindings(binding_id),
+ conversation_id TEXT NOT NULL REFERENCES private_conversations(conversation_id),
+ route_revision INTEGER NOT NULL CHECK(route_revision >= 1)
+);
+CREATE TRIGGER IF NOT EXISTS validate_private_web_delivery_insert
+ BEFORE INSERT ON private_web_deliveries
+ WHEN NOT EXISTS(SELECT 1 FROM interaction_deliveries d
+ JOIN interactions i ON i.interaction_id=d.interaction_id
+ JOIN private_conversation_messages m ON m.interaction_id=i.interaction_id
+ JOIN private_channel_routes r ON r.binding_id=NEW.binding_id
+ JOIN interaction_bindings b ON b.binding_id=r.binding_id
+ JOIN private_conversations c ON c.conversation_id=m.conversation_id
+ WHERE d.delivery_id=NEW.delivery_id AND d.subject_id=i.subject_id
+ AND r.subject_id=d.subject_id AND b.subject_id=d.subject_id AND c.subject_id=d.subject_id
+ AND m.subject_id=d.subject_id AND b.transport_id=d.transport_id AND b.status='active'
+ AND r.conversation_id=c.conversation_id AND c.conversation_id=NEW.conversation_id
+ AND r.revision=NEW.route_revision AND r.push_web_replies=1 AND r.share_web_history=1
+ AND c.status='active' AND m.author_verified=1 AND i.channel='web'
+ AND EXISTS(SELECT 1 FROM inbound_identity_challenges x WHERE x.binding_id=b.binding_id
+ AND x.status='confirmed' AND x.subject_id=d.subject_id)
+ AND i.direction='outgoing' AND EXISTS(SELECT 1 FROM private_message_sequences s
+ WHERE s.interaction_id=i.interaction_id AND s.sequence>r.push_after_sequence))
+ BEGIN SELECT RAISE(ABORT,'private push authorization mismatch'); END;
+CREATE TRIGGER IF NOT EXISTS prevent_private_web_delivery_update
+ BEFORE UPDATE ON private_web_deliveries
+ BEGIN SELECT RAISE(ABORT,'private push consent is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS prevent_private_web_delivery_delete
+ BEFORE DELETE ON private_web_deliveries
+ BEGIN SELECT RAISE(ABORT,'private push consent is audit evidence'); END;
+"""

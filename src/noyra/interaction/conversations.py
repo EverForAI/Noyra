@@ -302,6 +302,17 @@ class ConversationStore:
                     ),
                 ).fetchone()
                 item["model_call_status"] = call[0] if call else None
+                deliveries = connection.execute(
+                    "SELECT d.status,r.outcome AS reconciled FROM interaction_deliveries d "
+                    "LEFT JOIN interaction_delivery_reconciliations r "
+                    "ON r.delivery_id=d.delivery_id "
+                    "AND r.outcome IN ('delivered','failed','cancelled') WHERE d.subject_id=? "
+                    "AND d.interaction_id=? LIMIT 10",
+                    (subject_id, item["interaction_id"]),
+                ).fetchall()
+                item["delivery_statuses"] = [
+                    row["reconciled"] or row["status"] for row in deliveries
+                ]
         return {
             "conversation": state,
             "items": items,

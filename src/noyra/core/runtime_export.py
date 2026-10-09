@@ -651,6 +651,11 @@ _OWNERSHIP_GRAPHS[89] = {
     "inbound_identity_challenges": _subject_rule(),
     "private_channel_routes": _subject_rule(),
 }
+_OWNERSHIP_GRAPHS[90] = {
+    **_OWNERSHIP_GRAPHS[89],
+    "private_web_deliveries": _parent_rule("interaction_deliveries", "delivery_id", "delivery_id"),
+    "private_message_sequences": _parent_rule("interactions", "interaction_id", "interaction_id"),
+}
 
 
 @dataclass(frozen=True)

@@ -30,7 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
-from noyra.core.types import content_hash, new_id, utc_now
+from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 
 from .store import InteractionStore
 
@@ -1113,17 +1113,34 @@ class InboundStore:
             return binding_id
 
     def route_private_chat(
-        self, subject_id: str, binding_id: str, conversation_id: str, *, share_web_history: bool
+        self,
+        subject_id: str,
+        binding_id: str,
+        conversation_id: str,
+        *,
+        share_web_history: bool,
+        push_web_replies: bool = False,
+        expected_revision: int | None = None,
     ) -> None:
         from .conversations import WEB_PRINCIPAL, _row
 
-        if type(share_web_history) is not bool:
+        if type(share_web_history) is not bool or type(push_web_replies) is not bool:
             raise ValueError("explicit history scope is required")
         with self.database.transaction() as connection:
+            route = connection.execute(
+                "SELECT revision FROM private_channel_routes WHERE subject_id=? AND binding_id=?",
+                (subject_id, binding_id),
+            ).fetchone()
+            if expected_revision is not None and (
+                type(expected_revision) is not int
+                or expected_revision != (route[0] if route else 0)
+            ):
+                raise ValueError("private route revision changed")
             binding = connection.execute(
                 "SELECT b.channel FROM interaction_bindings b JOIN inbound_identity_challenges c "
-                "ON c.binding_id=b.binding_id WHERE b.subject_id=? AND b.binding_id=? "
-                "AND b.status='active' AND c.status='confirmed'",
+                "ON c.binding_id=b.binding_id JOIN interaction_transports t "
+                "ON t.transport_id=b.transport_id WHERE b.subject_id=? AND b.binding_id=? "
+                "AND b.status='active' AND c.status='confirmed' AND t.status='active'",
                 (subject_id, binding_id),
             ).fetchone()
             window = _row(connection, subject_id, conversation_id)
@@ -1135,11 +1152,67 @@ class InboundStore:
                 or window["principal_id"] != WEB_PRINCIPAL
             ):
                 raise ValueError("verified private identity and explicit history consent required")
+            now = utc_now()
+            sequence = connection.execute(
+                "SELECT COALESCE(MAX(s.sequence),0) FROM private_message_sequences s "
+                "JOIN interactions i ON i.interaction_id=s.interaction_id WHERE i.subject_id=?",
+                (subject_id,),
+            ).fetchone()[0]
             connection.execute(
-                "INSERT INTO private_channel_routes VALUES(?,?,?,?,?) ON CONFLICT(binding_id) "
+                "INSERT INTO private_channel_routes(binding_id,subject_id,conversation_id,"
+                "share_web_history,updated_at,push_web_replies,revision,push_since,"
+                "push_after_sequence) VALUES(?,?,?,?,?,?,1,?,?) ON CONFLICT(binding_id) "
                 "DO UPDATE SET conversation_id=excluded.conversation_id,"
-                "share_web_history=excluded.share_web_history,updated_at=excluded.updated_at",
-                (binding_id, subject_id, conversation_id, 1, utc_now()),
+                "share_web_history=excluded.share_web_history,updated_at=excluded.updated_at,"
+                "push_web_replies=excluded.push_web_replies,revision=revision+1,"
+                "push_since=excluded.push_since,push_after_sequence=excluded.push_after_sequence",
+                (
+                    binding_id,
+                    subject_id,
+                    conversation_id,
+                    1,
+                    now,
+                    int(push_web_replies),
+                    now if push_web_replies else None,
+                    sequence,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO audit_records VALUES(?,?,'private_route_changed','operator',?,?)",
+                (
+                    new_id("audit"),
+                    subject_id,
+                    canonical_json(
+                        {"binding_id": binding_id, "push_web_replies": push_web_replies}
+                    ),
+                    now,
+                ),
+            )
+
+    def unlink_private_chat(self, subject_id: str, binding_id: str) -> None:
+        with self.database.transaction() as connection:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM interaction_bindings WHERE subject_id=? AND binding_id=?",
+                    (subject_id, binding_id),
+                ).fetchone()
+                is None
+            ):
+                raise NotFoundError("binding not found")
+            connection.execute(
+                "UPDATE private_channel_routes SET share_web_history=0,push_web_replies=0,"
+                "push_since=NULL,revision=revision+1,updated_at=? "
+                "WHERE subject_id=? AND binding_id=?",
+                (utc_now(), subject_id, binding_id),
+            )
+            connection.execute(
+                "INSERT INTO audit_records VALUES(?,?,'private_route_unlinked','operator',?,?)",
+                (
+                    new_id("audit"),
+                    subject_id,
+                    canonical_json({"binding_id": binding_id}),
+                    utc_now(),
+                ),
             )
 
     def _observe_identity(self, envelope: InboundEnvelope) -> InboundIdentityObserved | None:
@@ -1477,7 +1550,7 @@ class InboundStore:
         bounded = max(1, min(int(limit), 1_000))
         with self.database.connection() as connection:
             rows = connection.execute(
-                "SELECT b.*,r.conversation_id,r.share_web_history,"
+                "SELECT b.*,r.conversation_id,r.share_web_history,r.push_web_replies,r.revision,"
                 "EXISTS(SELECT 1 FROM inbound_identity_challenges c "
                 "WHERE c.binding_id=b.binding_id "
                 "AND c.status='confirmed') AS identity_verified "
@@ -1559,6 +1632,12 @@ class InboundStore:
                 "WHERE binding_id = ? AND subject_id = ?",
                 (status, utc_now(), binding_id, subject_id),
             )
+            if status != "active":
+                connection.execute(
+                    "UPDATE private_channel_routes SET push_web_replies=0,push_since=NULL,"
+                    "revision=revision+1,share_web_history=0 WHERE binding_id=? AND subject_id=?",
+                    (binding_id, subject_id),
+                )
         return {
             "binding_id": binding_id,
             "transport_id": row["transport_id"],

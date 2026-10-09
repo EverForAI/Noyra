@@ -630,7 +630,8 @@ function renderChatMessages() {
     const mine=row.direction==="incoming" && row.channel==="web" && row.author_verified;
     const author=row.direction==="outgoing" ? "Noyra" : mine?"我":row.channel==="web"?"历史网页访客（作者未确认）":`${row.channel} · ${row.counterparty}`;
     const progress=["offered","deferred"].includes(row.status)?({executing:"模型调用中",prepared:"模型调用已准备",failed:"最近调用失败，等待后续处理",unknown:"调用结果未知，等待核对"}[row.model_call_status]||chatStatus[row.status]):chatStatus[row.status];
-    return heading+`<article class="chat-message ${mine?"mine":""}"><small>${esc(author)} · ${esc(formatTimestamp(row.created_at))}</small><p>${esc(row.content)}</p><small>${esc(progress||row.status)}${row.related_interaction_id?" · 回复关联原消息":""}</small><button data-copy-message="${esc(row.interaction_id)}" title="复制消息" type="button">复制</button></article>`;
+    const delivery=(row.delivery_statuses || []).map(status=>({queued:"等待平台投递",sending:"平台投递中",delivered:"平台已接收",failed:"平台投递失败",unknown:"平台投递结果未知，需核对",cancelled:"平台投递已取消"}[status] || "未知投递状态")).join("、");
+    return heading+`<article class="chat-message ${mine?"mine":""}"><small>${esc(author)} · ${esc(formatTimestamp(row.created_at))}</small><p>${esc(row.content)}</p><small>${esc(progress||row.status)}${row.related_interaction_id?" · 回复关联原消息":""}${delivery ? " · "+esc(delivery):""}</small><button data-copy-message="${esc(row.interaction_id)}" title="复制消息" type="button">复制</button></article>`;
   }).join("") || '<p class="muted">暂无消息</p>';
 }
 async function loadChatMessages({older=false}={}) {
@@ -1404,23 +1405,29 @@ async function loadSearchProviders() {
 }
 async function loadCapabilities() { const rows = await request("/api/config/capabilities"); $("#capability-list").innerHTML = rows.length ? rows.map((item) => { const scope = item.scope?.public_https ? "所有经过安全边界的公网 HTTPS 来源" : JSON.stringify(item.scope || {}); const canRevoke = item.status === "active"; return `<article class="resource-item"><div><h3>${esc(item.capability_type)} · ${esc(item.effective_status || item.status)}</h3><p>${esc(scope)}</p><small>签发者：${esc(item.issuer)} · 每小时：${esc(item.rate_limit_per_hour)} · ${esc(item.expires_at || "长期")}</small></div>${canRevoke ? `<button data-capability-action="revoke" data-id="${esc(item.grant_id)}" type="button">撤销</button>` : ""}</article>`; }).join("") : '<div class="muted">暂无能力授权</div>'; }
 async function loadChannels() {
+  const session=csrfToken;
   const [transports, bindings] = await Promise.all([request("/api/config/transports"), request("/api/config/inbound-bindings")]);
+  if(!session || session!==csrfToken)return;
   const transportMap = new Map(transports.map((item) => [item.transport_id, item]));
   $("#admin-binding-transport").innerHTML = transports.filter((item) => item.status === "active").map((item) => `<option value="${esc(item.transport_id)}">${esc(item.channel)} · ${esc(item.label)}</option>`).join("") || '<option value="">先添加渠道</option>';
   const selected = $("#qq-identity-transport").value;
   $("#qq-identity-transport").innerHTML = transports.filter(item => item.channel === "qq" && item.status === "active").map(item => `<option value="${esc(item.transport_id)}">${esc(item.label)}</option>`).join("") || '<option value="">尚无启用的 QQ 机器人</option>';
   if ([...$("#qq-identity-transport").options].some(option => option.value === selected)) $("#qq-identity-transport").value = selected;
   $("#channel-list").innerHTML = transports.length ? transports.map((item) => `<article class="resource-item"><div><h3>${esc(item.label)}</h3><p>${esc(item.channel)} · ${esc(item.status)}</p><small>${esc(item.endpoint)}</small></div><div class="resource-actions">${item.status === "active" ? `<button data-channel-action="disable" data-id="${esc(item.transport_id)}" type="button">停用</button>` : item.status === "disabled" ? `<button data-channel-action="enable" data-id="${esc(item.transport_id)}" type="button">启用</button>` : ""}</div></article>`).join("") : '<div class="muted">尚未配置通讯渠道</div>';
-  $("#binding-list").innerHTML = bindings.length ? bindings.map((item) => `<article class="resource-item"><div><h3>${esc(item.label || item.external_sender_id)}</h3><p>${esc(item.channel)} · ${esc(item.role)} · ${esc(item.status)}</p><small>${esc(item.external_account_id)} / ${esc(item.external_sender_id)}</small></div><div class="resource-actions">${item.status === "active" ? `<button data-binding-action="disable" data-id="${esc(item.binding_id)}" type="button">停用</button>` : item.status === "disabled" ? `<button data-binding-action="enable" data-id="${esc(item.binding_id)}" type="button">启用</button>` : ""}</div></article>`).join("") : '<div class="muted">暂无入站账号绑定</div>';
+  channelBindings = bindings;
+  $("#binding-list").innerHTML = bindings.length ? bindings.map((item) => `<article class="resource-item"><div><h3>${esc(item.label || item.external_sender_id)}</h3><p>${esc(item.channel)} · ${{creator:"创建者",participant:"参与者"}[item.role] || "未知角色"} · ${{active:"已准入",disabled:"已停用",revoked:"已解绑"}[item.status] || "未知状态"}</p><p>${item.identity_verified ? "身份已验证" : "手动准入"} · ${item.share_web_history ? "网页历史已关联" : "网页历史未共享"} · ${item.push_web_replies ? "新网页回复推送已开启" : "网页回复推送关闭"}</p><details><summary>平台标识</summary><small>${esc(item.external_account_id)} / ${esc(item.external_sender_id)}</small></details></div><div class="resource-actions">${item.status === "active" ? `<button data-binding-action="disable" data-id="${esc(item.binding_id)}" type="button">停用</button>${item.identity_verified ? `<button data-binding-route="${esc(item.binding_id)}" type="button">设置聊天关联</button>` : ""}${item.share_web_history ? `<button data-binding-action="unlink" data-id="${esc(item.binding_id)}" type="button">取消历史共享</button>` : ""}` : item.status === "disabled" ? `<button data-binding-action="enable" data-id="${esc(item.binding_id)}" type="button">启用</button>` : ""}${item.status !== "revoked" ? `<button data-binding-action="revoke" data-id="${esc(item.binding_id)}" type="button">解绑账号</button>` : ""}</div></article>`).join("") : '<div class="muted">暂无允许聊天的账号</div>';
   void transportMap;
 }
 let qqIdentity = null;
+let channelBindings = [];
 function clearQQIdentity() {
   qqIdentity = null;
   $("#qq-identity-summary").replaceChildren();
   $("#qq-identity-challenge").hidden = true;
   $("#qq-chat-route-form").hidden = true;
   $("#qq-share-history").checked = false;
+  $("#qq-push-web-replies").checked = false;
+  $("#qq-identity-status").textContent="";
 }
 async function checkQQIdentity() {
   if (!qqIdentity) return;
@@ -2016,7 +2023,7 @@ $("#qq-identity-confirm").addEventListener("click",async event => {
   try {
     const result=await request(`/api/config/identity-challenges/${encodeURIComponent(identity.challenge_id)}/confirm`,{method:"POST",body:JSON.stringify({label:"我的 QQ"})});
     if(qqIdentity!==identity || !csrfToken)return;
-    identity.binding_id=result.binding_id;$("#qq-identity-summary").replaceChildren();
+    identity.binding_id=result.binding_id;identity.revision=0;$("#qq-identity-summary").replaceChildren();
     setStatus("#qq-identity-status","身份已确认；网页历史共享尚未开启");
     const page=await request("/api/admin/conversations?limit=100");
     if(qqIdentity!==identity || !csrfToken)return;
@@ -2027,13 +2034,39 @@ $("#qq-identity-confirm").addEventListener("click",async event => {
 $("#qq-chat-route-form").addEventListener("submit",async event => {
   event.preventDefault();if(!qqIdentity?.binding_id)return;const button=submitButton(event.currentTarget,event);button.disabled=true;
   try {
-    await request(`/api/config/inbound-bindings/${encodeURIComponent(qqIdentity.binding_id)}/route`,{method:"POST",body:JSON.stringify({conversation_id:$("#qq-chat-window").value,share_web_history:$("#qq-share-history").checked,reason:"operator verified private history association"})});
-    setStatus("#qq-identity-status","后续 QQ 私聊已同步到选定会话；QQ 回复回到原 QQ，网页回复保留在网页");await loadChannels();
+    const push = $("#qq-push-web-replies").checked;
+    if(push && !window.confirm("将此窗口今后产生的 Noyra 网页回复发送到已验证 QQ 私聊；不补发历史。平台可能拒绝主动消息，已发送的第三方副本无法撤回。继续吗？")) return;
+    await request(`/api/config/inbound-bindings/${encodeURIComponent(qqIdentity.binding_id)}/route`,{method:"POST",body:JSON.stringify({conversation_id:$("#qq-chat-window").value,share_web_history:$("#qq-share-history").checked,push_web_replies:push,expected_revision:qqIdentity.revision ?? 0,reason:"operator verified private history association"})});
+    if(!qqIdentity || !csrfToken)return;
+    qqIdentity.revision=(qqIdentity.revision ?? 0)+1;
+    setStatus("#qq-identity-status",push ? "聊天关联已保存，新网页回复推送已开启" : "聊天关联已保存，网页回复推送关闭");
+    try {await loadChannels();} catch {setStatus("#qq-identity-status","关联已保存；联系人刷新失败",true);}
   } catch(error) {setStatus("#qq-identity-status",errorText(error),true);} finally {button.disabled=false;}
 });
 $("#admin-binding-form").addEventListener("submit", async (event) => { event.preventDefault(); const form = event.currentTarget; const button = submitButton(form, event); if (button) button.disabled = true; try { await request("/api/config/inbound-bindings", { method: "POST", body: JSON.stringify({ transport_id: $("#admin-binding-transport").value, external_account_id: $("#admin-binding-account").value.trim(), external_sender_id: $("#admin-binding-sender").value.trim(), role: $("#admin-binding-role").value, label: $("#admin-binding-label").value.trim() }) }); form.reset(); setStatus("#binding-status", "入站账号已绑定"); await loadChannels(); } catch (error) { setStatus("#binding-status", errorText(error), true); } finally { if (button) button.disabled = false; } });
 $("#channel-list").addEventListener("click", async (event) => { const button = event.target.closest("[data-channel-action]"); if (!button) return; button.disabled = true; try { const operation = button.dataset.channelAction; await request(`/api/config/transports/${button.dataset.id}/${operation}`, { method: "POST", body: JSON.stringify({ reason: `admin ${operation} transport` }) }); await loadChannels(); } catch (error) { setStatus("#channel-status", errorText(error), true); } finally { button.disabled = false; } });
-$("#binding-list").addEventListener("click", async (event) => { const button = event.target.closest("[data-binding-action]"); if (!button) return; button.disabled = true; try { const operation = button.dataset.bindingAction; await request(`/api/config/inbound-bindings/${button.dataset.id}/${operation}`, { method: "POST", body: JSON.stringify({ reason: `admin ${operation} inbound binding` }) }); await loadChannels(); } catch (error) { setStatus("#binding-status", errorText(error), true); } finally { button.disabled = false; } });
+$("#binding-list").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-binding-action], [data-binding-route]"); if (!button) return; button.disabled = true;
+  try {
+    if(button.dataset.bindingRoute) {
+      const binding = channelBindings.find(item=>item.binding_id===button.dataset.bindingRoute);
+      if(!binding)return;
+      clearQQIdentity(); const identity = {binding_id:binding.binding_id,revision:binding.revision ?? 0}; qqIdentity=identity;
+      const page = await request("/api/admin/conversations?limit=100");
+      if(qqIdentity!==identity || !csrfToken)return;
+      $("#qq-chat-window").innerHTML=page.items.filter(item=>item.principal_id==="operator:web-user").map(item=>`<option value="${esc(item.conversation_id)}">${esc(item.title)}</option>`).join("");
+      if(binding.conversation_id)$("#qq-chat-window").value=binding.conversation_id;
+      $("#qq-share-history").checked=Boolean(binding.share_web_history);$("#qq-push-web-replies").checked=Boolean(binding.push_web_replies);
+      $("#qq-chat-route-form").hidden=false; $("#qq-chat-route-form").scrollIntoView({block:"nearest"});
+      return;
+    }
+    const operation=button.dataset.bindingAction;
+    if(["revoke","unlink"].includes(operation) && !window.confirm(operation==="revoke" ? "解绑后此账号无法发送新消息，尚未外发的回复将停止投递。重新接入需要再次验证。继续吗？" : "取消关联会停止历史共享和网页回复推送，已有消息保留。继续吗？"))return;
+    await request(`/api/config/inbound-bindings/${encodeURIComponent(button.dataset.id)}/${operation}`,{method:"POST",body:JSON.stringify({reason:`admin ${operation} inbound binding`})});
+    clearQQIdentity();setStatus("#binding-status","联系人设置已更新");
+    try {await loadChannels();} catch {setStatus("#binding-status","设置已更新；列表刷新失败",true);}
+  } catch(error) {setStatus("#binding-status",errorText(error),true);} finally {button.disabled=false;}
+});
 $("#refresh-channels").addEventListener("click", loadChannels);
 $("#model-list").addEventListener("click", async (event) => {
   const button = event.target.closest("[data-model-action]"); if (!button) return;

@@ -2078,6 +2078,7 @@ paths:
     get:
       tags: [configuration]
       operationId: listInboundBindings
+      description: Verified identity, route generation, history sharing and new web reply push state. No credential values.
       security: [{ operatorBearer: [] }]
       responses:
         '200': { $ref: '#/components/responses/JsonList' }

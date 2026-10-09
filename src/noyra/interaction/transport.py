@@ -794,6 +794,13 @@ class TransportStore:
                 "WHERE transport_id = ? AND subject_id = ?",
                 (status, state_hash, now, transport_id, subject_id),
             )
+            if status != "active":
+                connection.execute(
+                    "UPDATE private_channel_routes SET push_web_replies=0,push_since=NULL,"
+                    "revision=revision+1,share_web_history=0 WHERE subject_id=? AND binding_id IN "
+                    "(SELECT binding_id FROM interaction_bindings WHERE transport_id=?)",
+                    (subject_id, transport_id),
+                )
             if status == "revoked" and row["secret_reference"]:
                 self.secret_cleanup.prepare_delete(
                     str(row["subject_id"]),
@@ -1291,7 +1298,86 @@ class DeliveryDispatcher:
                     ),
                 )
                 created += 1
+            # Only new replies in the explicitly consented window qualify.
+            # The immutable route generation prevents queued replies reviving
+            # after a stop, unlink, or route change.
+            replies = connection.execute(
+                "SELECT i.interaction_id,r.binding_id,r.conversation_id,r.revision,b.transport_id "
+                "FROM interactions i JOIN private_conversation_messages m "
+                "ON m.interaction_id=i.interaction_id JOIN private_conversations c "
+                "ON c.conversation_id=m.conversation_id JOIN private_channel_routes r "
+                "ON r.subject_id=i.subject_id AND r.conversation_id=c.conversation_id "
+                "JOIN interaction_bindings b ON b.binding_id=r.binding_id "
+                "JOIN interaction_transports t ON t.transport_id=b.transport_id "
+                "WHERE i.subject_id=? AND m.subject_id=i.subject_id AND c.subject_id=i.subject_id "
+                "AND b.subject_id=i.subject_id AND t.subject_id=i.subject_id "
+                "AND i.channel='web' AND i.direction='outgoing' AND i.kind!='help_request' "
+                "AND m.author_verified=1 AND c.status='active' AND b.status='active' "
+                "AND t.status='active' AND t.channel='qq' AND r.push_web_replies=1 "
+                "AND r.share_web_history=1 AND EXISTS(SELECT 1 FROM private_message_sequences s "
+                "WHERE s.interaction_id=i.interaction_id AND s.sequence>r.push_after_sequence) "
+                "AND NOT EXISTS(SELECT 1 FROM interaction_deliveries d "
+                "WHERE d.interaction_id=i.interaction_id) ORDER BY i.created_at LIMIT ?",
+                (subject_id, max(1, min(limit, 200))),
+            ).fetchall()
+            for reply in replies:
+                now = utc_now()
+                delivery_id = new_id("delivery")
+                connection.execute(
+                    "INSERT INTO interaction_deliveries(delivery_id,interaction_id,subject_id,"
+                    "transport_id,idempotency_key,status,attempts,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,'queued',0,?,?)",
+                    (
+                        delivery_id,
+                        reply["interaction_id"],
+                        subject_id,
+                        reply["transport_id"],
+                        f"private-push:{reply['interaction_id']}:{reply['binding_id']}",
+                        now,
+                        now,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO private_web_deliveries VALUES(?,?,?,?)",
+                    (delivery_id, reply["binding_id"], reply["conversation_id"], reply["revision"]),
+                )
+                created += 1
         return created
+
+    @staticmethod
+    def _web_push_recipient(connection: Any, delivery_id: str) -> str | None:
+        push = connection.execute(
+            "SELECT * FROM private_web_deliveries WHERE delivery_id=?", (delivery_id,)
+        ).fetchone()
+        if push is None:
+            return None
+        consent = connection.execute(
+            "SELECT b.external_sender_id FROM private_web_deliveries p "
+            "JOIN interaction_deliveries d ON d.delivery_id=p.delivery_id "
+            "JOIN interactions i ON i.interaction_id=d.interaction_id "
+            "JOIN private_conversation_messages m ON m.interaction_id=i.interaction_id "
+            "JOIN private_conversations c ON c.conversation_id=m.conversation_id "
+            "JOIN private_channel_routes r ON r.binding_id=p.binding_id "
+            "JOIN interaction_bindings b ON b.binding_id=r.binding_id "
+            "JOIN interaction_transports t ON t.transport_id=b.transport_id "
+            "WHERE p.delivery_id=? AND i.subject_id=d.subject_id AND r.subject_id=d.subject_id "
+            "AND b.subject_id=d.subject_id AND t.subject_id=d.subject_id "
+            "AND m.subject_id=d.subject_id AND c.subject_id=d.subject_id "
+            "AND t.transport_id=d.transport_id AND t.status='active' AND t.channel='qq' "
+            "AND b.status='active' AND c.status='active' AND m.author_verified=1 "
+            "AND r.share_web_history=1 AND r.push_web_replies=1 AND r.revision=p.route_revision "
+            "AND r.conversation_id=p.conversation_id AND c.conversation_id=p.conversation_id "
+            "AND EXISTS(SELECT 1 FROM private_message_sequences s "
+            "WHERE s.interaction_id=i.interaction_id AND s.sequence>r.push_after_sequence) "
+            "AND i.channel='web' AND i.direction='outgoing' "
+            "AND EXISTS(SELECT 1 FROM inbound_identity_challenges x "
+            "WHERE x.binding_id=b.binding_id "
+            "AND x.status='confirmed' AND x.subject_id=d.subject_id)",
+            (delivery_id,),
+        ).fetchone()
+        if consent is None:
+            raise PermissionError("private push consent withdrawn")
+        return str(consent[0])
 
     async def deliver_pending(self, subject_id: str, *, limit: int = 10) -> list[DeliveryRecord]:
         if self._closed:
@@ -1507,6 +1593,11 @@ class DeliveryDispatcher:
             send_interaction["counterparty"] = self.transports.delivery_counterparty(
                 record.transport_id, interaction, subject_id=delivery.subject_id
             )
+            with self.database.connection() as connection:
+                push_recipient = self._web_push_recipient(connection, delivery.delivery_id)
+            if push_recipient is not None:
+                send_interaction["counterparty"] = push_recipient
+                send_interaction["reply_selector"] = "qq:user"
             response_id = await self._send(
                 record, secret, send_interaction, delivery.idempotency_key
             )
@@ -1601,6 +1692,16 @@ class DeliveryDispatcher:
             ).fetchone()
             if withdrawn is not None:
                 raise PermissionError("private content withdrawn")
+            delivery = connection.execute(
+                "SELECT delivery_id FROM interaction_deliveries WHERE idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+            push_recipient = self._web_push_recipient(connection, delivery[0])
+            if push_recipient is not None and (
+                interaction.get("counterparty") != push_recipient
+                or interaction.get("reply_selector") != "qq:user"
+            ):
+                raise PermissionError("private push recipient mismatch")
             context = connection.execute(
                 "SELECT * FROM interaction_inbound_events WHERE interaction_id=? "
                 "AND subject_id=? LIMIT 1",
