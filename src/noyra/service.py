@@ -196,6 +196,7 @@ from noyra.wallet import (
     WalletSigner,
     WalletStore,
 )
+from noyra.wallet.admin_projection import WalletAdminProjection, WalletListLimit
 from noyra.wallet.config import configured_wallet_signer_from_env
 from noyra.wallet.types import canonical_timestamp
 from noyra.world import SafeWebReader
@@ -2561,6 +2562,47 @@ class NoyraHTTPServer:
                     self._wechat_webhook_challenge()
                     return
                 parsed = urlsplit(self.path)
+                wallet_list_path = parsed.path.replace("/api/v1/", "/api/", 1)
+                if wallet_list_path.startswith("/api/admin/wallet-lists/"):
+                    if not self._authorized("operator"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    try:
+                        list_query = parse_qs(parsed.query, keep_blank_values=True)
+                        if set(list_query) - {"limit", "status", "network_id", "cursor"} or any(
+                            len(values) != 1 for values in list_query.values()
+                        ):
+                            raise ValueError("invalid wallet list query")
+                        raw_limit = list_query.get("limit", ["25"])[0]
+                        if not raw_limit.isascii() or not raw_limit.isdecimal():
+                            raise ValueError("invalid wallet list limit")
+                        projection = WalletAdminProjection(owner.kernel.database).page(
+                            owner.kernel.subject_id,
+                            wallet_list_path.removeprefix("/api/admin/wallet-lists/"),
+                            limit=int(raw_limit),
+                            status=list_query.get("status", [None])[0],
+                            network_id=list_query.get("network_id", [None])[0],
+                            cursor=list_query.get("cursor", [None])[0],
+                        )
+                    except (ValueError, TypeError):
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_wallet_list_query"})
+                        return
+                    except WalletListLimit:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "wallet_list_budget_exceeded"},
+                            retry_after=60,
+                        )
+                        return
+                    except (IntegrityError, sqlite3.DatabaseError):
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "wallet_integrity_unavailable"},
+                            retry_after=60,
+                        )
+                        return
+                    self._json(HTTPStatus.OK, projection)
+                    return
                 if parsed.path in {"/admin", "/admin.html"}:
                     self._asset("admin.html", "text/html; charset=utf-8")
                     return

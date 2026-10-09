@@ -33,7 +33,7 @@ def test_wallet_acquisition_admin_surface_is_observable_and_read_only() -> None:
     for marker in (
         "/api/config/wallet-networks?limit=100",
         "/api/config/wallet-balances?limit=100",
-        "/api/admin/wallet-acquisitions?limit=100",
+        'readWalletPage("acquisitions"',
         "/api/admin/wallet-acquisition-budget?network_id=",
         "/api/admin/wallet-acquisitions/run",
         "/api/config/wallet-observation-health?group_by=",

@@ -202,6 +202,32 @@ def test_https_signer_uses_only_fixed_transfer_and_receipt_routes() -> None:
     assert "private_key" not in json.dumps(calls)
 
 
+@pytest.mark.parametrize("kind", ["bounties", "orders", "executions"])
+def test_admin_pages_verify_payment_records_and_preserve_amounts(tmp_path: Path, kind: str) -> None:
+    from noyra.wallet.admin_projection import WalletAdminProjection
+
+    db, subject, _network, _asset, _source, order = fixture(tmp_path)
+    if kind == "executions":
+        WalletPaymentExecutionEngine(db, MockSigner()).execute_order(
+            order.order_id, subject, actor="operator"
+        )
+    projection = WalletAdminProjection(db)
+    page = projection.page(subject, kind)
+    assert len(page["items"]) == 1
+    amount_field = "reward_amount" if kind == "bounties" else "amount"
+    assert page["items"][0][amount_field] == "10"
+    table, key, _timestamp = projection.SOURCES[kind]
+    with db.connection() as connection:
+        corrupted = dict(
+            connection.execute(
+                f'SELECT * FROM "{table}" WHERE "{key}"=?', (page["items"][0][key],)
+            ).fetchone()
+        )
+    corrupted["state_hash"] = "0" * 64
+    with pytest.raises(IntegrityError, match="hash mismatch"):
+        projection._record(kind, corrupted)
+
+
 def test_https_signer_rejects_transfer_from_a_different_bound_address() -> None:
     client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200)))
     signer = HTTPSWalletSigner(

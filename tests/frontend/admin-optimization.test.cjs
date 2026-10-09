@@ -65,6 +65,37 @@ test("wallet freshness uses the effective server observation threshold", () => {
   assert.notEqual(sandbox.walletObservationLabel("2026-10-10T00:02:00Z"), fresh);
 });
 
+test("wallet pages navigate stable cursors and reset when the filter changes", async () => {
+  const paths=[];
+  const { sandbox } = context({URLSearchParams, walletListPages:new Map(), walletListVersions:new Map(), walletListEpoch:0,
+    request:async path=>{paths.push(path);return {items:[{id:paths.length}],total:52,has_more:true,next_cursor:"synthetic-next"};},
+  });
+  vm.runInContext(functionsBetween("async function readWalletPage(", "async function loadWalletRegistry("),sandbox);
+  await sandbox.readWalletPage("acquisitions",{status:"queued"});
+  await sandbox.readWalletPage("acquisitions",{status:"queued",move:"next"});
+  assert.ok(paths[1].includes("cursor=synthetic-next"));
+  assert.equal(sandbox.walletListPages.get("acquisitions").items.length,1);
+  await sandbox.readWalletPage("acquisitions",{status:"queued",move:"previous"});
+  assert.ok(!paths[2].includes("cursor="));
+  await sandbox.readWalletPage("acquisitions",{status:"unknown",move:"next"});
+  assert.ok(!paths[3].includes("cursor="));
+  assert.equal(sandbox.walletListPages.get("acquisitions").index,0);
+});
+
+test("wallet page responses cannot repopulate a cleared session", async () => {
+  let resolve;
+  const { sandbox } = context({URLSearchParams, walletListPages:new Map(), walletListVersions:new Map(), walletListEpoch:0,
+    request:()=>new Promise(done=>{resolve=done;}),
+  });
+  vm.runInContext(functionsBetween("async function readWalletPage(", "async function loadWalletRegistry("),sandbox);
+  const pending=sandbox.readWalletPage("orders");
+  sandbox.walletListEpoch++;
+  sandbox.walletListVersions.clear();
+  resolve({items:[{id:"private"}],total:1,has_more:false,next_cursor:null});
+  assert.equal(await pending,null);
+  assert.equal(sandbox.walletListPages.size,0);
+});
+
 test("overview reads only summary sources and preserves partial failure visibility", async () => {
   const paths = [];
   const { sandbox, nodes } = context({ request: async path => {
@@ -95,6 +126,26 @@ test("overview sorts blocking findings before risk and reminders and escapes tex
   assert.ok(html.indexOf('data-priority="blocker"') < html.indexOf('data-priority="risk"'));
   assert.ok(html.indexOf('data-priority="risk"') < html.indexOf('data-priority="reminder"'));
   assert.ok(!html.includes("<script>"));
+});
+
+test("overview does not treat missing cognition or optional encryption as blockers", () => {
+  const { sandbox, nodes } = context();
+  vm.runInContext(functionsBetween("async function loadOverview()", "function renderModelObservability("), sandbox);
+  sandbox.renderOverviewAttention({operator_health:{at_rest:{ready:false,enforced:false}}});
+  assert.ok(!nodes.get("#overview-attention").innerHTML.includes('data-priority="blocker"'));
+  sandbox.renderOverviewAttention({cognition:{enabled:false}});
+  assert.ok(nodes.get("#overview-attention").innerHTML.includes('data-priority="blocker"'));
+});
+
+test("overview retains previously loaded events and lifecycle when their reads fail", async () => {
+  const { sandbox, nodes } = context({request:async()=>{throw new Error("offline");}});
+  sandbox.$("#overview-events").innerHTML="older events";
+  sandbox.$("#overview-lifecycle").innerHTML="older lifecycle";
+  vm.runInContext(functionsBetween("async function loadOverview()", "function renderModelObservability("), sandbox);
+  await sandbox.loadOverview();
+  assert.equal(nodes.get("#overview-events").innerHTML,"older events");
+  assert.equal(nodes.get("#overview-lifecycle").innerHTML,"older lifecycle");
+  assert.ok(nodes.get("#overview-updated").textContent.includes("·"));
 });
 
 test("failed version checks display the server error without losing the installed version", async () => {

@@ -915,6 +915,40 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-lists/{kind}:
+    get:
+      tags: [configuration]
+      operationId: listWalletAdminPage
+      description: >-
+        Read-only keyset page. New insertions are excluded until refresh; mutable statuses
+        are evaluated on each read. RPC URLs and acquisition claim secrets are omitted.
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - name: kind
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [networks, assets, addresses, acquisitions, bounties, orders, executions, audits]
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+        - name: cursor
+          in: query
+          schema: { type: string, maxLength: 2048 }
+        - name: status
+          in: query
+          description: Supported for registries, acquisitions, orders and executions.
+          schema: { type: string, maxLength: 64 }
+        - name: network_id
+          in: query
+          description: Supported except for networks and audits.
+          schema: { type: string, maxLength: 128 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/v1/admin/wallet-rewards:
     get:
       tags: [wallet-rewards]
