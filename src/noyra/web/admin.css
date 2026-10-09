@@ -31,7 +31,8 @@ textarea { min-height: 112px; resize: vertical; }
 .sidebar-footer { display: grid; gap: 14px; margin-top: auto; padding-top: 20px; border-top: 1px solid rgba(214, 239, 224, .16); }
 .sidebar-footer button { border: 0; padding: 0; text-align: left; background: transparent; color: #b8d1c3; min-height: 28px; }
 .sidebar-footer a { color: #d0e9da; }
-.main-panel { width: min(1300px, 100%); padding: 30px clamp(20px, 4vw, 58px) 64px; }
+.main-panel { min-width: 0; width: min(1300px, 100%); padding: 30px clamp(20px, 4vw, 58px) 64px; }
+.sidebar { min-width: 0; }
 .topbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 10px; }
 .topbar-actions { display: flex; align-items: center; gap: 10px; }
 .session-badge, .card-state { display: inline-flex; align-items: center; min-height: 30px; border-radius: 999px; padding: 5px 10px; background: #dcefe4; color: #176446; font-size: 12px; font-weight: 650; }
@@ -47,7 +48,7 @@ textarea { min-height: 112px; resize: vertical; }
 .surface-card { padding: 21px; border: 1px solid #d4dfd8; border-radius: 10px; background: #fff; }
 .card-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 16px; }.card-heading h2 { margin: 0; font-size: 17px; }
 .summary-list { display: grid; gap: 10px; }.summary-row { display: flex; justify-content: space-between; gap: 14px; padding-bottom: 9px; border-bottom: 1px solid #edf1ee; font-size: 13px; }.summary-row span { color: #718078; }.summary-row strong { text-align: right; overflow-wrap: anywhere; }
-.section-intro { display: flex; justify-content: space-between; margin-bottom: 16px; }.section-intro h2 { margin: 5px 0; font-size: 25px; }.section-intro p { margin: 0; max-width: 68ch; }
+.section-intro { display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; margin-bottom: 16px; }.section-intro > div { min-width: 0; }.section-intro h2 { margin: 5px 0; font-size: 25px; }.section-intro p { margin: 0; max-width: 68ch; overflow-wrap: anywhere; }
 .message-composer form { display: grid; gap: 12px; }.composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; }.composer-footer button { flex: 0 0 auto; }
 .message-list, .resource-list { display: grid; gap: 10px; max-height: 540px; overflow: auto; }.message-item, .resource-item { padding: 13px; border: 1px solid #e0e8e2; border-radius: 8px; background: #f8fbf9; }.message-item time, .resource-item small { display: block; color: #7c8982; font-size: 11px; }.message-item p { margin: 8px 0 0; white-space: pre-wrap; line-height: 1.55; }.status-chip { display: inline-block; margin-left: 6px; border-radius: 999px; padding: 3px 7px; background: #e7eee9; color: #557064; font-size: 11px; }
 .channel-binding-card { margin-top: 18px; }
@@ -208,3 +209,12 @@ textarea { min-height: 112px; resize: vertical; }
 .upgrade-confirmation code { overflow-wrap: anywhere; color: #176446; }
 @media (max-width: 860px) { .upgrade-version-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 640px) { .upgrade-panel .card-heading { flex-direction: column; }.upgrade-version-grid { grid-template-columns: 1fr 1fr; }.upgrade-actions { align-items: stretch; flex-direction: column; }.upgrade-actions button { width: 100%; }.upgrade-confirmation { padding: 20px; } }
+.log-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 0 0 12px; }
+.log-toolbar label { display: grid; gap: 6px; min-width: 140px; font-size: 13px; }
+.activity-list { display: grid; }
+.activity-item { display: grid; grid-template-columns: 155px 110px minmax(0, 1fr) 90px; gap: 12px; padding: 14px 0; border-bottom: 1px solid #dce4de; font-size: 14px; }
+.activity-item > * { min-width: 0; overflow-wrap: anywhere; }
+.activity-item time { color: #617168; font-size: 12px; }
+.activity-item details { grid-column: 3; }
+.activity-timeline { padding-left: 20px; line-height: 1.9; }
+@media (max-width: 680px) { .activity-item { grid-template-columns: 1fr 1fr; } .activity-item .activity-summary, .activity-item details { grid-column: 1 / -1; } .log-toolbar label { min-width: 0; flex: 1 1 150px; } }

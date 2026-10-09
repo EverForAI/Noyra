@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
+from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 from noyra.core.database import Database
@@ -497,9 +499,26 @@ class PublicProjection:
         }
 
     def runtime_logs(
-        self, subject_id: str, *, limit: int = 100, cursor: str | None = None
+        self,
+        subject_id: str,
+        *,
+        limit: int = 100,
+        cursor: str | None = None,
+        category: str | None = None,
+        status: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        summary_only: bool = False,
     ) -> dict[str, Any]:
         bounded = max(1, min(limit, 1_000))
+        if category is not None and category not in {s[0] for s in self.RUNTIME_LOG_SOURCES}:
+            raise ValueError("invalid runtime log category")
+        if status is not None and not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", status):
+            raise ValueError("invalid runtime log status")
+        since = self._log_timestamp(since)
+        until = self._log_timestamp(until)
+        if since and until and since >= until:
+            raise ValueError("invalid runtime log interval")
         cursor_key: tuple[str, str, str] | None = None
         with self.database.read_transaction() as connection:
             if cursor is None:
@@ -515,13 +534,18 @@ class PublicProjection:
                 cursor_key, anchors = self._decode_runtime_log_cursor(cursor)
             merged: list[dict[str, Any]] = []
             for source in self.RUNTIME_LOG_SOURCES:
-                category = source[0]
+                source_category = source[0]
+                if category is not None and source_category != category:
+                    continue
                 query, parameters = self._runtime_log_query(
                     source,
                     subject_id,
-                    anchors[category],
+                    anchors[source_category],
                     bounded + 1,
                     cursor_key,
+                    status=status,
+                    since=since,
+                    until=until,
                 )
                 merged.extend(dict(row) for row in connection.execute(query, parameters))
         merged.sort(
@@ -545,7 +569,93 @@ class PublicProjection:
         safe_page = redact_secrets(page)
         if not isinstance(safe_page, list):
             raise TypeError("sanitized runtime log page is not a list")
+        if summary_only:
+            for item in safe_page:
+                if item["category"] in {
+                    "epistemic_review",
+                    "relationship_social",
+                    "intrinsic_thought",
+                    "motivation",
+                    "autonomous_project",
+                }:
+                    item["summary"] = item["category"]
         return {"items": safe_page, "next_cursor": next_cursor}
+
+    @staticmethod
+    def _log_timestamp(value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or len(value) > 40:
+            raise ValueError("invalid timestamp")
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("timestamp needs timezone")
+        return parsed.astimezone(UTC).isoformat(timespec="milliseconds")
+
+    def lifecycle_summary(self, subject_id: str) -> dict[str, Any]:
+        """Operator summary without free-text reasons or reflection content."""
+        with self.database.read_transaction() as connection:
+            state = connection.execute(
+                "SELECT state, changed_at FROM runtime_state WHERE subject_id=?",
+                (subject_id,),
+            ).fetchone()
+            sleep = connection.execute(
+                "SELECT status, trigger_type, trigger_reason, started_at, wake_after, completed_at "
+                "FROM sleep_runs WHERE subject_id=? ORDER BY started_at DESC LIMIT 1",
+                (subject_id,),
+            ).fetchone()
+            rows = connection.execute(
+                "SELECT t.from_status, t.to_status, t.created_at FROM sleep_transitions t "
+                "JOIN sleep_runs s ON s.sleep_id=t.sleep_id WHERE s.subject_id=? "
+                "ORDER BY t.created_at DESC, t.transition_id DESC LIMIT 30",
+                (subject_id,),
+            ).fetchall()
+            lifecycle_rows = connection.execute(
+                "WITH recent AS (SELECT occurred_at, event_id, event_type, payload_json "
+                "FROM events WHERE subject_id=? "
+                "ORDER BY occurred_at DESC, event_id DESC LIMIT 5000) "
+                "SELECT occurred_at, json_extract(payload_json, '$.from') AS from_state, "
+                "json_extract(payload_json, '$.to') AS to_state FROM recent "
+                "WHERE event_type IN ('lifecycle_transition', 'lifecycle_recovery') "
+                "ORDER BY occurred_at DESC, event_id DESC LIMIT 30",
+                (subject_id,),
+            ).fetchall()
+        if state is None:
+            raise NotFoundError("subject lifecycle not found")
+        sleep_summary = None
+        if sleep is not None:
+            sleep_summary = dict(sleep)
+            reason = str(sleep_summary.pop("trigger_reason"))
+            allowed_reasons = {
+                "fatigue_threshold",
+                "hard_resource_budget_exhausted",
+                "repeated_failure_pressure",
+                "goal_conflict_pressure",
+                "information_staleness",
+            }
+            sleep_summary["reason_codes"] = [
+                code for code in reason.split(",") if code in allowed_reasons
+            ]
+        sampled_at = datetime.now(UTC)
+        last_active_seconds = None
+        active_end = None
+        for transition in lifecycle_rows:
+            if transition["from_state"] == "active" and active_end is None:
+                active_end = datetime.fromisoformat(transition["occurred_at"])
+            if transition["to_state"] == "active" and active_end is not None:
+                active_start = datetime.fromisoformat(transition["occurred_at"])
+                last_active_seconds = max(0, int((active_end - active_start).total_seconds()))
+                break
+        return {
+            "lifecycle": dict(state),
+            "state_elapsed_seconds": max(
+                0, int((sampled_at - datetime.fromisoformat(state["changed_at"])).total_seconds())
+            ),
+            "last_active_seconds": last_active_seconds,
+            "sleep": sleep_summary,
+            "transitions": [dict(row) for row in rows],
+            "sampled_at": sampled_at.isoformat(),
+        }
 
     @classmethod
     def _runtime_log_query(
@@ -555,8 +665,12 @@ class PublicProjection:
         anchor: int,
         limit: int,
         cursor_key: tuple[str, str, str] | None,
+        *,
+        status: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
     ) -> tuple[str, tuple[Any, ...]]:
-        category, table, time_column, id_column, status, summary, index = source
+        category, table, time_column, id_column, status_expression, summary, index = source
         predicate = ""
         parameters: list[Any] = [category, subject_id, anchor]
         if cursor_key is not None:
@@ -572,10 +686,18 @@ class PublicProjection:
             else:
                 predicate = f' AND "{time_column}" < ?'
                 parameters.append(cursor_time)
+        for value, clause in (
+            (status, f" AND ({status_expression}) = ?"),
+            (since, f' AND "{time_column}" >= ?'),
+            (until, f' AND "{time_column}" < ?'),
+        ):
+            if value is not None:
+                predicate += clause
+                parameters.append(value)
         parameters.append(limit)
         query = (
             f'SELECT "{time_column}" AS occurred_at, ? AS category, '
-            f'"{id_column}" AS record_id, {status} AS status, {summary} AS summary '
+            f'"{id_column}" AS record_id, {status_expression} AS status, {summary} AS summary '
             f'FROM "{table}" INDEXED BY "{index}" WHERE subject_id = ? AND rowid <= ?'
             f'{predicate} ORDER BY "{time_column}" DESC, "{id_column}" DESC LIMIT ?'
         )

@@ -24,14 +24,93 @@ let upgradeStatusAvailable = false;
 let upgradePollTimer = null;
 let upgradePollController = null;
 let upgradePollDelay = 3000;
+let runtimeLogCursor = null;
+let runtimeLogVersion = 0;
+let runtimeLogTimer = null;
+let runtimeLogController = null;
+let runtimeLogBrowsingHistory = false;
+const lifecycleLabels = { booting: "启动中", orienting: "初始化", active: "活跃", paused: "已暂停", winding_down: "准备休眠", reflective_sleep: "反思休眠", deep_sleep: "深度休眠", waking: "唤醒中", resetting: "重置中", stopped: "已停止" };
+const logCategoryLabels = { event: "运行事件", model_call: "模型调用", action: "行为执行", routing: "资源路由", audit: "管理审计", metacognition: "元认知", epistemic_review: "知识复核", relationship_social: "关系交流", self_model: "自我模型", intrinsic_thought: "思考", motivation: "动机", consciousness: "意识框架", autonomous_project: "自主项目" };
+const logStatusLabels = { succeeded: "成功", failed: "失败", unknown: "结果未知", executing: "执行中", prepared: "已准备", recorded: "已记录", processed: "已处理", deferred: "暂缓", accepted: "接受", rejected: "拒绝", silent: "选择沉默", completed: "已完成" };
+
+function stopRuntimeLogPolling() {
+  clearTimeout(runtimeLogTimer);
+  runtimeLogTimer = null;
+  runtimeLogController?.abort();
+  runtimeLogController = null;
+  runtimeLogVersion += 1;
+}
+function scheduleRuntimeLogs() {
+  clearTimeout(runtimeLogTimer);
+  if (csrfToken && activeSection === "logs" && !document.hidden && $("#runtime-log-auto")?.checked && !runtimeLogBrowsingHistory) {
+    runtimeLogTimer = setTimeout(() => { void loadRuntimeLogs(); }, 15000);
+  }
+}
+async function loadRuntimeLogs({ append = false } = {}) {
+  if (!csrfToken) return;
+  runtimeLogBrowsingHistory = append;
+  clearTimeout(runtimeLogTimer);
+  runtimeLogController?.abort();
+  const controller = new AbortController();
+  runtimeLogController = controller;
+  const generation = ++runtimeLogVersion;
+  const query = new URLSearchParams({ limit: "50" });
+  for (const [field, selector] of [["category", "#runtime-log-category"], ["status", "#runtime-log-status"]]) {
+    if ($(selector).value) query.set(field, $(selector).value);
+  }
+  for (const [field, selector] of [["since", "#runtime-log-since"], ["until", "#runtime-log-until"]]) {
+    if ($(selector).value) {
+      const date = new Date($(selector).value);
+      if (Number.isNaN(date.getTime())) { setStatus("#runtime-log-feedback", "时间格式无效", true); return; }
+      query.set(field, date.toISOString());
+    }
+  }
+  if (append && runtimeLogCursor) query.set("cursor", runtimeLogCursor);
+  $("#runtime-log-more").disabled = true;
+  try {
+    const results = await Promise.allSettled([
+      request(`/api/admin/activity-logs?${query}`, { signal: controller.signal }),
+      ...(append ? [] : [request("/api/admin/lifecycle-summary", { signal: controller.signal })]),
+    ]);
+    if (generation !== runtimeLogVersion || !csrfToken) return;
+    if (results.some((result) => result.status === "rejected" && result.reason?.status === 401)) { await logout(); return; }
+    if (results[1]?.status === "fulfilled") renderLifecycleSummary(results[1].value);
+    if (results[0].status === "rejected") throw results[0].reason;
+    const page = results[0].value;
+    const html = page.items.map((row) => `<article class="activity-item"><time>${esc(formatTimestamp(row.occurred_at))}</time><span>${esc(logCategoryLabels[row.category] || row.category)}</span><span class="activity-summary">${esc(row.summary)}</span><span>${esc(logStatusLabels[row.status] || row.status)}</span><details><summary>记录编号</summary><code>${esc(row.record_id)}</code></details></article>`).join("");
+    if (append) $("#runtime-log-list").insertAdjacentHTML("beforeend", html);
+    else $("#runtime-log-list").innerHTML = html || '<p class="muted">当前条件下没有记录</p>';
+    runtimeLogCursor = page.next_cursor;
+    $("#runtime-log-more").hidden = !runtimeLogCursor;
+    setStatus("#runtime-log-feedback", `数据更新于 ${formatTimestamp(new Date().toISOString())}${results[1]?.status === "rejected" ? "；生命周期暂不可读取" : ""}`);
+  } catch (error) {
+    if (generation === runtimeLogVersion && !controller.signal.aborted) setStatus("#runtime-log-feedback", `读取失败，已保留现有记录。${errorText(error)}`, true);
+  } finally {
+    if (generation === runtimeLogVersion) { $("#runtime-log-more").disabled = false; scheduleRuntimeLogs(); }
+  }
+}
+function renderLifecycleSummary(data) {
+  const sleep = data.sleep || {};
+  const reasons = { fatigue_threshold: "疲劳达到阈值", hard_resource_budget_exhausted: "认知预算耗尽", repeated_failure_pressure: "反复调用失败", goal_conflict_pressure: "目标冲突压力", information_staleness: "信息需要更新" };
+  const triggers = { fatigue: "疲劳阈值", budget: "预算压力", failures: "调用失败压力", staleness: "信息陈旧", goal_conflict: "目标冲突", subject_choice: "主体或运行策略", schedule: "定时", emergency: "紧急保护" };
+  const duration = (seconds) => seconds == null ? "近期记录不足" : `${Math.floor(seconds / 3600)} 小时 ${Math.floor(seconds % 3600 / 60)} 分 ${seconds % 60} 秒`;
+  $("#lifecycle-summary").innerHTML = summaryRows([["当前阶段", lifecycleLabels[data.lifecycle.state] || data.lifecycle.state], ["进入时间", formatTimestamp(data.lifecycle.changed_at)], ["本阶段已持续", duration(data.state_elapsed_seconds)], ["最近一次活跃时长", duration(data.last_active_seconds)], ["最近休眠触发类型", triggers[sleep.trigger_type] || "暂无"], ["已记录原因", (sleep.reason_codes || []).map((code) => reasons[code]).join("、") || "暂无已记录的原因类别"], ["最近休眠开始", formatTimestamp(sleep.started_at)], ["计划唤醒", formatTimestamp(sleep.wake_after)], ["最近休眠完成", formatTimestamp(sleep.completed_at)]]);
+  $("#lifecycle-timeline").innerHTML = data.transitions.map((row) => `<li><time>${esc(formatTimestamp(row.created_at))}</time> ${esc(lifecycleLabels[row.from_status] || "开始")} → ${esc(lifecycleLabels[row.to_status] || row.to_status)}</li>`).join("");
+}
 const migrationRiskErrors = {
   migration_policy_confirmation_required: "开启策略自动前必须再次确认风险",
   migration_local_wallet_confirmation_required: "开启本地钱包迁移前必须再次确认风险",
 };
 const MODEL_KEY_REQUEST_CONCURRENCY = 4;
+const upgradeErrorLabels = {
+  upgrade_no_stable_release: "尚无可用的正式 Release；当前仍使用正式发布通道",
+  upgrade_remote_rate_limited: "GitHub 请求额度已用尽，请稍后重试",
+  upgrade_remote_connect_failed: "无法连接 GitHub，请检查服务器网络后重试",
+  upgrade_remote_http_error: "GitHub 返回异常状态，请稍后重试",
+};
 const $ = (selector) => document.querySelector(selector);
 const esc = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
-const errorText = (error) => ({ production_release_evidence_required: "当前版本缺少同 SHA 的签名验收证据，生产自动化暂不可启用", upgrade_release_unverified: "发布签名或同版本质量证据未通过，服务器已停止升级", admin_network_unavailable: "管理台暂时无法连接服务，请检查 HTTPS 地址或服务器后重试", admin_login_rate_limited: "登录失败次数过多，请 1 分钟后再试", unauthorized: "令牌无效或会话已过期", migration_target_integrity_unavailable: "迁移目标完整性检查未通过，系统已暂停相关操作", migration_target_challenge_failed: "迁移目标挑战发起失败，请确认目标仍处于可用状态", migration_target_attestation_failed: "迁移目标验证失败，请核对签名和挑战是否匹配", migration_proposal_rejection_failed: "迁移提案拒绝失败，请刷新后重试", migration_cutover_rejected: "迁移切换未通过安全状态检查", migration_rollback_rejected: "迁移回滚未通过安全状态检查", migration_recovery_rejected: "紧急恢复证明未通过，请核对目标、备份、摘要和签名", upgrade_unavailable: "网页升级当前不可用，请检查服务器网络和升级组件后重试", upgrade_in_progress: "已有升级任务正在执行", upgrade_source_dirty: "服务器升级源码状态异常，已停止升级", upgrade_target_invalid: "版本检查已过期，请重新检查最新版本", upgrade_target_stale: "GitHub 版本刚刚更新，请重新检查后再升级", upgrade_start_failed: "服务器未能启动升级任务，请稍后重试", upgrade_install_failed: "升级未成功；安装器已执行已有的恢复保护，请查看运行状态", upgrade_interrupted: "升级过程曾被系统中断，请重新检查版本并发起升级", json_required: "请求格式不正确", invalid_wallet_policy: "自动付款需要填写大于 0 的单笔上限和每日总额上限", invalid_wallet_audit_query: "审计记录筛选条件不符合要求", wallet_integrity_unavailable: "钱包完整性检查未通过，请稍后重试", invalid_model_resource_test: "模型测试信息不完整", invalid_model_discovery: "模型发现信息不完整", provider_auth_failed: "模型服务拒绝了密钥，请检查密钥和地址", provider_response_empty: "模型服务返回了空内容", provider_response_invalid: "模型服务响应格式不正确", provider_connect_failed: "无法连接模型服务", invalid_search_provider: "搜索 API 配置不完整", invalid_search_provider_test: "搜索 API 测试信息不完整", search_provider_test_failed: "搜索 API 连接失败", search_provider_test_unknown: "搜索 API 结果未知，请稍后查看供应商记录", model_discovery_unsupported: "该接口不支持获取模型列表，请手动填写模型名称", model_discovery_invalid_response: "模型列表响应格式不正确", provider_response_invalid: "模型服务响应格式不正确", model_resource_label_exists: "该认知池已有相同名称", invalid_model_resource_update: "预算或路由参数不符合要求", model_resource_not_found: "认知资源不存在", model_resource_key_not_found: "模型密钥不存在", model_resource_integrity_unavailable: "认知资源完整性检查未通过，请稍后重试", search_provider_not_found: "搜索 API 不存在", search_provider_integrity_unavailable: "搜索 API 完整性检查未通过，请稍后重试", search_routing_integrity_unavailable: "搜索方式完整性检查不通过，请稍后重试", invalid_search_routing: "搜索方式配置不正确", invalid_capability: "能力授权请求不符合要求", capability_not_found: "能力授权不存在", cognition_unavailable: "认知功能尚未启用", public_post_not_found: "帖子不存在或已不可用", invalid_public_post_moderation: "审核状态或理由不符合要求", public_post_moderation_conflict: "帖子状态或幂等请求已发生变化，请刷新后重试", public_post_integrity_unavailable: "帖子完整性检查未通过，审核已暂停", invalid_wallet_acquisition: "采集目标或参数不符合要求", invalid_wallet_acquisition_query: "采集队列筛选条件不符合要求", invalid_wallet_acquisition_run: "采集执行上限不符合要求", invalid_wallet_acquisition_retry: "重试参数不符合要求", invalid_wallet_acquisition_cancel: "取消参数不符合要求", wallet_acquisition_conflict: "相同目标已有活动采集，或幂等键指向其他目标", wallet_acquisition_target_not_found: "采集目标不存在", wallet_acquisition_not_found: "采集运行不存在", wallet_acquisition_unknown_retry_not_allowed: "只有结果未知的运行可以重试", wallet_acquisition_attempt_limit_reached: "采集已达到最大尝试次数", wallet_acquisition_cancel_not_allowed: "当前状态不允许取消", wallet_network_not_found: "钱包网络不存在", invalid_wallet_observation_health_query: "钱包观测健康筛选条件不符合要求", wallet_execution_unavailable: "独立签名器未配置，转账执行已关闭", wallet_execution_not_found: "转账执行不存在", wallet_execution_integrity_unavailable: "转账执行完整性检查未通过，请稍后重试", invalid_wallet_order_execution: "转账执行参数或状态不符合要求", wallet_order_transition_conflict: "订单状态已变化，请刷新后重试", invalid_wallet_receipt_request: "回执查询请求不符合要求", invalid_wallet_execution_recovery: "未完成转账恢复参数不符合要求" }[error?.code] || (error?.message && error.message !== error.code ? error.message : error?.status ? `服务器暂时无法完成请求（HTTP ${error.status}）` : typeof error?.code === "string" && /^[a-z][a-z0-9_]*$/.test(error?.code) ? "服务器返回了暂未识别的错误，请检查配置后重试" : error?.message || "请求失败"));
+const errorText = (error) => ({ production_release_evidence_required: "当前版本缺少同 SHA 的签名验收证据，生产自动化暂不可启用", upgrade_release_unverified: "发布签名或同版本质量证据未通过，服务器已停止升级", admin_network_unavailable: "未能连接服务，请检查网络、访问地址或 SSH 隧道后重试", admin_login_rate_limited: "登录失败次数过多，请 1 分钟后再试", unauthorized: "令牌无效或会话已过期", migration_target_integrity_unavailable: "迁移目标完整性检查未通过，系统已暂停相关操作", migration_target_challenge_failed: "迁移目标挑战发起失败，请确认目标仍处于可用状态", migration_target_attestation_failed: "迁移目标验证失败，请核对签名和挑战是否匹配", migration_proposal_rejection_failed: "迁移提案拒绝失败，请刷新后重试", migration_cutover_rejected: "迁移切换未通过安全状态检查", migration_rollback_rejected: "迁移回滚未通过安全状态检查", migration_recovery_rejected: "紧急恢复证明未通过，请核对目标、备份、摘要和签名", upgrade_unavailable: "无法读取远端版本，可能暂无正式发布、网络受限或组件异常；已安装版本单独显示", upgrade_in_progress: "已有升级任务正在执行", upgrade_source_dirty: "服务器升级源码状态异常，已停止升级", upgrade_target_invalid: "版本检查已过期，请重新检查最新版本", upgrade_target_stale: "GitHub 版本刚刚更新，请重新检查后再升级", upgrade_start_failed: "服务器未能启动升级任务，请稍后重试", upgrade_install_failed: "升级未成功；安装器已执行已有的恢复保护，请查看运行状态", upgrade_interrupted: "升级过程曾被系统中断，请重新检查版本并发起升级", json_required: "请求格式不正确", invalid_wallet_policy: "自动付款需要填写大于 0 的单笔上限和每日总额上限", invalid_wallet_audit_query: "审计记录筛选条件不符合要求", wallet_integrity_unavailable: "钱包完整性检查未通过，请稍后重试", invalid_model_resource_test: "模型测试信息不完整", invalid_model_discovery: "模型发现信息不完整", provider_auth_failed: "模型服务拒绝了密钥，请检查密钥和地址", provider_response_empty: "模型服务返回了空内容", provider_response_invalid: "模型服务响应格式不正确", provider_connect_failed: "无法连接模型服务", invalid_search_provider: "搜索 API 配置不完整", invalid_search_provider_test: "搜索 API 测试信息不完整", search_provider_test_failed: "搜索 API 连接失败", search_provider_test_unknown: "搜索 API 结果未知，请稍后查看供应商记录", model_discovery_unsupported: "该接口不支持获取模型列表，请手动填写模型名称", model_discovery_invalid_response: "模型列表响应格式不正确", provider_response_invalid: "模型服务响应格式不正确", model_resource_label_exists: "该认知池已有相同名称", invalid_model_resource_update: "预算或路由参数不符合要求", model_resource_not_found: "认知资源不存在", model_resource_key_not_found: "模型密钥不存在", model_resource_integrity_unavailable: "认知资源完整性检查未通过，请稍后重试", search_provider_not_found: "搜索 API 不存在", search_provider_integrity_unavailable: "搜索 API 完整性检查未通过，请稍后重试", search_routing_integrity_unavailable: "搜索方式完整性检查不通过，请稍后重试", invalid_search_routing: "搜索方式配置不正确", invalid_capability: "能力授权请求不符合要求", capability_not_found: "能力授权不存在", cognition_unavailable: "认知功能尚未启用", public_post_not_found: "帖子不存在或已不可用", invalid_public_post_moderation: "审核状态或理由不符合要求", public_post_moderation_conflict: "帖子状态或幂等请求已发生变化，请刷新后重试", public_post_integrity_unavailable: "帖子完整性检查未通过，审核已暂停", invalid_wallet_acquisition: "采集目标或参数不符合要求", invalid_wallet_acquisition_query: "采集队列筛选条件不符合要求", invalid_wallet_acquisition_run: "采集执行上限不符合要求", invalid_wallet_acquisition_retry: "重试参数不符合要求", invalid_wallet_acquisition_cancel: "取消参数不符合要求", wallet_acquisition_conflict: "相同目标已有活动采集，或幂等键指向其他目标", wallet_acquisition_target_not_found: "采集目标不存在", wallet_acquisition_not_found: "采集运行不存在", wallet_acquisition_unknown_retry_not_allowed: "只有结果未知的运行可以重试", wallet_acquisition_attempt_limit_reached: "采集已达到最大尝试次数", wallet_acquisition_cancel_not_allowed: "当前状态不允许取消", wallet_network_not_found: "钱包网络不存在", invalid_wallet_observation_health_query: "钱包观测健康筛选条件不符合要求", wallet_execution_unavailable: "独立签名器未配置，转账执行已关闭", wallet_execution_not_found: "转账执行不存在", wallet_execution_integrity_unavailable: "转账执行完整性检查未通过，请稍后重试", invalid_wallet_order_execution: "转账执行参数或状态不符合要求", wallet_order_transition_conflict: "订单状态已变化，请刷新后重试", invalid_wallet_receipt_request: "回执查询请求不符合要求", invalid_wallet_execution_recovery: "未完成转账恢复参数不符合要求" }[error?.code] || (error?.message && error.message !== error.code ? error.message : error?.status ? `服务器暂时无法完成请求（HTTP ${error.status}）` : typeof error?.code === "string" && /^[a-z][a-z0-9_]*$/.test(error?.code) ? "服务器返回了暂未识别的错误，请检查配置后重试" : error?.message || "请求失败"));
 
 async function request(path, options = {}) {
   const headers = { ...(options.body ? { "Content-Type": "application/json" } : {}), ...(options.headers || {}) };
@@ -40,18 +119,19 @@ async function request(path, options = {}) {
   try {
     response = await fetch(path, { credentials: "same-origin", cache: "no-store", ...options, headers });
   } catch (cause) {
+    if (cause?.name === "AbortError") throw cause;
     const error = new Error("admin_network_unavailable", { cause });
     error.code = "admin_network_unavailable";
     throw error;
   }
   let payload = null;
   try { payload = await response.json(); } catch { payload = null; }
-  if (!response.ok) { const error = new Error(payload?.error || `HTTP ${response.status}`); error.code = payload?.error || `HTTP ${response.status}`; error.status = response.status; throw error; }
+  if (!response.ok) { const error = new Error(upgradeErrorLabels[payload?.error] || payload?.error || `HTTP ${response.status}`); error.code = payload?.error || `HTTP ${response.status}`; error.status = response.status; throw error; }
   return payload;
 }
 
 function setStatus(target, message, error = false) { const node = $(target); node.textContent = message || ""; node.classList.toggle("error", error); }
-function showSection(section) { activeSection = section; document.querySelectorAll("[data-section-panel]").forEach((panel) => { panel.hidden = panel.dataset.sectionPanel !== section; }); document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.section === section)); $("#page-title").textContent = { overview: "总览", conversation: "私密交流", "public-posts": "内容审核", models: "认知资源", search: "搜索配置", capabilities: "能力授权", channels: "通讯渠道", wallet: "钱包采集", migration: "迁移与庇护所", runtime: "运行防护" }[section]; }
+function showSection(section) { stopRuntimeLogPolling(); activeSection = section; document.querySelectorAll("[data-section-panel]").forEach((panel) => { panel.hidden = panel.dataset.sectionPanel !== section; }); document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.section === section)); $("#page-title").textContent = { overview: "总览", conversation: "私密交流", logs: "活动日志", "public-posts": "内容审核", models: "认知资源", search: "搜索配置", capabilities: "能力授权", channels: "通讯渠道", wallet: "钱包采集", migration: "迁移与庇护所", runtime: "运行防护" }[section]; if (section === "logs") { runtimeLogCursor = null; void loadRuntimeLogs(); } }
 async function loadMigration() {
   const [policy, targets, proposals, tasks] = await Promise.all([request("/api/v1/admin/migration/policy"), request("/api/v1/admin/migration/targets"), request("/api/v1/admin/migration/proposals"), request("/api/v1/admin/migration/tasks")]);
   $("#migration-enabled").checked = Boolean(policy.enabled); $("#migration-approval-mode").value = policy.approval_mode; $("#migration-cooldown").value = Math.round((policy.rejection_cooldown_seconds || 0) / 86400); $("#migration-wallet-mode").value = policy.wallet_mode; $("#migration-local-wallet").checked = Boolean(policy.local_wallet_transfer_enabled); $("#migration-policy-summary").innerHTML = summaryRows([["当前状态", policy.enabled ? "已开启" : "已关闭"], ["评估状态", ({ disabled: "已关闭", deferred: "评估延后", no_actionable_need: "无需迁移", cognition_unavailable: "等待认知资源", awaiting_approval: "等待审批", approved: "已批准", executing: "执行中", committed: "已迁移", reconciliation_required: "需核对或回滚", cognition_declined: "认知评估未建议迁移", hard_gate_rejected: "未通过策略检查" })[policy.assessment_status] || "等待评估"], ["策略版本", policy.revision], ["审批模式", policy.approval_mode], ["钱包模式", policy.wallet_mode], ["活动 epoch", policy.active_epoch ? `${policy.active_epoch.epoch_number} · ${policy.active_epoch.target_id}` : "无"]]);
@@ -272,11 +352,10 @@ async function loadUpgradeCheck(quiet = false) {
       return null;
     }
     upgradeCheckResult = null;
-    $("#upgrade-current-version").textContent = "暂不可读取";
     $("#upgrade-latest-version").textContent = "检查失败";
     $("#upgrade-commit-time").textContent = "-";
     $("#upgrade-checked-time").textContent = "-";
-    $("#upgrade-commit-title").textContent = "服务器可能尚未安装网页升级组件，或暂时无法连接 GitHub。";
+    $("#upgrade-commit-title").textContent = upgradeErrorLabels[checkResult.reason?.code] || errorText(checkResult.reason);
     $("#upgrade-status-label").textContent = "无法检查版本";
     $("#start-upgrade").disabled = true;
     if (!quiet) setStatus("#upgrade-status", errorText(error), true);
@@ -284,6 +363,10 @@ async function loadUpgradeCheck(quiet = false) {
   }
 }
 async function loadUpgradePanel() {
+  try {
+    const installed = await request("/api/v1/admin/upgrade/installed");
+    $("#upgrade-current-version").textContent = `${installed.current_release} · ${String(installed.current_sha || "未知提交").slice(0, 12)}`;
+  } catch (error) { if (!upgradeCheckResult) $("#upgrade-current-version").textContent = `本地信息不可读（${error.status || "连接失败"}）`; }
   const [checkResult, statusResult] = await Promise.allSettled([
     request("/api/v1/admin/upgrade/check"),
     request("/api/v1/admin/upgrade/status"),
@@ -295,7 +378,6 @@ async function loadUpgradePanel() {
   if (checkResult.status === "fulfilled") renderUpgradeCheck(checkResult.value);
   else {
     upgradeCheckResult = null;
-    $("#upgrade-current-version").textContent = "暂不可读取";
     $("#upgrade-latest-version").textContent = "检查失败";
     $("#upgrade-commit-title").textContent = "服务器可能尚未安装网页升级组件，或暂时无法连接 GitHub。";
     $("#upgrade-status-label").textContent = "无法检查版本";
@@ -381,7 +463,7 @@ function renderModelKey(item, key) {
 }
 
 async function login(event) { event.preventDefault(); const form = event.currentTarget; const token = $("#login-token").value.trim(); if (!token) return; const button = submitButton(form, event); if (button) button.disabled = true; setStatus("#login-status", "正在建立会话"); try { const result = await request("/admin/session", { method: "POST", body: JSON.stringify({ token }) }); stopUpgradePolling(); upgradeTaskId = null; upgradeStatusAvailable = false; upgradeCheckResult = null; csrfToken = result.csrf_token; $("#login-token").value = ""; $("#login-shell").hidden = true; $("#admin-shell").hidden = false; await loadAll(); } catch (error) { setStatus("#login-status", errorText(error), true); } finally { if (button) button.disabled = false; } }
-async function logout() { stopUpgradePolling(); try { await request("/admin/session/logout", { method: "POST" }); } catch { /* session is already unusable */ } csrfToken = ""; upgradeTaskId = null; upgradeStatusAvailable = false; upgradeCheckResult = null; publicPostCursor = ""; publicPostRows = []; publicPostActionKeys.clear(); $("#public-post-review-list").replaceChildren(); $("#admin-shell").hidden = true; $("#login-shell").hidden = false; }
+async function logout() { stopUpgradePolling(); stopRuntimeLogPolling(); runtimeLogCursor = null; runtimeLogBrowsingHistory = false; $("#runtime-log-list").replaceChildren(); $("#lifecycle-summary").replaceChildren(); $("#lifecycle-timeline").replaceChildren(); try { await request("/admin/session/logout", { method: "POST" }); } catch { /* session is already unusable */ } csrfToken = ""; upgradeTaskId = null; upgradeStatusAvailable = false; upgradeCheckResult = null; publicPostCursor = ""; publicPostRows = []; publicPostActionKeys.clear(); $("#public-post-review-list").replaceChildren(); $("#admin-shell").hidden = true; $("#login-shell").hidden = false; }
 
 async function loadOverview() {
   latestDiagnostics = null;
@@ -1113,6 +1195,13 @@ async function loadAll() {
   }
 }
 async function restoreSession() { try { const result = await request("/admin/session"); if (!result.authenticated) return; csrfToken = result.csrf_token; $("#login-shell").hidden = true; $("#admin-shell").hidden = false; await loadAll(); } catch (error) { setStatus("#login-status", errorText(error), true); } }
+
+$("#refresh-runtime-logs").addEventListener("click", () => { runtimeLogCursor = null; void loadRuntimeLogs(); });
+$("#runtime-log-more").addEventListener("click", () => { void loadRuntimeLogs({ append: true }); });
+for (const selector of ["#runtime-log-category", "#runtime-log-status", "#runtime-log-since", "#runtime-log-until"]) $(selector).addEventListener("change", () => { runtimeLogCursor = null; void loadRuntimeLogs(); });
+$("#runtime-log-auto").addEventListener("change", () => { clearTimeout(runtimeLogTimer); scheduleRuntimeLogs(); });
+$("#logout").addEventListener("click", stopRuntimeLogPolling);
+document.addEventListener("visibilitychange", () => { if (document.hidden) stopRuntimeLogPolling(); else if (activeSection === "logs") { runtimeLogCursor = null; void loadRuntimeLogs(); } });
 
 $("#login-form").addEventListener("submit", login); $("#logout").addEventListener("click", logout); $("#refresh-admin").addEventListener("click", loadAll); $("#check-upgrade-version").addEventListener("click", checkUpgradeVersion); $("#start-upgrade").addEventListener("click", requestUpgradeConfirmation); $("#confirm-upgrade").addEventListener("click", confirmUpgrade); $("#refresh-observability").addEventListener("click", () => { void loadOverview().catch((error) => setStatus("#global-status", errorText(error), true)); }); $("#refresh-provider-health").addEventListener("click", () => { void loadProviderHealth().catch((error) => setStatus("#provider-health-status", errorText(error), true)); }); $("#refresh-retention").addEventListener("click", () => { void loadRetention().catch((error) => setStatus("#retention-status", errorText(error), true)); }); $("#run-retention").addEventListener("click", () => { void runRetention(); }); $("#refresh-mailbox").addEventListener("click", loadMailbox); $("#refresh-models").addEventListener("click", loadModels); $("#refresh-search-providers").addEventListener("click", loadSearchProviders); $("#refresh-capabilities").addEventListener("click", loadCapabilities); $("#refresh-runtime").addEventListener("click", loadRuntime); document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => showSection(button.dataset.section)));
 $("#setup-guide-list").addEventListener("click", (event) => { const button = event.target.closest("[data-setup-go]"); if (button) showSection(button.dataset.setupGo); });

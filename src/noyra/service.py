@@ -2970,7 +2970,7 @@ class NoyraHTTPServer:
                         HTTPStatus.OK,
                         owner.projection.outcomes_view(owner.kernel.subject_id, limit=limit),
                     )
-                elif parsed.path == "/api/runtime-logs":
+                elif parsed.path in {"/api/runtime-logs", "/api/admin/activity-logs"}:
                     if not self._authorized("read"):
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
@@ -2985,11 +2985,23 @@ class NoyraHTTPServer:
                             owner.kernel.subject_id,
                             limit=limit,
                             cursor=self._cursor(query),
+                            category=query.get("category", [None])[0],
+                            status=query.get("status", [None])[0],
+                            since=query.get("since", [None])[0],
+                            until=query.get("until", [None])[0],
+                            summary_only=parsed.path == "/api/admin/activity-logs",
                         )
                     except ValueError:
                         self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_cursor"})
                         return
                     self._json(HTTPStatus.OK, page)
+                elif parsed.path == "/api/admin/lifecycle-summary":
+                    if not self._authorized("read"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    self._json(
+                        HTTPStatus.OK, owner.projection.lifecycle_summary(owner.kernel.subject_id)
+                    )
                 elif parsed.path == "/api/diagnostics":
                     if not self._authorized("read"):
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -2998,6 +3010,7 @@ class NoyraHTTPServer:
                 elif parsed.path in {
                     "/api/admin/upgrade/check",
                     "/api/admin/upgrade/status",
+                    "/api/admin/upgrade/installed",
                 }:
                     if not self._authorized():
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -3006,6 +3019,8 @@ class NoyraHTTPServer:
                         payload = (
                             owner.upgrade_manager.check_version()
                             if parsed.path.endswith("/check")
+                            else owner.upgrade_manager.installed_version()
+                            if parsed.path.endswith("/installed")
                             else owner.upgrade_manager.status()
                         )
                     except UpgradeError as error:

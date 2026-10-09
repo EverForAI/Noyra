@@ -172,6 +172,10 @@ class UpgradeManager:
         if self.channel == "stable":
             try:
                 return stable_metadata(self.github_owner, self.github_repo)
+            except urllib.error.HTTPError as error:
+                raise UpgradeError(self._remote_http_error(error)) from None
+            except (urllib.error.URLError, TimeoutError):
+                raise UpgradeError("upgrade_remote_connect_failed") from None
             except (OSError, ValueError, KeyError):
                 raise UpgradeError("upgrade_unavailable") from None
         url = (
@@ -188,8 +192,25 @@ class UpgradeManager:
             if len(raw) > 65_536:
                 raise ValueError("response too large")
             return json.loads(raw)
-        except (OSError, urllib.error.URLError, ValueError, TimeoutError):
+        except urllib.error.HTTPError as error:
+            raise UpgradeError(self._remote_http_error(error)) from None
+        except (urllib.error.URLError, TimeoutError):
+            raise UpgradeError("upgrade_remote_connect_failed") from None
+        except (OSError, ValueError):
             raise UpgradeError("upgrade_unavailable") from None
+
+    def _remote_http_error(self, error: urllib.error.HTTPError) -> str:
+        if (
+            error.code == 404
+            and self.channel == "stable"
+            and error.url.endswith("/releases/latest")
+        ):
+            return "upgrade_no_stable_release"
+        if error.code == 429 or (
+            error.code == 403 and error.headers.get("X-RateLimit-Remaining") == "0"
+        ):
+            return "upgrade_remote_rate_limited"
+        return "upgrade_remote_http_error"
 
     def _parse_metadata(self, payload: Any) -> dict[str, str]:
         if isinstance(payload, dict) and set(payload).issuperset({"sha", "committed_at", "title"}):
@@ -218,16 +239,23 @@ class UpgradeManager:
         safe_title = redact_text(title_lines[0] if title_lines else "No commit message")[:160]
         return {"sha": sha, "committed_at": committed_at, "title": safe_title}
 
+    def installed_version(self) -> dict[str, Any]:
+        """Read installed metadata independently of the remote release channel."""
+        return {
+            "current_release": self._current_release(),
+            "current_sha": self._current_sha(),
+            "channel": self.channel,
+        }
+
     def check_version(self) -> dict[str, Any]:
         self._require_available()
-        current = self._current_release()
-        current_sha = self._current_sha()
+        installed = self.installed_version()
+        current_sha = installed["current_sha"]
         latest = self._parse_metadata(self.github_fetcher())
         checked_at = datetime.now(UTC)
         self._checked = (latest["sha"], checked_at)
         return {
-            "current_release": current,
-            "current_sha": current_sha,
+            **installed,
             "latest": {
                 **latest,
                 "short_sha": latest["sha"][:12],

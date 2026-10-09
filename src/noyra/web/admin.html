@@ -30,6 +30,7 @@
       <nav aria-label="管理台导航">
         <button class="nav-item active" data-section="overview" type="button">总览</button>
         <button class="nav-item" data-section="conversation" type="button">私密交流</button>
+        <button class="nav-item" data-section="logs" type="button">活动日志</button>
         <button class="nav-item" data-section="public-posts" type="button">内容审核</button>
         <button class="nav-item" data-section="models" type="button">认知资源</button>
         <button class="nav-item" data-section="search" type="button">搜索配置</button>
@@ -239,6 +240,11 @@
         <div class="section-intro"><div><p class="eyebrow">RUNTIME GUARDRAILS</p><h2>运行防护</h2><p>这里展示认知是否被暂停、等待或模型错误阻断，不显示私密模型上下文。</p></div></div>
         <article class="surface-card"><div class="card-heading"><h2>诊断摘要</h2><button class="text-button" id="refresh-runtime" type="button">更新</button></div><div id="runtime-summary" class="runtime-grid"></div></article>
         <article class="surface-card"><div class="card-heading"><h2>公共发帖防护</h2><span class="muted">修改后立即生效</span></div><form id="public-post-controls-form" class="model-grid"><input id="public-post-rate-limit" type="number" min="1" max="100000" required placeholder="同一来源每小时帖子数"><input id="public-post-queue-cap" type="number" min="1" max="100000" required placeholder="待审核队列上限"><input id="public-post-captcha-ttl" type="number" min="30" max="3600" required placeholder="验证码有效期（秒）"><input id="public-post-captcha-attempts" type="number" min="1" max="20" required placeholder="验证码最大尝试次数"><select id="public-post-captcha-mode" aria-label="验证码字符模式"><option value="alphanumeric">字母 + 数字</option><option value="letters">纯字母</option><option value="digits">纯数字</option></select><input id="public-post-captcha-issue-limit" type="number" min="1" max="100000" required placeholder="同一来源每小时验证码数"><input id="public-post-captcha-global-rate" type="number" min="1" max="100000" required placeholder="全站每分钟验证码数"><input id="public-post-storage-cap" type="number" min="1000000" max="2000000000" required placeholder="帖子内容字节上限"><button type="submit">保存防护设置</button></form><div id="public-post-usage" class="summary-list"></div><p class="form-status" id="public-post-controls-status" role="status"></p></article>
+      </section>
+      <section class="admin-section" data-section-panel="logs" hidden>
+        <div class="section-intro"><div><p class="eyebrow">ACTIVITY LOG</p><h2>活动日志</h2><p>只显示经过授权和脱敏的运行摘要；不会展示令牌、模型正文或私密反思内容。</p></div><button id="refresh-runtime-logs" type="button">刷新</button></div>
+        <article class="surface-card"><div class="card-heading"><h2>生命周期</h2></div><div id="lifecycle-summary" class="summary-list"></div><details><summary>休眠阶段时间线</summary><ol id="lifecycle-timeline" class="activity-timeline"></ol></details></article>
+        <article class="surface-card"><div class="log-toolbar"><label>记录类别<select id="runtime-log-category"><option value="">全部</option><option value="event">运行事件</option><option value="model_call">模型调用</option><option value="action">行为执行</option><option value="routing">资源路由</option><option value="audit">管理审计</option></select></label><label>状态<select id="runtime-log-status"><option value="">全部</option><option value="succeeded">成功</option><option value="failed">失败</option><option value="unknown">结果未知</option><option value="executing">执行中</option><option value="recorded">已记录</option></select></label><label>开始时间<input id="runtime-log-since" type="datetime-local"></label><label>结束时间<input id="runtime-log-until" type="datetime-local"></label><label class="checkbox-field"><input id="runtime-log-auto" type="checkbox" checked>自动更新</label></div><p id="runtime-log-feedback" class="form-status" role="status"></p><div id="runtime-log-list" class="activity-list" aria-live="polite"></div><button id="runtime-log-more" type="button" hidden>加载更早记录</button></article>
       </section>
     </main>
   </div>

@@ -193,7 +193,7 @@ def test_admin_setup_guide_and_observability_are_present_and_localized() -> None
     assert 'walletAuditActionLabels[row.action] || "其他钱包操作"' in ADMIN_JS
     assert "Promise.allSettled" in ADMIN_JS
     assert "admin_network_unavailable" in ADMIN_JS
-    assert "管理台暂时无法连接服务" in ADMIN_JS
+    assert "未能连接服务" in ADMIN_JS
 
 
 def test_admin_upgrade_panel_has_confirmed_upgrade_and_session_bound_polling() -> None:
