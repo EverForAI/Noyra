@@ -1811,7 +1811,7 @@ $("#model-list").addEventListener("submit", async (event) => {
   event.preventDefault(); const button = form.querySelector("button[type=submit]"); button.disabled = true;
   try {
     await request(`/api/config/model-resources/${encodeURIComponent(form.dataset.id)}/keys`, { method: "POST", body: JSON.stringify({ api_keys: form.elements.api_keys.value.split(/\r?\n/).map((v) => v.trim()).filter(Boolean) }) });
-    form.reset(); setStatus("#model-status", "密钥已添加");
+    form.reset(); delete form.dataset.dirty; setStatus("#model-status", "密钥已添加");
     try { await loadModels(); } catch { setStatus("#model-status", "密钥已添加；列表刷新失败", true); }
   } catch (error) { setStatus("#model-status", errorText(error), true); }
   finally { button.disabled = false; }
