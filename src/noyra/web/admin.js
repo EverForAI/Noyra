@@ -17,6 +17,14 @@ let walletObservationHealth = null;
 let walletObservationLoadVersion = 0;
 let walletEconomyLoadVersion = 0;
 let walletExecutionLoadVersion = 0;
+let walletArea = "balances";
+let walletLoadVersion = 0;
+let walletHistoryCursor = null;
+let walletHistoryStarted = false;
+let walletOrders = [];
+let walletPolicyDraftVersion = null;
+let walletPolicyLoadVersion = 0;
+let walletAuditLoadVersion = 0;
 let latestDiagnostics = null;
 let upgradeCheckResult = null;
 let upgradeTaskId = null;
@@ -133,7 +141,7 @@ async function request(path, options = {}) {
 }
 
 function setStatus(target, message, error = false) { const node = $(target); node.textContent = message || ""; node.classList.toggle("error", error); }
-function showSection(section) { stopRuntimeLogPolling(); clearTimeout(chat.timer); activeSection = section; document.querySelectorAll("[data-section-panel]").forEach((panel) => { panel.hidden = panel.dataset.sectionPanel !== section; }); document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.section === section)); $("#page-title").textContent = { overview: "总览", conversation: "私密交流", logs: "活动日志", "public-posts": "内容审核", models: "认知资源", search: "搜索配置", capabilities: "能力授权", channels: "通讯渠道", wallet: "钱包采集", migration: "迁移与庇护所", runtime: "运行防护" }[section]; if (section === "logs") { runtimeLogCursor = null; void loadRuntimeLogs(); } if(section==="conversation" && !chat.history) void loadMailbox().catch(error=>setStatus("#message-status",errorText(error),true)); }
+function showSection(section) { stopRuntimeLogPolling(); clearTimeout(chat.timer); activeSection = section; document.querySelectorAll("[data-section-panel]").forEach((panel) => { panel.hidden = panel.dataset.sectionPanel !== section; }); document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.section === section)); $("#page-title").textContent = { overview: "总览", conversation: "私密交流", logs: "活动日志", "public-posts": "内容审核", models: "认知资源", search: "搜索配置", capabilities: "能力授权", channels: "通讯渠道", wallet: "钱包与付款", migration: "迁移与庇护所", runtime: "运行防护" }[section]; if (section === "logs") { runtimeLogCursor = null; void loadRuntimeLogs(); } if(section==="conversation" && !chat.history) void loadMailbox().catch(error=>setStatus("#message-status",errorText(error),true)); if(section==="wallet")void loadWallet().catch(error=>setStatus("#wallet-read-status",errorText(error),true)); }
 async function loadMigration() {
   const [policy, targets, proposals, tasks] = await Promise.all([request("/api/v1/admin/migration/policy"), request("/api/v1/admin/migration/targets"), request("/api/v1/admin/migration/proposals"), request("/api/v1/admin/migration/tasks")]);
   $("#migration-enabled").checked = Boolean(policy.enabled); $("#migration-approval-mode").value = policy.approval_mode; $("#migration-cooldown").value = Math.round((policy.rejection_cooldown_seconds || 0) / 86400); $("#migration-wallet-mode").value = policy.wallet_mode; $("#migration-local-wallet").checked = Boolean(policy.local_wallet_transfer_enabled); $("#migration-policy-summary").innerHTML = summaryRows([["当前状态", policy.enabled ? "已开启" : "已关闭"], ["评估状态", ({ disabled: "已关闭", deferred: "评估延后", no_actionable_need: "无需迁移", cognition_unavailable: "等待认知资源", awaiting_approval: "等待审批", approved: "已批准", executing: "执行中", committed: "已迁移", reconciliation_required: "需核对或回滚", cognition_declined: "认知评估未建议迁移", hard_gate_rejected: "未通过策略检查" })[policy.assessment_status] || "等待评估"], ["策略版本", policy.revision], ["审批模式", policy.approval_mode], ["钱包模式", policy.wallet_mode], ["活动 epoch", policy.active_epoch ? `${policy.active_epoch.epoch_number} · ${policy.active_epoch.target_id}` : "无"]]);
@@ -674,6 +682,34 @@ const walletRunStatusLabels = { queued: "排队中", running: "执行中", retry
 const walletAttemptStatusLabels = { executing: "执行中", succeeded: "成功", failed: "失败", unknown: "结果未知" };
 
 function walletStatusLabel(status, labels = walletRunStatusLabels) { return labels[status] || status || "未知"; }
+function walletOrderStatus(status) { return ({open:"开放中",closed:"已关闭",pending_policy:"等待策略",awaiting_confirmation:"等待确认",reserved:"已预留",signing:"签名中",broadcast:"已广播",confirmed:"链上已确认",refunded:"预留已释放",rejected:"已拒绝",expired:"已过期",...walletRunStatusLabels})[status] || status || "未知"; }
+function walletAmount(value, assetId) {
+  if (value === null || value === undefined) return "无金额记录";
+  if (typeof value !== "string" || !/^-?\d+$/.test(value) || value.length > 512) return "金额格式异常";
+  const asset = walletAssetLookup().get(assetId);
+  if (!asset || !Number.isInteger(asset.decimals) || asset.decimals < 0 || asset.decimals > 255) return `${value} 最小单位（精度未知）`;
+  const negative = value.startsWith("-");
+  const digits = BigInt(negative ? value.slice(1) : value).toString().padStart(asset.decimals + 1, "0");
+  const fraction = asset.decimals ? digits.slice(-asset.decimals).replace(/0+$/, "") : "";
+  return `${negative && BigInt(value) !== 0n ? "-" : ""}${asset.decimals ? digits.slice(0, -asset.decimals) : digits}${fraction ? "." + fraction : ""} ${asset.symbol}`;
+}
+function walletObservationLabel(observedAt) {
+  const date = Date.parse(observedAt);
+  const reference = Date.parse(walletObservationHealth?.evaluated_at);
+  const threshold = walletObservationHealth?.stale_after_seconds;
+  if (!Number.isFinite(date)) return "观测时间异常";
+  if (!Number.isFinite(reference) || !Number.isFinite(threshold)) return "新鲜度尚未读取";
+  const age = (reference - date) / 1000;
+  if (age < 0) return "未来时间异常";
+  return age > threshold ? "已过期" : age >= threshold * 0.8 ? "临近过期" : "新鲜快照";
+}
+function walletRPCHost(value) { try { return new URL(value).hostname; } catch { return "RPC 地址异常"; } }
+function walletCoverage(rows, label) { return `${label}：已读 ${rows.length} 条${rows.length >= 100 ? "（读取上限 100，可能还有记录）" : ""}`; }
+async function walletRefreshAfterWrite(status, message, refresh) {
+  setStatus(status, message);
+  try { await refresh(); setStatus(status, message); }
+  catch (error) { setStatus(status, `${message}；读取更新失败，请刷新核对。${errorText(error)}`, true); }
+}
 function walletNetworkLookup() { return new Map(walletNetworks.map((item) => [item.network_id, item])); }
 function walletAssetLookup() { return new Map(walletAssets.map((item) => [item.asset_id, item])); }
 function walletAddressLookup() { return new Map(walletAddresses.map((item) => [item.address_id, item])); }
@@ -713,9 +749,10 @@ async function loadWalletObservationHealth() {
   setStatus("#wallet-observation-health-status", "正在读取");
   try {
     const payload = await request("/api/config/wallet-observation-health?group_by=" + encodeURIComponent(groupBy) + "&limit=100");
-    if (version !== walletObservationLoadVersion) return;
+    if (version !== walletObservationLoadVersion || !csrfToken) return;
     walletObservationHealth = payload;
     renderWalletObservationHealth(payload);
+    renderWalletGraph();
   } catch (error) {
     if (version === walletObservationLoadVersion) {
       walletObservationHealth = null;
@@ -731,13 +768,17 @@ async function loadWalletObservationHealth() {
   }
 }
 
-function renderWalletMetrics(health) {
+function renderWalletMetrics(health, wallet = {}) {
+  const observations=wallet.balance_history || {};
+  const freshness=observations.observation_health || {};
   $("#wallet-metrics").innerHTML = [
     ["采集状态", walletStatusLabel(health?.status, { ok: "正常", attention: "需要关注", degraded: "不可用" })],
     ["活动运行", health?.active ?? 0],
     ["需要关注", health?.attention ?? 0],
     ["过期租约", health?.expired_running ?? 0],
     ["RPC 尝试", health?.attempts ?? 0],
+    ["最近观测",formatTimestamp(observations.latest_observed_at)],
+    ["过期 / 无快照",`${freshness.stale_pairs ?? "未读取"} / ${freshness.never_pairs ?? "未读取"}`],
   ].map(([label, value]) => '<div class="metric"><span>' + esc(label) + "</span><strong>" + esc(value) + "</strong></div>").join("");
 }
 function updateWalletAddressOptions() {
@@ -766,45 +807,33 @@ function renderWalletEnqueueOptions() {
   updateWalletAddressOptions();
 }
 function renderWalletGraph() {
-  const assetsByNetwork = new Map();
-  const addressesByNetwork = new Map();
   const balancesByNetwork = new Map();
-  walletAssets.forEach((item) => { if (!assetsByNetwork.has(item.network_id)) assetsByNetwork.set(item.network_id, []); assetsByNetwork.get(item.network_id).push(item); });
-  walletAddresses.forEach((item) => { if (!addressesByNetwork.has(item.network_id)) addressesByNetwork.set(item.network_id, []); addressesByNetwork.get(item.network_id).push(item); });
   walletBalances.forEach((item) => { if (!balancesByNetwork.has(item.network_id)) balancesByNetwork.set(item.network_id, []); balancesByNetwork.get(item.network_id).push(item); });
   $("#wallet-graph-list").innerHTML = walletNetworks.length ? walletNetworks.map((network) => {
-    const assets = assetsByNetwork.get(network.network_id) || [];
-    const addresses = addressesByNetwork.get(network.network_id) || [];
     const balances = balancesByNetwork.get(network.network_id) || [];
-    const assetMarkup = assets.length
-      ? "<ul>" + assets.map((item) => '<li>' + esc(item.name) + " · " + esc(item.symbol) + " · " + esc(item.asset_type) + ' · <span class="status-chip status-' + esc(item.status) + '">' + esc(walletStatusLabel(item.status, { active: "活动", revoked: "已撤销" })) + "</span></li>").join("") + "</ul>"
-      : '<div class="muted">暂无资产</div>';
-    const addressMarkup = addresses.length
-      ? "<ul>" + addresses.map((item) => '<li>' + esc(item.label) + ' · <code>' + esc(item.address) + '</code> · <span class="status-chip status-' + esc(item.status) + '">' + esc(walletStatusLabel(item.status, { active: "活动", revoked: "已撤销" })) + "</span></li>").join("") + "</ul>"
-      : '<div class="muted">暂无地址</div>';
     const balanceMarkup = balances.length
-      ? "<ul>" + balances.map((item) => "<li>" + esc(walletTargetText(item.asset_id, item.address_id)) + " · <strong>" + esc(item.balance) + "</strong> · " + esc(formatTimestamp(item.observed_at)) + "</li>").join("") + "</ul>"
+      ? "<ul>" + balances.map((item) => "<li>" + esc(walletTargetText(item.asset_id, item.address_id)) + " · <strong>" + esc(walletAmount(item.balance,item.asset_id)) + "</strong> · " + esc(formatTimestamp(item.observed_at)) + " · " + esc(walletObservationLabel(item.observed_at)) + '<details><summary>最小单位原值</summary><code>' + esc(item.balance) + '</code></details></li>').join("") + "</ul>"
       : '<div class="muted">暂无余额观测</div>';
-    return '<article class="resource-item wallet-network-item"><div class="wallet-network-heading"><div><h3>' + esc(network.label) + "</h3><p>" + esc(network.chain_family) + " · chain " + esc(network.chain_id) + " · " + esc(network.native_symbol) + '</p></div><span class="status-chip status-' + esc(network.status) + '">' + esc(walletStatusLabel(network.status, { active: "活动", revoked: "已撤销" })) + '</span></div><small class="wallet-rpc-origin">' + esc(network.rpc_url || "未配置 RPC") + '</small><div class="wallet-subsections"><div><strong>资产</strong>' + assetMarkup + "</div><div><strong>地址</strong>" + addressMarkup + "</div><div><strong>最近余额</strong>" + balanceMarkup + "</div></div></article>";
+    return '<article class="resource-item wallet-network-item"><div><h3>' + esc(network.label) + '</h3>' + balanceMarkup + '</div></article>';
   }).join("") : '<div class="empty-state">尚未登记钱包网络</div>';
   renderWalletEnqueueOptions();
 }
 async function loadWalletGraph() {
   const version = ++walletGraphLoadVersion;
-  const [diagnostics, networks, assets, addresses, balances] = await Promise.all([
-    request("/api/diagnostics"),
+  const [networks, assets, addresses, balances] = await Promise.all([
     request("/api/config/wallet-networks?limit=100"),
     request("/api/config/wallet-assets?limit=100"),
     request("/api/config/wallet-addresses?limit=100"),
-    request("/api/config/wallet-balances?limit=100"),
+    ...(walletArea === "balances" ? [request("/api/config/wallet-balances?limit=100")] : [Promise.resolve(walletBalances)]),
   ]);
-  if (version !== walletGraphLoadVersion) return;
+  if (version !== walletGraphLoadVersion || !csrfToken) return;
   walletNetworks = Array.isArray(networks) ? networks : [];
   walletAssets = Array.isArray(assets) ? assets : [];
   walletAddresses = Array.isArray(addresses) ? addresses : [];
   walletBalances = Array.isArray(balances) ? balances : [];
-  renderWalletMetrics(diagnostics.wallet_acquisition || {});
   renderWalletGraph();
+  $("#wallet-registry-list").innerHTML = walletNetworks.map(network => `<article class="resource-item"><div><h3>${esc(network.label)}</h3><p>${esc(network.chain_family)} · ${esc(network.chain_id)} · ${esc(walletRPCHost(network.rpc_url))} · ${esc(walletStatusLabel(network.status,{active:"活动",revoked:"已撤销"}))}</p><h4>资产</h4>${walletAssets.filter(row=>row.network_id===network.network_id).map(row=>`<p>${esc(row.name)} · ${esc(row.symbol)} · 小数位 ${esc(row.decimals)} · ${esc(row.status)}</p>`).join("") || "暂无资产"}<h4>地址</h4>${walletAddresses.filter(row=>row.network_id===network.network_id).map(row=>`<p>${esc(row.label)} · <code>${esc(row.address)}</code> · ${esc(row.status)}</p>`).join("") || "暂无地址"}</div></article>`).join("") || '<p class="muted">暂无网络</p>';
+  setStatus("#wallet-registry-status", [walletCoverage(walletNetworks,"网络"),walletCoverage(walletAssets,"资产"),walletCoverage(walletAddresses,"地址")].join(" · "));
   const select = $("#wallet-budget-network");
   const current = select.value;
   select.innerHTML = walletNetworks.length
@@ -812,6 +841,12 @@ async function loadWalletGraph() {
     : '<option value="">尚未登记网络</option>';
   if (walletNetworks.some((item) => item.network_id === current)) select.value = current;
   select.disabled = !walletNetworks.length;
+  for(const control of document.querySelectorAll("[data-wallet-network-select]")) {
+    const selected=control.value;const choices=walletNetworks.filter(row=>row.status==="active");
+    control.innerHTML=choices.map(row=>`<option value="${esc(row.network_id)}">${esc(row.label)}</option>`).join("") || '<option value="">先登记网络</option>';
+    if(choices.some(row=>row.network_id===selected))control.value=selected;
+    control.disabled=!choices.length;
+  }
 }
 function renderWalletBudget(budget) {
   $("#wallet-budget-summary").innerHTML = summaryRows([
@@ -819,6 +854,7 @@ function renderWalletBudget(budget) {
     ["窗口请求上限", formatInteger(budget.request_limit)],
     ["已使用请求", formatInteger(budget.requests_used)],
     ["已预留请求", formatInteger(budget.requests_reserved)],
+    ["剩余请求", formatInteger(Math.max(0,budget.request_limit-budget.requests_used-budget.requests_reserved))],
     ["下一次可用", budget.next_allowed_at ? formatTimestamp(budget.next_allowed_at) : "现在"],
   ]);
 }
@@ -834,7 +870,7 @@ async function loadWalletBudget() {
   setStatus("#wallet-budget-status", "正在读取");
   try {
     const budget = await request("/api/admin/wallet-acquisition-budget?network_id=" + encodeURIComponent(networkId));
-    if (version !== walletBudgetLoadVersion) return;
+    if (version !== walletBudgetLoadVersion || !csrfToken) return;
     if (!budget || typeof budget !== "object") throw new Error("RPC 预算响应无效");
     renderWalletBudget(budget);
     setStatus("#wallet-budget-status", "");
@@ -878,11 +914,11 @@ async function loadWalletAcquisitions() {
   if (filter !== "all") path += "&status=" + encodeURIComponent(filter);
   try {
     const rows = await request(path);
-    if (version !== walletQueueLoadVersion) return;
+    if (version !== walletQueueLoadVersion || !csrfToken) return;
     if (!Array.isArray(rows)) throw new Error("采集队列响应无效");
     walletAcquisitionRows = rows;
     renderWalletAcquisitions();
-    setStatus("#wallet-acquisition-status", "已加载 " + rows.length + " 条");
+    setStatus("#wallet-acquisition-status", walletCoverage(rows,"最近采集"));
   } catch (error) {
     if (version === walletQueueLoadVersion) {
       $("#wallet-acquisition-list").innerHTML = '<div class="muted">采集队列加载失败，请重试</div>';
@@ -903,18 +939,24 @@ async function loadWalletEconomy() {
     request("/api/admin/wallet-orders?limit=100"),
     request("/api/admin/wallet-ledger?limit=100"),
   ]);
-  if (version !== walletEconomyLoadVersion) return;
-  $("#wallet-bounty-list").innerHTML = (Array.isArray(bounties) && bounties.length) ? bounties.map((item) => `<article class="resource-item"><strong>${esc(item.title)}</strong><span class="muted">${esc(item.status)} · ${esc(item.reward_amount)}</span></article>`).join("") : '<div class="muted">暂无任务</div>';
+  if (version !== walletEconomyLoadVersion || !csrfToken) return;
+  walletOrders = Array.isArray(orders) ? orders : [];
+  $("#wallet-bounty-list").innerHTML = (Array.isArray(bounties) && bounties.length) ? bounties.map((item) => `<article class="resource-item"><strong>${esc(item.title)}</strong><span class="muted">${esc(walletOrderStatus(item.status))} · ${esc(walletAmount(item.reward_amount,item.asset_id))}</span></article>`).join("") : '<div class="muted">暂无任务</div>';
+  $("#wallet-bounty-list").insertAdjacentHTML("beforeend", `<p class="muted">${esc(walletCoverage(bounties,"最近赏金"))}</p>`);
   $("#wallet-order-list").innerHTML = (Array.isArray(orders) && orders.length) ? orders.map((item) => {
-    const execute = item.status === "reserved" ? `<button data-wallet-order-action="execute" data-order-id="${esc(item.order_id)}" type="button">执行转账</button>` : "";
-    return `<article class="resource-item"><div><strong>${esc(item.order_id)}</strong><span class="muted">${esc(item.status)} · ${esc(item.amount)}（内部预留）</span></div><div class="resource-actions">${execute}</div></article>`;
+    const execute = item.status === "reserved" ? `<button data-wallet-order-action="execute" data-order-id="${esc(item.order_id)}" type="button">签名并广播</button>` : "";
+    return `<article class="resource-item"><div><strong>${esc(walletAmount(item.amount,item.asset_id))}</strong><p>${esc(walletOrderStatus(item.status))} · 收款 ${esc(item.recipient_address)}</p><details><summary>订单详情</summary><code>${esc(item.order_id)}</code><p>最小单位 ${esc(item.amount)}</p></details></div><div class="resource-actions">${execute}</div></article>`;
   }).join("") : '<div class="muted">暂无订单</div>';
-  $("#wallet-ledger-list").innerHTML = Array.isArray(ledger) ? ledger.map((item) => `<div class="summary-row"><span>${esc(item.account)}</span><strong>${esc(item.net)}</strong></div>`).join("") : "";
+  $("#wallet-order-list").insertAdjacentHTML("beforeend", `<p class="muted">${esc(walletCoverage(walletOrders,"最近订单"))}</p>`);
+  $("#wallet-ledger-list").innerHTML = Array.isArray(ledger) ? ledger.map((item) => `<div class="summary-row"><span>${esc(item.account)} · ${esc(item.network_id)}</span><strong>${esc(walletAmount(item.net,item.asset_id))}</strong></div>`).join("") : "";
 }
 
 function renderWalletPolicy(policy) {
   walletPolicy = policy && typeof policy === "object" ? policy : null;
   if (!walletPolicy) return;
+  $("#wallet-policy-effective").innerHTML=summaryRows([["模式",({disabled:"付款关闭",conditional_confirmation:"逐笔确认",automatic:"自动付款"})[policy.mode]||policy.mode],["自动付款开关",policy.automation_enabled ? "开启":"关闭"],["紧急暂停",policy.emergency_paused ? "暂停中":"未暂停"],["单笔上限（最小单位）",policy.per_order_limit],["每日上限（最小单位）",policy.daily_limit],["收款白名单",policy.recipient_allowlist_enabled ? `${policy.allowed_recipient_addresses.length} 个地址`:"关闭"],["有效策略版本",policy.policy_version]]);
+  if($("#wallet-policy-form").dataset.dirty)return;
+  walletPolicyDraftVersion = policy.policy_version;
   $("#wallet-policy-mode").value = walletPolicy.mode || "disabled";
   $("#wallet-policy-per-order").value = walletPolicy.per_order_limit ?? "0";
   $("#wallet-policy-daily").value = walletPolicy.daily_limit ?? "0";
@@ -939,10 +981,13 @@ const walletFailureReasonLabels = {
   none: "无原因码",
 };
 async function loadWalletPolicy() {
+  const version=++walletPolicyLoadVersion;
   const policy = await request("/api/admin/wallet-policy");
+  if(version!==walletPolicyLoadVersion || !csrfToken)return;
   renderWalletPolicy(policy);
   try {
     const automation = await request("/api/v1/admin/wallet-automation");
+    if(version!==walletPolicyLoadVersion || !csrfToken)return;
     const label = automation.status === "paused" ? "紧急暂停中" : automation.status === "evidence_required" ? "自动付款受验收门禁阻断" : automation.status === "enabled" ? "自动付款已开启" : "自动付款已关闭";
     $("#wallet-automation-status").textContent = `${label} · 待处理 ${Object.values(automation.pending_reason_counts || {}).reduce((a, b) => a + Number(b || 0), 0)} 项`;
     const failure = automation.latest_failure;
@@ -1036,19 +1081,19 @@ function renderWalletExecutions(rows) {
     const status = walletExecutionStatusLabels[row.status] || row.status || "未知";
     const poll = ["broadcast", "unknown"].includes(row.status) ? `<button data-wallet-execution-action="receipt" data-id="${esc(row.execution_id)}" type="button">查回执</button>` : "";
     const retry = row.status === "unknown" ? `<button data-wallet-execution-action="retry" data-order-id="${esc(row.order_id)}" type="button">明确重试</button>` : "";
-    const refund = ["unknown", "failed"].includes(row.status) ? `<button data-wallet-execution-action="refund" data-order-id="${esc(row.order_id)}" type="button">退款</button>` : "";
-    return `<article class="resource-item"><div><strong>${esc(row.order_id)}</strong><span class="muted">${esc(status)} · ${esc(row.amount)} · 尝试 ${esc(row.attempt_count)}</span><small>${esc(row.tx_hash || "尚无交易哈希")}</small></div><div class="resource-actions">${poll}${retry}${refund}</div></article>`;
+    const refund = row.status === "failed" ? `<button data-wallet-execution-action="refund" data-order-id="${esc(row.order_id)}" type="button">释放失败订单预留</button>` : "";
+    return `<article class="resource-item"><div><strong>${esc(walletAmount(row.amount,row.asset_id))}</strong><p>${esc(status)} · 尝试 ${esc(row.attempt_count)}</p>${row.status==="unknown" ? '<p class="inline-error">结果未知，资金仍占用；先查回执，不能释放预留。</p>':""}<small>${esc(row.tx_hash || "尚无交易哈希")}</small><details><summary>执行详情</summary><p>订单 ${esc(row.order_id)}</p><p>收款 ${esc(row.recipient_address)} · 最小单位 ${esc(row.amount)}</p></details></div><div class="resource-actions">${poll}${retry}${refund}</div></article>`;
   }).join("");
 }
 async function loadWalletExecutions() {
   const version = ++walletExecutionLoadVersion;
   try {
     const rows = await request("/api/admin/wallet-executions?limit=100");
-    if (version !== walletExecutionLoadVersion) return;
+    if (version !== walletExecutionLoadVersion || !csrfToken) return;
     renderWalletExecutions(rows);
     setStatus("#wallet-execution-status", "已加载 " + (Array.isArray(rows) ? rows.length : 0) + " 条");
   } catch (error) {
-    if (version === walletExecutionLoadVersion) { $("#wallet-execution-list").innerHTML = `<div class="muted">${esc(errorText(error))}</div>`; setStatus("#wallet-execution-status", errorText(error), true); }
+    if (version === walletExecutionLoadVersion) { $("#wallet-execution-list").innerHTML = `<div class="muted">${esc(errorText(error))}</div>`; setStatus("#wallet-execution-status", errorText(error), error.code!=="wallet_execution_unavailable"); }
   }
 }
 const walletAuditActionLabels = {
@@ -1080,7 +1125,7 @@ const walletAuditActionLabels = {
   wallet_payment_order_unknown: "交易结果未知",
   wallet_payment_order_confirmed: "交易已确认",
   wallet_payment_order_failed: "付款失败",
-  wallet_payment_order_refunded: "已退款",
+  wallet_payment_order_refunded: "失败订单预留已释放",
   wallet_payment_execution_retry: "重试转账执行",
   wallet_payment_failed: "付款失败",
   wallet_payment_execution_signing: "开始签名",
@@ -1122,9 +1167,11 @@ const walletAuditFieldLabels = {
   tx_hash: "交易哈希",
 };
 async function loadWalletAudits() {
+  const version=++walletAuditLoadVersion;
   const list = $("#wallet-audit-list");
   try {
     const rows = await request("/api/admin/wallet-audits?limit=100");
+    if(version!==walletAuditLoadVersion || !csrfToken)return;
     if (!Array.isArray(rows)) throw new Error("审计记录响应无效");
     list.innerHTML = rows.length ? rows.map((row) => {
       const details = Object.entries(row.details || {}).filter(([key]) => walletAuditFieldLabels[key]);
@@ -1133,7 +1180,7 @@ async function loadWalletAudits() {
         : "";
       return `<article class="resource-item wallet-audit-item"><div class="wallet-audit-heading"><strong>${esc(walletAuditActionLabels[row.action] || "其他钱包操作")}</strong><time>${esc(formatTimestamp(row.occurred_at))}</time></div><p>操作人：${esc(row.actor || "未知")}</p>${detailMarkup}<small>审计编号：${esc(row.audit_id)}</small></article>`;
     }).join("") : '<div class="empty-state">还没有钱包审计记录</div>';
-    setStatus("#wallet-audit-status", `已加载 ${rows.length} 条审计记录`);
+    setStatus("#wallet-audit-status", walletCoverage(rows,"最近审计"));
   } catch (error) {
     list.innerHTML = `<div class="muted">${esc(errorText(error))}</div>`;
     setStatus("#wallet-audit-status", errorText(error), true);
@@ -1141,21 +1188,51 @@ async function loadWalletAudits() {
   }
 }
 async function loadWallet() {
-  const tasks = [
-    ["付款策略", loadWalletPolicy],
-    ["RPC 预算", loadWalletBudget],
-    ["余额采集", loadWalletAcquisitions],
-    ["观测健康", loadWalletObservationHealth],
-    ["任务与账本", loadWalletEconomy],
-    ["转账执行", loadWalletExecutions],
-    ["审计历史", loadWalletAudits],
-  ];
-  const graphResult = (await Promise.allSettled([loadWalletGraph()]))[0];
-  const results = [graphResult, ...(await Promise.allSettled(tasks.map(([, load]) => load())))];
-  const unauthorized = results.find((result) => result.status === "rejected" && result.reason?.status === 401);
-  if (unauthorized) throw unauthorized.reason;
-  return results.flatMap((result, index) => result.status === "rejected" ? [{ label: index === 0 ? "网络与余额" : tasks[index - 1][0], error: result.reason }] : []);
+  const version = ++walletLoadVersion;
+  document.querySelectorAll("[data-wallet-area]").forEach(node=>{node.hidden=node.dataset.walletArea!==walletArea;});
+  document.querySelectorAll("[data-wallet-tab]").forEach(node=>node.setAttribute("aria-pressed",String(node.dataset.walletTab===walletArea)));
+  setStatus("#wallet-read-status", "正在读取已保存数据");
+  const failures = [];
+  const collect = async (label, load) => { try { await load(); } catch(error) { failures.push({label,error}); } };
+  const summary = collect("钱包摘要",async()=>{const data=await request("/api/diagnostics"); if(version===walletLoadVersion && csrfToken) renderWalletMetrics(data.wallet_acquisition,data.wallet);});
+  if(walletArea!=="audit") await collect("网络与资产",loadWalletGraph);
+  if(version!==walletLoadVersion || !csrfToken)return [];
+  const tasks = {balances:[["观测健康",loadWalletObservationHealth]],registry:[],budget:[["RPC 预算",loadWalletBudget]],acquisition:[["采集队列",loadWalletAcquisitions]],economy:[["赏金与账本",loadWalletEconomy]],payment:[["付款策略",loadWalletPolicy],["转账执行",loadWalletExecutions]],audit:[["审计历史",loadWalletAudits]]}[walletArea];
+  await Promise.all([summary,...tasks.map(([label,load])=>collect(label,load))]);
+  if(version!==walletLoadVersion || !csrfToken)return [];
+  if(failures.some(row=>row.error.status===401)){await logout();return failures;}
+  setStatus("#wallet-read-status", failures.length ? `${failures.map(row=>row.label).join("、")}读取失败；保留已有内容` : `读取于 ${formatTimestamp(new Date().toISOString())} · ${walletArea==="balances" ? walletCoverage(walletBalances,"最近快照") : "当前分区"}`,Boolean(failures.length));
+  return failures;
 }
+$("#wallet-tabs").addEventListener("click",event=>{const button=event.target.closest("[data-wallet-tab]"); if(button){walletArea=button.dataset.walletTab;void loadWallet();}});
+$("#wallet-policy-form").addEventListener("input",event=>{event.currentTarget.dataset.dirty="true";});
+function clearWallet() {
+  walletLoadVersion++;walletGraphLoadVersion++;walletBudgetLoadVersion++;walletQueueLoadVersion++;walletEconomyLoadVersion++;walletExecutionLoadVersion++;walletObservationLoadVersion++;walletPolicyLoadVersion++;walletAuditLoadVersion++;
+  walletNetworks=[];walletAssets=[];walletAddresses=[];walletBalances=[];walletOrders=[];walletPolicy=null;walletPolicyDraftVersion=null;walletObservationHealth=null;walletAcquisitionRows=[];walletHistoryCursor=null;walletHistoryStarted=false;
+  for(const id of ["wallet-graph-list","wallet-registry-list","wallet-history-list","wallet-acquisition-list","wallet-bounty-list","wallet-order-list","wallet-ledger-list","wallet-execution-list","wallet-audit-list","wallet-observation-health-list","wallet-metrics","wallet-policy-effective"])$("#"+id).replaceChildren();
+  for(const id of ["wallet-policy-form","wallet-network-form","wallet-asset-form","wallet-address-form","wallet-enqueue-form"]){$("#"+id).reset();delete $("#"+id).dataset.dirty;}
+  $("#wallet-history-more").hidden=false;
+}
+for(const kind of ["network","asset","address"]) $("#wallet-"+kind+"-form").addEventListener("submit",async event=>{
+  event.preventDefault();const form=event.currentTarget;const button=form.querySelector("button[type=submit]");const payload=Object.fromEntries(new FormData(form));
+  if(kind==="network") {const id=payload.chain_id;if(!/^[1-9]\d*$/.test(id) || BigInt(id)>BigInt(Number.MAX_SAFE_INTEGER)){setStatus("#wallet-registry-status","Chain ID 超过浏览器精确输入范围",true);return;}payload.chain_id=Number(id);payload.chain_family="evm";payload.rpc_url=payload.rpc_url.trim() || null;}
+  if(kind==="asset") {payload.decimals=Number(payload.decimals);payload.contract_address=payload.contract_address.trim() || null;}
+  if(kind==="address")payload.purpose="observation";
+  button.disabled=true;
+  try {await request(`/api/config/wallet-${kind==="address" ? "addresses" : kind+"s"}`,{method:"POST",body:JSON.stringify(payload)});form.reset();delete form.dataset.dirty;await walletRefreshAfterWrite("#wallet-registry-status","登记成功",loadWalletGraph);}
+  catch(error){setStatus("#wallet-registry-status",errorText(error),true);}finally{button.disabled=false;}
+});
+$("#wallet-history-more").addEventListener("click",async()=>{
+  const button=$("#wallet-history-more");button.disabled=true;
+  try{const params=new URLSearchParams({limit:"25"});if(walletHistoryCursor)params.set("cursor",walletHistoryCursor);
+    const page=await request(`/api/config/wallet-balance-history?${params}`);
+    if(!csrfToken)return;
+    if(!walletHistoryStarted)$("#wallet-history-list").innerHTML="";
+    walletHistoryStarted=true;walletHistoryCursor=page.next_cursor;
+    $("#wallet-history-list").insertAdjacentHTML("beforeend",page.items.map(row=>`<article class="resource-item"><div><strong>${esc(walletAmount(row.balance,row.asset_id))}</strong><p>${esc(walletTargetText(row.asset_id,row.address_id))}</p><time>${esc(formatTimestamp(row.observed_at))}</time><details><summary>最小单位</summary><code>${esc(row.balance)}</code></details></div></article>`).join(""));
+    button.hidden=!page.has_more;button.textContent="加载更早观测";setStatus("#wallet-history-status",page.items.length ? "已读取历史快照" : "暂无历史快照");
+  }catch(error){setStatus("#wallet-history-status",errorText(error),true);}finally{button.disabled=false;}
+});
 const publicPostStatusLabels = {
   pending_review: "待审核",
   published: "已发布",
@@ -1653,12 +1730,11 @@ $("#run-wallet-acquisitions").addEventListener("click", async (event) => {
     return;
   }
   button.disabled = true;
+  if(!confirm(`处理最多 ${limit} 个到期采集；会向链上读取并消耗 RPC 预算。继续？`)){button.disabled=false;return;}
   setStatus("#wallet-acquisition-status", "正在处理到期读取");
   try {
     const result = await request("/api/admin/wallet-acquisitions/run", { method: "POST", body: JSON.stringify({ limit }) });
-    await loadWalletGraph();
-    await Promise.all([loadWalletBudget(), loadWalletAcquisitions()]);
-    setStatus("#wallet-acquisition-status", "本次处理 " + (result?.processed ?? 0) + " 条");
+    await walletRefreshAfterWrite("#wallet-acquisition-status","本次处理 " + (result?.processed ?? 0) + " 条",loadWalletAcquisitions);
   } catch (error) {
     setStatus("#wallet-acquisition-status", errorText(error), true);
     if (error.status === 401) await logout();
@@ -1687,7 +1763,7 @@ $("#wallet-enqueue-form").addEventListener("submit", async (event) => {
     $("#wallet-enqueue-attempts").value = "5";
     renderWalletEnqueueOptions();
     setStatus("#wallet-acquisition-form-status", result?.status === "queued" ? "采集已加入队列" : "采集队列已更新");
-    await loadWallet();
+    try { await loadWalletAcquisitions(); } catch(error) { setStatus("#wallet-acquisition-form-status",`采集请求已处理；刷新失败，请核对队列。${errorText(error)}`,true); }
   } catch (error) {
     setStatus("#wallet-acquisition-form-status", errorText(error), true);
     if (error.status === 401) await logout();
@@ -1730,13 +1806,13 @@ $("#wallet-acquisition-list").addEventListener("click", async (event) => {
     return;
   }
   if (operation === "cancel" && !window.confirm("取消后该采集不会自动执行，继续吗？")) return;
+  if (operation === "retry" && !window.confirm("将未知采集重新排队；后续读取会再次消耗 RPC 预算。继续吗？")) return;
   const controls = card.querySelectorAll("button, input");
   controls.forEach((control) => { control.disabled = true; });
   button.textContent = operation === "retry" ? "重试中…" : "取消中…";
   try {
     await request("/api/admin/wallet-acquisitions/" + encodeURIComponent(runId) + "/" + operation, { method: "POST", body: JSON.stringify({ reason }) });
-    await loadWalletAcquisitions();
-    setStatus("#wallet-acquisition-status", operation === "retry" ? "采集已重新排队" : "采集已取消");
+    await walletRefreshAfterWrite("#wallet-acquisition-status",operation === "retry" ? "采集已重新排队" : "采集已取消",loadWalletAcquisitions);
   } catch (error) {
     setStatus("#wallet-acquisition-status", errorText(error), true);
     if (error.status === 401) await logout();
@@ -2097,9 +2173,13 @@ $("#wallet-order-list").addEventListener("click", async (event) => {
   if (!button) return;
   button.disabled = true;
   try {
+    await loadWalletEconomy();
+    const order=walletOrders.find(row=>row.order_id===button.dataset.orderId);
+    if(!order || order.status!=="reserved")throw new Error("订单已变化，请核对当前状态");
+    if(!confirm(`签名并向链上广播 ${walletAmount(order.amount,order.asset_id)}\n网络：${order.network_id}\n收款：${order.recipient_address}\n此操作会消耗 RPC，链上付款不可撤回。确认继续？`))return;
     await request(`/api/admin/wallet-orders/${encodeURIComponent(button.dataset.orderId)}/execute`, { method: "POST", body: JSON.stringify({}) });
-    await Promise.all([loadWalletExecutions(), loadWalletEconomy()]);
-  } catch (error) { setStatus("#wallet-execution-status", errorText(error), true); }
+    await walletRefreshAfterWrite("#wallet-read-status","转账请求已处理，请核对订单与回执",()=>loadWalletEconomy());
+  } catch (error) { setStatus("#wallet-read-status", errorText(error), true); }
   finally { button.disabled = false; }
 });
 
@@ -2178,12 +2258,13 @@ $("#wallet-policy-form").addEventListener("submit", async (event) => {
     .split(/\r?\n/)
     .map((value) => value.trim())
     .filter(Boolean);
+  if(!confirm(`保存付款策略？\n模式：${$("#wallet-policy-mode option:checked").textContent}\n自动付款：${$("#wallet-policy-automation-enabled").checked ? "开启":"关闭"}\n单笔 / 每日上限：${perOrder} / ${daily} 最小单位\n白名单：${$("#wallet-policy-allowlist-enabled").checked ? allowedRecipients.length + " 个地址" : "关闭"}\n其他有效限制保持现有值。`))return;
   if (button) button.disabled = true;
   try {
     await request("/api/admin/wallet-policy", {
       method: "POST",
       body: JSON.stringify({
-        expected_version: walletPolicy.policy_version,
+        expected_version: walletPolicyDraftVersion,
         mode,
         allowed_network_ids: walletPolicy.allowed_network_ids || [],
         allowed_asset_ids: walletPolicy.allowed_asset_ids || [],
@@ -2204,8 +2285,8 @@ $("#wallet-policy-form").addEventListener("submit", async (event) => {
         allowed_recipient_addresses: allowedRecipients,
       }),
     });
-    await loadWalletPolicy();
-    setStatus("#wallet-policy-status", "自动付款策略已保存");
+    delete form.dataset.dirty;
+    await walletRefreshAfterWrite("#wallet-policy-status","付款策略已保存",loadWalletPolicy);
   } catch (error) {
     setStatus("#wallet-policy-status", errorText(error), true);
     if (error.status === 401) await logout();
@@ -2216,6 +2297,7 @@ $("#wallet-policy-form").addEventListener("submit", async (event) => {
 
 async function setWalletAutomationPause(paused) {
   if (!walletPolicy) return;
+  if(!paused && !confirm("解除紧急暂停后，已开启的自动付款可恢复执行。确认继续？"))return;
   const button = paused ? $("#wallet-automation-pause") : $("#wallet-automation-resume");
   button.disabled = true;
   try {
@@ -2223,7 +2305,7 @@ async function setWalletAutomationPause(paused) {
       method: "POST",
       body: JSON.stringify({ expected_version: walletPolicy.policy_version, reason: paused ? "管理员紧急暂停自动付款" : "管理员解除自动付款暂停" }),
     });
-    await loadWalletPolicy();
+    await walletRefreshAfterWrite("#wallet-policy-status",paused ? "已紧急暂停":"已解除暂停",loadWalletPolicy);
   } catch (error) { setStatus("#wallet-policy-status", errorText(error), true); button.disabled = false; }
 }
 $("#wallet-automation-pause").addEventListener("click", () => { void setWalletAutomationPause(true); });
@@ -2306,22 +2388,25 @@ $("#wallet-execution-list").addEventListener("click", async (event) => {
   const orderId = button.dataset.orderId;
   let path;
   let payload = {};
-  if (action === "receipt") path = `/api/admin/wallet-executions/${encodeURIComponent(id)}/receipt`;
+  if (action === "receipt") {if(!confirm("查询链上回执会消耗 RPC 并更新执行状态。继续？"))return;path = `/api/admin/wallet-executions/${encodeURIComponent(id)}/receipt`;}
   else {
-    const reason = window.prompt(action === "retry" ? "请输入重试理由" : "请输入退款理由", "operator review");
+    if(action==="retry" && !confirm("上次广播结果未知，重试可能造成重复付款。请先核对链上回执，确认仍需重试？"))return;
+    if(action==="refund" && !confirm("仅释放失败订单的内部预留，不追回已发送的链上资金。继续？"))return;
+    const reason = window.prompt(action === "retry" ? "请输入已核对链上结果后的重试理由" : "请输入释放失败订单预留的理由", "");
     if (!reason || !reason.trim()) return;
     path = `/api/admin/wallet-orders/${encodeURIComponent(orderId)}/${action}`;
     payload = { reason: reason.trim() };
   }
   button.disabled = true;
-  try { await request(path, { method: "POST", body: JSON.stringify(payload) }); await Promise.all([loadWalletExecutions(), loadWalletEconomy()]); }
+  try { await request(path, { method: "POST", body: JSON.stringify(payload) }); await walletRefreshAfterWrite("#wallet-execution-status","操作已处理，请核对当前状态",loadWalletExecutions); }
   catch (error) { setStatus("#wallet-execution-status", errorText(error), true); }
   finally { button.disabled = false; }
 });
 $("#refresh-wallet-executions").addEventListener("click", loadWalletExecutions);
 $("#recover-wallet-executions").addEventListener("click", async () => {
+  if(!confirm("仅在确认无签名请求仍在进行时使用：所有签名中记录会被标记为结果未知，不会重复广播。继续？"))return;
   const button = $("#recover-wallet-executions"); button.disabled = true;
-  try { await request("/api/admin/wallet-executions/recover", { method: "POST", body: JSON.stringify({ limit: 100 }) }); await loadWalletExecutions(); }
+  try { await request("/api/admin/wallet-executions/recover", { method: "POST", body: JSON.stringify({ limit: 100 }) }); await walletRefreshAfterWrite("#wallet-execution-status","恢复操作已处理",loadWalletExecutions); }
   catch (error) { setStatus("#wallet-execution-status", errorText(error), true); }
   finally { button.disabled = false; }
 });

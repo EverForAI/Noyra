@@ -1,6 +1,12 @@
 :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; color: #17231e; background: #edf2ef; }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
+[data-section-panel="wallet"] .surface-card { border: 0; border-radius: 0; background: transparent; padding: 18px 0; box-shadow: none; }
+[data-section-panel="wallet"] .wallet-columns { grid-template-columns: minmax(0, 1fr); }
+#wallet-tabs { justify-content: flex-start; border-bottom: 1px solid #d4dfd8; padding-bottom: 12px; }
+#wallet-tabs [aria-pressed="true"] { background: #e2efe9; color: #175845; border-color: #34735b; }
+[data-section-panel="wallet"] .resource-item { border-radius: 6px; }
+[data-section-panel="wallet"] .card-heading > button { flex-shrink: 0; white-space: nowrap; }
 body { margin: 0; min-width: 320px; }
 button, input, textarea, select { font: inherit; letter-spacing: 0; }
 button { border: 1px solid #9aaba2; border-radius: 7px; background: #fff; color: #17231e; min-height: 40px; padding: 8px 15px; cursor: pointer; }
