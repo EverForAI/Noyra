@@ -25,6 +25,7 @@ from noyra.interaction.erasure import (
 from noyra.interaction.integrity import InteractionIntegrity
 from noyra.interaction.types import InteractionDecision
 from noyra.mind import MemoryStore, MindEngine
+from noyra.mind.errors import CausalValidationError
 from noyra.model.errors import ModelCallStateError
 from noyra.model.ledger import ModelLedger
 from noyra.model.types import BudgetLimits, ModelUsage
@@ -199,7 +200,7 @@ def test_exclusive_memory_revisions_and_vector_are_erased(tmp_path: Path, archiv
                 utc_now(),
             ),
         )
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(CausalValidationError, match="withdrawn"):
         memories.revise(
             memory.memory_id,
             content="late private revival",
@@ -209,6 +210,72 @@ def test_exclusive_memory_revisions_and_vector_are_erased(tmp_path: Path, archiv
             reason="late",
             source_event_ids=(event,),
         )
+
+
+def test_deleted_events_cannot_form_new_memories_and_verification_rolls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, event = _private_message(db)
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    with monkeypatch.context() as fault:
+
+        def fail_verification(*args: object) -> None:
+            raise IntegrityError("injected residual")
+
+        fault.setattr(ConversationErasure, "_verify", staticmethod(fail_verification))
+        assert erasure.run("owner", window["conversation_id"])["status"] == "failed"
+    assert InteractionStore(db).get(message).content == "private original"
+    assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+    with pytest.raises(CausalValidationError, match="withdrawn"):
+        MemoryStore(db).create(
+            "owner",
+            "semantic",
+            "late private content",
+            salience=0.5,
+            confidence=0.5,
+            source_event_ids=(event,),
+        )
+    with db.connection() as connection:
+        assert connection.execute("SELECT count(*) FROM memories").fetchone()[0] == 0
+
+
+def test_late_unknown_reconciliation_preserves_erasure(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, _ = _private_message(db)
+    ledger = ModelLedger(db)
+    with private_input_scope((message,)):
+        call, _ = ledger.prepare_call(
+            "owner", "mock", "mock", "interaction", content_hash("input"), "unknown"
+        )
+    attempt = ledger.authorize_attempt(
+        call.call_id,
+        BudgetLimits(10, 1000, 1000, 1000),
+        reserved_input_tokens=1,
+        reserved_output_tokens=1,
+        reserved_cost_microusd=1,
+    )
+    ledger.start_attempt(attempt.attempt_id)
+    ledger.finish_attempt(attempt.attempt_id, "unknown", usage=None, cost_microusd=None)
+    ledger.finish_call(call.call_id, "unknown")
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+    reconciled = ledger.reconcile_unknown(
+        call.call_id,
+        outcome="succeeded",
+        actor="operator",
+        reason="private reply",
+        response={"content": "late private reply"},
+    )
+    assert reconciled.response == ERASED_MODEL
+    assert reconciled.error_code == "private_content_erased"
+    with db.connection() as connection:
+        payloads = connection.execute(
+            "SELECT payload_json FROM audit_records WHERE action='model_unknown_reconciled'"
+        ).fetchall()
+    assert all("private reply" not in row[0] for row in payloads)
 
 
 def test_mixed_source_memory_requires_review_before_accepting_intent(tmp_path: Path) -> None:

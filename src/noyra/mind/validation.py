@@ -23,6 +23,24 @@ def validate_event_ids(
     missing = [event_id for event_id in ids if event_id not in found]
     if missing:
         raise CausalValidationError("source events are missing or belong to another subject")
+    if (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='private_conversation_messages'"
+        ).fetchone()
+        is None
+    ):
+        return ids
+    withdrawn = connection.execute(
+        f"SELECT 1 FROM events e JOIN private_conversation_messages m "
+        "ON json_extract(e.payload_json,'$.interaction_id')=m.interaction_id "
+        "JOIN private_conversations c ON c.conversation_id=m.conversation_id "
+        f"WHERE e.subject_id=? AND e.event_id IN ({placeholders}) "
+        "AND c.status IN ('deleting','deleted') LIMIT 1",
+        (subject_id, *ids),
+    ).fetchone()
+    if withdrawn is not None:
+        raise CausalValidationError("private source events have been withdrawn")
     return ids
 
 
@@ -45,6 +63,25 @@ def validate_causal_source_ids(
         ("psychological_snapshots", "snapshot_id"),
     )
     for source_id in ids:
+        receipts_installed = (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='private_erasure_receipts'"
+            ).fetchone()
+            is not None
+        )
+        if (
+            receipts_installed
+            and connection.execute(
+                "SELECT 1 FROM private_erasure_receipts WHERE record_id=? LIMIT 1", (source_id,)
+            ).fetchone()
+            is not None
+        ):
+            raise CausalValidationError("private causal source has been withdrawn")
+        event = connection.execute(
+            "SELECT 1 FROM events WHERE subject_id=? AND event_id=?", (subject_id, source_id)
+        ).fetchone()
+        if event is not None:
+            validate_event_ids(connection, subject_id, (source_id,))
         if not any(
             connection.execute(
                 f"SELECT 1 FROM {table} WHERE subject_id = ? AND {key} = ?",

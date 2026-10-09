@@ -98,6 +98,28 @@ class InteractionIntegrity:
                     (window[0],),
                 ).fetchall()
                 for message in messages:
+                    verified_external = False
+                    if message["author_verified"] and message["channel"] == "qq":
+                        source = (
+                            message["related_interaction_id"]
+                            if message["direction"] == "outgoing"
+                            else message["interaction_id"]
+                        )
+                        verified_external = bool(
+                            connection.execute(
+                                "SELECT 1 FROM interaction_inbound_events e "
+                                "JOIN inbound_identity_challenges c "
+                                "ON c.transport_id=e.transport_id "
+                                "AND c.external_account_id=e.external_account_id "
+                                "AND c.external_sender_id=e.external_sender_id "
+                                "WHERE e.interaction_id=? AND e.subject_id=? AND c.subject_id=? "
+                                "AND c.status='confirmed' AND c.binding_id IS NOT NULL "
+                                "AND c.confirmed_at<=e.received_at "
+                                "AND e.reply_selector='qq:user' AND e.channel='qq' "
+                                "AND e.status='processed'",
+                                (source, subject_id, subject_id),
+                            ).fetchone()
+                        )
                     if (
                         message["subject_id"] != subject_id
                         or message["linked_subject"] != subject_id
@@ -108,7 +130,11 @@ class InteractionIntegrity:
                                 or message["counterparty"] != "web-user"
                             )
                         )
-                        or (message["author_verified"] and message["channel"] != "web")
+                        or (
+                            message["author_verified"]
+                            and message["channel"] != "web"
+                            and not verified_external
+                        )
                     ):
                         raise IntegrityError("conversation message ownership mismatch")
                     related = message["related_interaction_id"]

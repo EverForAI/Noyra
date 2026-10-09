@@ -1569,6 +1569,59 @@ class DeliveryDispatcher:
             delivery.delivery_id, "delivered", None, attempts, provider_message_id=response_id
         )
 
+    def _assert_message_send_allowed(
+        self, transport: TransportRecord, interaction: Mapping[str, Any], idempotency_key: str
+    ) -> None:
+        assert_current_lease()
+        if self.transports is None:
+            return
+        with self.database.connection() as connection:
+            current = connection.execute(
+                "SELECT i.*,t.status AS transport_status,d.status AS delivery_status "
+                "FROM interaction_deliveries d JOIN interactions i "
+                "ON i.interaction_id=d.interaction_id JOIN interaction_transports t "
+                "ON t.transport_id=d.transport_id WHERE d.idempotency_key=? "
+                "AND d.subject_id=? AND d.transport_id=? AND i.subject_id=d.subject_id "
+                "AND t.subject_id=d.subject_id",
+                (idempotency_key, transport.subject_id, transport.transport_id),
+            ).fetchone()
+            if (
+                current is None
+                or current["transport_status"] != "active"
+                or current["delivery_status"] != "sending"
+                or current["interaction_id"] != interaction.get("interaction_id")
+                or current["content"] != interaction.get("content")
+            ):
+                raise PermissionError("delivery authorization withdrawn")
+            withdrawn = connection.execute(
+                "SELECT 1 FROM private_conversation_messages m JOIN private_conversations c "
+                "ON c.conversation_id=m.conversation_id WHERE m.interaction_id IN (?,?) "
+                "AND c.status IN ('deleting','deleted')",
+                (current["interaction_id"], current["related_interaction_id"]),
+            ).fetchone()
+            if withdrawn is not None:
+                raise PermissionError("private content withdrawn")
+            context = connection.execute(
+                "SELECT * FROM interaction_inbound_events WHERE interaction_id=? "
+                "AND subject_id=? LIMIT 1",
+                (current["related_interaction_id"], transport.subject_id),
+            ).fetchone()
+            if context is not None:
+                permitted = connection.execute(
+                    "SELECT 1 FROM interaction_bindings WHERE subject_id=? AND transport_id=? "
+                    "AND channel=? AND external_account_id=? AND external_sender_id=? "
+                    "AND status='active'",
+                    (
+                        transport.subject_id,
+                        transport.transport_id,
+                        context["channel"],
+                        context["external_account_id"],
+                        context["external_sender_id"],
+                    ),
+                ).fetchone()
+                if permitted is None or context["transport_id"] != transport.transport_id:
+                    raise PermissionError("reply recipient withdrawn")
+
     async def _send(
         self,
         transport: TransportRecord,
@@ -1610,6 +1663,9 @@ class DeliveryDispatcher:
                     interaction["counterparty"],
                     interaction["content"],
                     idempotency_key,
+                    lambda: self._assert_message_send_allowed(
+                        transport, interaction, idempotency_key
+                    ),
                 ),
             )
         adapter = OUTBOUND_ADAPTERS.get(channel)
@@ -1636,6 +1692,8 @@ class DeliveryDispatcher:
             deadline = asyncio.get_running_loop().time() + TRANSPORT_TOTAL_TIMEOUT_SECONDS
             try:
                 async with asyncio.timeout(TRANSPORT_TOTAL_TIMEOUT_SECONDS):
+                    # Token acquisition and refresh can yield to a revocation or deletion.
+                    self._assert_message_send_allowed(transport, interaction, idempotency_key)
                     async with self._http_client().stream(
                         "POST",
                         outbound.endpoint,
@@ -1814,6 +1872,7 @@ class DeliveryDispatcher:
         recipient: str,
         content: str,
         idempotency_key: str,
+        authorize_send: Callable[[], None] | None = None,
     ) -> str:
         parsed = urlsplit(endpoint)
         host = parsed.hostname
@@ -1852,6 +1911,8 @@ class DeliveryDispatcher:
             password = credentials.get("password")
             if username and password:
                 client.login(str(username), str(password))
+            if authorize_send is not None:
+                authorize_send()
             try:
                 client.send_message(message)
             except (TimeoutError, OSError, smtplib.SMTPServerDisconnected) as error:

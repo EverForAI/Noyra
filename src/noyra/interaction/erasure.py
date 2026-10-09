@@ -228,6 +228,7 @@ class ConversationErasure:
                         subject_id,
                     ),
                 )
+                self._verify(connection, subject_id, conversation_id, messages, calls, events)
                 connection.execute(
                     "UPDATE private_erasure_jobs SET status='completed',stage='verified',"
                     "counts_json=?,updated_at=? WHERE job_id=?",
@@ -246,6 +247,64 @@ class ConversationErasure:
         final = self.get(subject_id, conversation_id)
         assert final is not None
         return final
+
+    @staticmethod
+    def _verify(
+        connection: Any,
+        subject: str,
+        window: str,
+        messages: list[Any],
+        calls: list[Any],
+        events: set[str],
+    ) -> None:
+        state = _row(connection, subject, window)
+        if state["title"] != ERASED or state["status"] != "deleted" or state["pinned"]:
+            raise IntegrityError("private erasure window residual")
+        for original in messages:
+            message = connection.execute(
+                "SELECT * FROM interactions WHERE interaction_id=? AND subject_id=?",
+                (original["interaction_id"], subject),
+            ).fetchone()
+            if message is None or message["content"] != ERASED or message["rationale"] is not None:
+                raise IntegrityError("private erasure message residual")
+            InteractionStore._from_row(message)
+            if connection.execute(
+                "SELECT 1 FROM interaction_decisions WHERE interaction_id=? AND rationale!=?",
+                (original["interaction_id"], ERASED),
+            ).fetchone():
+                raise IntegrityError("private erasure decision residual")
+        for original in calls:
+            call = connection.execute(
+                "SELECT request_json,response_json,response_hash FROM model_calls "
+                "WHERE call_id=? AND subject_id=?",
+                (original["call_id"], subject),
+            ).fetchone()
+            if (
+                call is None
+                or call["request_json"] is not None
+                or call["response_json"] != canonical_json(ERASED_MODEL)
+                or call["response_hash"] != content_hash(ERASED_MODEL)
+            ):
+                raise IntegrityError("private erasure model residual")
+        for revision in connection.execute(
+            "SELECT r.memory_id,r.content,r.reason,r.source_event_ids_json,m.content AS current,"
+            "m.status FROM memory_revisions r JOIN memories m ON m.memory_id=r.memory_id "
+            "WHERE m.subject_id=? LIMIT ?",
+            (subject, MAX_ERASURE_ROWS + 1),
+        ).fetchall():
+            if not set(_memory_sources(revision["source_event_ids_json"])) & events:
+                continue
+            if (
+                revision["content"] != ERASED
+                or revision["reason"] != "privacy erasure"
+                or revision["current"] != ERASED
+                or revision["status"] != "archived"
+            ):
+                raise IntegrityError("private erasure memory residual")
+            if connection.execute(
+                "SELECT 1 FROM memory_embeddings WHERE memory_id=?", (revision["memory_id"],)
+            ).fetchone():
+                raise IntegrityError("private erasure index residual")
 
     @staticmethod
     def _receipt(connection: Any, job: str, table: str, key: str, old: str, new: str) -> None:

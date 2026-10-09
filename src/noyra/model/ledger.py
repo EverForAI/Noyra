@@ -615,10 +615,24 @@ class ModelLedger:
         if outcome == "succeeded" and response is None:
             raise ValueError("successful reconciliation requires provider response evidence")
         now = utc_now()
-        with self.database.transaction() as connection:
+        with accounting_scope(), self.database.transaction() as connection:
             row = self._get_call_row(connection, call_id)
             if row["status"] != "unknown":
                 raise ModelCallStateError("only unknown model calls can be reconciled")
+            withdrawn = (
+                connection.execute(
+                    "SELECT 1 FROM private_model_sources s JOIN private_conversations c "
+                    "ON c.conversation_id=s.conversation_id WHERE s.call_id=? "
+                    "AND c.status IN ('deleting','deleted') LIMIT 1",
+                    (call_id,),
+                ).fetchone()
+                is not None
+            )
+            if withdrawn:
+                from noyra.interaction.erasure import ERASED_MODEL
+
+                response = ERASED_MODEL
+                reason = "private content erased"
             response_json = canonical_json(response) if response is not None else None
             response_hash = content_hash(response) if response is not None else None
             connection.execute(
@@ -628,7 +642,9 @@ class ModelLedger:
                     outcome,
                     response_json,
                     response_hash,
-                    None if outcome == "succeeded" else "operator_reconciled_failed",
+                    "private_content_erased"
+                    if withdrawn
+                    else (None if outcome == "succeeded" else "operator_reconciled_failed"),
                     now,
                     call_id,
                 ),

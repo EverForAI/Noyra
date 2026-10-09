@@ -16,6 +16,7 @@ from noyra.interaction import (
     TransportStore,
 )
 from noyra.interaction.conversations import ConversationStore
+from noyra.interaction.integrity import InteractionIntegrity
 
 
 def setup(tmp_path: Path) -> tuple[SubjectKernel, InboundStore, str]:
@@ -85,6 +86,36 @@ def test_confirmation_and_shared_chat_do_not_copy_or_invent_messages(tmp_path: P
         subject, "web", "web-user", "next", conversation_id=window["conversation_id"]
     )
     assert len(windows.authorized_history(subject, web.interaction_id)) == 2
+    assert InteractionIntegrity(kernel.database).verify(subject)["interactions"] == 3
+    store.change_binding(binding, subject, status="revoked", actor="operator", reason="test revoke")
+    assert InteractionIntegrity(kernel.database).verify(subject)["interactions"] == 3
+    with pytest.raises(PermissionError):
+        store.ingest(envelope(transport, "new message", "after-revoke"))
+
+
+def test_false_external_author_is_rejected_by_integrity(tmp_path: Path) -> None:
+    from noyra.core.errors import IntegrityError
+    from noyra.interaction.conversations import link_message
+
+    kernel, store, _ = setup(tmp_path)
+    window = ConversationStore(kernel.database).create(kernel.subject_id, "test")
+    original = store.interactions.receive(kernel.subject_id, "qq", "unverified", "test")
+    with kernel.database.transaction() as connection:
+        link_message(
+            connection,
+            kernel.subject_id,
+            original.interaction_id,
+            conversation_id=window["conversation_id"],
+            related_id=None,
+            channel="qq",
+            counterparty="unverified",
+        )
+        connection.execute(
+            "UPDATE private_conversation_messages SET author_verified=1 WHERE interaction_id=?",
+            (original.interaction_id,),
+        )
+    with pytest.raises(IntegrityError, match="conversation message ownership"):
+        InteractionIntegrity(kernel.database).verify(kernel.subject_id)
 
 
 def test_wrong_guesses_commit_and_fifth_guess_revokes(tmp_path: Path) -> None:
@@ -210,4 +241,117 @@ def test_identity_http_auth_and_confirmation_errors(tmp_path: Path) -> None:
         assert call(path + "/confirm", {})[0] == 200
     finally:
         server.close()
+        kernel.close()
+
+
+@pytest.mark.asyncio
+async def test_revoked_recipient_does_not_receive_queued_reply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from typing import Any
+
+    from noyra.interaction import DeliveryDispatcher
+
+    kernel, store, transport = setup(tmp_path)
+    subject = kernel.subject_id
+    store.bind(subject, transport, external_account_id="app", external_sender_id="me")
+    incoming = store.ingest(envelope(transport, "hello"))
+    store.interactions.send(
+        subject, "qq", "me", "sensitive reply", related_interaction_id=incoming.interaction_id
+    )
+    transports = TransportStore(kernel.database, tmp_path / "secrets")
+    dispatcher = DeliveryDispatcher(kernel.database, transports)
+    called = False
+
+    async def simulated_send(*args: Any, **kwargs: Any) -> str:
+        nonlocal called
+        called = True
+        return "provider-message"
+
+    monkeypatch.setattr(dispatcher, "_send", simulated_send)
+    assert dispatcher.enqueue_pending(subject) == 1
+    binding = store.list_bindings(subject)[0]
+    store.change_binding(
+        binding["binding_id"], subject, status="revoked", actor="operator", reason="withdraw"
+    )
+    try:
+        results = await dispatcher.deliver_pending(subject)
+        assert len(results) == 1
+        assert results[0].status == "failed"
+        assert called is False
+    finally:
+        await dispatcher.aclose()
+        kernel.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("withdraw_at", ["token", "refresh"])
+@pytest.mark.parametrize("withdraw", ["recipient", "transport", "content"])
+async def test_delivery_rechecks_authorization_after_token_await(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, withdraw_at: str, withdraw: str
+) -> None:
+    import httpx
+
+    from noyra.interaction import DeliveryDispatcher
+
+    kernel, store, transport = setup(tmp_path)
+    subject = kernel.subject_id
+    store.bind(subject, transport, external_account_id="app", external_sender_id="me")
+    incoming = store.ingest(envelope(transport, "hello"))
+    outgoing = store.interactions.send(
+        subject, "qq", "me", "sensitive reply", related_interaction_id=incoming.interaction_id
+    )
+    sends = 0
+    tokens = 0
+
+    def platform(req: httpx.Request) -> httpx.Response:
+        nonlocal sends
+        sends += 1
+        return httpx.Response(401 if withdraw_at == "refresh" else 200, json={"id": "message"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(platform))
+    dispatcher = DeliveryDispatcher(
+        kernel.database, TransportStore(kernel.database, tmp_path / "secrets"), client=client
+    )
+
+    async def credentials(*args: object) -> dict[str, str]:
+        nonlocal tokens
+        tokens += 1
+        if tokens == (2 if withdraw_at == "refresh" else 1):
+            if withdraw == "recipient":
+                binding = store.list_bindings(subject)[0]
+                store.change_binding(
+                    binding["binding_id"], subject, status="revoked", actor="operator",
+                    reason="withdraw",
+                )
+            elif withdraw == "transport":
+                with kernel.database.transaction() as connection:
+                    connection.execute(
+                        "UPDATE interaction_transports SET status='disabled' WHERE transport_id=?",
+                        (transport,),
+                    )
+            else:
+                window = ConversationStore(kernel.database).create(subject, "withdrawn")
+                with kernel.database.transaction() as connection:
+                    connection.execute(
+                        "INSERT INTO private_conversation_messages "
+                        "(interaction_id,conversation_id,subject_id) VALUES(?,?,?)",
+                        (outgoing.interaction_id, window["conversation_id"], subject),
+                    )
+                    connection.execute(
+                        "UPDATE private_conversations SET status='deleting' "
+                        "WHERE conversation_id=?",
+                        (window["conversation_id"],),
+                    )
+        return {"access_token": "test-token"}
+
+    monkeypatch.setattr(dispatcher, "_provider_credentials", credentials)
+    try:
+        assert dispatcher.enqueue_pending(subject) == 1
+        results = await dispatcher.deliver_pending(subject)
+        assert len(results) == 1 and results[0].status == "failed"
+        assert sends == (1 if withdraw_at == "refresh" else 0)
+    finally:
+        await dispatcher.aclose()
+        await client.aclose()
         kernel.close()
