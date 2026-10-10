@@ -656,6 +656,7 @@ _OWNERSHIP_GRAPHS[90] = {
     "private_web_deliveries": _parent_rule("interaction_deliveries", "delivery_id", "delivery_id"),
     "private_message_sequences": _parent_rule("interactions", "interaction_id", "interaction_id"),
 }
+_OWNERSHIP_GRAPHS[91] = _OWNERSHIP_GRAPHS[90]
 
 
 @dataclass(frozen=True)

@@ -29,6 +29,7 @@ from .types import (
     BudgetLimits,
     BudgetStatus,
     CallRecord,
+    ModelPricing,
     ModelUsage,
 )
 
@@ -139,6 +140,7 @@ class ModelLedger:
         refresh_pool_limits: bool = False,
         resource_key_id: str | None = None,
         resource_key_fingerprint: str | None = None,
+        pricing: ModelPricing | None = None,
     ) -> AttemptRecord:
         if min(reserved_input_tokens, reserved_output_tokens, reserved_cost_microusd) < 0:
             raise ValueError("model attempt reservations cannot be negative")
@@ -175,6 +177,21 @@ class ModelLedger:
                 ).fetchone()
                 is not None
             )
+            price_evidence: dict[str, Any] = {
+                "version": 1,
+                "status": "unknown",
+                "basis": "unconfigured",
+                "input_microusd_per_million": pricing.input_microusd_per_million
+                if pricing
+                else None,
+                "output_microusd_per_million": pricing.output_microusd_per_million
+                if pricing
+                else None,
+            }
+            if pricing is not None and (
+                pricing.input_microusd_per_million or pricing.output_microusd_per_million
+            ):
+                price_evidence.update(status="priced", basis="gateway_configuration")
             if expected_resource_revision is not None and not group_exists:
                 raise ModelAuthorizationError("model resource is unavailable")
             if group_exists:
@@ -184,6 +201,19 @@ class ModelLedger:
                     connection, group_id, subject_id=call["subject_id"]
                 )
                 group = CognitiveResourceStore._from_group_row(connection, group_row)
+                if pricing is not None and (
+                    pricing.input_microusd_per_million != group.input_microusd_per_million
+                    or pricing.output_microusd_per_million != group.output_microusd_per_million
+                ):
+                    raise ModelAuthorizationError("model pricing changed before authorization")
+                price_evidence.update(
+                    status=group.pricing_status,
+                    basis="resource_revision",
+                    resource_group_id=group.group_id,
+                    revision=group.limit_revision,
+                    input_microusd_per_million=group.input_microusd_per_million,
+                    output_microusd_per_million=group.output_microusd_per_million,
+                )
                 if group.status != "active":
                     raise ModelAuthorizationError("model resource is not active")
                 if (
@@ -287,10 +317,10 @@ class ModelLedger:
                     attempt_id, call_id, subject_id, budget_day, attempt_number, status,
                     reserved_input_tokens, reserved_output_tokens, reserved_cost_microusd,
                     input_tokens, output_tokens, cost_microusd, provider_request_id,
-                    error_code, started_at, completed_at
+                    error_code, started_at, completed_at, usage_source, pricing_snapshot_json
                 ) VALUES (
                     ?, ?, ?, ?, ?, 'authorized', ?, ?, ?,
-                    NULL, NULL, NULL, NULL, NULL, NULL, NULL
+                    NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'unknown', ?
                 )""",
                 (
                     attempt_id,
@@ -301,6 +331,7 @@ class ModelLedger:
                     reserved_input_tokens,
                     reserved_output_tokens,
                     reserved_cost_microusd,
+                    canonical_json(price_evidence),
                 ),
             )
             connection.execute(
@@ -423,6 +454,7 @@ class ModelLedger:
         cost_microusd: int | None,
         provider_request_id: str | None = None,
         error_code: str | None = None,
+        usage_estimated: bool = False,
     ) -> AttemptRecord:
         if status not in {"succeeded", "failed", "unknown"}:
             raise ValueError(f"invalid model attempt completion status: {status}")
@@ -430,6 +462,8 @@ class ModelLedger:
             raise ValueError("model attempt cost cannot be negative")
         if (usage is None) != (cost_microusd is None):
             raise ValueError("usage and cost must both be known or both be unknown")
+        if type(usage_estimated) is not bool:
+            raise ValueError("usage_estimated must be boolean")
         with accounting_scope(), self.database.transaction() as connection:
             row = self._get_attempt_row(connection, attempt_id)
             if row["status"] != "executing":
@@ -437,7 +471,7 @@ class ModelLedger:
             connection.execute(
                 """UPDATE model_attempts SET
                     status = ?, input_tokens = ?, output_tokens = ?, cost_microusd = ?,
-                    provider_request_id = ?, error_code = ?, completed_at = ?
+                    provider_request_id = ?, error_code = ?, completed_at = ?, usage_source = ?
                     WHERE attempt_id = ?""",
                 (
                     status,
@@ -447,6 +481,7 @@ class ModelLedger:
                     provider_request_id,
                     error_code,
                     utc_now(),
+                    "unknown" if usage is None else "estimated" if usage_estimated else "provider",
                     attempt_id,
                 ),
             )

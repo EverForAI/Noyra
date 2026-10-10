@@ -162,6 +162,7 @@ class ModelGateway:
                     refresh_pool_limits=self.resource_revision is not None,
                     resource_key_id=self.resource_key_id,
                     resource_key_fingerprint=self.resource_key_fingerprint,
+                    pricing=self.pricing,
                 )
             except (BudgetExhaustedError, ModelAuthorizationError) as error:
                 self.ledger.finish_call(
@@ -307,6 +308,7 @@ class ModelGateway:
                 usage=usage,
                 cost_microusd=cost_microusd,
                 provider_request_id=provider_response.provider_request_id,
+                usage_estimated=usage_estimated,
             )
             if stale_operation:
                 # The provider side effect is already complete, so preserve

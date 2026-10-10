@@ -902,7 +902,9 @@ def test_inflight_model_call_is_rejected_without_closing_window(tmp_path: Path) 
     assert ConversationStore(db).list("owner")["items"][0]["status"] == "active"
     ledger.finish_call(call.call_id, "failed")
     erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
-    with pytest.raises(ModelCallStateError, match="private source has been withdrawn"):
+    with pytest.raises(
+        ModelCallStateError, match="cannot authorize attempt for call in state failed"
+    ):
         ledger.authorize_attempt(
             call.call_id,
             BudgetLimits(10, 1000, 1000, 1000),
@@ -910,6 +912,7 @@ def test_inflight_model_call_is_rejected_without_closing_window(tmp_path: Path) 
             reserved_output_tokens=1,
             reserved_cost_microusd=1,
         )
+    assert not ledger.attempts(call.call_id)
     assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
 
 

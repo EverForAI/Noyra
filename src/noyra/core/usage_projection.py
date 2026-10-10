@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 from .database import Database
+from .types import strict_json_loads
 
 
 class UsageQueryLimit(ValueError):
@@ -64,6 +65,8 @@ class UsageProjection:
                 "estimated_cost_microusd",
                 "estimated_cost_attempts",
                 "unknown_price_attempts",
+                "untraceable_usage_attempts",
+                "untraceable_cost_microusd",
                 "pending_untimed_attempts",
                 "untimed_terminal_attempts",
             ),
@@ -104,12 +107,8 @@ class UsageProjection:
                 if row["status"] in {"succeeded", "failed", "unknown"}:
                     counters[row["status"] + "_calls"] += 1
             for row in bounded(
-                "SELECT a.*, c.usage_estimated, g.input_microusd_per_million input_price, "
-                "g.output_microusd_per_million output_price, p.pricing_status, "
-                "p.updated_at pricing_updated_at FROM model_attempts a "
+                "SELECT a.* FROM model_attempts a "
                 "JOIN model_calls c ON c.call_id=a.call_id AND c.subject_id=a.subject_id "
-                "LEFT JOIN cognitive_resource_groups g ON g.group_id=c.resource_group_id "
-                "LEFT JOIN cognitive_resource_limit_policies p ON p.group_id=g.group_id "
                 "WHERE c.subject_id=? AND a.started_at>=? AND a.started_at<=?" + scope,
                 params,
             ):
@@ -120,24 +119,30 @@ class UsageProjection:
                 for field in ("input_tokens", "output_tokens"):
                     counters[field] += int(row[field] or 0)
                 cost = int(row["cost_microusd"] or 0)
-                estimated = row["cost_microusd"] is None or row["usage_estimated"] == 1
+                estimated = row["cost_microusd"] is None or row["usage_source"] == "estimated"
                 if row["cost_microusd"] is None:
                     cost = int(row["reserved_cost_microusd"])
+                if row["status"] == "cancelled":
+                    cost = 0
+                    estimated = False
                 counters["cost_microusd"] += cost
-                counters["estimated_cost_microusd" if estimated else "known_cost_microusd"] += cost
+                category = (
+                    "estimated_cost_microusd"
+                    if estimated
+                    else "untraceable_cost_microusd"
+                    if row["usage_source"] == "legacy"
+                    else "known_cost_microusd"
+                )
+                counters[category] += cost
                 counters["estimated_cost_attempts"] += int(estimated)
-                confirmed_free = (
-                    row["pricing_status"] == "free"
-                    and row["pricing_updated_at"] <= row["started_at"]
+                counters["untraceable_usage_attempts"] += int(row["usage_source"] == "legacy")
+                price = (
+                    strict_json_loads(row["pricing_snapshot_json"])
+                    if row["pricing_snapshot_json"]
+                    else None
                 )
                 counters["unknown_price_attempts"] += int(
-                    cost == 0
-                    and not confirmed_free
-                    and (
-                        not row["pricing_updated_at"]
-                        or row["pricing_updated_at"] > row["started_at"]
-                        or (not row["input_price"] and not row["output_price"])
-                    )
+                    price is None or price["status"] == "unknown"
                 )
             counters["pending_untimed_attempts"] = int(
                 connection.execute(
