@@ -1,5 +1,6 @@
 let csrfToken = "";
 let adminSessionGeneration = 0;
+let activeLoginAttempt = null;
 const adminReadVersions = new Map();
 function beginAdminRead(name) {
   const session = adminSessionGeneration;
@@ -573,8 +574,39 @@ function renderModelKey(item, key) {
   return `<details class="model-key-details"><summary><span class="model-key-identity"><code title="密钥指纹（截断）">${esc(shortFingerprint(key.key_fingerprint))}</code><span class="status-chip status-${esc(key.status)}">${esc(status)}</span></span><span class="model-key-counters">选用 ${esc(formatInteger(key.selection_count))} 次 · 连续失败 ${esc(formatInteger(key.consecutive_failures))} 次${esc(cooldown)}</span></summary><div class="model-key-body"><dl class="model-key-metadata"><div><dt>密钥标识</dt><dd>${esc(key.key_id)}</dd></div><div><dt>创建时间</dt><dd>${esc(formatTimestamp(key.created_at))}</dd></div><div><dt>最近选用</dt><dd>${esc(formatTimestamp(key.last_selected_at))}</dd></div><div><dt>最近成功</dt><dd>${esc(formatTimestamp(key.last_success_at))}</dd></div><div><dt>最近失败</dt><dd>${esc(formatTimestamp(key.last_failure_at))}</dd></div><div><dt>冷却结束</dt><dd>${esc(formatTimestamp(key.cooldown_until))}</dd></div></dl>${canRevoke ? `<div class="resource-actions"><button data-model-key-action="revoke" data-group-id="${esc(item.group_id)}" data-key-id="${esc(key.key_id)}" type="button">撤销密钥</button></div>` : ""}</div></details>`;
 }
 
-async function login(event) { event.preventDefault(); const form = event.currentTarget; const token = $("#login-token").value.trim(); if (!token) return; const session = adminSessionGeneration; const button = submitButton(form, event); if (button) button.disabled = true; setStatus("#login-status", "正在建立会话"); try { const result = await request("/admin/session", { method: "POST", body: JSON.stringify({ token }) }); if (session !== adminSessionGeneration) return; adminSessionGeneration++; stopUpgradePolling(); upgradeTaskId = null; upgradeStatusAvailable = false; upgradeCheckResult = null; csrfToken = result.csrf_token; $("#login-token").value = ""; $("#login-shell").hidden = true; $("#admin-shell").hidden = false; await loadAll(); } catch (error) { if (session === adminSessionGeneration) setStatus("#login-status", errorText(error), true); } finally { if (button) button.disabled = false; } }
+async function login(event) {
+  event.preventDefault();
+  if (activeLoginAttempt) return;
+  const token = $("#login-token").value.trim();
+  if (!token) return;
+  const button = submitButton(event.currentTarget, event);
+  const attempt = { button, session: adminSessionGeneration };
+  activeLoginAttempt = attempt;
+  if (button) button.disabled = true;
+  setStatus("#login-status", "正在建立会话");
+  try {
+    const result = await request("/admin/session", { method: "POST", body: JSON.stringify({ token }) });
+    if (activeLoginAttempt !== attempt || attempt.session !== adminSessionGeneration) return;
+    attempt.session = ++adminSessionGeneration;
+    stopUpgradePolling(); upgradeTaskId = null; upgradeStatusAvailable = false; upgradeCheckResult = null;
+    csrfToken = result.csrf_token;
+    $("#login-token").value = "";
+    $("#login-shell").hidden = true; $("#admin-shell").hidden = false;
+    await loadAll();
+  } catch (error) {
+    if (activeLoginAttempt === attempt && attempt.session === adminSessionGeneration) {
+      setStatus("#login-status", errorText(error), true);
+    }
+  } finally {
+    if (activeLoginAttempt === attempt) {
+      activeLoginAttempt = null;
+      if (button) button.disabled = false;
+    }
+  }
+}
 async function logout() {
+  if (activeLoginAttempt?.button) activeLoginAttempt.button.disabled = false;
+  activeLoginAttempt = null;
   adminSessionGeneration++; adminReadVersions.clear();
   const previousToken=csrfToken;csrfToken="";
   stopUpgradePolling();stopRuntimeLogPolling();clearChat();clearWallet();overviewLoadVersion++;modelLoadVersion++;

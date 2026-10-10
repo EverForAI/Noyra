@@ -43,3 +43,9 @@
 已准备但政策撤销且确定未发的新尝试记失败；unknown 重试仍保持 unknown/原哈希、nonce 和费用预留。运行失效保守结算 unknown 再抛出，替代 signing 残留；已发广播/unknown/失败的终态记账可完成。没有放宽付款、发布门禁，也没有迁移 schema。锁文件固定一个且不包含秘密；默认网络写超时继续约束已进入写入阶段的线程，暂停不能撤回已经发出的请求。
 
 既有付款/本地签名/费用/审计 103 通过；首批新增故障注入 13 通过；补充并发写体、取消、审计、发布门禁、奖励工作流与 HTTP 57 通过，均无失败。全根 Ruff/format 604 文件通过，钱包及新测试/HTTP Mypy 通过。证据 `.runtime/dispatch-wallet-first.log/xml`、`dispatch-wallet-fence.log/xml`、`dispatch-wallet-cross.log/xml`。复审锁顺序、稳定文件身份、独立 worker 收尾和 unknown 不释放均符合预期；真实 KMS/链和 Linux 进程锁验收仍由 E01 覆盖。
+
+### 5. Q08/Q09 前端（已实现并复审）
+
+登录使用独立尝试对象拥有提交按钮；退出立即释放旧按钮和尝试，旧成功/失败/finally 不影响新登录，重复提交不会创建第二个请求。公开四类视图在每个响应体 await 后核验世代，现有错误分支仍由 refresh 的世代保护。没有修改鉴权、会话 cookie、令牌传输、路由和聊天功能。
+
+Node 实际函数回归 69 通过（新增 11），JS 语法通过；本地 Chromium 真实 HTML/JS、合成请求验证旧登录完成/新登录等待和四类公开视图迟到响应通过，截图及驱动脚本在 `output/playwright/dispatch-*`。浏览器最初静态服务器没有 session/API，404 为验收夹具限制；一次公开探针误在 admin 页面运行的 ReferenceError 已通过导航到公开页后重做，不算应用故障。模块源码复审没有新增阻断；证据 `.runtime/dispatch-frontend.log`。

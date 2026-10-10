@@ -15,7 +15,7 @@ function context(extra = {}) {
   const nodes = new Map();
   const sandbox = {
     csrfToken: "synthetic-session", overviewLoadVersion: 0, latestDiagnostics: null,
-    adminSessionGeneration: 0, adminReadVersions: new Map(),
+    adminSessionGeneration: 0, adminReadVersions: new Map(), activeLoginAttempt: null,
     $: selector => {
       if (!nodes.has(selector)) nodes.set(selector, { innerHTML: "", textContent: "", value:"", dataset:{},
         options:[], querySelector:()=>null, replaceChildren(){this.innerHTML="";this.textContent="";} });
@@ -68,6 +68,93 @@ function requestContext(extra = {}) {
   const { sandbox, nodes } = context({ upgradeErrorLabels: {}, ...extra });
   vm.runInContext(functionsBetween("const describeRequestError =", "function showSection("), sandbox);
   return { sandbox, nodes };
+}
+
+const deferred = () => {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+};
+
+for (const oldOutcome of ["success", "failure"]) {
+  test(`old login ${oldOutcome} cannot unlock a newer login after logout`, async () => {
+    const oldLoad = deferred(), nextSession = deferred();
+    const button = { disabled: false };
+    let calls = 0;
+    const { sandbox } = context({ csrfToken: "", submitButton: () => button,
+      stopUpgradePolling: () => {}, stopRuntimeLogPolling: () => {},
+      clearChat: () => {}, clearWallet: () => {}, document: { querySelectorAll: () => [] },
+      renderedModels: new Map(), publicPostActionKeys: new Map(), publicPostLoadVersion: 0,
+      modelLoadVersion: 0, usageLoadVersion: 0, usageResourceVersion: 0, healthLoadVersion: 0,
+      healthPages: { model: 0, search: 0 },
+      request: path => path.endsWith("/logout") ? Promise.resolve({}) :
+        ++calls === 1 ? Promise.resolve({ csrf_token: "first" }) : nextSession.promise,
+      loadAll: () => oldLoad.promise,
+    });
+    vm.runInContext(functionsBetween("async function login(", "async function loadOverview("), sandbox);
+    sandbox.$("#login-token").value = "synthetic";
+    const event = { preventDefault() {}, currentTarget: {} };
+    const old = sandbox.login(event);
+    await new Promise(setImmediate);
+    await sandbox.logout();
+    assert.equal(button.disabled, false);
+    sandbox.$("#login-token").value = "synthetic-new";
+    const fresh = sandbox.login(event);
+    await sandbox.login(event); // Double submit cannot create a second session request.
+    assert.equal(calls, 2);
+    assert.equal(button.disabled, true);
+    if (oldOutcome === "failure") oldLoad.reject(new Error("old private error"));
+    else oldLoad.resolve();
+    await old;
+    assert.equal(button.disabled, true);
+    assert.ok(!sandbox.$("#login-status").textContent.includes("old private error"));
+    sandbox.loadAll = async () => {};
+    nextSession.resolve({ csrf_token: "second" });
+    await fresh;
+    assert.equal(button.disabled, false);
+    assert.equal(sandbox.activeLoginAttempt, null);
+    assert.equal(sandbox.csrfToken, "second");
+  });
+}
+
+test("current login error restores submit ownership and allows retry", async () => {
+  const button = { disabled: false };
+  const { sandbox } = context({ submitButton: () => button,
+    request: async () => { throw new Error("current login error"); } });
+  vm.runInContext(functionsBetween("async function login(", "async function logout("), sandbox);
+  sandbox.$("#login-token").value = "synthetic";
+  await sandbox.login({ preventDefault() {}, currentTarget: {} });
+  assert.equal(button.disabled, false);
+  assert.equal(sandbox.activeLoginAttempt, null);
+  assert.equal(sandbox.$("#login-status").textContent, "current login error");
+});
+
+for (const view of ["diary", "behavior", "interactions", "posts"]) {
+  for (const outcome of ["success", "error"]) {
+    test(`public ${view} ignores late ${outcome} after switching views`, async () => {
+      const body = deferred();
+      const content = { innerHTML: "" };
+      const pub = readFileSync(join(__dirname, "../../src/noyra/web/app.js"), "utf8");
+      const sandbox = vm.createContext({ content, activeView: view, viewGeneration: 0,
+        beginViewGeneration() { return ++sandbox.viewGeneration; },
+        currentViewGeneration: generation => generation === sandbox.viewGeneration,
+        requestScope: () => ({ signal: {} }), loadState: async () => {},
+        getJson: () => body.promise, renderDiary: () => "old diary", renderPosts: () => "new posts",
+        table: () => "old table", isAbortError: () => false, escapeHtml: String,
+        publicErrorMessage: () => "old error" });
+      vm.runInContext(pub.slice(pub.indexOf("async function loadView("),
+        pub.indexOf("async function loadPublicPostCaptcha(")), sandbox);
+      const old = sandbox.refresh();
+      sandbox.activeView = "posts";
+      sandbox.getJson = async () => [];
+      await sandbox.refresh();
+      assert.equal(content.innerHTML, "new posts");
+      if (outcome === "success") body.resolve([]);
+      else body.reject(new Error("old response"));
+      await old;
+      assert.equal(content.innerHTML, "new posts");
+    });
+  }
 }
 
 test("cost-only protection rejects unknown and zero-priced drafts but allows free or bounded alternatives", () => {

@@ -143,15 +143,19 @@ async function loadView(generation, signal) {
   let rows;
   if (activeView === "diary") {
     rows = await getJson("/api/diary", { signal });
+    if (!currentViewGeneration(generation)) return;
     content.innerHTML = renderDiary(rows);
   } else if (activeView === "behavior") {
     rows = await getJson("/api/behavior", { signal });
+    if (!currentViewGeneration(generation)) return;
     content.innerHTML = '<p class="history-context">历史行为记录</p>' + table(rows.map((row) => ({...row, result_status: ({succeeded:"成功",failed:"失败",unknown:"结果未知",pending:"待处理",running:"执行中",rejected:"未执行"})[row.result_status] || row.result_status})), [["occurred_at", "发生时间"], ["action_type", "行为"], ["result_status", "结果"], ["public_explanation", "说明"]]);
   } else if (activeView === "interactions") {
     rows = await getJson("/api/interactions", { signal });
+    if (!currentViewGeneration(generation)) return;
     content.innerHTML = table(rows, [["created_at", "时间"], ["direction", "方向"], ["status", "状态"], ["content", "内容"]]);
   } else if (activeView === "posts") {
     rows = await getJson("/api/public-posts", { signal });
+    if (!currentViewGeneration(generation)) return;
     content.innerHTML = renderPosts(rows);
   } else {
     content.innerHTML = '<div class="empty">该内容仅在管理台中提供。</div>';
