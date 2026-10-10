@@ -64,6 +64,78 @@ function modelContext(extra = {}) {
   return { sandbox, nodes };
 }
 
+function requestContext(extra = {}) {
+  const { sandbox, nodes } = context({ upgradeErrorLabels: {}, ...extra });
+  vm.runInContext(functionsBetween("const describeRequestError =", "function showSection("), sandbox);
+  return { sandbox, nodes };
+}
+
+for (const method of ["GET", "POST"]) {
+  for (const completion of ["success", "unauthorized", "network", "body"]) {
+    test(`${method} request discards ${completion} from a previous session`, async () => {
+      let resolve;
+      let reject;
+      const response = new Promise((yes, no) => { resolve = yes; reject = no; });
+      const { sandbox } = requestContext({ fetch: () => response });
+      const pending = sandbox.request("/api/admin/fixture", { method });
+      if (completion === "body") {
+        let bodyResolve;
+        const body = new Promise(yes => { bodyResolve = yes; });
+        resolve({ ok:true, json:() => body });
+        await Promise.resolve();
+        sandbox.adminSessionGeneration++;
+        sandbox.csrfToken = "another-session";
+        bodyResolve({ private_metadata:"old" });
+      } else {
+        sandbox.adminSessionGeneration++;
+        sandbox.csrfToken = "another-session";
+        if (completion === "network") reject(new Error("old network error"));
+        else resolve({ ok:completion === "success", status:401,
+          json:async() => ({ private_metadata:"old", error:"unauthorized" }) });
+      }
+      await assert.rejects(pending, error => {
+        assert.equal(error.staleSession, true);
+        assert.equal(error.status, undefined);
+        assert.equal(error.code, "admin_session_changed");
+        return true;
+      });
+    });
+  }
+}
+
+test("current-session request keeps CSRF, normal data and HTTP errors", async () => {
+  let headers;
+  const { sandbox } = requestContext({ fetch:async(_, options) => {
+    headers=options.headers;
+    return { ok:true, json:async() => ({ saved:true }) };
+  } });
+  const result=await sandbox.request("/api/admin/fixture", { method:"POST", body:"{}" });
+  assert.equal(result.saved, true);
+  assert.equal(headers["X-CSRF-Token"], "synthetic-session");
+  sandbox.fetch=async() => ({ok:false,status:401,json:async() => ({error:"unauthorized"})});
+  await assert.rejects(sandbox.request("/api/admin/fixture"), error => error.status === 401);
+});
+
+test("stale write results cannot reopen a chat or replace current status", async () => {
+  let resolve;
+  let handler;
+  let selected=0;
+  const response = new Promise(yes => { resolve=yes; });
+  const { sandbox, nodes } = requestContext({
+    fetch:() => response, prompt:() => "new chat", selectChat:() => { selected++; },
+    loadMailbox:async() => {},
+  });
+  sandbox.$("#new-conversation").addEventListener=(_, action) => { handler=action; };
+  const status=sandbox.$("#message-status"); status.textContent="new-session-status";
+  vm.runInContext(functionsBetween('$("#new-conversation").addEventListener', 'for(const [id,action]'), sandbox);
+  const pending=handler();
+  sandbox.adminSessionGeneration++; sandbox.csrfToken="another-session";
+  resolve({ok:true,json:async() => ({conversation_id:"old-private-window",title:"private title"})});
+  await pending;
+  assert.equal(selected,0);
+  assert.equal(nodes.get("#message-status").textContent,"new-session-status");
+});
+
 test("each model limit combination ignores disabled values and requires enabled values", () => {
   const { sandbox } = modelContext();
   const fields = { attempts:"daily_attempts", input_tokens:"daily_input_tokens", output_tokens:"daily_output_tokens", cost:"daily_cost_limit_usd" };
