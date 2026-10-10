@@ -64,8 +64,22 @@
 - 首次回归1失败、32通过确实暴露Windows同长度+恢复mtime盲点；补足原生共享限制后整批通过，没有只修改断言掩盖问题。注册完整性、目标签名/allowlist、运行epoch、幂等重放均保留；schema不变。
 - 复审边界：POSIX检查不能撤回检查之后由特权进程执行的文件修改；生产备份仍必须位于受保护、不可随意改写的目录。真实LUKS/跨机恢复由E01验收，文件摘要不代替目标恢复签名证明。
 
-### 模块 7：N09/E02（门禁实现完成，最终全仓待执行）
+### 模块 7：N09/E02（本地完成）
 
 - 发布full gate统一Ruff check/format全根目录，专项和全仓pytest明确使用串行（禁用额外xdist插件），清除外部PYTEST_ADDOPTS，精确提交验证器使用相同串行合同。没有删除memoryview子测试或测试断言，也没有给锁文件引入额外插件。
 - 门禁、精确提交导出、外部证据拒绝、发布脚本/工作流回归通过，详见 `.runtime/post-audit-module7.log/xml`。全根Ruff595文件检查和格式、默认Mypy390文件、pip check通过；Node58项通过。正式结束前对最终应用提交独立导出并跑完整串行验证。
 - 复审：旧并行回归8项xdist/memoryview序列化失败保留真实历史，不能改写成通过；新的串行执行是受支持的测试环境选择。E01不因任何本地结果而变为passed。
+
+### 最终整仓和失败复验
+
+- 独立Git导出应用提交 `c764cbef887adf21044cb86cc83717854d19570d`，全根Ruff check/format **598文件**、Mypy **390文件**、pip check、JS语法、Node **58项** 全通过。
+- 完整串行pytest结果为 **2209通过、56跳过、259子测试通过、3失败**，4081.82秒。`.runtime/post-audit-final-c764cbe.log/json`保留完整输出和failed状态。这次不再出现xdist/memoryview序列化失败，但不能称为一次全仓零失败。
+- 三项均在 `test_m42_p2_03_http_bounds.py`：旧搜索夹具将Database强转为None，在新发送授权读取前失败，没有到达原限长/超时/重定向断言。修正为真实临时Database，保留合成transport/secret及全部边界断言；没有为生产代码添加None绕过，也没有关闭发送授权。
+- 修正后该文件、发送围栏和搜索路由全批 **55通过**，108.71秒；Mypy/Ruff通过。证据 `.runtime/post-audit-http-fixture.log/xml`。这是失败原因修正后的专项复验，不能把原整仓failed JSON重写为passed。后续仅测试夹具/文档变化，应用源码与c764cbe一致，因此没有无变化地重复一小时整仓；最终提交再独立验证静态和该HTTP测试文件。
+- 本机56跳过含Linux/root/POSIX权限及Windows8.3别名环境条件；不把这些写成已经验收。聊天删除关闭、启动/恢复保留原文记忆和历史schema路径包含在本轮通过集合中，schema仍92。
+
+### 模块 8：E01（验收材料完成，真实环境阻断保留）
+
+- 已生成应用SHA的unsigned pending模板 `.runtime/external-gates-pending-c764cbef887adf21044cb86cc83717854d19570d.json`。最终文档/夹具提交后重新生成最终HEAD模板；任何源代码变化均必须重新绑定并验收。没有伪造签名或通过状态。
+- [外部验收交接](../release/2026-10-10-post-audit-external-acceptance.md)逐项列明八门禁、否定路径、独立复核及版本固定，补充连接等待撤销、真实备份文件竞态、双窗口CAS、跨会话UI和soak失败记录。
+- N01–N09及E02共10项本地实现/工具问题已按根因实施并复审提交；E01仍缺同最终SHA的真实Ubuntu/LUKS、双机、KMS、测试链、HTTPS和24/72小时证据。未推送、合并、部署、真实付费调用或交易，不宣称全部环境验收完成。

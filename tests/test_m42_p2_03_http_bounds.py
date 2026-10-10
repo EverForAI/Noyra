@@ -118,7 +118,9 @@ class _ProviderSecrets:
 
 
 @pytest.mark.asyncio
-async def test_search_stream_bounds_release_response_and_preserve_unknown_timeout() -> None:
+async def test_search_stream_bounds_release_response_and_preserve_unknown_timeout(
+    tmp_path: Path,
+) -> None:
     oversized_stream = _ChunkStream((b"x" * 2_000_001,))
 
     async def oversized(request: httpx.Request) -> httpx.Response:
@@ -126,7 +128,7 @@ async def test_search_stream_bounds_release_response_and_preserve_unknown_timeou
 
     oversized_client = httpx.AsyncClient(transport=httpx.MockTransport(oversized))
     executor = SearchExecutor(
-        cast(Database, None),
+        Database(tmp_path / "search.sqlite3"),
         cast(Any, _ProviderSecrets()),
         client=oversized_client,
     )
@@ -144,7 +146,7 @@ async def test_search_stream_bounds_release_response_and_preserve_unknown_timeou
 
     slow_client = httpx.AsyncClient(transport=httpx.MockTransport(slow))
     executor = SearchExecutor(
-        cast(Database, None),
+        Database(tmp_path / "search.sqlite3"),
         cast(Any, _ProviderSecrets()),
         client=slow_client,
     )
@@ -286,14 +288,14 @@ async def test_oversized_transport_response_is_unknown_and_not_retried() -> None
 
 
 @pytest.mark.asyncio
-async def test_adapter_deadlines_include_waiting_for_response_headers() -> None:
+async def test_adapter_deadlines_include_waiting_for_response_headers(tmp_path: Path) -> None:
     async def delayed_headers(request: httpx.Request) -> httpx.Response:
         await asyncio.sleep(0.05)
         return httpx.Response(200, request=request)
 
     search_client = httpx.AsyncClient(transport=httpx.MockTransport(delayed_headers))
     search = SearchExecutor(
-        cast(Database, None),
+        Database(tmp_path / "search.sqlite3"),
         cast(Any, _ProviderSecrets()),
         client=search_client,
     )
@@ -341,7 +343,7 @@ async def test_adapter_deadlines_include_waiting_for_response_headers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_adapters_disable_redirects_per_request() -> None:
+async def test_adapters_disable_redirects_per_request(tmp_path: Path) -> None:
     search_requests: list[httpx.Request] = []
 
     async def search_redirect(request: httpx.Request) -> httpx.Response:
@@ -358,7 +360,7 @@ async def test_adapters_disable_redirects_per_request() -> None:
         transport=httpx.MockTransport(search_redirect), follow_redirects=True
     )
     search = SearchExecutor(
-        cast(Database, None),
+        Database(tmp_path / "search.sqlite3"),
         cast(Any, _ProviderSecrets()),
         client=search_client,
     )
