@@ -243,6 +243,22 @@ class PublicPostStore:
             effective_storage_cap = (
                 self.storage_cap_bytes if storage_cap_bytes is None else storage_cap_bytes
             )
+            controls = self.controls(
+                subject_id,
+                defaults={
+                    "rate_limit_per_hour": self.rate_limit_per_hour
+                    if rate_limit_per_hour is None
+                    else rate_limit_per_hour,
+                    "queue_cap": effective_queue_cap,
+                    "storage_cap_bytes": effective_storage_cap,
+                    "captcha_ttl_seconds": 300,
+                    "captcha_max_attempts": 5,
+                    "captcha_mode": "digits",
+                },
+                connection=connection,
+            )
+            effective_queue_cap = controls["queue_cap"]
+            effective_storage_cap = controls["storage_cap_bytes"]
             if trusted_author:
                 self._check_post_capacity(
                     connection,
@@ -256,11 +272,7 @@ class PublicPostStore:
                     connection,
                     subject_id=subject_id,
                     client_ip=client_ip,
-                    rate_limit_per_hour=(
-                        self.rate_limit_per_hour
-                        if rate_limit_per_hour is None
-                        else rate_limit_per_hour
-                    ),
+                    rate_limit_per_hour=controls["rate_limit_per_hour"],
                     queue_cap=effective_queue_cap,
                     storage_cap_bytes=effective_storage_cap,
                     prospective_bytes=prospective_bytes,
@@ -497,10 +509,13 @@ class PublicPostStore:
             raise NotFoundError(f"public post not found: {post_id}")
         return self._record(row)
 
-    def controls(self, subject_id: str, *, defaults: Mapping[str, Any]) -> dict[str, Any]:
+    def controls(
+        self, subject_id: str, *, defaults: Mapping[str, Any], connection: Any | None = None
+    ) -> dict[str, Any]:
         """Return operator overrides, falling back to the process defaults."""
-        with self.database.connection() as connection:
-            row = connection.execute(
+        scope = self.database.connection() if connection is None else nullcontext(connection)
+        with scope as reader:
+            row = reader.execute(
                 "SELECT subject_id, rate_limit_per_hour, queue_cap, captcha_ttl_seconds, "
                 "captcha_max_attempts, captcha_mode, storage_cap_bytes, "
                 "captcha_issue_limit_per_hour, captcha_global_rate_per_minute, "
@@ -528,7 +543,7 @@ class PublicPostStore:
                 "updated_at": None,
                 "updated_by": None,
                 "source": "environment",
-                **self.length_policy(subject_id),
+                **self.length_policy(subject_id, connection),
             }
         state = {
             "subject_id": row["subject_id"],
@@ -559,7 +574,7 @@ class PublicPostStore:
             "updated_at": str(row["updated_at"]),
             "updated_by": str(row["updated_by"]),
             "source": "admin",
-            **self.length_policy(subject_id),
+            **self.length_policy(subject_id, connection),
         }
 
     def length_policy(self, subject_id: str, connection: Any | None = None) -> dict[str, Any]:

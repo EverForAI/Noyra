@@ -15,10 +15,99 @@ from pydantic import SecretStr
 
 from noyra.core import Database, IdentityStore
 from noyra.core.types import content_hash
-from noyra.interaction import PublicPostCapacityError, PublicPostInput, PublicPostStore
+from noyra.interaction import (
+    PublicPostCapacityError,
+    PublicPostInput,
+    PublicPostQueueFullError,
+    PublicPostRateLimitError,
+    PublicPostStore,
+)
 from noyra.service import NoyraService, ServiceSettings
 
 REAL_CHOICE = secrets.choice
+
+
+@pytest.mark.parametrize("dimension", ["storage", "queue", "rate"])
+def test_lowered_saved_controls_override_inflight_snapshot(
+    tmp_path: Path,
+    dimension: str,
+) -> None:
+    db = Database(tmp_path / "db")
+    subject = "public-stale-controls"
+    IdentityStore(db).ensure(subject, content_hash(subject))
+    store = PublicPostStore(db)
+    proposal = PublicPostInput(kind="post", title="first", content="x" * 500)
+    original = store.create(
+        subject, proposal, idempotency_key="first", author_provenance="operator"
+    )
+    store.configure_controls(
+        subject,
+        rate_limit_per_hour=1,
+        queue_cap=1 if dimension == "queue" else 100,
+        storage_cap_bytes=1000 if dimension == "storage" else 10000,
+        captcha_ttl_seconds=300,
+        captcha_max_attempts=5,
+        captcha_mode="digits",
+        actor="operator",
+    )
+    # Lowering limits must still permit replay of the exact accepted post.
+    assert (
+        store.create(
+            subject,
+            proposal,
+            idempotency_key="first",
+            author_provenance="operator",
+            queue_cap=100,
+            storage_cap_bytes=10000,
+        ).post_id
+        == original.post_id
+    )
+    expected = {
+        "storage": PublicPostCapacityError,
+        "queue": PublicPostQueueFullError,
+        "rate": PublicPostRateLimitError,
+    }[dimension]
+    if dimension == "rate":
+        with db.transaction() as connection:
+            store._record_rate_event(connection, subject, store._client_bucket("192.0.2.1"))
+    with pytest.raises(expected):
+        store.create(
+            subject,
+            PublicPostInput(kind="post", title="second", content="y" * 600),
+            queue_cap=100,
+            storage_cap_bytes=10000,
+            rate_limit_per_hour=100,
+            author_provenance="visitor" if dimension == "rate" else "operator",
+            client_ip="192.0.2.1",
+        )
+    assert store.get(original.post_id, subject_id=subject).content == proposal.content
+
+
+def test_post_configuration_tampering_is_rejected_inside_write_transaction(tmp_path: Path) -> None:
+    from noyra.core.errors import IntegrityError
+
+    db = Database(tmp_path / "db")
+    subject = "public-controls-integrity"
+    IdentityStore(db).ensure(subject, content_hash(subject))
+    store = PublicPostStore(db)
+    store.configure_controls(
+        subject,
+        rate_limit_per_hour=10,
+        queue_cap=10,
+        captcha_ttl_seconds=300,
+        captcha_max_attempts=5,
+        captcha_mode="digits",
+        actor="operator",
+    )
+    with db.transaction() as connection:
+        connection.execute("UPDATE public_post_controls SET queue_cap=100")
+    with pytest.raises(IntegrityError):
+        store.create(
+            subject,
+            PublicPostInput(kind="post", title="test", content="test"),
+            author_provenance="operator",
+            queue_cap=100,
+        )
 
 
 def fixed_choice(sequence: Sequence[Any]) -> Any:
