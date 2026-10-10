@@ -14,7 +14,7 @@
 | D 用量证据 | R06 attempt 来源借用 call 最终值和当前价格 | 新证据不可变；历史无法追溯明确标记，不猜测回填；费用总额不变 | 已提交 `c792be0` |
 | E 前端会话隔离 | R07 logout 清理不全，await 后旧读取写回 | 不展示令牌/API Key；旧响应不能跨会话恢复缓存/控件；保留正常草稿行为 | 已提交 `0e38e1f`，行为与浏览器验证通过 |
 | F 长期容量 | R08 路由证据不计容量，每逻辑键一个永久锁文件 | 不随意删除不可变证据或 unlink 活跃锁；已有工作结算与投递仍允许 | 已提交 `3bfb8f3`，模块回归和复审通过 |
-| G 最终审计与外部交接 | R03 精确 SHA 八项签名门禁证据缺失 | 不部署生产、不交易、不伪造签名/通过记录；最终 SHA 固定后采集 | 最终全仓回归、静态/依赖/精确提交验证；八外部门禁保留待外部验收 |
+| G 最终审计与外部交接 | R03 精确 SHA 八项签名门禁证据缺失 | 不部署生产、不交易、不伪造签名/通过记录；最终 SHA 固定后采集 | 本地回归/复验完成，首次工具失败如实保留；八外部门禁保留待外部验收 |
 
 每个模块开始前核对根因和调用路径，完成后检查 diff、相关回归、异常/中断、迁移兼容与交叉合同，记录首次失败与复验，再本地提交。不能用局部检查替代整仓检查；不重复已完成 UI 优化。若发现数据损坏、授权越界、丢账或重复外发等阻断，先停止扩展并报告。
 
@@ -77,7 +77,7 @@ schema 92 添加独立的五表路由计数，保持 schema80 八表迁移和指
 
 Node新增10项覆盖GET/POST成功、401、网络失败、读取JSON期间切换会话、正常CSRF和实际创建会话处理器，全部45项通过。页面/迁移/投稿/持久管理会话27项通过（`.runtime/remediation-session-contract.xml`）。首次Python命令引用不存在测试文件没有执行测试，改为仓库真实测试清单后通过。Playwright合成响应验证旧会话拒绝和chat.current保持空；首次合成fetch误拦截logout导致等待，重载页面后修正夹具并验证通过。390x844截图 `output/playwright/remediation-session-final-mobile.png` 已检查；静态预览的/admin/session返回404、POST logout返回501是模拟环境限制，不作为真实鉴权验收。预览和浏览器已关闭。
 
-这是独立前端补充，不改变Python或schema92。`3bfb8f3`精确提交完整Python回归已经在运行，保留该执行，不重复启动相同Python树的全仓测试；此补充提交后另跑精确提交静态及页面专项，准确标明测试提交与最终提交的关系。
+这是独立前端补充，不改变Python或schema92。当时`3bfb8f3`精确提交完整Python回归仍在运行，没有重复启动相同Python树的全仓测试；此补充提交后另跑精确提交静态及页面专项。随后因下面的F容量补充改变Python树而中断旧执行，最终测试提交与结果在G节单独记录。
 
 ### F 补充：尝试容量拒绝的完整终态
 
@@ -88,3 +88,38 @@ Node新增10项覆盖GET/POST成功、401、网络失败、读取JSON期间切�
 模型/授权/unknown/用量/容量交叉109通过、172子测试通过（`.runtime/remediation-capacity-denial-final.xml`）；首次和重试两项容量边界2通过（`.runtime/remediation-capacity-denial-boundaries.xml`），其中重试已知费用3微美元保持。Ruff全根及Mypy389文件通过。前端补充`7e3ce95`的精确提交静态、Node45和页面27项另通过（`.runtime/remediation-session-exact.json`）。
 
 由于本补充改变Python树，之前`3bfb8f3`整仓精确回归在约48%处停止，日志`.runtime/remediation-final-exact.log`保留，没有完整结果、不能称为整仓通过。最终应用提交后重新完整检出回归；测试环境固定dev/cloud哈希锁，额外测试调度插件pytest-xdist3.8.0、execnet2.1.2只安装在忽略的隔离环境，不改产品锁。采用三进程隔离测试，命令与精确SHA写入验证报告；如有失败按实测记录、查因和复验。
+
+### G：问题状态与最终验收边界
+
+| 原审计项 | 本轮结果 | 验收边界 |
+| --- | --- | --- |
+| R01 密钥撤销后新重试 | 本地修复，逐次授权及发送头前重查 | 已发送输入无法撤回；供应商端撤销另行操作 |
+| R02 完整聊天删除 | 用户取消；无删除入口，新内部请求固定拒绝 | 保留原文、记忆和历史恢复保护，不宣称完整删除交付 |
+| R03 精确SHA外部证据 | 待真实环境验收 | 八项签名门禁不能由本地合成测试、旧服务器SHA或待办模板代替 |
+| R04 停用后错误executing | 本地修复，拥有调用的授权拒绝进入正确终态 | unknown隔离及既有费用不丢失，不终止其他执行者 |
+| R05 小容量投稿 | 本地修复，配置和投稿统一最低1000字节 | 字符限制、UTF-8容量、验证码和限流独立保留 |
+| R06 用量来源分类 | 本地修复，schema91尝试级来源和价格快照 | 历史证据缺失标记legacy/未知，不猜测回填 |
+| R07 会话迟到响应 | 本地修复，读取版本及公共请求会话generation | 包含写响应；服务器已接受的动作不被伪称取消或自动重发 |
+| R08 路由与锁增长 | 本地修复，schema92计数、终态预留和固定锁分片 | 保留超限历史及旧锁；升级仍须单活并先停旧进程 |
+| R09 全仓Ruff | 本地修复，固定0.16.2全根目录门禁 | 包含受跟踪素材脚本，不用局部范围替代全根检查 |
+| R10 soak误判 | 本地修复，按整轮失败和过程失败准确退出 | 必须重新执行真实soak；原有一次503不能改述为无失败 |
+| R11 Node持续门禁 | 本地修复，CI、发布和精确提交验证接入 | 行为测试不能替代真实平台和移动端验收 |
+| R12 可选依赖漏洞 | 本地修复，urllib3升级和三组持续扫描 | 扫描是当时公告证据，不保证未来不存在新漏洞 |
+
+因此，12项中10项有本地修复、1项取消需求、1项仍待外部验收。最终整仓验收以实际完整结果和必要复验为准，不将模块专项通过自动等同于整仓通过或生产验收。
+
+应用提交固定为`e369ec65752714f312eef7e92e64035784b51497`，schema92。隔离检出使用Python3.11.16、固定开发/cloud哈希锁、Ruff0.16.2、Node24.15.0；完整pytest额外用仅测试环境的xdist3.8.0三进程调度。精确提交静态部分已通过全根Ruff检查、595文件格式检查、Mypy389文件、pip check、JS语法和Node45项。整仓Python结果及失败复验见下面的G验收结果。
+
+依赖扫描产物为`.runtime/remediation-base-audit.json`（32包）、`.runtime/remediation-cloud-audit.json`（39包）、`.runtime/remediation-dev-audit.json`（69包），三组已知漏洞均为0。扫描未修改锁；基础、cloud、开发锁的SHA256分别为`81d242aa1cbb5b4a5c3c0354e6b1f5ef37d901809fe01700bc14a1f1fd06b78f`、`4aafa2bedfc749e3c82964ffe3fa8807e7b4cfd8017fe88d70dbdd2b0fd5e7b0`、`e93467e673d93a4464b909526798a98551cede0b035403946b680cf694c7ef31`。
+
+R03的外部执行矩阵见`docs/release/external-gates.md`。最终提交固定后生成对应SHA的unsigned pending模板；模板不会作为通过证据。当前没有连接生产服务器、真实平台或资金网络，没有推送、合并或部署。
+
+### G 验收结果
+
+精确提交 `e369ec65752714f312eef7e92e64035784b51497` 的静态和前端命令全部通过：Ruff check 全根目录、Ruff format check（595文件）、Mypy（389文件）、pip check、JavaScript语法及 Node 行为测试45项。三组锁扫描分别为32、39、69个包，已知漏洞均为0。完整 Python 回归使用固定 dev/cloud 锁和仅测试环境的 pytest-xdist3.8.0/execnet2.1.2，第一次并行运行记录为 `2116 passed, 56 skipped, 212 subtests passed, 8 failed`，耗时2038.19秒。8项失败全部发生在 pytest-xdist 序列化带 `sqlite3.Binary` 的 subtest 参数时，堆栈统一落在插件 `xdist/remote.py` 与 `pytest/subtests.py` 的 `deepcopy(memoryview)`，没有产品断言失败；原始日志和 XML 保留为`.runtime/remediation-complete-final.log`、`.runtime/remediation-complete-final.xml`，验证 JSON 的状态保持`failed`，不将并行结果改报为通过。
+
+在同一精确提交上不启用并行插件，对受影响的 `tests/test_mind.py`、`tests/test_model_gateway.py`、`tests/test_sleep.py` 串行复验，结果为 `83 passed, 224 subtests passed`，无失败（`.runtime/remediation-serial-subtests.log`、`.runtime/remediation-serial-subtests.xml`）。这证明失败来自测试调度器与参数序列化的环境兼容性，而非当前产品逻辑；仍保留并行整仓首次失败的真实口径。没有修改测试以掩盖该工具问题，也没有把串行三个文件的结果扩大成整仓零失败。
+
+本地修复状态因此为：R01、R04、R05、R06、R07、R08、R09、R10、R11、R12 已实现并有模块专项及最终静态/交叉证据；R02 按用户决定取消并继续关闭；R03 的八项真实环境门禁仍未执行。当前工作区没有生产配置、密钥、数据库或外部平台变化。
+
+本节最终提交只修改本执行文档，应用、测试、脚本和依赖树与上述精确测试提交一致；最终HEAD另执行静态精确检出验证并生成pending外部门禁模板。不因文档提交重复运行耗时Python整仓测试，不能把应用提交的测试SHA直接写成最终文档提交SHA。
