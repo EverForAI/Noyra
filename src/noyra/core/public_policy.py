@@ -1,5 +1,7 @@
 """Public admission controls migration; preserve historical control hashes."""
 
+MIN_PUBLIC_POST_STORAGE_BYTES = 1_000
+
 MIGRATION_V82 = """
 CREATE TABLE public_post_controls_v82 (
  subject_id TEXT PRIMARY KEY REFERENCES subject_identity(subject_id),

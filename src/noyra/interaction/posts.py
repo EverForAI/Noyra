@@ -18,6 +18,7 @@ from typing import Any
 
 from noyra.core.database import Database, public_post_identity_hash
 from noyra.core.errors import IntegrityError, NotFoundError
+from noyra.core.public_policy import MIN_PUBLIC_POST_STORAGE_BYTES
 from noyra.core.types import content_hash, new_id, utc_now
 
 from .types import PublicPostInput, PublicPostRecord
@@ -617,7 +618,9 @@ class PublicPostStore:
             raise ValueError("CAPTCHA attempts are invalid")
         if captcha_mode not in {"letters", "digits", "alphanumeric"}:
             raise ValueError("CAPTCHA mode is invalid")
-        if not 1_000 <= storage_cap_bytes <= self.storage_cap_bytes:
+        if type(storage_cap_bytes) is not int or not (
+            MIN_PUBLIC_POST_STORAGE_BYTES <= storage_cap_bytes <= self.storage_cap_bytes
+        ):
             raise ValueError("public post storage cap is invalid")
         if max_content_chars is not None and (
             type(max_content_chars) is not int or not 1 <= max_content_chars <= 20_000
@@ -913,7 +916,8 @@ class PublicPostStore:
             or type(queue_cap) is not int
             or rate_limit_per_hour < 1
             or queue_cap < 1
-            or storage_cap_bytes < 1_000_000
+            or type(storage_cap_bytes) is not int
+            or storage_cap_bytes < MIN_PUBLIC_POST_STORAGE_BYTES
             or prospective_bytes < 0
         ):
             raise ValueError("invalid public post abuse limits")
@@ -976,6 +980,10 @@ class PublicPostStore:
         storage_cap_bytes: int,
         prospective_bytes: int,
     ) -> None:
+        if type(storage_cap_bytes) is not int or not (
+            MIN_PUBLIC_POST_STORAGE_BYTES <= storage_cap_bytes <= self.storage_cap_bytes
+        ):
+            raise ValueError("public post storage cap is invalid")
         total = connection.execute(
             "SELECT COUNT(*) AS count FROM public_posts WHERE subject_id = ?",
             (subject_id,),
