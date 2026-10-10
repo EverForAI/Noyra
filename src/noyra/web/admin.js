@@ -11,6 +11,10 @@ async function adminRead(current, path) {
   try { return await request(path); }
   catch (error) { if (current()) throw error; return null; }
 }
+function beginAdminAction() {
+  const session = adminSessionGeneration;
+  return () => Boolean(csrfToken) && session === adminSessionGeneration;
+}
 let activeSection = "overview";
 let publicPostCursor = "";
 let publicPostRows = [];
@@ -190,6 +194,7 @@ async function loadMigration() {
   const [policy, targets, proposals, tasks] = await Promise.all(["policy", "targets", "proposals", "tasks"].map(kind => adminRead(current, `/api/v1/admin/migration/${kind}`)));
   if (!current()) return;
   const draft = $("#migration-policy-form").dataset.dirty ? [...$("#migration-policy-form").elements].map(input => [input,input.value,input.checked]) : [];
+  if (!$("#migration-policy-form").dataset.dirty) $("#migration-policy-form").dataset.revision = String(policy.revision);
   $("#migration-enabled").checked = Boolean(policy.enabled); $("#migration-approval-mode").value = policy.approval_mode; $("#migration-cooldown").value = Math.round((policy.rejection_cooldown_seconds || 0) / 86400); $("#migration-wallet-mode").value = policy.wallet_mode; $("#migration-local-wallet").checked = Boolean(policy.local_wallet_transfer_enabled); $("#migration-policy-summary").innerHTML = summaryRows([["当前状态", policy.enabled ? "已开启" : "已关闭"], ["评估状态", ({ disabled: "已关闭", deferred: "评估延后", no_actionable_need: "无需迁移", cognition_unavailable: "等待认知资源", awaiting_approval: "等待审批", approved: "已批准", executing: "执行中", committed: "已迁移", reconciliation_required: "需核对或回滚", cognition_declined: "认知评估未建议迁移", hard_gate_rejected: "未通过策略检查" })[policy.assessment_status] || "等待评估"], ["策略版本", policy.revision], ["审批模式", policy.approval_mode], ["钱包模式", policy.wallet_mode], ["活动 epoch", policy.active_epoch ? `${policy.active_epoch.epoch_number} · ${policy.active_epoch.target_id}` : "无"]]);
   $("#migration-allowed-targets").value = (policy.allowed_target_ids || []).join(",");
   $("#migration-allowed-regions").value = (policy.allowed_regions || []).join(",");
@@ -516,12 +521,13 @@ function startUpgradePolling() {
   scheduleUpgradePoll();
 }
 async function checkUpgradeVersion() {
+  const current = beginAdminAction();
   const button = $("#check-upgrade-version");
   button.disabled = true;
   try {
     await loadUpgradeCheck();
   } finally {
-    button.disabled = false;
+    if (current()) button.disabled = false;
   }
 }
 function requestUpgradeConfirmation() {
@@ -530,6 +536,7 @@ function requestUpgradeConfirmation() {
   $("#upgrade-confirmation").showModal();
 }
 async function confirmUpgrade() {
+  const current = beginAdminAction();
   const button = $("#confirm-upgrade");
   if (!upgradeCheckResult?.update_available || !csrfToken) return;
   button.disabled = true;
@@ -542,6 +549,7 @@ async function confirmUpgrade() {
         idempotency_key: crypto.randomUUID(),
       }),
     });
+    if (!current()) return;
     $("#upgrade-confirmation").close();
     upgradeTaskId = result.task_id;
     setStatus("#upgrade-status", "升级任务已提交。服务器会在后台继续运行，页面关闭后不会取消。请勿再次发起升级。");
@@ -550,10 +558,11 @@ async function confirmUpgrade() {
     upgradePollDelay = 1500;
     startUpgradePolling();
   } catch (error) {
+    if (!current()) return;
     if (error.status === 401) await logout();
     else setStatus("#upgrade-status", errorText(error), true);
   } finally {
-    button.disabled = false;
+    if (current()) button.disabled = false;
   }
 }
 
@@ -576,6 +585,7 @@ async function logout() {
   for(const id of ["model-list","runtime-log-list","lifecycle-summary","lifecycle-timeline","public-post-review-list","overview-attention","overview-events","overview-lifecycle","overview-metrics","cognition-summary","storage-summary","search-provider-list","capability-list","channel-list","binding-list","migration-policy-summary","migration-target-list","migration-proposal-list","migration-task-list","runtime-summary","public-post-usage","setup-guide-list","model-observability-summary","model-provider-health-list","search-provider-health-list","retention-summary","upgrade-log-summary","upgrade-confirmation-sha"])$("#"+id).replaceChildren();
   for(const node of document.querySelectorAll("#admin-shell .form-status, #admin-shell .card-state, #admin-shell dd, #subject-name, #subject-meta, #overview-updated, #upgrade-commit-title"))node.textContent="";
   for(const form of document.querySelectorAll("#admin-shell form")){form.reset();for(const name of ["dirty","revision","lengthRevision"])delete form.dataset[name];}
+  for(const control of document.querySelectorAll("#admin-shell button, #migration-policy-form input, #migration-policy-form select")) control.disabled=false;
   for(const input of document.querySelectorAll('#admin-shell input[type=password], #admin-shell textarea'))input.value="";
   for(const id of ["usage-resource","admin-binding-transport","qq-identity-transport","admin-model-options"])$("#"+id).replaceChildren();
   $("#admin-model-options").hidden=true; $("#start-upgrade").disabled=true;
@@ -761,7 +771,7 @@ async function loadChatMessages({older=false}={}) {
     if(older) list.scrollTop=position+list.scrollHeight-previousHeight;
     else if(bottom) list.scrollTop=list.scrollHeight;
     else {list.scrollTop=position; $("#chat-latest").hidden=false;}
-  } catch(error) {chat.failures++; throw error;}
+  } catch(error) {if(generation===chat.generation && csrfToken) chat.failures++; throw error;}
   finally { if(generation===chat.generation && activeSection==="conversation" && !document.hidden && !chat.history && !$("#chat-search").value && !$("#chat-status").value) chat.timer=setTimeout(()=>{void loadChatMessages().catch(error=>setStatus("#message-status",errorText(error),true));},Math.min(60000,10000*2**chat.failures)); }
 }
 $("#conversation-list").addEventListener("click",event=>{const button=event.target.closest("[data-window]"); if(button) void selectChat(chat.windows.find(row=>row.conversation_id===button.dataset.window)).catch(error=>setStatus("#message-status",errorText(error),true));});
@@ -770,15 +780,18 @@ $("#conversation-more").addEventListener("click",()=>{void loadMailbox({append:t
 $("#chat-more").addEventListener("click",()=>{void loadChatMessages({older:true}).catch(error=>setStatus("#message-status",errorText(error),true));});
 for(const id of ["chat-search-button","chat-status"]) $("#"+id).addEventListener(id==="chat-status"?"change":"click",()=>{chat.history=false; void loadChatMessages().catch(error=>setStatus("#message-status",errorText(error),true));});
 $("#chat-back").addEventListener("click",()=>{$(".chat-workspace").classList.remove("has-current");});
-$("#chat-latest").addEventListener("click",()=>{chat.history=false; $("#chat-search").value=""; $("#chat-status").value=""; void loadChatMessages().then(()=>{$("#mailbox-list").scrollTop=$("#mailbox-list").scrollHeight; $("#chat-latest").hidden=true;}).catch(error=>setStatus("#message-status",errorText(error),true));});
-$("#mailbox-list").addEventListener("click",async event=>{const button=event.target.closest("[data-copy-message]"); if(button) {try {await navigator.clipboard.writeText(chat.rows.find(row=>row.interaction_id===button.dataset.copyMessage).content);} catch {setStatus("#message-status","复制失败",true);}}});
-$("#new-conversation").addEventListener("click",async()=>{const title=prompt("会话名称", "新会话"); if(!title?.trim()) return; try{const row=await request("/api/admin/conversations",{method:"POST",body:JSON.stringify({title:title.trim()})}); selectChat(row); await loadMailbox();}catch(error){setStatus("#message-status",errorText(error),true);}});
+$("#chat-latest").addEventListener("click",()=>{chat.history=false; $("#chat-search").value=""; $("#chat-status").value=""; const current=beginAdminAction(); void loadChatMessages().then(()=>{if (!current()) return;$("#mailbox-list").scrollTop=$("#mailbox-list").scrollHeight; $("#chat-latest").hidden=true;}).catch(error=>setStatus("#message-status",errorText(error),true));});
+$("#mailbox-list").addEventListener("click",async event=>{
+  const currentAction = beginAdminAction();const button=event.target.closest("[data-copy-message]"); if(button) {try {await navigator.clipboard.writeText(chat.rows.find(row=>row.interaction_id===button.dataset.copyMessage).content);} catch { if (!currentAction()) return;setStatus("#message-status","复制失败",true);}}});
+$("#new-conversation").addEventListener("click",async()=>{
+  const currentAction = beginAdminAction();const title=prompt("会话名称", "新会话"); if(!title?.trim()) return; try{const row=await request("/api/admin/conversations",{method:"POST",body:JSON.stringify({title:title.trim()})}); if (!currentAction()) return; selectChat(row); await loadMailbox(); if (!currentAction()) return;}catch (error) { if (!currentAction()) return;setStatus("#message-status",errorText(error),true);}});
 for(const [id,action] of [["rename-conversation","title"],["pin-conversation","pinned"],["archive-conversation","archived"]]) $("#"+id).addEventListener("click",async()=>{
+  const currentAction = beginAdminAction();
   if(!chat.current) return; let value;
   if(action==="title") {value=prompt("会话名称",chat.current.title); if(!value?.trim()) return;}
   else value=action==="pinned"?!chat.current.pinned:chat.current.status!=="archived";
-  try {chat.current=await request(`/api/admin/conversations/${encodeURIComponent(chat.current.conversation_id)}`,{method:"POST",body:JSON.stringify({[action]:value,expected_revision:chat.current.revision})}); await loadMailbox();}
-  catch(error){setStatus("#message-status",errorText(error),true);}
+  try {const updated=await request(`/api/admin/conversations/${encodeURIComponent(chat.current.conversation_id)}`,{method:"POST",body:JSON.stringify({[action]:value,expected_revision:chat.current.revision})}); if (!currentAction()) return; chat.current=updated; await loadMailbox(); if (!currentAction()) return;}
+  catch (error) { if (!currentAction()) return;setStatus("#message-status",errorText(error),true);}
 });
 
 const walletRunStatusLabels = { queued: "排队中", running: "执行中", retry_wait: "等待重试", succeeded: "成功", failed: "失败", unknown: "结果未知", cancelled: "已取消" };
@@ -809,9 +822,11 @@ function walletObservationLabel(observedAt) {
 function walletRPCHost(value) { try { return new URL(value).hostname; } catch { return "RPC 地址异常"; } }
 function walletCoverage(rows, label) { return `${label}：已读 ${rows.length} 条${rows.length >= 100 ? "（读取上限 100，可能还有记录）" : ""}`; }
 async function walletRefreshAfterWrite(status, message, refresh) {
+  const current = beginAdminAction();
+  if (!current()) return;
   setStatus(status, message);
-  try { await refresh(); setStatus(status, message); }
-  catch (error) { setStatus(status, `${message}；读取更新失败，请刷新核对。${errorText(error)}`, true); }
+  try { await refresh(); if (current()) setStatus(status, message); }
+  catch (error) { if (current() && !error?.staleSession) setStatus(status, `${message}；读取更新失败，请刷新核对。${errorText(error)}`, true); }
 }
 function walletNetworkLookup() { return new Map(walletNetworks.map((item) => [item.network_id, item])); }
 function walletAssetLookup() { return new Map(walletAssets.map((item) => [item.asset_id, item])); }
@@ -1368,6 +1383,7 @@ $("#wallet-registry-refresh").addEventListener("click",()=>void loadWalletRegist
 $("#wallet-order-filter").addEventListener("change",()=>void loadWalletEconomy({kind:"orders"}).catch(error=>setStatus("#wallet-read-status",errorText(error),true)));
 $("#wallet-execution-filter").addEventListener("change",()=>void loadWalletExecutions());
 document.querySelector('[data-section-panel="wallet"]').addEventListener("click", async event => {
+  const currentAction = beginAdminAction();
   const button = event.target.closest("[data-wallet-page], [data-wallet-revoke]");
   if (!button || button.disabled) return;
   const epoch = walletListEpoch;
@@ -1378,8 +1394,8 @@ document.querySelector('[data-section-panel="wallet"]').addEventListener("click"
       const reason = prompt(`撤销 ${button.dataset.label}。历史记录保留；新采集或付款将受到限制。请输入理由：`);
       if (!reason?.trim()) return;
       if (!confirm(`${kind==="networks" ? "网络撤销会限制其下全部资产和地址。" : "撤销后不能进行该项的新采集或付款。"}此操作不能撤回已经广播的交易。确认撤销？`)) return;
-      await request(`/api/config/wallet-${kind}/${encodeURIComponent(button.dataset.id)}/revoke`, {method:"POST",body:JSON.stringify({reason:reason.trim()})});
-      await walletRefreshAfterWrite("#wallet-registry-status","已撤销",async()=>{await loadWalletRegistry();await loadWalletGraph();});
+      await request(`/api/config/wallet-${kind}/${encodeURIComponent(button.dataset.id)}/revoke`, {method:"POST",body:JSON.stringify({reason:reason.trim()})}); if (!currentAction()) return;
+      await walletRefreshAfterWrite("#wallet-registry-status","已撤销",()=>Promise.all([loadWalletRegistry(),loadWalletGraph()])); if (!currentAction()) return;
       return;
     }
     const kind = button.dataset.walletPage;
@@ -1388,8 +1404,8 @@ document.querySelector('[data-section-panel="wallet"]').addEventListener("click"
     else if (kind==="balances") await loadWalletGraph(options);
     else if (["bounties","orders"].includes(kind)) await loadWalletEconomy(options);
     else await ({acquisitions:loadWalletAcquisitions,executions:loadWalletExecutions,audits:loadWalletAudits})[kind](options);
-  } catch(error) { if (epoch === walletListEpoch && csrfToken) setStatus("#wallet-read-status",`读取或操作未完成，请核对当前状态。${errorText(error)}`,true); }
-  finally { if (epoch === walletListEpoch) button.disabled = false; }
+  } catch (error) { if (!currentAction()) return; if (epoch === walletListEpoch && csrfToken) setStatus("#wallet-read-status",`读取或操作未完成，请核对当前状态。${errorText(error)}`,true); }
+  finally { if (!currentAction()) return; if (epoch === walletListEpoch) button.disabled = false; }
 });
 $("#wallet-policy-form").addEventListener("input",event=>{event.currentTarget.dataset.dirty="true";});
 function clearWallet() {
@@ -1401,24 +1417,26 @@ function clearWallet() {
   $("#wallet-history-more").hidden=false;
 }
 for(const kind of ["network","asset","address"]) $("#wallet-"+kind+"-form").addEventListener("submit",async event=>{
+  const currentAction = beginAdminAction();
   event.preventDefault();const form=event.currentTarget;const button=form.querySelector("button[type=submit]");const payload=Object.fromEntries(new FormData(form));
   if(kind==="network") {const id=payload.chain_id;if(!/^[1-9]\d*$/.test(id) || BigInt(id)>BigInt(Number.MAX_SAFE_INTEGER)){setStatus("#wallet-registry-status","Chain ID 超过浏览器精确输入范围",true);return;}payload.chain_id=Number(id);payload.chain_family="evm";payload.rpc_url=payload.rpc_url.trim() || null;}
   if(kind==="asset") {payload.decimals=Number(payload.decimals);payload.contract_address=payload.contract_address.trim() || null;}
   if(kind==="address")payload.purpose="observation";
   button.disabled=true;
-  try {await request(`/api/config/wallet-${kind==="address" ? "addresses" : kind+"s"}`,{method:"POST",body:JSON.stringify(payload)});form.reset();delete form.dataset.dirty;await walletRefreshAfterWrite("#wallet-registry-status","登记成功",async()=>{await loadWalletGraph();await loadWalletRegistry();});}
-  catch(error){setStatus("#wallet-registry-status",errorText(error),true);}finally{button.disabled=false;}
+  try {await request(`/api/config/wallet-${kind==="address" ? "addresses" : kind+"s"}`,{method:"POST",body:JSON.stringify(payload)}); if (!currentAction()) return;form.reset();delete form.dataset.dirty;await walletRefreshAfterWrite("#wallet-registry-status","登记成功",()=>Promise.all([loadWalletGraph(),loadWalletRegistry()])); if (!currentAction()) return;}
+  catch (error) { if (!currentAction()) return;setStatus("#wallet-registry-status",errorText(error),true);}finally { if (!currentAction()) return;button.disabled=false;}
 });
 $("#wallet-history-more").addEventListener("click",async()=>{
+  const currentAction = beginAdminAction();
   const button=$("#wallet-history-more");button.disabled=true;
   try{const params=new URLSearchParams({limit:"25"});if(walletHistoryCursor)params.set("cursor",walletHistoryCursor);
-    const page=await request(`/api/config/wallet-balance-history?${params}`);
+    const page=await request(`/api/config/wallet-balance-history?${params}`); if (!currentAction()) return;
     if(!csrfToken)return;
     if(!walletHistoryStarted)$("#wallet-history-list").innerHTML="";
     walletHistoryStarted=true;walletHistoryCursor=page.next_cursor;
     $("#wallet-history-list").insertAdjacentHTML("beforeend",page.items.map(row=>`<article class="resource-item"><div><strong>${esc(walletAmount(row.balance,row.asset_id))}</strong><p>${esc(walletTargetText(row.asset_id,row.address_id))}</p><time>${esc(formatTimestamp(row.observed_at))}</time><details><summary>最小单位</summary><code>${esc(row.balance)}</code></details></div></article>`).join(""));
     button.hidden=!page.has_more;button.textContent="加载更早观测";setStatus("#wallet-history-status",page.items.length ? "已读取历史快照" : "暂无历史快照");
-  }catch(error){setStatus("#wallet-history-status",errorText(error),true);}finally{button.disabled=false;}
+  }catch (error) { if (!currentAction()) return;setStatus("#wallet-history-status",errorText(error),true);}finally { if (!currentAction()) return;button.disabled=false;}
 });
 const publicPostStatusLabels = {
   pending_review: "待审核",
@@ -1515,15 +1533,16 @@ function restoreModelFilters() {
 
 $("#retention-settings-form").addEventListener("input", (event) => { event.currentTarget.dataset.dirty = "1"; });
 $("#retention-settings-form").addEventListener("submit", async (event) => {
+  const currentAction = beginAdminAction();
   event.preventDefault(); const form = event.currentTarget; const button = submitButton(form,event); button.disabled = true;
   try {
     const settings = Object.fromEntries([...form.querySelectorAll("input[name]")].map((input) => [input.name,Number(input.value)]));
-    await request("/api/admin/retention/settings", {method:"POST",body:JSON.stringify({settings,expected_revision:Number(form.dataset.revision)})});
+    await request("/api/admin/retention/settings", {method:"POST",body:JSON.stringify({settings,expected_revision:Number(form.dataset.revision)})}); if (!currentAction()) return;
     delete form.dataset.dirty;
-    try { await loadRetention(); setStatus("#retention-status","设置已保存，尚未执行清理"); }
-    catch { setStatus("#retention-status","设置已保存；读取失败，请刷新",true); }
-  } catch (error) { setStatus("#retention-status",error.status === 409 ? "设置已被修改，请刷新后核对版本" : errorText(error),true); }
-  finally { button.disabled = false; }
+    try { await loadRetention(); if (!currentAction()) return; setStatus("#retention-status","设置已保存，尚未执行清理"); }
+    catch { if (!currentAction()) return; setStatus("#retention-status","设置已保存；读取失败，请刷新",true); }
+  } catch (error) { if (!currentAction()) return; setStatus("#retention-status",error.status === 409 ? "设置已被修改，请刷新后核对版本" : errorText(error),true); }
+  finally { if (!currentAction()) return; button.disabled = false; }
 });
 let usageLoadVersion = 0;
 let usageResourcePage = 0;
@@ -1829,76 +1848,86 @@ document.addEventListener("visibilitychange", () => { if (document.hidden) stopR
 $("#login-form").addEventListener("submit", login); $("#logout").addEventListener("click", logout); $("#refresh-admin").addEventListener("click", loadAll); $("#check-upgrade-version").addEventListener("click", checkUpgradeVersion); $("#start-upgrade").addEventListener("click", requestUpgradeConfirmation); $("#confirm-upgrade").addEventListener("click", confirmUpgrade); $("#refresh-observability").addEventListener("click", () => { void loadOverview().catch((error) => setStatus("#global-status", errorText(error), true)); }); $("#refresh-provider-health").addEventListener("click", () => { void loadProviderHealth().catch((error) => setStatus("#provider-health-status", errorText(error), true)); }); $("#refresh-retention").addEventListener("click", () => { void loadRetention().catch((error) => setStatus("#retention-status", errorText(error), true)); }); $("#run-retention").addEventListener("click", () => { void runRetention(); }); $("#refresh-mailbox").addEventListener("click", loadMailbox); $("#refresh-models").addEventListener("click", loadModels); $("#refresh-search-providers").addEventListener("click", loadSearchProviders); $("#refresh-capabilities").addEventListener("click", loadCapabilities); $("#refresh-runtime").addEventListener("click", loadRuntime); document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => showSection(button.dataset.section)));
 $("[data-section-panel=overview]").addEventListener("click", (event) => { const button = event.target.closest("[data-setup-go]"); if (button) showSection(button.dataset.setupGo); });
 $("#refresh-wallet-audits").addEventListener("click", () => { void loadWalletAudits().catch(() => {}); });
-$("#refresh-migration").addEventListener("click", () => { void loadMigration().catch((error) => setStatus("#migration-status", errorText(error), true)); });
+$("#refresh-migration").addEventListener("click", () => {
+  const form = $("#migration-policy-form");
+  if (form.dataset.dirty && !window.confirm("重新读取将丢弃尚未保存的迁移策略草稿。继续吗？")) return;
+  delete form.dataset.dirty;
+  void loadMigration().catch(error => setStatus("#migration-status", errorText(error), true));
+});
 $("#refresh-migration-tasks").addEventListener("click", () => { void loadMigration().catch((error) => setStatus("#migration-status", errorText(error), true)); });
 $("#migration-target-form").addEventListener("submit", async (event) => {
+  const currentAction = beginAdminAction();
   event.preventDefault();
   try {
     await request("/api/v1/admin/migration/targets", { method: "POST", body: JSON.stringify({
       target_id: $("#migration-target-id").value.trim(), endpoint: $("#migration-target-endpoint").value.trim(), public_key: $("#migration-target-key").value.trim(), recipient_public_key: $("#migration-target-recipient").value.trim(), channel_token: $("#migration-target-token").value.trim(), release_sha: $("#migration-target-release").value.trim(), os_arch: $("#migration-target-arch").value.trim(), region: $("#migration-target-region").value.trim() || null, provider: $("#migration-target-provider").value.trim() || null, capabilities: {}, encrypted_volume: $("#migration-target-encrypted").checked,
-    }) });
-    event.currentTarget.reset(); $("#migration-target-arch").value = "linux-amd64"; setStatus("#migration-target-status", "迁移目标已注册"); await loadMigration();
-  } catch (error) { setStatus("#migration-target-status", errorText(error), true); }
+    }) }); if (!currentAction()) return;
+    event.currentTarget.reset(); $("#migration-target-arch").value = "linux-amd64"; setStatus("#migration-target-status", "迁移目标已注册"); await loadMigration(); if (!currentAction()) return;
+  } catch (error) { if (!currentAction()) return; setStatus("#migration-target-status", errorText(error), true); }
 });
 $("#migration-target-list").addEventListener("click", async (event) => {
+  const currentAction = beginAdminAction();
   const challengeButton = event.target.closest("[data-migration-challenge]");
   const revokeButton = event.target.closest("[data-migration-revoke]");
   try {
     if (challengeButton) {
       const targetId = challengeButton.dataset.migrationChallenge;
-      await request(`/api/v1/admin/migration/targets/${encodeURIComponent(targetId)}/challenge`, { method: "POST", body: JSON.stringify({ automatic: true }) });
-      setStatus("#migration-target-status", "目标验证成功"); await loadMigration();
+      await request(`/api/v1/admin/migration/targets/${encodeURIComponent(targetId)}/challenge`, { method: "POST", body: JSON.stringify({ automatic: true }) }); if (!currentAction()) return;
+      setStatus("#migration-target-status", "目标验证成功"); await loadMigration(); if (!currentAction()) return;
     } else if (revokeButton) {
       const targetId = revokeButton.dataset.migrationRevoke;
       if (!window.confirm(`确定撤销目标 ${targetId} 吗？`)) return;
-      await request(`/api/v1/admin/migration/targets/${encodeURIComponent(targetId)}/revoke`, { method: "POST", body: JSON.stringify({ reason: "管理员在管理台撤销" }) });
-      setStatus("#migration-target-status", "目标已撤销"); await loadMigration();
+      await request(`/api/v1/admin/migration/targets/${encodeURIComponent(targetId)}/revoke`, { method: "POST", body: JSON.stringify({ reason: "管理员在管理台撤销" }) }); if (!currentAction()) return;
+      setStatus("#migration-target-status", "目标已撤销"); await loadMigration(); if (!currentAction()) return;
     }
-  } catch (error) { setStatus("#migration-target-status", errorText(error), true); }
+  } catch (error) { if (!currentAction()) return; setStatus("#migration-target-status", errorText(error), true); }
 });
 $("#migration-proposal-list").addEventListener("click", async (event) => {
+  const currentAction = beginAdminAction();
   const approve = event.target.closest("[data-migration-approve]");
   const reject = event.target.closest("[data-migration-reject]");
   try {
     if (approve) {
-      await request(`/api/v1/admin/migration/proposals/${encodeURIComponent(approve.dataset.migrationApprove)}/approve`, { method: "POST", body: JSON.stringify({ idempotency_key: `admin-approve-${approve.dataset.migrationApprove}` }) });
-      setStatus("#migration-status", "迁移提案已批准"); await loadMigration();
+      await request(`/api/v1/admin/migration/proposals/${encodeURIComponent(approve.dataset.migrationApprove)}/approve`, { method: "POST", body: JSON.stringify({ idempotency_key: `admin-approve-${approve.dataset.migrationApprove}` }) }); if (!currentAction()) return;
+      setStatus("#migration-status", "迁移提案已批准"); await loadMigration(); if (!currentAction()) return;
     } else if (reject) {
       const reason = window.prompt("请输入拒绝原因：");
       if (!reason?.trim()) return;
-      await request(`/api/v1/admin/migration/proposals/${encodeURIComponent(reject.dataset.migrationReject)}/reject`, { method: "POST", body: JSON.stringify({ reason: reason.trim() }) });
-      setStatus("#migration-status", "迁移提案已拒绝"); await loadMigration();
+      await request(`/api/v1/admin/migration/proposals/${encodeURIComponent(reject.dataset.migrationReject)}/reject`, { method: "POST", body: JSON.stringify({ reason: reason.trim() }) }); if (!currentAction()) return;
+      setStatus("#migration-status", "迁移提案已拒绝"); await loadMigration(); if (!currentAction()) return;
     }
-  } catch (error) { setStatus("#migration-status", errorText(error), true); }
+  } catch (error) { if (!currentAction()) return; setStatus("#migration-status", errorText(error), true); }
 });
 $("#migration-task-list").addEventListener("click", async (event) => {
+  const currentAction = beginAdminAction();
   const cutover = event.target.closest("[data-migration-cutover]");
   const rollback = event.target.closest("[data-migration-rollback]");
   const cancel = event.target.closest("[data-migration-cancel]");
   try {
     if (cutover) {
-      const policy = await request("/api/v1/admin/migration/policy");
+      const policy = await request("/api/v1/admin/migration/policy"); if (!currentAction()) return;
       if (policy.wallet_mode === "local_wallet_transfer") {
         if (!window.confirm("本次迁移将通过接收方加密包转移本地钱包及解锁文件。目标必须是您信任的设备。确认授权本次任务吗？")) return;
-        await request(`/api/v1/admin/migration/tasks/${encodeURIComponent(cutover.dataset.migrationCutover)}/wallet-approval`, { method: "POST", body: JSON.stringify({ authorize_local_wallet: true }) });
+        await request(`/api/v1/admin/migration/tasks/${encodeURIComponent(cutover.dataset.migrationCutover)}/wallet-approval`, { method: "POST", body: JSON.stringify({ authorize_local_wallet: true }) }); if (!currentAction()) return;
       }
-      await request(`/api/v1/admin/migration/tasks/${encodeURIComponent(cutover.dataset.migrationCutover)}/cutover`, { method: "POST", body: JSON.stringify({}) });
+      await request(`/api/v1/admin/migration/tasks/${encodeURIComponent(cutover.dataset.migrationCutover)}/cutover`, { method: "POST", body: JSON.stringify({}) }); if (!currentAction()) return;
       setStatus("#migration-status", "迁移执行已启动；传输和验证在服务器后台继续，请更新任务状态");
-      await loadMigration();
+      await loadMigration(); if (!currentAction()) return;
     } else if (cancel) {
       const reason = window.prompt("请输入取消迁移的原因：");
       if (!reason?.trim()) return;
-      await request(`/api/v1/admin/migration/tasks/${encodeURIComponent(cancel.dataset.migrationCancel)}/cancel`, { method: "POST", body: JSON.stringify({ reason: reason.trim() }) });
-      setStatus("#migration-status", "迁移任务已取消"); await loadMigration();
+      await request(`/api/v1/admin/migration/tasks/${encodeURIComponent(cancel.dataset.migrationCancel)}/cancel`, { method: "POST", body: JSON.stringify({ reason: reason.trim() }) }); if (!currentAction()) return;
+      setStatus("#migration-status", "迁移任务已取消"); await loadMigration(); if (!currentAction()) return;
     } else if (rollback) {
       const reason = window.prompt("请输入回滚原因：");
       if (!reason?.trim()) return;
-      await request(`/api/v1/admin/migration/tasks/${encodeURIComponent(rollback.dataset.migrationRollback)}/rollback`, { method: "POST", body: JSON.stringify({ reason: reason.trim() }) });
-      setStatus("#migration-status", "迁移任务已回滚"); await loadMigration();
+      await request(`/api/v1/admin/migration/tasks/${encodeURIComponent(rollback.dataset.migrationRollback)}/rollback`, { method: "POST", body: JSON.stringify({ reason: reason.trim() }) }); if (!currentAction()) return;
+      setStatus("#migration-status", "迁移任务已回滚"); await loadMigration(); if (!currentAction()) return;
     }
-  } catch (error) { setStatus("#migration-status", errorText(error), true); }
+  } catch (error) { if (!currentAction()) return; setStatus("#migration-status", errorText(error), true); }
 });
 $("#migration-recovery-form").addEventListener("submit", async (event) => {
+  const currentAction = beginAdminAction();
   event.preventDefault();
   const form = event.currentTarget;
   const button = submitButton(form, event);
@@ -1913,22 +1942,44 @@ $("#migration-recovery-form").addEventListener("submit", async (event) => {
       health_report_digest: $("#migration-recovery-health-report-digest").value.trim(),
       target_signature: $("#migration-recovery-target-signature").value.trim(),
       source_failure_evidence: $("#migration-recovery-source-failure-evidence").value.trim(),
-    }) });
+    }) }); if (!currentAction()) return;
     setStatus("#migration-recovery-status", "紧急恢复已提交，服务器正在准备验证任务");
-    await loadMigration();
-  } catch (error) {
+    await loadMigration(); if (!currentAction()) return;
+  } catch (error) { if (!currentAction()) return;
     setStatus("#migration-recovery-status", errorText(error), true);
-  } finally {
+  } finally { if (!currentAction()) return;
     if (button) button.disabled = false;
   }
 });
 $("#migration-policy-form").addEventListener("submit", async (event) => {
+  const currentAction = beginAdminAction();
   event.preventDefault();
+  const form = event.currentTarget;
+  const controls = [...form.elements];
+  const disabled = controls.map(input => input.disabled);
+  const revision = form.dataset.revision;
+  if (!revision || !/^[0-9]+$/.test(revision) || !Number.isSafeInteger(Number(revision))) {
+    setStatus("#migration-status", "尚未读取编辑版本，请重新读取策略后再保存", true); return;
+  }
+  const draft = {
+    expected_revision: Number(revision), enabled: $("#migration-enabled").checked,
+    approval_mode: $("#migration-approval-mode").value,
+    rejection_cooldown_seconds: Number($("#migration-cooldown").value) * 86400,
+    allowed_target_ids: $("#migration-allowed-targets").value.split(/[,，]/).map(s => s.trim()).filter(Boolean),
+    allowed_regions: $("#migration-allowed-regions").value.split(/[,，]/).map(s => s.trim()).filter(Boolean),
+    max_cost_microusd: Number($("#migration-max-cost").value), min_free_bytes: Number($("#migration-min-free").value),
+    trust_level: Number($("#migration-trust").value), max_downtime_seconds: Number($("#migration-downtime").value),
+    wallet_mode: $("#migration-wallet-mode").value, local_wallet_transfer_enabled: $("#migration-local-wallet").checked,
+  };
+  controls.forEach(input => { input.disabled = true; });
   try {
-    const current = await request("/api/v1/admin/migration/policy");
-    const approvalMode = $("#migration-approval-mode").value;
-    const walletMode = $("#migration-wallet-mode").value;
-    const localWalletEnabled = $("#migration-local-wallet").checked;
+    const current = await request("/api/v1/admin/migration/policy"); if (!currentAction()) return;
+    if (current.revision !== draft.expected_revision) {
+      setStatus("#migration-status", "策略已被其他窗口修改，草稿已保留。请比较当前策略并重新读取后再保存", true); return;
+    }
+    const approvalMode = draft.approval_mode;
+    const walletMode = draft.wallet_mode;
+    const localWalletEnabled = draft.local_wallet_transfer_enabled;
     const enteringPolicyAuto = approvalMode === "policy_auto" && (current.approval_mode !== "policy_auto" || !current.enabled);
     const enteringLocalWallet = walletMode === "local_wallet_transfer" && localWalletEnabled && (current.wallet_mode !== "local_wallet_transfer" || !current.local_wallet_transfer_enabled);
     const confirmPolicyAuto = !enteringPolicyAuto || window.confirm("策略自动模式会允许无需逐次人工批准的迁移，必须确认目标、资源和回滚边界均已验证。继续吗？");
@@ -1936,40 +1987,31 @@ $("#migration-policy-form").addEventListener("submit", async (event) => {
     const confirmLocalWallet = !enteringLocalWallet || window.confirm("本地钱包迁移会在受保护通道中转移密钥，必须确认已准备二次批准和回滚方案。继续吗？");
     if (!confirmLocalWallet) return;
     await request("/api/v1/admin/migration/policy", { method: "PUT", body: JSON.stringify({
-      expected_revision: current.revision,
-      enabled: $("#migration-enabled").checked,
-      approval_mode: approvalMode,
-      rejection_cooldown_seconds: Number($("#migration-cooldown").value) * 86400,
-      allowed_target_ids: $("#migration-allowed-targets").value.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
-      allowed_regions: $("#migration-allowed-regions").value.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
-      max_cost_microusd: Number($("#migration-max-cost").value),
-      min_free_bytes: Number($("#migration-min-free").value),
-      trust_level: Number($("#migration-trust").value),
-      max_downtime_seconds: Number($("#migration-downtime").value),
-      wallet_mode: walletMode,
-      local_wallet_transfer_enabled: localWalletEnabled,
+      ...draft,
       ...(enteringPolicyAuto ? { confirm_policy_auto: true } : {}),
       ...(enteringLocalWallet ? { confirm_local_wallet_transfer: true } : {}),
-    }) });
+    }) }); if (!currentAction()) return;
     setStatus("#migration-status", "迁移策略已保存");
     delete $("#migration-policy-form").dataset.dirty;
-    await loadMigration();
-  } catch (error) { setStatus("#migration-status", errorText(error), true); }
+    await loadMigration(); if (!currentAction()) return;
+  } catch (error) { if (!currentAction()) return; setStatus("#migration-status", error.status === 409 ? "策略版本冲突，草稿已保留。请核对当前策略后重新读取" : errorText(error), true); }
+  finally { if (currentAction()) controls.forEach((input, index) => { input.disabled = disabled[index]; }); }
 });
 $("#admin-message-form").addEventListener("submit", async (event) => {
+  const currentAction = beginAdminAction();
   event.preventDefault(); if(event.isComposing || !chat.current || chat.current.status!=="active") return;
   const button=submitButton(event.currentTarget,event); button.disabled=true;
   const windowId=chat.current.conversation_id; const content=$("#admin-message").value.trim();
   const keyId=windowId+":"+content; const key=chat.keys.get(keyId)||crypto.randomUUID(); chat.keys.set(keyId,key);
   try {
-    await request("/api/interactions", {method:"POST",body:JSON.stringify({channel:"web",counterparty:"web-user",content,idempotency_key:key,conversation_id:windowId})});
+    await request("/api/interactions", {method:"POST",body:JSON.stringify({channel:"web",counterparty:"web-user",content,idempotency_key:key,conversation_id:windowId})}); if (!currentAction()) return;
     chat.keys.delete(keyId);
     if(chat.drafts.get(windowId)?.trim()===content) chat.drafts.delete(windowId);
     if(chat.current?.conversation_id===windowId && $("#admin-message").value.trim()===content) $("#admin-message").value="";
     setStatus("#message-status","消息已记录，等待处理");
-    try {await loadChatMessages();} catch {setStatus("#message-status","消息已记录；读取失败，请刷新",true);}
-  } catch(error) {setStatus("#message-status",errorText(error),true);}
-  finally {button.disabled=false;}
+    try {await loadChatMessages(); if (!currentAction()) return;} catch { if (!currentAction()) return;setStatus("#message-status","消息已记录；读取失败，请刷新",true);}
+  } catch (error) { if (!currentAction()) return;setStatus("#message-status",errorText(error),true);}
+  finally { if (!currentAction()) return;button.disabled=false;}
 });
 
 $("#wallet-enqueue-asset").addEventListener("change", updateWalletAddressOptions);
@@ -1983,6 +2025,7 @@ $("#refresh-wallet-observation-health").addEventListener("click", () => { void l
 $("#refresh-wallet-policy").addEventListener("click", () => { void loadWalletPolicy().catch((error) => setStatus("#wallet-policy-status", errorText(error), true)); });
 $("#refresh-wallet-economy").addEventListener("click", () => { void loadWalletEconomy().catch((error) => setStatus("#global-status", errorText(error), true)); });
 $("#run-wallet-acquisitions").addEventListener("click", async (event) => {
+  const currentAction = beginAdminAction();
   const button = event.currentTarget;
   const limit = Number($("#wallet-run-limit").value);
   if (!Number.isInteger(limit) || limit < 1 || limit > 32) {
@@ -1993,16 +2036,17 @@ $("#run-wallet-acquisitions").addEventListener("click", async (event) => {
   if(!confirm(`处理最多 ${limit} 个到期采集；会向链上读取并消耗 RPC 预算。继续？`)){button.disabled=false;return;}
   setStatus("#wallet-acquisition-status", "正在处理到期读取");
   try {
-    const result = await request("/api/admin/wallet-acquisitions/run", { method: "POST", body: JSON.stringify({ limit }) });
-    await walletRefreshAfterWrite("#wallet-acquisition-status","本次处理 " + (result?.processed ?? 0) + " 条",loadWalletAcquisitions);
-  } catch (error) {
+    const result = await request("/api/admin/wallet-acquisitions/run", { method: "POST", body: JSON.stringify({ limit }) }); if (!currentAction()) return;
+    await walletRefreshAfterWrite("#wallet-acquisition-status","本次处理 " + (result?.processed ?? 0) + " 条",loadWalletAcquisitions); if (!currentAction()) return;
+  } catch (error) { if (!currentAction()) return;
     setStatus("#wallet-acquisition-status", errorText(error), true);
     if (error.status === 401) await logout();
-  } finally {
+  } finally { if (!currentAction()) return;
     button.disabled = false;
   }
 });
 $("#wallet-enqueue-form").addEventListener("submit", async (event) => {
+  const currentAction = beginAdminAction();
   event.preventDefault();
   const form = event.currentTarget;
   const button = submitButton(form, event);
@@ -2018,20 +2062,21 @@ $("#wallet-enqueue-form").addEventListener("submit", async (event) => {
   try {
     const payload = { asset_id: assetId, address_id: addressId, max_attempts: maxAttempts };
     if (idempotencyKey) payload.idempotency_key = idempotencyKey;
-    const result = await request("/api/admin/wallet-acquisitions", { method: "POST", body: JSON.stringify(payload) });
+    const result = await request("/api/admin/wallet-acquisitions", { method: "POST", body: JSON.stringify(payload) }); if (!currentAction()) return;
     form.reset();
     $("#wallet-enqueue-attempts").value = "5";
     renderWalletEnqueueOptions();
     setStatus("#wallet-acquisition-form-status", result?.status === "queued" ? "采集已加入队列" : "采集队列已更新");
-    try { await loadWalletAcquisitions(); } catch(error) { setStatus("#wallet-acquisition-form-status",`采集请求已处理；刷新失败，请核对队列。${errorText(error)}`,true); }
-  } catch (error) {
+    try { await loadWalletAcquisitions(); if (!currentAction()) return; } catch (error) { if (!currentAction()) return; setStatus("#wallet-acquisition-form-status",`采集请求已处理；刷新失败，请核对队列。${errorText(error)}`,true); }
+  } catch (error) { if (!currentAction()) return;
     setStatus("#wallet-acquisition-form-status", errorText(error), true);
     if (error.status === 401) await logout();
-  } finally {
+  } finally { if (!currentAction()) return;
     if (button) button.disabled = false;
   }
 });
 $("#wallet-acquisition-list").addEventListener("click", async (event) => {
+  const currentAction = beginAdminAction();
   const button = event.target.closest("[data-wallet-acquisition-action]");
   if (!button) return;
   const card = button.closest("[data-run-id]");
@@ -2047,13 +2092,13 @@ $("#wallet-acquisition-list").addEventListener("click", async (event) => {
     }
     button.disabled = true;
     try {
-      const attempts = await request("/api/admin/wallet-acquisitions/" + encodeURIComponent(runId) + "/attempts");
+      const attempts = await request("/api/admin/wallet-acquisitions/" + encodeURIComponent(runId) + "/attempts"); if (!currentAction()) return;
       if (!Array.isArray(attempts)) throw new Error("尝试记录响应无效");
       renderWalletAttempts(target, attempts);
-    } catch (error) {
+    } catch (error) { if (!currentAction()) return;
       setStatus("#wallet-acquisition-status", errorText(error), true);
       if (error.status === 401) await logout();
-    } finally {
+    } finally { if (!currentAction()) return;
       button.disabled = false;
     }
     return;
@@ -2071,17 +2116,18 @@ $("#wallet-acquisition-list").addEventListener("click", async (event) => {
   controls.forEach((control) => { control.disabled = true; });
   button.textContent = operation === "retry" ? "重试中…" : "取消中…";
   try {
-    await request("/api/admin/wallet-acquisitions/" + encodeURIComponent(runId) + "/" + operation, { method: "POST", body: JSON.stringify({ reason }) });
-    await walletRefreshAfterWrite("#wallet-acquisition-status",operation === "retry" ? "采集已重新排队" : "采集已取消",loadWalletAcquisitions);
-  } catch (error) {
+    await request("/api/admin/wallet-acquisitions/" + encodeURIComponent(runId) + "/" + operation, { method: "POST", body: JSON.stringify({ reason }) }); if (!currentAction()) return;
+    await walletRefreshAfterWrite("#wallet-acquisition-status",operation === "retry" ? "采集已重新排队" : "采集已取消",loadWalletAcquisitions); if (!currentAction()) return;
+  } catch (error) { if (!currentAction()) return;
     setStatus("#wallet-acquisition-status", errorText(error), true);
     if (error.status === 401) await logout();
-  } finally {
+  } finally { if (!currentAction()) return;
     controls.forEach((control) => { control.disabled = false; });
   }
 });
 
 $("#public-post-controls-form").addEventListener("submit", async (event) => {
+  const currentAction = beginAdminAction();
   event.preventDefault(); const form = event.currentTarget; const button = submitButton(form, event); if (button) button.disabled = true;
   try {
     const raw = $("#public-post-storage-cap").value.trim();
@@ -2090,14 +2136,15 @@ $("#public-post-controls-form").addEventListener("submit", async (event) => {
     const numerator = BigInt(whole + fraction) * scale; const divisor = 10n ** BigInt(fraction.length);
     if (numerator % divisor || numerator / divisor < 1000n || numerator / divisor > 2000000000n) throw new Error("容量须为整数个字节，范围 1 KB 至 2 GB（十进制）");
     const payload = {rate_limit_per_hour:Number($("#public-post-rate-limit").value),queue_cap:Number($("#public-post-queue-cap").value),captcha_ttl_seconds:Number($("#public-post-captcha-ttl").value),captcha_max_attempts:Number($("#public-post-captcha-attempts").value),captcha_mode:$("#public-post-captcha-mode").value,storage_cap_bytes:Number(numerator/divisor),captcha_issue_limit_per_hour:Number($("#public-post-captcha-issue-limit").value),captcha_global_rate_per_minute:Number($("#public-post-captcha-global-rate").value),max_content_chars:Number($("#public-post-max-chars").value),expected_length_revision:Number(form.dataset.lengthRevision)};
-    await request("/api/config/public-post-controls", {method:"POST",body:JSON.stringify(payload)});
+    await request("/api/config/public-post-controls", {method:"POST",body:JSON.stringify(payload)}); if (!currentAction()) return;
     delete form.dataset.dirty; setStatus("#public-post-controls-status", "公共发帖防护设置已保存");
-    try { await loadRuntime(); } catch { setStatus("#public-post-controls-status", "设置已保存；读取失败，请刷新",true); }
-  } catch (error) { setStatus("#public-post-controls-status",errorText(error),true); }
-  finally { if (button) button.disabled = false; }
+    try { await loadRuntime(); if (!currentAction()) return; } catch { if (!currentAction()) return; setStatus("#public-post-controls-status", "设置已保存；读取失败，请刷新",true); }
+  } catch (error) { if (!currentAction()) return; setStatus("#public-post-controls-status",errorText(error),true); }
+  finally { if (!currentAction()) return; if (button) button.disabled = false; }
 });
 
 $("#model-list").addEventListener("submit", async (event) => {
+  const currentAction = beginAdminAction();
   const form = event.target.closest("[data-model-budget-form]");
   if (!form) return;
   event.preventDefault();
@@ -2116,30 +2163,31 @@ $("#model-list").addEventListener("submit", async (event) => {
     if (!/^[1-9][0-9]*$/.test(attempts) || BigInt(attempts) > 10n) throw new Error("最大尝试应为 1 至 10");
     payload.max_attempts = attempts;
     Object.keys(payload).forEach((name) => { if (payload[name] === null) delete payload[name]; });
-    await request(`/api/config/model-resources/${encodeURIComponent(form.dataset.id)}/update`, { method: "POST", body: JSON.stringify(payload) });
+    await request(`/api/config/model-resources/${encodeURIComponent(form.dataset.id)}/update`, { method: "POST", body: JSON.stringify(payload) }); if (!currentAction()) return;
     delete form.dataset.dirty;
     setStatus("#model-status", "模型资源限制已更新");
-    try { await loadModels(); } catch { setStatus("#model-status", "模型资源限制已保存；列表刷新失败，请点击更新", true); }
-  } catch (error) {
+    try { await loadModels(); if (!currentAction()) return; } catch { if (!currentAction()) return; setStatus("#model-status", "模型资源限制已保存；列表刷新失败，请点击更新", true); }
+  } catch (error) { if (!currentAction()) return;
     showBudgetError(form, error);
     setStatus("#model-status", errorText(error), true);
-  } finally {
+  } finally { if (!currentAction()) return;
     if (button) button.disabled = false;
   }
 });
 
 $("#capability-list").addEventListener("click", async (event) => {
+  const currentAction = beginAdminAction();
   const button = event.target.closest("[data-capability-action]");
   if (!button) return;
   if (!window.confirm("撤销后该能力立即失效，并保留审计记录。继续吗？")) return;
   button.disabled = true;
   try {
-    await request(`/api/config/capabilities/${encodeURIComponent(button.dataset.id)}/revoke`, { method: "POST", body: JSON.stringify({ reason: "admin capability revoke" }) });
+    await request(`/api/config/capabilities/${encodeURIComponent(button.dataset.id)}/revoke`, { method: "POST", body: JSON.stringify({ reason: "admin capability revoke" }) }); if (!currentAction()) return;
     setStatus("#capability-status", "能力已撤销");
-    await loadCapabilities();
-  } catch (error) {
+    await loadCapabilities(); if (!currentAction()) return;
+  } catch (error) { if (!currentAction()) return;
     setStatus("#capability-status", errorText(error), true);
-  } finally {
+  } finally { if (!currentAction()) return;
     button.disabled = false;
   }
 });
@@ -2148,6 +2196,7 @@ $("#public-post-status-filter").addEventListener("change", () => { void loadPubl
 $("#refresh-public-posts").addEventListener("click", () => { void loadPublicPosts().catch(() => {}); });
 $("#load-more-public-posts").addEventListener("click", () => { void loadPublicPosts({ append: true }).catch(() => {}); });
 $("#public-post-review-list").addEventListener("click", async (event) => {
+  const currentAction = beginAdminAction();
   const button = event.target.closest("[data-public-post-action]");
   if (!button) return;
   const card = button.closest("[data-public-post-card]");
@@ -2180,19 +2229,19 @@ $("#public-post-review-list").addEventListener("click", async (event) => {
     await request(`/api/admin/public-posts/${encodeURIComponent(postId)}/${operation}`, {
       method: "POST",
       body: JSON.stringify({ reason, expected_status: expectedStatus, idempotency_key: idempotencyKey }),
-    });
+    }); if (!currentAction()) return;
     publicPostActionKeys.delete(actionKey);
     setStatus("#public-post-review-status", "审核决定已保存");
     try {
-      await loadPublicPosts();
-    } catch (error) {
+      await loadPublicPosts(); if (!currentAction()) return;
+    } catch (error) { if (!currentAction()) return;
       setStatus("#public-post-review-status", `审核已保存，但列表刷新失败：${errorText(error)}`, true);
     }
-  } catch (error) {
+  } catch (error) { if (!currentAction()) return;
     itemStatus.textContent = errorText(error);
     itemStatus.classList.add("error");
     if (error.status === 401) await logout();
-  } finally {
+  } finally { if (!currentAction()) return;
     button.textContent = originalLabel;
     controls.forEach((control) => { control.disabled = false; });
   }
@@ -2274,6 +2323,7 @@ $("#admin-channel-type").addEventListener("change", updateChannelForm);
 $("#admin-channel-feishu-mode").addEventListener("change", updateChannelForm);
 updateChannelForm();
 $("#admin-channel-form").addEventListener("submit", async (event) => {
+  const currentAction = beginAdminAction();
   event.preventDefault();
   const form = event.currentTarget;
   const button = submitButton(form, event);
@@ -2323,71 +2373,78 @@ $("#admin-channel-form").addEventListener("submit", async (event) => {
     } else if (account) {
       settings.recipient = account;
     }
-    await request("/api/config/transports", { method: "POST", body: JSON.stringify({ channel, label: $("#admin-channel-label").value.trim(), endpoint: $("#admin-channel-endpoint").value.trim(), settings, credentials }) });
+    await request("/api/config/transports", { method: "POST", body: JSON.stringify({ channel, label: $("#admin-channel-label").value.trim(), endpoint: $("#admin-channel-endpoint").value.trim(), settings, credentials }) }); if (!currentAction()) return;
     form.reset();
     updateChannelForm();
     setStatus("#channel-status", "通讯渠道已保存");
-    await loadChannels();
-  } catch (error) {
+    await loadChannels(); if (!currentAction()) return;
+  } catch (error) { if (!currentAction()) return;
     setStatus("#channel-status", errorText(error), true);
-  } finally {
+  } finally { if (!currentAction()) return;
     if (button) button.disabled = false;
   }
 });
 $("#qq-identity-form").addEventListener("submit", async event => {
+  const currentAction = beginAdminAction();
   event.preventDefault(); const button = submitButton(event.currentTarget, event); button.disabled = true;
   const session = csrfToken;
   try {
-    const result = await request("/api/config/identity-challenges", {method:"POST",body:JSON.stringify({transport_id:$("#qq-identity-transport").value})});
+    const result = await request("/api/config/identity-challenges", {method:"POST",body:JSON.stringify({transport_id:$("#qq-identity-transport").value})}); if (!currentAction()) return;
     if (!session || csrfToken !== session) return;
     clearQQIdentity(); qqIdentity = result;
     $("#qq-identity-challenge").hidden = false;
     $("#qq-identity-summary").innerHTML = summaryRows([["QQ 私聊验证码",result.code],["有效至",formatTimestamp(result.expires_at)],["验证范围","当前机器人私聊；不触发认知调用"]]);
     setStatus("#qq-identity-status","等待收到验证码");
-  } catch(error) {setStatus("#qq-identity-status",errorText(error),true);} finally {button.disabled=false;}
+  } catch (error) { if (!currentAction()) return;setStatus("#qq-identity-status",errorText(error),true);} finally { if (!currentAction()) return;button.disabled=false;}
 });
 $("#qq-identity-transport").addEventListener("change",clearQQIdentity);
 $("#logout").addEventListener("click",clearQQIdentity);
 $("#qq-identity-check").addEventListener("click",async event => {
+  const currentAction = beginAdminAction();
   const button=event.currentTarget; button.disabled=true;
-  try {await checkQQIdentity();} catch(error) {setStatus("#qq-identity-status",errorText(error),true);} finally {button.disabled=false;}
+  try {await checkQQIdentity();} catch (error) { if (!currentAction()) return;setStatus("#qq-identity-status",errorText(error),true);} finally { if (!currentAction()) return;button.disabled=false;}
 });
 $("#qq-identity-confirm").addEventListener("click",async event => {
+  const currentAction = beginAdminAction();
   const button=event.currentTarget;button.disabled=true;const identity=qqIdentity;
   if(!identity)return;
   try {
-    const result=await request(`/api/config/identity-challenges/${encodeURIComponent(identity.challenge_id)}/confirm`,{method:"POST",body:JSON.stringify({label:"我的 QQ"})});
+    const result=await request(`/api/config/identity-challenges/${encodeURIComponent(identity.challenge_id)}/confirm`,{method:"POST",body:JSON.stringify({label:"我的 QQ"})}); if (!currentAction()) return;
     if(qqIdentity!==identity || !csrfToken)return;
     identity.binding_id=result.binding_id;identity.revision=0;$("#qq-identity-summary").replaceChildren();
     setStatus("#qq-identity-status","身份已确认；网页历史共享尚未开启");
-    const page=await request("/api/admin/conversations?limit=100");
+    const page=await request("/api/admin/conversations?limit=100"); if (!currentAction()) return;
     if(qqIdentity!==identity || !csrfToken)return;
     $("#qq-chat-window").innerHTML=page.items.filter(item=>item.principal_id==="operator:web-user").map(item=>`<option value="${esc(item.conversation_id)}">${esc(item.title)}</option>`).join("");
-    $("#qq-chat-route-form").hidden=false;await loadChannels();
-  } catch(error) {setStatus("#qq-identity-status",errorText(error),true);button.disabled=false;}
+    $("#qq-chat-route-form").hidden=false;await loadChannels(); if (!currentAction()) return;
+  } catch (error) { if (!currentAction()) return;setStatus("#qq-identity-status",errorText(error),true);button.disabled=false;}
 });
 $("#qq-chat-route-form").addEventListener("submit",async event => {
+  const currentAction = beginAdminAction();
   event.preventDefault();if(!qqIdentity?.binding_id)return;const button=submitButton(event.currentTarget,event);button.disabled=true;
   try {
     const push = $("#qq-push-web-replies").checked;
     if(push && !window.confirm("将此窗口今后产生的 Noyra 网页回复发送到已验证 QQ 私聊；不补发历史。平台可能拒绝主动消息，已发送的第三方副本无法撤回。继续吗？")) return;
-    await request(`/api/config/inbound-bindings/${encodeURIComponent(qqIdentity.binding_id)}/route`,{method:"POST",body:JSON.stringify({conversation_id:$("#qq-chat-window").value,share_web_history:$("#qq-share-history").checked,push_web_replies:push,expected_revision:qqIdentity.revision ?? 0,reason:"operator verified private history association"})});
+    await request(`/api/config/inbound-bindings/${encodeURIComponent(qqIdentity.binding_id)}/route`,{method:"POST",body:JSON.stringify({conversation_id:$("#qq-chat-window").value,share_web_history:$("#qq-share-history").checked,push_web_replies:push,expected_revision:qqIdentity.revision ?? 0,reason:"operator verified private history association"})}); if (!currentAction()) return;
     if(!qqIdentity || !csrfToken)return;
     qqIdentity.revision=(qqIdentity.revision ?? 0)+1;
     setStatus("#qq-identity-status",push ? "聊天关联已保存，新网页回复推送已开启" : "聊天关联已保存，网页回复推送关闭");
-    try {await loadChannels();} catch {setStatus("#qq-identity-status","关联已保存；联系人刷新失败",true);}
-  } catch(error) {setStatus("#qq-identity-status",errorText(error),true);} finally {button.disabled=false;}
+    try {await loadChannels(); if (!currentAction()) return;} catch { if (!currentAction()) return;setStatus("#qq-identity-status","关联已保存；联系人刷新失败",true);}
+  } catch (error) { if (!currentAction()) return;setStatus("#qq-identity-status",errorText(error),true);} finally { if (!currentAction()) return;button.disabled=false;}
 });
-$("#admin-binding-form").addEventListener("submit", async (event) => { event.preventDefault(); const form = event.currentTarget; const button = submitButton(form, event); if (button) button.disabled = true; try { await request("/api/config/inbound-bindings", { method: "POST", body: JSON.stringify({ transport_id: $("#admin-binding-transport").value, external_account_id: $("#admin-binding-account").value.trim(), external_sender_id: $("#admin-binding-sender").value.trim(), role: $("#admin-binding-role").value, label: $("#admin-binding-label").value.trim() }) }); form.reset(); setStatus("#binding-status", "入站账号已绑定"); await loadChannels(); } catch (error) { setStatus("#binding-status", errorText(error), true); } finally { if (button) button.disabled = false; } });
-$("#channel-list").addEventListener("click", async (event) => { const button = event.target.closest("[data-channel-action]"); if (!button) return; button.disabled = true; try { const operation = button.dataset.channelAction; await request(`/api/config/transports/${button.dataset.id}/${operation}`, { method: "POST", body: JSON.stringify({ reason: `admin ${operation} transport` }) }); await loadChannels(); } catch (error) { setStatus("#channel-status", errorText(error), true); } finally { button.disabled = false; } });
+$("#admin-binding-form").addEventListener("submit", async (event) => {
+  const currentAction = beginAdminAction(); event.preventDefault(); const form = event.currentTarget; const button = submitButton(form, event); if (button) button.disabled = true; try { await request("/api/config/inbound-bindings", { method: "POST", body: JSON.stringify({ transport_id: $("#admin-binding-transport").value, external_account_id: $("#admin-binding-account").value.trim(), external_sender_id: $("#admin-binding-sender").value.trim(), role: $("#admin-binding-role").value, label: $("#admin-binding-label").value.trim() }) }); if (!currentAction()) return; form.reset(); setStatus("#binding-status", "入站账号已绑定"); await loadChannels(); if (!currentAction()) return; } catch (error) { if (!currentAction()) return; setStatus("#binding-status", errorText(error), true); } finally { if (!currentAction()) return; if (button) button.disabled = false; } });
+$("#channel-list").addEventListener("click", async (event) => {
+  const currentAction = beginAdminAction(); const button = event.target.closest("[data-channel-action]"); if (!button) return; button.disabled = true; try { const operation = button.dataset.channelAction; await request(`/api/config/transports/${button.dataset.id}/${operation}`, { method: "POST", body: JSON.stringify({ reason: `admin ${operation} transport` }) }); if (!currentAction()) return; await loadChannels(); if (!currentAction()) return; } catch (error) { if (!currentAction()) return; setStatus("#channel-status", errorText(error), true); } finally { if (!currentAction()) return; button.disabled = false; } });
 $("#binding-list").addEventListener("click", async (event) => {
+  const currentAction = beginAdminAction();
   const button = event.target.closest("[data-binding-action], [data-binding-route]"); if (!button) return; button.disabled = true;
   try {
     if(button.dataset.bindingRoute) {
       const binding = channelBindings.find(item=>item.binding_id===button.dataset.bindingRoute);
       if(!binding)return;
       clearQQIdentity(); const identity = {binding_id:binding.binding_id,revision:binding.revision ?? 0}; qqIdentity=identity;
-      const page = await request("/api/admin/conversations?limit=100");
+      const page = await request("/api/admin/conversations?limit=100"); if (!currentAction()) return;
       if(qqIdentity!==identity || !csrfToken)return;
       $("#qq-chat-window").innerHTML=page.items.filter(item=>item.principal_id==="operator:web-user").map(item=>`<option value="${esc(item.conversation_id)}">${esc(item.title)}</option>`).join("");
       if(binding.conversation_id)$("#qq-chat-window").value=binding.conversation_id;
@@ -2397,13 +2454,14 @@ $("#binding-list").addEventListener("click", async (event) => {
     }
     const operation=button.dataset.bindingAction;
     if(["revoke","unlink"].includes(operation) && !window.confirm(operation==="revoke" ? "解绑后此账号无法发送新消息，尚未外发的回复将停止投递。重新接入需要再次验证。继续吗？" : "取消关联会停止历史共享和网页回复推送，已有消息保留。继续吗？"))return;
-    await request(`/api/config/inbound-bindings/${encodeURIComponent(button.dataset.id)}/${operation}`,{method:"POST",body:JSON.stringify({reason:`admin ${operation} inbound binding`})});
+    await request(`/api/config/inbound-bindings/${encodeURIComponent(button.dataset.id)}/${operation}`,{method:"POST",body:JSON.stringify({reason:`admin ${operation} inbound binding`})}); if (!currentAction()) return;
     clearQQIdentity();setStatus("#binding-status","联系人设置已更新");
-    try {await loadChannels();} catch {setStatus("#binding-status","设置已更新；列表刷新失败",true);}
-  } catch(error) {setStatus("#binding-status",errorText(error),true);} finally {button.disabled=false;}
+    try {await loadChannels(); if (!currentAction()) return;} catch { if (!currentAction()) return;setStatus("#binding-status","设置已更新；列表刷新失败",true);}
+  } catch (error) { if (!currentAction()) return;setStatus("#binding-status",errorText(error),true);} finally { if (!currentAction()) return;button.disabled=false;}
 });
 $("#refresh-channels").addEventListener("click", loadChannels);
 $("#model-list").addEventListener("click", async (event) => {
+  const currentAction = beginAdminAction();
   const button = event.target.closest("[data-model-action]"); if (!button) return;
   const action = button.dataset.modelAction;
   if (action === "test" && !window.confirm("测试会调用供应商并消耗模型额度，继续吗？")) return;
@@ -2413,31 +2471,34 @@ $("#model-list").addEventListener("click", async (event) => {
   }
   button.disabled = true;
   try {
-    await request(`/api/config/model-resources/${encodeURIComponent(button.dataset.id)}/${action}`, { method: "POST", body: JSON.stringify({ reason: `admin ${action} model resource` }) });
+    await request(`/api/config/model-resources/${encodeURIComponent(button.dataset.id)}/${action}`, { method: "POST", body: JSON.stringify({ reason: `admin ${action} model resource` }) }); if (!currentAction()) return;
     setStatus("#model-status", action === "test" ? "模型测试请求已完成" : "资源状态已更新");
-    try { await loadModels(); } catch { setStatus("#model-status", "操作已完成；列表刷新失败，请点击更新", true); }
-  } catch (error) { setStatus("#model-status", errorText(error), true); }
-  finally { button.disabled = false; }
+    try { await loadModels(); if (!currentAction()) return; } catch { if (!currentAction()) return; setStatus("#model-status", "操作已完成；列表刷新失败，请点击更新", true); }
+  } catch (error) { if (!currentAction()) return; setStatus("#model-status", errorText(error), true); }
+  finally { if (!currentAction()) return; button.disabled = false; }
 });
 $("#model-list").addEventListener("submit", async (event) => {
+  const currentAction = beginAdminAction();
   const form = event.target.closest("[data-add-model-keys]"); if (!form) return;
   event.preventDefault(); const button = form.querySelector("button[type=submit]"); button.disabled = true;
   try {
-    await request(`/api/config/model-resources/${encodeURIComponent(form.dataset.id)}/keys`, { method: "POST", body: JSON.stringify({ api_keys: form.elements.api_keys.value.split(/\r?\n/).map((v) => v.trim()).filter(Boolean) }) });
+    await request(`/api/config/model-resources/${encodeURIComponent(form.dataset.id)}/keys`, { method: "POST", body: JSON.stringify({ api_keys: form.elements.api_keys.value.split(/\r?\n/).map((v) => v.trim()).filter(Boolean) }) }); if (!currentAction()) return;
     form.reset(); delete form.dataset.dirty; setStatus("#model-status", "密钥已添加");
-    try { await loadModels(); } catch { setStatus("#model-status", "密钥已添加；列表刷新失败", true); }
-  } catch (error) { setStatus("#model-status", errorText(error), true); }
-  finally { button.disabled = false; }
+    try { await loadModels(); if (!currentAction()) return; } catch { if (!currentAction()) return; setStatus("#model-status", "密钥已添加；列表刷新失败", true); }
+  } catch (error) { if (!currentAction()) return; setStatus("#model-status", errorText(error), true); }
+  finally { if (!currentAction()) return; button.disabled = false; }
 });
-$("#model-list").addEventListener("click", async (event) => { const button = event.target.closest("[data-model-key-action]"); if (!button) return; if (!window.confirm("撤销后该密钥立即失效，且不可恢复。继续吗？")) return; button.disabled = true; try { await request(`/api/config/model-resources/${encodeURIComponent(button.dataset.groupId)}/keys/${encodeURIComponent(button.dataset.keyId)}/revoke`, { method: "POST", body: JSON.stringify({ reason: "admin revoked model key" }) }); setStatus("#model-status", "模型密钥已撤销"); await loadModels(); } catch (error) { setStatus("#model-status", errorText(error), true); } finally { button.disabled = false; } });
+$("#model-list").addEventListener("click", async (event) => {
+  const currentAction = beginAdminAction(); const button = event.target.closest("[data-model-key-action]"); if (!button) return; if (!window.confirm("撤销后该密钥立即失效，且不可恢复。继续吗？")) return; button.disabled = true; try { await request(`/api/config/model-resources/${encodeURIComponent(button.dataset.groupId)}/keys/${encodeURIComponent(button.dataset.keyId)}/revoke`, { method: "POST", body: JSON.stringify({ reason: "admin revoked model key" }) }); if (!currentAction()) return; setStatus("#model-status", "模型密钥已撤销"); await loadModels(); if (!currentAction()) return; } catch (error) { if (!currentAction()) return; setStatus("#model-status", errorText(error), true); } finally { if (!currentAction()) return; button.disabled = false; } });
 $("#wallet-order-list").addEventListener("click", async (event) => {
+  const currentAction = beginAdminAction();
   const button = event.target.closest('[data-wallet-order-action]');
   if (!button) return;
   const action = button.dataset.walletOrderAction;
   if (!["execute","confirm","reject","cancel"].includes(action)) return;
   button.disabled = true;
   try {
-    await loadWalletEconomy({kind:"orders",move:"current"});
+    await loadWalletEconomy({kind:"orders",move:"current"}); if (!currentAction()) return;
     const order=walletOrders.find(row=>row.order_id===button.dataset.orderId);
     const expected = ["execute","cancel"].includes(action) ? "reserved":"awaiting_confirmation";
     if(!order || order.status!==expected)throw new Error("订单已变化，请核对当前状态");
@@ -2448,14 +2509,15 @@ $("#wallet-order-list").addEventListener("click", async (event) => {
     const labels={execute:"签名并广播",confirm:"确认付款额度",reject:"拒绝订单",cancel:"取消订单"};
     const effect=action==="execute" ? "此操作会消耗 RPC，链上付款不可撤回。" : action==="confirm" ? "确认会预留额度；已开启的自动付款流程可能随后执行此订单。" : "此操作不追回链上资金。";
     if(!confirm(`${labels[action]} ${walletAmount(order.amount,order.asset_id)}\n网络：${order.network_id}\n收款：${order.recipient_address}\n${effect}确认继续？`))return;
-    await request(`/api/admin/wallet-orders/${encodeURIComponent(button.dataset.orderId)}/${action}`, { method: "POST", body: JSON.stringify(payload) });
+    await request(`/api/admin/wallet-orders/${encodeURIComponent(button.dataset.orderId)}/${action}`, { method: "POST", body: JSON.stringify(payload) }); if (!currentAction()) return;
     const messages={execute:"转账请求已处理，请核对订单与回执",confirm:"付款额度已确认并预留",reject:"订单已拒绝",cancel:"订单已取消"};
-    await walletRefreshAfterWrite("#wallet-read-status",messages[action],()=>loadWalletEconomy());
-  } catch (error) { setStatus("#wallet-read-status", errorText(error), true); }
-  finally { button.disabled = false; }
+    await walletRefreshAfterWrite("#wallet-read-status",messages[action],()=>loadWalletEconomy()); if (!currentAction()) return;
+  } catch (error) { if (!currentAction()) return; setStatus("#wallet-read-status", errorText(error), true); }
+  finally { if (!currentAction()) return; button.disabled = false; }
 });
 
 $("#admin-model-form").addEventListener("submit", async (event) => {
+  const currentAction = beginAdminAction();
   event.preventDefault();
   const form = event.currentTarget;
   const button = submitButton(form, event);
@@ -2470,41 +2532,44 @@ $("#admin-model-form").addEventListener("submit", async (event) => {
     const maxAttempts = form.elements.max_attempts.value.trim();
     if (!/^[1-9][0-9]*$/.test(maxAttempts) || BigInt(maxAttempts) > 10n) throw new Error("最大尝试应为 1 至 10");
     payload.max_attempts = maxAttempts;
-    await request("/api/config/model-resources", { method: "POST", body: JSON.stringify(payload) });
+    await request("/api/config/model-resources", { method: "POST", body: JSON.stringify(payload) }); if (!currentAction()) return;
     form.reset();
     delete form.dataset.dirty;
     for (const toggle of form.querySelectorAll("[data-draft-limit]")) form.elements[limitFields[toggle.dataset.draftLimit]].disabled = !toggle.checked;
     $("#admin-model-options").hidden = true;
     setStatus("#model-status", "认知资源已保存");
-    try { await loadModels(); } catch { setStatus("#model-status", "认知资源已保存；列表刷新失败，请点击更新", true); }
-  } catch (error) { setStatus("#model-status", errorText(error), true); }
-  finally { if (button) button.disabled = false; }
+    try { await loadModels(); if (!currentAction()) return; } catch { if (!currentAction()) return; setStatus("#model-status", "认知资源已保存；列表刷新失败，请点击更新", true); }
+  } catch (error) { if (!currentAction()) return; setStatus("#model-status", errorText(error), true); }
+  finally { if (!currentAction()) return; if (button) button.disabled = false; }
 });
 $("#admin-model-test").addEventListener("click", async (event) => {
+  const currentAction = beginAdminAction();
   const button = event.currentTarget;
   if (!window.confirm("测试当前配置会向供应商发送请求，可能产生费用；配置尚未保存，因此不会计入已保存资源的预算。确认测试吗？")) return;
   button.disabled = true;
   try {
-    const result = await request("/api/config/model-resources/test", { method: "POST", body: JSON.stringify(draftModelPayload(true)) });
+    const result = await request("/api/config/model-resources/test", { method: "POST", body: JSON.stringify(draftModelPayload(true)) }); if (!currentAction()) return;
     setStatus("#model-status", `连接测试成功：${result.model}`);
-  } catch (error) { setStatus("#model-status", errorText(error), true); }
-  finally { button.disabled = false; }
+  } catch (error) { if (!currentAction()) return; setStatus("#model-status", errorText(error), true); }
+  finally { if (!currentAction()) return; button.disabled = false; }
 });
 $("#admin-model-discover").addEventListener("click", async (event) => {
+  const currentAction = beginAdminAction();
   const button = event.currentTarget;
   button.disabled = true;
   try {
-    const result = await request("/api/config/model-resources/models", { method: "POST", body: JSON.stringify(draftModelPayload(false)) });
+    const result = await request("/api/config/model-resources/models", { method: "POST", body: JSON.stringify(draftModelPayload(false)) }); if (!currentAction()) return;
     const select = $("#admin-model-options");
     select.innerHTML = '<option value="">请选择模型</option>' + (result.models || []).map((model) => `<option value="${esc(model)}">${esc(model)}</option>`).join("");
     select.hidden = !(result.models || []).length;
     setStatus("#model-status", result.models?.length ? `已获取 ${result.models.length} 个模型` : "接口返回的模型列表为空");
-  } catch (error) { setStatus("#model-status", errorText(error), true); }
-  finally { button.disabled = false; }
+  } catch (error) { if (!currentAction()) return; setStatus("#model-status", errorText(error), true); }
+  finally { if (!currentAction()) return; button.disabled = false; }
 });
 $("#admin-model-options").addEventListener("change", (event) => { if (event.currentTarget.value) $("#admin-model-name").value = event.currentTarget.value; });
 
 $("#wallet-policy-form").addEventListener("submit", async (event) => {
+  const currentAction = beginAdminAction();
   event.preventDefault();
   if (!walletPolicy) {
     setStatus("#wallet-policy-status", "策略尚未加载，请先更新", true);
@@ -2553,18 +2618,19 @@ $("#wallet-policy-form").addEventListener("submit", async (event) => {
         recipient_allowlist_enabled: $("#wallet-policy-allowlist-enabled").checked,
         allowed_recipient_addresses: allowedRecipients,
       }),
-    });
+    }); if (!currentAction()) return;
     delete form.dataset.dirty;
-    await walletRefreshAfterWrite("#wallet-policy-status","付款策略已保存",loadWalletPolicy);
-  } catch (error) {
+    await walletRefreshAfterWrite("#wallet-policy-status","付款策略已保存",loadWalletPolicy); if (!currentAction()) return;
+  } catch (error) { if (!currentAction()) return;
     setStatus("#wallet-policy-status", errorText(error), true);
     if (error.status === 401) await logout();
-  } finally {
+  } finally { if (!currentAction()) return;
     if (button) button.disabled = false;
   }
 });
 
 async function setWalletAutomationPause(paused) {
+  const currentAction = beginAdminAction();
   if (!walletPolicy) return;
   if(!paused && !confirm("解除紧急暂停后，已开启的自动付款可恢复执行。确认继续？"))return;
   const button = paused ? $("#wallet-automation-pause") : $("#wallet-automation-resume");
@@ -2574,46 +2640,51 @@ async function setWalletAutomationPause(paused) {
       method: "POST",
       body: JSON.stringify({ expected_version: walletPolicy.policy_version, reason: paused ? "管理员紧急暂停自动付款" : "管理员解除自动付款暂停" }),
     });
+    if (!currentAction()) return;
     await walletRefreshAfterWrite("#wallet-policy-status",paused ? "已紧急暂停":"已解除暂停",loadWalletPolicy);
-  } catch (error) { setStatus("#wallet-policy-status", errorText(error), true); button.disabled = false; }
+  } catch (error) { if (!currentAction()) return; setStatus("#wallet-policy-status", errorText(error), true); button.disabled = false; }
 }
 $("#wallet-automation-pause").addEventListener("click", () => { void setWalletAutomationPause(true); });
 $("#wallet-automation-resume").addEventListener("click", () => { void setWalletAutomationPause(false); });
 
 $("#admin-search-provider-form").addEventListener("submit", async (event) => {
+  const currentAction = beginAdminAction();
   event.preventDefault();
   const form = event.currentTarget;
   const button = submitButton(form, event);
   if (button) button.disabled = true;
   try {
-    await request("/api/config/search-providers", { method: "POST", body: JSON.stringify({ provider_type: $("#admin-search-provider-type").value, label: $("#admin-search-provider-label").value.trim(), api_key: $("#admin-search-provider-key").value }) });
+    await request("/api/config/search-providers", { method: "POST", body: JSON.stringify({ provider_type: $("#admin-search-provider-type").value, label: $("#admin-search-provider-label").value.trim(), api_key: $("#admin-search-provider-key").value }) }); if (!currentAction()) return;
     form.reset();
     setStatus("#search-provider-status", "搜索 API 已保存");
-    await loadSearchProviders();
-  } catch (error) { setStatus("#search-provider-status", errorText(error), true); }
-  finally { if (button) button.disabled = false; }
+    await loadSearchProviders(); if (!currentAction()) return;
+  } catch (error) { if (!currentAction()) return; setStatus("#search-provider-status", errorText(error), true); }
+  finally { if (!currentAction()) return; if (button) button.disabled = false; }
 });
 $("#admin-search-provider-test").addEventListener("click", async (event) => {
+  const currentAction = beginAdminAction();
   const button = event.currentTarget;
   button.disabled = true;
   try {
-    const result = await request("/api/config/search-providers/test", { method: "POST", body: JSON.stringify({ provider_type: $("#admin-search-provider-type").value, api_key: $("#admin-search-provider-key").value }) });
+    const result = await request("/api/config/search-providers/test", { method: "POST", body: JSON.stringify({ provider_type: $("#admin-search-provider-type").value, api_key: $("#admin-search-provider-key").value }) }); if (!currentAction()) return;
     setStatus("#search-provider-status", `连接测试成功，返回 ${result.result_count} 条结果`);
-  } catch (error) { setStatus("#search-provider-status", errorText(error), true); }
-  finally { button.disabled = false; }
+  } catch (error) { if (!currentAction()) return; setStatus("#search-provider-status", errorText(error), true); }
+  finally { if (!currentAction()) return; button.disabled = false; }
 });
 for (const selector of ["#migration-policy-form", "#admin-search-routing-form"]) $(selector).addEventListener("input", event => { event.currentTarget.dataset.dirty="1"; });
 $("#search-provider-list").addEventListener("input", event => { const form=event.target.closest("form"); if(form)form.dataset.dirty="1"; });
 $("#admin-search-routing-form").addEventListener("submit", async (event) => {
+  const currentAction = beginAdminAction();
   event.preventDefault();
   const form = event.currentTarget;
   const button = submitButton(form, event);
   if (button) button.disabled = true;
-  try { await request("/api/config/search-routing", { method: "POST", body: JSON.stringify({ mode: $("#search-routing-mode").value }) }); delete form.dataset.dirty; setStatus("#search-routing-status", "搜索方式已保存"); }
-  catch (error) { setStatus("#search-routing-status", errorText(error), true); }
-  finally { if (button) button.disabled = false; }
+  try { await request("/api/config/search-routing", { method: "POST", body: JSON.stringify({ mode: $("#search-routing-mode").value }) }); if (!currentAction()) return; delete form.dataset.dirty; setStatus("#search-routing-status", "搜索方式已保存"); }
+  catch (error) { if (!currentAction()) return; setStatus("#search-routing-status", errorText(error), true); }
+  finally { if (!currentAction()) return; if (button) button.disabled = false; }
 });
 $("#search-provider-list").addEventListener("click", async (event) => {
+  const currentAction = beginAdminAction();
   const button = event.target.closest("[data-search-provider-action]");
   if (!button) return;
   button.disabled = true;
@@ -2621,13 +2692,14 @@ $("#search-provider-list").addEventListener("click", async (event) => {
     const action = button.dataset.searchProviderAction;
     const path = action === "revoke" ? "revoke" : action;
     const reason = action === "revoke" ? "管理员撤销搜索 API" : (action === "enable" ? "管理员启用搜索 API" : "管理员停用搜索 API");
-    await request(`/api/config/search-providers/${encodeURIComponent(button.dataset.id)}/${path}`, { method: "POST", body: JSON.stringify({ reason }) });
-    await loadSearchProviders();
+    await request(`/api/config/search-providers/${encodeURIComponent(button.dataset.id)}/${path}`, { method: "POST", body: JSON.stringify({ reason }) }); if (!currentAction()) return;
+    await loadSearchProviders(); if (!currentAction()) return;
   }
-  catch (error) { setStatus("#search-provider-status", errorText(error), true); }
-  finally { button.disabled = false; }
+  catch (error) { if (!currentAction()) return; setStatus("#search-provider-status", errorText(error), true); }
+  finally { if (!currentAction()) return; button.disabled = false; }
 });
 $("#search-provider-list").addEventListener("submit", async (event) => {
+  const currentAction = beginAdminAction();
   const form = event.target.closest("[data-search-routing-form]");
   if (!form) return;
   event.preventDefault();
@@ -2642,18 +2714,19 @@ $("#search-provider-list").addEventListener("submit", async (event) => {
     await request(`/api/config/search-providers/${encodeURIComponent(form.dataset.id)}/routing`, {
       method: "POST",
       body: JSON.stringify({ priority, weight, reason: form.elements.reason.value.trim() }),
-    });
+    }); if (!currentAction()) return;
     status.textContent = "优先级已保存";
     delete form.dataset.dirty;
     status.classList.remove("error");
-    await loadSearchProviders();
-  } catch (error) {
+    await loadSearchProviders(); if (!currentAction()) return;
+  } catch (error) { if (!currentAction()) return;
     status.textContent = error?.code === "invalid_search_provider_routing" ? "搜索优先级或权重不符合要求" : errorText(error);
     status.classList.add("error");
   }
-  finally { if (button) button.disabled = false; }
+  finally { if (!currentAction()) return; if (button) button.disabled = false; }
 });
 $("#wallet-execution-list").addEventListener("click", async (event) => {
+  const currentAction = beginAdminAction();
   const button = event.target.closest("[data-wallet-execution-action]");
   if (!button) return;
   const action = button.dataset.walletExecutionAction;
@@ -2671,26 +2744,27 @@ $("#wallet-execution-list").addEventListener("click", async (event) => {
     payload = { reason: reason.trim() };
   }
   button.disabled = true;
-  try { await request(path, { method: "POST", body: JSON.stringify(payload) }); await walletRefreshAfterWrite("#wallet-execution-status","操作已处理，请核对当前状态",loadWalletExecutions); }
-  catch (error) { setStatus("#wallet-execution-status", errorText(error), true); }
-  finally { button.disabled = false; }
+  try { await request(path, { method: "POST", body: JSON.stringify(payload) }); if (!currentAction()) return; await walletRefreshAfterWrite("#wallet-execution-status","操作已处理，请核对当前状态",loadWalletExecutions); if (!currentAction()) return; }
+  catch (error) { if (!currentAction()) return; setStatus("#wallet-execution-status", errorText(error), true); }
+  finally { if (!currentAction()) return; button.disabled = false; }
 });
 $("#refresh-wallet-executions").addEventListener("click", loadWalletExecutions);
 $("#recover-wallet-executions").addEventListener("click", async () => {
+  const currentAction = beginAdminAction();
   if(!confirm("仅在确认无签名请求仍在进行时使用：所有签名中记录会被标记为结果未知，不会重复广播。继续？"))return;
   const button = $("#recover-wallet-executions"); button.disabled = true;
-  try { await request("/api/admin/wallet-executions/recover", { method: "POST", body: JSON.stringify({ limit: 100 }) }); await walletRefreshAfterWrite("#wallet-execution-status","恢复操作已处理",loadWalletExecutions); }
-  catch (error) { setStatus("#wallet-execution-status", errorText(error), true); }
-  finally { button.disabled = false; }
+  try { await request("/api/admin/wallet-executions/recover", { method: "POST", body: JSON.stringify({ limit: 100 }) }); if (!currentAction()) return; await walletRefreshAfterWrite("#wallet-execution-status","恢复操作已处理",loadWalletExecutions); if (!currentAction()) return; }
+  catch (error) { if (!currentAction()) return; setStatus("#wallet-execution-status", errorText(error), true); }
+  finally { if (!currentAction()) return; button.disabled = false; }
 });
 const modelFilter = document.createElement("select"); modelFilter.id = "model-status-filter"; modelFilter.setAttribute("aria-label", "资源状态筛选");
 modelFilter.innerHTML = '<option value="active">启用的资源</option><option value="disabled">停用的资源</option><option value="revoked">已删除的记录</option><option value="all">全部记录</option>';
 $("#refresh-models").before(modelFilter);
-modelFilter.addEventListener("change", () => { modelPageOffset = 0; void loadModels().catch((error) => { restoreModelFilters(); setStatus("#model-status", errorText(error), true); }); });
+modelFilter.addEventListener("change", () => { modelPageOffset = 0; void loadModels().catch((error) => { if (error?.staleSession) return; restoreModelFilters(); setStatus("#model-status", errorText(error), true); }); });
 const poolFilter = document.createElement("select"); poolFilter.id = "model-pool-filter"; poolFilter.setAttribute("aria-label", "认知池筛选"); poolFilter.innerHTML = '<option value="economy">经济池</option><option value="deep">深度池</option>';
 const modelSearch = document.createElement("input"); modelSearch.id = "model-search"; modelSearch.type = "search"; modelSearch.placeholder = "名称或模型"; modelSearch.maxLength = 128; modelSearch.setAttribute("aria-label", "搜索认知资源");
 modelFilter.before(poolFilter, modelSearch);
-for (const control of [poolFilter, modelSearch]) control.addEventListener("change", () => { modelPageOffset = 0; void loadModels().catch((error) => { restoreModelFilters(); setStatus("#model-status", errorText(error), true); }); });
+for (const control of [poolFilter, modelSearch]) control.addEventListener("change", () => { modelPageOffset = 0; void loadModels().catch((error) => { if (error?.staleSession) return; restoreModelFilters(); setStatus("#model-status", errorText(error), true); }); });
 const poolTabs = document.createElement("div"); poolTabs.className = "pool-tabs"; poolTabs.setAttribute("role", "tablist"); poolTabs.setAttribute("aria-label", "认知池");
 poolTabs.innerHTML = '<button type="button" role="tab" data-model-pool="economy" aria-selected="true">经济池</button><button type="button" role="tab" data-model-pool="deep" aria-selected="false">深度池</button>';
 poolFilter.before(poolTabs); poolFilter.hidden = true;
@@ -2698,7 +2772,7 @@ poolTabs.addEventListener("click", (event) => { const button = event.target.clos
 const modelPaging = document.createElement("div"); modelPaging.className = "resource-actions";
 modelPaging.innerHTML = '<button type="button" id="model-page-prev" aria-label="上一页" title="上一页">←</button><span id="model-page-label"></span><button type="button" id="model-page-next" aria-label="下一页" title="下一页">→</button>';
 $("#model-list").after(modelPaging);
-for (const [id, step] of [["model-page-prev", -50], ["model-page-next", 50]]) $("#" + id).addEventListener("click", () => { modelPageOffset = Math.max(0, modelPageOffset + step); void loadModels().catch((error) => { restoreModelFilters(); setStatus("#model-status", errorText(error), true); }); });
+for (const [id, step] of [["model-page-prev", -50], ["model-page-next", 50]]) $("#" + id).addEventListener("click", () => { modelPageOffset = Math.max(0, modelPageOffset + step); void loadModels().catch((error) => { if (error?.staleSession) return; restoreModelFilters(); setStatus("#model-status", errorText(error), true); }); });
 $("#model-list").addEventListener("input", (event) => { const form = event.target.closest("form"); if (form) form.dataset.dirty = "true"; });
 $("#model-list").addEventListener("toggle", (event) => {
   const details = event.target;

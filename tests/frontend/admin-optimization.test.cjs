@@ -503,3 +503,94 @@ test("logout clears every private panel, loaded option, cache and open dialog",a
   assert.equal(closed,1);
   assert.ok([...nodes.values()].every(node=>!node.innerHTML.includes("private data")));
 });
+
+for (const stale of [false,true]) for (const failed of [false,true]) {
+  test(`write refresh isolates session: stale=${stale}, failed=${failed}`,async()=>{
+    let finish,reject;
+    const waiting=new Promise((yes,no)=>{finish=yes;reject=no;});
+    const {sandbox}=context();
+    vm.runInContext(functionsBetween("async function walletRefreshAfterWrite(","function walletNetworkLookup("),sandbox);
+    const pending=sandbox.walletRefreshAfterWrite("#status","saved",()=>waiting);
+    if(stale){sandbox.adminSessionGeneration++;sandbox.csrfToken="new-session";sandbox.$("#status").textContent="new-session";}
+    if(failed) reject(stale ? {staleSession:true} : {code:"read_failed"}); else finish();
+    await pending;
+    assert.equal(sandbox.$("#status").textContent,stale ? "new-session" : failed ? "saved；读取更新失败，请刷新核对。read_failed" : "saved");
+  });
+}
+
+for (const module of ["chat","retention"]) for (const failed of [false,true]) {
+  test(`${module} write continuation and buttons ignore old session (${failed ? "failure" : "success"})`,async()=>{
+    let handler,finish,reject,entered;
+    const reading=new Promise(yes=>entered=yes);
+    const refresh=()=>{entered();return new Promise((yes,no)=>{finish=yes;reject=no;});};
+    const button={disabled:false};
+    const form={dataset:{revision:"1",dirty:"1"},querySelectorAll:()=>[]};
+    const {sandbox}=context({submitButton:()=>button,request:async()=>({}),loadRetention:refresh,loadChatMessages:refresh,
+      chat:{current:{status:"active",conversation_id:"one"},keys:new Map(),drafts:new Map()},crypto:{randomUUID:()=>"key"}});
+    const selector=module==="chat" ? "#admin-message-form" : "#retention-settings-form";
+    sandbox.$(selector).addEventListener=(_kind,callback)=>handler=callback;
+    sandbox.$("#admin-message").value="hello";
+    vm.runInContext(module==="chat" ? functionsBetween('$("#admin-message-form").addEventListener', '$("#wallet-enqueue-asset")') : functionsBetween('$("#retention-settings-form").addEventListener("submit"','let usageLoadVersion ='),sandbox);
+    const pending=handler({preventDefault(){},currentTarget:form});
+    await reading;
+    sandbox.adminSessionGeneration++;sandbox.csrfToken="new-session";
+    const status=module==="chat" ? "#message-status" : "#retention-status";
+    sandbox.$(status).textContent="new-session";button.disabled=true;
+    if(failed)reject({staleSession:true});else finish();
+    await pending;
+    assert.equal(sandbox.$(status).textContent,"new-session");
+    assert.equal(button.disabled,true);
+  });
+}
+
+test("dirty migration refresh retains its editing revision and all draft values",async()=>{
+  let revision=1;
+  const {sandbox}=context({request:async path=>path.endsWith("policy") ? {revision,max_cost_microusd:100,allowed_target_ids:[],allowed_regions:[]} : []});
+  const form=sandbox.$("#migration-policy-form");
+  const cost=sandbox.$("#migration-max-cost");form.elements=[cost];
+  vm.runInContext(functionsBetween("async function loadMigration(","function summaryRows("),sandbox);
+  await sandbox.loadMigration();assert.equal(form.dataset.revision,"1");
+  form.dataset.dirty="1";cost.value="7";revision=2;
+  await sandbox.loadMigration();assert.equal(form.dataset.revision,"1");assert.equal(cost.value,"7");
+  delete form.dataset.dirty;
+  await sandbox.loadMigration();assert.equal(form.dataset.revision,"2");assert.equal(cost.value,100);
+});
+
+function migrationSubmitContext(request,confirm=()=>true) {
+  let handler;
+  const {sandbox}=context({request,window:{confirm},loadMigration:async()=>{}});
+  const form=sandbox.$("#migration-policy-form");form.elements=[];form.dataset={revision:"1",dirty:"1"};
+  form.addEventListener=(_kind,callback)=>handler=callback;
+  for(const [name,value] of Object.entries({"approval-mode":"disabled","wallet-mode":"external_signer_rebind","cooldown":"7","max-cost":"0","min-free":"0","trust":"3","downtime":"3600"}))sandbox.$("#migration-"+name).value=value;
+  vm.runInContext(functionsBetween('$("#migration-policy-form").addEventListener("submit"','$("#admin-message-form")'),sandbox);
+  return {sandbox,form,submit:()=>handler({preventDefault(){},currentTarget:form})};
+}
+
+test("migration old draft cannot submit with another writer's latest revision",async()=>{
+  const writes=[];
+  const {sandbox,form,submit}=migrationSubmitContext(async(_path,options)=>{if(options)writes.push(JSON.parse(options.body));return {revision:2};});
+  await submit();assert.equal(writes.length,0);assert.equal(form.dataset.dirty,"1");assert.equal(form.dataset.revision,"1");
+  assert.match(sandbox.$("#migration-status").textContent,/草稿已保留/);
+});
+
+test("migration captures draft before GET and preserves final backend CAS conflict",async()=>{
+  let finish,saved;
+  const {sandbox,form,submit}=migrationSubmitContext((_path,options)=>{
+    if(!options)return new Promise(yes=>finish=yes);
+    saved=JSON.parse(options.body);return Promise.reject({status:409});
+  });
+  const control={disabled:false};form.elements=[control];
+  const pending=submit();assert.equal(control.disabled,true);
+  sandbox.$("#migration-max-cost").value="100";
+  finish({revision:1});await pending;
+  assert.equal(saved.expected_revision,1);assert.equal(saved.max_cost_microusd,0);
+  assert.equal(form.dataset.dirty,"1");assert.equal(control.disabled,false);
+  assert.match(sandbox.$("#migration-status").textContent,/版本冲突/);
+});
+
+test("migration risk confirmation still blocks entering automatic mode",async()=>{
+  let writes=0,confirmations=0;
+  const {sandbox,form,submit}=migrationSubmitContext(async(_path,options)=>{if(options)writes++;return {revision:1,approval_mode:"disabled"};},()=>{confirmations++;return false;});
+  sandbox.$("#migration-approval-mode").value="policy_auto";
+  await submit();assert.equal(writes,0);assert.equal(confirmations,1);assert.equal(form.dataset.dirty,"1");
+});
