@@ -454,8 +454,13 @@ class CognitiveResourceStore:
                     connection, group_id, "active", "operator configured cognitive resource", now
                 )
                 write_resource_policy(
-                    connection, group_id, subject_id, proposal.limit_enabled,
-                    actor=actor, reason="operator configured limits", now=now,
+                    connection,
+                    group_id,
+                    subject_id,
+                    proposal.limit_enabled,
+                    actor=actor,
+                    reason="operator configured limits",
+                    now=now,
                     pricing_status=(
                         "priced" if (values[12] or values[13]) else proposal.pricing_status
                     ),
@@ -653,8 +658,13 @@ class CognitiveResourceStore:
             if values == stored_values and not policy_changed:
                 raise ValueError("cognitive resource update has no changes")
             write_resource_policy(
-                connection, group_id, subject_id, proposal.limit_enabled or current_policy,
-                actor=actor, reason=reason, now=now,
+                connection,
+                group_id,
+                subject_id,
+                proposal.limit_enabled or current_policy,
+                actor=actor,
+                reason=reason,
+                now=now,
                 pricing_status=price_status,
             )
             state_hash = self._group_hash(group_id, values, row["status"])
@@ -752,10 +762,12 @@ class CognitiveResourceStore:
     ) -> builtins.list[CognitiveResourceGroupRecord]:
         page_limit = self._page_limit(limit)
         page_offset = self._page_offset(offset)
-        if (
-            pool not in {None, "economy", "deep"}
-            or status not in {None, "active", "disabled", "revoked"}
-        ):
+        if pool not in {None, "economy", "deep"} or status not in {
+            None,
+            "active",
+            "disabled",
+            "revoked",
+        }:
             raise ValueError("invalid resource filters")
         clauses = ["subject_id = ?"]
         parameters: list[Any] = [subject_id]
@@ -770,8 +782,9 @@ class CognitiveResourceStore:
             parameters.extend((search, search))
         with self.database.connection() as connection:
             rows = connection.execute(
-                "SELECT * FROM cognitive_resource_groups WHERE " + " AND ".join(clauses) +
-                " ORDER BY pool, priority, label, group_id LIMIT ? OFFSET ?",
+                "SELECT * FROM cognitive_resource_groups WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY pool, priority, label, group_id LIMIT ? OFFSET ?",
                 (*parameters, page_limit, page_offset),
             ).fetchall()
             return [self._from_group_row(connection, row) for row in rows]
@@ -786,8 +799,12 @@ class CognitiveResourceStore:
         fields = ("attempts", "input_tokens", "output_tokens", "cost_microusd")
         with self.database.read_transaction() as connection:
             usage = ModelLedger._budget_status_connection(
-                connection, group.subject_id, RoutedModelGateway._limits_for_group(group),
-                now.date().isoformat(), resource_pool=group.pool, resource_group_id=group.group_id,
+                connection,
+                group.subject_id,
+                RoutedModelGateway._limits_for_group(group),
+                now.date().isoformat(),
+                resource_pool=group.pool,
+                resource_group_id=group.group_id,
             )
             reserved = connection.execute(
                 "SELECT COUNT(*) attempts, "
@@ -802,7 +819,8 @@ class CognitiveResourceStore:
             pending = connection.execute(
                 "SELECT COUNT(*) FROM secret_cleanup_queue q "
                 "JOIN cognitive_resource_keys k ON k.key_id=q.resource_id "
-                "WHERE k.group_id=? AND q.status != 'removed'", (group.group_id,),
+                "WHERE k.group_id=? AND q.status != 'removed'",
+                (group.group_id,),
             ).fetchone()[0]
             pool_counts = connection.execute(
                 "SELECT COUNT(*) active_resources, COALESCE(SUM(CASE WHEN EXISTS ("
@@ -818,9 +836,9 @@ class CognitiveResourceStore:
             "reserved": {field: str(reserved[field]) for field in fields},
             "cleanup_pending": pending,
             "pool_summary": dict(pool_counts),
-            "reset_at_utc": (now + timedelta(days=1)).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            ).isoformat(),
+            "reset_at_utc": (now + timedelta(days=1))
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .isoformat(),
         }
 
     def get(self, group_id: str, *, subject_id: str) -> CognitiveResourceGroupRecord:
@@ -1048,11 +1066,14 @@ class CognitiveResourceStore:
                 expected_revision = 1
                 for policy in connection.execute(
                     "SELECT * FROM cognitive_resource_limit_revisions WHERE group_id=? "
-                    "ORDER BY revision", (group_id,),
+                    "ORDER BY revision",
+                    (group_id,),
                 ):
-                    if (policy["subject_id"] != subject_id
+                    if (
+                        policy["subject_id"] != subject_id
                         or policy["revision"] != expected_revision
-                        or resource_policy_hash(policy) != policy["state_hash"]):
+                        or resource_policy_hash(policy) != policy["state_hash"]
+                    ):
                         raise IntegrityError("cognitive resource limit history mismatch")
                     expected_revision += 1
 
@@ -2252,14 +2273,18 @@ class CognitiveResourceStore:
             row["created_at"],
             row["updated_at"],
             read_resource_policy(connection, row["group_id"], row["subject_id"]),
-            int(connection.execute(
-                "SELECT revision FROM cognitive_resource_limit_policies WHERE group_id=?",
-                (row["group_id"],),
-            ).fetchone()[0]),
-            str(connection.execute(
-                "SELECT pricing_status FROM cognitive_resource_limit_policies WHERE group_id=?",
-                (row["group_id"],),
-            ).fetchone()[0]),
+            int(
+                connection.execute(
+                    "SELECT revision FROM cognitive_resource_limit_policies WHERE group_id=?",
+                    (row["group_id"],),
+                ).fetchone()[0]
+            ),
+            str(
+                connection.execute(
+                    "SELECT pricing_status FROM cognitive_resource_limit_policies WHERE group_id=?",
+                    (row["group_id"],),
+                ).fetchone()[0]
+            ),
         )
 
     @classmethod

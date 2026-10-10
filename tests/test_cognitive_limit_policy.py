@@ -228,8 +228,11 @@ def test_schema80_upgrade_preserves_old_limits_hashes_and_history(
     with old_database.transaction() as connection:
         connection.execute("ATTACH DATABASE ? AS seed", (str(database.path),))
         for table in (
-            "subject_identity", "cognitive_resource_groups", "cognitive_resource_group_revisions",
-            "cognitive_resource_keys", "cognitive_resource_key_events",
+            "subject_identity",
+            "cognitive_resource_groups",
+            "cognitive_resource_group_revisions",
+            "cognitive_resource_keys",
+            "cognitive_resource_key_events",
         ):
             connection.execute(f"INSERT INTO {table} SELECT * FROM seed.{table}")
     upgraded = Database(old_path)
@@ -255,8 +258,11 @@ def test_same_name_recreation_keeps_old_group_and_usage(tmp_path: Path) -> None:
     ledger = ModelLedger(database)
     call_id = prepare(ledger, subject, old.group_id, "old-group-request")
     ledger.authorize_attempt(
-        call_id, RoutedModelGateway._limits_for_group(old), reserved_input_tokens=1,
-        reserved_output_tokens=1, reserved_cost_microusd=0,
+        call_id,
+        RoutedModelGateway._limits_for_group(old),
+        reserved_input_tokens=1,
+        reserved_output_tokens=1,
+        reserved_cost_microusd=0,
     )
     store.revoke(old.group_id, subject_id=subject, actor="operator", reason="replace")
     new = configure(store, subject)
@@ -275,19 +281,28 @@ def test_stale_resource_revision_cannot_authorize_or_weaken_explicit_pool_cap(
     ledger = ModelLedger(database)
     call_id = prepare(ledger, subject, group.group_id, "changed-price")
     store.update(
-        group.group_id, CognitiveResourceGroupUpdate(input_usd_per_million=Decimal("1")),
-        subject_id=subject, actor="operator", reason="new price",
+        group.group_id,
+        CognitiveResourceGroupUpdate(input_usd_per_million=Decimal("1")),
+        subject_id=subject,
+        actor="operator",
+        reason="new price",
     )
     with pytest.raises(ModelCallStateError, match="changed"):
         ledger.authorize_attempt(
-            call_id, RoutedModelGateway._limits_for_group(group),
-            reserved_input_tokens=1, reserved_output_tokens=1, reserved_cost_microusd=0,
+            call_id,
+            RoutedModelGateway._limits_for_group(group),
+            reserved_input_tokens=1,
+            reserved_output_tokens=1,
+            reserved_cost_microusd=0,
             expected_resource_revision=group.limit_revision,
         )
     with pytest.raises(BudgetExhaustedError, match="pool"):
         ledger.authorize_attempt(
-            call_id, RoutedModelGateway._limits_for_group(group),
-            reserved_input_tokens=1, reserved_output_tokens=1, reserved_cost_microusd=0,
+            call_id,
+            RoutedModelGateway._limits_for_group(group),
+            reserved_input_tokens=1,
+            reserved_output_tokens=1,
+            reserved_cost_microusd=0,
             pool_limits=BudgetLimits(0, 100, 100, 100),
         )
     assert store.budget_summary(group)["today_usage"]["attempts"] == "0"
@@ -298,15 +313,20 @@ def test_pricing_unknown_and_confirmed_free_are_distinct(tmp_path: Path) -> None
     group = configure(store, subject)
     assert group.pricing_status == "unknown"
     group = store.update(
-        group.group_id, CognitiveResourceGroupUpdate(pricing_status="free"),
-        subject_id=subject, actor="operator", reason="supplier free tier",
+        group.group_id,
+        CognitiveResourceGroupUpdate(pricing_status="free"),
+        subject_id=subject,
+        actor="operator",
+        reason="supplier free tier",
     )
     assert group.pricing_status == "free"
     with pytest.raises(ValueError, match="zero prices"):
         store.update(
             group.group_id,
             CognitiveResourceGroupUpdate(pricing_status="free", input_usd_per_million=Decimal("1")),
-            subject_id=subject, actor="operator", reason="invalid",
+            subject_id=subject,
+            actor="operator",
+            reason="invalid",
         )
 
 
@@ -316,14 +336,17 @@ def test_management_summary_counts_pool_outside_resource_filters(tmp_path: Path)
     second = configure(store, subject, label="second")
     configure(store, subject, label="another pool", pool="deep")
     assert store.budget_summary(first)["pool_summary"] == {
-        "active_resources": 2, "available_resources": 2
+        "active_resources": 2,
+        "available_resources": 2,
     }
     key = store.keys(second.group_id, subject_id=subject)[0]
     store.revoke_key(key.key_id, subject_id=subject, actor="operator", reason="retire")
     assert store.budget_summary(first)["pool_summary"] == {
-        "active_resources": 2, "available_resources": 1
+        "active_resources": 2,
+        "available_resources": 1,
     }
     store.disable(second.group_id, subject_id=subject, actor="operator", reason="stop")
     assert store.budget_summary(first)["pool_summary"] == {
-        "active_resources": 1, "available_resources": 1
+        "active_resources": 1,
+        "available_resources": 1,
     }

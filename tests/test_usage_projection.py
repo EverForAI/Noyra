@@ -37,33 +37,53 @@ def test_cross_window_retry_uses_attempt_time_and_is_not_duplicate(tmp_path: Pat
     IdentityStore(database).ensure(subject, content_hash("usage"))
     ledger = ModelLedger(database)
     call, _ = ledger.prepare_call(
-        subject, "fake", "test", "test", content_hash("req"), "request-key",
+        subject,
+        "fake",
+        "test",
+        "test",
+        content_hash("req"),
+        "request-key",
         resource_pool="economy",
     )
     limits = BudgetLimits(100, 100_000, 100_000, 100_000)
     first = ledger.authorize_attempt(
-        call.call_id, limits, reserved_input_tokens=100, reserved_output_tokens=100,
+        call.call_id,
+        limits,
+        reserved_input_tokens=100,
+        reserved_output_tokens=100,
         reserved_cost_microusd=10,
     )
     ledger.start_attempt(first.attempt_id)
     ledger.finish_attempt(
-        first.attempt_id, "failed", usage=ModelUsage(2, 3), cost_microusd=1,
+        first.attempt_id,
+        "failed",
+        usage=ModelUsage(2, 3),
+        cost_microusd=1,
         error_code="timeout",
     )
     second = ledger.authorize_attempt(
-        call.call_id, limits, reserved_input_tokens=100, reserved_output_tokens=100,
-        reserved_cost_microusd=12, continuation=True,
+        call.call_id,
+        limits,
+        reserved_input_tokens=100,
+        reserved_output_tokens=100,
+        reserved_cost_microusd=12,
+        continuation=True,
     )
     ledger.start_attempt(second.attempt_id)
     ledger.finish_attempt(
-        second.attempt_id, "unknown", usage=None, cost_microusd=None, error_code="unknown",
+        second.attempt_id,
+        "unknown",
+        usage=None,
+        cost_microusd=None,
+        error_code="unknown",
     )
     now = datetime.now(UTC) + timedelta(seconds=1)
     old = (now - timedelta(days=8)).isoformat()
     with database.transaction() as connection:
         connection.execute("UPDATE model_calls SET created_at=?", (old,))
         connection.execute(
-            "UPDATE model_attempts SET started_at=? WHERE attempt_id=?", (old, first.attempt_id),
+            "UPDATE model_attempts SET started_at=? WHERE attempt_id=?",
+            (old, first.attempt_id),
         )
     projection = UsageProjection(database)
     week = projection.summary(subject, window="7", now=now)

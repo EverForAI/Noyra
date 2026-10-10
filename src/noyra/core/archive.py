@@ -1464,7 +1464,9 @@ class S3ArchiveProvider:
         if not bucket:
             raise ValueError("NOYRA_ARCHIVE_S3_BUCKET is required")
         try:
-            import boto3  # type: ignore[import-not-found]
+            from importlib import import_module
+
+            boto3 = import_module("boto3")
         except ImportError as error:
             raise RuntimeError("install Noyra's optional cloud dependency") from error
         endpoint = os.getenv("NOYRA_ARCHIVE_S3_ENDPOINT") or None
@@ -1475,7 +1477,7 @@ class S3ArchiveProvider:
         if endpoint is not None and urlsplit(endpoint).scheme.lower() != "https":
             raise ValueError("NOYRA_ARCHIVE_S3_ENDPOINT must use HTTPS")
         try:
-            from botocore.config import Config  # type: ignore[import-not-found]
+            Config = import_module("botocore.config").Config
         except ImportError as error:
             raise RuntimeError("install Noyra's optional cloud dependency") from error
         connect_timeout = float(os.getenv("NOYRA_ARCHIVE_S3_CONNECT_TIMEOUT_SECONDS", "5"))

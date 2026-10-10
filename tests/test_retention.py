@@ -93,7 +93,8 @@ def test_retention_settings_http_auth_revision_and_validation(tmp_path: Any) -> 
     try:
         address = f"http://127.0.0.1:{http.address[1]}/api/admin/retention/settings"
         payload: dict[str, Any] = {
-            "settings": asdict(RetentionSettings(health_days=14)), "expected_revision": 0
+            "settings": asdict(RetentionSettings(health_days=14)),
+            "expected_revision": 0,
         }
         headers = {"Content-Type": "application/json"}
 

@@ -6,7 +6,6 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-
 ROOT = Path(__file__).resolve().parent
 FONTS = Path(r"C:\Windows\Fonts")
 BACKGROUND = "#111211"
@@ -25,7 +24,9 @@ def build() -> None:
     canvas = Image.new("RGB", (2000, 2000), BACKGROUND)
     draw = ImageDraw.Draw(canvas)
 
-    def label(x: int, y: int, text: str, size: int, color: str = WHITE, name: str = "msyh.ttc") -> None:
+    def label(
+        x: int, y: int, text: str, size: int, color: str = WHITE, name: str = "msyh.ttc"
+    ) -> None:
         font = ImageFont.truetype(str(FONTS / name), size)
         bounds = draw.textbbox((x, y), text, font=font)
         assert bounds[2] <= 1872 and bounds[3] <= 1960, (text, bounds)
@@ -74,7 +75,9 @@ def build() -> None:
         "embedded_original_sha256": source_hash,
         "embedded_original_transform": "5x nearest-neighbor scaling, no crop or retouch",
         "edition": "Not assigned. Choose the platform and edition before issuance.",
-        "event_date_note": "2026-10-08 is the upgrade event date, not an asserted capture or mint timestamp.",
+        "event_date_note": (
+            "2026-10-08 is the upgrade event date, not an asserted capture or mint timestamp."
+        ),
     }
     (ROOT / "single-image-provenance.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

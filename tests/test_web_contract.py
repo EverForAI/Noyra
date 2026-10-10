@@ -117,7 +117,7 @@ def test_admin_model_resource_controls_are_precise_bounded_and_escaped() -> None
     ):
         assert path in ADMIN_JS
     assert "async function loadModelKeys(details)" in ADMIN_JS
-    assert 'data-model-key-details' in ADMIN_JS
+    assert "data-model-key-details" in ADMIN_JS
     assert "renderedModels.get(details.dataset.id) === item" in ADMIN_JS
     assert "session === csrfToken" in ADMIN_JS
     assert "Promise.all(rows.map" not in ADMIN_JS

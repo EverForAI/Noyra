@@ -58,3 +58,9 @@ def test_external_template_cannot_be_mistaken_for_passed_evidence() -> None:
     assert "status" in errors and "signature" in errors
     with pytest.raises(ValueError):
         module.pending_record("main")
+
+
+def test_exact_commit_verifies_frontend_even_in_static_scope() -> None:
+    commands = _tool().verification_commands("static", [])
+    assert ["node", "--check", "src/noyra/web/admin.js"] in commands
+    assert ["node", "--test", "tests/frontend/admin-optimization.test.cjs"] in commands

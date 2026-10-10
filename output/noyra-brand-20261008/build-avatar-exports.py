@@ -4,7 +4,6 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-
 ROOT = Path(__file__).resolve().parent
 SOURCE = ROOT / "ikunai-20261008-215635-1.png"
 image = Image.open(SOURCE).convert("RGB")

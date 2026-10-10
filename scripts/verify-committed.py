@@ -43,6 +43,8 @@ def verification_commands(scope: str, tests: list[str]) -> list[list[str]]:
         [sys.executable, "-m", "ruff", "format", "--check", "."],
         [sys.executable, "-m", "mypy", "src", "tests"],
         [sys.executable, "-m", "pip", "check"],
+        ["node", "--check", "src/noyra/web/admin.js"],
+        ["node", "--test", "tests/frontend/admin-optimization.test.cjs"],
     ]
     if scope != "static":
         commands.append([sys.executable, "-m", "pytest", "-q", *tests])

@@ -125,8 +125,12 @@ def test_installed_version_does_not_require_remote_or_runner(tmp_path: Path) -> 
 
 @pytest.mark.parametrize(
     ("status", "remaining", "expected"),
-    [(404, None, "upgrade_no_stable_release"), (403, "0", "upgrade_remote_rate_limited"),
-     (429, None, "upgrade_remote_rate_limited"), (503, None, "upgrade_remote_http_error")],
+    [
+        (404, None, "upgrade_no_stable_release"),
+        (403, "0", "upgrade_remote_rate_limited"),
+        (429, None, "upgrade_remote_rate_limited"),
+        (503, None, "upgrade_remote_http_error"),
+    ],
 )
 def test_release_check_reports_safe_remote_failure(
     monkeypatch: pytest.MonkeyPatch, status: int, remaining: str | None, expected: str
@@ -136,8 +140,13 @@ def test_release_check_reports_safe_remote_failure(
         headers["X-RateLimit-Remaining"] = remaining
 
     def fail(*args: Any) -> None:
-        raise HTTPError("https://api.github.com/repos/example/noyra/releases/latest",
-                        status, "redact-private-message", headers, None)
+        raise HTTPError(
+            "https://api.github.com/repos/example/noyra/releases/latest",
+            status,
+            "redact-private-message",
+            headers,
+            None,
+        )
 
     monkeypatch.setattr("noyra.core.upgrade.stable_metadata", fail)
     manager = UpgradeManager(github_owner="example", github_repo="noyra")

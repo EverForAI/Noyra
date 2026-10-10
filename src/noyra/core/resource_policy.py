@@ -71,10 +71,13 @@ def write_resource_policy(
     if pricing_status is None:
         prices = connection.execute(
             "SELECT input_microusd_per_million, output_microusd_per_million "
-            "FROM cognitive_resource_groups WHERE group_id=?", (group_id,),
+            "FROM cognitive_resource_groups WHERE group_id=?",
+            (group_id,),
         ).fetchone()
-        pricing_status = "priced" if any(prices) else (
-            previous["pricing_status"] if previous is not None else "unknown"
+        pricing_status = (
+            "priced"
+            if any(prices)
+            else (previous["pricing_status"] if previous is not None else "unknown")
         )
     if pricing_status not in ("unknown", "priced", "free"):
         raise ValueError("invalid resource pricing status")
