@@ -1277,11 +1277,13 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
             reason_code="purpose_classified_locally",
         )
         with self.database.transaction() as connection:
+            # This fixture simulates disk tampering beyond the normal writer guards.
             for trigger in (
                 "prevent_cognitive_route_decision_update",
                 "prevent_cognitive_route_attempt_update",
                 "prevent_cognitive_route_outcome_update",
                 "prevent_waiting_cognitive_task_revision_update",
+                "evidence_count_cognitive_route_attempts_owner",
             ):
                 connection.execute(f'DROP TRIGGER "{trigger}"')
         with self.database.connection() as connection:

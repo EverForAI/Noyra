@@ -657,6 +657,7 @@ _OWNERSHIP_GRAPHS[90] = {
     "private_message_sequences": _parent_rule("interactions", "interaction_id", "interaction_id"),
 }
 _OWNERSHIP_GRAPHS[91] = _OWNERSHIP_GRAPHS[90]
+_OWNERSHIP_GRAPHS[92] = {**_OWNERSHIP_GRAPHS[91], "route_evidence_row_counts": _subject_rule()}
 
 
 @dataclass(frozen=True)

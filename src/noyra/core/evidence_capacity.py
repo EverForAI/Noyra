@@ -8,9 +8,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from .errors import IntegrityError, InvalidTransitionError
-from .evidence_schema import TABLES_V80
+from .evidence_schema import MAX_ROUTE_FAILOVERS, TABLES_V80, TABLES_V92
 
-EVIDENCE_TABLES = TABLES_V80
+EVIDENCE_TABLES = TABLES_V92
 DEFAULT_EVIDENCE_ROWS = 250_000
 
 # Persistent idempotency and causal evidence is deliberately retained. The
@@ -36,6 +36,14 @@ EVIDENCE_LIFECYCLE = {
         "model_calls",
         "one record per deliberation call; permanent result identity",
     ),
+    "cognitive_route_decisions": ("cognitive_route_decisions", "bounded routing admission"),
+    "cognitive_route_attempts": ("cognitive_route_decisions", "two records per bounded failover"),
+    "cognitive_route_outcomes": ("cognitive_route_decisions", "one reserved terminal per decision"),
+    "waiting_cognitive_tasks": ("waiting_cognitive_tasks", "bounded durable waiting identities"),
+    "waiting_cognitive_task_revisions": (
+        "waiting_cognitive_task_revisions",
+        "bounded waits plus reserved resolutions",
+    ),
 }
 
 
@@ -55,10 +63,12 @@ def _limits() -> dict[str, int]:
     limit = evidence_row_limit()
     # Initial circuit + probe + terminal/recovery transitions are reserved by
     # usage admission. Completion must never be blocked at the capacity limit.
-    return {
-        table: limit * (3 if table == "embedding_circuit_transitions" else 1)
-        for table in EVIDENCE_TABLES
+    multipliers = {
+        "embedding_circuit_transitions": 3,
+        "cognitive_route_attempts": 2 * MAX_ROUTE_FAILOVERS,
+        "waiting_cognitive_task_revisions": 2,
     }
+    return {table: limit * multipliers.get(table, 1) for table in EVIDENCE_TABLES}
 
 
 def evidence_counts(connection: Any, subject_id: str) -> dict[str, int]:
@@ -73,13 +83,24 @@ def evidence_counts(connection: Any, subject_id: str) -> dict[str, int]:
                     f"SELECT count(*) FROM {table} WHERE subject_id=?", (subject_id,)
                 ).fetchone()[0]
             )
-            for table in EVIDENCE_TABLES
+            for table in TABLES_V80
         }
     rows = connection.execute(
         "SELECT table_name,row_count FROM evidence_row_counts WHERE subject_id=?", (subject_id,)
     ).fetchall()
     counts = {str(row[0]): row[1] for row in rows}
-    if set(counts) != set(EVIDENCE_TABLES) or any(
+    if version is not None and int(version[0]) >= 92:
+        counts.update(
+            {
+                str(row[0]): row[1]
+                for row in connection.execute(
+                    "SELECT table_name,row_count FROM route_evidence_row_counts WHERE subject_id=?",
+                    (subject_id,),
+                )
+            }
+        )
+    tables = TABLES_V80 if version is not None and int(version[0]) < 92 else EVIDENCE_TABLES
+    if set(counts) != set(tables) or any(
         type(value) is not int or value < 0 for value in counts.values()
     ):
         # Preserve the writer's foreign-key error contract for absent subjects.
@@ -104,7 +125,7 @@ def require_evidence_capacity(connection: Any, subject_id: str, table: str) -> N
     protected = {table} | {
         name for name, (source, _) in EVIDENCE_LIFECYCLE.items() if source == table
     }
-    if any(counts[name] >= limits[name] for name in protected):
+    if any(counts[name] >= limits[name] for name in protected if name in counts):
         raise InvalidTransitionError("evidence_capacity_reached")
 
 

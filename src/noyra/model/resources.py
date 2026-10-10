@@ -22,7 +22,18 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, m
 from noyra.core.at_rest import validate_private_file, validate_private_root
 from noyra.core.credentials import read_secret_file
 from noyra.core.database import Database
-from noyra.core.errors import IntegrityError, NotFoundError, RuntimeOwnershipError
+from noyra.core.errors import (
+    IntegrityError,
+    InvalidTransitionError,
+    NotFoundError,
+    RuntimeOwnershipError,
+)
+from noyra.core.evidence_capacity import (
+    evidence_counts,
+    evidence_row_limit,
+    require_evidence_capacity,
+)
+from noyra.core.evidence_schema import MAX_ROUTE_FAILOVERS
 from noyra.core.locking import ProcessLock
 from noyra.core.provider_health import ProviderHealthStore
 from noyra.core.resource_policy import (
@@ -1809,7 +1820,7 @@ class CognitiveResourceStore:
                 else:
                     if status == "waiting":
                         valid = (
-                            state["previous_status"] == "waiting"
+                            state["previous_status"] in {"waiting", "resolved", "cancelled"}
                             and retry_count == state["previous_retry_count"] + 1
                         )
                     else:
@@ -2604,6 +2615,11 @@ class RoutedModelGateway(ModelGateway):
         self.wait_base_seconds = wait_base_seconds
         self.wait_max_seconds = wait_max_seconds
         self.max_group_failovers = max_group_failovers
+        if (
+            type(max_group_failovers) is not int
+            or not 0 <= max_group_failovers <= MAX_ROUTE_FAILOVERS
+        ):
+            raise ValueError("route failovers must be between 0 and 32")
         self.capture_model_io = capture_model_io
         self.capture_model_io_getter = capture_model_io_getter
         self.enforce_training_policy = enforce_training_policy
@@ -2682,13 +2698,21 @@ class RoutedModelGateway(ModelGateway):
                 "idempotency_key": idempotency_key,
             }
         )
-        process_lock = ProcessLock(
+        legacy_path = (
             self.database.path.with_name(f".{self.database.path.name}.model-route-locks")
             / f"{route_digest}.lock"
         )
+        # Fixed files avoid unlink races; hash collisions conservatively refuse work.
+        process_lock = ProcessLock(
+            self.database.path.with_name(f".{self.database.path.name}.model-route-locks-v2")
+            / f"{int(route_digest[:8], 16) % 256:02x}.lock"
+        )
+        legacy_lock = ProcessLock(legacy_path) if legacy_path.exists() else None
         try:
             try:
                 process_lock.acquire()
+                if legacy_lock is not None:
+                    legacy_lock.acquire()
             except RuntimeOwnershipError as error:
                 raise ProviderCallError(
                     "routed_model_call_in_progress",
@@ -2705,8 +2729,14 @@ class RoutedModelGateway(ModelGateway):
                 temperature=temperature,
             )
         finally:
-            process_lock.release()
-            self._release_logical_route(lock_key, lock, acquired=True)
+            try:
+                if legacy_lock is not None:
+                    legacy_lock.release()
+            finally:
+                try:
+                    process_lock.release()
+                finally:
+                    self._release_logical_route(lock_key, lock, acquired=True)
 
     async def _complete_structured_locked(
         self,
@@ -2723,14 +2753,6 @@ class RoutedModelGateway(ModelGateway):
             raise PermissionError("routed model gateway cannot serve another subject")
         pool = self.pool_for_purpose(purpose)
         self.limits = self._aggregate_limits(pool)
-        decision = self._record_decision(
-            purpose,
-            pool,
-            selected_route=f"{pool}_model",
-            group_id=None,
-            key_id=None,
-            reason_code="purpose_classified_locally",
-        )
         # A routed logical request is fenced by its first ambiguous physical
         # call.  This check must happen before cache recovery, retry timers, or
         # key selection: a later key can never prove that the first provider
@@ -2740,17 +2762,6 @@ class RoutedModelGateway(ModelGateway):
             if logical_state.disposition == "retry":
                 forced_state = logical_state
             else:
-                self._record_unavailable(
-                    pool,
-                    purpose,
-                    "model_outcome_unknown_quarantined",
-                    force=True,
-                )
-                self._finish_decision(
-                    decision.decision_id,
-                    "deferred",
-                    "model_outcome_unknown_quarantined",
-                )
                 raise ProviderCallError(
                     "routed_model_call_quarantined",
                     retryable=False,
@@ -2766,24 +2777,21 @@ class RoutedModelGateway(ModelGateway):
         )
         if recovered is not None and forced_state is None:
             self._resolve_wait(pool, purpose)
-            self._finish_decision(
-                decision.decision_id,
-                "cached",
-                "idempotent_route_recovered",
-                result=recovered,
-            )
             return recovered
         if forced_state is None and not self._retry_due(pool, purpose):
-            self._finish_decision(
-                decision.decision_id,
-                "deferred",
-                "resource_retry_not_due",
-            )
             raise ProviderCallError(
                 f"{pool}_pool_waiting",
                 retryable=False,
                 outcome_unknown=False,
             )
+        decision = self._record_decision(
+            purpose,
+            pool,
+            selected_route=f"{pool}_model",
+            group_id=None,
+            key_id=None,
+            reason_code="purpose_classified_locally",
+        )
         groups = self.resources.active(subject_id, pool)
         if forced_state is not None and not groups:
             self._finish_decision(
@@ -3555,6 +3563,7 @@ class RoutedModelGateway(ModelGateway):
             "created_at": now,
         }
         with self.database.transaction() as connection:
+            require_evidence_capacity(connection, self.subject_id, "cognitive_route_decisions")
             connection.execute(
                 """INSERT INTO cognitive_route_decisions(
                     decision_id, subject_id, purpose, task_kind, selected_route, pool,
@@ -3619,6 +3628,26 @@ class RoutedModelGateway(ModelGateway):
             "created_at": now,
         }
         with self.database.transaction() as connection:
+            # Selection reserves its matching terminal row; settlement never checks capacity.
+            existing = connection.execute(
+                "SELECT outcome FROM cognitive_route_attempts "
+                "WHERE decision_id=? AND attempt_number=?",
+                (decision_id, attempt_number),
+            ).fetchall()
+            if (
+                any(row[0] != "selected" for row in existing)
+                or (outcome == "selected" and existing)
+                or (outcome != "selected" and not existing)
+            ):
+                raise IntegrityError("routing attempt transition invalid")
+            if outcome == "selected":
+                selected = connection.execute(
+                    "SELECT count(*) FROM cognitive_route_attempts WHERE decision_id=? "
+                    "AND outcome='selected'",
+                    (decision_id,),
+                ).fetchone()[0]
+                if selected >= MAX_ROUTE_FAILOVERS:
+                    raise InvalidTransitionError("evidence_capacity_reached")
             connection.execute(
                 """INSERT INTO cognitive_route_attempts(
                     attempt_id, subject_id, decision_id, group_id, key_id, attempt_number,
@@ -3696,6 +3725,9 @@ class RoutedModelGateway(ModelGateway):
     ) -> None:
         now = utc_now()
         with self.database.transaction() as connection:
+            counts = evidence_counts(connection, self.subject_id)
+            if counts.get("waiting_cognitive_task_revisions", 0) >= evidence_row_limit():
+                return
             row = connection.execute(
                 "SELECT * FROM waiting_cognitive_tasks WHERE subject_id = ? AND pool = ? "
                 "AND purpose = ? AND status = 'waiting'",
@@ -3712,7 +3744,9 @@ class RoutedModelGateway(ModelGateway):
                     (self.subject_id, pool, purpose),
                 ).fetchone()
             retry_count = 1 if row is None else int(row["retry_count"]) + 1
-            delay = min(self.wait_max_seconds, self.wait_base_seconds * (2 ** (retry_count - 1)))
+            delay = min(
+                self.wait_max_seconds, self.wait_base_seconds * (2 ** min(retry_count - 1, 32))
+            )
             next_retry = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat(
                 timespec="milliseconds"
             )
@@ -3730,6 +3764,8 @@ class RoutedModelGateway(ModelGateway):
                 "updated_at": now,
             }
             if row is None:
+                if counts.get("waiting_cognitive_tasks", 0) >= evidence_row_limit():
+                    return
                 connection.execute(
                     """INSERT INTO waiting_cognitive_tasks(
                         task_id, subject_id, pool, purpose, status, reason_code,
@@ -3820,6 +3856,15 @@ class RoutedModelGateway(ModelGateway):
         next_retry_at: str,
         now: str,
     ) -> None:
+        if status == "waiting":
+            owner = connection.execute(
+                "SELECT subject_id FROM waiting_cognitive_tasks WHERE task_id=?", (task_id,)
+            ).fetchone()[0]
+            if (
+                evidence_counts(connection, owner).get("waiting_cognitive_task_revisions", 0)
+                >= evidence_row_limit()
+            ):
+                raise InvalidTransitionError("evidence_capacity_reached")
         payload = {
             "task_id": task_id,
             "status": status,

@@ -15,7 +15,7 @@ from typing import Any
 from .admission import current_commit_scope, is_accounting_scope
 from .conversation_schema import MIGRATION_V84, MIGRATION_V85
 from .errors import RuntimeOwnershipError
-from .evidence_schema import migration_v80
+from .evidence_schema import migration_v80, migration_v92
 from .locking import ProcessLock
 from .private_erasure_schema import (
     MIGRATION_V87,
@@ -308,7 +308,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 91
+CURRENT_SCHEMA_VERSION = 92
 
 # The schema DDL fingerprint is checked after every successful initialization.
 # Update this value only alongside a reviewed schema migration and its tests.
@@ -316,6 +316,7 @@ CURRENT_SCHEMA_VERSION = 91
 # installations persist this value in ``schema_meta`` and therefore require
 # the value to remain stable across compatible runtime fixes.
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
+    92: "28e3601ed49497ace746afc16374512e35491c6a3cd30299d4fd8122eab4c543",
     91: "7747814bce9f944f0b64f407da16524a7728671272797273eefc5ba72193daab",
     90: "649a64f023b29e3dddc355e0e45598e77446876884f3adeb0c199b1677ba8eb5",
     89: "dd50e35a4449d3c4dbe424ec7ed4ccb7464665a01efbb5b30131a5578f4abc55",
@@ -338,6 +339,7 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 # auditable P0 finding.  Tables, indexes, and views still fail closed during
 # database construction because they define the storage contract itself.
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
+    92: "09ccb3fabc0eb74acae5bb8b3a6fa540d1fda3a436f1b62ab32755e9d46226a6",
     91: "ab84d8a689063a3e2313c587f3dc7bd20795bac4187f00f2fade22b794de43c4",
     90: "96618523ee767b8249c9c03775ff330c28195e68579a7e344475a369cf29400d",
     89: "fddaa5e147c496247e6a1c895303a77b52d3d64a8e1fe22cb060a5b18a81b3b0",
@@ -6900,6 +6902,7 @@ SELECT 1;
     89: MIGRATION_V89,
     90: MIGRATION_V90,
     91: MIGRATION_V91,
+    92: migration_v92(),
 }
 
 

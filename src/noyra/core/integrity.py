@@ -1575,7 +1575,11 @@ def _check_evidence_counts(context: IntegrityContext) -> IntegrityCheckOutcome:
         actual = sum(
             1
             for _ in context.connection.execute(
-                f"SELECT subject_id FROM {table} WHERE subject_id=?", (context.subject_id,)
+                "SELECT t.subject_id FROM waiting_cognitive_task_revisions r "
+                "JOIN waiting_cognitive_tasks t ON t.task_id=r.task_id WHERE t.subject_id=?"
+                if table == "waiting_cognitive_task_revisions"
+                else f"SELECT subject_id FROM {table} WHERE subject_id=?",
+                (context.subject_id,),
             )
         )
         if actual != expected:
