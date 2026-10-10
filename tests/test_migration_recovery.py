@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
+import sqlite3
+import tracemalloc
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -177,3 +181,177 @@ def test_recovery_proof_rejects_changed_digest(tmp_path: Any) -> None:
     changed = replace(request, health_report_digest="d" * 64)
     with pytest.raises(ValueError, match="signature"):
         RecoveryCoordinator(database).restore_standby(changed, policy)
+
+
+def test_backup_hash_is_streamed_without_holding_database_writer(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    database, policy, private, _ = _setup(tmp_path)
+    backup = tmp_path / "large.bin"
+    chunk = b"x" * (1024 * 1024)
+    digest = hashlib.sha256()
+    with backup.open("wb") as stream:
+        for _ in range(8):
+            stream.write(chunk)
+            digest.update(chunk)
+    del chunk
+    original = RecoveryCoordinator._stream_digest
+    hashes = 0
+
+    def check_writer(stream: Any, size: int) -> str:
+        nonlocal hashes
+        hashes += 1
+        # A second connection must acquire the SQLite writer while hashing.
+        with sqlite3.connect(database.path, timeout=0) as writer:
+            writer.execute("BEGIN IMMEDIATE")
+            writer.rollback()
+        return original(stream, size)
+
+    monkeypatch.setattr(RecoveryCoordinator, "_stream_digest", staticmethod(check_writer))
+    monkeypatch.setattr(Path, "read_bytes", lambda _: pytest.fail("whole-file read is forbidden"))
+    tracemalloc.start()
+    try:
+        coordinator = RecoveryCoordinator(database)
+        coordinator.register_backup(
+            subject_id=policy.subject_id,
+            backup_id="large-backup",
+            backup_path=str(backup),
+            content_hash_value=digest.hexdigest(),
+            byte_size=backup.stat().st_size,
+            schema_version=CURRENT_SCHEMA_VERSION,
+            genesis_hash="d" * 64,
+            key_id="backup-key-1",
+            keyring_generation=1,
+        )
+        request = replace(_request(private), verified_backup_id="large-backup")
+        request = replace(
+            request,
+            target_signature=base64.urlsafe_b64encode(
+                private.sign(RecoveryCoordinator.signing_bytes(request))
+            ).decode(),
+        )
+        assert coordinator.restore_standby(request, policy)["status"] == "recovery_ready"
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert hashes == 2
+    assert peak < 5 * 1024 * 1024
+
+
+@pytest.mark.parametrize("change", ["truncate", "same_size", "replace"])
+def test_recovery_rejects_backup_changed_while_hashing(
+    tmp_path: Path, monkeypatch: Any, change: str
+) -> None:
+    database, policy, private, _ = _setup(tmp_path)
+    path = tmp_path / "backup.bin"
+    original = RecoveryCoordinator._stream_digest
+
+    def mutate(stream: Any, size: int) -> str:
+        result = original(stream, size)
+        if change == "truncate":
+            path.write_bytes(b"short")
+        elif change == "same_size":
+            before = path.stat()
+            path.write_bytes(b"z" * size)
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        else:
+            replacement = tmp_path / "replacement.bin"
+            replacement.write_bytes(b"z" * size)
+            try:
+                replacement.replace(path)
+            except PermissionError:
+                # Windows may prevent replacement of an open file; in-place
+                # mutation still tests that digest alone cannot authorize it.
+                path.write_bytes(b"z" * size)
+        return result
+
+    monkeypatch.setattr(RecoveryCoordinator, "_stream_digest", staticmethod(mutate))
+    with pytest.raises(ValueError, match=r"identity changed|file is unavailable"):
+        RecoveryCoordinator(database).restore_standby(_request(private), policy)
+    with database.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM migration_tasks").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM migration_epochs").fetchone()[0] == 0
+
+
+def test_backup_registry_snapshot_is_rechecked_in_publication_transaction(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    from noyra.core.types import content_hash
+
+    database, policy, private, _ = _setup(tmp_path)
+    original = RecoveryCoordinator._stream_digest
+
+    def change_registry(stream: Any, size: int) -> str:
+        result = original(stream, size)
+        with database.transaction() as connection:
+            row = dict(
+                connection.execute(
+                    "SELECT * FROM migration_backup_registry WHERE backup_id='backup-1'"
+                ).fetchone()
+            )
+            row.pop("state_hash")
+            row["keyring_generation"] = 2
+            connection.execute(
+                "UPDATE migration_backup_registry SET keyring_generation=2,state_hash=? "
+                "WHERE backup_id='backup-1'",
+                (content_hash(row),),
+            )
+        return result
+
+    monkeypatch.setattr(RecoveryCoordinator, "_stream_digest", staticmethod(change_registry))
+    with pytest.raises(ValueError, match="registry changed"):
+        RecoveryCoordinator(database).restore_standby(_request(private), policy)
+    with database.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM migration_tasks").fetchone()[0] == 0
+
+
+def test_recovery_rechecks_file_before_task_publication_commit(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    database, policy, private, _ = _setup(tmp_path)
+    original = MigrationStore._append_audit
+
+    def modify_after_insert(
+        connection: Any, subject: str, action: str, actor: str, payload: Any
+    ) -> None:
+        original(connection, subject, action, actor, payload)
+        if action == "migration_emergency_recovery_verified":
+            (tmp_path / "backup.bin").write_bytes(b"changed after publication")
+
+    monkeypatch.setattr(MigrationStore, "_append_audit", staticmethod(modify_after_insert))
+    with pytest.raises(ValueError, match=r"identity changed|file is unavailable"):
+        RecoveryCoordinator(database).restore_standby(_request(private), policy)
+    with database.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM migration_tasks").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM migration_proposals").fetchone()[0] == 0
+
+
+def test_registration_rechecks_file_before_commit(tmp_path: Path, monkeypatch: Any) -> None:
+    database, policy, _, _ = _setup(tmp_path)
+    path = tmp_path / "registration.bin"
+    path.write_bytes(b"registered")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    original = MigrationStore._append_audit
+
+    def modify(connection: Any, subject: str, action: str, actor: str, payload: Any) -> None:
+        original(connection, subject, action, actor, payload)
+        if action == "migration_backup_registered":
+            path.write_bytes(b"changed")
+
+    monkeypatch.setattr(MigrationStore, "_append_audit", staticmethod(modify))
+    with pytest.raises(ValueError, match=r"identity changed|file is unavailable"):
+        RecoveryCoordinator(database).register_backup(
+            subject_id=policy.subject_id,
+            backup_id="registration-2",
+            backup_path=str(path),
+            content_hash_value=digest,
+            byte_size=10,
+            schema_version=CURRENT_SCHEMA_VERSION,
+            genesis_hash="d" * 64,
+            key_id="backup-key-1",
+            keyring_generation=1,
+        )
+    with database.connection() as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM migration_backup_registry").fetchone()[0] == 1
+        )
