@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -130,6 +131,71 @@ async def test_full_capacity_still_replays_cache_without_new_evidence(
     with pytest.raises(InvalidTransitionError, match="evidence_capacity_reached"):
         await complete(gateway, subject, "another")
     assert len(provider.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_attempt_capacity_denial_settles_owned_call_and_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from noyra.model import CognitiveResourceGroupUpdate
+
+    monkeypatch.setenv("NOYRA_EVIDENCE_MAX_ROWS_PER_TABLE", "1")
+    db, subject, gateway, _, group, _ = setup_route(tmp_path)
+    gateway.resources.update(
+        group,
+        CognitiveResourceGroupUpdate(
+            max_attempts=2,
+            input_usd_per_million=Decimal("1"),
+            output_usd_per_million=Decimal("1"),
+        ),
+        subject_id=subject,
+        actor="operator",
+        reason="fixture",
+    )
+    provider = FakeProvider([ProviderResponse("invalid-json", ModelUsage(2, 1))])
+    gateway.provider_factory = lambda _: provider
+    with pytest.raises(InvalidTransitionError, match="evidence_capacity_reached"):
+        await complete(gateway, subject, "retry-full")
+    assert len(provider.requests) == 1
+    with db.connection() as c:
+        assert c.execute("SELECT status FROM model_calls").fetchone()[0] == "failed"
+        assert c.execute("SELECT status FROM model_attempts").fetchone()[0] == "succeeded"
+        assert c.execute("SELECT cost_microusd FROM model_attempts").fetchone()[0] == 3
+        assert c.execute("SELECT outcome FROM cognitive_route_outcomes").fetchone()[0] == "failed"
+    assert gateway.resources.verify_routing_integrity(subject)["cognitive_route_attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_first_attempt_capacity_denial_sends_nothing_and_is_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from noyra.model import BudgetLimits, ModelLedger
+
+    monkeypatch.setenv("NOYRA_EVIDENCE_MAX_ROWS_PER_TABLE", "2")
+    db, subject, gateway, provider, _, _ = setup_route(tmp_path)
+    ledger = ModelLedger(db)
+    call, _ = ledger.prepare_call(subject, "fixture", "model", "test", "a" * 64, "previous")
+    for number in range(2):
+        attempt = ledger.authorize_attempt(
+            call.call_id,
+            BudgetLimits(100, 10000, 10000, 10000),
+            reserved_input_tokens=1,
+            reserved_output_tokens=1,
+            reserved_cost_microusd=1,
+            continuation=number > 0,
+        )
+        ledger.start_attempt(attempt.attempt_id)
+        ledger.finish_attempt(attempt.attempt_id, "failed", usage=ModelUsage(0, 0), cost_microusd=0)
+    ledger.finish_call(call.call_id, "failed")
+    with pytest.raises(InvalidTransitionError, match="evidence_capacity_reached"):
+        await complete(gateway, subject, "initial-full")
+    assert not provider.requests
+    with db.connection() as c:
+        assert {row[0] for row in c.execute("SELECT status FROM model_calls")} == {"failed"}
+        assert c.execute("SELECT outcome FROM cognitive_route_outcomes").fetchone()[0] == "failed"
+    assert gateway.resources.verify_routing_integrity(subject)["cognitive_route_attempts"] == 2
 
 
 @pytest.mark.asyncio

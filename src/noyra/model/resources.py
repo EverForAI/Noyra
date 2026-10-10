@@ -3036,6 +3036,22 @@ class RoutedModelGateway(ModelGateway):
                         # must never trigger credential failover.
                         route_in_progress = True
                     break
+                except InvalidTransitionError as error:
+                    if str(error) != "evidence_capacity_reached":
+                        raise
+                    self._record_attempt(
+                        decision.decision_id,
+                        group.group_id,
+                        key.key_id,
+                        attempt_number,
+                        "failed",
+                        "evidence_capacity_reached",
+                        int((time.monotonic() - started) * 1000),
+                    )
+                    self._finish_decision(
+                        decision.decision_id, "failed", "evidence_capacity_reached"
+                    )
+                    raise
                 else:
                     latency = int((time.monotonic() - started) * 1000)
                     with suppress(Exception):

@@ -75,6 +75,16 @@ schema 92 添加独立的五表路由计数，保持 schema80 八表迁移和指
 
 最终跨模块阅读发现单页创建/重命名等写操作也可能在退出后把迟到响应重新赋给聊天状态。原模块 generation 覆盖主要读取，但不足以保护所有写操作延续。本补充在公共请求层记录会话 generation，fetch失败或响应体读完后检查；旧会话响应以无HTTP状态的内部异常拒绝，避免迟到401登出新会话。状态格式器对该异常不写提示。已被服务器接受的写操作可能已经完成，客户端不宣称取消或回滚，也不自动重发。
 
-Node新增10项覆盖GET/POST成功、401、网络失败、读取JSON期间切换会话、正常CSRF和实际创建会话处理器，全部45项通过。页面/迁移/投稿/持久管理会话27项通过（`.runtime/remediation-session-contract.xml`）。首次Python命令引用不存在测试文件没有执行测试，改为仓库真实测试清单后通过。Playwright合成响应验证旧会话拒绝和chat.current保持空；首次合成fetch误拦截logout导致等待，重载页面后修正夹具并验证通过。390x844截图 `output/playwright/remediation-session-final-mobile.png` 已检查；静态预览的/admin/session及POST logout返回404是模拟环境限制，不作为真实鉴权验收。预览和浏览器已关闭。
+Node新增10项覆盖GET/POST成功、401、网络失败、读取JSON期间切换会话、正常CSRF和实际创建会话处理器，全部45项通过。页面/迁移/投稿/持久管理会话27项通过（`.runtime/remediation-session-contract.xml`）。首次Python命令引用不存在测试文件没有执行测试，改为仓库真实测试清单后通过。Playwright合成响应验证旧会话拒绝和chat.current保持空；首次合成fetch误拦截logout导致等待，重载页面后修正夹具并验证通过。390x844截图 `output/playwright/remediation-session-final-mobile.png` 已检查；静态预览的/admin/session返回404、POST logout返回501是模拟环境限制，不作为真实鉴权验收。预览和浏览器已关闭。
 
 这是独立前端补充，不改变Python或schema92。`3bfb8f3`精确提交完整Python回归已经在运行，保留该执行，不重复启动相同Python树的全仓测试；此补充提交后另跑精确提交静态及页面专项，准确标明测试提交与最终提交的关系。
+
+### F 补充：尝试容量拒绝的完整终态
+
+继续复审满容量的真实网关接线，发现已有容量拒绝从 authorize_attempt 抛出 InvalidTransitionError，而ModelGateway只处理预算和授权异常；第二次结构重试未获准入后，已有费用完成的call仍executing，路由只有selected、无终态。新增真实网关测试已复现（`.runtime/remediation-capacity-denial-before.xml`），未通过结果没有丢弃。
+
+根因修复只捕获明确的evidence_capacity_reached准入拒绝，拥有的call结束failed，之前succeeded尝试及费用保持；路由保存已选路线的failed终态与结果，不把本地容量拒绝当供应商失败，不更换密钥再试。其他完整性、状态或未知异常不被宽泛吞掉；unknown请求继续隔离。首次尝试尚未授权的拒绝也终态且零外发，已发送尝试的费用不清零。
+
+模型/授权/unknown/用量/容量交叉109通过、172子测试通过（`.runtime/remediation-capacity-denial-final.xml`）；首次和重试两项容量边界2通过（`.runtime/remediation-capacity-denial-boundaries.xml`），其中重试已知费用3微美元保持。Ruff全根及Mypy389文件通过。前端补充`7e3ce95`的精确提交静态、Node45和页面27项另通过（`.runtime/remediation-session-exact.json`）。
+
+由于本补充改变Python树，之前`3bfb8f3`整仓精确回归在约48%处停止，日志`.runtime/remediation-final-exact.log`保留，没有完整结果、不能称为整仓通过。最终应用提交后重新完整检出回归；测试环境固定dev/cloud哈希锁，额外测试调度插件pytest-xdist3.8.0、execnet2.1.2只安装在忽略的隔离环境，不改产品锁。采用三进程隔离测试，命令与精确SHA写入验证报告；如有失败按实测记录、查因和复验。

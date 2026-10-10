@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 from noyra.core.admission import OperationInvalidated, assert_current_lease
-from noyra.core.errors import IntegrityError
+from noyra.core.errors import IntegrityError, InvalidTransitionError
 from noyra.core.redaction import redact_payload
 from noyra.core.types import canonical_json, content_hash
 
@@ -171,6 +171,14 @@ class ModelGateway:
                     error_code="budget_exhausted"
                     if isinstance(error, BudgetExhaustedError)
                     else "model_authorization_denied",
+                )
+                raise
+            except InvalidTransitionError as error:
+                if str(error) != "evidence_capacity_reached":
+                    raise
+                # No new attempt was admitted; preserve all earlier settled usage.
+                self.ledger.finish_call(
+                    call.call_id, "failed", error_code="evidence_capacity_reached"
                 )
                 raise
 
