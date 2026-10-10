@@ -45,6 +45,7 @@ from .config import OpenAICompatibleSettings
 from .errors import (
     BudgetExhaustedError,
     ConfigurationError,
+    ModelAuthorizationError,
     ModelCallStateError,
     ProviderCallError,
     StructuredOutputError,
@@ -3018,7 +3019,9 @@ class RoutedModelGateway(ModelGateway):
                         latency,
                     )
                     terminal_error = error
-                    if isinstance(error, ModelCallStateError):
+                    if isinstance(error, ModelCallStateError) and not isinstance(
+                        error, ModelAuthorizationError
+                    ):
                         # Another worker may have claimed the same logical
                         # request between route inspection and durable
                         # preparation.  This is not a provider failure and
@@ -3480,6 +3483,8 @@ class RoutedModelGateway(ModelGateway):
             resource_group_id=group.group_id,
             pool_limits=self._aggregate_limits(group.pool),
             resource_revision=group.limit_revision,
+            resource_key_id=key.key_id,
+            resource_key_fingerprint=key.key_fingerprint,
             capture_model_io=self.capture_model_io,
             capture_model_io_getter=self.capture_model_io_getter,
             enforce_training_policy=self.enforce_training_policy,

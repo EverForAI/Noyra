@@ -38,6 +38,10 @@ class ModelCallStateError(ModelGatewayError):
     """A model call cannot advance from its current durable state."""
 
 
+class ModelAuthorizationError(ModelCallStateError):
+    """Current resource authorization denies a request that has not been sent."""
+
+
 class StructuredOutputError(ModelGatewayError):
     """The provider response did not satisfy the requested output schema."""
 

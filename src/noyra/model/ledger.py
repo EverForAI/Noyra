@@ -18,7 +18,12 @@ from noyra.core.types import (
     utc_now,
 )
 
-from .errors import BudgetExhaustedError, ModelCallConflictError, ModelCallStateError
+from .errors import (
+    BudgetExhaustedError,
+    ModelAuthorizationError,
+    ModelCallConflictError,
+    ModelCallStateError,
+)
 from .types import (
     AttemptRecord,
     BudgetLimits,
@@ -132,19 +137,14 @@ class ModelLedger:
         continuation: bool = False,
         expected_resource_revision: int | None = None,
         refresh_pool_limits: bool = False,
+        resource_key_id: str | None = None,
+        resource_key_fingerprint: str | None = None,
     ) -> AttemptRecord:
         if min(reserved_input_tokens, reserved_output_tokens, reserved_cost_microusd) < 0:
             raise ValueError("model attempt reservations cannot be negative")
         budget_day = budget_day or utc_now()[:10]
         with self.database.transaction() as connection:
             call = self._get_call_row(connection, call_id)
-            if connection.execute(
-                "SELECT 1 FROM private_model_sources s JOIN private_conversations c "
-                "ON c.conversation_id=s.conversation_id WHERE s.call_id=? "
-                "AND c.status IN ('deleting','deleted') LIMIT 1",
-                (call_id,),
-            ).fetchone():
-                raise ModelCallStateError("private source has been withdrawn")
             if call["status"] == "executing" and continuation:
                 previous = connection.execute(
                     "SELECT status FROM model_attempts WHERE call_id = ? "
@@ -157,6 +157,13 @@ class ModelLedger:
                 raise ModelCallStateError(
                     f"cannot authorize attempt for call in state {call['status']}"
                 )
+            self._check_request(
+                connection,
+                call_id,
+                resource_key_id,
+                resource_key_fingerprint,
+                expected_resource_revision,
+            )
             group_id = call["resource_group_id"]
             if resource_group_id is not None and resource_group_id != group_id:
                 raise ModelCallStateError("model attempt resource group does not match its call")
@@ -169,7 +176,7 @@ class ModelLedger:
                 is not None
             )
             if expected_resource_revision is not None and not group_exists:
-                raise ModelCallStateError("model resource is unavailable")
+                raise ModelAuthorizationError("model resource is unavailable")
             if group_exists:
                 from .resources import CognitiveResourceStore, RoutedModelGateway
 
@@ -178,12 +185,12 @@ class ModelLedger:
                 )
                 group = CognitiveResourceStore._from_group_row(connection, group_row)
                 if group.status != "active":
-                    raise ModelCallStateError("model resource is not active")
+                    raise ModelAuthorizationError("model resource is not active")
                 if (
                     expected_resource_revision is not None
                     and group.limit_revision != expected_resource_revision
                 ):
-                    raise ModelCallStateError("model resource changed before authorization")
+                    raise ModelAuthorizationError("model resource changed before authorization")
                 limits = RoutedModelGateway._limits_for_group(group)
                 if pool_limits is not None and refresh_pool_limits:
                     groups = [
@@ -302,16 +309,102 @@ class ModelLedger:
             )
             return self._load_attempt_connection(connection, attempt_id)
 
-    def start_attempt(self, attempt_id: str) -> AttemptRecord:
+    @staticmethod
+    def _check_key(connection: Any, call: Any, key_id: str | None, fingerprint: str | None) -> None:
+        if key_id is None:
+            return
+        key = connection.execute(
+            "SELECT * FROM cognitive_resource_keys WHERE key_id=? AND subject_id=? AND group_id=?",
+            (key_id, call["subject_id"], call["resource_group_id"]),
+        ).fetchone()
+        if key is None or key["status"] == "revoked" or key["key_fingerprint"] != fingerprint:
+            raise ModelAuthorizationError("model credential authorization changed")
+        from .resources import CognitiveResourceStore
+
+        CognitiveResourceStore._from_key_row(key)
+
+    def check_request_authorization(
+        self,
+        call_id: str,
+        *,
+        resource_key_id: str | None = None,
+        resource_key_fingerprint: str | None = None,
+        expected_resource_revision: int | None = None,
+    ) -> None:
+        with self.database.connection() as connection:
+            self._check_request(
+                connection,
+                call_id,
+                resource_key_id,
+                resource_key_fingerprint,
+                expected_resource_revision,
+            )
+
+    def _check_request(
+        self,
+        connection: Any,
+        call_id: str,
+        key_id: str | None,
+        fingerprint: str | None,
+        revision: int | None,
+    ) -> None:
+        call = self._get_call_row(connection, call_id)
+        if connection.execute(
+            "SELECT 1 FROM private_model_sources s JOIN private_conversations c "
+            "ON c.conversation_id=s.conversation_id WHERE s.call_id=? "
+            "AND c.status IN ('deleting','deleted') LIMIT 1",
+            (call_id,),
+        ).fetchone():
+            raise ModelAuthorizationError("private source has been withdrawn")
+        self._check_key(connection, call, key_id, fingerprint)
+        if revision is not None:
+            from .resources import CognitiveResourceStore
+
+            group = connection.execute(
+                "SELECT * FROM cognitive_resource_groups WHERE group_id=? AND subject_id=?",
+                (call["resource_group_id"], call["subject_id"]),
+            ).fetchone()
+            if group is None:
+                raise ModelAuthorizationError("model resource is unavailable")
+            current = CognitiveResourceStore._from_group_row(connection, group)
+            if current.status != "active" or current.limit_revision != revision:
+                raise ModelAuthorizationError("model resource authorization changed")
+
+    def cancel_unsent_attempt(self, attempt_id: str, *, error_code: str) -> None:
+        with accounting_scope(), self.database.transaction() as connection:
+            row = self._get_attempt_row(connection, attempt_id)
+            if row["status"] not in {"authorized", "executing"}:
+                raise ModelCallStateError("cannot cancel a terminal model attempt")
+            connection.execute(
+                "UPDATE model_attempts SET status='cancelled', error_code=?, completed_at=? "
+                "WHERE attempt_id=?",
+                (error_code, utc_now(), attempt_id),
+            )
+
+    def start_attempt(
+        self,
+        attempt_id: str,
+        *,
+        resource_key_id: str | None = None,
+        resource_key_fingerprint: str | None = None,
+        expected_resource_revision: int | None = None,
+    ) -> AttemptRecord:
         with self.database.transaction() as connection:
             row = self._get_attempt_row(connection, attempt_id)
+            self._check_request(
+                connection,
+                str(row["call_id"]),
+                resource_key_id,
+                resource_key_fingerprint,
+                expected_resource_revision,
+            )
             if connection.execute(
                 "SELECT 1 FROM private_model_sources s JOIN private_conversations c "
                 "ON c.conversation_id=s.conversation_id WHERE s.call_id=? "
                 "AND c.status IN ('deleting','deleted') LIMIT 1",
                 (row["call_id"],),
             ).fetchone():
-                raise ModelCallStateError("private source has been withdrawn")
+                raise ModelAuthorizationError("private source has been withdrawn")
             if row["status"] != "authorized":
                 raise ModelCallStateError(f"cannot start model attempt in state {row['status']}")
             connection.execute(
