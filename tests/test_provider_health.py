@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -6,8 +7,136 @@ import pytest
 
 from noyra.core import Database, IdentityStore
 from noyra.core.errors import IntegrityError
+from noyra.core.integrity import IntegrityRegistry
 from noyra.core.provider_health import ProviderHealthStore, RoutePermit
 from noyra.core.types import content_hash
+
+
+def legacy_bucket() -> dict[str, Any]:
+    row = {
+        "subject_id": "test",
+        "provider_kind": "model",
+        "provider_id": "test",
+        "bucket_start": "2026-10-10T00:00:00+00:00",
+        "attempt_count": 2,
+        "success_count": 1,
+        "failure_count": 1,
+        "unknown_count": 0,
+        "latency_total_ms": 100,
+        "last_success_at": None,
+        "last_failure_at": None,
+        "error_counts_json": "{}",
+        "latency_samples_json": "[]",
+    }
+    row["state_hash"] = ProviderHealthStore._legacy_bucket_hash(row)
+    return row
+
+
+@pytest.mark.parametrize(
+    "errors,samples",
+    [
+        ({"auth": -999}, [-800]),
+        ({"auth": True}, []),
+        ([], []),
+        ({}, {}),
+        ({"other": 1}, []),
+        ({"auth": 3}, []),
+        ({}, [101]),
+        ({}, [0, 0, 0]),
+        ({}, [True]),
+        ({}, [0.5]),
+        ({}, [0] * 129),
+        (None, []),
+    ],
+)
+@pytest.mark.parametrize("modern", [False, True])
+def test_health_detail_shape_counts_and_bounds_are_authenticated(
+    errors: Any,
+    samples: Any,
+    modern: bool,
+) -> None:
+    row = legacy_bucket()
+    row["error_counts_json"] = json.dumps(errors)
+    row["latency_samples_json"] = json.dumps(samples)
+    if modern:
+        row["state_hash"] = ProviderHealthStore._bucket_hash(
+            "test",
+            "model",
+            "test",
+            row["bucket_start"],
+            2,
+            1,
+            1,
+            100,
+            0,
+            None,
+            None,
+            errors,
+            samples,
+        )
+    with pytest.raises(IntegrityError):
+        ProviderHealthStore._verify_bucket(row)
+
+
+def test_canonical_legacy_bucket_accepts_only_empty_added_fields() -> None:
+    row = legacy_bucket()
+    ProviderHealthStore._verify_bucket(row)
+    row["error_counts_json"] = '{"auth":1}'
+    with pytest.raises(IntegrityError):
+        ProviderHealthStore._verify_bucket(row)
+    row["error_counts_json"] = "{}"
+    row["last_failure_at"] = "2026-10-10T00:00:00+00:00"
+    with pytest.raises(IntegrityError):
+        ProviderHealthStore._verify_bucket(row)
+
+
+def test_legacy_state_cannot_authenticate_a_new_probe() -> None:
+    row = {
+        "subject_id": "test",
+        "provider_kind": "model",
+        "provider_id": "test",
+        "state": "healthy",
+        "consecutive_failures": 0,
+        "updated_at": "2026-10-10T00:00:00+00:00",
+        "cooldown_until": None,
+        "probe_token": None,
+        "probe_started_at": None,
+        "last_success_at": None,
+        "last_failure_at": None,
+    }
+    row["state_hash"] = ProviderHealthStore._legacy_state_hash(row)
+    ProviderHealthStore._verify_state(row)
+    row["probe_token"] = "injected"
+    row["probe_started_at"] = row["updated_at"]
+    with pytest.raises(IntegrityError):
+        ProviderHealthStore._verify_state(row)
+
+
+def test_projection_and_watchdog_share_strict_legacy_validation(tmp_path: Path) -> None:
+    db, subject = fixture(tmp_path)
+    store = ProviderHealthStore(db)
+    store.record_attempt(subject, "model", "test", "fixture", False, 100, "timeout")
+    with db.transaction() as connection:
+        row = dict(connection.execute("SELECT * FROM provider_health_buckets").fetchone())
+        row["state_hash"] = store._legacy_bucket_hash(row)
+        connection.execute(
+            "UPDATE provider_health_buckets SET state_hash=?,error_counts_json=?,"
+            "latency_samples_json='[]',last_success_at=NULL,last_failure_at=NULL",
+            (row["state_hash"], '{"auth":-999}'),
+        )
+    with pytest.raises(IntegrityError):
+        store.list_projection(subject, "model")
+    report = IntegrityRegistry().run(
+        db,
+        subject,
+        tmp_path,
+        profile="manual",
+        policy_mode="alert",
+        deadline_seconds=10,
+        check_ids=("operations.provider_health",),
+    )
+    assert report.status != "ok"
+    assert any(finding.check_id == "operations.provider_health" for finding in report.findings)
 
 
 def fixture(tmp_path: Path) -> Any:

@@ -1605,23 +1605,7 @@ def _check_provider_health(context: IntegrityContext) -> IntegrityCheckOutcome:
     ).fetchall()
     bucket_providers: set[tuple[str, str]] = set()
     for row in bucket_rows:
-        expected = ProviderHealthStore._bucket_hash(
-            row["subject_id"],
-            row["provider_kind"],
-            row["provider_id"],
-            row["bucket_start"],
-            int(row["attempt_count"]),
-            int(row["success_count"]),
-            int(row["failure_count"]),
-            int(row["latency_total_ms"]),
-            int(row["unknown_count"]),
-            row["last_success_at"],
-            row["last_failure_at"],
-            json.loads(row["error_counts_json"] or "{}"),
-            json.loads(row["latency_samples_json"] or "[]"),
-        )
-        if row["state_hash"] not in {expected, ProviderHealthStore._legacy_bucket_hash(row)}:
-            raise IntegrityError("provider health bucket state hash mismatch")
+        ProviderHealthStore._verify_bucket(row)
         bucket_providers.add((str(row["provider_kind"]), str(row["provider_id"])))
     state_rows = context.connection.execute(
         "SELECT * FROM provider_health_state WHERE subject_id=?", (context.subject_id,)
