@@ -15,6 +15,10 @@ from typing import Any
 import httpcore
 import httpx
 
+from .runtime_logging import install_log_safety
+
+install_log_safety()
+
 DEFAULT_MAX_RESPONSE_BYTES = 2_000_000
 DEFAULT_MAX_HEADER_BYTES = 64_000
 DEFAULT_TOTAL_TIMEOUT_SECONDS = 30.0

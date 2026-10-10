@@ -10546,6 +10546,9 @@ class NoyraService:
 
 
 def main() -> None:
+    from noyra.core.runtime_logging import install_log_safety
+
+    install_log_safety()
     multiprocessing.freeze_support()
     parser = argparse.ArgumentParser(prog="noyra-service")
     parser.add_argument("--log-level", default=os.getenv("NOYRA_LOG_LEVEL", "INFO"))
