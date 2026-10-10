@@ -1,4 +1,16 @@
 let csrfToken = "";
+let adminSessionGeneration = 0;
+const adminReadVersions = new Map();
+function beginAdminRead(name) {
+  const session = adminSessionGeneration;
+  const version = (adminReadVersions.get(name) || 0) + 1;
+  adminReadVersions.set(name, version);
+  return () => Boolean(csrfToken) && session === adminSessionGeneration && version === adminReadVersions.get(name);
+}
+async function adminRead(current, path) {
+  try { return await request(path); }
+  catch (error) { if (current()) throw error; return null; }
+}
 let activeSection = "overview";
 let publicPostCursor = "";
 let publicPostRows = [];
@@ -161,7 +173,10 @@ function showSection(section) {
   void loadAll();
 }
 async function loadMigration() {
-  const [policy, targets, proposals, tasks] = await Promise.all([request("/api/v1/admin/migration/policy"), request("/api/v1/admin/migration/targets"), request("/api/v1/admin/migration/proposals"), request("/api/v1/admin/migration/tasks")]);
+  const current = beginAdminRead("migration");
+  const [policy, targets, proposals, tasks] = await Promise.all(["policy", "targets", "proposals", "tasks"].map(kind => adminRead(current, `/api/v1/admin/migration/${kind}`)));
+  if (!current()) return;
+  const draft = $("#migration-policy-form").dataset.dirty ? [...$("#migration-policy-form").elements].map(input => [input,input.value,input.checked]) : [];
   $("#migration-enabled").checked = Boolean(policy.enabled); $("#migration-approval-mode").value = policy.approval_mode; $("#migration-cooldown").value = Math.round((policy.rejection_cooldown_seconds || 0) / 86400); $("#migration-wallet-mode").value = policy.wallet_mode; $("#migration-local-wallet").checked = Boolean(policy.local_wallet_transfer_enabled); $("#migration-policy-summary").innerHTML = summaryRows([["当前状态", policy.enabled ? "已开启" : "已关闭"], ["评估状态", ({ disabled: "已关闭", deferred: "评估延后", no_actionable_need: "无需迁移", cognition_unavailable: "等待认知资源", awaiting_approval: "等待审批", approved: "已批准", executing: "执行中", committed: "已迁移", reconciliation_required: "需核对或回滚", cognition_declined: "认知评估未建议迁移", hard_gate_rejected: "未通过策略检查" })[policy.assessment_status] || "等待评估"], ["策略版本", policy.revision], ["审批模式", policy.approval_mode], ["钱包模式", policy.wallet_mode], ["活动 epoch", policy.active_epoch ? `${policy.active_epoch.epoch_number} · ${policy.active_epoch.target_id}` : "无"]]);
   $("#migration-allowed-targets").value = (policy.allowed_target_ids || []).join(",");
   $("#migration-allowed-regions").value = (policy.allowed_regions || []).join(",");
@@ -169,6 +184,7 @@ async function loadMigration() {
   $("#migration-min-free").value = policy.min_free_bytes;
   $("#migration-trust").value = policy.trust_level;
   $("#migration-downtime").value = policy.max_downtime_seconds;
+  for (const [input,value,checked] of draft) { input.value=value; input.checked=checked; }
   $("#migration-target-list").innerHTML = targets.length ? targets.map((item) => `<article class="resource-item"><div><h3>${esc(item.target_id)}</h3><p>${item.status === "active" ? "已验证" : "等待验证"} · ${esc(item.region || "未设置区域")}</p><small>${esc(item.endpoint)} · ${esc(item.key_fingerprint)}</small></div><div class="resource-actions"><button type="button" data-migration-challenge="${esc(item.target_id)}">${item.status === "active" ? "重新验证" : "发起验证"}</button>${item.status !== "revoked" ? `<button class="text-button" type="button" data-migration-revoke="${esc(item.target_id)}">撤销</button>` : ""}</div></article>`).join("") : '<div class="muted">尚未注册迁移目标</div>';
   $("#migration-proposal-list").innerHTML = proposals.length ? proposals.map((item) => `<article class="resource-item"><div><h3>${esc(item.reason_code)}</h3><p>${esc(item.status)} · 目标 ${esc(item.target_id)} · 策略版本 ${esc(item.policy_revision)}</p><small>${esc(item.reason)}</small><small>收益 ${esc(item.benefit_score)} · 风险 ${esc(item.risk_score)} · 过期 ${esc(item.expires_at)}</small><small>证据：${esc(JSON.stringify(item.evidence || {}))}</small></div>${["awaiting_approval", "planned"].includes(item.status) ? `<div class="resource-actions"><button type="button" data-migration-approve="${esc(item.proposal_id)}">批准</button><button class="text-button" type="button" data-migration-reject="${esc(item.proposal_id)}">拒绝</button></div>` : ""}</article>`).join("") : '<div class="muted">暂无迁移提案</div>';
   $("#migration-task-list").innerHTML = tasks.length ? tasks.map((item) => `<article class="resource-item"><div><h3>${esc(item.task_id)}</h3><p>${esc(item.status)} · 目标 ${esc(item.target_id)}</p><small>${esc(item.updated_at || item.created_at)}</small>${item.error_code ? `<small>执行受阻：${esc(item.error_code)}</small>` : ""}</div>${["approved"].includes(item.status) ? `<div class="resource-actions"><button type="button" data-migration-cutover="${esc(item.task_id)}">执行迁移</button></div>` : ""}${["approved", "preflight", "awaiting_approval"].includes(item.status) ? `<div class="resource-actions"><button class="text-button" type="button" data-migration-cancel="${esc(item.task_id)}">取消任务</button></div>` : ""}${!["committed", "rolled_back", "cancelled"].includes(item.status) ? `<div class="resource-actions"><button class="text-button" type="button" data-migration-rollback="${esc(item.task_id)}">回滚</button></div>` : ""}</article>`).join("") : '<div class="muted">暂无迁移任务</div>';
@@ -365,11 +381,12 @@ function renderUpgradeStatus(result) {
 }
 async function pollUpgradeStatus() {
   if (!csrfToken) return;
+  const current = beginAdminRead("upgrade-poll");
   const controller = new AbortController();
   upgradePollController = controller;
   try {
     const result = await request("/api/v1/admin/upgrade/status", { signal: controller.signal });
-    if (!csrfToken || controller.signal.aborted) return;
+    if (!current() || controller.signal.aborted) return;
     upgradeStatusAvailable = true;
     if (upgradeTaskId && result.task_id !== upgradeTaskId) {
       $("#upgrade-status-label").textContent = "等待服务器开始";
@@ -386,10 +403,12 @@ async function pollUpgradeStatus() {
       stopUpgradePolling();
       if (result.status === "completed") {
         await loadUpgradeCheck(true);
+        if (!current()) return;
         $("#upgrade-status-label").textContent = "升级完成";
       }
     }
   } catch (error) {
+    if (!current()) return;
     if (error?.name === "AbortError") return;
     if (error.status === 401) {
       await logout();
@@ -404,12 +423,15 @@ async function pollUpgradeStatus() {
   }
 }
 async function loadUpgradeCheck(quiet = false) {
+  const current = beginAdminRead("upgrade-check");
   try {
     const result = await request("/api/v1/admin/upgrade/check");
+    if (!current()) return null;
     renderUpgradeCheck(result);
     if (!quiet) setStatus("#upgrade-status", result.update_available ? "已找到可升级版本，请核对信息后手动确认。" : "当前已经是最新版本。");
     return result;
   } catch (error) {
+    if (!current()) return null;
     if (error.status === 401) {
       await logout();
       return null;
@@ -426,14 +448,17 @@ async function loadUpgradeCheck(quiet = false) {
   }
 }
 async function loadUpgradePanel() {
+  const current = beginAdminRead("upgrade-panel");
   try {
     const installed = await request("/api/v1/admin/upgrade/installed");
+    if (!current()) return;
     $("#upgrade-current-version").textContent = `${installed.current_release} · ${String(installed.current_sha || "未知提交").slice(0, 12)}`;
-  } catch (error) { if (!upgradeCheckResult) $("#upgrade-current-version").textContent = `本地信息不可读（${error.status || "连接失败"}）`; }
+  } catch (error) { if (!current()) return; if (!upgradeCheckResult) $("#upgrade-current-version").textContent = `本地信息不可读（${error.status || "连接失败"}）`; }
   const [checkResult, statusResult] = await Promise.allSettled([
     Promise.resolve(null),
     request("/api/v1/admin/upgrade/status"),
   ]);
+  if (!current()) return;
   if ([checkResult, statusResult].some((entry) => entry.status === "rejected" && entry.reason?.status === 401)) {
     await logout();
     return;
@@ -526,15 +551,22 @@ function renderModelKey(item, key) {
   return `<details class="model-key-details"><summary><span class="model-key-identity"><code title="密钥指纹（截断）">${esc(shortFingerprint(key.key_fingerprint))}</code><span class="status-chip status-${esc(key.status)}">${esc(status)}</span></span><span class="model-key-counters">选用 ${esc(formatInteger(key.selection_count))} 次 · 连续失败 ${esc(formatInteger(key.consecutive_failures))} 次${esc(cooldown)}</span></summary><div class="model-key-body"><dl class="model-key-metadata"><div><dt>密钥标识</dt><dd>${esc(key.key_id)}</dd></div><div><dt>创建时间</dt><dd>${esc(formatTimestamp(key.created_at))}</dd></div><div><dt>最近选用</dt><dd>${esc(formatTimestamp(key.last_selected_at))}</dd></div><div><dt>最近成功</dt><dd>${esc(formatTimestamp(key.last_success_at))}</dd></div><div><dt>最近失败</dt><dd>${esc(formatTimestamp(key.last_failure_at))}</dd></div><div><dt>冷却结束</dt><dd>${esc(formatTimestamp(key.cooldown_until))}</dd></div></dl>${canRevoke ? `<div class="resource-actions"><button data-model-key-action="revoke" data-group-id="${esc(item.group_id)}" data-key-id="${esc(key.key_id)}" type="button">撤销密钥</button></div>` : ""}</div></details>`;
 }
 
-async function login(event) { event.preventDefault(); const form = event.currentTarget; const token = $("#login-token").value.trim(); if (!token) return; const button = submitButton(form, event); if (button) button.disabled = true; setStatus("#login-status", "正在建立会话"); try { const result = await request("/admin/session", { method: "POST", body: JSON.stringify({ token }) }); stopUpgradePolling(); upgradeTaskId = null; upgradeStatusAvailable = false; upgradeCheckResult = null; csrfToken = result.csrf_token; $("#login-token").value = ""; $("#login-shell").hidden = true; $("#admin-shell").hidden = false; await loadAll(); } catch (error) { setStatus("#login-status", errorText(error), true); } finally { if (button) button.disabled = false; } }
+async function login(event) { event.preventDefault(); const form = event.currentTarget; const token = $("#login-token").value.trim(); if (!token) return; const session = adminSessionGeneration; const button = submitButton(form, event); if (button) button.disabled = true; setStatus("#login-status", "正在建立会话"); try { const result = await request("/admin/session", { method: "POST", body: JSON.stringify({ token }) }); if (session !== adminSessionGeneration) return; adminSessionGeneration++; stopUpgradePolling(); upgradeTaskId = null; upgradeStatusAvailable = false; upgradeCheckResult = null; csrfToken = result.csrf_token; $("#login-token").value = ""; $("#login-shell").hidden = true; $("#admin-shell").hidden = false; await loadAll(); } catch (error) { if (session === adminSessionGeneration) setStatus("#login-status", errorText(error), true); } finally { if (button) button.disabled = false; } }
 async function logout() {
+  adminSessionGeneration++; adminReadVersions.clear();
   const previousToken=csrfToken;csrfToken="";
   stopUpgradePolling();stopRuntimeLogPolling();clearChat();clearWallet();overviewLoadVersion++;modelLoadVersion++;
   renderedModels.clear();
   latestDiagnostics=null;runtimeLogCursor=null;runtimeLogBrowsingHistory=false;upgradeTaskId=null;upgradeStatusAvailable=false;upgradeCheckResult=null;
   publicPostCursor="";publicPostRows=[];publicPostActionKeys.clear();publicPostLoadVersion++;
-  for(const id of ["model-list","runtime-log-list","lifecycle-summary","lifecycle-timeline","public-post-review-list","overview-attention","overview-events","overview-lifecycle","overview-metrics","cognition-summary","storage-summary"])$("#"+id).replaceChildren();
-  for(const form of document.querySelectorAll("#admin-shell form")){form.reset();delete form.dataset.dirty;}
+  channelBindings=[]; modelPageOffset=0; usageResourcePage=0; usageLoadVersion++; usageResourceVersion++; healthLoadVersion++; healthPages.model=0; healthPages.search=0; renderedModelQuery=null;
+  for(const id of ["model-list","runtime-log-list","lifecycle-summary","lifecycle-timeline","public-post-review-list","overview-attention","overview-events","overview-lifecycle","overview-metrics","cognition-summary","storage-summary","search-provider-list","capability-list","channel-list","binding-list","migration-policy-summary","migration-target-list","migration-proposal-list","migration-task-list","runtime-summary","public-post-usage","setup-guide-list","model-observability-summary","model-provider-health-list","search-provider-health-list","retention-summary","upgrade-log-summary","upgrade-confirmation-sha"])$("#"+id).replaceChildren();
+  for(const node of document.querySelectorAll("#admin-shell .form-status, #admin-shell .card-state, #admin-shell dd, #subject-name, #subject-meta, #overview-updated, #upgrade-commit-title"))node.textContent="";
+  for(const form of document.querySelectorAll("#admin-shell form")){form.reset();for(const name of ["dirty","revision","lengthRevision"])delete form.dataset[name];}
+  for(const input of document.querySelectorAll('#admin-shell input[type=password], #admin-shell textarea'))input.value="";
+  for(const id of ["usage-resource","admin-binding-transport","qq-identity-transport","admin-model-options"])$("#"+id).replaceChildren();
+  $("#admin-model-options").hidden=true; $("#start-upgrade").disabled=true;
+  for(const dialog of document.querySelectorAll("dialog[open]"))dialog.close();
   $("#admin-shell").hidden=true;$("#login-shell").hidden=false;activeSection="overview";
   document.querySelectorAll("[data-section-panel]").forEach(panel=>{panel.hidden=panel.dataset.sectionPanel!=="overview";});
   try {await request("/admin/session/logout",{method:"POST",headers:{"X-CSRF-Token":previousToken}});} catch { /* session is already unusable */ }
@@ -654,15 +686,17 @@ function renderSetupGuide(results) {
 }
 
 async function loadSetupGuide() {
+  const current = beginAdminRead("setup");
   const results = await Promise.allSettled([
     request("/api/config/model-resources"),
     request("/api/config/search-providers"),
     request("/api/config/transports"),
     request("/api/admin/wallet-policy"),
   ]);
-  renderSetupGuide(results);
+  if (!current()) return;
   const unauthorized = results.find((result) => result.status === "rejected" && result.reason?.status === 401);
   if (unauthorized) throw unauthorized.reason;
+  renderSetupGuide(results);
 }
 const chat = {current:null,windows:[],nextOffset:null,before:null,rows:[],drafts:new Map(),keys:new Map(),generation:0,listGeneration:0,timer:null,history:false,failures:0};
 const chatStatus = {offered:"已记录，等待处理",accepted:"接受",rejected:"拒绝",deferred:"暂缓",silent:"选择沉默",sent:"已生成回复",expired:"已过期"};
@@ -1158,22 +1192,28 @@ function renderRetention(payload) {
   ]);
 }
 async function loadRetention() {
-  const payload = await request("/api/admin/retention");
+  const current = beginAdminRead("retention");
+  const payload = await adminRead(current, "/api/admin/retention");
+  if (!current()) return;
   renderRetention(payload);
   setStatus("#retention-status", `读取于 ${formatTimestamp(new Date().toISOString())}`);
 }
 async function runRetention() {
+  const current = beginAdminRead("retention-run");
   const button = $("#run-retention");
   button.disabled = true;
   try {
     const preview = await request("/api/admin/retention");
+    if (!current()) return;
     if (!confirm(`预计待处理 ${Object.values(preview.estimate || {}).reduce((sum, value) => sum + Number(value || 0), 0)} 行；实际执行受每批上限限制。继续执行一批？`)) return;
     const result = await request("/api/admin/retention/run", { method: "POST", body: JSON.stringify({ reason: "管理员执行聚合数据保留清理" }) });
+    if (!current()) return;
     await loadRetention();
+    if (!current()) return;
     const deleted = Object.entries(result.deleted_by_table || {}).filter(([key]) => key !== "retention_runs").reduce((sum,[,value]) => sum + Number(value || 0),0);
     setStatus("#retention-status", result.failed_reason ? `部分失败：${result.failure_stage} / ${result.failed_reason}；已删除 ${formatInteger(deleted)} 行` : `已删除 ${formatInteger(deleted)} 行；压缩 ${formatInteger(result.compacted_by_table?.model_calls || 0)} 条模型内容`, Boolean(result.failed_reason));
-  } catch (error) { setStatus("#retention-status", errorText(error), true); }
-  finally { button.disabled = false; }
+  } catch (error) { if (current()) setStatus("#retention-status", errorText(error), true); }
+  finally { if (current()) button.disabled = false; }
 }
 
 const walletExecutionStatusLabels = { signing: "签名中", broadcast: "已广播", unknown: "结果未知", confirmed: "已确认", failed: "失败" };
@@ -1488,7 +1528,7 @@ async function loadUsageResources() {
     $("#usage-resource-page").textContent = `资源第 ${usageResourcePage / 50 + 1} 页`;
     $("#usage-resource-prev").disabled = usageResourcePage === 0;
     $("#usage-resource-next").disabled = records.length < 50;
-  } catch (error) { setStatus("#usage-status", errorText(error), true); }
+  } catch (error) { if (version === usageResourceVersion && csrfToken) setStatus("#usage-status", errorText(error), true); }
 }
 async function loadUsage() {
   const generation = ++usageLoadVersion;
@@ -1656,8 +1696,11 @@ function draftModelPayload(includeModel = true) {
   return payload;
 }
 async function loadSearchProviders() {
-  const [providers, routing] = await Promise.all([request("/api/config/search-providers"), request("/api/config/search-routing")]);
-  $("#search-routing-mode").value = routing.mode || "auto";
+  const current = beginAdminRead("search");
+  const [providers, routing] = await Promise.all([adminRead(current, "/api/config/search-providers"), adminRead(current, "/api/config/search-routing")]);
+  if (!current()) return;
+  if (!$("#admin-search-routing-form").dataset.dirty) $("#search-routing-mode").value = routing.mode || "auto";
+  if ($("#search-provider-list").querySelector("form[data-dirty]")) return;
   const statusLabels = { active: "可用", revoked: "已撤销" };
   $("#search-provider-list").innerHTML = providers.length ? providers.map((item) => {
     const enabled = item.status === "active" && item.enabled !== false;
@@ -1666,11 +1709,16 @@ async function loadSearchProviders() {
     return `<article class="resource-item"><div><h3>${esc(item.label)} · ${esc(item.provider_type)}</h3><p>密钥指纹：${esc(item.key_fingerprint)} · 状态：${esc(item.status === "active" ? (enabled ? "可用" : "已停用") : statusLabels[item.status] || "未知")} · 优先级 ${esc(formatInteger(item.priority ?? 100))} · 权重 ${esc(formatInteger(item.weight ?? 1))}</p></div><div class="resource-actions">${controls}</div>${routing}</article>`;
   }).join("") : '<div class="empty-state">尚未配置搜索 API</div>';
 }
-async function loadCapabilities() { const rows = await request("/api/config/capabilities"); $("#capability-list").innerHTML = rows.length ? rows.map((item) => { const scope = item.scope?.public_https ? "所有经过安全边界的公网 HTTPS 来源" : JSON.stringify(item.scope || {}); const canRevoke = item.status === "active"; return `<article class="resource-item"><div><h3>${esc(item.capability_type)} · ${esc(item.effective_status || item.status)}</h3><p>${esc(scope)}</p><small>签发者：${esc(item.issuer)} · 每小时：${esc(item.rate_limit_per_hour)} · ${esc(item.expires_at || "长期")}</small></div>${canRevoke ? `<button data-capability-action="revoke" data-id="${esc(item.grant_id)}" type="button">撤销</button>` : ""}</article>`; }).join("") : '<div class="muted">暂无能力授权</div>'; }
+async function loadCapabilities() {
+  const current = beginAdminRead("capabilities");
+  const rows = await adminRead(current, "/api/config/capabilities");
+  if (!current()) return;
+  $("#capability-list").innerHTML = rows.length ? rows.map((item) => { const scope = item.scope?.public_https ? "所有经过安全边界的公网 HTTPS 来源" : JSON.stringify(item.scope || {}); const canRevoke = item.status === "active"; return `<article class="resource-item"><div><h3>${esc(item.capability_type)} · ${esc(item.effective_status || item.status)}</h3><p>${esc(scope)}</p><small>签发者：${esc(item.issuer)} · 每小时：${esc(item.rate_limit_per_hour)} · ${esc(item.expires_at || "长期")}</small></div>${canRevoke ? `<button data-capability-action="revoke" data-id="${esc(item.grant_id)}" type="button">撤销</button>` : ""}</article>`; }).join("") : '<div class="muted">暂无能力授权</div>';
+}
 async function loadChannels() {
-  const session=csrfToken;
-  const [transports, bindings] = await Promise.all([request("/api/config/transports"), request("/api/config/inbound-bindings")]);
-  if(!session || session!==csrfToken)return;
+  const current = beginAdminRead("channels");
+  const [transports, bindings] = await Promise.all([adminRead(current, "/api/config/transports"), adminRead(current, "/api/config/inbound-bindings")]);
+  if (!current()) return;
   const transportMap = new Map(transports.map((item) => [item.transport_id, item]));
   $("#admin-binding-transport").innerHTML = transports.filter((item) => item.status === "active").map((item) => `<option value="${esc(item.transport_id)}">${esc(item.channel)} · ${esc(item.label)}</option>`).join("") || '<option value="">先添加渠道</option>';
   const selected = $("#qq-identity-transport").value;
@@ -1703,8 +1751,11 @@ async function checkQQIdentity() {
   if (state.binding_id) qqIdentity.binding_id = state.binding_id;
 }
 async function loadRuntime() {
+  const current = beginAdminRead("runtime");
   const results = await Promise.allSettled([request("/api/diagnostics"), request("/api/admin/public-post-controls")]);
-  if (!csrfToken) return;
+  if (!current()) return;
+  const unauthorized = results.find(result => result.status === "rejected" && result.reason?.status === 401);
+  if (unauthorized) throw unauthorized.reason;
   if (results[0].status === "fulfilled") {
     const diagnostics = results[0].value; const cognition = diagnostics.cognition || {};
     $("#runtime-summary").innerHTML = summaryRows([["认知状态", cognition.enabled ? "已启用" : "未启用"], ["待处理消息", cognition.pending_interactions?.length || 0], ["认知等待任务", cognition.waiting_interaction_tasks?.length || 0], ["入站去重", JSON.stringify(diagnostics.inbound || {})], ["未知模型调用", diagnostics.unknown?.model_calls || 0], ["外部投递", JSON.stringify(diagnostics.deliveries || {})], ["完整性", diagnostics.integrity?.status || "未配置"]]).replaceAll("summary-row", "runtime-item");
@@ -1721,11 +1772,12 @@ async function loadRuntime() {
 }
 async function loadAll() {
   if(!csrfToken)return;
+  const current = beginAdminRead("all");
   const section=activeSection;
   const tasks = {overview:[["总览",loadOverview]],logs:[["活动日志",loadRuntimeLogs]],conversation:[["私密交流",loadMailbox]],"public-posts":[["内容审核",loadPublicPosts]],models:[["认知资源",loadModels]],search:[["搜索配置",loadSearchProviders]],capabilities:[["能力授权",loadCapabilities]],channels:[["通讯渠道",loadChannels]],wallet:[["钱包与付款",loadWallet]],migration:[["迁移与庇护所",loadMigration]],runtime:[["运行防护",loadRuntime]]}[section] || [];
   if(section==="overview")for(const [id,label,load] of [["overview-setup","配置检查",loadSetupGuide],["overview-version","本地版本",loadUpgradePanel],["overview-usage","用量",async()=>{await Promise.all([loadUsage(),loadUsageResources()]);}],["overview-providers","供应商健康",loadProviderHealth],["overview-retention","数据保留",loadRetention]])if($("#"+id).open)tasks.push([label,load]);
   const results = await Promise.allSettled(tasks.map(([, load]) => load()));
-  if(section!==activeSection || !csrfToken)return;
+  if(section!==activeSection || !current())return;
   const failures = [];
   results.forEach((result, index) => {
     if (result.status === "rejected") failures.push({ label: tasks[index][0], error: result.reason });
@@ -1744,7 +1796,7 @@ async function loadAll() {
   }
 }
 for(const [id,load] of [["overview-setup",loadSetupGuide],["overview-version",loadUpgradePanel],["overview-usage",async()=>{await Promise.all([loadUsage(),loadUsageResources()]);}],["overview-providers",loadProviderHealth],["overview-retention",loadRetention]])$("#"+id).addEventListener("toggle",()=>{if($("#"+id).open && csrfToken)void load().catch(error=>setStatus("#global-status",errorText(error),true));});
-async function restoreSession() { try { const result = await request("/admin/session"); if (!result.authenticated) return; csrfToken = result.csrf_token; $("#login-shell").hidden = true; $("#admin-shell").hidden = false; await loadAll(); } catch (error) { setStatus("#login-status", errorText(error), true); } }
+async function restoreSession() { const session = adminSessionGeneration; try { const result = await request("/admin/session"); if (!result.authenticated || session !== adminSessionGeneration) return; adminSessionGeneration++; csrfToken = result.csrf_token; $("#login-shell").hidden = true; $("#admin-shell").hidden = false; await loadAll(); } catch (error) { if (session === adminSessionGeneration) setStatus("#login-status", errorText(error), true); } }
 
 $("#refresh-runtime-logs").addEventListener("click", () => { runtimeLogCursor = null; void loadRuntimeLogs(); });
 $("#runtime-log-more").addEventListener("click", () => { void loadRuntimeLogs({ append: true }); });
@@ -1879,6 +1931,7 @@ $("#migration-policy-form").addEventListener("submit", async (event) => {
       ...(enteringLocalWallet ? { confirm_local_wallet_transfer: true } : {}),
     }) });
     setStatus("#migration-status", "迁移策略已保存");
+    delete $("#migration-policy-form").dataset.dirty;
     await loadMigration();
   } catch (error) { setStatus("#migration-status", errorText(error), true); }
 });
@@ -2526,11 +2579,14 @@ $("#admin-search-provider-test").addEventListener("click", async (event) => {
   } catch (error) { setStatus("#search-provider-status", errorText(error), true); }
   finally { button.disabled = false; }
 });
+for (const selector of ["#migration-policy-form", "#admin-search-routing-form"]) $(selector).addEventListener("input", event => { event.currentTarget.dataset.dirty="1"; });
+$("#search-provider-list").addEventListener("input", event => { const form=event.target.closest("form"); if(form)form.dataset.dirty="1"; });
 $("#admin-search-routing-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const button = submitButton(event.currentTarget, event);
+  const form = event.currentTarget;
+  const button = submitButton(form, event);
   if (button) button.disabled = true;
-  try { await request("/api/config/search-routing", { method: "POST", body: JSON.stringify({ mode: $("#search-routing-mode").value }) }); setStatus("#search-routing-status", "搜索方式已保存"); }
+  try { await request("/api/config/search-routing", { method: "POST", body: JSON.stringify({ mode: $("#search-routing-mode").value }) }); delete form.dataset.dirty; setStatus("#search-routing-status", "搜索方式已保存"); }
   catch (error) { setStatus("#search-routing-status", errorText(error), true); }
   finally { if (button) button.disabled = false; }
 });
@@ -2565,6 +2621,7 @@ $("#search-provider-list").addEventListener("submit", async (event) => {
       body: JSON.stringify({ priority, weight, reason: form.elements.reason.value.trim() }),
     });
     status.textContent = "优先级已保存";
+    delete form.dataset.dirty;
     status.classList.remove("error");
     await loadSearchProviders();
   } catch (error) {
@@ -2647,4 +2704,3 @@ $("#usage-resource").addEventListener("change", () => { void loadUsage(); });
 $("#usage-pool").addEventListener("change", () => { usageResourcePage = 0; $("#usage-resource").value = ""; void loadUsageResources().then(loadUsage); });
 for (const [id, step] of [["usage-resource-prev",-50],["usage-resource-next",50]]) $("#" + id).addEventListener("click", () => { usageResourcePage = Math.max(0, usageResourcePage + step); void loadUsageResources().then(loadUsage); });
 $("#provider-health").addEventListener("click", (event) => { const button = event.target.closest("[data-health-page]"); if (button) { healthPages[button.dataset.healthPage] = Math.max(0, healthPages[button.dataset.healthPage] + Number(button.dataset.step)); void loadProviderHealth(); } });
-$("#logout").addEventListener("click", () => { usageLoadVersion += 1; usageResourceVersion += 1; healthLoadVersion += 1; $("#model-observability-summary").replaceChildren(); $("#model-provider-health-list").replaceChildren(); $("#search-provider-health-list").replaceChildren(); $("#usage-resource").innerHTML = '<option value="">全部资源</option>'; renderedModelQuery = null; delete $("#admin-model-form").dataset.dirty; });

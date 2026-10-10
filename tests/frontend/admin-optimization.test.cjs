@@ -15,8 +15,10 @@ function context(extra = {}) {
   const nodes = new Map();
   const sandbox = {
     csrfToken: "synthetic-session", overviewLoadVersion: 0, latestDiagnostics: null,
+    adminSessionGeneration: 0, adminReadVersions: new Map(),
     $: selector => {
-      if (!nodes.has(selector)) nodes.set(selector, { innerHTML: "", textContent: "" });
+      if (!nodes.has(selector)) nodes.set(selector, { innerHTML: "", textContent: "", value:"", dataset:{},
+        options:[], querySelector:()=>null, replaceChildren(){this.innerHTML="";this.textContent="";} });
       return nodes.get(selector);
     },
     esc: value => String(value ?? "").replaceAll("<", "&lt;"),
@@ -33,7 +35,9 @@ function context(extra = {}) {
     },
     logout: async () => {}, ...extra,
   };
-  return { sandbox: vm.createContext(sandbox), nodes };
+  const isolated = vm.createContext(sandbox);
+  vm.runInContext(functionsBetween("function beginAdminRead(", "let activeSection ="), isolated);
+  return { sandbox: isolated, nodes };
 }
 
 test("wallet amounts retain exact values across zero and maximum precision", () => {
@@ -332,4 +336,84 @@ test("chat logout clears local drafts without invoking a retired erasure control
   const html=readFileSync(join(__dirname,"../../src/noyra/web/admin.html"),"utf8");
   assert.ok(!html.includes("assess-conversation-erasure"));
   assert.ok(!html.includes("conversation-erasure-assessment"));
+});
+
+const readModules = [
+  ["loadSearchProviders", "async function loadSearchProviders(", "async function loadCapabilities(", [[],{mode:"auto"}]],
+  ["loadCapabilities", "async function loadCapabilities(", "async function loadChannels(", [[]]],
+  ["loadMigration", "async function loadMigration(", "function summaryRows(", [{allowed_target_ids:[],allowed_regions:[]},[],[],[]]],
+  ["loadChannels", "async function loadChannels(", "let qqIdentity =", [[],[]]],
+  ["loadRuntime", "async function loadRuntime(", "async function loadAll(", [{cognition:{}},{usage:{}}]],
+  ["loadSetupGuide", "async function loadSetupGuide(", "const chat =", [[],[],[],{}]],
+  ["loadRetention", "async function loadRetention(", "async function runRetention(", [{}]],
+];
+for (const [name,start,end,payloads] of readModules) {
+  test(`${name} discards old session responses even after a new login`,async()=>{
+    const waiting=[];
+    let renders=0;
+    const {sandbox,nodes}=context({channelBindings:[],renderSetupGuide:()=>renders++,renderRetention:()=>renders++,
+      request:()=>new Promise(resolve=>waiting.push(resolve))});
+    vm.runInContext(functionsBetween(start,end),sandbox);
+    const pending=sandbox[name]();
+    sandbox.adminSessionGeneration++;
+    sandbox.csrfToken="another-session";
+    waiting.forEach((resolve,i)=>resolve(payloads[i]));
+    await pending;
+    assert.equal(renders,0);
+    assert.equal(nodes.size,0);
+    assert.equal(sandbox.channelBindings.length,0);
+  });
+  test(`${name} preserves latest refresh when an older response finishes last`,async()=>{
+    const waiting=[];
+    const {sandbox,nodes}=context({channelBindings:[],renderSetupGuide:()=>{},renderRetention:()=>{},
+      request:()=>new Promise(resolve=>waiting.push(resolve))});
+    vm.runInContext(functionsBetween(start,end),sandbox);
+    const first=sandbox[name]();
+    const count=waiting.length;
+    const second=sandbox[name]();
+    waiting.slice(count).forEach((resolve,i)=>resolve(payloads[i]));
+    await second;
+    const snapshot=JSON.stringify([...nodes]);
+    waiting.slice(0,count).forEach((resolve,i)=>resolve(payloads[i]));
+    await first;
+    assert.equal(JSON.stringify([...nodes]),snapshot);
+  });
+}
+
+test("stale private read errors do not become new-session errors",async()=>{
+  let reject;
+  const {sandbox}=context({request:()=>new Promise((_resolve,no)=>reject=no)});
+  vm.runInContext(functionsBetween("async function loadCapabilities(","async function loadChannels("),sandbox);
+  const pending=sandbox.loadCapabilities();
+  sandbox.adminSessionGeneration++;
+  reject({status:401,code:"unauthorized"});
+  await pending;
+});
+
+test("logout clears every private panel, loaded option, cache and open dialog",async()=>{
+  let closed=0;
+  const form={dataset:{dirty:"1",revision:"7",lengthRevision:"9"},reset(){}};
+  const secret={value:"synthetic secret"};
+  const {sandbox,nodes}=context({request:async()=>null,stopUpgradePolling:()=>{},stopRuntimeLogPolling:()=>{},
+    clearChat:()=>{},clearWallet:()=>{},document:{querySelectorAll:selector=>{
+      if(selector==="#admin-shell form")return [form];
+      if(selector.includes("input[type=password]"))return [secret];
+      if(selector==="dialog[open]")return [{close:()=>closed++}];
+      return [];
+    }},renderedModels:new Map([["private",{}]]),publicPostActionKeys:new Map(),
+    publicPostLoadVersion:0,modelLoadVersion:0,usageLoadVersion:0,usageResourceVersion:0,
+    healthLoadVersion:0,healthPages:{model:50,search:50}});
+  vm.runInContext(functionsBetween("async function logout(","async function loadOverview("),sandbox);
+  for(const id of ["search-provider-list","capability-list","channel-list","binding-list",
+    "migration-policy-summary","migration-target-list","migration-proposal-list","migration-task-list",
+    "runtime-summary","public-post-usage","setup-guide-list","model-observability-summary","retention-summary"])
+    sandbox.$("#"+id).innerHTML="private data";
+  await sandbox.logout();
+  assert.equal(sandbox.csrfToken,"");
+  assert.equal(secret.value,"");
+  assert.deepEqual(form.dataset,{});
+  assert.equal(sandbox.renderedModels.size,0);
+  assert.equal(sandbox.channelBindings.length,0);
+  assert.equal(closed,1);
+  assert.ok([...nodes.values()].every(node=>!node.innerHTML.includes("private data")));
 });
