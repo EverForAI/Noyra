@@ -55,3 +55,33 @@ Node 实际函数回归 69 通过（新增 11），JS 语法通过；本地 Chro
 首轮完整串行回归针对 `7ec7574`，运行至 61% 时已出现 4 个失败，保留 `.runtime/dispatch-full-7ec7574.log`，停止该轮以修复确定根因，不能称其通过或完整结束。对应恢复测试单独复验为 2 通过、2 失败；正常备份在打开时被误判为身份变化。探针证实当前 Python 3.12/Windows 的 `fstat.st_ctime_ns` 与 `lstat.st_ctime_ns` 含义不一致，纳秒值分别对应 change-time/creation-time，并非文件真实被改写。
 
 修复 Windows 身份元组优先使用两接口一致的 `st_birthtime_ns`（旧 Python 回退 ctime）；保留设备号、inode、大小、mtime、禁止写/删除共享的句柄。POSIX 继续比较 ctime，不能以忽略时间或删除哈希校验绕过保护。新增创建/修改时间明显不同的确定性测试；恢复及端到端 21 通过，包括替换/同长度写入/截断/注册变化/提交前修改拒绝。Ruff/format/Mypy 通过，复审无 schema、发布或恢复授权变化；证据 `.runtime/dispatch-windows-backup.log/xml`。此项是整仓发现的既有兼容问题，本轮一并修复后重新执行完整回归。
+
+## 问题与提交对应关系
+
+| 问题 | 修复提交 | 交付边界 |
+| --- | --- | --- |
+| Q03 | `3cde742` | 新日志输出脱敏；没有清除生产历史日志或执行凭据轮换。 |
+| Q01/Q02/Q07 | `41e7b8c` | 通讯消息和令牌交换的最终授权、有界读取与缓存隔离；真实平台验收保留 E01。 |
+| Q04 | `2f6cbed` | 浏览器搜索围栏、真实终态记账与失效结果隔离。 |
+| Q05/Q06 | `a5bd18e` | 付款策略与实际 worker 发送共同边界，超时后禁止迟到首次发送，unknown 预留不释放。 |
+| Q08/Q09 | `7ec7574` | 登录动作所有权及公开视图迟到响应隔离。 |
+| Windows 备份兼容 | `d6f689f` | Windows 创建时间统一比较，POSIX ctime 与其余防篡改校验保留。 |
+| E01 | 外部验收交接文档 | 仍为发布阻断；pending 模板不是签名通过证据。 |
+
+这些提交均为本地提交。聊天删除继续关闭，schema 仍为 92；没有推送、合并、部署、真实平台消息、付费调用或资金交易。
+
+## 最终整仓回归
+
+在应用提交 `d6f689ff3e1d380fbb143b6eda0be7986ced9eac` 上，以 Windows 本地环境串行执行：
+
+```text
+python -u -m pytest -q -p no:xdist --junitxml=.runtime/dispatch-full-d6f689f.xml
+```
+
+结果为 **2276 passed、56 skipped、259 subtests passed、0 failed**，耗时 `4333.37s`（1:12:13）。XML 共记录 2591 个 pytest testcase（其中包含 subtests），errors=0、failures=0。56 个跳过项明确标记为当前主机不具备 POSIX root、服务账户权限、Linux 所有权、Bash、符号链接或 Windows 8.3 别名条件；不能计为已通过。Linux 专项仍需 E01 的真实环境门禁，Windows 别名和符号链接边界需支持这些特性的主机补验。历史 `7ec7574` 的中断整仓记录和四个失败标记保留在 `.runtime/dispatch-full-7ec7574.log`，未被本轮结果覆盖。
+
+最终整仓证据：`.runtime/dispatch-full-d6f689f.log`、`.runtime/dispatch-full-d6f689f.xml`。静态与 Node/依赖证据沿用应用提交上的既有通过结果；本轮新增的 Windows 备份专项和整仓回归均以 `d6f689f` 为准。
+
+整合验证还包括全根 Ruff check、605 文件 format check、Mypy 396 文件、JavaScript 语法、Node 69 项、pip check，全部通过。基础、基础+cloud、开发三组锁的 pip-audit 均为无已知漏洞；最初中文路径编码失败保留，设置 `PYTHONUTF8=1` 后复验成功。工具为 Python 3.12.10、pytest 9.1.1、Ruff 0.16.9、Mypy 1.20.2、Node 24.15.0。依赖及前端在 Windows 备份修复中未改变，未重复无关检查。汇总位于 `.runtime/dispatch-local-evidence.json`；忽略目录证据不随 Git 克隆，需另行留存。
+
+Q01–Q09 的本地实现与 E02 整仓证据缺口现已关闭。E01 仍未完成，不能将本轮结论称为生产可发布。最终文档提交仅更新本记录、原审计的后续链接和[外部验收交接](../release/2026-10-10-dispatch-remediation-external-acceptance.md)，应用树和受测应用提交一致；真实签名必须使用最终实际安装 SHA，不能复用文档提交前的 SHA。生产历史日志暴露范围也仍需获授权的环境核查。

@@ -1,5 +1,7 @@
 # Noyra 第二轮修复后的全项目只读审计
 
+后续状态请见[第三轮修复执行记录](../roadmap/2026-10-10-dispatch-audit-remediation.md)及[外部验收交接](../release/2026-10-10-dispatch-remediation-external-acceptance.md)。下文保留审计当时的基线、问题、失败证据和结论，不以修复后的结果改写历史。
+
 审计日期：2026-10-10（Asia/Shanghai）。分支：`codex/admin-optimization-20261009`。
 
 审计应用基线：`e4bfc5dc3f61642085b62f7a0cfcfc0b526c7c38`；数据库合同：schema 92。开始时工作区干净。应用源码、脚本、工作流及依赖锁与完整串行回归基线 `c764cbef887adf21044cb86cc83717854d19570d` 相同；两提交之间仅有 HTTP 测试夹具及文档修改。
