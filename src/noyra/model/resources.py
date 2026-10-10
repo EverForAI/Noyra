@@ -373,6 +373,18 @@ class CognitiveResourceGroupRecord:
     limit_revision: int
     pricing_status: str
 
+    @property
+    def cost_limit_effective(self) -> bool:
+        return self.pricing_status == "free" or bool(
+            self.input_microusd_per_million or self.output_microusd_per_million
+        )
+
+    @property
+    def cost_only_blocked(self) -> bool:
+        return not self.cost_limit_effective and tuple(
+            self.limit_enabled[name] for name in LIMIT_DIMENSIONS
+        ) == (False, False, False, True)
+
 
 @dataclass(frozen=True)
 class CognitiveResourceKeyRecord:
@@ -845,6 +857,8 @@ class CognitiveResourceStore:
             ).fetchone()
         return {
             "today_usage": {field: str(getattr(usage, field)) for field in fields},
+            "cost_limit_effective": group.cost_limit_effective,
+            "cost_only_blocked": group.cost_only_blocked,
             "reserved": {field: str(reserved[field]) for field in fields},
             "cleanup_pending": pending,
             "pool_summary": dict(pool_counts),
@@ -3459,9 +3473,13 @@ class RoutedModelGateway(ModelGateway):
                 )
             result[pool] = {
                 "status": "healthy"
-                if any(group.available_key_count > 0 for group in groups)
+                if any(
+                    group.available_key_count > 0 and not group.cost_only_blocked
+                    for group in groups
+                )
                 else "unavailable",
                 "group_count": len(groups),
+                "cost_only_blocked_count": sum(group.cost_only_blocked for group in groups),
                 "key_count": sum(group.key_count for group in groups),
                 "available_key_count": sum(group.available_key_count for group in groups),
                 "today_attempts": usage.attempts,

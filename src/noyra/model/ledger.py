@@ -243,6 +243,15 @@ class ModelLedger:
                             for name in LIMIT_DIMENSIONS
                         ),
                     )
+            price_known = price_evidence["status"] == "free" or any(
+                price_evidence.get(name)
+                for name in ("input_microusd_per_million", "output_microusd_per_million")
+            )
+            if not price_known and any(
+                candidate is not None and candidate.enabled == (False, False, False, True)
+                for candidate in (limits, pool_limits)
+            ):
+                raise BudgetExhaustedError("cost_only_pricing_unknown")
             status = self._budget_status_connection(
                 connection,
                 call["subject_id"],

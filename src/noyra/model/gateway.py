@@ -168,7 +168,11 @@ class ModelGateway:
                 self.ledger.finish_call(
                     call.call_id,
                     "failed",
-                    error_code="budget_exhausted"
+                    error_code=(
+                        "cost_only_pricing_unknown"
+                        if str(error) == "cost_only_pricing_unknown"
+                        else "budget_exhausted"
+                    )
                     if isinstance(error, BudgetExhaustedError)
                     else "model_authorization_denied",
                 )

@@ -136,6 +136,7 @@ const migrationRiskErrors = {
   migration_local_wallet_confirmation_required: "开启本地钱包迁移前必须再次确认风险",
 };
 const upgradeErrorLabels = {
+  model_cost_only_pricing_unknown: "调用已阻止：仅启用成本上限但价格未知，请填写单价或同时启用次数/Token上限",
   upgrade_no_stable_release: "尚无可用的正式 Release；当前仍使用正式发布通道",
   upgrade_remote_rate_limited: "GitHub 请求额度已用尽，请稍后重试",
   upgrade_remote_connect_failed: "无法连接 GitHub，请检查服务器网络后重试",
@@ -223,7 +224,7 @@ const parameterHelp = {
   daily_attempts: ["每日尝试上限", "每一次供应商尝试都计数，重试也计数。零代表不允许尝试；关闭开关仅取消此资源的次数上限。每日按 UTC 重置。只接受非负整数，最大 9223372036854775807。"],
   daily_input_tokens: ["每日输入 Token 上限", "限制发送给模型的 Token，包括提示、上下文和历史。调用前预留，完成后按已知实际用量结算；结果未知保留预留。零是零额度。只接受非负整数，最大 9223372036854775807。"],
   daily_output_tokens: ["每日输出 Token 上限", "限制模型输出用量。调用前按最大输出预留，可能在实际额度用完前阻止超额调用。零是零额度。只接受非负整数，最大 9223372036854775807。"],
-  daily_cost_limit_usd: ["每日成本上限", "以 USD 计，精确至六位小数。根据输入输出单价估算和预留。供应商单价未填或填零时，成本可能显示零，不能据此判断实际免费。"],
+  daily_cost_limit_usd: ["每日成本上限", "以 USD 计，精确至六位小数，根据填写单价估算和预留。价格未知时无法限制实际费用；若只启用成本上限，系统会阻止调用。请填写单价，或同时启用次数/Token上限。供应商确认免费需单独选择，不会自动视为免费。"],
   input_usd_per_million: ["输入单价", "供应商每一百万输入 Token 的 USD 价格，用于成本预算和统计，不会向供应商修改收费。"],
   output_usd_per_million: ["输出单价", "供应商每一百万输出 Token 的 USD 价格。应与实际模型价格一致。"],
   max_attempts: ["单次调用最大尝试", "1 至 10。失败重试会消耗每日次数和费用；结果未知不会自动重试。"],
@@ -1572,6 +1573,13 @@ function readModelLimits(form, attribute) {
   }
   return payload;
 }
+function validateCostProtection(payload) {
+  const limits = payload.limit_enabled;
+  const hasPrice = [payload.input_usd_per_million, payload.output_usd_per_million].some(value => value != null && !/^0*(?:\.0*)?$/.test(String(value)));
+  if (limits.cost && !limits.attempts && !limits.input_tokens && !limits.output_tokens && payload.pricing_status !== "free" && !hasPrice) {
+    throw new Error("只启用成本上限时必须填写供应商单价，或明确确认免费；价格未知时请同时启用次数或Token上限");
+  }
+}
 function modelBudgetRemaining(maximum, accounted) {
   // The ledger aggregate already includes executing and unknown reservations.
   const difference = BigInt(maximum) - BigInt(accounted || "0");
@@ -1685,6 +1693,7 @@ async function loadModels() {
       facts.insertAdjacentHTML("beforeend", `<div><dt>${parameterHelp[field][0]}</dt><dd>已计（含预留）${esc(displayAmount(amount))}<br>其中预留 ${esc(displayAmount(reserve))}<br>剩余 ${esc(remaining)}</dd></div>`);
     }
     facts.insertAdjacentHTML("beforeend", `<div><dt>价格依据</dt><dd>${esc(({unknown:"价格未知",priced:"填写单价估算",free:"已确认免费"})[item.pricing_status] || "价格未知")}</dd></div>`);
+    if (!item.cost_limit_effective && item.limit_enabled?.cost) facts.insertAdjacentHTML("beforeend", `<div><dt>成本保护</dt><dd>${item.cost_only_blocked ? "调用已阻止：仅启用成本上限但价格未知" : "实际费用无法限制；仅次数/Token上限提供准入保护"}</dd></div>`);
     card.querySelector(".model-resource-identity").insertAdjacentHTML("afterend", `<small>UTC 重置 ${esc(formatTimestamp(item.reset_at_utc))}${item.cleanup_pending ? ` · 密钥清理待完成 ${item.cleanup_pending}` : ""}</small>`);
   }
   const cards = Array.from($("#model-list").querySelectorAll("[data-pool]"));
@@ -2102,6 +2111,7 @@ $("#model-list").addEventListener("submit", async (event) => {
     for (const name of ["priority", "weight"]) payload[name] = normalizeBudgetInteger(name, form.elements[name].value);
     payload.input_usd_per_million = normalizeBudgetCost(form.elements.input_usd_per_million.value);
     payload.output_usd_per_million = normalizeBudgetCost(form.elements.output_usd_per_million.value);
+    validateCostProtection(payload);
     const attempts = form.elements.max_attempts.value.trim();
     if (!/^[1-9][0-9]*$/.test(attempts) || BigInt(attempts) > 10n) throw new Error("最大尝试应为 1 至 10");
     payload.max_attempts = attempts;
@@ -2456,6 +2466,7 @@ $("#admin-model-form").addEventListener("submit", async (event) => {
     payload.input_usd_per_million = normalizeBudgetCost(form.elements.input_usd_per_million.value);
     payload.output_usd_per_million = normalizeBudgetCost(form.elements.output_usd_per_million.value);
     payload.pricing_status = form.elements.pricing_status.value;
+    validateCostProtection(payload);
     const maxAttempts = form.elements.max_attempts.value.trim();
     if (!/^[1-9][0-9]*$/.test(maxAttempts) || BigInt(maxAttempts) > 10n) throw new Error("最大尝试应为 1 至 10");
     payload.max_attempts = maxAttempts;

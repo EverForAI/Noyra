@@ -70,6 +70,20 @@ function requestContext(extra = {}) {
   return { sandbox, nodes };
 }
 
+test("cost-only protection rejects unknown and zero-priced drafts but allows free or bounded alternatives", () => {
+  const { sandbox } = modelContext();
+  const payload={limit_enabled:{attempts:false,input_tokens:false,output_tokens:false,cost:true},pricing_status:"unknown",input_usd_per_million:"0.000000",output_usd_per_million:"0.000000"};
+  assert.throws(()=>sandbox.validateCostProtection(payload), /成本上限/);
+  payload.pricing_status="priced";
+  assert.throws(()=>sandbox.validateCostProtection(payload), /成本上限/);
+  payload.pricing_status="free";
+  assert.doesNotThrow(()=>sandbox.validateCostProtection(payload));
+  payload.pricing_status="unknown";payload.limit_enabled.attempts=true;
+  assert.doesNotThrow(()=>sandbox.validateCostProtection(payload));
+  payload.limit_enabled.attempts=false;payload.input_usd_per_million="0.000001";
+  assert.doesNotThrow(()=>sandbox.validateCostProtection(payload));
+});
+
 for (const method of ["GET", "POST"]) {
   for (const completion of ["success", "unauthorized", "network", "body"]) {
     test(`${method} request discards ${completion} from a previous session`, async () => {

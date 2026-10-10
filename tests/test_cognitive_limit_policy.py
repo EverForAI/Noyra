@@ -6,6 +6,7 @@ from decimal import Decimal
 from itertools import product
 from pathlib import Path
 from threading import Barrier
+from typing import Any
 
 import pytest
 from pydantic import SecretStr
@@ -26,6 +27,63 @@ from noyra.model.resources import (
     RoutedModelGateway,
 )
 from noyra.model.types import BudgetLimits
+
+
+@pytest.mark.parametrize(
+    "price_status,price,blocked",
+    [
+        ("unknown", "0", True),
+        ("priced", "0", True),
+        ("free", "0", False),
+        ("unknown", "1", False),
+        ("priced", "1", False),
+    ],
+)
+def test_cost_only_requires_real_price_or_confirmed_free(
+    tmp_path: Path, price_status: str, price: str, blocked: bool
+) -> None:
+    db, store, subject = resources(tmp_path)
+    group = configure(
+        store,
+        subject,
+        pricing_status=price_status,
+        input_usd_per_million=price,
+        limit_enabled=dict(zip(LIMIT_DIMENSIONS, (False, False, False, True), strict=True)),
+    )
+    ledger = ModelLedger(db)
+    call = prepare(ledger, subject, group.group_id, "cost-only")
+    summary = store.budget_summary(group)
+    assert summary["cost_only_blocked"] == blocked
+    assert summary["cost_limit_effective"] != blocked
+    kwargs: dict[str, Any] = dict(
+        reserved_input_tokens=10, reserved_output_tokens=10, reserved_cost_microusd=0
+    )
+    if blocked:
+        with pytest.raises(BudgetExhaustedError, match="cost_only_pricing_unknown"):
+            ledger.authorize_attempt(call, RoutedModelGateway._limits_for_group(group), **kwargs)
+        assert ledger.attempts(call) == []
+    else:
+        ledger.authorize_attempt(call, RoutedModelGateway._limits_for_group(group), **kwargs)
+    store.verify_integrity(subject)
+
+
+def test_unknown_price_cannot_bypass_cost_only_pool_even_with_group_token_limit(
+    tmp_path: Path,
+) -> None:
+    db, store, subject = resources(tmp_path)
+    group = configure(store, subject)
+    ledger = ModelLedger(db)
+    call = prepare(ledger, subject, group.group_id, "pool-cost-only")
+    with pytest.raises(BudgetExhaustedError, match="cost_only_pricing_unknown"):
+        ledger.authorize_attempt(
+            call,
+            RoutedModelGateway._limits_for_group(group),
+            reserved_input_tokens=10,
+            reserved_output_tokens=10,
+            reserved_cost_microusd=0,
+            pool_limits=BudgetLimits(100, 100, 100, 100, enabled=(False, False, False, True)),
+        )
+    assert ledger.attempts(call) == []
 
 
 def resources(tmp_path: Path) -> tuple[Database, CognitiveResourceStore, str]:

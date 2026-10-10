@@ -8029,10 +8029,14 @@ class NoyraHTTPServer:
                         retry_after=60,
                     )
                     return
-                except BudgetExhaustedError:
+                except BudgetExhaustedError as error:
                     self._json(
                         HTTPStatus.TOO_MANY_REQUESTS,
-                        {"error": "model_test_budget_exhausted"},
+                        {
+                            "error": "model_cost_only_pricing_unknown"
+                            if str(error) == "cost_only_pricing_unknown"
+                            else "model_test_budget_exhausted"
+                        },
                     )
                     return
                 except (ProviderCallError, StructuredOutputError) as error:
