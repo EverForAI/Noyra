@@ -57,6 +57,38 @@ def test_dirty_tree_is_rejected_before_tests_and_recorded(
     assert record["commands"] == []
 
 
+def test_full_gate_checks_repository_root_and_uses_serial_pytest(
+    gate: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure(gate, tmp_path, monkeypatch)
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-n auto")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], environment: Any, **kwargs: Any) -> dict[str, Any]:
+        assert "PYTEST_ADDOPTS" not in environment
+        commands.append(command)
+        kwargs["log_path"].write_text("pass\n", encoding="utf-8")
+        return {
+            "status": "passed",
+            "exit_code": 0,
+            "peak_rss_bytes": 1,
+            "peak_wal_bytes": 1,
+            "peak_database_bytes": 1,
+            "rss_samples": 1,
+        }
+
+    monkeypatch.setattr(gate, "run", fake_run)
+    gate.main()
+    assert any(command[1:] == ["-m", "ruff", "check", "."] for command in commands)
+    assert any(command[1:] == ["-m", "ruff", "format", "--check", "."] for command in commands)
+    assert any(
+        command[1:] == ["-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:xdist"]
+        for command in commands
+    )
+    _, record = _run_record(tmp_path)
+    assert record["status"] == "passed"
+
+
 @pytest.mark.parametrize("failed", [False, True])
 def test_cleanup_failure_does_not_replace_original_gate_failure(
     gate: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed: bool

@@ -47,7 +47,7 @@ def verification_commands(scope: str, tests: list[str]) -> list[list[str]]:
         ["node", "--test", "tests/frontend/admin-optimization.test.cjs"],
     ]
     if scope != "static":
-        commands.append([sys.executable, "-m", "pytest", "-q", *tests])
+        commands.append([sys.executable, "-m", "pytest", "-q", "-p", "no:xdist", *tests])
     return commands
 
 

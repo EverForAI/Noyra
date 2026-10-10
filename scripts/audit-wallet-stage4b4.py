@@ -363,6 +363,7 @@ def main() -> None:
             temporary = run_root / "t"
             temporary.mkdir()
             environment = dict(os.environ)
+            environment.pop("PYTEST_ADDOPTS", None)
             environment.update(
                 {
                     "NOYRA_STAGE4B4_PROFILE": args.profile,
@@ -396,7 +397,18 @@ def main() -> None:
 
             name = "targeted.txt" if args.profile == "smoke" else "pressure.txt"
             targeted = execute(
-                [python, "-m", "pytest", *TARGETED_TESTS, "-q", "-p", "no:cacheprovider"], name
+                [
+                    python,
+                    "-m",
+                    "pytest",
+                    *TARGETED_TESTS,
+                    "-q",
+                    "-p",
+                    "no:cacheprovider",
+                    "-p",
+                    "no:xdist",
+                ],
+                name,
             )
             violations = [
                 metric
@@ -438,16 +450,22 @@ def main() -> None:
                     full_log.flush()
                     for index, command in enumerate(
                         (
-                            [python, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+                            [
+                                python,
+                                "-m",
+                                "pytest",
+                                "-q",
+                                "-p",
+                                "no:cacheprovider",
+                                "-p",
+                                "no:xdist",
+                            ],
                             [
                                 python,
                                 "-m",
                                 "ruff",
                                 "check",
-                                "src",
-                                "tests",
-                                "scripts/audit-wallet-stage4b4.py",
-                                "scripts/authorize-wallet-schema60.py",
+                                ".",
                             ],
                             [
                                 python,
@@ -455,10 +473,7 @@ def main() -> None:
                                 "ruff",
                                 "format",
                                 "--check",
-                                "src",
-                                "tests",
-                                "scripts/audit-wallet-stage4b4.py",
-                                "scripts/authorize-wallet-schema60.py",
+                                ".",
                             ],
                             [python, "-m", "mypy"],
                             [
