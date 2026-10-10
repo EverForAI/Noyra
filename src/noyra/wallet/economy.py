@@ -25,6 +25,7 @@ from noyra.core.types import (
 )
 from noyra.core.wallet_schema import wallet_entry_hash, wallet_journal_hash
 
+from .dispatch import wallet_policy_scope
 from .economy_types import (
     BountyInput,
     BountyRecord,
@@ -611,7 +612,7 @@ class WalletEconomyStore:
             int(proposal.per_order_limit) <= 0 or int(proposal.daily_limit) <= 0
         ):
             raise ValueError("automatic payment requires per-order and daily amount limits")
-        with self.database.transaction() as c:
+        with wallet_policy_scope(self.database), self.database.transaction() as c:
             row = c.execute(
                 "SELECT * FROM wallet_payment_policies WHERE subject_id=?", (subject_id,)
             ).fetchone()

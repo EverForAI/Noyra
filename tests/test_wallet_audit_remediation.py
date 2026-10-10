@@ -199,4 +199,5 @@ def test_invalidated_runtime_fences_signer_before_external_call(
         engine.execute_order(order.order_id, subject, actor="operator")
     assert signer.requests == []
     execution = engine._order_execution(order.order_id, subject)
-    assert execution is not None and execution.status == "signing"
+    assert execution is not None and execution.status == "unknown"
+    assert execution.error_code == "dispatch_authorization_changed"

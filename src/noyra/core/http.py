@@ -60,6 +60,11 @@ class SyncHTTPTimeoutHook:
             if resource is None or self._resource is resource:
                 self._resource = None
 
+    def assert_active(self) -> None:
+        with self._lock:
+            if self._cancelled:
+                raise TimeoutError("HTTP operation was cancelled")
+
     def cancel(self) -> None:
         with self._lock:
             self._cancelled = True

@@ -6,6 +6,7 @@ import time
 
 import httpx
 
+from noyra.core.admission import OperationInvalidated
 from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
     PublicDNSHTTPTransport,
@@ -16,6 +17,7 @@ from noyra.core.http import (
 )
 from noyra.core.types import strict_json_loads
 
+from .dispatch import WalletDispatchDenied, WalletRequestFence
 from .execution import WalletExecutionError, WalletRPCError
 from .types import SQLITE_INT64_MAX, _rpc_url
 
@@ -76,6 +78,14 @@ class LocalWalletRPC:
         hook = SyncHTTPTimeoutHook()
 
         def request() -> bytes:
+            fence = WalletRequestFence(deadline, hook, payment=method == "eth_sendRawTransaction")
+            fence.check_deadline()
+            try:
+                return send(fence)
+            finally:
+                fence.close()
+
+        def send(fence: WalletRequestFence) -> bytes:
             with self._client.stream(
                 "POST",
                 self.urls[chain_id],
@@ -87,6 +97,7 @@ class LocalWalletRPC:
                     "User-Agent": "Noyra-LocalWallet/0.1.0",
                 },
                 follow_redirects=False,
+                extensions={"trace": fence.trace},
                 timeout=httpx.Timeout(remaining),
             ) as response:
                 hook.register(response)
@@ -133,7 +144,7 @@ class LocalWalletRPC:
                     raise WalletRPCError(reason)
                 raise ValueError("invalid RPC response")
             return body["result"]
-        except WalletRPCError:
+        except (WalletRPCError, WalletDispatchDenied, OperationInvalidated):
             raise
         except Exception:
             # Provider messages/transport exceptions can contain URLs or signed
