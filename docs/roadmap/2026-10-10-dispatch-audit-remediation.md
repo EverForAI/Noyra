@@ -49,3 +49,9 @@
 登录使用独立尝试对象拥有提交按钮；退出立即释放旧按钮和尝试，旧成功/失败/finally 不影响新登录，重复提交不会创建第二个请求。公开四类视图在每个响应体 await 后核验世代，现有错误分支仍由 refresh 的世代保护。没有修改鉴权、会话 cookie、令牌传输、路由和聊天功能。
 
 Node 实际函数回归 69 通过（新增 11），JS 语法通过；本地 Chromium 真实 HTML/JS、合成请求验证旧登录完成/新登录等待和四类公开视图迟到响应通过，截图及驱动脚本在 `output/playwright/dispatch-*`。浏览器最初静态服务器没有 session/API，404 为验收夹具限制；一次公开探针误在 admin 页面运行的 ReferenceError 已通过导航到公开页后重做，不算应用故障。模块源码复审没有新增阻断；证据 `.runtime/dispatch-frontend.log`。
+
+### 6. 整合中发现的 Windows 备份兼容问题
+
+首轮完整串行回归针对 `7ec7574`，运行至 61% 时已出现 4 个失败，保留 `.runtime/dispatch-full-7ec7574.log`，停止该轮以修复确定根因，不能称其通过或完整结束。对应恢复测试单独复验为 2 通过、2 失败；正常备份在打开时被误判为身份变化。探针证实当前 Python 3.12/Windows 的 `fstat.st_ctime_ns` 与 `lstat.st_ctime_ns` 含义不一致，纳秒值分别对应 change-time/creation-time，并非文件真实被改写。
+
+修复 Windows 身份元组优先使用两接口一致的 `st_birthtime_ns`（旧 Python 回退 ctime）；保留设备号、inode、大小、mtime、禁止写/删除共享的句柄。POSIX 继续比较 ctime，不能以忽略时间或删除哈希校验绕过保护。新增创建/修改时间明显不同的确定性测试；恢复及端到端 21 通过，包括替换/同长度写入/截断/注册变化/提交前修改拒绝。Ruff/format/Mypy 通过，复审无 schema、发布或恢复授权变化；证据 `.runtime/dispatch-windows-backup.log/xml`。此项是整仓发现的既有兼容问题，本轮一并修复后重新执行完整回归。

@@ -41,7 +41,16 @@ class _PinnedBackup:
     def file_identity(info: os.stat_result) -> tuple[int, ...]:
         if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
             raise ValueError("backup path must be a regular file")
-        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        # Python 3.12 on Windows can report change-time from fstat but creation
+        # time from lstat in st_ctime. Compare explicit birth-time when present;
+        # deny-write/delete handles remain the Windows mutation boundary. POSIX
+        # must retain ctime to detect same-size writes with restored mtime.
+        stable_time = (
+            getattr(info, "st_birthtime_ns", info.st_ctime_ns)
+            if os.name == "nt"
+            else info.st_ctime_ns
+        )
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, stable_time)
 
     def assert_unchanged(self) -> None:
         try:

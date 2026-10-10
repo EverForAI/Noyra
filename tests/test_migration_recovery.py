@@ -183,6 +183,28 @@ def test_recovery_proof_rejects_changed_digest(tmp_path: Any) -> None:
         RecoveryCoordinator(database).restore_standby(changed, policy)
 
 
+def test_backup_identity_agrees_for_handle_and_path_with_distinct_file_times(
+    tmp_path: Path,
+) -> None:
+    from noyra.migration.recovery import _PinnedBackup
+
+    path = tmp_path / "different-times.bin"
+    path.write_bytes(b"synthetic verified backup")
+    # Creation/change time and mtime must differ, even on a fast filesystem.
+    os.utime(path, ns=(1_000_000_000, 2_000_000_000))
+    descriptor = RecoveryCoordinator._open_backup(path)
+    try:
+        assert _PinnedBackup.file_identity(os.fstat(descriptor)) == _PinnedBackup.file_identity(
+            path.lstat()
+        )
+    finally:
+        os.close(descriptor)
+    with RecoveryCoordinator._pin_verified_file(
+        path, path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest()
+    ) as backup:
+        backup.assert_unchanged()
+
+
 def test_backup_hash_is_streamed_without_holding_database_writer(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
