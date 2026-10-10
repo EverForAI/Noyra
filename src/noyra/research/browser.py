@@ -10,6 +10,7 @@ from xml.etree import ElementTree
 import httpx
 
 from noyra.core.actions import ActionLedger
+from noyra.core.admission import OperationInvalidated, accounting_scope, assert_current_lease
 from noyra.core.database import Database
 from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
@@ -22,6 +23,7 @@ from noyra.core.http import (
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.world import canonical_public_url
 
+from .routing import get_search_routing_mode
 from .types import SearchExecution, SearchResult
 
 BROWSER_SEARCH_ENDPOINT = "https://www.bing.com/search"
@@ -69,6 +71,15 @@ class BrowserSearchExecutor:
         limit: int,
         hourly_limit: int,
     ) -> SearchExecution:
+        assert_current_lease()
+        routing = get_search_routing_mode(self.database, subject_id)
+
+        def before_send() -> None:
+            assert_current_lease()
+            if get_search_routing_mode(self.database, subject_id) != routing:
+                raise PermissionError("search routing changed before browser dispatch")
+            assert_current_lease()
+
         normalized_query = " ".join(query.split())
         if not normalized_query or len(normalized_query) > 512:
             raise ValueError("browser search query is invalid")
@@ -101,6 +112,7 @@ class BrowserSearchExecutor:
                 "browser",
                 normalized_query,
                 (),
+                "failed" if action.status == "failed" else "unknown",
             )
         if action.status != "prepared":
             raise RuntimeError(f"browser search cannot resume from state {action.status}")
@@ -109,22 +121,34 @@ class BrowserSearchExecutor:
             raise PermissionError("browser search hourly limit reached")
         action = self.actions.start(action.action_id)
         try:
-            response = await self._request(normalized_query, limit)
+            response = await self._request(normalized_query, limit, before_send=before_send)
             results = self._parse(response, limit)
+        except OperationInvalidated:
+            self._finish_action(
+                action.action_id,
+                "failed",
+                {"error": "runtime_epoch_invalidated", "request_sent": False},
+                public_goal_reference=goal_id,
+                public_explanation="Browser search stopped before sending: admission closed.",
+                resource_summary="browser request not sent",
+            )
+            raise
         except asyncio.CancelledError:
             self._finish_unknown(action.action_id, goal_id, "browser_search_cancelled")
             raise
         except BrowserSearchOutcomeUnknownError as error:
             self._finish_unknown(action.action_id, goal_id, type(error).__name__)
+            assert_current_lease()
             return SearchExecution(
                 action.action_id,
                 "browser:bing-rss",
                 "browser",
                 normalized_query,
                 (),
+                "unknown",
             )
         except Exception as error:
-            self.actions.finish(
+            self._finish_action(
                 action.action_id,
                 "failed",
                 {"error": type(error).__name__},
@@ -133,14 +157,16 @@ class BrowserSearchExecutor:
                 resource_summary="browser search request failed",
                 redaction_reason="search query withheld as private research context",
             )
+            assert_current_lease()
             return SearchExecution(
                 action.action_id,
                 "browser:bing-rss",
                 "browser",
                 normalized_query,
                 (),
+                "failed",
             )
-        self.actions.finish(
+        self._finish_action(
             action.action_id,
             "succeeded",
             {
@@ -153,6 +179,7 @@ class BrowserSearchExecutor:
             resource_summary=f"{len(results)} browser search results",
             redaction_reason="search query withheld as private research context",
         )
+        assert_current_lease()
         return SearchExecution(
             action.action_id,
             "browser:bing-rss",
@@ -165,10 +192,23 @@ class BrowserSearchExecutor:
         if self._owns_client:
             await self._client.aclose()
 
-    async def _request(self, query: str, limit: int) -> httpx.Response:
+    async def _request(
+        self, query: str, limit: int, *, before_send: Callable[[], None] | None = None
+    ) -> httpx.Response:
         deadline = asyncio.get_running_loop().time() + DEFAULT_TOTAL_TIMEOUT_SECONDS
+
+        def authorize() -> None:
+            assert_current_lease()
+            if before_send is not None:
+                before_send()
+
+        async def trace(event: str, info: dict[str, Any]) -> None:
+            if event.endswith("send_request_headers.started"):
+                authorize()
+
         try:
             async with asyncio.timeout(DEFAULT_TOTAL_TIMEOUT_SECONDS):
+                authorize()
                 async with self._client.stream(
                     "GET",
                     f"{BROWSER_SEARCH_ENDPOINT}?format=rss&q={quote_plus(query)}&count={limit}",
@@ -178,6 +218,7 @@ class BrowserSearchExecutor:
                         "User-Agent": "Mozilla/5.0 (compatible; Noyra-Research/0.1.0)",
                     },
                     follow_redirects=False,
+                    extensions={"trace": trace},
                 ) as response:
                     validate_response_headers(response, max_header_bytes=DEFAULT_MAX_HEADER_BYTES)
                     response.raise_for_status()
@@ -266,8 +307,16 @@ class BrowserSearchExecutor:
             )
             return True
 
+    def _finish_action(
+        self, action_id: str, status: str, result: dict[str, Any], **kwargs: Any
+    ) -> None:
+        # Only settle the already-started action; reservations, follow-up search
+        # and result consumption remain subject to normal runtime admission.
+        with accounting_scope():
+            self.actions.finish(action_id, status, result, **kwargs)
+
     def _finish_unknown(self, action_id: str, goal_id: str, error_code: str) -> None:
-        self.actions.finish(
+        self._finish_action(
             action_id,
             "unknown",
             {"error": error_code, "outcome_unknown": True},
