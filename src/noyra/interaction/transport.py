@@ -1004,7 +1004,7 @@ class DeliveryDispatcher:
         self._recovered_subjects: set[str] = set()
         self._closed = False
         self._worker_tasks: set[asyncio.Task[Any]] = set()
-        self._provider_tokens: dict[tuple[str, str], tuple[str, float]] = {}
+        self._provider_tokens: dict[tuple[str, str, str], tuple[str, float]] = {}
         self._provider_token_lock = asyncio.Lock()
 
     async def aclose(self) -> None:
@@ -1050,7 +1050,10 @@ class DeliveryDispatcher:
         return self._client
 
     async def _provider_credentials(
-        self, transport: TransportRecord, credentials: Mapping[str, Any]
+        self,
+        transport: TransportRecord,
+        credentials: Mapping[str, Any],
+        before_send: Callable[[], None],
     ) -> dict[str, Any]:
         """Resolve short-lived native provider tokens without persisting them."""
         resolved = dict(credentials)
@@ -1074,6 +1077,7 @@ class DeliveryDispatcher:
                 transport.transport_id,
                 "qq",
                 resolved,
+                before_send,
             )
         elif (
             transport.channel == "feishu"
@@ -1085,6 +1089,7 @@ class DeliveryDispatcher:
                 transport.transport_id,
                 "feishu",
                 resolved,
+                before_send,
             )
         elif (
             transport.channel == "wechat"
@@ -1096,6 +1101,7 @@ class DeliveryDispatcher:
                 transport.transport_id,
                 "wechat",
                 resolved,
+                before_send,
             )
         return resolved
 
@@ -1105,10 +1111,18 @@ class DeliveryDispatcher:
         transport_id: str,
         provider: str,
         credentials: Mapping[str, Any],
+        before_send: Callable[[], None],
     ) -> str:
-        cache_key = (transport_id, provider)
-        now = time.time()
-        async with self._provider_token_lock:
+        cache_key = (transport_id, provider, content_hash(dict(credentials)))
+        deadline = asyncio.get_running_loop().time() + TRANSPORT_TOTAL_TIMEOUT_SECONDS
+
+        async def trace(event: str, info: dict[str, Any]) -> None:
+            if event.endswith("send_request_headers.started"):
+                before_send()
+
+        async with asyncio.timeout_at(deadline), self._provider_token_lock:
+            before_send()
+            now = time.time()
             cached = self._provider_tokens.get(cache_key)
             if cached is not None and cached[1] > now + PROVIDER_TOKEN_SKEW_SECONDS:
                 return cached[0]
@@ -1146,21 +1160,20 @@ class DeliveryDispatcher:
             else:
                 raise ValueError("unsupported provider token")
             try:
-                async with asyncio.timeout(TRANSPORT_TOTAL_TIMEOUT_SECONDS):
-                    response = await self._http_client().request(
-                        method,
-                        endpoint,
-                        headers={"Accept": "application/json", "Accept-Encoding": "identity"},
-                        follow_redirects=False,
-                        **request_kwargs,
-                    )
+                async with self._http_client().stream(
+                    method,
+                    endpoint,
+                    headers={"Accept": "application/json", "Accept-Encoding": "identity"},
+                    follow_redirects=False,
+                    extensions={"trace": trace},
+                    **request_kwargs,
+                ) as response:
                     validate_response_headers(response, max_header_bytes=DEFAULT_MAX_HEADER_BYTES)
                     body = await read_bounded_response(
                         response,
                         max_body_bytes=TRANSPORT_MAX_RESPONSE_BYTES,
                         max_header_bytes=DEFAULT_MAX_HEADER_BYTES,
-                        deadline=asyncio.get_running_loop().time()
-                        + TRANSPORT_TOTAL_TIMEOUT_SECONDS,
+                        deadline=deadline,
                     )
             except (TimeoutError, httpx.HTTPError, HTTPResponseLimitError) as error:
                 raise ValueError(f"{provider} access token request failed") from error
@@ -1188,12 +1201,18 @@ class DeliveryDispatcher:
                 except (TypeError, ValueError):
                     lifetime = 7_200.0
             value = token.strip()
+            before_send()
+            for old_key in tuple(self._provider_tokens):
+                if old_key[:2] == cache_key[:2]:
+                    self._provider_tokens.pop(old_key, None)
             self._provider_tokens[cache_key] = (value, time.time() + lifetime)
             return value
 
     async def _invalidate_provider_token(self, transport_id: str, provider: str) -> None:
         async with self._provider_token_lock:
-            self._provider_tokens.pop((transport_id, provider), None)
+            for key in tuple(self._provider_tokens):
+                if key[:2] == (transport_id, provider):
+                    self._provider_tokens.pop(key, None)
 
     def _feishu_api_origin(self, transport: TransportRecord, credentials: Mapping[str, Any]) -> str:
         """Resolve a pinned official Feishu/Lark API origin.
@@ -1601,26 +1620,22 @@ class DeliveryDispatcher:
             response_id = await self._send(
                 record, secret, send_interaction, delivery.idempotency_key
             )
-            try:
-                assert_current_lease()
-            except OperationInvalidated:
-                with accounting_scope():
-                    self._finish(
-                        delivery.delivery_id,
-                        "unknown",
-                        "runtime epoch invalidated after delivery",
-                        attempts,
-                        provider_message_id=provider_reference,
-                    )
-                raise
+            # Account for the confirmed external outcome before fencing a stale
+            # continuation. Losing the receipt here risks a duplicate resend.
+            completed = self._finish(
+                delivery.delivery_id, "delivered", None, attempts, provider_message_id=response_id
+            )
+            assert_current_lease()
         except DeliveryOutcomeUnknown as error:
-            return self._finish(
+            completed = self._finish(
                 delivery.delivery_id,
                 "unknown",
                 str(error),
                 attempts,
                 provider_message_id=error.provider_message_id,
             )
+            assert_current_lease()
+            return completed
         except asyncio.CancelledError:
             try:
                 self._finish(
@@ -1651,14 +1666,18 @@ class DeliveryDispatcher:
             httpx.RemoteProtocolError,
             HTTPResponseLimitError,
         ):
-            return self._finish(
+            completed = self._finish(
                 delivery.delivery_id, "unknown", "transport outcome unknown", attempts
             )
+            assert_current_lease()
+            return completed
+        except PermissionError:
+            return self._fail_closed_delivery(delivery, "PermissionError")
         except Exception as error:
-            return self._finish(delivery.delivery_id, "failed", type(error).__name__, attempts)
-        return self._finish(
-            delivery.delivery_id, "delivered", None, attempts, provider_message_id=response_id
-        )
+            completed = self._finish(delivery.delivery_id, "failed", type(error).__name__, attempts)
+            assert_current_lease()
+            return completed
+        return completed
 
     def _assert_message_send_allowed(
         self, transport: TransportRecord, interaction: Mapping[str, Any], idempotency_key: str
@@ -1734,7 +1753,40 @@ class DeliveryDispatcher:
         if not isinstance(credentials, Mapping):
             raise ValueError("transport credentials are invalid")
         original_credentials = dict(credentials)
-        credentials = await self._provider_credentials(transport, original_credentials)
+        settings = (
+            self.transports.settings(transport.transport_id, subject_id=transport.subject_id)
+            if self.transports is not None
+            else {}
+        )
+        frozen_secret = content_hash(secret)
+        frozen_settings = content_hash(settings)
+
+        def before_send() -> None:
+            self._assert_message_send_allowed(transport, interaction, idempotency_key)
+            if self.transports is not None:
+                current = self.transports.get(
+                    transport.transport_id, subject_id=transport.subject_id
+                )
+                current_secret = self.transports.secret(
+                    transport.transport_id, subject_id=transport.subject_id
+                )
+                current_settings = self.transports.settings(
+                    transport.transport_id, subject_id=transport.subject_id
+                )
+                if (
+                    current != transport
+                    or content_hash(current_secret) != frozen_secret
+                    or content_hash(current_settings) != frozen_settings
+                ):
+                    raise PermissionError("transport configuration changed before dispatch")
+            assert_current_lease()
+
+        async def trace(event: str, info: dict[str, Any]) -> None:
+            if event.endswith("send_request_headers.started"):
+                before_send()
+
+        before_send()
+        credentials = await self._provider_credentials(transport, original_credentials, before_send)
         # Adapter routing fields are non-secret transport settings kept in
         # SQLite, while provider tokens remain in the private secret file.
         # Pass only the known provider selectors across this boundary so a
@@ -1764,9 +1816,7 @@ class DeliveryDispatcher:
                     interaction["counterparty"],
                     interaction["content"],
                     idempotency_key,
-                    lambda: self._assert_message_send_allowed(
-                        transport, interaction, idempotency_key
-                    ),
+                    before_send,
                 ),
             )
         adapter = OUTBOUND_ADAPTERS.get(channel)
@@ -1794,13 +1844,14 @@ class DeliveryDispatcher:
             try:
                 async with asyncio.timeout(TRANSPORT_TOTAL_TIMEOUT_SECONDS):
                     # Token acquisition and refresh can yield to a revocation or deletion.
-                    self._assert_message_send_allowed(transport, interaction, idempotency_key)
+                    before_send()
                     async with self._http_client().stream(
                         "POST",
                         outbound.endpoint,
                         json=outbound.payload,
                         headers=request_headers,
                         follow_redirects=False,
+                        extensions={"trace": trace},
                     ) as response:
                         validate_response_headers(
                             response, max_header_bytes=DEFAULT_MAX_HEADER_BYTES
@@ -1823,7 +1874,9 @@ class DeliveryDispatcher:
                     and original_credentials.get("app_secret")
                 ):
                     await self._invalidate_provider_token(transport.transport_id, provider_name)
-                    credentials = await self._provider_credentials(transport, original_credentials)
+                    credentials = await self._provider_credentials(
+                        transport, original_credentials, before_send
+                    )
                     adapter_credentials = dict(credentials)
                     if self.transports is not None:
                         settings = self.transports.settings(
@@ -1853,7 +1906,7 @@ class DeliveryDispatcher:
                     ):
                         await self._invalidate_provider_token(transport.transport_id, provider_name)
                         credentials = await self._provider_credentials(
-                            transport, original_credentials
+                            transport, original_credentials, before_send
                         )
                         adapter_credentials = dict(credentials)
                         if self.transports is not None:
