@@ -3244,29 +3244,6 @@ class NoyraHTTPServer:
                         return
                     self._json(HTTPStatus.OK, page)
                 elif parsed.path.startswith("/api/admin/conversations/") and parsed.path.endswith(
-                    "/erasure-assessment"
-                ):
-                    if not self._authorized("read"):
-                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
-                        return
-                    if len(parsed.path.split("/")) != 6 or parsed.query:
-                        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_conversation_query"})
-                        return
-                    try:
-                        assessment = ConversationErasure(owner.kernel.database).assess(
-                            owner.kernel.subject_id, parsed.path.split("/")[4]
-                        )
-                    except NotFoundError:
-                        self._json(HTTPStatus.NOT_FOUND, {"error": "conversation_not_found"})
-                        return
-                    except IntegrityError:
-                        self._json(
-                            HTTPStatus.SERVICE_UNAVAILABLE,
-                            {"error": "private_erasure_assessment_unavailable"},
-                        )
-                        return
-                    self._json(HTTPStatus.OK, assessment)
-                elif parsed.path.startswith("/api/admin/conversations/") and parsed.path.endswith(
                     "/messages"
                 ):
                     if not self._authorized("read"):

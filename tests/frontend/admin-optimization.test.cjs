@@ -315,41 +315,21 @@ test("failed version checks display the server error without losing the installe
   assert.equal(nodes.get("#upgrade-commit-title").textContent, "upgrade_no_stable_release");
 });
 
-test("erasure assessment is read only and cannot display a late response after session clearing", async () => {
-  const code=functionsBetween("const erasureReasonLabels =", "const walletRunStatusLabels =");
-  let resolve;
-  const paths=[];
-  const {sandbox,nodes}=context({chat:{current:{conversation_id:"c"},assessmentVersion:0},
-    request:(path,options)=>{paths.push({path,options});return new Promise(done=>{resolve=done;});},
-    formatInteger:String,setStatus:()=>{},
-  });
-  let shown=0;
-  sandbox.$("#conversation-erasure-assessment").showModal=()=>{shown++;};
-  sandbox.$("#assess-conversation-erasure").addEventListener=()=>{};
-  vm.runInContext(code,sandbox);
-  const pending=sandbox.assessConversationErasure();
-  sandbox.chat.assessmentVersion++;
-  sandbox.csrfToken="";
-  resolve({reason_code:"private_erasure_full_contract_pending",counts:{messages:1,model_copies:0}});
-  await pending;
-  assert.equal(paths[0].path,"/api/admin/conversations/c/erasure-assessment");
-  assert.equal(paths[0].options,undefined);
-  assert.equal(shown,0);
-  assert.equal(nodes.get("#conversation-erasure-reason"),undefined);
-});
-
-test("erasure assessment renders a limitation without a deletion action", async () => {
-  const code=functionsBetween("const erasureReasonLabels =", "const walletRunStatusLabels =");
-  const {sandbox,nodes}=context({chat:{current:{conversation_id:"c"},assessmentVersion:0},
-    request:async()=>({reason_code:"legacy_private_provenance_review_required",counts:null,checked_at:"2026-10-10T00:00:00Z",deletion_available:false}),
-    formatInteger:String,setStatus:()=>{},
-  });
-  let shown=0;
-  sandbox.$("#conversation-erasure-assessment").showModal=()=>{shown++;};
-  sandbox.$("#assess-conversation-erasure").addEventListener=()=>{};
-  vm.runInContext(code,sandbox);
-  await sandbox.assessConversationErasure();
-  assert.equal(shown,1);
-  assert.ok(nodes.get("#conversation-erasure-reason").textContent.includes("旧模型调用"));
-  assert.ok(nodes.get("#conversation-erasure-time").textContent.includes("未删除"));
+test("chat logout clears local drafts without invoking a retired erasure control", () => {
+  const chat={current:{conversation_id:"c"},windows:[{}],rows:[{}],drafts:new Map([["c","draft"]]),
+    keys:new Map([["c","key"]]),generation:1,listGeneration:2,timer:42};
+  const {sandbox,nodes}=context({chat,clearQQIdentity:()=>{},clearTimeout:()=>{}});
+  for(const id of ["#mailbox-list","#conversation-list"]) sandbox.$(id).replaceChildren=()=>{};
+  vm.runInContext(functionsBetween("function clearChat()", "async function loadMailbox("),sandbox);
+  sandbox.clearChat();
+  assert.equal(chat.current,null);
+  assert.equal(chat.drafts.size,0);
+  assert.equal(chat.keys.size,0);
+  assert.equal(chat.generation,2);
+  assert.equal(chat.listGeneration,3);
+  assert.equal(nodes.get("#admin-message").value,"");
+  assert.ok(!source.includes("erasure-assessment"));
+  const html=readFileSync(join(__dirname,"../../src/noyra/web/admin.html"),"utf8");
+  assert.ok(!html.includes("assess-conversation-erasure"));
+  assert.ok(!html.includes("conversation-erasure-assessment"));
 });

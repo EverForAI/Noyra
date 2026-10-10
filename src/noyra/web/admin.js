@@ -663,9 +663,9 @@ async function loadSetupGuide() {
   const unauthorized = results.find((result) => result.status === "rejected" && result.reason?.status === 401);
   if (unauthorized) throw unauthorized.reason;
 }
-const chat = {current:null,windows:[],nextOffset:null,before:null,rows:[],drafts:new Map(),keys:new Map(),generation:0,listGeneration:0,assessmentVersion:0,timer:null,history:false,failures:0};
+const chat = {current:null,windows:[],nextOffset:null,before:null,rows:[],drafts:new Map(),keys:new Map(),generation:0,listGeneration:0,timer:null,history:false,failures:0};
 const chatStatus = {offered:"已记录，等待处理",accepted:"接受",rejected:"拒绝",deferred:"暂缓",silent:"选择沉默",sent:"已生成回复",expired:"已过期"};
-function clearChat() { clearQQIdentity(); clearTimeout(chat.timer); chat.generation++; chat.listGeneration++; chat.assessmentVersion++; $("#conversation-erasure-assessment").close(); $("#conversation-erasure-reason").textContent=""; $("#conversation-erasure-counts").textContent=""; $("#conversation-erasure-time").textContent=""; $("#assess-conversation-erasure").disabled=false; chat.current=null; chat.windows=[]; chat.rows=[]; chat.drafts.clear(); chat.keys.clear(); $("#admin-message").value=""; $("#mailbox-list").replaceChildren(); $("#conversation-list").replaceChildren(); $("#message-status").textContent=""; $("#conversation-title").textContent="选择一个会话"; }
+function clearChat() { clearQQIdentity(); clearTimeout(chat.timer); chat.generation++; chat.listGeneration++; chat.current=null; chat.windows=[]; chat.rows=[]; chat.drafts.clear(); chat.keys.clear(); $("#admin-message").value=""; $("#mailbox-list").replaceChildren(); $("#conversation-list").replaceChildren(); $("#message-status").textContent=""; $("#conversation-title").textContent="选择一个会话"; }
 async function loadMailbox({append=false}={}) {
   const generation=++chat.listGeneration;
   const page=await request(`/api/admin/conversations?limit=50&archived=${$("#conversation-filter").value === "archived"}&offset=${append ? chat.nextOffset || 0 : 0}`);
@@ -679,7 +679,6 @@ async function loadMailbox({append=false}={}) {
 }
 async function selectChat(row) {
   if(!row) return;
-  chat.assessmentVersion++; $("#assess-conversation-erasure").disabled=false; $("#conversation-erasure-assessment").close();
   clearTimeout(chat.timer);
   if(chat.current) chat.drafts.set(chat.current.conversation_id,$("#admin-message").value);
   chat.current=row; chat.before=null; chat.rows=[]; chat.history=false; chat.failures=0; $("#chat-search").value=""; $("#chat-status").value="";
@@ -733,37 +732,6 @@ for(const [id,action] of [["rename-conversation","title"],["pin-conversation","p
   try {chat.current=await request(`/api/admin/conversations/${encodeURIComponent(chat.current.conversation_id)}`,{method:"POST",body:JSON.stringify({[action]:value,expected_revision:chat.current.revision})}); await loadMailbox();}
   catch(error){setStatus("#message-status",errorText(error),true);}
 });
-
-const erasureReasonLabels = {
-  private_erasure_full_contract_pending:"基础范围可评估，但完整清除与残留验证尚未完成。",
-  legacy_private_provenance_review_required:"旧模型调用缺少完整来源，尚不能确认相关内容的清除范围。",
-  reflection_derivative_review_required:"反思内容的来源与派生记忆仍需核实。",
-  private_memory_derivative_review_required:"存在尚未完成清除验证的心理、目标或其他派生记录。",
-  multi_source_memory_review_required:"相关记忆包含多个来源，尚不能确认应保留的独立事实。",
-  cross_window_derivative_review_required:"模型输入涉及其他会话，需要核实跨会话影响。",
-  private_event_derivative_review_required:"消息已产生后续内容，需要核实完整影响范围。",
-  private_calls_in_flight:"相关模型调用尚未结束，需要先核对调用结果。",
-  private_exports_in_flight:"有导出任务正在排队或执行，需要先核对其结果。",
-  private_legacy_export_review_required:"旧导出文件的归属与清除范围仍需核实。",
-  private_erasure_scope_exceeds_limit:"内容范围超过本次评估上限，需要分批评估。",
-  private_erasure_review_deadline:"本次评估达到时间上限，尚未得到完整结论。",
-};
-async function assessConversationErasure() {
-  if(!chat.current || !csrfToken)return;
-  const id=chat.current.conversation_id;
-  const version=++chat.assessmentVersion;
-  const button=$("#assess-conversation-erasure");button.disabled=true;
-  try{
-    const result=await request(`/api/admin/conversations/${encodeURIComponent(id)}/erasure-assessment`);
-    if(version!==chat.assessmentVersion || !csrfToken || chat.current?.conversation_id!==id)return;
-    $("#conversation-erasure-reason").textContent=erasureReasonLabels[result.reason_code] || "尚未得到可靠的清除范围。";
-    $("#conversation-erasure-counts").textContent=result.counts ? `基础范围：${formatInteger(result.counts.messages)} 条消息、${formatInteger(result.counts.model_copies)} 份模型内容副本。` : "当前未提供可确认的范围计数。";
-    $("#conversation-erasure-time").textContent=`评估于 ${formatTimestamp(result.checked_at)} · 本次未删除内容`;
-    $("#conversation-erasure-assessment").showModal();
-  }catch(error){if(version===chat.assessmentVersion && csrfToken)setStatus("#message-status","清除评估未完成，请稍后重试",true);}
-  finally{if(version===chat.assessmentVersion)button.disabled=false;}
-}
-$("#assess-conversation-erasure").addEventListener("click",()=>void assessConversationErasure());
 
 const walletRunStatusLabels = { queued: "排队中", running: "执行中", retry_wait: "等待重试", succeeded: "成功", failed: "失败", unknown: "结果未知", cancelled: "已取消" };
 const walletAttemptStatusLabels = { executing: "执行中", succeeded: "成功", failed: "失败", unknown: "结果未知" };

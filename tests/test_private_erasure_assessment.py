@@ -66,7 +66,7 @@ def test_assessment_reports_opaque_provenance_without_accepting_or_hiding_window
     assert ConversationStore(db).list("owner")["items"][0]["status"] == "active"
 
 
-def test_assessment_http_auth_strict_query_and_no_mutation(tmp_path: Path) -> None:
+def test_retired_erasure_http_routes_cannot_mutate_chat(tmp_path: Path) -> None:
     token = "synthetic-erasure-assessment-token"
     settings = ServiceSettings(
         data_dir=tmp_path,
@@ -91,32 +91,41 @@ def test_assessment_http_auth_strict_query_and_no_mutation(tmp_path: Path) -> No
             route: str, *, auth: bool = True, method: str = "GET"
         ) -> tuple[int, dict[str, Any]]:
             headers = {"Authorization": f"Bearer {token}"} if auth else {}
-            if method == "POST":
+            if method in {"POST", "DELETE"}:
                 headers["Content-Type"] = "application/json"
             req = Request(
                 base + route,
                 headers=headers,
                 method=method,
-                data=b"{}" if method == "POST" else None,
+                data=b"{}" if method in {"POST", "DELETE"} else None,
             )
             try:
                 reply = urlopen(req, timeout=10)
             except HTTPError as error:
                 reply = error
             with reply:
-                return reply.status, json.loads(reply.read())
+                raw = reply.read()
+                return reply.status, (
+                    json.loads(raw)
+                    if reply.headers.get_content_type() == "application/json"
+                    else {}
+                )
 
         with kernel.database.read_transaction() as connection:
             before = list(connection.iterdump())
-        assert call(path, auth=False)[0] == 401
+        assert call(path, auth=False)[0] == 404
         status, body = call(path)
-        assert status == 200 and body["deletion_available"] is False
+        assert status == 404 and body["error"] == "not_found"
         assert "private HTTP title" not in json.dumps(body)
-        assert call(path.replace("/api/v1/", "/api/"))[0] == 200
+        assert call(path.replace("/api/v1/", "/api/"))[0] == 404
         for suffix in ("?limit=1", "?bad=1", "?limit=1&limit=2"):
-            assert call(path + suffix)[0] == 400
+            assert call(path + suffix)[0] == 404
         assert call(path.replace(window["conversation_id"], "missing"))[0] == 404
         assert call(path, method="POST")[0] in {400, 404, 405}
+        conversation_path = path.removesuffix("/erasure-assessment")
+        assert call(conversation_path, method="DELETE")[0] == 501
+        for operation in ("delete", "erase", "erasure"):
+            assert call(conversation_path + "/" + operation, method="POST")[0] == 400
         assert not (tmp_path / "privacy-deletions").exists()
         with kernel.database.read_transaction() as connection:
             assert list(connection.iterdump()) == before

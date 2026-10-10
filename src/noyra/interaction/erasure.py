@@ -1,4 +1,4 @@
-"""Durable privacy deletion with an explicit stop on unreviewed provenance."""
+"""Compatibility recovery for historical privacy intents; new deletion is disabled."""
 
 from __future__ import annotations
 
@@ -41,8 +41,8 @@ _REVIEW_CODES = frozenset(
     }
 )
 
-# This foundation deliberately excludes rich/transitive provenance. It has no
-# public endpoint until each domain has its own reviewed deletion contract.
+# Retained for historical recovery only. Rich/transitive provenance still
+# requires review; disabling the feature must not weaken existing receipts.
 _UNREVIEWED_DOMAINS = (
     "appraisals",
     "beliefs",
@@ -139,8 +139,15 @@ class ConversationErasure:
     def request(
         self, subject_id: str, conversation_id: str, *, expected_revision: int, confirmed: bool
     ) -> dict[str, Any]:
-        if confirmed is not True or type(expected_revision) is not int:
-            raise ValueError("explicit deletion confirmation is required")
+        """Do not accept a new deletion, including through the former internal API."""
+        raise ErasureReviewRequired("private_deletion_disabled")
+
+    def _resume_recorded_intent(
+        self, subject_id: str, conversation_id: str, *, expected_revision: int
+    ) -> dict[str, Any]:
+        marker = _read_marker(self.root / (content_hash([subject_id, conversation_id]) + ".json"))
+        if marker["subject_id"] != subject_id or marker["conversation_id"] != conversation_id:
+            raise IntegrityError("privacy deletion recovery subject mismatch")
         with self.database.transaction() as connection:
             state = _row(connection, subject_id, conversation_id)
             existing = connection.execute(
@@ -151,10 +158,7 @@ class ConversationErasure:
                 if state["revision"] != expected_revision:
                     raise ConversationConflict("conversation revision changed")
                 self._review(connection, subject_id, conversation_id)
-                job_id = new_id("erase")
-                # Persist outside the database before accepting the intent. A crash before
-                # the transaction commits still leaves a deletion intent to replay.
-                job_id = self._write_marker(subject_id, conversation_id, job_id)
+                job_id = marker["job_id"]
                 state.update(
                     status="deleting", revision=state["revision"] + 1, updated_at=utc_now()
                 )
@@ -181,6 +185,8 @@ class ConversationErasure:
                     "'operator',?,?)",
                     (new_id("audit"), subject_id, canonical_json({"job_id": job_id}), utc_now()),
                 )
+            elif existing["job_id"] != marker["job_id"]:
+                raise IntegrityError("privacy deletion job and journal mismatch")
         result = self.get(subject_id, conversation_id)
         assert result is not None
         return result
@@ -227,7 +233,7 @@ class ConversationErasure:
                 ).fetchone()
             if state is None:
                 continue
-            job = self.request(subject_id, window, expected_revision=state[0], confirmed=True)
+            job = self._resume_recorded_intent(subject_id, window, expected_revision=state[0])
             if job["job_id"] != marker["job_id"]:
                 raise IntegrityError("privacy deletion recovery identity mismatch")
             results.append(self.run(subject_id, window))
@@ -895,7 +901,7 @@ def replay_privacy_deletions(current_root: Path, restored_root: Path) -> None:
             ).fetchone()
         if row is None:
             continue
-        erasure.request(subject, window, expected_revision=row[0], confirmed=True)
+        erasure._resume_recorded_intent(subject, window, expected_revision=row[0])
         if erasure.run(subject, window)["status"] != "completed":
             raise ErasureReviewRequired("backup_private_deletion_replay_requires_review")
 

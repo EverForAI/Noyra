@@ -14,14 +14,16 @@ from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.private_sources import private_input_scope
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.interaction import InteractionStore
-from noyra.interaction.conversations import ConversationConflict, ConversationStore
+from noyra.interaction.conversations import ConversationConflict, ConversationStore, _row
 from noyra.interaction.erasure import (
     ERASED,
     ERASED_MODEL,
-    ConversationErasure,
     ErasureReviewRequired,
     _read_marker,
     replay_privacy_deletions,
+)
+from noyra.interaction.erasure import (
+    ConversationErasure as RecoveryErasure,
 )
 from noyra.interaction.integrity import InteractionIntegrity
 from noyra.interaction.types import InteractionDecision
@@ -30,6 +32,26 @@ from noyra.mind.errors import CausalValidationError
 from noyra.model.errors import ModelCallStateError
 from noyra.model.ledger import ModelLedger
 from noyra.model.types import BudgetLimits, ModelUsage
+
+
+class ConversationErasure(RecoveryErasure):
+    """Fixture for intents accepted by the historical prototype, never a product switch."""
+
+    def request(
+        self, subject_id: str, conversation_id: str, *, expected_revision: int, confirmed: bool
+    ) -> dict[str, Any]:
+        if confirmed is not True or type(expected_revision) is not int:
+            raise ValueError("explicit deletion confirmation is required")
+        with self.database.read_transaction() as connection:
+            state = _row(connection, subject_id, conversation_id)
+            if self.get(subject_id, conversation_id) is None:
+                if state["revision"] != expected_revision:
+                    raise ConversationConflict("conversation revision changed")
+                self._review(connection, subject_id, conversation_id)
+        self._write_marker(subject_id, conversation_id, new_id("erase"))
+        return self._resume_recorded_intent(
+            subject_id, conversation_id, expected_revision=expected_revision
+        )
 
 
 def test_erasure_preserves_accounting_and_blocks_late_writes(tmp_path: Path) -> None:

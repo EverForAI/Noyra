@@ -149,18 +149,6 @@ paths:
         '404': { description: Conversation absent }
         '409': { description: Revision or state conflict }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
-  /api/v1/admin/conversations/{conversationId}/erasure-assessment:
-    parameters:
-      - { name: conversationId, in: path, required: true, schema: { type: string } }
-    get:
-      operationId: assessConversationErasure
-      security: [{ readBearer: [] }]
-      responses:
-        '200': { description: First prototype blocker and bounded counts; deletion remains unavailable }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '404': { description: Conversation absent }
-        '503': { description: Assessment integrity unavailable }
   /api/v1/admin/conversations/{conversationId}/messages:
     parameters:
       - { name: conversationId, in: path, required: true, schema: { type: string } }
