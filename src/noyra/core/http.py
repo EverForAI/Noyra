@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
+from contextvars import copy_context
 from typing import Any
 
 import httpcore
@@ -200,12 +201,13 @@ def call_sync_http_with_deadline(
 
     def invoke() -> None:
         try:
-            outcome.put((True, function(*args)))
+            outcome.put((True, context.run(function, *args)))
         except BaseException as error:
             outcome.put((False, error))
         finally:
             _SYNC_HTTP_GATE.release()
 
+    context = copy_context()
     worker = threading.Thread(target=invoke, name="noyra-sync-http", daemon=True)
     try:
         worker.start()

@@ -182,13 +182,26 @@ class ModelGateway:
                 )
                 raise
 
+            send_denied = False
+
             def before_send() -> None:
+                nonlocal send_denied
+                try:
+                    assert_current_lease()
+                except OperationInvalidated:
+                    send_denied = True
+                    raise
                 self.ledger.check_request_authorization(
                     call.call_id,
                     resource_key_id=self.resource_key_id,
                     resource_key_fingerprint=self.resource_key_fingerprint,
                     expected_resource_revision=self.resource_revision,
                 )
+                try:
+                    assert_current_lease()
+                except OperationInvalidated:
+                    send_denied = True
+                    raise
 
             try:
                 self.ledger.start_attempt(
@@ -198,13 +211,14 @@ class ModelGateway:
                     expected_resource_revision=self.resource_revision,
                 )
                 before_send()
-            except ModelAuthorizationError:
-                self.ledger.cancel_unsent_attempt(
-                    attempt.attempt_id, error_code="model_authorization_denied"
+            except (ModelAuthorizationError, OperationInvalidated) as error:
+                code = (
+                    "runtime_epoch_invalidated"
+                    if isinstance(error, OperationInvalidated)
+                    else "model_authorization_denied"
                 )
-                self.ledger.finish_call(
-                    call.call_id, "failed", error_code="model_authorization_denied"
-                )
+                self.ledger.cancel_unsent_attempt(attempt.attempt_id, error_code=code)
+                self.ledger.finish_call(call.call_id, "failed", error_code=code)
                 raise
 
             from .openai_compatible import OpenAICompatibleProvider
@@ -214,7 +228,7 @@ class ModelGateway:
 
             stale_operation = False
             try:
-                assert_current_lease()
+                before_send()
                 provider_response = await self.provider.complete(request)
                 try:
                     assert_current_lease()
@@ -229,6 +243,14 @@ class ModelGateway:
                 )
                 raise
             except OperationInvalidated:
+                if send_denied:
+                    self.ledger.cancel_unsent_attempt(
+                        attempt.attempt_id, error_code="runtime_epoch_invalidated"
+                    )
+                    self.ledger.finish_call(
+                        call.call_id, "failed", error_code="runtime_epoch_invalidated"
+                    )
+                    raise
                 self.ledger.finish_attempt(
                     attempt.attempt_id,
                     "unknown",

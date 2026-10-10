@@ -109,20 +109,21 @@ class OpenAICompatibleProvider:
             headers["Authorization"] = f"Bearer {api_key}"
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.settings.timeout_seconds
+        before_send = self.before_send
 
         async def trace(event: str, info: dict[str, Any]) -> None:
             # httpcore emits this after pool/DNS/TLS waits, before any request
             # headers are written. A revoke while connecting still stops send.
-            if event.endswith("send_request_headers.started") and self.before_send is not None:
-                self.before_send()
+            if event.endswith("send_request_headers.started") and before_send is not None:
+                before_send()
 
         try:
             # httpx's read timeout is an idle timeout.  The outer scope is the
             # operation contract: DNS, connection, response headers, and every
             # response chunk must fit inside one absolute wall-clock deadline.
             async with asyncio.timeout(self.settings.timeout_seconds):
-                if self.before_send is not None:
-                    self.before_send()
+                if before_send is not None:
+                    before_send()
                 async with self._client.stream(
                     "POST",
                     f"{self.settings.base_url}/chat/completions",

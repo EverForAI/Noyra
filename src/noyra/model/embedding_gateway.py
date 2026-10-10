@@ -6,9 +6,11 @@ import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from contextvars import copy_context
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
+from noyra.core.admission import OperationInvalidated, assert_current_lease
 from noyra.core.errors import IntegrityError
 from noyra.core.types import content_hash, new_id
 
@@ -134,6 +136,10 @@ class EmbeddingGateway:
             raise provider_error from error
         except EmbeddingProviderError as error:
             self._finish_failure(usage.usage_id, error, reserved_tokens)
+            if error.code == "embedding_runtime_invalidated":
+                raise OperationInvalidated(
+                    "embedding request belongs to a stale runtime epoch"
+                ) from error
             raise
         except Exception as error:
             provider_error = EmbeddingProviderError(
@@ -172,6 +178,7 @@ class EmbeddingGateway:
             )
             self._finish_failure(usage.usage_id, provider_error, reserved_tokens)
             raise provider_error from error
+        assert_current_lease()
         self._account("succeeded", actual_tokens, pool_pressure=0.0, frustration=0.0)
         return [list(vector) for vector in vectors]
 
@@ -194,9 +201,10 @@ class EmbeddingGateway:
             return True
 
     def _call_with_timeout(self, texts: tuple[str, ...]) -> EmbeddingProviderResponse:
+        context = copy_context()
         if self._executor is not None:
             future: Future[EmbeddingProviderResponse] = self._executor.submit(
-                self._provider_call, texts
+                context.run, self._provider_call, texts
             )
             with self._worker_condition:
                 self._futures.add(future)
@@ -214,7 +222,7 @@ class EmbeddingGateway:
 
         def invoke() -> None:
             try:
-                result.append(self._provider_call(texts))
+                result.append(context.run(self._provider_call, texts))
             except BaseException as error:  # propagate provider failures to the caller
                 errors.append(error)
             finally:
@@ -269,9 +277,13 @@ class EmbeddingGateway:
                 error_code=error.code,
                 usage_unknown=error.usage_unknown,
                 circuit_policy=self.circuit_policy,
+                provider_failure=error.code
+                not in {"embedding_runtime_invalidated", "embedding_resource_inactive"},
             )
         except ValueError as state_error:
             self._handle_recovered_usage(usage_id, reserved_tokens, state_error)
+            return
+        if error.code == "embedding_runtime_invalidated":
             return
         circuit = self.ledger.circuit(self.subject_id, self.resource_id)
         self._account(
@@ -307,6 +319,12 @@ class EmbeddingGateway:
         )
 
     def _provider_call(self, texts: tuple[str, ...]) -> EmbeddingProviderResponse:
+        try:
+            assert_current_lease()
+        except OperationInvalidated as error:
+            raise EmbeddingProviderError(
+                "embedding_runtime_invalidated", usage_unknown=False
+            ) from error
         embed_with_usage = getattr(self.provider, "embed_with_usage", None)
         if embed_with_usage is not None:
             response = embed_with_usage(texts)

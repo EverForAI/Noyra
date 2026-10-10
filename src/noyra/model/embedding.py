@@ -13,6 +13,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
+from noyra.core.admission import OperationInvalidated, assert_current_lease
 from noyra.core.credentials import read_env_secret
 from noyra.core.errors import IntegrityError
 from noyra.core.http import (
@@ -229,15 +230,25 @@ class OpenAIEmbeddingProvider:
             raise ValueError("embedding batch size must be between one and 128")
         if any(not isinstance(text, str) or not text for text in texts):
             raise ValueError("embedding inputs must be nonempty text")
-        if self.call_authorizer is not None:
+
+        def before_send() -> None:
             try:
-                self.call_authorizer()
+                assert_current_lease()
+                if self.call_authorizer is not None:
+                    self.call_authorizer()
+                assert_current_lease()
+            except OperationInvalidated as error:
+                raise EmbeddingProviderError(
+                    "embedding_runtime_invalidated", usage_unknown=False
+                ) from error
             except EmbeddingProviderError:
                 raise
             except (IntegrityError, PermissionError) as error:
                 raise EmbeddingProviderError(
                     "embedding_resource_inactive", usage_unknown=False
                 ) from error
+
+        before_send()
         payload: dict[str, object] = {
             "model": self.settings.model,
             "input": list(texts),
@@ -246,9 +257,17 @@ class OpenAIEmbeddingProvider:
             payload["dimensions"] = self.settings.dimensions
 
         timeout_hook = SyncHTTPTimeoutHook()
+        deadline = time.monotonic() + self.settings.timeout_seconds
 
         def perform_request() -> tuple[bytes, str | None]:
-            deadline = time.monotonic() + self.settings.timeout_seconds
+
+            def trace(event: str, info: dict[str, Any]) -> None:
+                if event.endswith("send_request_headers.started"):
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("embedding operation deadline exceeded")
+                    before_send()
+
+            before_send()
             with (
                 httpx.Client(
                     timeout=httpx.Timeout(self.settings.timeout_seconds),
@@ -268,6 +287,7 @@ class OpenAIEmbeddingProvider:
                         "User-Agent": "Noyra/0.1.0",
                     },
                     follow_redirects=False,
+                    extensions={"trace": trace},
                 ) as response,
             ):
                 timeout_hook.register(response)
