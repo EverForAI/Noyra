@@ -29,7 +29,8 @@ jobs:
           node-version: "24.15.0"
       - run: node --version
       - run: node --check src/noyra/web/admin.js
-      - run: node --test tests/frontend/admin-optimization.test.cjs
+      - run: node --check src/noyra/web/app.js
+      - run: node --test tests/frontend/*.test.cjs
       - name: Run cloud security regression without skips
         run: |
           python -m pytest tests/test_runtime_logging.py tests/test_cloud_dependency_compatibility.py \

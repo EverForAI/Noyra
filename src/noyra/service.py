@@ -3103,7 +3103,35 @@ class NoyraHTTPServer:
                     if not self._authorized():
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
-                    self._json(HTTPStatus.OK, owner.public_archive.admin(owner.kernel.subject_id))
+                    try:
+                        params = parse_qs(parsed.query, keep_blank_values=True)
+                        if not params:
+                            management_result: Any = owner.public_archive.admin(
+                                owner.kernel.subject_id
+                            )
+                        else:
+                            if (
+                                set(params) - {"view", "limit", "cursor"}
+                                or any(len(value) != 1 for value in params.values())
+                                or params.get("view") != ["management"]
+                            ):
+                                raise ValueError("invalid public management query")
+                            management_result = owner.public_archive.admin_page(
+                                owner.kernel.subject_id,
+                                limit=int(params.get("limit", ["20"])[0]),
+                                cursor=params.get("cursor", [None])[0],
+                            )
+                    except (ValueError, TypeError, UnicodeError):
+                        self._json(
+                            HTTPStatus.BAD_REQUEST, {"error": "invalid_public_publication_query"}
+                        )
+                        return
+                    except IntegrityError:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE, {"error": "public_content_unavailable"}
+                        )
+                        return
+                    self._json(HTTPStatus.OK, management_result)
                 elif parsed.path == "/api/state":
                     state = owner.projection.state(owner.kernel.subject_id)
                     self._json(HTTPStatus.OK, state, public_contract=True)
@@ -7478,6 +7506,11 @@ class NoyraHTTPServer:
                     return
                 except PublicationConflict:
                     self._json(HTTPStatus.CONFLICT, {"error": "public_publication_conflict"})
+                    return
+                except IntegrityError:
+                    self._json(
+                        HTTPStatus.SERVICE_UNAVAILABLE, {"error": "public_content_unavailable"}
+                    )
                     return
                 except (ValueError, TypeError, UnicodeError, PermissionError):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_public_publication"})

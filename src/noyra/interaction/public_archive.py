@@ -320,6 +320,49 @@ class PublicArchive:
             )
             return [{**self._publication(r), "source_id": r["source_id"]} for r in rows]
 
+    def admin_page(
+        self, subject_id: str, *, limit: int = 20, cursor: str | None = None
+    ) -> dict[str, Any]:
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise ValueError("invalid public management page size")
+        clauses, values = ["subject_id=?"], [subject_id]
+        if cursor:
+            try:
+                if len(cursor) > 1500:
+                    raise ValueError("invalid public management cursor")
+                data = json.loads(base64.b64decode(cursor, altchars=b"-_", validate=True))
+                if not isinstance(data, dict) or data.get("subject") != subject_id:
+                    raise ValueError("invalid public management subject")
+                timestamp = _timestamp(data["time"])
+                identifier = _text(data["id"], 100, required=True)
+            except (KeyError, TypeError, binascii.Error, UnicodeError, json.JSONDecodeError) as exc:
+                raise ValueError("invalid public management cursor") from exc
+            clauses.append("(updated_at,publication_id)<(?,?)")
+            values.extend([timestamp, identifier])
+        with self.database.read_transaction() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM public_publications WHERE {' AND '.join(clauses)} "
+                "ORDER BY updated_at DESC,publication_id DESC LIMIT ?",
+                (*values, limit + 1),
+            ).fetchall()
+        page = rows[:limit]
+        next_cursor = None
+        if len(rows) > limit:
+            last = page[-1]
+            next_cursor = base64.urlsafe_b64encode(
+                canonical_json(
+                    {
+                        "subject": subject_id,
+                        "time": last["updated_at"],
+                        "id": last["publication_id"],
+                    }
+                ).encode()
+            ).decode()
+        return {
+            "items": [{**self._publication(r), "source_id": r["source_id"]} for r in page],
+            "next_cursor": next_cursor,
+        }
+
     def overview(self, subject_id: str) -> dict[str, Any]:
         with self.database.read_transaction() as connection:
             row = connection.execute(

@@ -112,3 +112,43 @@ class PublicArchiveHTTPTests(unittest.TestCase):
         with self.assertRaises(HTTPError) as unauthorized:
             urlopen(request, timeout=5)
         self.assertEqual(unauthorized.exception.code, 401)
+
+    def test_cookie_session_publication_csrf_conflict_and_bounded_management(self) -> None:
+        from http.cookiejar import CookieJar
+        from urllib.request import HTTPCookieProcessor, build_opener
+
+        from test_public_archive import publication
+
+        opener = build_opener(HTTPCookieProcessor(CookieJar()))
+        login = Request(
+            self.base_url + "/admin/session",
+            data=json.dumps({"token": self.token}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with opener.open(login, timeout=5) as response:
+            session = json.loads(response.read())
+        path = self.base_url + "/api/admin/public-publications"
+        request = Request(
+            path,
+            data=json.dumps(publication()).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with self.assertRaises(HTTPError) as missing_csrf:
+            opener.open(request, timeout=5)
+        self.assertEqual(missing_csrf.exception.code, 401)
+        request.add_header("X-CSRF-Token", session["csrf_token"])
+        with opener.open(request, timeout=5) as response:
+            self.assertEqual(json.loads(response.read())["revision"], 1)
+        request = Request(
+            path,
+            data=json.dumps(publication(title="conflict")).encode(),
+            headers={"Content-Type": "application/json", "X-CSRF-Token": session["csrf_token"]},
+        )
+        with self.assertRaises(HTTPError) as conflict:
+            opener.open(request, timeout=5)
+        self.assertEqual(conflict.exception.code, 409)
+        with opener.open(path + "?view=management&limit=1", timeout=5) as response:
+            self.assertEqual(len(json.loads(response.read())["items"]), 1)
+        with self.assertRaises(HTTPError) as bad_limit:
+            opener.open(path + "?view=management&limit=51", timeout=5)
+        self.assertEqual(bad_limit.exception.code, 400)

@@ -172,6 +172,26 @@ def test_lifecycle_projects_only_state_and_not_reason(
     assert "PRIVATE-SENTINEL" not in str(overview)
 
 
+def test_management_cursor_keeps_withdrawn_rows_and_subject_isolation(
+    archive: tuple[PublicArchive, SubjectKernel],
+) -> None:
+    store, kernel = archive
+    for index in range(5):
+        store.publish(
+            kernel.subject_id, publication(publication_id=f"manage-{index:04}"), actor="operator"
+        )
+    store.withdraw(kernel.subject_id, "manage-0002", 1, actor="operator")
+    first = store.admin_page(kernel.subject_id, limit=2)
+    second = store.admin_page(kernel.subject_id, limit=2, cursor=first["next_cursor"])
+    assert len(first["items"]) == len(second["items"]) == 2
+    assert any(row["status"] == "withdrawn" for row in first["items"])
+    assert not {r["id"] for r in first["items"]} & {r["id"] for r in second["items"]}
+    with pytest.raises(ValueError):
+        store.admin_page("another-subject", cursor=first["next_cursor"])
+    with pytest.raises(ValueError):
+        store.admin_page(kernel.subject_id, cursor="bad!")
+
+
 def test_schema92_upgrade_preserves_private_history_and_publishes_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

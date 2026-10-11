@@ -83,7 +83,7 @@ for (const oldOutcome of ["success", "failure"]) {
     let calls = 0;
     const { sandbox } = context({ csrfToken: "", submitButton: () => button,
       stopUpgradePolling: () => {}, stopRuntimeLogPolling: () => {},
-      clearChat: () => {}, clearWallet: () => {}, document: { querySelectorAll: () => [] },
+      clearChat: () => {}, clearWallet: () => {}, clearPublicPublications: () => {}, document: { querySelectorAll: () => [] },
       renderedModels: new Map(), publicPostActionKeys: new Map(), publicPostLoadVersion: 0,
       modelLoadVersion: 0, usageLoadVersion: 0, usageResourceVersion: 0, healthLoadVersion: 0,
       healthPages: { model: 0, search: 0 },
@@ -540,7 +540,7 @@ test("logout clears every private panel, loaded option, cache and open dialog",a
   const form={dataset:{dirty:"1",revision:"7",lengthRevision:"9"},reset(){}};
   const secret={value:"synthetic secret"};
   const {sandbox,nodes}=context({request:async()=>null,stopUpgradePolling:()=>{},stopRuntimeLogPolling:()=>{},
-    clearChat:()=>{},clearWallet:()=>{},document:{querySelectorAll:selector=>{
+    clearChat:()=>{},clearWallet:()=>{}, clearPublicPublications:()=>{},document:{querySelectorAll:selector=>{
       if(selector==="#admin-shell form")return [form];
       if(selector.includes("input[type=password]"))return [secret];
       if(selector==="dialog[open]")return [{close:()=>closed++}];

@@ -32,6 +32,7 @@
         <button class="nav-item" data-section="conversation" type="button">私密交流</button>
         <button class="nav-item" data-section="logs" type="button">活动日志</button>
         <button class="nav-item" data-section="public-posts" type="button">内容审核</button>
+        <button class="nav-item" data-section="publications" type="button">公开摘要</button>
         <button class="nav-item" data-section="models" type="button">认知资源</button>
         <button class="nav-item" data-section="search" type="button">搜索配置</button>
         <button class="nav-item" data-section="capabilities" type="button">能力授权</button>
@@ -197,6 +198,37 @@
           </div>
           <p class="form-status" id="public-post-review-status" role="status"></p>
         </article>
+      </section>
+      <section class="admin-section" data-section-panel="publications" hidden>
+        <div class="section-intro"><div><p class="eyebrow">APPROVED PUBLIC SUMMARIES</p><h2>公开摘要管理</h2><p>新增目标、项目、预测、研究与睡眠记录默认私密。这里只发布你手写并审核的独立摘要，不自动复制内部资料，不代表 Noyra 原话。</p></div></div>
+        <article class="surface-card">
+          <div class="card-heading"><h2 id="publication-editor-heading">新建公开摘要</h2><button id="publication-new" type="button">新建</button></div>
+          <p class="muted">公开前请检查正文及参考链接中没有私人交流、记忆、密钥或内部判断。撤回只停止本站展示，无法撤回他人已经复制的内容；不会删除原始记录。</p>
+          <form id="publication-form" class="model-grid labeled-form">
+            <label for="publication-kind"><span>摘要类型</span><select id="publication-kind"><option value="goal">目标</option><option value="project">项目</option><option value="prediction">预测</option><option value="research">研究</option><option value="sleep">睡眠</option><option value="update">公开更新</option></select></label>
+            <label for="publication-source"><span>关联内部记录 ID（可选，不公开）</span><input id="publication-source" maxlength="256"><small>只验证归属，不读取正文。没有关联 ID 也可手写摘要；保存后类型与关联不能更改。</small></label>
+            <label for="publication-title"><span>公开标题</span><input id="publication-title" maxlength="240" required></label>
+            <label for="publication-status"><span>公开状态（可选）</span><select id="publication-status"><option value="">未说明</option><option value="planned">计划中</option><option value="active">活跃</option><option value="running">进行中</option><option value="completed">已完成</option><option value="paused">暂停</option><option value="cancelled">取消</option><option value="published">已公开</option></select></label>
+            <label for="publication-summary"><span>公开摘要</span><textarea id="publication-summary" maxlength="1000" rows="3" required></textarea></label>
+            <label for="publication-body"><span>公开正文（可选）</span><textarea id="publication-body" maxlength="20000" rows="6"></textarea></label>
+            <label for="publication-progress" data-publication-field="goal project" hidden><span>公开进度（可选，0–100%）</span><input id="publication-progress" type="number" min="0" max="100" step="0.1"></label>
+            <label for="publication-next" data-publication-field="goal project" hidden><span>公开下一步（可选）</span><textarea id="publication-next" maxlength="500" rows="2"></textarea></label>
+            <label for="publication-resources" data-publication-field="project" hidden><span>公开资源状态（可选）</span><select id="publication-resources"><option value="">未说明</option><option value="normal">正常</option><option value="limited">有限</option><option value="paused">暂停</option><option value="undisclosed">不公开</option></select></label>
+            <label for="publication-phases" data-publication-field="project" hidden><span>公开阶段（可选，最多10项）</span><textarea id="publication-phases" rows="3" maxlength="6000" placeholder="每行：阶段名称 | 状态，例如 阅读资料 | active"></textarea></label>
+            <label for="publication-probability" data-publication-field="prediction" hidden><span>公开概率（可选，0–100%）</span><input id="publication-probability" type="number" min="0" max="100" step="0.1"></label>
+            <label for="publication-target" data-publication-field="prediction" hidden><span>预测目标时间（可选，本地时区）</span><input id="publication-target" type="datetime-local"></label>
+            <label for="publication-outcome" data-publication-field="prediction" hidden><span>公开预测结果（可选）</span><select id="publication-outcome"><option value="">未说明</option><option value="pending">待确认</option><option value="supported">得到支持</option><option value="not_supported">未获支持</option><option value="partial">部分支持</option><option value="cancelled">取消</option></select></label>
+            <label for="publication-uncertainty" data-publication-field="research" hidden><span>限制与不确定性（可选）</span><textarea id="publication-uncertainty" maxlength="500" rows="3"></textarea></label>
+            <label for="publication-sources" data-publication-field="research" hidden><span>公开参考资料（可选，最多10项）</span><textarea id="publication-sources" maxlength="6000" rows="3" placeholder="每行：资料标题 | https://example.com/article"></textarea><small>只发布链接，不向外部网站发起读取请求。请确认链接不包含凭证或私人资料。</small></label>
+            <label for="publication-start" data-publication-field="sleep" hidden><span>公开开始时间（可选，本地时区）</span><input id="publication-start" type="datetime-local"></label>
+            <label for="publication-end" data-publication-field="sleep" hidden><span>公开结束时间（可选，本地时区）</span><input id="publication-end" type="datetime-local"></label>
+            <label for="publication-reason" data-publication-field="sleep" hidden><span>公开原因类别（可选，必须显式批准）</span><select id="publication-reason"><option value="">未说明</option><option value="undisclosed">不公开</option><option value="periodic">周期休眠</option><option value="resource">资源调整</option><option value="maintenance">维护</option></select></label>
+            <label class="publication-confirm"><input id="publication-confirm" type="checkbox" required><span>我已逐项审核，明确允许将本表所有内容匿名公开。</span></label>
+            <div class="resource-actions"><button type="submit">审核并发布摘要</button></div>
+          </form>
+          <p id="publication-editor-status" class="form-status" role="status"></p>
+        </article>
+        <article class="surface-card"><div class="card-heading"><h2>已发布与已撤回摘要</h2><button id="publication-refresh" type="button">刷新列表</button></div><p class="muted">每页20条，修订与撤回保留必要管理记录。刷新不会覆盖编辑草稿。</p><div id="publication-list" class="resource-list"></div><button id="publication-more" type="button" hidden>加载更多</button><p id="publication-list-status" class="form-status" role="status"></p></article>
       </section>
       <section class="admin-section" data-section-panel="models" hidden>
         <div class="section-intro"><div><p class="eyebrow">MODEL RESOURCES</p><h2>认知资源</h2><p>资源按认知池隔离。测试只调用选中的资源，并消耗一次模型额度。</p></div></div>
