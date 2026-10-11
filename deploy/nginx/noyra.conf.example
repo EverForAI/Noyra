@@ -1,5 +1,6 @@
-# Replace archive.example.com and admin.example.com and install this server
-# block under nginx. The public and management origins are separate hostnames;
+# Replace archive.example.com and admin.example.com and include this entire file
+# inside nginx's http context (for example /etc/nginx/conf.d/noyra.conf), not
+# inside another server block. The public and management origins are separate hostnames;
 # both proxy to the loopback-only Noyra listener.
 #
 # Set these values in /etc/noyra/noyra.env before starting the service:
@@ -9,10 +10,32 @@
 # NOYRA_ADMIN_SESSION_TTL_SECONDS=43200
 # Obtain the certificate before enabling the HTTPS block, for example with
 # certbot or your platform's ACME integration.
+
+# Log only allowlisted methods and server-produced numeric fields. Never add
+# request, request_uri, uri, args, headers or upstream payloads to this format.
+map $request_method $noyra_log_method {
+    default UNKNOWN;
+    GET GET;
+    POST POST;
+    PUT PUT;
+    PATCH PATCH;
+    DELETE DELETE;
+    HEAD HEAD;
+    OPTIONS OPTIONS;
+    TRACE TRACE;
+    CONNECT CONNECT;
+}
+log_format noyra_privacy escape=json
+    '{"method":"$noyra_log_method","status":$status,"duration_seconds":$request_time}';
+
 server {
     listen 80;
     listen [::]:80;
     server_name archive.example.com admin.example.com;
+    access_log /var/log/nginx/noyra-access.log noyra_privacy;
+    # nginx error records cannot be field-filtered and may include raw targets.
+    # Retain status/timing in access_log and route/error events in Noyra logs.
+    error_log /dev/null crit;
     return 301 https://$host$request_uri;
 }
 
@@ -20,6 +43,8 @@ server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
     server_name archive.example.com admin.example.com;
+    access_log /var/log/nginx/noyra-access.log noyra_privacy;
+    error_log /dev/null crit;
 
     ssl_certificate /etc/letsencrypt/live/archive.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/archive.example.com/privkey.pem;

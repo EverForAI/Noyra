@@ -88,6 +88,7 @@ from noyra.core.upgrade import (
     UpgradeManager,
 )
 from noyra.core.usage_projection import UsageProjection, UsageQueryLimit
+from noyra.http_access_logging import http_log_fields
 from noyra.interaction import (
     ADAPTERS,
     REPLAY_WINDOW_SECONDS,
@@ -2581,8 +2582,13 @@ class NoyraHTTPServer:
                 )
 
             def handle_one_request(self) -> None:
+                self._log_request_parsed = False
                 with operation_deadline(owner.settings.request_timeout_seconds):
                     super().handle_one_request()
+
+            def parse_request(self) -> bool:
+                self._log_request_parsed = super().parse_request()
+                return self._log_request_parsed
 
             def do_GET(self) -> None:
                 if not owner.allow_request(
@@ -9579,8 +9585,35 @@ class NoyraHTTPServer:
                     raise ValueError("runtime log cursor is invalid")
                 return value
 
+            def _log_http_event(self, event: str, code: object = "-") -> None:
+                method, route, status = http_log_fields(
+                    getattr(self, "command", None),
+                    getattr(self, "path", "")
+                    if getattr(self, "_log_request_parsed", False)
+                    else "",
+                    code,
+                )
+                LOGGER.info(
+                    "http event=%s method=%s route=%s status=%s", event, method, route, status
+                )
+
+            def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+                # Never delegate to the stdlib request-line formatter. Neither
+                # the original target nor response/header/body data enter logs.
+                self._log_http_event("request", code)
+
+            def log_error(self, format: str, *args: Any) -> None:
+                if format == "code %d, message %s" and args:
+                    self._log_http_event("response_error", args[0])
+                elif format == "Request timed out: %r":
+                    self._log_http_event("timeout")
+                else:
+                    self._log_http_event("protocol_error")
+
             def log_message(self, format: str, *args: Any) -> None:
-                LOGGER.info("http %s", format % args)
+                # Unknown/future stdlib diagnostics may contain request data or
+                # exception text. Keep a fixed event, never interpolate them.
+                self._log_http_event("diagnostic")
 
         return Handler
 
