@@ -31,6 +31,7 @@ function harness(extra = {}) {
     const sandbox = vm.createContext({
         document: { querySelector: node },
         URLSearchParams,
+        URL,
         AbortController,
         Date,
         console,
@@ -217,4 +218,58 @@ test("public requests omit management cookies and reject wrong contracts", async
     );
     assert.equal(options.credentials, "omit");
     assert.equal(options.cache, "no-store");
+});
+
+test("structured summaries render zero progress and probability without private fields", () => {
+    const h = harness();
+    assert.ok(
+        h.sandbox
+            .renderDetails({
+                kind: "goal",
+                details: { progress: 0, next_step: "<private>" },
+            })
+            .includes("0%"),
+    );
+    const prediction = h.sandbox.renderDetails({
+        kind: "prediction",
+        details: {
+            probability: 0,
+            outcome: "pending",
+            private_reason: "sentinel",
+        },
+    });
+    assert.ok(prediction.includes("0%"));
+    assert.ok(!prediction.includes("sentinel"));
+    const sleep = h.sandbox.renderDetails({
+        kind: "sleep",
+        details: {
+            started_at: "2026-10-12T00:00:00Z",
+            completed_at: "2026-10-12T04:00:00Z",
+        },
+    });
+    assert.ok(sleep.includes("4 小时"));
+});
+test("research references reject script, HTTP and credential-bearing URLs", () => {
+    const h = harness();
+    for (const url of [
+        "javascript:alert(1)",
+        "http://example.com",
+        "https://user:secret@example.com",
+    ]) {
+        assert.equal(h.sandbox.safePublicLink(url), null);
+        const html = h.sandbox.renderDetails({
+            kind: "research",
+            details: { sources: [{ title: "<img>", url }] },
+        });
+        assert.ok(!html.includes('href="'));
+        assert.ok(!html.includes("<img>"));
+    }
+    const html = h.sandbox.renderDetails({
+        kind: "research",
+        details: {
+            sources: [{ title: "Reference", url: "https://example.com/a" }],
+        },
+    });
+    assert.ok(html.includes('rel="noopener noreferrer"'));
+    assert.ok(html.includes('referrerpolicy="no-referrer"'));
 });

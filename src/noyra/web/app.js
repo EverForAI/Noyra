@@ -347,9 +347,135 @@ function recordTitle(row) {
           ? viewLabel(row.kind)
           : row.title || viewLabel(row.kind);
 }
-function renderDetails() {
-    return "";
-} // P04 extends structured reading without exposing private data.
+function safePublicLink(value) {
+    try {
+        const url = new URL(value);
+        return url.protocol === "https:" && !url.username && !url.password
+            ? url.href
+            : null;
+    } catch {
+        return null;
+    }
+}
+function renderDetails(row) {
+    const details = row.details || {},
+        fields = [];
+    const field = (zh, en, text, wide = false) => {
+        if (text != null && String(text).length)
+            fields.push(
+                `<div class="detail-field${wide ? " wide" : ""}"><dt>${escapeHtml(tr(zh, en))}</dt><dd>${escapeHtml(text)}</dd></div>`,
+            );
+    };
+    if (["goal", "project"].includes(row.kind)) {
+        if (Number.isFinite(details.progress)) {
+            const percent = Math.round(
+                Math.max(0, Math.min(1, details.progress)) * 100,
+            );
+            fields.push(
+                `<div class="detail-field"><dt>${tr("公开进度", "Published progress")}</dt><dd>${percent}%<progress class="public-progress" aria-label="${tr("公开进度", "Published progress")}" value="${percent}" max="100">${percent}%</progress></dd></div>`,
+            );
+        }
+        field("下一步", "Next step", details.next_step, true);
+        if (row.kind === "project") {
+            if (details.resource_state)
+                field(
+                    "资源状态（审核摘要）",
+                    "Resources (approved summary)",
+                    label(details.resource_state),
+                );
+            if (Array.isArray(details.phases) && details.phases.length)
+                fields.push(
+                    `<div class="detail-field wide"><dt>${tr("公开阶段", "Public phases")}</dt><dd><ol>${details.phases
+                        .slice(0, 10)
+                        .map(
+                            (item) =>
+                                `<li>${escapeHtml(item.title)} · ${escapeHtml(label(item.status))}</li>`,
+                        )
+                        .join("")}</ol></dd></div>`,
+                );
+        }
+    }
+    if (row.kind === "prediction") {
+        if (Number.isFinite(details.probability))
+            field(
+                "公开概率",
+                "Published probability",
+                `${Math.round(details.probability * 100)}%`,
+            );
+        if (details.target_at)
+            field("目标时间", "Target time", formatTime(details.target_at));
+        if (details.outcome)
+            field("公开结果", "Published outcome", label(details.outcome));
+        field(
+            "阅读提示",
+            "Reading note",
+            tr(
+                "概率来自审核摘要，不是客观保证；未公布结果不代表已应验。",
+                "Probability is from the approved summary, not a guarantee. An unpublished outcome is not a confirmed result.",
+            ),
+            true,
+        );
+    }
+    if (row.kind === "research") {
+        field(
+            "限制与不确定性",
+            "Limitations & uncertainty",
+            details.uncertainty,
+            true,
+        );
+        if (Array.isArray(details.sources) && details.sources.length)
+            fields.push(
+                `<div class="detail-field wide"><dt>${tr("公开参考资料", "Public references")}</dt><dd><ul>${details.sources
+                    .slice(0, 10)
+                    .map((item) => {
+                        const url = safePublicLink(item.url);
+                        return `<li>${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${escapeHtml(item.title)} ↗</a>` : escapeHtml(item.title)}</li>`;
+                    })
+                    .join("")}</ul></dd></div>`,
+            );
+    }
+    if (row.kind === "sleep") {
+        if (details.started_at)
+            field(
+                "公开开始时间",
+                "Published start",
+                formatTime(details.started_at),
+            );
+        if (details.completed_at)
+            field(
+                "公开结束时间",
+                "Published end",
+                formatTime(details.completed_at),
+            );
+        if (details.started_at && details.completed_at)
+            field(
+                "记录时长",
+                "Recorded duration",
+                elapsed(
+                    details.started_at,
+                    new Date(details.completed_at).getTime(),
+                ),
+            );
+        if (details.reason_category)
+            field(
+                "公开原因类别",
+                "Published reason category",
+                label(details.reason_category),
+            );
+    }
+    if (row.kind === "behavior") {
+        field(
+            "公开影响说明",
+            "Public effects",
+            details.side_effect_summary,
+            true,
+        );
+        field("公开目标说明", "Public target", details.public_target, true);
+    }
+    return fields.length
+        ? `<dl class="record-details">${fields.join("")}</dl>`
+        : "";
+}
 function renderCard(row) {
     const summary = String(row.summary || row.body || "");
     return `<article class="record-card"><div class="record-meta"><span class="tag">${escapeHtml(viewLabel(row.kind))}</span><time datetime="${escapeHtml(row.occurred_at)}">${escapeHtml(formatTime(row.occurred_at))}</time><span>${escapeHtml(label(row.details?.status || row.status))}</span></div><h3><a href="${escapeHtml(itemHref(row))}">${escapeHtml(recordTitle(row))}</a></h3><p class="record-summary">${escapeHtml(summary.slice(0, 300))}${summary.length > 300 ? "…" : ""}</p>${renderDetails(row)}<div class="record-meta"><span>${escapeHtml(provenance(row))}</span>${row.details?.author_label ? `<span>${escapeHtml(row.details.author_label)}</span>` : ""}<a class="record-more" href="${escapeHtml(itemHref(row))}">${tr("阅读全文 ↗", "Read more ↗")}</a></div></article>`;
