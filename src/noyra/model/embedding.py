@@ -317,7 +317,7 @@ class OpenAIEmbeddingProvider:
                 timeout=self.settings.timeout_seconds,
                 on_timeout=timeout_hook.cancel,
             )
-        except httpx.ConnectError as error:
+        except (httpx.ConnectError, httpx.ConnectTimeout) as error:
             raise EmbeddingProviderError("embedding_connect_failed", usage_unknown=False) from error
         except (TimeoutError, httpx.TimeoutException) as error:
             raise EmbeddingProviderError("embedding_timeout", usage_unknown=True) from error

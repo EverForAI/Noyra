@@ -15,6 +15,7 @@ from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
     HTTPResponseLimitError,
     PublicDNSAsyncHTTPTransport,
+    PublicEndpointRejected,
     read_bounded_response,
     validate_response_headers,
 )
@@ -146,9 +147,12 @@ class OpenAICompatibleProvider:
             raise ProviderCallError(
                 "provider_outcome_unknown", retryable=False, outcome_unknown=True
             ) from None
-        except (httpx.ConnectError, httpx.ConnectTimeout):
+        except (httpx.ConnectError, httpx.ConnectTimeout) as error:
+            rejected = isinstance(error.__cause__, PublicEndpointRejected)
             raise ProviderCallError(
-                "provider_connect_failed", retryable=True, outcome_unknown=False
+                "provider_endpoint_rejected" if rejected else "provider_connect_failed",
+                retryable=not rejected,
+                outcome_unknown=False,
             ) from None
         except (
             httpx.ReadTimeout,

@@ -222,7 +222,7 @@ async def test_custom_resolver_result_is_the_exact_tcp_destination() -> None:
 
     rebound_backend = _PublicDNSAsyncBackend(rebound)
     rebound_backend._backend = cast(Any, connector)
-    with pytest.raises(OSError, match="non-public"):
+    with pytest.raises(httpcore.ConnectError, match="address rejected"):
         await rebound_backend.connect_tcp("world.example", 443)
     assert connector.addresses == ["93.184.216.34"]
 
