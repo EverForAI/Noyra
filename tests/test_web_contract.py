@@ -116,15 +116,17 @@ def test_admin_model_resource_controls_are_precise_bounded_and_escaped() -> None
         "/api/config/capabilities/${encodeURIComponent(button.dataset.id)}/revoke",
     ):
         assert path in ADMIN_JS
-    assert "MODEL_KEY_REQUEST_CONCURRENCY = 4" in ADMIN_JS
-    assert "mapWithConcurrency(rows, MODEL_KEY_REQUEST_CONCURRENCY" in ADMIN_JS
+    assert "async function loadModelKeys(details)" in ADMIN_JS
+    assert "data-model-key-details" in ADMIN_JS
+    assert "renderedModels.get(details.dataset.id) === item" in ADMIN_JS
+    assert "session === csrfToken" in ADMIN_JS
     assert "Promise.all(rows.map" not in ADMIN_JS
     assert "SQLITE_INT64_MAX = 9223372036854775807n" in ADMIN_JS
     assert "return parsed.toString()" in ADMIN_JS
     assert "const exactBudget = item.exact_budget || item" in ADMIN_JS
     assert "exactBudget.daily_input_tokens" in ADMIN_JS
     assert "formatMicroUsd(exactBudget.daily_cost_microusd)" in ADMIN_JS
-    assert "payload.daily_cost_limit_usd = normalizeBudgetCost" in ADMIN_JS
+    assert 'readModelLimits(form, "data-limit-dimension")' in ADMIN_JS
     for escaped_value in (
         "esc(item.label)",
         "esc(item.group_id)",
@@ -186,14 +188,15 @@ def test_admin_setup_guide_and_observability_are_present_and_localized() -> None
     ):
         assert marker in ADMIN_HTML
     assert "renderSetupGuide" in ADMIN_JS
-    assert "diagnostics.model_observability" in ADMIN_JS
-    assert '"/api/admin/wallet-audits?limit=100"' in ADMIN_JS
+    assert "/api/admin/usage?" in ADMIN_JS
+    assert 'readWalletPage("audits"' in ADMIN_JS
+    assert "/api/admin/wallet-lists/" in ADMIN_JS
     assert 'wallet_reward_workflow_manual_intervention: "奖励流程需要人工处理"' in ADMIN_JS
     assert 'wallet_payment_order_awaiting_confirmation: "等待付款确认"' in ADMIN_JS
     assert 'walletAuditActionLabels[row.action] || "其他钱包操作"' in ADMIN_JS
     assert "Promise.allSettled" in ADMIN_JS
     assert "admin_network_unavailable" in ADMIN_JS
-    assert "管理台暂时无法连接服务" in ADMIN_JS
+    assert "未能连接服务" in ADMIN_JS
 
 
 def test_admin_upgrade_panel_has_confirmed_upgrade_and_session_bound_polling() -> None:

@@ -1,0 +1,6 @@
+Static deployment contracts passed; runtime and developer tests were not run.
+migration install contract passed
+migration runner shell contract passed
+migration component rollback checks passed
+upgrade runner contract checks passed
+upgrade component rollback checks passed

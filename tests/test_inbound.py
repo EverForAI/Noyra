@@ -126,6 +126,8 @@ def test_rejected_inbound_event_can_retry_without_creating_a_ghost_interaction(
             kind: InteractionKind = "human_message",
             related_interaction_id: str | None = None,
             idempotency_key: str | None = None,
+            conversation_id: str | None = None,
+            verified_binding_id: str | None = None,
         ) -> InteractionRecord:
             self.calls += 1
             if self.calls == 1:
@@ -138,6 +140,8 @@ def test_rejected_inbound_event_can_retry_without_creating_a_ghost_interaction(
                 kind=kind,
                 related_interaction_id=related_interaction_id,
                 idempotency_key=idempotency_key,
+                conversation_id=conversation_id,
+                verified_binding_id=verified_binding_id,
             )
 
     store = InboundStore(kernel.database, FailOnce(kernel.database))
@@ -185,6 +189,8 @@ def test_successful_inbound_recovers_rejected_state_from_concurrent_failure(
             kind: InteractionKind = "human_message",
             related_interaction_id: str | None = None,
             idempotency_key: str | None = None,
+            conversation_id: str | None = None,
+            verified_binding_id: str | None = None,
         ) -> InteractionRecord:
             interaction = super().receive(
                 subject_id,
@@ -194,6 +200,8 @@ def test_successful_inbound_recovers_rejected_state_from_concurrent_failure(
                 kind=kind,
                 related_interaction_id=related_interaction_id,
                 idempotency_key=idempotency_key,
+                conversation_id=conversation_id,
+                verified_binding_id=verified_binding_id,
             )
             with kernel.database.transaction() as connection:
                 changed = connection.execute(

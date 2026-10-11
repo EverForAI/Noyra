@@ -121,10 +121,10 @@ preflight() {
 
 smoke() {
   section 'smoke health probes'
-  systemctl is-active --quiet "$service_name"
-  probe /health/live
-  probe /health/ready
-  probe /health
+  systemctl is-active --quiet "$service_name" || return 1
+  probe /health/live || return 1
+  probe /health/ready || return 1
+  probe /health || return 1
   collect_common
   printf '%s smoke=passed evidence_dir=%s\n' "$(timestamp)" "$evidence_dir"
 }
@@ -134,36 +134,53 @@ soak() {
   local failures=0
   local samples=0
   local consecutive_failures=0
+  local round_failed
   deadline=$(( $(date +%s) + duration_seconds ))
   section "soak duration_seconds=$duration_seconds interval_seconds=$interval_seconds"
   printf 'timestamp endpoint result\n' >"$evidence_dir/health-samples.log"
   while [[ "$(date +%s)" -lt "$deadline" ]]; do
     samples=$((samples + 1))
+    round_failed=false
     if probe /health/live >>"$evidence_dir/health-samples.log" 2>&1; then
-      consecutive_failures=0
       printf '%s /health/live pass\n' "$(timestamp)" >>"$evidence_dir/health-samples.log"
     else
       failures=$((failures + 1))
-      consecutive_failures=$((consecutive_failures + 1))
-      printf '%s /health/live fail consecutive=%s\n' "$(timestamp)" "$consecutive_failures" \
+      round_failed=true
+      printf '%s /health/live fail\n' "$(timestamp)" \
         >>"$evidence_dir/health-samples.log"
     fi
     if ! probe /health/ready >>"$evidence_dir/health-samples.log" 2>&1; then
       failures=$((failures + 1))
-      consecutive_failures=$((consecutive_failures + 1))
-      printf '%s /health/ready fail consecutive=%s\n' "$(timestamp)" "$consecutive_failures" \
+      round_failed=true
+      printf '%s /health/ready fail\n' "$(timestamp)" \
         >>"$evidence_dir/health-samples.log"
     else
       printf '%s /health/ready pass\n' "$(timestamp)" >>"$evidence_dir/health-samples.log"
     fi
+    if [[ "$round_failed" == true ]]; then
+      consecutive_failures=$((consecutive_failures + 1))
+    else
+      consecutive_failures=0
+    fi
     if [[ "$consecutive_failures" -ge 3 ]]; then
-      printf '%s soak=aborted reason=three-consecutive-probe-failures\n' "$(timestamp)"
+      printf '%s soak=aborted reason=three-consecutive-failed-rounds samples=%s probe_failures=%s\n' \
+        "$(timestamp)" "$samples" "$failures"
       collect_common
       return 1
     fi
     sleep "$interval_seconds"
   done
+  if ! smoke; then
+    printf '%s soak=failed reason=final-smoke samples=%s probe_failures=%s\n' \
+      "$(timestamp)" "$samples" "$failures"
+    return 1
+  fi
   collect_common
+  if [[ "$failures" -gt 0 ]]; then
+    printf '%s soak=degraded samples=%s probe_failures=%s evidence_dir=%s\n' \
+      "$(timestamp)" "$samples" "$failures" "$evidence_dir"
+    return 1
+  fi
   printf '%s soak=passed samples=%s probe_failures=%s evidence_dir=%s\n' \
     "$(timestamp)" "$samples" "$failures" "$evidence_dir"
 }

@@ -289,6 +289,7 @@ class EmbeddingLedger:
         error_code: str,
         usage_unknown: bool,
         circuit_policy: EmbeddingCircuitPolicy,
+        provider_failure: bool = True,
     ) -> EmbeddingUsageRecord:
         if not error_code.strip():
             raise ValueError("embedding failure code is required")
@@ -314,7 +315,9 @@ class EmbeddingLedger:
             circuit = self._ensure_circuit(
                 connection, str(row["subject_id"]), str(row["resource_id"]), now
             )
-            failures = circuit.consecutive_failures + 1
+            if not provider_failure and circuit.status != "half_open":
+                return self._load_usage(connection, usage_id)
+            failures = circuit.consecutive_failures + int(provider_failure)
             should_open = circuit.status == "half_open" or (
                 failures >= circuit_policy.failure_threshold
             )

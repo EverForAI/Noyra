@@ -9,10 +9,15 @@ import threading
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
+from contextvars import copy_context
 from typing import Any
 
 import httpcore
 import httpx
+
+from .runtime_logging import install_log_safety
+
+install_log_safety()
 
 DEFAULT_MAX_RESPONSE_BYTES = 2_000_000
 DEFAULT_MAX_HEADER_BYTES = 64_000
@@ -54,6 +59,11 @@ class SyncHTTPTimeoutHook:
         with self._lock:
             if resource is None or self._resource is resource:
                 self._resource = None
+
+    def assert_active(self) -> None:
+        with self._lock:
+            if self._cancelled:
+                raise TimeoutError("HTTP operation was cancelled")
 
     def cancel(self) -> None:
         with self._lock:
@@ -200,12 +210,13 @@ def call_sync_http_with_deadline(
 
     def invoke() -> None:
         try:
-            outcome.put((True, function(*args)))
+            outcome.put((True, context.run(function, *args)))
         except BaseException as error:
             outcome.put((False, error))
         finally:
             _SYNC_HTTP_GATE.release()
 
+    context = copy_context()
     worker = threading.Thread(target=invoke, name="noyra-sync-http", daemon=True)
     try:
         worker.start()
@@ -226,19 +237,35 @@ class HTTPResponseLimitError(ValueError):
     """The upstream response exceeded an explicit header or body bound."""
 
 
-def public_addresses(host: str, port: int) -> list[str]:
+class PublicAddressRejected(OSError):
+    """An address result violates the public endpoint policy, before connection."""
+
+
+class PublicEndpointRejected(httpcore.ConnectError):
+    """A non-retryable policy rejection retained as the HTTPX exception cause."""
+
+
+def public_addresses(host: str, port: int, *, timeout: float | None = None) -> list[str]:
     """Resolve a host to public addresses without leaving a DNS-to-connect gap."""
     del port
     literal = host.split("%", 1)[0]
     try:
         address = ipaddress.ip_address(literal)
         if not address.is_global:
-            raise OSError("HTTP endpoint resolved to a non-public address")
+            raise PublicAddressRejected("HTTP endpoint resolved to a non-public address")
         return [str(address)]
     except ValueError:
         pass
     try:
-        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        resolver = socket.getaddrinfo
+        if timeout is None:
+            infos = resolver(host, None, type=socket.SOCK_STREAM)
+        else:
+            infos = _call_sync_with_timeout(
+                lambda: resolver(host, None, type=socket.SOCK_STREAM), timeout=timeout
+            )
+    except TimeoutError as error:
+        raise TimeoutError("HTTP endpoint DNS resolution timed out") from error
     except OSError as error:
         raise OSError("HTTP endpoint DNS resolution failed") from error
     addresses: list[str] = []
@@ -252,7 +279,7 @@ def public_addresses(host: str, port: int) -> list[str]:
         if address.is_global and normalized not in addresses:
             addresses.append(normalized)
     if not addresses:
-        raise OSError("HTTP endpoint resolved to a non-public address")
+        raise PublicAddressRejected("HTTP endpoint resolved to a non-public address")
     return addresses
 
 
@@ -268,14 +295,16 @@ def validate_public_addresses(addresses: Sequence[str]) -> list[str]:
         try:
             address = ipaddress.ip_address(str(raw).split("%", 1)[0])
         except ValueError as error:
-            raise OSError("HTTP endpoint resolver returned an invalid address") from error
+            raise PublicAddressRejected(
+                "HTTP endpoint resolver returned an invalid address"
+            ) from error
         if not address.is_global:
-            raise OSError("HTTP endpoint resolved to a non-public address")
+            raise PublicAddressRejected("HTTP endpoint resolved to a non-public address")
         value = str(address)
         if value not in normalized:
             normalized.append(value)
     if not normalized:
-        raise OSError("HTTP endpoint resolved to a non-public address")
+        raise PublicAddressRejected("HTTP endpoint resolved to a non-public address")
     return normalized
 
 
@@ -313,9 +342,12 @@ class _PinnedDNSSyncStream(httpcore.NetworkStream):
 class _PublicDNSSyncBackend(httpcore.NetworkBackend):
     """Resolve once, reject private addresses, and connect to that exact result."""
 
-    def __init__(self, resolver: SyncResolver | None = None) -> None:
+    def __init__(
+        self, resolver: SyncResolver | None = None, remaining: Callable[[], float] | None = None
+    ) -> None:
         self._backend = httpcore.SyncBackend()
         self._resolver = resolver
+        self._remaining = remaining
 
     def connect_tcp(
         self,
@@ -325,6 +357,9 @@ class _PublicDNSSyncBackend(httpcore.NetworkBackend):
         local_address: str | None = None,
         socket_options: Any = None,
     ) -> httpcore.NetworkStream:
+        if self._remaining is not None:
+            budget = self._remaining()
+            timeout = budget if timeout is None else min(timeout, budget)
         deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
         try:
             remaining = None if deadline is None else deadline - time.monotonic()
@@ -338,14 +373,18 @@ class _PublicDNSSyncBackend(httpcore.NetworkBackend):
                 if self._resolver is None
                 else validate_public_addresses(raw_addresses)
             )
+        except PublicAddressRejected as error:
+            raise PublicEndpointRejected("HTTP endpoint address rejected") from error
         except TimeoutError as error:
             raise httpcore.ConnectTimeout("HTTP endpoint DNS resolution timed out") from error
+        except OSError as error:
+            raise httpcore.ConnectError("HTTP endpoint DNS resolution failed") from error
         last_error: BaseException | None = None
         for address in resolved:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise httpcore.ConnectTimeout("HTTP endpoint connection timed out") from last_error
             try:
-                remaining = None if deadline is None else deadline - time.monotonic()
-                if remaining is not None and remaining <= 0:
-                    raise httpcore.ConnectTimeout("HTTP endpoint connection timed out")
                 stream = self._backend.connect_tcp(
                     address,
                     port,
@@ -353,10 +392,21 @@ class _PublicDNSSyncBackend(httpcore.NetworkBackend):
                     local_address=local_address,
                     socket_options=socket_options,
                 )
-                return _PinnedDNSSyncStream(stream, host)
             except (OSError, httpcore.ConnectError, httpcore.ConnectTimeout) as error:
                 last_error = error
-        raise OSError(f"public HTTP connection failed for {host}") from last_error
+                continue
+            pinned = _PinnedDNSSyncStream(stream, host)
+            if self._remaining is not None:
+                try:
+                    self._remaining()
+                except BaseException:
+                    pinned.close()
+                    raise
+                return _DeadlineSyncStream(pinned, self._remaining)
+            return pinned
+        if isinstance(last_error, (TimeoutError, httpcore.ConnectTimeout)):
+            raise httpcore.ConnectTimeout("HTTP endpoint connection timed out") from last_error
+        raise httpcore.ConnectError("HTTP endpoint connection failed") from last_error
 
     def connect_unix_socket(
         self,
@@ -364,7 +414,49 @@ class _PublicDNSSyncBackend(httpcore.NetworkBackend):
         timeout: float | None = None,
         socket_options: Any = None,
     ) -> httpcore.NetworkStream:
-        raise OSError("public HTTP transport does not support Unix sockets")
+        raise PublicEndpointRejected("public HTTP transport does not support Unix sockets")
+
+
+class _DeadlineSyncStream(httpcore.NetworkStream):
+    """Enforce one budget on every raw read, including incomplete headers."""
+
+    def __init__(self, stream: httpcore.NetworkStream, remaining: Callable[[], float]):
+        self._stream = stream
+        self._remaining = remaining
+
+    def _timeout(self, timeout: float | None) -> float:
+        remaining = self._remaining()
+        return remaining if timeout is None else min(timeout, remaining)
+
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        value = self._stream.read(max_bytes, timeout=self._timeout(timeout))
+        self._remaining()
+        return value
+
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        self._stream.write(buffer, timeout=self._timeout(timeout))
+
+    def close(self) -> None:
+        self._stream.close()
+
+    def get_extra_info(self, info: str) -> Any:
+        return self._stream.get_extra_info(info)
+
+    def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> httpcore.NetworkStream:
+        stream = self._stream.start_tls(
+            ssl_context, server_hostname=server_hostname, timeout=self._timeout(timeout)
+        )
+        try:
+            self._remaining()
+        except BaseException:
+            stream.close()
+            raise
+        return _DeadlineSyncStream(stream, self._remaining)
 
 
 class _PinnedDNSAsyncStream(httpcore.AsyncNetworkStream):
@@ -413,20 +505,17 @@ class _PublicDNSAsyncBackend(httpcore.AsyncNetworkBackend):
         local_address: str | None = None,
         socket_options: Any = None,
     ) -> httpcore.AsyncNetworkStream:
-        if timeout is None:
-            if self._resolver is None:
-                addresses = await _call_sync_resolver_async(
-                    public_addresses,
-                    host,
-                    port,
-                    timeout=None,
-                )
+        try:
+            if timeout is None:
+                if self._resolver is None:
+                    addresses = await _call_sync_resolver_async(
+                        public_addresses, host, port, timeout=None
+                    )
+                else:
+                    addresses = validate_public_addresses(await self._resolver(host, port))
+                deadline = None
             else:
-                addresses = validate_public_addresses(await self._resolver(host, port))
-            deadline = None
-        else:
-            deadline = asyncio.get_running_loop().time() + max(0.0, timeout)
-            try:
+                deadline = asyncio.get_running_loop().time() + max(0.0, timeout)
                 async with asyncio.timeout(max(0.0, timeout)):
                     if self._resolver is None:
                         addresses = await _call_sync_resolver_async(
@@ -437,16 +526,18 @@ class _PublicDNSAsyncBackend(httpcore.AsyncNetworkBackend):
                         )
                     else:
                         addresses = validate_public_addresses(await self._resolver(host, port))
-            except TimeoutError as error:
-                raise httpcore.ConnectTimeout("HTTP endpoint DNS resolution timed out") from error
+        except PublicAddressRejected as error:
+            raise PublicEndpointRejected("HTTP endpoint address rejected") from error
+        except TimeoutError as error:
+            raise httpcore.ConnectTimeout("HTTP endpoint DNS resolution timed out") from error
+        except OSError as error:
+            raise httpcore.ConnectError("HTTP endpoint DNS resolution failed") from error
         last_error: BaseException | None = None
         for address in addresses:
+            remaining = None if deadline is None else deadline - asyncio.get_running_loop().time()
+            if remaining is not None and remaining <= 0:
+                raise httpcore.ConnectTimeout("HTTP endpoint connection timed out") from last_error
             try:
-                remaining = (
-                    None if deadline is None else deadline - asyncio.get_running_loop().time()
-                )
-                if remaining is not None and remaining <= 0:
-                    raise httpcore.ConnectTimeout("HTTP endpoint connection timed out")
                 stream = await self._backend.connect_tcp(
                     address,
                     port,
@@ -457,7 +548,9 @@ class _PublicDNSAsyncBackend(httpcore.AsyncNetworkBackend):
                 return _PinnedDNSAsyncStream(stream, host)
             except (OSError, httpcore.ConnectError, httpcore.ConnectTimeout) as error:
                 last_error = error
-        raise OSError(f"public HTTP connection failed for {host}") from last_error
+        if isinstance(last_error, (TimeoutError, httpcore.ConnectTimeout)):
+            raise httpcore.ConnectTimeout("HTTP endpoint connection timed out") from last_error
+        raise httpcore.ConnectError("HTTP endpoint connection failed") from last_error
 
     async def connect_unix_socket(
         self,
@@ -465,7 +558,7 @@ class _PublicDNSAsyncBackend(httpcore.AsyncNetworkBackend):
         timeout: float | None = None,
         socket_options: Any = None,
     ) -> httpcore.AsyncNetworkStream:
-        raise OSError("public HTTP transport does not support Unix sockets")
+        raise PublicEndpointRejected("public HTTP transport does not support Unix sockets")
 
 
 class PublicDNSHTTPTransport(httpx.HTTPTransport):
@@ -476,6 +569,7 @@ class PublicDNSHTTPTransport(httpx.HTTPTransport):
         *,
         max_connections: int = 16,
         resolver: SyncResolver | None = None,
+        remaining: Callable[[], float] | None = None,
     ) -> None:
         from httpx._config import create_ssl_context
 
@@ -488,7 +582,7 @@ class PublicDNSHTTPTransport(httpx.HTTPTransport):
             http1=True,
             http2=False,
             retries=0,
-            network_backend=_PublicDNSSyncBackend(resolver),
+            network_backend=_PublicDNSSyncBackend(resolver, remaining),
         )
 
 

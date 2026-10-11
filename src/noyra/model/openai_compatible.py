@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
 from urllib.parse import urlsplit
@@ -14,6 +15,7 @@ from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
     HTTPResponseLimitError,
     PublicDNSAsyncHTTPTransport,
+    PublicEndpointRejected,
     read_bounded_response,
     validate_response_headers,
 )
@@ -61,6 +63,7 @@ class OpenAICompatibleProvider:
         client: httpx.AsyncClient | None = None,
     ):
         self.settings = settings
+        self.before_send: Callable[[], None] | None = None
         self._owns_client = client is None
         if client is not None:
             self._client = client
@@ -107,17 +110,28 @@ class OpenAICompatibleProvider:
             headers["Authorization"] = f"Bearer {api_key}"
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.settings.timeout_seconds
+        before_send = self.before_send
+
+        async def trace(event: str, info: dict[str, Any]) -> None:
+            # httpcore emits this after pool/DNS/TLS waits, before any request
+            # headers are written. A revoke while connecting still stops send.
+            if event.endswith("send_request_headers.started") and before_send is not None:
+                before_send()
+
         try:
             # httpx's read timeout is an idle timeout.  The outer scope is the
             # operation contract: DNS, connection, response headers, and every
             # response chunk must fit inside one absolute wall-clock deadline.
             async with asyncio.timeout(self.settings.timeout_seconds):
+                if before_send is not None:
+                    before_send()
                 async with self._client.stream(
                     "POST",
                     f"{self.settings.base_url}/chat/completions",
                     headers=headers,
                     json=self._request_payload(request),
                     follow_redirects=False,
+                    extensions={"trace": trace},
                 ) as response:
                     return await self._parse_response(response, deadline=deadline)
         except ProviderCallError:
@@ -133,9 +147,12 @@ class OpenAICompatibleProvider:
             raise ProviderCallError(
                 "provider_outcome_unknown", retryable=False, outcome_unknown=True
             ) from None
-        except (httpx.ConnectError, httpx.ConnectTimeout):
+        except (httpx.ConnectError, httpx.ConnectTimeout) as error:
+            rejected = isinstance(error.__cause__, PublicEndpointRejected)
             raise ProviderCallError(
-                "provider_connect_failed", retryable=True, outcome_unknown=False
+                "provider_endpoint_rejected" if rejected else "provider_connect_failed",
+                retryable=not rejected,
+                outcome_unknown=False,
             ) from None
         except (
             httpx.ReadTimeout,

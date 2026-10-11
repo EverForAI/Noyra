@@ -2,6 +2,9 @@
 # Caddy obtains and renews the HTTPS certificates automatically. The public and
 # management origins are separate hostnames, while Noyra still listens only on
 # the loopback interface.
+# Access logging is intentionally not enabled. Before adding log/debug output,
+# review request URI/header/error logging at every destination; see
+# docs/deployment/ubuntu.md (HTTP log privacy).
 # Generated setup path: noyra setup --mode public --public-domain <domain> --admin-domain admin.<domain>
 #
 # Set these values in /etc/noyra/noyra.env before starting the service:

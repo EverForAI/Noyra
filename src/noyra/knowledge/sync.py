@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
+from contextlib import nullcontext
 from types import TracebackType
 from typing import Any, Protocol, Self
 from urllib.parse import urlencode
 
 import httpx
 
+from noyra.core.admission import assert_current_lease
 from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
     HTTPResponseLimitError,
@@ -48,18 +51,15 @@ class CommonKnowledgeHTTPClient:
         *,
         client: httpx.Client | None = None,
         timeout_seconds: float = COMMON_KNOWLEDGE_TOTAL_TIMEOUT_SECONDS,
+        checkpoint: Callable[[], None] | None = None,
     ):
         if not 0 < timeout_seconds <= 60:
             raise ValueError("common knowledge sync timeout is invalid")
         self.endpoint = endpoint.rstrip("/")
         self.timeout_seconds = timeout_seconds
-        self._owns_client = client is None
-        self._client = client or httpx.Client(
-            timeout=httpx.Timeout(timeout_seconds),
-            follow_redirects=False,
-            trust_env=False,
-            transport=PublicDNSHTTPTransport(max_connections=4),
-        )
+        self._client = client
+        self._checkpoint = checkpoint
+        self._closed = False
 
     def __enter__(self) -> Self:
         return self
@@ -74,8 +74,9 @@ class CommonKnowledgeHTTPClient:
         self.close()
 
     def close(self) -> None:
-        if self._owns_client:
-            self._client.close()
+        # Owned clients live in their actual request worker until it exits.
+        # A timed-out caller cannot close a pooled connection under that worker.
+        self._closed = True
 
     def discovery(self, *, etag: str | None = None) -> dict[str, Any] | None:
         headers = {"Accept": "application/json"}
@@ -103,18 +104,53 @@ class CommonKnowledgeHTTPClient:
         allow_304: bool,
     ) -> dict[str, Any] | None:
         timeout_hook = SyncHTTPTimeoutHook()
+        deadline = time.monotonic() + self.timeout_seconds
+
+        def remaining_budget() -> float:
+            timeout_hook.assert_active()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or self._closed:
+                raise TimeoutError("common knowledge peer deadline exceeded")
+            assert_current_lease()
+            return remaining
+
+        def active() -> float:
+            remaining_budget()
+            if self._checkpoint is not None:
+                self._checkpoint()
+            return remaining_budget()
+
+        def trace(event: str, info: dict[str, Any]) -> None:
+            if event.endswith(("send_request_headers.started", "send_request_body.started")):
+                active()
 
         def perform_request() -> bytes | None:
-            deadline = time.monotonic() + self.timeout_seconds
+            active()
             request_headers = {**headers, "Accept-Encoding": "identity"}
-            with self._client.stream(
-                "GET",
-                self.endpoint + path,
-                headers=request_headers,
-                follow_redirects=False,
-            ) as response:
+            context = (
+                nullcontext(self._client)
+                if self._client is not None
+                else httpx.Client(
+                    timeout=self.timeout_seconds,
+                    follow_redirects=False,
+                    trust_env=False,
+                    transport=PublicDNSHTTPTransport(max_connections=1, remaining=remaining_budget),
+                )
+            )
+            with (
+                context as client,
+                client.stream(
+                    "GET",
+                    self.endpoint + path,
+                    headers=request_headers,
+                    follow_redirects=False,
+                    timeout=active(),
+                    extensions={"trace": trace},
+                ) as response,
+            ):
                 timeout_hook.register(response)
                 try:
+                    active()
                     validate_response_headers(response, max_header_bytes=DEFAULT_MAX_HEADER_BYTES)
                     if allow_304 and response.status_code == 304:
                         return None
@@ -125,22 +161,25 @@ class CommonKnowledgeHTTPClient:
                     content_type = response.headers.get("content-type", "").split(";", 1)[0]
                     if content_type != "application/json":
                         raise CommonKnowledgeSyncError("common_knowledge_peer_content_type")
-                    return read_bounded_sync_response(
+                    body = read_bounded_sync_response(
                         response,
                         max_body_bytes=COMMON_KNOWLEDGE_MAX_RESPONSE_BYTES,
                         max_header_bytes=DEFAULT_MAX_HEADER_BYTES,
                         total_timeout_seconds=self.timeout_seconds,
                         deadline=deadline,
                     )
+                    active()
+                    return body
                 finally:
                     timeout_hook.clear(response)
 
         try:
             body = call_sync_http_with_deadline(
                 perform_request,
-                timeout=self.timeout_seconds,
+                timeout=active(),
                 on_timeout=timeout_hook.cancel,
             )
+            active()
         except CommonKnowledgeSyncError:
             raise
         except HTTPResponseLimitError as error:

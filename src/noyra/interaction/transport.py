@@ -9,9 +9,12 @@ import json
 import logging
 import os
 import smtplib
+import socket
 import ssl
+import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
@@ -32,6 +35,7 @@ from noyra.core.http import (
     HTTPResponseLimitError,
     PublicDNSAsyncHTTPTransport,
     _PublicDNSAsyncBackend,
+    public_addresses,
     read_bounded_response,
     validate_response_headers,
 )
@@ -46,6 +50,7 @@ from noyra.core.types import (
 )
 
 from .outbound import OUTBOUND_ADAPTERS
+from .smtp_deadline import SMTPOperation
 
 TransportChannel = Literal["telegram", "wechat", "qq", "feishu", "email", "webhook"]
 DeliveryReconciliationOutcome = Literal[
@@ -794,6 +799,13 @@ class TransportStore:
                 "WHERE transport_id = ? AND subject_id = ?",
                 (status, state_hash, now, transport_id, subject_id),
             )
+            if status != "active":
+                connection.execute(
+                    "UPDATE private_channel_routes SET push_web_replies=0,push_since=NULL,"
+                    "revision=revision+1,share_web_history=0 WHERE subject_id=? AND binding_id IN "
+                    "(SELECT binding_id FROM interaction_bindings WHERE transport_id=?)",
+                    (subject_id, transport_id),
+                )
             if status == "revoked" and row["secret_reference"]:
                 self.secret_cleanup.prepare_delete(
                     str(row["subject_id"]),
@@ -996,40 +1008,16 @@ class DeliveryDispatcher:
         self._status_client = status_client
         self._recovered_subjects: set[str] = set()
         self._closed = False
-        self._worker_tasks: set[asyncio.Task[Any]] = set()
-        self._provider_tokens: dict[tuple[str, str], tuple[str, float]] = {}
+        self._smtp_operations: set[SMTPOperation] = set()
+        self._provider_tokens: dict[tuple[str, str, str], tuple[str, float]] = {}
         self._provider_token_lock = asyncio.Lock()
 
     async def aclose(self) -> None:
         self._closed = True
-        for worker in tuple(self._worker_tasks):
-            while not worker.done():
-                try:
-                    await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    continue
-                except Exception:
-                    break
+        for operation in tuple(self._smtp_operations):
+            operation.abort()
         if self._owns_client and self._client is not None:
             await self._client.aclose()
-
-    async def _run_blocking(self, function: Any, /, *args: Any) -> Any:
-        worker = asyncio.create_task(asyncio.to_thread(function, *args))
-        self._worker_tasks.add(worker)
-        try:
-            return await asyncio.shield(worker)
-        except asyncio.CancelledError:
-            while not worker.done():
-                try:
-                    await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    continue
-                except Exception:
-                    break
-            raise
-        finally:
-            if worker.done():
-                self._worker_tasks.discard(worker)
 
     def _http_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -1043,7 +1031,10 @@ class DeliveryDispatcher:
         return self._client
 
     async def _provider_credentials(
-        self, transport: TransportRecord, credentials: Mapping[str, Any]
+        self,
+        transport: TransportRecord,
+        credentials: Mapping[str, Any],
+        before_send: Callable[[], None],
     ) -> dict[str, Any]:
         """Resolve short-lived native provider tokens without persisting them."""
         resolved = dict(credentials)
@@ -1067,6 +1058,7 @@ class DeliveryDispatcher:
                 transport.transport_id,
                 "qq",
                 resolved,
+                before_send,
             )
         elif (
             transport.channel == "feishu"
@@ -1078,6 +1070,7 @@ class DeliveryDispatcher:
                 transport.transport_id,
                 "feishu",
                 resolved,
+                before_send,
             )
         elif (
             transport.channel == "wechat"
@@ -1089,6 +1082,7 @@ class DeliveryDispatcher:
                 transport.transport_id,
                 "wechat",
                 resolved,
+                before_send,
             )
         return resolved
 
@@ -1098,10 +1092,18 @@ class DeliveryDispatcher:
         transport_id: str,
         provider: str,
         credentials: Mapping[str, Any],
+        before_send: Callable[[], None],
     ) -> str:
-        cache_key = (transport_id, provider)
-        now = time.time()
-        async with self._provider_token_lock:
+        cache_key = (transport_id, provider, content_hash(dict(credentials)))
+        deadline = asyncio.get_running_loop().time() + TRANSPORT_TOTAL_TIMEOUT_SECONDS
+
+        async def trace(event: str, info: dict[str, Any]) -> None:
+            if event.endswith("send_request_headers.started"):
+                before_send()
+
+        async with asyncio.timeout_at(deadline), self._provider_token_lock:
+            before_send()
+            now = time.time()
             cached = self._provider_tokens.get(cache_key)
             if cached is not None and cached[1] > now + PROVIDER_TOKEN_SKEW_SECONDS:
                 return cached[0]
@@ -1139,21 +1141,20 @@ class DeliveryDispatcher:
             else:
                 raise ValueError("unsupported provider token")
             try:
-                async with asyncio.timeout(TRANSPORT_TOTAL_TIMEOUT_SECONDS):
-                    response = await self._http_client().request(
-                        method,
-                        endpoint,
-                        headers={"Accept": "application/json", "Accept-Encoding": "identity"},
-                        follow_redirects=False,
-                        **request_kwargs,
-                    )
+                async with self._http_client().stream(
+                    method,
+                    endpoint,
+                    headers={"Accept": "application/json", "Accept-Encoding": "identity"},
+                    follow_redirects=False,
+                    extensions={"trace": trace},
+                    **request_kwargs,
+                ) as response:
                     validate_response_headers(response, max_header_bytes=DEFAULT_MAX_HEADER_BYTES)
                     body = await read_bounded_response(
                         response,
                         max_body_bytes=TRANSPORT_MAX_RESPONSE_BYTES,
                         max_header_bytes=DEFAULT_MAX_HEADER_BYTES,
-                        deadline=asyncio.get_running_loop().time()
-                        + TRANSPORT_TOTAL_TIMEOUT_SECONDS,
+                        deadline=deadline,
                     )
             except (TimeoutError, httpx.HTTPError, HTTPResponseLimitError) as error:
                 raise ValueError(f"{provider} access token request failed") from error
@@ -1181,12 +1182,18 @@ class DeliveryDispatcher:
                 except (TypeError, ValueError):
                     lifetime = 7_200.0
             value = token.strip()
+            before_send()
+            for old_key in tuple(self._provider_tokens):
+                if old_key[:2] == cache_key[:2]:
+                    self._provider_tokens.pop(old_key, None)
             self._provider_tokens[cache_key] = (value, time.time() + lifetime)
             return value
 
     async def _invalidate_provider_token(self, transport_id: str, provider: str) -> None:
         async with self._provider_token_lock:
-            self._provider_tokens.pop((transport_id, provider), None)
+            for key in tuple(self._provider_tokens):
+                if key[:2] == (transport_id, provider):
+                    self._provider_tokens.pop(key, None)
 
     def _feishu_api_origin(self, transport: TransportRecord, credentials: Mapping[str, Any]) -> str:
         """Resolve a pinned official Feishu/Lark API origin.
@@ -1291,7 +1298,86 @@ class DeliveryDispatcher:
                     ),
                 )
                 created += 1
+            # Only new replies in the explicitly consented window qualify.
+            # The immutable route generation prevents queued replies reviving
+            # after a stop, unlink, or route change.
+            replies = connection.execute(
+                "SELECT i.interaction_id,r.binding_id,r.conversation_id,r.revision,b.transport_id "
+                "FROM interactions i JOIN private_conversation_messages m "
+                "ON m.interaction_id=i.interaction_id JOIN private_conversations c "
+                "ON c.conversation_id=m.conversation_id JOIN private_channel_routes r "
+                "ON r.subject_id=i.subject_id AND r.conversation_id=c.conversation_id "
+                "JOIN interaction_bindings b ON b.binding_id=r.binding_id "
+                "JOIN interaction_transports t ON t.transport_id=b.transport_id "
+                "WHERE i.subject_id=? AND m.subject_id=i.subject_id AND c.subject_id=i.subject_id "
+                "AND b.subject_id=i.subject_id AND t.subject_id=i.subject_id "
+                "AND i.channel='web' AND i.direction='outgoing' AND i.kind!='help_request' "
+                "AND m.author_verified=1 AND c.status='active' AND b.status='active' "
+                "AND t.status='active' AND t.channel='qq' AND r.push_web_replies=1 "
+                "AND r.share_web_history=1 AND EXISTS(SELECT 1 FROM private_message_sequences s "
+                "WHERE s.interaction_id=i.interaction_id AND s.sequence>r.push_after_sequence) "
+                "AND NOT EXISTS(SELECT 1 FROM interaction_deliveries d "
+                "WHERE d.interaction_id=i.interaction_id) ORDER BY i.created_at LIMIT ?",
+                (subject_id, max(1, min(limit, 200))),
+            ).fetchall()
+            for reply in replies:
+                now = utc_now()
+                delivery_id = new_id("delivery")
+                connection.execute(
+                    "INSERT INTO interaction_deliveries(delivery_id,interaction_id,subject_id,"
+                    "transport_id,idempotency_key,status,attempts,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,'queued',0,?,?)",
+                    (
+                        delivery_id,
+                        reply["interaction_id"],
+                        subject_id,
+                        reply["transport_id"],
+                        f"private-push:{reply['interaction_id']}:{reply['binding_id']}",
+                        now,
+                        now,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO private_web_deliveries VALUES(?,?,?,?)",
+                    (delivery_id, reply["binding_id"], reply["conversation_id"], reply["revision"]),
+                )
+                created += 1
         return created
+
+    @staticmethod
+    def _web_push_recipient(connection: Any, delivery_id: str) -> str | None:
+        push = connection.execute(
+            "SELECT * FROM private_web_deliveries WHERE delivery_id=?", (delivery_id,)
+        ).fetchone()
+        if push is None:
+            return None
+        consent = connection.execute(
+            "SELECT b.external_sender_id FROM private_web_deliveries p "
+            "JOIN interaction_deliveries d ON d.delivery_id=p.delivery_id "
+            "JOIN interactions i ON i.interaction_id=d.interaction_id "
+            "JOIN private_conversation_messages m ON m.interaction_id=i.interaction_id "
+            "JOIN private_conversations c ON c.conversation_id=m.conversation_id "
+            "JOIN private_channel_routes r ON r.binding_id=p.binding_id "
+            "JOIN interaction_bindings b ON b.binding_id=r.binding_id "
+            "JOIN interaction_transports t ON t.transport_id=b.transport_id "
+            "WHERE p.delivery_id=? AND i.subject_id=d.subject_id AND r.subject_id=d.subject_id "
+            "AND b.subject_id=d.subject_id AND t.subject_id=d.subject_id "
+            "AND m.subject_id=d.subject_id AND c.subject_id=d.subject_id "
+            "AND t.transport_id=d.transport_id AND t.status='active' AND t.channel='qq' "
+            "AND b.status='active' AND c.status='active' AND m.author_verified=1 "
+            "AND r.share_web_history=1 AND r.push_web_replies=1 AND r.revision=p.route_revision "
+            "AND r.conversation_id=p.conversation_id AND c.conversation_id=p.conversation_id "
+            "AND EXISTS(SELECT 1 FROM private_message_sequences s "
+            "WHERE s.interaction_id=i.interaction_id AND s.sequence>r.push_after_sequence) "
+            "AND i.channel='web' AND i.direction='outgoing' "
+            "AND EXISTS(SELECT 1 FROM inbound_identity_challenges x "
+            "WHERE x.binding_id=b.binding_id "
+            "AND x.status='confirmed' AND x.subject_id=d.subject_id)",
+            (delivery_id,),
+        ).fetchone()
+        if consent is None:
+            raise PermissionError("private push consent withdrawn")
+        return str(consent[0])
 
     async def deliver_pending(self, subject_id: str, *, limit: int = 10) -> list[DeliveryRecord]:
         if self._closed:
@@ -1443,6 +1529,27 @@ class DeliveryDispatcher:
                     if context is not None and context["transport_id"] != record.transport_id:
                         raise IntegrityError("reply delivery uses a different source transport")
                     if context is not None:
+                        permitted = connection.execute(
+                            "SELECT 1 FROM interaction_bindings b WHERE b.subject_id=? "
+                            "AND b.transport_id=? AND b.channel=? AND b.external_account_id=? "
+                            "AND b.external_sender_id=? AND b.status='active'",
+                            (
+                                delivery.subject_id,
+                                context["transport_id"],
+                                context["channel"],
+                                context["external_account_id"],
+                                context["external_sender_id"],
+                            ),
+                        ).fetchone()
+                        withdrawn = connection.execute(
+                            "SELECT 1 FROM private_conversation_messages m "
+                            "JOIN private_conversations c "
+                            "ON c.conversation_id=m.conversation_id WHERE m.interaction_id=? "
+                            "AND c.status IN ('deleting','deleted')",
+                            (interaction["interaction_id"],),
+                        ).fetchone()
+                        if permitted is None or withdrawn is not None:
+                            raise PermissionError("reply recipient or private content withdrawn")
                         expected_counterparty = (
                             context["external_sender_id"]
                             if context["channel"] == "email"
@@ -1486,29 +1593,30 @@ class DeliveryDispatcher:
             send_interaction["counterparty"] = self.transports.delivery_counterparty(
                 record.transport_id, interaction, subject_id=delivery.subject_id
             )
+            with self.database.connection() as connection:
+                push_recipient = self._web_push_recipient(connection, delivery.delivery_id)
+            if push_recipient is not None:
+                send_interaction["counterparty"] = push_recipient
+                send_interaction["reply_selector"] = "qq:user"
             response_id = await self._send(
                 record, secret, send_interaction, delivery.idempotency_key
             )
-            try:
-                assert_current_lease()
-            except OperationInvalidated:
-                with accounting_scope():
-                    self._finish(
-                        delivery.delivery_id,
-                        "unknown",
-                        "runtime epoch invalidated after delivery",
-                        attempts,
-                        provider_message_id=provider_reference,
-                    )
-                raise
+            # Account for the confirmed external outcome before fencing a stale
+            # continuation. Losing the receipt here risks a duplicate resend.
+            completed = self._finish(
+                delivery.delivery_id, "delivered", None, attempts, provider_message_id=response_id
+            )
+            assert_current_lease()
         except DeliveryOutcomeUnknown as error:
-            return self._finish(
+            completed = self._finish(
                 delivery.delivery_id,
                 "unknown",
                 str(error),
                 attempts,
                 provider_message_id=error.provider_message_id,
             )
+            assert_current_lease()
+            return completed
         except asyncio.CancelledError:
             try:
                 self._finish(
@@ -1539,14 +1647,81 @@ class DeliveryDispatcher:
             httpx.RemoteProtocolError,
             HTTPResponseLimitError,
         ):
-            return self._finish(
+            completed = self._finish(
                 delivery.delivery_id, "unknown", "transport outcome unknown", attempts
             )
+            assert_current_lease()
+            return completed
+        except PermissionError:
+            return self._fail_closed_delivery(delivery, "PermissionError")
         except Exception as error:
-            return self._finish(delivery.delivery_id, "failed", type(error).__name__, attempts)
-        return self._finish(
-            delivery.delivery_id, "delivered", None, attempts, provider_message_id=response_id
-        )
+            completed = self._finish(delivery.delivery_id, "failed", type(error).__name__, attempts)
+            assert_current_lease()
+            return completed
+        return completed
+
+    def _assert_message_send_allowed(
+        self, transport: TransportRecord, interaction: Mapping[str, Any], idempotency_key: str
+    ) -> None:
+        assert_current_lease()
+        if self.transports is None:
+            return
+        with self.database.connection() as connection:
+            current = connection.execute(
+                "SELECT i.*,t.status AS transport_status,d.status AS delivery_status "
+                "FROM interaction_deliveries d JOIN interactions i "
+                "ON i.interaction_id=d.interaction_id JOIN interaction_transports t "
+                "ON t.transport_id=d.transport_id WHERE d.idempotency_key=? "
+                "AND d.subject_id=? AND d.transport_id=? AND i.subject_id=d.subject_id "
+                "AND t.subject_id=d.subject_id",
+                (idempotency_key, transport.subject_id, transport.transport_id),
+            ).fetchone()
+            if (
+                current is None
+                or current["transport_status"] != "active"
+                or current["delivery_status"] != "sending"
+                or current["interaction_id"] != interaction.get("interaction_id")
+                or current["content"] != interaction.get("content")
+            ):
+                raise PermissionError("delivery authorization withdrawn")
+            withdrawn = connection.execute(
+                "SELECT 1 FROM private_conversation_messages m JOIN private_conversations c "
+                "ON c.conversation_id=m.conversation_id WHERE m.interaction_id IN (?,?) "
+                "AND c.status IN ('deleting','deleted')",
+                (current["interaction_id"], current["related_interaction_id"]),
+            ).fetchone()
+            if withdrawn is not None:
+                raise PermissionError("private content withdrawn")
+            delivery = connection.execute(
+                "SELECT delivery_id FROM interaction_deliveries WHERE idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+            push_recipient = self._web_push_recipient(connection, delivery[0])
+            if push_recipient is not None and (
+                interaction.get("counterparty") != push_recipient
+                or interaction.get("reply_selector") != "qq:user"
+            ):
+                raise PermissionError("private push recipient mismatch")
+            context = connection.execute(
+                "SELECT * FROM interaction_inbound_events WHERE interaction_id=? "
+                "AND subject_id=? LIMIT 1",
+                (current["related_interaction_id"], transport.subject_id),
+            ).fetchone()
+            if context is not None:
+                permitted = connection.execute(
+                    "SELECT 1 FROM interaction_bindings WHERE subject_id=? AND transport_id=? "
+                    "AND channel=? AND external_account_id=? AND external_sender_id=? "
+                    "AND status='active'",
+                    (
+                        transport.subject_id,
+                        transport.transport_id,
+                        context["channel"],
+                        context["external_account_id"],
+                        context["external_sender_id"],
+                    ),
+                ).fetchone()
+                if permitted is None or context["transport_id"] != transport.transport_id:
+                    raise PermissionError("reply recipient withdrawn")
 
     async def _send(
         self,
@@ -1559,7 +1734,40 @@ class DeliveryDispatcher:
         if not isinstance(credentials, Mapping):
             raise ValueError("transport credentials are invalid")
         original_credentials = dict(credentials)
-        credentials = await self._provider_credentials(transport, original_credentials)
+        settings = (
+            self.transports.settings(transport.transport_id, subject_id=transport.subject_id)
+            if self.transports is not None
+            else {}
+        )
+        frozen_secret = content_hash(secret)
+        frozen_settings = content_hash(settings)
+
+        def before_send() -> None:
+            self._assert_message_send_allowed(transport, interaction, idempotency_key)
+            if self.transports is not None:
+                current = self.transports.get(
+                    transport.transport_id, subject_id=transport.subject_id
+                )
+                current_secret = self.transports.secret(
+                    transport.transport_id, subject_id=transport.subject_id
+                )
+                current_settings = self.transports.settings(
+                    transport.transport_id, subject_id=transport.subject_id
+                )
+                if (
+                    current != transport
+                    or content_hash(current_secret) != frozen_secret
+                    or content_hash(current_settings) != frozen_settings
+                ):
+                    raise PermissionError("transport configuration changed before dispatch")
+            assert_current_lease()
+
+        async def trace(event: str, info: dict[str, Any]) -> None:
+            if event.endswith("send_request_headers.started"):
+                before_send()
+
+        before_send()
+        credentials = await self._provider_credentials(transport, original_credentials, before_send)
         # Adapter routing fields are non-secret transport settings kept in
         # SQLite, while provider tokens remain in the private secret file.
         # Pass only the known provider selectors across this boundary so a
@@ -1580,17 +1788,29 @@ class DeliveryDispatcher:
         endpoint = str(secret.get("endpoint", transport.endpoint))
         channel = transport.channel
         if channel == "email":
-            return cast(
-                str | None,
-                await self._run_blocking(
-                    self._send_email,
-                    endpoint,
-                    credentials,
-                    interaction["counterparty"],
-                    interaction["content"],
-                    idempotency_key,
-                ),
-            )
+            operation = SMTPOperation(SMTP_TIMEOUT_SECONDS)
+            self._smtp_operations.add(operation)
+            try:
+                return await operation.run(
+                    lambda: self._send_email(
+                        endpoint,
+                        credentials,
+                        interaction["counterparty"],
+                        interaction["content"],
+                        idempotency_key,
+                        before_send,
+                        operation=operation,
+                    )
+                )
+            except TimeoutError as error:
+                # A caller timeout can race DATA acceptance. Never resend it
+                # automatically, even when no receipt has returned yet.
+                raise DeliveryOutcomeUnknown(
+                    "SMTP operation deadline exceeded",
+                    provider_message_id=self._smtp_message_id(idempotency_key),
+                ) from error
+            finally:
+                self._smtp_operations.discard(operation)
         adapter = OUTBOUND_ADAPTERS.get(channel)
         if adapter is None:
             raise ValueError("unsupported transport channel")
@@ -1615,12 +1835,15 @@ class DeliveryDispatcher:
             deadline = asyncio.get_running_loop().time() + TRANSPORT_TOTAL_TIMEOUT_SECONDS
             try:
                 async with asyncio.timeout(TRANSPORT_TOTAL_TIMEOUT_SECONDS):
+                    # Token acquisition and refresh can yield to a revocation or deletion.
+                    before_send()
                     async with self._http_client().stream(
                         "POST",
                         outbound.endpoint,
                         json=outbound.payload,
                         headers=request_headers,
                         follow_redirects=False,
+                        extensions={"trace": trace},
                     ) as response:
                         validate_response_headers(
                             response, max_header_bytes=DEFAULT_MAX_HEADER_BYTES
@@ -1643,7 +1866,9 @@ class DeliveryDispatcher:
                     and original_credentials.get("app_secret")
                 ):
                     await self._invalidate_provider_token(transport.transport_id, provider_name)
-                    credentials = await self._provider_credentials(transport, original_credentials)
+                    credentials = await self._provider_credentials(
+                        transport, original_credentials, before_send
+                    )
                     adapter_credentials = dict(credentials)
                     if self.transports is not None:
                         settings = self.transports.settings(
@@ -1673,7 +1898,7 @@ class DeliveryDispatcher:
                     ):
                         await self._invalidate_provider_token(transport.transport_id, provider_name)
                         credentials = await self._provider_credentials(
-                            transport, original_credentials
+                            transport, original_credentials, before_send
                         )
                         adapter_credentials = dict(credentials)
                         if self.transports is not None:
@@ -1793,7 +2018,11 @@ class DeliveryDispatcher:
         recipient: str,
         content: str,
         idempotency_key: str,
+        authorize_send: Callable[[], None] | None = None,
+        *,
+        operation: SMTPOperation | None = None,
     ) -> str:
+        operation = operation or SMTPOperation(SMTP_TIMEOUT_SECONDS)
         parsed = urlsplit(endpoint)
         host = parsed.hostname
         if not host:
@@ -1809,28 +2038,67 @@ class DeliveryDispatcher:
         message_id = DeliveryDispatcher._smtp_message_id(idempotency_key)
         message["Message-ID"] = message_id
         message.set_content(content)
-        addresses = _PublicDNSBackend._public_addresses(host, port)
+        addresses = public_addresses(host, port, timeout=operation.remaining())
         address = addresses[0]
         if parsed.scheme == "smtps":
             client: smtplib.SMTP = smtplib.SMTP_SSL(
-                timeout=SMTP_TIMEOUT_SECONDS,
+                timeout=operation.remaining(),
                 context=ssl.create_default_context(),
             )
         else:
-            client = smtplib.SMTP(timeout=SMTP_TIMEOUT_SECONDS)
+            client = smtplib.SMTP(timeout=operation.remaining())
+        operation.client = client
         cast(Any, client)._host = host
-        sent = False
+
+        def boundary() -> None:
+            operation.remaining()
+            if authorize_send is not None:
+                authorize_send()
+            remaining = operation.remaining()
+            if isinstance(client.sock, ssl.SSLSocket | socket.socket):
+                client.sock.settimeout(remaining)
+            client.timeout = remaining
+
+        # smtplib AUTH can use several challenge/response writes or fall back
+        # to a different mechanism. Guard every write, including those after
+        # a server wait and the actual DATA body, not just login() entry.
+        raw_send = getattr(client, "send", None)
+        if raw_send is not None:
+
+            def fenced_send(data: Any) -> Any:
+                boundary()
+                return raw_send(data)
+
+            cast(Any, client).send = fenced_send
+        raw_getreply = getattr(client, "getreply", None)
+        if raw_getreply is not None:
+
+            def bounded_getreply() -> Any:
+                # connect() installs its socket only after TCP/TLS succeeds.
+                # Recheck here even if the abort timer fired before that
+                # socket was available to shut down.
+                operation.remaining()
+                return raw_getreply()
+
+            cast(Any, client).getreply = bounded_getreply
+        timer = threading.Timer(max(0.0, operation.deadline - time.monotonic()), operation.abort)
+        timer.daemon = True
         try:
+            timer.start()
+            boundary()
             code, message_text = client.connect(address, port)
             if code != 220:
                 raise smtplib.SMTPConnectError(code, message_text)
             DeliveryDispatcher._verify_smtp_peer(client, address)
+            boundary()
             if parsed.scheme != "smtps":
                 client.starttls(context=ssl.create_default_context())
+            boundary()
             username = credentials.get("username")
             password = credentials.get("password")
             if username and password:
                 client.login(str(username), str(password))
+            boundary()
             try:
                 client.send_message(message)
             except (TimeoutError, OSError, smtplib.SMTPServerDisconnected) as error:
@@ -1838,14 +2106,11 @@ class DeliveryDispatcher:
                     "SMTP send outcome unknown",
                     provider_message_id=message_id,
                 ) from error
-            sent = True
         finally:
-            if sent:
-                try:
-                    client.quit()
-                except (OSError, smtplib.SMTPException):
-                    client.close()
-            else:
+            timer.cancel()
+            # QUIT is not part of delivery acceptance. Close locally so a
+            # malicious QUIT response cannot delay a confirmed result.
+            with suppress(OSError, smtplib.SMTPException):
                 client.close()
         return message_id
 

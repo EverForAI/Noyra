@@ -12,11 +12,29 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
-from .admission import current_commit_scope
+from .admission import current_commit_scope, is_accounting_scope
+from .conversation_schema import MIGRATION_V84, MIGRATION_V85
 from .errors import RuntimeOwnershipError
-from .evidence_schema import migration_v80
+from .evidence_schema import migration_v80, migration_v92
 from .locking import ProcessLock
+from .private_erasure_schema import (
+    MIGRATION_V87,
+    MIGRATION_V88,
+    MIGRATION_V89,
+    MIGRATION_V90,
+    PRIVATE_ROUTE_PUSH_COLUMNS,
+)
+from .private_sources import MIGRATION_V86, assert_private_inputs_available
+from .public_policy import MIGRATION_V82
+from .resource_policy import (
+    LIMIT_DIMENSIONS,
+    MIGRATION_V81,
+    read_resource_policy,
+    write_resource_policy,
+)
+from .retention_policy import MIGRATION_V83
 from .types import canonical_json, content_hash, new_id, strict_int, utc_now
+from .usage_schema import ATTEMPT_USAGE_COLUMNS, MIGRATION_V91
 from .wallet_schema import (
     WalletLegacyApproval,
     legacy_entry_hash,
@@ -290,7 +308,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 80
+CURRENT_SCHEMA_VERSION = 92
 
 # The schema DDL fingerprint is checked after every successful initialization.
 # Update this value only alongside a reviewed schema migration and its tests.
@@ -298,6 +316,18 @@ CURRENT_SCHEMA_VERSION = 80
 # installations persist this value in ``schema_meta`` and therefore require
 # the value to remain stable across compatible runtime fixes.
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
+    92: "28e3601ed49497ace746afc16374512e35491c6a3cd30299d4fd8122eab4c543",
+    91: "7747814bce9f944f0b64f407da16524a7728671272797273eefc5ba72193daab",
+    90: "649a64f023b29e3dddc355e0e45598e77446876884f3adeb0c199b1677ba8eb5",
+    89: "dd50e35a4449d3c4dbe424ec7ed4ccb7464665a01efbb5b30131a5578f4abc55",
+    88: "0a0e187d52eadc7cf9631117a9a864ceb0882e3ead3a4461306d80d759813119",
+    87: "9f7249ee4e7d465438cc06aa0d9a635a281a0a3118ae1210407c14c242d8ee2f",
+    86: "43368f8885f52e6fc915a25f60ad983dd6f55a0de28007f18b6603f4cf55fbd3",
+    85: "1866b81f3fbe8104021f130564d175b61961100a4524c84d3ef3a7ffd1c012e4",
+    84: "a3a27655b433d22d0b2148267592067c724e17f37622fa95c1c69b0bd88496a4",
+    83: "ad714681e3e85d60a20ab14ebabc4106285df457bfd8fc633c002097b12c2505",
+    82: "5a6031407e2cc1e55da5706c5ab8d0fe749286b8402976eae76fc1f8c71d4288",
+    81: "4d82e1926e29d7fd6d01e59149017eab575f50fff949f0827b3dab3918d1beb1",
     80: "70e0fcbd9ee1929f64bd9869d7070496ff45b0f14dee7d0bb9db316e62d12326",
     77: "2487f1a2703fc940178b2c77f2b3982a37b4a526de37b9b253204be71f4a6d1f",
     78: "895ea957c9befde841e2c665c1cae4d47d9f90c9b37a9f6341e2cea339bbd5d5",
@@ -309,6 +339,18 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 # auditable P0 finding.  Tables, indexes, and views still fail closed during
 # database construction because they define the storage contract itself.
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
+    92: "09ccb3fabc0eb74acae5bb8b3a6fa540d1fda3a436f1b62ab32755e9d46226a6",
+    91: "ab84d8a689063a3e2313c587f3dc7bd20795bac4187f00f2fade22b794de43c4",
+    90: "96618523ee767b8249c9c03775ff330c28195e68579a7e344475a369cf29400d",
+    89: "fddaa5e147c496247e6a1c895303a77b52d3d64a8e1fe22cb060a5b18a81b3b0",
+    88: "67486314faded669b7b3d6bcdcd619f90a7abdf22da3f01ec07127abe896cfc5",
+    87: "67486314faded669b7b3d6bcdcd619f90a7abdf22da3f01ec07127abe896cfc5",
+    86: "d54e6742307c5ec757afc98430368d0e11c3dfe0b87d1a3372f141dc9f2c292f",
+    85: "57ef8566669d777860b4c97c3cf4f58e2050d3ca40bae05972094d564e7501a6",
+    84: "60389656a9820b16ef4321937a04c139e068c4416189544938017ab586d017b5",
+    83: "a9e34bb9c15d3499f211d315fde416314012a9754fee7fe535e87f59d4ff731f",
+    82: "c7071ba23a95d0c56f7518ceb6cdd9c2609a58fb9978cd1deb6bc84d04292457",
+    81: "34d4cbb66c5433a6cb4614cba22b2a5dd69b55705a56733b1af38b26da297843",
     80: "840bae4d215def4cb6425ac5977c2a093fdaf90cfd7f2b5ec841c27ba0afd9dd",
     77: "03eae2bf8cdb2379f5a7271801044ce1920e0805018827d3661184b2a9fca896",
     78: "d8cc66309f41f32f3c7a7f05954ac237ad3826cfcdf6cf178c07538aa30fe828",
@@ -6849,6 +6891,18 @@ CREATE INDEX IF NOT EXISTS idx_migration_backup_registry_subject_status
 SELECT 1;
 """,
     80: migration_v80(),
+    81: MIGRATION_V81,
+    82: MIGRATION_V82,
+    83: MIGRATION_V83,
+    84: MIGRATION_V84,
+    85: MIGRATION_V85,
+    86: MIGRATION_V86,
+    87: MIGRATION_V87,
+    88: MIGRATION_V88,
+    89: MIGRATION_V89,
+    90: MIGRATION_V90,
+    91: MIGRATION_V91,
+    92: migration_v92(),
 }
 
 
@@ -7109,6 +7163,8 @@ class Database:
         try:
             with current_commit_scope():
                 connection.execute("BEGIN IMMEDIATE")
+                if not is_accounting_scope():
+                    assert_private_inputs_available(connection)
                 yield connection
                 connection.commit()
         except Exception:
@@ -10164,6 +10220,32 @@ END;
                     connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
             for target_version in range(version + 1, CURRENT_SCHEMA_VERSION + 1):
                 migration = MIGRATIONS[target_version]
+                if target_version == 85 and any(
+                    row[1] == "author_verified"
+                    for row in connection.execute(
+                        "PRAGMA table_info(private_conversation_messages)"
+                    )
+                ):
+                    connection.execute(
+                        "UPDATE schema_meta SET value='85' WHERE key='schema_version'"
+                    )
+                    connection.commit()
+                    continue
+                if target_version == 84:
+                    from noyra.interaction.conversations import migrate_web_history
+
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._execute_sql_script(connection, migration)
+                        migrate_web_history(connection)
+                        connection.execute(
+                            "UPDATE schema_meta SET value='84' WHERE key='schema_version'"
+                        )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
                 if target_version == 21:
                     self._ensure_project_execution_columns(connection)
                 if target_version == 34:
@@ -10363,6 +10445,56 @@ END;
                         connection.rollback()
                         raise
                     continue
+                if target_version in {81, 82}:
+                    foreign_keys_enabled = bool(
+                        connection.execute("PRAGMA foreign_keys").fetchone()[0]
+                    )
+                    try:
+                        connection.execute("PRAGMA foreign_keys = OFF")
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._execute_sql_script(connection, migration)
+                        self._ensure_subject_scoped_triggers(connection)
+                        if connection.execute("PRAGMA foreign_key_check").fetchall():
+                            raise RuntimeError(
+                                "resource policy migration introduced foreign-key violations"
+                            )
+                        for group in (
+                            connection.execute(
+                                "SELECT group_id, subject_id FROM cognitive_resource_groups"
+                            ).fetchall()
+                            if target_version == 81
+                            else []
+                        ):
+                            if connection.execute(
+                                "SELECT 1 FROM cognitive_resource_limit_policies WHERE group_id=?",
+                                (group["group_id"],),
+                            ).fetchone():
+                                read_resource_policy(
+                                    connection, group["group_id"], group["subject_id"]
+                                )
+                                continue
+                            write_resource_policy(
+                                connection,
+                                group["group_id"],
+                                group["subject_id"],
+                                dict.fromkeys(LIMIT_DIMENSIONS, True),
+                                actor="schema-migration",
+                                reason="preserve existing limits",
+                                now=utc_now(),
+                            )
+                        connection.execute(
+                            "UPDATE schema_meta SET value=? WHERE key='schema_version'",
+                            (str(target_version),),
+                        )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    finally:
+                        connection.execute(
+                            f"PRAGMA foreign_keys = {'ON' if foreign_keys_enabled else 'OFF'}"
+                        )
+                    continue
                 if target_version == 80:
                     try:
                         connection.execute("BEGIN IMMEDIATE")
@@ -10400,6 +10532,44 @@ END;
                             self._upgrade_public_post_evidence(connection)
                         connection.execute(
                             "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                            (str(target_version),),
+                        )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
+                if target_version in (90, 91):
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        existing = {
+                            row[1]
+                            for row in connection.execute(
+                                "PRAGMA table_info("
+                                + (
+                                    "private_channel_routes"
+                                    if target_version == 90
+                                    else "model_attempts"
+                                )
+                                + ")"
+                            )
+                        }
+                        columns = (
+                            PRIVATE_ROUTE_PUSH_COLUMNS
+                            if target_version == 90
+                            else ATTEMPT_USAGE_COLUMNS
+                        )
+                        table = (
+                            "private_channel_routes" if target_version == 90 else "model_attempts"
+                        )
+                        for name, declaration in columns.items():
+                            if name not in existing:
+                                connection.execute(
+                                    f"ALTER TABLE {table} ADD COLUMN {name} {declaration}"
+                                )
+                        self._execute_sql_script(connection, migration)
+                        connection.execute(
+                            "UPDATE schema_meta SET value=? WHERE key='schema_version'",
                             (str(target_version),),
                         )
                         connection.commit()

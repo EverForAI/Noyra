@@ -14,11 +14,13 @@ import hashlib
 import hmac
 import json
 import re
+import secrets
 import sqlite3
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from email import policy
 from email.parser import BytesParser
 from email.utils import getaddresses
@@ -28,7 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
-from noyra.core.types import content_hash, new_id, utc_now
+from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 
 from .store import InteractionStore
 
@@ -107,6 +109,17 @@ class InboundAccepted:
     interaction_id: str
     duplicate: bool
     scheduling_priority: int
+
+
+@dataclass(frozen=True)
+class InboundIdentityObserved(InboundAccepted):
+    transport_id: str
+    external_account_id: str
+    external_sender_id: str
+
+    @property
+    def challenge_id(self) -> str:
+        return self.event_id
 
 
 @dataclass(frozen=True)
@@ -923,44 +936,406 @@ class InboundStore:
         account = _text(external_account_id, "external_account_id")
         sender = _text(external_sender_id, "external_sender_id")
         label = _text(label, "binding label", required=False)
-        binding_id = new_id("ibind")
         with self.database.transaction() as connection:
-            transport = connection.execute(
-                "SELECT channel FROM interaction_transports "
-                "WHERE transport_id = ? AND subject_id = ? AND status = 'active'",
-                (transport_id, subject_id),
-            ).fetchone()
-            if transport is None:
-                raise ValueError("active transport is required for inbound binding")
-            try:
-                connection.execute(
-                    "INSERT INTO interaction_bindings("
-                    "binding_id, subject_id, transport_id, channel, external_account_id, "
-                    "external_sender_id, role, label, status, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
-                    (
-                        binding_id,
-                        subject_id,
-                        transport_id,
-                        transport["channel"],
-                        account,
-                        sender,
-                        role,
-                        label,
-                        utc_now(),
-                        utc_now(),
-                    ),
-                )
-            except sqlite3.IntegrityError as error:
-                raise ValueError("inbound account binding already exists") from error
+            binding_id = self._bind_connection(
+                connection,
+                subject_id,
+                transport_id,
+                external_account_id=account,
+                external_sender_id=sender,
+                role=role,
+                label=label,
+            )
         return binding_id
 
-    def ingest(self, envelope: InboundEnvelope) -> InboundAccepted:
+    @staticmethod
+    def _bind_connection(
+        connection: Any,
+        subject_id: str,
+        transport_id: str,
+        *,
+        external_account_id: str,
+        external_sender_id: str,
+        role: InboundRole,
+        label: str,
+    ) -> str:
+        transport = connection.execute(
+            "SELECT channel FROM interaction_transports "
+            "WHERE transport_id = ? AND subject_id = ? AND status = 'active'",
+            (transport_id, subject_id),
+        ).fetchone()
+        if transport is None:
+            raise ValueError("active transport is required for inbound binding")
+        binding_id = new_id("ibind")
+        try:
+            connection.execute(
+                "INSERT INTO interaction_bindings("
+                "binding_id, subject_id, transport_id, channel, external_account_id, "
+                "external_sender_id, role, label, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+                (
+                    binding_id,
+                    subject_id,
+                    transport_id,
+                    transport["channel"],
+                    external_account_id,
+                    external_sender_id,
+                    role,
+                    label,
+                    utc_now(),
+                    utc_now(),
+                ),
+            )
+        except sqlite3.IntegrityError as error:
+            raise ValueError("inbound account binding already exists") from error
+        return binding_id
+
+    def issue_identity_challenge(self, subject_id: str, transport_id: str) -> dict[str, Any]:
+        code = "".join(secrets.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567") for _ in range(10))
+        now = utc_now()
+        expires = (datetime.fromisoformat(now) + timedelta(minutes=5)).isoformat(
+            timespec="milliseconds"
+        )
+        with self.database.transaction() as connection:
+            transport = connection.execute(
+                "SELECT channel FROM interaction_transports WHERE transport_id=? "
+                "AND subject_id=? AND status='active'",
+                (transport_id, subject_id),
+            ).fetchone()
+            if transport is None or transport["channel"] != "qq":
+                raise ValueError("active QQ transport is required")
+            since = (datetime.fromisoformat(now) - timedelta(hours=1)).isoformat(
+                timespec="milliseconds"
+            )
+            if (
+                connection.execute(
+                    "SELECT count(*) FROM inbound_identity_challenges WHERE subject_id=? "
+                    "AND transport_id=? AND created_at>=?",
+                    (subject_id, transport_id, since),
+                ).fetchone()[0]
+                >= 20
+            ):
+                raise ValueError("identity challenge issue rate exceeded")
+            connection.execute(
+                "UPDATE inbound_identity_challenges SET status='revoked' WHERE subject_id=? "
+                "AND transport_id=? AND status IN ('pending','observed')",
+                (subject_id, transport_id),
+            )
+            challenge_id = new_id("ichal")
+            connection.execute(
+                "INSERT INTO inbound_identity_challenges VALUES(?,?,?,?,?,NULL,NULL,0,?,?,"
+                "NULL,NULL,NULL,NULL)",
+                (
+                    challenge_id,
+                    subject_id,
+                    transport_id,
+                    content_hash(code),
+                    "pending",
+                    expires,
+                    now,
+                ),
+            )
+        return {"challenge_id": challenge_id, "code": code, "expires_at": expires}
+
+    def identity_challenge(self, subject_id: str, challenge_id: str) -> dict[str, Any]:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT challenge_id,transport_id,status,external_account_id,external_sender_id,"
+                "attempts,expires_at,observed_at,binding_id FROM inbound_identity_challenges "
+                "WHERE subject_id=? AND challenge_id=?",
+                (subject_id, challenge_id),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("identity challenge not found")
+        result = dict(row)
+        if result["status"] in {"pending", "observed"} and result["expires_at"] <= utc_now():
+            result["status"] = "expired"
+        return result
+
+    def confirm_identity_challenge(
+        self,
+        subject_id: str,
+        challenge_id: str,
+        *,
+        role: InboundRole = "participant",
+        label: str = "",
+    ) -> str:
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM inbound_identity_challenges WHERE challenge_id=? AND subject_id=?",
+                (challenge_id, subject_id),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError("identity challenge not found")
+            if role not in {"creator", "participant"}:
+                raise ValueError("invalid binding role")
+            if row["status"] == "confirmed":
+                return str(row["binding_id"])
+            if row["status"] != "observed":
+                raise ValueError("identity challenge is not awaiting confirmation")
+            if datetime.fromisoformat(row["expires_at"]) <= datetime.fromisoformat(utc_now()):
+                raise ValueError("identity challenge expired")
+            existing = connection.execute(
+                "SELECT binding_id,status FROM interaction_bindings WHERE subject_id=? "
+                "AND transport_id=? AND external_account_id=? AND external_sender_id=?",
+                (
+                    subject_id,
+                    row["transport_id"],
+                    row["external_account_id"],
+                    row["external_sender_id"],
+                ),
+            ).fetchone()
+            if existing is not None:
+                if existing["status"] != "active":
+                    raise ValueError("previous binding is unavailable")
+                if not connection.execute(
+                    "SELECT 1 FROM interaction_transports WHERE transport_id=? AND status='active'",
+                    (row["transport_id"],),
+                ).fetchone():
+                    raise ValueError("transport is unavailable")
+                binding_id = str(existing["binding_id"])
+            else:
+                binding_id = self._bind_connection(
+                    connection,
+                    subject_id,
+                    row["transport_id"],
+                    external_account_id=row["external_account_id"],
+                    external_sender_id=row["external_sender_id"],
+                    role=role,
+                    label=_text(label, "binding label", required=False),
+                )
+            connection.execute(
+                "UPDATE inbound_identity_challenges SET status='confirmed',confirmed_at=?,"
+                "binding_id=? "
+                "WHERE challenge_id=? AND status='observed'",
+                (utc_now(), binding_id, challenge_id),
+            )
+            return binding_id
+
+    def route_private_chat(
+        self,
+        subject_id: str,
+        binding_id: str,
+        conversation_id: str,
+        *,
+        share_web_history: bool,
+        push_web_replies: bool = False,
+        expected_revision: int | None = None,
+    ) -> None:
+        from .conversations import WEB_PRINCIPAL, _row
+
+        if type(share_web_history) is not bool or type(push_web_replies) is not bool:
+            raise ValueError("explicit history scope is required")
+        with self.database.transaction() as connection:
+            route = connection.execute(
+                "SELECT revision FROM private_channel_routes WHERE subject_id=? AND binding_id=?",
+                (subject_id, binding_id),
+            ).fetchone()
+            if expected_revision is not None and (
+                type(expected_revision) is not int
+                or expected_revision != (route[0] if route else 0)
+            ):
+                raise ValueError("private route revision changed")
+            binding = connection.execute(
+                "SELECT b.channel FROM interaction_bindings b JOIN inbound_identity_challenges c "
+                "ON c.binding_id=b.binding_id JOIN interaction_transports t "
+                "ON t.transport_id=b.transport_id WHERE b.subject_id=? AND b.binding_id=? "
+                "AND b.status='active' AND c.status='confirmed' AND t.status='active'",
+                (subject_id, binding_id),
+            ).fetchone()
+            window = _row(connection, subject_id, conversation_id)
+            if (
+                binding is None
+                or binding["channel"] != "qq"
+                or window["status"] != "active"
+                or not share_web_history
+                or window["principal_id"] != WEB_PRINCIPAL
+            ):
+                raise ValueError("verified private identity and explicit history consent required")
+            now = utc_now()
+            sequence = connection.execute(
+                "SELECT COALESCE(MAX(s.sequence),0) FROM private_message_sequences s "
+                "JOIN interactions i ON i.interaction_id=s.interaction_id WHERE i.subject_id=?",
+                (subject_id,),
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO private_channel_routes(binding_id,subject_id,conversation_id,"
+                "share_web_history,updated_at,push_web_replies,revision,push_since,"
+                "push_after_sequence) VALUES(?,?,?,?,?,?,1,?,?) ON CONFLICT(binding_id) "
+                "DO UPDATE SET conversation_id=excluded.conversation_id,"
+                "share_web_history=excluded.share_web_history,updated_at=excluded.updated_at,"
+                "push_web_replies=excluded.push_web_replies,revision=revision+1,"
+                "push_since=excluded.push_since,push_after_sequence=excluded.push_after_sequence",
+                (
+                    binding_id,
+                    subject_id,
+                    conversation_id,
+                    1,
+                    now,
+                    int(push_web_replies),
+                    now if push_web_replies else None,
+                    sequence,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO audit_records VALUES(?,?,'private_route_changed','operator',?,?)",
+                (
+                    new_id("audit"),
+                    subject_id,
+                    canonical_json(
+                        {"binding_id": binding_id, "push_web_replies": push_web_replies}
+                    ),
+                    now,
+                ),
+            )
+
+    def unlink_private_chat(self, subject_id: str, binding_id: str) -> None:
+        with self.database.transaction() as connection:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM interaction_bindings WHERE subject_id=? AND binding_id=?",
+                    (subject_id, binding_id),
+                ).fetchone()
+                is None
+            ):
+                raise NotFoundError("binding not found")
+            connection.execute(
+                "UPDATE private_channel_routes SET share_web_history=0,push_web_replies=0,"
+                "push_since=NULL,revision=revision+1,updated_at=? "
+                "WHERE subject_id=? AND binding_id=?",
+                (utc_now(), subject_id, binding_id),
+            )
+            connection.execute(
+                "INSERT INTO audit_records VALUES(?,?,'private_route_unlinked','operator',?,?)",
+                (
+                    new_id("audit"),
+                    subject_id,
+                    canonical_json({"binding_id": binding_id}),
+                    utc_now(),
+                ),
+            )
+
+    def _observe_identity(self, envelope: InboundEnvelope) -> InboundIdentityObserved | None:
+        if envelope.channel != "qq":
+            return None
+        denied = False
+        result = None
+        now = utc_now()
+        event_hash = content_hash(
+            [
+                envelope.transport_id,
+                envelope.external_account_id,
+                envelope.external_sender_id,
+                envelope.provider_event_id,
+            ]
+        )
+        with self.database.transaction() as connection:
+            transport = connection.execute(
+                "SELECT subject_id FROM interaction_transports WHERE transport_id=? "
+                "AND status='active' AND channel='qq'",
+                (envelope.transport_id,),
+            ).fetchone()
+            if transport is None:
+                raise PermissionError("transport is unavailable")
+            subject_id = transport["subject_id"]
+            duplicate = connection.execute(
+                "SELECT challenge_id FROM inbound_identity_challenges WHERE subject_id=? "
+                "AND transport_id=? AND observed_event_hash=?",
+                (subject_id, envelope.transport_id, event_hash),
+            ).fetchone()
+            if duplicate is not None:
+                return InboundIdentityObserved(
+                    duplicate[0],
+                    "",
+                    True,
+                    0,
+                    envelope.transport_id,
+                    envelope.external_account_id,
+                    envelope.external_sender_id,
+                )
+            code = envelope.content.strip().upper()
+            # Only code-shaped control messages count as guesses; ordinary chat is unaffected.
+            if not re.fullmatch(r"[A-Z2-7]{10}", code):
+                return None
+            if envelope.reply_selector != "qq:user":
+                if connection.execute(
+                    "SELECT 1 FROM inbound_identity_challenges WHERE subject_id=? "
+                    "AND transport_id=? AND code_hash=?",
+                    (subject_id, envelope.transport_id, content_hash(code)),
+                ).fetchone():
+                    raise PermissionError("identity verification requires private QQ chat")
+                return None
+            challenge = connection.execute(
+                "SELECT * FROM inbound_identity_challenges WHERE subject_id=? AND transport_id=? "
+                "AND status IN ('pending','observed') ORDER BY created_at DESC LIMIT 1",
+                (subject_id, envelope.transport_id),
+            ).fetchone()
+            if challenge is None:
+                if connection.execute(
+                    "SELECT 1 FROM inbound_identity_challenges WHERE subject_id=? "
+                    "AND transport_id=? AND code_hash=?",
+                    (subject_id, envelope.transport_id, content_hash(code)),
+                ).fetchone():
+                    raise PermissionError("identity challenge already consumed")
+                return None
+            if challenge["expires_at"] <= now:
+                connection.execute(
+                    "UPDATE inbound_identity_challenges SET status='expired' WHERE challenge_id=?",
+                    (challenge["challenge_id"],),
+                )
+                denied = True
+            elif challenge["status"] != "pending" or challenge["attempts"] >= 5:
+                denied = True
+            elif not hmac.compare_digest(challenge["code_hash"], content_hash(code)):
+                connection.execute(
+                    "UPDATE inbound_identity_challenges SET attempts=attempts+1,"
+                    "status=CASE WHEN attempts>=4 THEN 'revoked' ELSE status END "
+                    "WHERE challenge_id=?",
+                    (challenge["challenge_id"],),
+                )
+                denied = True
+            else:
+                connection.execute(
+                    "UPDATE inbound_identity_challenges SET status='observed',"
+                    "external_account_id=?,"
+                    "external_sender_id=?,observed_at=?,observed_event_hash=? WHERE challenge_id=?",
+                    (
+                        envelope.external_account_id,
+                        envelope.external_sender_id,
+                        now,
+                        event_hash,
+                        challenge["challenge_id"],
+                    ),
+                )
+                result = InboundIdentityObserved(
+                    challenge["challenge_id"],
+                    "",
+                    False,
+                    0,
+                    envelope.transport_id,
+                    envelope.external_account_id,
+                    envelope.external_sender_id,
+                )
+        if denied:
+            raise PermissionError("identity challenge unavailable")
+        return result
+
+    def ingest(self, envelope: InboundEnvelope) -> InboundAccepted | InboundIdentityObserved:
+        observed = self._observe_identity(envelope)
+        if observed is not None:
+            return observed
         now = utc_now()
         provider_duplicate = False
         with self.database.transaction() as connection:
+            transport = connection.execute(
+                "SELECT subject_id FROM interaction_transports WHERE transport_id=? "
+                "AND channel=? AND status='active'",
+                (envelope.transport_id, envelope.channel),
+            ).fetchone()
+            if transport is None:
+                raise PermissionError("transport is unavailable")
             binding = connection.execute(
-                "SELECT role, status FROM interaction_bindings "
+                "SELECT binding_id, role, status FROM interaction_bindings "
                 "WHERE subject_id = ? AND transport_id = ? AND channel = ? "
                 "AND external_account_id = ? AND external_sender_id = ?",
                 (
@@ -975,6 +1350,15 @@ class InboundStore:
             if binding is None or binding["status"] != "active":
                 raise PermissionError("inbound account is not bound")
             priority = 100 if binding["role"] == "creator" else 0
+            route = (
+                connection.execute(
+                    "SELECT conversation_id FROM private_channel_routes WHERE binding_id=? "
+                    "AND subject_id=? AND share_web_history=1",
+                    (binding["binding_id"], subject_id),
+                ).fetchone()
+                if envelope.reply_selector == "qq:user"
+                else None
+            )
             event_id = new_id("inevt")
             content_digest = content_hash(envelope.content)
             try:
@@ -1068,6 +1452,11 @@ class InboundStore:
                     else envelope.conversation_id
                 ),
                 envelope.content,
+                **(
+                    {"conversation_id": route[0], "verified_binding_id": binding["binding_id"]}
+                    if route is not None
+                    else {}
+                ),
                 idempotency_key=(
                     "inbound:"
                     f"{envelope.transport_id}:"
@@ -1161,10 +1550,13 @@ class InboundStore:
         bounded = max(1, min(int(limit), 1_000))
         with self.database.connection() as connection:
             rows = connection.execute(
-                "SELECT binding_id, transport_id, channel, external_account_id, "
-                "external_sender_id, role, label, status, created_at, updated_at "
-                "FROM interaction_bindings WHERE subject_id = ? "
-                "ORDER BY channel, label, binding_id LIMIT ?",
+                "SELECT b.*,r.conversation_id,r.share_web_history,r.push_web_replies,r.revision,"
+                "EXISTS(SELECT 1 FROM inbound_identity_challenges c "
+                "WHERE c.binding_id=b.binding_id "
+                "AND c.status='confirmed') AS identity_verified "
+                "FROM interaction_bindings b LEFT JOIN private_channel_routes r "
+                "ON r.binding_id=b.binding_id WHERE b.subject_id = ? "
+                "ORDER BY b.channel, b.label, b.binding_id LIMIT ?",
                 (subject_id, bounded),
             ).fetchall()
         return [dict(row) for row in rows]
@@ -1240,6 +1632,12 @@ class InboundStore:
                 "WHERE binding_id = ? AND subject_id = ?",
                 (status, utc_now(), binding_id, subject_id),
             )
+            if status != "active":
+                connection.execute(
+                    "UPDATE private_channel_routes SET push_web_replies=0,push_since=NULL,"
+                    "revision=revision+1,share_web_history=0 WHERE binding_id=? AND subject_id=?",
+                    (binding_id, subject_id),
+                )
         return {
             "binding_id": binding_id,
             "transport_id": row["transport_id"],

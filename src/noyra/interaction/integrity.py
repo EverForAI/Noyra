@@ -83,6 +83,99 @@ class InteractionIntegrity:
             ).fetchall()
             counts["interaction_decisions"] = len(decisions)
 
+            from .conversations import WEB_PRINCIPAL, _row
+
+            conversations = connection.execute(
+                "SELECT conversation_id FROM private_conversations WHERE subject_id=?",
+                (subject_id,),
+            ).fetchall()
+            for window in conversations:
+                state = _row(connection, subject_id, window[0])
+                messages = connection.execute(
+                    "SELECT m.subject_id AS linked_subject, i.*, m.author_verified "
+                    "FROM private_conversation_messages m JOIN interactions i "
+                    "ON i.interaction_id=m.interaction_id WHERE m.conversation_id=?",
+                    (window[0],),
+                ).fetchall()
+                for message in messages:
+                    verified_external = False
+                    if message["author_verified"] and message["channel"] == "qq":
+                        source = (
+                            message["related_interaction_id"]
+                            if message["direction"] == "outgoing"
+                            else message["interaction_id"]
+                        )
+                        verified_external = bool(
+                            connection.execute(
+                                "SELECT 1 FROM interaction_inbound_events e "
+                                "JOIN inbound_identity_challenges c "
+                                "ON c.transport_id=e.transport_id "
+                                "AND c.external_account_id=e.external_account_id "
+                                "AND c.external_sender_id=e.external_sender_id "
+                                "WHERE e.interaction_id=? AND e.subject_id=? AND c.subject_id=? "
+                                "AND c.status='confirmed' AND c.binding_id IS NOT NULL "
+                                "AND c.confirmed_at<=e.received_at "
+                                "AND e.reply_selector='qq:user' AND e.channel='qq' "
+                                "AND e.status='processed'",
+                                (source, subject_id, subject_id),
+                            ).fetchone()
+                        )
+                    if (
+                        message["subject_id"] != subject_id
+                        or message["linked_subject"] != subject_id
+                        or (
+                            message["channel"] == "web"
+                            and (
+                                state["principal_id"] != WEB_PRINCIPAL
+                                or message["counterparty"] != "web-user"
+                            )
+                        )
+                        or (
+                            message["author_verified"]
+                            and message["channel"] != "web"
+                            and not verified_external
+                        )
+                    ):
+                        raise IntegrityError("conversation message ownership mismatch")
+                    related = message["related_interaction_id"]
+                    if related:
+                        source = connection.execute(
+                            "SELECT conversation_id FROM private_conversation_messages "
+                            "WHERE interaction_id=?",
+                            (related,),
+                        ).fetchone()
+                        if source and source[0] != window[0]:
+                            raise IntegrityError("conversation reply window mismatch")
+
+            for source in connection.execute(
+                "SELECT s.*, COALESCE(r.original_hash,i.content_hash) AS content_hash, "
+                "i.subject_id AS interaction_subject, "
+                "m.conversation_id AS linked_window, c.subject_id AS call_subject "
+                "FROM private_model_sources s LEFT JOIN interactions i "
+                "ON i.interaction_id=s.interaction_id LEFT JOIN model_calls c "
+                "ON c.call_id=s.call_id LEFT JOIN private_conversation_messages m "
+                "ON m.interaction_id=s.interaction_id LEFT JOIN private_erasure_receipts r "
+                "ON r.record_table='interactions' AND r.record_id=i.interaction_id "
+                "WHERE s.subject_id=?",
+                (subject_id,),
+            ):
+                expected = content_hash(
+                    {
+                        "call_id": source["call_id"],
+                        "interaction_id": source["interaction_id"],
+                        "conversation_id": source["conversation_id"],
+                        "subject_id": subject_id,
+                        "content_hash": source["content_hash"],
+                    }
+                )
+                if (
+                    source["interaction_subject"] != subject_id
+                    or source["call_subject"] != subject_id
+                    or source["linked_window"] != source["conversation_id"]
+                    or source["source_hash"] != expected
+                ):
+                    raise IntegrityError("private model source mismatch")
+
             bindings = connection.execute(
                 "SELECT b.*, t.subject_id AS transport_subject, t.channel AS transport_channel "
                 "FROM interaction_bindings b LEFT JOIN interaction_transports t "

@@ -114,6 +114,53 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/JsonList' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/admin/conversations:
+    get:
+      operationId: conversations
+      security: [{ readBearer: [] }]
+      responses:
+        '200': { description: Bounded conversation page }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      operationId: createConversation
+      security: [{ operatorBearer: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        '200': { description: Created conversation }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/admin/conversations/{conversationId}:
+    parameters:
+      - { name: conversationId, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: configureConversation
+      security: [{ operatorBearer: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        '200': { description: Updated conversation revision }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: Conversation absent }
+        '409': { description: Revision or state conflict }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/admin/conversations/{conversationId}/messages:
+    parameters:
+      - { name: conversationId, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: conversationMessages
+      security: [{ readBearer: [] }]
+      responses:
+        '200': { description: Original messages and replies with verified author projection }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: Conversation absent }
+        '409': { description: Conversation unavailable }
   /api/v1/interactions:
     get:
       tags: [observation]
@@ -129,6 +176,8 @@ paths:
           application/json: { schema: { $ref: '#/components/schemas/InteractionInput' } }
       responses:
         '201': { description: Interaction recorded }
+        '404': { description: Conversation absent }
+        '409': { description: Idempotency or conversation conflict }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
@@ -757,6 +806,46 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/usage:
+    get:
+      tags: [observation]
+      operationId: adminUsage
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - name: window
+          in: query
+          schema: { type: string, enum: [today, '3', '7', '30', '90', all], default: '7' }
+        - name: offset_minutes
+          in: query
+          schema: { type: integer, minimum: -840, maximum: 840, default: 0 }
+        - name: pool
+          in: query
+          schema: { type: string, enum: [economy, deep] }
+        - name: resource
+          in: query
+          schema: { type: string, maxLength: 128 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/activity-logs:
+    get:
+      tags: [observation]
+      operationId: adminActivityLogs
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/admin/lifecycle-summary:
+    get:
+      tags: [observation]
+      operationId: adminLifecycleSummary
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /api/v1/admin/provider-health:
     get:
       tags: [observation]
@@ -778,6 +867,24 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/JsonObject' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/retention/settings:
+    post:
+      tags: [configuration]
+      operationId: saveRetentionSettings
+      security: [{ operatorBearer: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '411': { $ref: '#/components/responses/LengthRequired' }
+        '413': { $ref: '#/components/responses/RequestTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/v1/admin/retention/run:
     post:
@@ -805,6 +912,40 @@ paths:
           schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
       responses:
         '200': { $ref: '#/components/responses/JsonList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/wallet-lists/{kind}:
+    get:
+      tags: [configuration]
+      operationId: listWalletAdminPage
+      description: >-
+        Read-only keyset page. New insertions are excluded until refresh; mutable statuses
+        are evaluated on each read. RPC URLs and acquisition claim secrets are omitted.
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - name: kind
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [networks, assets, addresses, balances, acquisitions, bounties, orders, executions, audits]
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+        - name: cursor
+          in: query
+          schema: { type: string, maxLength: 2048 }
+        - name: status
+          in: query
+          description: Supported for registries, acquisitions, orders and executions.
+          schema: { type: string, maxLength: 64 }
+        - name: network_id
+          in: query
+          description: Supported except for networks and audits.
+          schema: { type: string, maxLength: 128 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
@@ -1898,6 +2039,7 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/JsonObject' }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '411': { $ref: '#/components/responses/LengthRequired' }
         '413': { $ref: '#/components/responses/RequestTooLarge' }
@@ -1926,10 +2068,51 @@ paths:
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/config/identity-challenges:
+    post:
+      tags: [configuration]
+      operationId: issueInboundIdentityChallenge
+      security: [{ operatorBearer: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [transport_id], properties: { transport_id: { type: string } }, additionalProperties: false } } }
+      responses:
+        '200': { description: One-time code and expiration; never returned again by status }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/config/identity-challenges/{challengeId}:
+    parameters:
+      - { name: challengeId, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [configuration]
+      operationId: getInboundIdentityChallenge
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { description: Verification status without code or hash }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/config/identity-challenges/{challengeId}/confirm:
+    parameters:
+      - { name: challengeId, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [configuration]
+      operationId: confirmInboundIdentityChallenge
+      security: [{ operatorBearer: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, properties: { label: { type: string, maxLength: 512 } }, additionalProperties: false } } }
+      responses:
+        '200': { description: Confirmed binding; no administrative permission granted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
   /api/v1/config/inbound-bindings:
     get:
       tags: [configuration]
       operationId: listInboundBindings
+      description: Verified identity, route generation, history sharing and new web reply push state. No credential values.
       security: [{ operatorBearer: [] }]
       responses:
         '200': { $ref: '#/components/responses/JsonList' }
@@ -1959,7 +2142,7 @@ paths:
       security: [{ operatorBearer: [] }]
       parameters:
         - { name: bindingId, in: path, required: true, schema: { type: string } }
-        - { name: operation, in: path, required: true, schema: { type: string, enum: [enable, disable, revoke] } }
+        - { name: operation, in: path, required: true, schema: { type: string, enum: [enable, disable, revoke, route] } }
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/ReasonInput' } } }
@@ -1968,6 +2151,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '411': { $ref: '#/components/responses/LengthRequired' }
         '413': { $ref: '#/components/responses/RequestTooLarge' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }

@@ -1,0 +1,13 @@
+Verifying exact committed source: 005e86702c20fd49c7740266b3841b85d5bc16f1
+Running -m ruff check .
+All checks passed!
+Running -m ruff format --check .
+549 files already formatted
+Running -m mypy src tests
+Success: no issues found in 361 source files
+Running -m pip check
+No broken requirements found.
+Running -m pytest -q tests/test_migration_storage_boundary.py tests/test_migration_activation.py tests/test_service.py
+...................................................................... [ 72%]
+...........................                                        [100%]
+97 passed, 8 subtests passed in 609.19s (0:10:09)

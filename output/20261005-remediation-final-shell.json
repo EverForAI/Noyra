@@ -1,0 +1,48 @@
+{
+  "commit_sha": "005e86702c20fd49c7740266b3841b85d5bc16f1",
+  "checks": [
+    {
+      "command": [
+        "bash",
+        "scripts/audit-deployment.sh",
+        "--static"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "bash",
+        "tests/shell/test-migration-install.sh"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "bash",
+        "tests/shell/test-migration-runner.sh"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "bash",
+        "tests/shell/test-migration-components-rollback.sh"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "bash",
+        "tests/shell/test-upgrade-runner.sh"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "bash",
+        "tests/shell/test-upgrade-components-rollback.sh"
+      ],
+      "exit_code": 0
+    }
+  ]
+}

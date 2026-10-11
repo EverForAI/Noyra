@@ -16,8 +16,10 @@ import httpx
 from eth_account.signers.local import LocalAccount
 from eth_utils import to_checksum_address  # type: ignore[attr-defined]
 
+from noyra.core.admission import OperationInvalidated
 from noyra.core.types import content_hash, utc_now
 
+from .dispatch import WalletDispatchDenied
 from .execution import (
     WalletBroadcastResult,
     WalletBroadcastUnknownError,
@@ -53,6 +55,8 @@ def _hash(value: object) -> str:
 
 class LocalWalletSigner:
     """An in-process signer; it is not a security boundary against host compromise."""
+
+    fences_network_dispatch = True
 
     def __init__(
         self,
@@ -232,6 +236,8 @@ class LocalWalletSigner:
                 )
                 if result != tx_hash:
                     raise WalletExecutionError("transaction hash mismatch")
+            except (WalletDispatchDenied, OperationInvalidated):
+                raise
             except Exception:
                 # Even JSON-RPC errors like already-known/nonce-too-low are
                 # ambiguous after submission. Never release a possible payment.

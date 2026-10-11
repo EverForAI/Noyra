@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import hmac
 import html
+import io
 import ipaddress
 import json
 import logging
@@ -13,6 +14,7 @@ import os
 import re
 import secrets
 import signal
+import sqlite3
 import threading
 import time
 from collections import defaultdict, deque
@@ -44,6 +46,7 @@ from noyra.core.archive import CloudArchiveCoordinator, S3ArchiveProvider, Stora
 from noyra.core.at_rest import AtRestConfig, AtRestError, AtRestGuard
 from noyra.core.credentials import CredentialError, read_env_secret, read_secret_file
 from noyra.core.database import Database
+from noyra.core.deadline import operation_deadline, remaining_seconds
 from noyra.core.errors import (
     IntegrityError,
     InvalidTransitionError,
@@ -67,7 +70,8 @@ from noyra.core.operator_controls import (
 from noyra.core.provider_health import ProviderHealthStore
 from noyra.core.redaction import redact_secrets
 from noyra.core.release_assurance import activation_status, upgrade_channel
-from noyra.core.retention import RetentionManager, RetentionSettings
+from noyra.core.request_io import DeadlineRequestReader
+from noyra.core.retention import RetentionManager, RetentionPolicyConflict, RetentionSettings
 from noyra.core.runtime import SubjectKernel
 from noyra.core.runtime_export import RuntimeLogExporter
 from noyra.core.storage import StorageLayout, TrainingStore
@@ -83,12 +87,15 @@ from noyra.core.upgrade import (
     UpgradeError,
     UpgradeManager,
 )
+from noyra.core.usage_projection import UsageProjection, UsageQueryLimit
+from noyra.http_access_logging import http_log_fields
 from noyra.interaction import (
     ADAPTERS,
     REPLAY_WINDOW_SECONDS,
     DeliveryDispatcher,
     InboundAuthenticationError,
     InboundChallenge,
+    InboundIdentityObserved,
     InboundIgnored,
     InboundStore,
     InteractionStore,
@@ -96,6 +103,7 @@ from noyra.interaction import (
     PublicPostCaptchaError,
     PublicPostConflictError,
     PublicPostInput,
+    PublicPostLengthError,
     PublicPostQueueFullError,
     PublicPostRateLimitError,
     PublicPostStore,
@@ -104,6 +112,9 @@ from noyra.interaction import (
     TransportStore,
     WeChatInboundAdapter,
 )
+from noyra.interaction.conversations import ConversationConflict, ConversationStore
+from noyra.interaction.erasure import ConversationErasure, ErasureReviewRequired
+from noyra.interaction.errors import InteractionStateConflictError
 from noyra.interaction.public_contract import (
     PUBLIC_CACHE_CONTROL,
     PUBLIC_CONTRACT_ID,
@@ -189,6 +200,7 @@ from noyra.wallet import (
     WalletSigner,
     WalletStore,
 )
+from noyra.wallet.admin_projection import WalletAdminProjection, WalletListLimit
 from noyra.wallet.config import configured_wallet_signer_from_env
 from noyra.wallet.types import canonical_timestamp
 from noyra.world import SafeWebReader
@@ -382,6 +394,16 @@ _MODEL_RESOURCE_EXACT_FIELDS = (
     "output_microusd_per_million",
     "max_attempts",
 )
+
+
+def _ascii_token_equal(supplied: object, expected: str) -> bool:
+    """Reject malformed credentials without changing valid token equivalence."""
+    return (
+        isinstance(supplied, str)
+        and supplied.isascii()
+        and expected.isascii()
+        and hmac.compare_digest(supplied, expected)
+    )
 
 
 def _cognitive_resource_payload(record: CognitiveResourceGroupRecord) -> dict[str, Any]:
@@ -791,8 +813,8 @@ class ServiceSettings(BaseModel):
     public_post_queue_cap: int = Field(default=1_000, ge=1, le=100_000)
     public_post_captcha_ttl_seconds: int = Field(default=300, ge=30, le=3_600)
     public_post_captcha_max_attempts: int = Field(default=5, ge=1, le=20)
-    public_post_captcha_mode: Literal["letters", "digits", "alphanumeric"] = "alphanumeric"
-    public_post_storage_cap_bytes: int = Field(default=250_000_000, ge=1_000_000, le=2_000_000_000)
+    public_post_captcha_mode: Literal["letters", "digits", "alphanumeric"] = "digits"
+    public_post_storage_cap_bytes: int = Field(default=250_000_000, ge=1_000, le=2_000_000_000)
     public_post_captcha_issue_limit_per_hour: int = Field(default=30, ge=1, le=100_000)
     public_post_captcha_global_rate_per_minute: int = Field(default=300, ge=1, le=100_000)
     public_hash_key_file: Path | None = None
@@ -1143,7 +1165,7 @@ class ServiceSettings(BaseModel):
             ),
             public_post_captcha_mode=cast(
                 Literal["letters", "digits", "alphanumeric"],
-                os.getenv("NOYRA_PUBLIC_POST_CAPTCHA_MODE", "alphanumeric").strip().lower(),
+                os.getenv("NOYRA_PUBLIC_POST_CAPTCHA_MODE", "digits").strip().lower(),
             ),
             public_post_storage_cap_bytes=int(
                 os.getenv("NOYRA_PUBLIC_POST_STORAGE_CAP_BYTES", "250000000")
@@ -1418,6 +1440,7 @@ class NoyraHTTPServer:
         }
         self.cloud_archive_provider: Any = None
         self.interactions = InteractionStore(kernel.database)
+        self.conversations = ConversationStore(kernel.database)
         self.inbound = InboundStore(kernel.database, self.interactions)
         self.public_posts = PublicPostStore(
             kernel.database,
@@ -1753,6 +1776,11 @@ class NoyraHTTPServer:
             return True
 
     def run_async_from_handler(self, coroutine: Any) -> Any:
+        try:
+            remaining = remaining_seconds(self.settings.request_timeout_seconds)
+        except TimeoutError:
+            coroutine.close()
+            raise
         loop = self.event_loop
         if loop is not None and loop.is_running():
             bridge: ConcurrentFuture[Any] = ConcurrentFuture()
@@ -1760,10 +1788,21 @@ class NoyraHTTPServer:
             self._register_async_handler(bridge, done)
             task_holder: dict[str, asyncio.Task[Any]] = {}
 
-            def spawn() -> None:
+            async def start_if_current() -> Any:
                 try:
-                    task = loop.create_task(coroutine)
+                    remaining_seconds(remaining)
+                except TimeoutError:
+                    coroutine.close()
+                    raise
+                return await coroutine
+
+            def spawn() -> None:
+                wrapper = start_if_current()
+                try:
+                    task = loop.create_task(wrapper)
                 except BaseException as error:
+                    wrapper.close()
+                    coroutine.close()
                     if not bridge.done():
                         bridge.set_exception(error)
                     done.set()
@@ -1786,6 +1825,8 @@ class NoyraHTTPServer:
                         if not bridge.done():
                             bridge.set_exception(error)
                     finally:
+                        with suppress(Exception):
+                            coroutine.close()
                         done.set()
 
                 task.add_done_callback(finish)
@@ -1801,7 +1842,7 @@ class NoyraHTTPServer:
                 raise
 
             try:
-                return bridge.result(timeout=self.settings.request_timeout_seconds)
+                return bridge.result(timeout=remaining_seconds(remaining))
             except FutureTimeoutError:
                 # Cancel the actual asyncio task, not the bridge future.  A
                 # concurrent Future is marked cancelled immediately, which
@@ -1818,7 +1859,15 @@ class NoyraHTTPServer:
                 # intentional: shutdown must not release the subject lock.
                 done.wait()
                 raise
-        return asyncio.run(coroutine)
+
+        async def bounded() -> Any:
+            try:
+                async with asyncio.timeout(remaining_seconds(remaining)):
+                    return await coroutine
+            finally:
+                coroutine.close()
+
+        return asyncio.run(bounded())
 
     def _quarantined(self) -> bool:
         checker = self.quarantine_checker
@@ -2536,6 +2585,20 @@ class NoyraHTTPServer:
             def setup(self) -> None:
                 super().setup()
                 self.connection.settimeout(owner.settings.request_timeout_seconds)
+                self.rfile = io.BufferedReader(
+                    DeadlineRequestReader(
+                        self.rfile, self.connection, owner.settings.request_timeout_seconds
+                    )
+                )
+
+            def handle_one_request(self) -> None:
+                self._log_request_parsed = False
+                with operation_deadline(owner.settings.request_timeout_seconds):
+                    super().handle_one_request()
+
+            def parse_request(self) -> bool:
+                self._log_request_parsed = super().parse_request()
+                return self._log_request_parsed
 
             def do_GET(self) -> None:
                 if not owner.allow_request(
@@ -2553,6 +2616,47 @@ class NoyraHTTPServer:
                     self._wechat_webhook_challenge()
                     return
                 parsed = urlsplit(self.path)
+                wallet_list_path = parsed.path.replace("/api/v1/", "/api/", 1)
+                if wallet_list_path.startswith("/api/admin/wallet-lists/"):
+                    if not self._authorized("operator"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    try:
+                        list_query = parse_qs(parsed.query, keep_blank_values=True)
+                        if set(list_query) - {"limit", "status", "network_id", "cursor"} or any(
+                            len(values) != 1 for values in list_query.values()
+                        ):
+                            raise ValueError("invalid wallet list query")
+                        raw_limit = list_query.get("limit", ["25"])[0]
+                        if not raw_limit.isascii() or not raw_limit.isdecimal():
+                            raise ValueError("invalid wallet list limit")
+                        projection = WalletAdminProjection(owner.kernel.database).page(
+                            owner.kernel.subject_id,
+                            wallet_list_path.removeprefix("/api/admin/wallet-lists/"),
+                            limit=int(raw_limit),
+                            status=list_query.get("status", [None])[0],
+                            network_id=list_query.get("network_id", [None])[0],
+                            cursor=list_query.get("cursor", [None])[0],
+                        )
+                    except (ValueError, TypeError):
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_wallet_list_query"})
+                        return
+                    except WalletListLimit:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "wallet_list_budget_exceeded"},
+                            retry_after=60,
+                        )
+                        return
+                    except (IntegrityError, sqlite3.DatabaseError):
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "wallet_integrity_unavailable"},
+                            retry_after=60,
+                        )
+                        return
+                    self._json(HTTPStatus.OK, projection)
+                    return
                 if parsed.path in {"/admin", "/admin.html"}:
                     self._asset("admin.html", "text/html; charset=utf-8")
                     return
@@ -2970,7 +3074,7 @@ class NoyraHTTPServer:
                         HTTPStatus.OK,
                         owner.projection.outcomes_view(owner.kernel.subject_id, limit=limit),
                     )
-                elif parsed.path == "/api/runtime-logs":
+                elif parsed.path in {"/api/runtime-logs", "/api/admin/activity-logs"}:
                     if not self._authorized("read"):
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
@@ -2985,19 +3089,54 @@ class NoyraHTTPServer:
                             owner.kernel.subject_id,
                             limit=limit,
                             cursor=self._cursor(query),
+                            category=query.get("category", [None])[0],
+                            status=query.get("status", [None])[0],
+                            since=query.get("since", [None])[0],
+                            until=query.get("until", [None])[0],
+                            summary_only=parsed.path == "/api/admin/activity-logs",
                         )
                     except ValueError:
                         self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_cursor"})
                         return
                     self._json(HTTPStatus.OK, page)
+                elif parsed.path == "/api/admin/lifecycle-summary":
+                    if not self._authorized("read"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    self._json(
+                        HTTPStatus.OK, owner.projection.lifecycle_summary(owner.kernel.subject_id)
+                    )
                 elif parsed.path == "/api/diagnostics":
                     if not self._authorized("read"):
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
                     self._json(HTTPStatus.OK, owner.diagnostics())
+                elif parsed.path == "/api/admin/usage":
+                    if not self._authorized("read"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    try:
+                        usage_payload = UsageProjection(owner.kernel.database).summary(
+                            owner.kernel.subject_id,
+                            window=query.get("window", ["7"])[0],
+                            offset_minutes=int(query.get("offset_minutes", ["0"])[0]),
+                            pool=query.get("pool", [None])[0],
+                            resource=query.get("resource", [None])[0],
+                        )
+                    except UsageQueryLimit:
+                        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "usage_query_limit"})
+                        return
+                    except ValueError:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_usage_query"})
+                        return
+                    except sqlite3.OperationalError:
+                        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "usage_unavailable"})
+                        return
+                    self._json(HTTPStatus.OK, usage_payload)
                 elif parsed.path in {
                     "/api/admin/upgrade/check",
                     "/api/admin/upgrade/status",
+                    "/api/admin/upgrade/installed",
                 }:
                     if not self._authorized():
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -3006,6 +3145,8 @@ class NoyraHTTPServer:
                         payload = (
                             owner.upgrade_manager.check_version()
                             if parsed.path.endswith("/check")
+                            else owner.upgrade_manager.installed_version()
+                            if parsed.path.endswith("/installed")
                             else owner.upgrade_manager.status()
                         )
                     except UpgradeError as error:
@@ -3141,6 +3282,46 @@ class NoyraHTTPServer:
                             for record in owner.common_knowledge.published(limit=limit)
                         ],
                     )
+                elif parsed.path == "/api/admin/conversations":
+                    if not self._authorized("read"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    try:
+                        page = owner.conversations.list(
+                            owner.kernel.subject_id,
+                            archived=query.get("archived", ["false"])[0] == "true",
+                            limit=min(limit, 100),
+                            offset=int(query.get("offset", ["0"])[0]),
+                        )
+                    except ValueError:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_conversation_query"})
+                        return
+                    self._json(HTTPStatus.OK, page)
+                elif parsed.path.startswith("/api/admin/conversations/") and parsed.path.endswith(
+                    "/messages"
+                ):
+                    if not self._authorized("read"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    try:
+                        page = owner.conversations.messages(
+                            owner.kernel.subject_id,
+                            parsed.path.split("/")[4],
+                            before=query.get("before", [None])[0],
+                            query=query.get("query", [""])[0],
+                            status=query.get("status", [""])[0],
+                            limit=min(limit, 100),
+                        )
+                    except NotFoundError:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "conversation_not_found"})
+                        return
+                    except ConversationConflict:
+                        self._json(HTTPStatus.CONFLICT, {"error": "conversation_conflict"})
+                        return
+                    except ValueError:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_conversation_query"})
+                        return
+                    self._json(HTTPStatus.OK, page)
                 elif parsed.path == "/api/mailbox":
                     if not self._authorized("read"):
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -3456,9 +3637,54 @@ class NoyraHTTPServer:
                         self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_provider_kind"})
                         return
                     try:
+                        health_offset = int(query.get("offset", ["0"])[0])
+                        if not 0 <= health_offset <= 1_000_000:
+                            raise ValueError("invalid offset")
+                    except ValueError:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_provider_query"})
+                        return
+                    try:
                         providers = owner.provider_health.list_projection(
                             owner.kernel.subject_id, kind
                         )
+                        metadata: dict[str, dict[str, Any]] = {}
+                        if kind == "model":
+                            for group in owner.cognitive_resources.list(owner.kernel.subject_id):
+                                metadata[group.group_id] = {
+                                    "label": group.label,
+                                    "pool": group.pool,
+                                    "model": group.model,
+                                    "host": urlsplit(group.base_url).hostname,
+                                    "resource_status": group.status,
+                                }
+                        else:
+                            for provider in owner.search_providers.list(owner.kernel.subject_id):
+                                metadata[provider.config_id] = {
+                                    "label": provider.label,
+                                    "pool": "search",
+                                    "model": provider.provider_type,
+                                    "host": None,
+                                    "resource_status": provider.status,
+                                }
+                        observed_ids = {item["provider_id"] for item in providers}
+                        providers.extend(
+                            {"provider_id": identifier, "state": "no_data", "attempt_count": 0}
+                            for identifier in metadata
+                            if identifier not in observed_ids
+                        )
+                        for item in providers:
+                            item.update(
+                                metadata.get(
+                                    item["provider_id"],
+                                    {
+                                        "label": "历史资源",
+                                        "resource_status": "historical",
+                                        "pool": kind,
+                                        "model": None,
+                                        "host": None,
+                                    },
+                                )
+                            )
                     except IntegrityError:
                         self._json(
                             HTTPStatus.SERVICE_UNAVAILABLE,
@@ -3466,27 +3692,33 @@ class NoyraHTTPServer:
                             retry_after=60,
                         )
                         return
+                    except (ValueError, sqlite3.OperationalError):
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE, {"error": "provider_health_unavailable"}
+                        )
+                        return
                     self._json(
                         HTTPStatus.OK,
                         {
                             "provider_kind": kind,
-                            "providers": providers,
+                            "providers": providers[health_offset : health_offset + 50],
+                            "total": len(providers),
+                            "page_size": 50,
                         },
                     )
                 elif parsed.path in {"/api/v1/admin/retention", "/api/admin/retention"}:
                     if not self._authorized():
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
-                    settings = owner.retention.settings
+                    retention_policy = owner.retention.policy(owner.kernel.subject_id)
+                    settings = retention_policy["settings"]
                     self._json(
                         HTTPStatus.OK,
                         {
                             "settings": {
-                                "health_days": settings.health_days,
-                                "search_use_hours": settings.search_use_hours,
-                                "batch_size": settings.batch_size,
-                                "interval_seconds": settings.interval_seconds,
-                                "run_history": settings.run_history,
+                                **settings,
+                                "revision": retention_policy["revision"],
+                                "source": retention_policy["source"],
                             },
                             "estimate": owner.retention.estimate(owner.kernel.subject_id),
                             "latest": owner.retention.latest(owner.kernel.subject_id),
@@ -3854,6 +4086,18 @@ class NoyraHTTPServer:
                         )
                     else:
                         self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+                elif parsed.path.startswith("/api/config/identity-challenges/"):
+                    if not self._authorized():
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    try:
+                        result = owner.inbound.identity_challenge(
+                            owner.kernel.subject_id, parsed.path.rsplit("/", 1)[-1]
+                        )
+                    except NotFoundError:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "identity_challenge_not_found"})
+                        return
+                    self._json(HTTPStatus.OK, result)
                 elif parsed.path == "/api/config/inbound-bindings":
                     if not self._authorized():
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -3921,8 +4165,20 @@ class NoyraHTTPServer:
                         return
                     try:
                         model_resource_records = owner.cognitive_resources.list(
-                            owner.kernel.subject_id
+                            owner.kernel.subject_id,
+                            pool=query.get("pool", [None])[0],
+                            status=query.get("status", [None])[0],
+                            search=query.get("search", [None])[0],
+                            limit=limit
+                            if query.get("view", [""])[0] in {"management", "usage"}
+                            else None,
+                            offset=int(query.get("offset", ["0"])[0]),
                         )
+                    except (ValueError, TypeError):
+                        self._json(
+                            HTTPStatus.BAD_REQUEST, {"error": "invalid_model_resource_query"}
+                        )
+                        return
                     except IntegrityError:
                         self._json(
                             HTTPStatus.SERVICE_UNAVAILABLE,
@@ -3930,10 +4186,23 @@ class NoyraHTTPServer:
                             retry_after=60,
                         )
                         return
-                    self._json(
-                        HTTPStatus.OK,
-                        [_cognitive_resource_payload(record) for record in model_resource_records],
-                    )
+                    model_payloads = [
+                        _cognitive_resource_payload(group) for group in model_resource_records
+                    ]
+                    if query.get("view", [""])[0] == "management":
+                        try:
+                            for group, model_item in zip(
+                                model_resource_records, model_payloads, strict=True
+                            ):
+                                model_item.update(owner.cognitive_resources.budget_summary(group))
+                        except IntegrityError:
+                            self._json(
+                                HTTPStatus.SERVICE_UNAVAILABLE,
+                                {"error": "model_resource_integrity_unavailable"},
+                                retry_after=60,
+                            )
+                            return
+                    self._json(HTTPStatus.OK, model_payloads)
                 elif parsed.path == "/api/config/embedding-resources":
                     if not self._authorized():
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -4105,6 +4374,7 @@ class NoyraHTTPServer:
                             path,
                             filename=job.filename or f"{job_id}.zip",
                             digest=job.sha256 or "",
+                            export_job_id=job_id,
                         )
                     else:
                         try:
@@ -4867,6 +5137,9 @@ class NoyraHTTPServer:
                 if self.path in {"/api/v1/admin/retention/run", "/api/admin/retention/run"}:
                     self._run_retention_batch()
                     return
+                if self.path == "/api/admin/retention/settings":
+                    self._configure_retention()
+                    return
                 if self.path == "/api/config/wallet-networks":
                     self._configure_wallet_network()
                     return
@@ -4920,6 +5193,11 @@ class NoyraHTTPServer:
                     "/routing"
                 ):
                     self._set_search_provider_routing()
+                    return
+                if self.path == "/api/config/identity-challenges" or self.path.startswith(
+                    "/api/config/identity-challenges/"
+                ):
+                    self._identity_challenge()
                     return
                 if self.path == "/api/config/inbound-bindings":
                     self._configure_inbound_binding()
@@ -5059,6 +5337,9 @@ class NoyraHTTPServer:
                             queue_cap=controls["queue_cap"],
                             storage_cap_bytes=controls["storage_cap_bytes"],
                         )
+                    except PublicPostLengthError:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "public_post_too_long"})
+                        return
                     except PublicPostCaptchaError:
                         self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_captcha"})
                         return
@@ -5185,6 +5466,11 @@ class NoyraHTTPServer:
                         return
                     self._json(HTTPStatus.OK, record.__dict__)
                     return
+                if self.path == "/api/admin/conversations" or self.path.startswith(
+                    "/api/admin/conversations/"
+                ):
+                    self._configure_conversation()
+                    return
                 if self.path != "/api/interactions":
                     self._discard_small_request_body()
                     self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
@@ -5205,6 +5491,9 @@ class NoyraHTTPServer:
                     counterparty = payload.get("counterparty", "web-user")
                     content = payload.get("content")
                     idempotency_key = payload.get("idempotency_key")
+                    conversation_id = payload.get("conversation_id")
+                    if conversation_id is not None and not isinstance(conversation_id, str):
+                        raise ValueError("invalid conversation id")
                     if not isinstance(channel, str) or not isinstance(counterparty, str):
                         raise TypeError("interaction metadata must be text")
                     if channel != "web" or counterparty != "web-user":
@@ -5219,7 +5508,14 @@ class NoyraHTTPServer:
                         counterparty,
                         content,
                         idempotency_key=idempotency_key,
+                        conversation_id=conversation_id,
                     )
+                except NotFoundError:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "conversation_not_found"})
+                    return
+                except (ConversationConflict, InteractionStateConflictError):
+                    self._json(HTTPStatus.CONFLICT, {"error": "interaction_conflict"})
+                    return
                 except (ValueError, TypeError):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_interaction"})
                     return
@@ -5230,6 +5526,55 @@ class NoyraHTTPServer:
                         "status": interaction_record.status,
                     },
                 )
+
+            def _configure_conversation(self) -> None:
+                if not self._authorized():
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+                    return
+                payload = self._request_json()
+                if payload is None:
+                    return
+                try:
+                    if self.path == "/api/admin/conversations":
+                        if set(payload) != {"title"}:
+                            raise ValueError("invalid fields")
+                        result = owner.conversations.create(
+                            owner.kernel.subject_id, payload["title"]
+                        )
+                    else:
+                        if len(self.path.split("/")) != 5 or set(payload) - {
+                            "title",
+                            "pinned",
+                            "archived",
+                            "expected_revision",
+                        }:
+                            raise ValueError("invalid fields")
+                        revision = payload.get("expected_revision")
+                        if type(revision) is not int:
+                            raise ValueError("invalid revision")
+                        result = owner.conversations.update(
+                            owner.kernel.subject_id,
+                            self.path.split("/")[4],
+                            expected_revision=revision,
+                            title=payload.get("title"),
+                            pinned=payload.get("pinned"),
+                            archived=payload.get("archived"),
+                        )
+                except NotFoundError:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "conversation_not_found"})
+                    return
+                except ConversationConflict:
+                    self._json(HTTPStatus.CONFLICT, {"error": "conversation_conflict"})
+                    return
+                except (ValueError, TypeError, PermissionError):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_conversation"})
+                    return
+                self._json(HTTPStatus.OK, result)
 
             def _lifecycle_control(self) -> None:
                 if not self._authorized():
@@ -5292,7 +5637,7 @@ class NoyraHTTPServer:
                     return
                 batch_size = payload.get("batch_size")
                 if batch_size is not None and (
-                    isinstance(batch_size, bool) or not isinstance(batch_size, int)
+                    type(batch_size) is not int or not 1 <= batch_size <= 500
                 ):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_retention_run"})
                     return
@@ -5306,6 +5651,38 @@ class NoyraHTTPServer:
                         "protected_rows": result["protected_rows"],
                     },
                 )
+                self._json(HTTPStatus.OK, result)
+
+            def _configure_retention(self) -> None:
+                if not self._authorized():
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+                    return
+                payload = self._request_json()
+                if payload is None:
+                    return
+                try:
+                    if set(payload) != {"settings", "expected_revision"} or not isinstance(
+                        payload["settings"], dict
+                    ):
+                        raise ValueError("invalid fields")
+                    result = owner.retention.configure(
+                        owner.kernel.subject_id,
+                        payload["settings"],
+                        expected_revision=payload["expected_revision"],
+                        actor=self._actor(),
+                    )
+                except RetentionPolicyConflict:
+                    self._json(HTTPStatus.CONFLICT, {"error": "retention_policy_conflict"})
+                    return
+                except (ValueError, TypeError, PermissionError):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_retention_settings"})
+                    return
+                owner.audit_admin_event("retention_policy_updated", self._actor(), result)
                 self._json(HTTPStatus.OK, result)
 
             def _reconcile_action(self) -> None:
@@ -7009,6 +7386,12 @@ class NoyraHTTPServer:
                 ):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_public_post_controls"})
                     return
+                if any(
+                    name in payload and type(payload[name]) is not int
+                    for name in ("max_content_chars", "expected_length_revision")
+                ):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_public_post_controls"})
+                    return
                 try:
                     controls = owner.public_posts.configure_controls(
                         owner.kernel.subject_id,
@@ -7021,6 +7404,8 @@ class NoyraHTTPServer:
                         captcha_issue_limit_per_hour=payload["captcha_issue_limit_per_hour"],
                         captcha_global_rate_per_minute=payload["captcha_global_rate_per_minute"],
                         actor=self._actor(),
+                        max_content_chars=payload.get("max_content_chars"),
+                        expected_length_revision=payload.get("expected_length_revision"),
                     )
                     controls = owner.public_post_controls()
                     owner.audit_admin_event(
@@ -7037,6 +7422,8 @@ class NoyraHTTPServer:
                                 "storage_cap_bytes",
                                 "captcha_issue_limit_per_hour",
                                 "captcha_global_rate_per_minute",
+                                "max_content_chars",
+                                "length_revision",
                             )
                         },
                     )
@@ -7046,6 +7433,9 @@ class NoyraHTTPServer:
                         {"error": "public_post_integrity_unavailable"},
                         retry_after=60,
                     )
+                    return
+                except PublicPostConflictError:
+                    self._json(HTTPStatus.CONFLICT, {"error": "public_post_controls_conflict"})
                     return
                 except (ValueError, TypeError, PermissionError):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_public_post_controls"})
@@ -7078,7 +7468,7 @@ class NoyraHTTPServer:
                     not isinstance(payload, dict)
                     or set(payload) - {"presentation"}
                     or not isinstance(payload.get("presentation", "image"), str)
-                    or payload.get("presentation", "image") not in {"image", "audio"}
+                    or payload.get("presentation", "image") != "image"
                 ):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_captcha_request"})
                     return
@@ -7693,10 +8083,14 @@ class NoyraHTTPServer:
                         retry_after=60,
                     )
                     return
-                except BudgetExhaustedError:
+                except BudgetExhaustedError as error:
                     self._json(
                         HTTPStatus.TOO_MANY_REQUESTS,
-                        {"error": "model_test_budget_exhausted"},
+                        {
+                            "error": "model_cost_only_pricing_unknown"
+                            if str(error) == "cost_only_pricing_unknown"
+                            else "model_test_budget_exhausted"
+                        },
                     )
                     return
                 except (ProviderCallError, StructuredOutputError) as error:
@@ -7871,6 +8265,10 @@ class NoyraHTTPServer:
                         "input_usd_per_million",
                         "output_usd_per_million",
                         "max_attempts",
+                        "limit_enabled",
+                        "expected_updated_at",
+                        "expected_limit_revision",
+                        "pricing_status",
                     }
                 ):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_model_resource_update"})
@@ -8141,7 +8539,7 @@ class NoyraHTTPServer:
                 supplied = self.headers.get("Authorization", "")
                 bearer_authorized = any(
                     secret is not None
-                    and hmac.compare_digest(
+                    and _ascii_token_equal(
                         supplied,
                         f"Bearer {secret.get_secret_value()}",
                     )
@@ -8162,7 +8560,7 @@ class NoyraHTTPServer:
                     "/admin/session",
                     "/admin/session/logout",
                 }:
-                    return hmac.compare_digest(
+                    return _ascii_token_equal(
                         self.headers.get("X-CSRF-Token", ""), session.csrf_token
                     )
                 return True
@@ -8174,7 +8572,7 @@ class NoyraHTTPServer:
                     ("operator", owner.settings.operator_token),
                     ("break_glass", owner.settings.break_glass_token),
                 ):
-                    if secret is not None and hmac.compare_digest(
+                    if secret is not None and _ascii_token_equal(
                         supplied, f"Bearer {secret.get_secret_value()}"
                     ):
                         return f"web-{role}"
@@ -8225,7 +8623,7 @@ class NoyraHTTPServer:
                     if (
                         isinstance(token, str)
                         and secret is not None
-                        and hmac.compare_digest(token, secret.get_secret_value())
+                        and _ascii_token_equal(token, secret.get_secret_value())
                     ):
                         role = candidate
                         break
@@ -8276,7 +8674,7 @@ class NoyraHTTPServer:
 
             def _logout_admin_session(self) -> None:
                 session_id, session = self._session_from_cookie()
-                if session is not None and not hmac.compare_digest(
+                if session is not None and not _ascii_token_equal(
                     self.headers.get("X-CSRF-Token", ""), session.csrf_token
                 ):
                     self._json(HTTPStatus.UNAUTHORIZED, {"error": "csrf_required"})
@@ -8641,6 +9039,9 @@ class NoyraHTTPServer:
                             update={"external_account_id": str(configured_account).strip()}
                         )
                     accepted = owner.inbound.ingest(envelope)
+                    if isinstance(accepted, InboundIdentityObserved):
+                        self._inbound_ack(channel, {"status": "identity_observed"})
+                        return
                     try:
                         owner.wallet_rewards.submit_inbound(
                             accepted,
@@ -8832,6 +9233,48 @@ class NoyraHTTPServer:
                     return
                 self._json(HTTPStatus.CREATED, {"binding_id": binding_id, "status": "active"})
 
+            def _identity_challenge(self) -> None:
+                if not self._authorized():
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+                    return
+                payload = self._request_json()
+                if payload is None:
+                    return
+                try:
+                    if self.path == "/api/config/identity-challenges":
+                        if set(payload) != {"transport_id"} or not isinstance(
+                            payload["transport_id"], str
+                        ):
+                            raise ValueError("invalid challenge")
+                        result = owner.inbound.issue_identity_challenge(
+                            owner.kernel.subject_id, payload["transport_id"]
+                        )
+                    else:
+                        parts = self.path.removeprefix("/api/config/identity-challenges/").split(
+                            "/"
+                        )
+                        if len(parts) != 2 or parts[1] != "confirm" or set(payload) - {"label"}:
+                            raise ValueError("invalid challenge confirmation")
+                        label = payload.get("label", "我的 QQ")
+                        if not isinstance(label, str):
+                            raise ValueError("invalid challenge label")
+                        binding = owner.inbound.confirm_identity_challenge(
+                            owner.kernel.subject_id, parts[0], label=label
+                        )
+                        result = {"binding_id": binding, "status": "confirmed"}
+                except NotFoundError:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "identity_challenge_not_found"})
+                    return
+                except (ValueError, TypeError):
+                    self._json(HTTPStatus.CONFLICT, {"error": "identity_challenge_unavailable"})
+                    return
+                self._json(HTTPStatus.OK, result)
+
             def _change_inbound_binding(self) -> None:
                 if not self._authorized():
                     self._discard_small_request_body()
@@ -8852,6 +9295,38 @@ class NoyraHTTPServer:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_inbound_binding"})
                     return
                 binding_id, operation = parts
+                if operation == "unlink":
+                    try:
+                        owner.inbound.unlink_private_chat(owner.kernel.subject_id, binding_id)
+                    except NotFoundError:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "inbound_binding_not_found"})
+                        return
+                    self._json(HTTPStatus.OK, {"status": "unlinked"})
+                    return
+                if operation == "route":
+                    try:
+                        conversation_id = payload.get("conversation_id")
+                        share = payload.get("share_web_history")
+                        push = payload.get("push_web_replies", False)
+                        if (
+                            not isinstance(conversation_id, str)
+                            or type(share) is not bool
+                            or type(push) is not bool
+                        ):
+                            raise ValueError("invalid conversation route")
+                        owner.inbound.route_private_chat(
+                            owner.kernel.subject_id,
+                            binding_id,
+                            conversation_id,
+                            share_web_history=share,
+                            push_web_replies=push,
+                            expected_revision=payload.get("expected_revision"),
+                        )
+                    except (ValueError, TypeError, NotFoundError, sqlite3.IntegrityError):
+                        self._json(HTTPStatus.CONFLICT, {"error": "private_chat_route_unavailable"})
+                        return
+                    self._json(HTTPStatus.OK, {"status": "linked"})
+                    return
                 status = {"enable": "active", "disable": "disabled", "revoke": "revoked"}.get(
                     operation
                 )
@@ -9002,7 +9477,9 @@ class NoyraHTTPServer:
                 self.end_headers()
                 self.wfile.write(body)
 
-            def _send_file(self, path: Path, *, filename: str, digest: str) -> None:
+            def _send_file(
+                self, path: Path, *, filename: str, digest: str, export_job_id: str | None = None
+            ) -> None:
                 length = path.stat().st_size
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
@@ -9011,6 +9488,14 @@ class NoyraHTTPServer:
                 self.end_headers()
                 with path.open("rb") as stream:
                     while chunk := stream.read(1024 * 1024):
+                        if export_job_id is not None:
+                            try:
+                                owner.export_jobs.download_path(
+                                    export_job_id, subject_id=owner.kernel.subject_id
+                                )
+                            except (RuntimeError, FileNotFoundError):
+                                self.close_connection = True
+                                return
                         self.wfile.write(chunk)
 
             def _inbound_ack(self, channel: str, payload: Mapping[str, Any]) -> None:
@@ -9110,8 +9595,35 @@ class NoyraHTTPServer:
                     raise ValueError("runtime log cursor is invalid")
                 return value
 
+            def _log_http_event(self, event: str, code: object = "-") -> None:
+                method, route, status = http_log_fields(
+                    getattr(self, "command", None),
+                    getattr(self, "path", "")
+                    if getattr(self, "_log_request_parsed", False)
+                    else "",
+                    code,
+                )
+                LOGGER.info(
+                    "http event=%s method=%s route=%s status=%s", event, method, route, status
+                )
+
+            def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+                # Never delegate to the stdlib request-line formatter. Neither
+                # the original target nor response/header/body data enter logs.
+                self._log_http_event("request", code)
+
+            def log_error(self, format: str, *args: Any) -> None:
+                if format == "code %d, message %s" and args:
+                    self._log_http_event("response_error", args[0])
+                elif format == "Request timed out: %r":
+                    self._log_http_event("timeout")
+                else:
+                    self._log_http_event("protocol_error")
+
             def log_message(self, format: str, *args: Any) -> None:
-                LOGGER.info("http %s", format % args)
+                # Unknown/future stdlib diagnostics may contain request data or
+                # exception text. Keep a fixed event, never interpolate them.
+                self._log_http_event("diagnostic")
 
         return Handler
 
@@ -9521,6 +10033,11 @@ class NoyraService:
     def _complete_boot_after_integrity(self) -> None:
         if not self._boot_recovery_pending:
             return
+        # Replay accepted privacy intents before exports or cognition can read them.
+        erasure = ConversationErasure(self.kernel.database)
+        while results := erasure.resume(self.kernel.subject_id):
+            if any(result["status"] != "completed" for result in results):
+                raise ErasureReviewRequired("private_deletion_boot_replay_requires_review")
         state = self.kernel.recover_after_integrity()
         # A prior process may have stopped while an external RPC read was in
         # flight.  Preserve the ambiguous outcome as ``unknown`` and require
@@ -10000,7 +10517,9 @@ class NoyraService:
         if manager is None:
             return
         now = datetime.now(UTC)
-        interval = timedelta(seconds=manager.settings.interval_seconds)
+        interval = timedelta(
+            seconds=manager.effective_settings(self.kernel.subject_id).interval_seconds
+        )
         if self._last_retention_run_at is not None and now - self._last_retention_run_at < interval:
             return
         self._last_retention_run_at = now
@@ -10108,6 +10627,9 @@ class NoyraService:
 
 
 def main() -> None:
+    from noyra.core.runtime_logging import install_log_safety
+
+    install_log_safety()
     multiprocessing.freeze_support()
     parser = argparse.ArgumentParser(prog="noyra-service")
     parser.add_argument("--log-level", default=os.getenv("NOYRA_LOG_LEVEL", "INFO"))

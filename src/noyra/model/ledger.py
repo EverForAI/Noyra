@@ -7,6 +7,7 @@ from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.evidence_capacity import require_evidence_capacity
 from noyra.core.payload_codec import compress_text, decompress_text
+from noyra.core.private_sources import record_private_sources
 from noyra.core.types import (
     canonical_json,
     content_hash,
@@ -17,12 +18,18 @@ from noyra.core.types import (
     utc_now,
 )
 
-from .errors import BudgetExhaustedError, ModelCallConflictError, ModelCallStateError
+from .errors import (
+    BudgetExhaustedError,
+    ModelAuthorizationError,
+    ModelCallConflictError,
+    ModelCallStateError,
+)
 from .types import (
     AttemptRecord,
     BudgetLimits,
     BudgetStatus,
     CallRecord,
+    ModelPricing,
     ModelUsage,
 )
 
@@ -86,6 +93,7 @@ class ModelLedger:
                     raise ModelCallConflictError(
                         "idempotency key already identifies a different model call"
                     )
+                record_private_sources(connection, subject_id, existing["call_id"])
                 return self._call_from_row(existing), False
             require_evidence_capacity(connection, subject_id, "model_calls")
             call_id = new_id("mcall")
@@ -113,6 +121,7 @@ class ModelLedger:
                     capture_policy_version,
                 ),
             )
+            record_private_sources(connection, subject_id, call_id)
             return self._load_call_connection(connection, call_id), True
 
     def authorize_attempt(
@@ -127,6 +136,11 @@ class ModelLedger:
         resource_group_id: str | None = None,
         pool_limits: BudgetLimits | None = None,
         continuation: bool = False,
+        expected_resource_revision: int | None = None,
+        refresh_pool_limits: bool = False,
+        resource_key_id: str | None = None,
+        resource_key_fingerprint: str | None = None,
+        pricing: ModelPricing | None = None,
     ) -> AttemptRecord:
         if min(reserved_input_tokens, reserved_output_tokens, reserved_cost_microusd) < 0:
             raise ValueError("model attempt reservations cannot be negative")
@@ -145,9 +159,99 @@ class ModelLedger:
                 raise ModelCallStateError(
                     f"cannot authorize attempt for call in state {call['status']}"
                 )
+            self._check_request(
+                connection,
+                call_id,
+                resource_key_id,
+                resource_key_fingerprint,
+                expected_resource_revision,
+            )
             group_id = call["resource_group_id"]
             if resource_group_id is not None and resource_group_id != group_id:
                 raise ModelCallStateError("model attempt resource group does not match its call")
+            group_exists = (
+                group_id is not None
+                and connection.execute(
+                    "SELECT 1 FROM cognitive_resource_groups WHERE group_id=? AND subject_id=?",
+                    (group_id, call["subject_id"]),
+                ).fetchone()
+                is not None
+            )
+            price_evidence: dict[str, Any] = {
+                "version": 1,
+                "status": "unknown",
+                "basis": "unconfigured",
+                "input_microusd_per_million": pricing.input_microusd_per_million
+                if pricing
+                else None,
+                "output_microusd_per_million": pricing.output_microusd_per_million
+                if pricing
+                else None,
+            }
+            if pricing is not None and (
+                pricing.input_microusd_per_million or pricing.output_microusd_per_million
+            ):
+                price_evidence.update(status="priced", basis="gateway_configuration")
+            if expected_resource_revision is not None and not group_exists:
+                raise ModelAuthorizationError("model resource is unavailable")
+            if group_exists:
+                from .resources import CognitiveResourceStore, RoutedModelGateway
+
+                group_row = CognitiveResourceStore._get_group_row(
+                    connection, group_id, subject_id=call["subject_id"]
+                )
+                group = CognitiveResourceStore._from_group_row(connection, group_row)
+                if pricing is not None and (
+                    pricing.input_microusd_per_million != group.input_microusd_per_million
+                    or pricing.output_microusd_per_million != group.output_microusd_per_million
+                ):
+                    raise ModelAuthorizationError("model pricing changed before authorization")
+                price_evidence.update(
+                    status=group.pricing_status,
+                    basis="resource_revision",
+                    resource_group_id=group.group_id,
+                    revision=group.limit_revision,
+                    input_microusd_per_million=group.input_microusd_per_million,
+                    output_microusd_per_million=group.output_microusd_per_million,
+                )
+                if group.status != "active":
+                    raise ModelAuthorizationError("model resource is not active")
+                if (
+                    expected_resource_revision is not None
+                    and group.limit_revision != expected_resource_revision
+                ):
+                    raise ModelAuthorizationError("model resource changed before authorization")
+                limits = RoutedModelGateway._limits_for_group(group)
+                if pool_limits is not None and refresh_pool_limits:
+                    groups = [
+                        CognitiveResourceStore._from_group_row(connection, row)
+                        for row in connection.execute(
+                            "SELECT * FROM cognitive_resource_groups WHERE subject_id=? "
+                            "AND pool=? AND status='active'",
+                            (call["subject_id"], call["resource_pool"]),
+                        )
+                    ]
+                    from noyra.core.resource_policy import LIMIT_DIMENSIONS
+
+                    pool_limits = BudgetLimits(
+                        sum(item.daily_attempts for item in groups),
+                        sum(item.daily_input_tokens for item in groups),
+                        sum(item.daily_output_tokens for item in groups),
+                        sum(item.daily_cost_microusd for item in groups),
+                        enabled=tuple(
+                            all(item.limit_enabled[name] for item in groups)
+                            for name in LIMIT_DIMENSIONS
+                        ),
+                    )
+            price_known = price_evidence["status"] == "free" or any(
+                price_evidence.get(name)
+                for name in ("input_microusd_per_million", "output_microusd_per_million")
+            )
+            if not price_known and any(
+                candidate is not None and candidate.enabled == (False, False, False, True)
+                for candidate in (limits, pool_limits)
+            ):
+                raise BudgetExhaustedError("cost_only_pricing_unknown")
             status = self._budget_status_connection(
                 connection,
                 call["subject_id"],
@@ -169,8 +273,10 @@ class ModelLedger:
                 limits.daily_cost_microusd,
             )
             dimensions = ("attempts", "input_tokens", "output_tokens", "cost")
-            for name, value, limit in zip(dimensions, projected, maximum, strict=True):
-                if value > limit:
+            for name, value, limit, enabled in zip(
+                dimensions, projected, maximum, limits.enabled, strict=True
+            ):
+                if enabled and value > limit:
                     raise BudgetExhaustedError(f"daily model {name} budget exhausted")
 
             # The per-pool aggregate reservation must be checked while this
@@ -198,7 +304,10 @@ class ModelLedger:
                     pool_limits.daily_cost_microusd,
                 )
                 if any(
-                    value > limit for value, limit in zip(pool_projected, pool_maximum, strict=True)
+                    enabled and value > limit
+                    for value, limit, enabled in zip(
+                        pool_projected, pool_maximum, pool_limits.enabled, strict=True
+                    )
                 ):
                     raise BudgetExhaustedError("daily model pool budget exhausted")
 
@@ -217,10 +326,10 @@ class ModelLedger:
                     attempt_id, call_id, subject_id, budget_day, attempt_number, status,
                     reserved_input_tokens, reserved_output_tokens, reserved_cost_microusd,
                     input_tokens, output_tokens, cost_microusd, provider_request_id,
-                    error_code, started_at, completed_at
+                    error_code, started_at, completed_at, usage_source, pricing_snapshot_json
                 ) VALUES (
                     ?, ?, ?, ?, ?, 'authorized', ?, ?, ?,
-                    NULL, NULL, NULL, NULL, NULL, NULL, NULL
+                    NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'unknown', ?
                 )""",
                 (
                     attempt_id,
@@ -231,6 +340,7 @@ class ModelLedger:
                     reserved_input_tokens,
                     reserved_output_tokens,
                     reserved_cost_microusd,
+                    canonical_json(price_evidence),
                 ),
             )
             connection.execute(
@@ -239,9 +349,102 @@ class ModelLedger:
             )
             return self._load_attempt_connection(connection, attempt_id)
 
-    def start_attempt(self, attempt_id: str) -> AttemptRecord:
+    @staticmethod
+    def _check_key(connection: Any, call: Any, key_id: str | None, fingerprint: str | None) -> None:
+        if key_id is None:
+            return
+        key = connection.execute(
+            "SELECT * FROM cognitive_resource_keys WHERE key_id=? AND subject_id=? AND group_id=?",
+            (key_id, call["subject_id"], call["resource_group_id"]),
+        ).fetchone()
+        if key is None or key["status"] == "revoked" or key["key_fingerprint"] != fingerprint:
+            raise ModelAuthorizationError("model credential authorization changed")
+        from .resources import CognitiveResourceStore
+
+        CognitiveResourceStore._from_key_row(key)
+
+    def check_request_authorization(
+        self,
+        call_id: str,
+        *,
+        resource_key_id: str | None = None,
+        resource_key_fingerprint: str | None = None,
+        expected_resource_revision: int | None = None,
+    ) -> None:
+        with self.database.connection() as connection:
+            self._check_request(
+                connection,
+                call_id,
+                resource_key_id,
+                resource_key_fingerprint,
+                expected_resource_revision,
+            )
+
+    def _check_request(
+        self,
+        connection: Any,
+        call_id: str,
+        key_id: str | None,
+        fingerprint: str | None,
+        revision: int | None,
+    ) -> None:
+        call = self._get_call_row(connection, call_id)
+        if connection.execute(
+            "SELECT 1 FROM private_model_sources s JOIN private_conversations c "
+            "ON c.conversation_id=s.conversation_id WHERE s.call_id=? "
+            "AND c.status IN ('deleting','deleted') LIMIT 1",
+            (call_id,),
+        ).fetchone():
+            raise ModelAuthorizationError("private source has been withdrawn")
+        self._check_key(connection, call, key_id, fingerprint)
+        if revision is not None:
+            from .resources import CognitiveResourceStore
+
+            group = connection.execute(
+                "SELECT * FROM cognitive_resource_groups WHERE group_id=? AND subject_id=?",
+                (call["resource_group_id"], call["subject_id"]),
+            ).fetchone()
+            if group is None:
+                raise ModelAuthorizationError("model resource is unavailable")
+            current = CognitiveResourceStore._from_group_row(connection, group)
+            if current.status != "active" or current.limit_revision != revision:
+                raise ModelAuthorizationError("model resource authorization changed")
+
+    def cancel_unsent_attempt(self, attempt_id: str, *, error_code: str) -> None:
+        with accounting_scope(), self.database.transaction() as connection:
+            row = self._get_attempt_row(connection, attempt_id)
+            if row["status"] not in {"authorized", "executing"}:
+                raise ModelCallStateError("cannot cancel a terminal model attempt")
+            connection.execute(
+                "UPDATE model_attempts SET status='cancelled', error_code=?, completed_at=? "
+                "WHERE attempt_id=?",
+                (error_code, utc_now(), attempt_id),
+            )
+
+    def start_attempt(
+        self,
+        attempt_id: str,
+        *,
+        resource_key_id: str | None = None,
+        resource_key_fingerprint: str | None = None,
+        expected_resource_revision: int | None = None,
+    ) -> AttemptRecord:
         with self.database.transaction() as connection:
             row = self._get_attempt_row(connection, attempt_id)
+            self._check_request(
+                connection,
+                str(row["call_id"]),
+                resource_key_id,
+                resource_key_fingerprint,
+                expected_resource_revision,
+            )
+            if connection.execute(
+                "SELECT 1 FROM private_model_sources s JOIN private_conversations c "
+                "ON c.conversation_id=s.conversation_id WHERE s.call_id=? "
+                "AND c.status IN ('deleting','deleted') LIMIT 1",
+                (row["call_id"],),
+            ).fetchone():
+                raise ModelAuthorizationError("private source has been withdrawn")
             if row["status"] != "authorized":
                 raise ModelCallStateError(f"cannot start model attempt in state {row['status']}")
             connection.execute(
@@ -260,6 +463,7 @@ class ModelLedger:
         cost_microusd: int | None,
         provider_request_id: str | None = None,
         error_code: str | None = None,
+        usage_estimated: bool = False,
     ) -> AttemptRecord:
         if status not in {"succeeded", "failed", "unknown"}:
             raise ValueError(f"invalid model attempt completion status: {status}")
@@ -267,6 +471,8 @@ class ModelLedger:
             raise ValueError("model attempt cost cannot be negative")
         if (usage is None) != (cost_microusd is None):
             raise ValueError("usage and cost must both be known or both be unknown")
+        if type(usage_estimated) is not bool:
+            raise ValueError("usage_estimated must be boolean")
         with accounting_scope(), self.database.transaction() as connection:
             row = self._get_attempt_row(connection, attempt_id)
             if row["status"] != "executing":
@@ -274,7 +480,7 @@ class ModelLedger:
             connection.execute(
                 """UPDATE model_attempts SET
                     status = ?, input_tokens = ?, output_tokens = ?, cost_microusd = ?,
-                    provider_request_id = ?, error_code = ?, completed_at = ?
+                    provider_request_id = ?, error_code = ?, completed_at = ?, usage_source = ?
                     WHERE attempt_id = ?""",
                 (
                     status,
@@ -284,6 +490,7 @@ class ModelLedger:
                     provider_request_id,
                     error_code,
                     utc_now(),
+                    "unknown" if usage is None else "estimated" if usage_estimated else "provider",
                     attempt_id,
                 ),
             )
@@ -304,6 +511,16 @@ class ModelLedger:
             raise ValueError("successful model call requires a response")
         with accounting_scope(), self.database.transaction() as connection:
             row = self._get_call_row(connection, call_id)
+            if connection.execute(
+                "SELECT 1 FROM private_model_sources s JOIN private_conversations c "
+                "ON c.conversation_id=s.conversation_id WHERE s.call_id=? "
+                "AND c.status IN ('deleting','deleted') LIMIT 1",
+                (call_id,),
+            ).fetchone():
+                from noyra.interaction.erasure import ERASED_MODEL
+
+                response = ERASED_MODEL
+                error_code = "private_content_erased"
             allowed = {"executing"}
             if status == "failed":
                 allowed.add("prepared")
@@ -535,10 +752,24 @@ class ModelLedger:
         if outcome == "succeeded" and response is None:
             raise ValueError("successful reconciliation requires provider response evidence")
         now = utc_now()
-        with self.database.transaction() as connection:
+        with accounting_scope(), self.database.transaction() as connection:
             row = self._get_call_row(connection, call_id)
             if row["status"] != "unknown":
                 raise ModelCallStateError("only unknown model calls can be reconciled")
+            withdrawn = (
+                connection.execute(
+                    "SELECT 1 FROM private_model_sources s JOIN private_conversations c "
+                    "ON c.conversation_id=s.conversation_id WHERE s.call_id=? "
+                    "AND c.status IN ('deleting','deleted') LIMIT 1",
+                    (call_id,),
+                ).fetchone()
+                is not None
+            )
+            if withdrawn:
+                from noyra.interaction.erasure import ERASED_MODEL
+
+                response = ERASED_MODEL
+                reason = "private content erased"
             response_json = canonical_json(response) if response is not None else None
             response_hash = content_hash(response) if response is not None else None
             connection.execute(
@@ -548,7 +779,9 @@ class ModelLedger:
                     outcome,
                     response_json,
                     response_hash,
-                    None if outcome == "succeeded" else "operator_reconciled_failed",
+                    "private_content_erased"
+                    if withdrawn
+                    else (None if outcome == "succeeded" else "operator_reconciled_failed"),
                     now,
                     call_id,
                 ),

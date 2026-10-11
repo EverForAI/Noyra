@@ -9,6 +9,7 @@ from noyra.core.database import Database
 from noyra.core.errors import IntegrityError
 from noyra.core.events import EventStore
 from noyra.core.payload_codec import decompress_text
+from noyra.core.private_sources import private_input_scope
 from noyra.core.types import canonical_json, content_hash, utc_now
 from noyra.mind.goal import ALLOWED_GOAL_TRANSITIONS
 from noyra.model import ModelGateway, ModelMessage
@@ -41,6 +42,7 @@ class ReflectionContext:
     action_signatures: dict[str, tuple[str, str, str | None, str | None]]
     event_count: int
     interaction_count: int
+    interaction_ids: tuple[str, ...] = ()
 
 
 class SleepReflectionCognition:
@@ -74,15 +76,16 @@ class SleepReflectionCognition:
         if calls >= self.settings.max_sleep_model_calls_per_run:
             return self._fallback(context, "reflection model call limit reached")
         try:
-            result = await self.gateway.complete_structured(
-                self.subject_id,
-                purpose,
-                self._messages(run, context),
-                SleepReflectionPlan,
-                idempotency_key=f"sleep-reflection:{run.sleep_id}:{calls + 1}",
-                max_output_tokens=min(4_000, self.settings.max_output_tokens),
-                temperature=self.settings.temperature,
-            )
+            with private_input_scope(context.interaction_ids):
+                result = await self.gateway.complete_structured(
+                    self.subject_id,
+                    purpose,
+                    self._messages(run, context),
+                    SleepReflectionPlan,
+                    idempotency_key=f"sleep-reflection:{run.sleep_id}:{calls + 1}",
+                    max_output_tokens=min(4_000, self.settings.max_output_tokens),
+                    temperature=self.settings.temperature,
+                )
         except BudgetExhaustedError:
             return self._fallback(context, "remote model budget unavailable during reflection")
         except (ProviderCallError, StructuredOutputError, ModelCallStateError) as error:
@@ -146,6 +149,10 @@ class SleepReflectionCognition:
                 "rationale, "
                 "status, created_at, decided_at FROM interactions WHERE subject_id = ? "
                 "AND created_at > ? AND created_at <= ? "
+                "AND NOT EXISTS(SELECT 1 FROM private_conversation_messages m "
+                "JOIN private_conversations c ON c.conversation_id=m.conversation_id "
+                "WHERE m.interaction_id=interactions.interaction_id "
+                "AND c.status IN ('deleting','deleted')) "
                 "ORDER BY created_at DESC, interaction_id DESC LIMIT 8",
                 (self.subject_id, lower_bound, run.started_at),
             ).fetchall()
@@ -334,6 +341,7 @@ class SleepReflectionCognition:
             },
             event_count=len(context["events"]),
             interaction_count=len(context["interactions"]),
+            interaction_ids=tuple(str(item["interaction_id"]) for item in context["interactions"]),
         )
 
     def _window_start(self, run: SleepRunRecord) -> str:

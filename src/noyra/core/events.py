@@ -8,6 +8,7 @@ from typing import Any
 from .database import Database
 from .errors import EventConflictError, IntegrityError, NotFoundError
 from .event_archive import EventPayloadArchive
+from .private_sources import assert_event_sources_available
 from .storage import TrainingStore
 from .types import (
     EventRecord,
@@ -85,6 +86,8 @@ class EventStore:
         parents = tuple(causal_parent_ids)
         if len(parents) != len(set(parents)) or event_id in parents:
             raise ValueError("event causal parents must be distinct prior events")
+        for parent_id in parents:
+            assert_event_sources_available(connection, subject_id, parent_id)
         payload_json = canonical_json(payload)
         payload_hash = content_hash(payload)
         existing = connection.execute(

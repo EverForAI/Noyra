@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,3 +50,37 @@ def test_setup_modes_document_all_three_entry_points() -> None:
         assert marker in text
     assert "127.0.0.1:8765" in text
     assert "cloudflare-tunnel-token" in text
+
+
+def test_nginx_logs_exclude_client_targets_headers_and_unvalidated_methods() -> None:
+    text = "\n".join(line for line in NGINX.splitlines() if not line.lstrip().startswith("#"))
+    format_match = re.search(r"log_format\s+noyra_privacy\s+escape=json\s+([^;]+);", text)
+    assert format_match is not None
+    assert set(re.findall(r"\$[a-z_]+", format_match[1])) == {
+        "$noyra_log_method",
+        "$status",
+        "$request_time",
+    }
+    method_map = re.search(r"map\s+\$request_method\s+\$noyra_log_method\s*\{([^}]+)}", text)
+    assert method_map is not None
+    entries = dict(re.findall(r"(\w+)\s+(\w+);", method_map[1]))
+    assert entries.pop("default") == "UNKNOWN"
+    assert set(entries) == {
+        "GET",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "HEAD",
+        "OPTIONS",
+        "TRACE",
+        "CONNECT",
+    }
+    assert all(method == value for method, value in entries.items())
+    servers = text.split("server {")[1:]
+    assert len(servers) == 2
+    for server in servers:
+        assert re.findall(r"access_log\s+([^;]+);", server) == [
+            "/var/log/nginx/noyra-access.log noyra_privacy"
+        ]
+        assert re.findall(r"error_log\s+([^;]+);", server) == ["/dev/null crit"]

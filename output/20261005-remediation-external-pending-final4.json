@@ -1,0 +1,93 @@
+{
+  "format": "noyra-external-gates/v1",
+  "schema_version": 1,
+  "commit_sha": "0bff44322e104e8fbd42976107a69cd87216ff8d",
+  "status": "pending",
+  "reviewed_at": null,
+  "reviewer": {
+    "id": "",
+    "role": "release-reviewer"
+  },
+  "gates": [
+    {
+      "id": "ubuntu_systemd",
+      "status": "pending",
+      "executed_by": "",
+      "reviewed_by": "",
+      "started_at": null,
+      "finished_at": null,
+      "evidence_refs": [],
+      "failure_reason": "real environment verification not yet performed"
+    },
+    {
+      "id": "encrypted_volume",
+      "status": "pending",
+      "executed_by": "",
+      "reviewed_by": "",
+      "started_at": null,
+      "finished_at": null,
+      "evidence_refs": [],
+      "failure_reason": "real environment verification not yet performed"
+    },
+    {
+      "id": "backup_restore",
+      "status": "pending",
+      "executed_by": "",
+      "reviewed_by": "",
+      "started_at": null,
+      "finished_at": null,
+      "evidence_refs": [],
+      "failure_reason": "real environment verification not yet performed"
+    },
+    {
+      "id": "migration_fence",
+      "status": "pending",
+      "executed_by": "",
+      "reviewed_by": "",
+      "started_at": null,
+      "finished_at": null,
+      "evidence_refs": [],
+      "failure_reason": "real environment verification not yet performed"
+    },
+    {
+      "id": "signer_kms",
+      "status": "pending",
+      "executed_by": "",
+      "reviewed_by": "",
+      "started_at": null,
+      "finished_at": null,
+      "evidence_refs": [],
+      "failure_reason": "real environment verification not yet performed"
+    },
+    {
+      "id": "reorg_nonce",
+      "status": "pending",
+      "executed_by": "",
+      "reviewed_by": "",
+      "started_at": null,
+      "finished_at": null,
+      "evidence_refs": [],
+      "failure_reason": "real environment verification not yet performed"
+    },
+    {
+      "id": "https_proxy",
+      "status": "pending",
+      "executed_by": "",
+      "reviewed_by": "",
+      "started_at": null,
+      "finished_at": null,
+      "evidence_refs": [],
+      "failure_reason": "real environment verification not yet performed"
+    },
+    {
+      "id": "soak",
+      "status": "pending",
+      "executed_by": "",
+      "reviewed_by": "",
+      "started_at": null,
+      "finished_at": null,
+      "evidence_refs": [],
+      "failure_reason": "real environment verification not yet performed"
+    }
+  ]
+}

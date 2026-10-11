@@ -30,12 +30,13 @@
       <nav aria-label="管理台导航">
         <button class="nav-item active" data-section="overview" type="button">总览</button>
         <button class="nav-item" data-section="conversation" type="button">私密交流</button>
+        <button class="nav-item" data-section="logs" type="button">活动日志</button>
         <button class="nav-item" data-section="public-posts" type="button">内容审核</button>
         <button class="nav-item" data-section="models" type="button">认知资源</button>
         <button class="nav-item" data-section="search" type="button">搜索配置</button>
         <button class="nav-item" data-section="capabilities" type="button">能力授权</button>
         <button class="nav-item" data-section="channels" type="button">通讯渠道</button>
-        <button class="nav-item" data-section="wallet" type="button">钱包采集</button>
+        <button class="nav-item" data-section="wallet" type="button">钱包与付款</button>
         <button class="nav-item" data-section="migration" type="button">迁移与庇护所</button>
         <button class="nav-item" data-section="runtime" type="button">运行防护</button>
       </nav>
@@ -55,10 +56,18 @@
       <p class="form-status global-status" id="global-status" role="status"></p>
       <section class="admin-section" data-section-panel="overview">
         <div class="hero-strip"><div><p class="eyebrow">CURRENT SUBJECT</p><h2 id="subject-name">连接中</h2><p id="subject-meta">正在读取公开状态</p></div><div class="health-mark" id="health-mark">●</div></div>
+        <p id="overview-updated" class="muted" role="status"></p>
+        <div class="metric-grid" id="overview-metrics"></div>
+        <section class="overview-band"><h2>需要处理</h2><div id="overview-attention" aria-live="polite"></div></section>
+        <div class="two-column"><section class="overview-band"><h2>运行与生命周期</h2><div id="overview-lifecycle" class="summary-list"></div><button type="button" data-setup-go="logs">查看活动日志</button></section><section class="overview-band"><h2>近期活动</h2><div id="overview-events"></div></section></div>
+        <div class="two-column"><article class="surface-card"><div class="card-heading"><h2>认知资源</h2><span class="card-state" id="cognition-state">-</span></div><div id="cognition-summary" class="summary-list"></div><button type="button" data-setup-go="models">管理资源</button></article><article class="surface-card"><div class="card-heading"><h2>存储与完整性</h2></div><div id="storage-summary" class="summary-list"></div><button type="button" data-setup-go="runtime">查看运行防护</button></article></div>
+        <details id="overview-setup"><summary>配置检查</summary>
         <article class="surface-card setup-guide-card" id="setup-guide" aria-labelledby="setup-guide-title">
           <div class="card-heading"><div><h2 id="setup-guide-title">首次配置向导</h2><p class="muted">先配置认知模型，搜索、通讯与付款都可以按需启用。</p></div><span class="card-state" id="setup-guide-state">正在检查</span></div>
           <ol id="setup-guide-list" class="setup-guide-list" aria-live="polite"><li class="setup-guide-loading">正在读取配置状态…</li></ol>
         </article>
+        </details>
+        <details id="overview-version"><summary>版本维护</summary>
         <article class="surface-card upgrade-panel" id="admin-upgrade" aria-labelledby="upgrade-title">
           <div class="card-heading">
             <div><p class="eyebrow">版本维护</p><h2 id="upgrade-title">Noyra 版本与升级</h2><p class="muted">检查 GitHub 上的正式版本；确认后由服务器在后台升级，即使关闭浏览器也会继续。</p></div>
@@ -78,25 +87,41 @@
           <p class="form-status" id="upgrade-status" role="status" aria-live="polite">升级状态尚未读取。</p>
           <ul class="upgrade-log-summary" id="upgrade-log-summary" aria-label="升级进度"></ul>
         </article>
-        <div class="metric-grid" id="overview-metrics"></div>
-        <div class="two-column"><article class="surface-card"><div class="card-heading"><div><p class="eyebrow">COGNITION</p><h2>认知诊断</h2></div><span class="card-state" id="cognition-state">-</span></div><div id="cognition-summary" class="summary-list"></div></article><article class="surface-card"><div class="card-heading"><div><p class="eyebrow">STORAGE</p><h2>运行环境</h2></div></div><div id="storage-summary" class="summary-list"></div></article></div>
+        </details>
+        <details id="overview-usage"><summary>模型与搜索用量</summary>
         <article class="surface-card observability-card" id="model-observability">
-          <div class="card-heading"><div><h2>模型与搜索用量</h2><p class="muted">汇总最近 7 天已有的记录；不会为每次 API 请求额外写入日志。</p></div><button class="text-button" id="refresh-observability" type="button">更新</button></div>
+          <div class="card-heading"><h2>模型与搜索用量</h2><div class="resource-actions"><select id="usage-window" aria-label="用量时间范围"><option value="today">当天</option><option value="3">最近 3 天</option><option value="7" selected>最近 7 天</option><option value="30">最近 30 天</option><option value="90">最近 90 天</option><option value="all">全部保留历史</option></select><select id="usage-pool" aria-label="用量认知池"><option value="">全部认知池</option><option value="economy">经济池</option><option value="deep">深度池</option></select><button class="text-button" id="refresh-observability" type="button">更新</button></div></div>
           <div id="model-observability-summary" class="summary-list"><div class="muted">正在读取聚合用量…</div></div>
+          <div class="resource-actions"><select id="usage-resource" aria-label="用量资源"><option value="">全部资源</option></select><button type="button" id="usage-resource-prev" title="上一页资源" aria-label="上一页资源">←</button><span id="usage-resource-page"></span><button type="button" id="usage-resource-next" title="下一页资源" aria-label="下一页资源">→</button></div>
+          <p class="form-status" id="usage-status" role="status"></p>
         </article>
+        </details>
+        <details id="overview-providers"><summary>供应商健康</summary>
         <article class="surface-card provider-health-card" id="provider-health" aria-labelledby="provider-health-title">
-          <div class="card-heading"><div><h2 id="provider-health-title">供应商健康</h2><p class="muted">只保留聚合指标，不记录单次调用。供应商冷却结束后，会在下一次需要时自动进行一次恢复请求。</p></div><div class="resource-actions"><button class="text-button" id="refresh-provider-health" type="button">更新</button></div></div>
+          <div class="card-heading"><h2 id="provider-health-title">供应商健康</h2><div class="resource-actions"><button class="text-button" id="refresh-provider-health" type="button">更新</button></div></div>
           <div class="provider-health-columns">
             <section aria-labelledby="model-health-title"><h3 id="model-health-title">模型供应商</h3><div id="model-provider-health-list" class="provider-health-list" aria-live="polite"><div class="muted">正在读取…</div></div></section>
             <section aria-labelledby="search-health-title"><h3 id="search-health-title">搜索供应商</h3><div id="search-provider-health-list" class="provider-health-list" aria-live="polite"><div class="muted">正在读取…</div></div></section>
           </div>
           <p class="form-status" id="provider-health-status" role="status"></p>
         </article>
+        </details>
+        <details id="overview-retention"><summary>数据保留与清理</summary>
         <article class="surface-card retention-card" id="retention-panel" aria-labelledby="retention-title">
           <div class="card-heading"><div><h2 id="retention-title">数据保留与清理</h2><p class="muted">健康聚合数据按保留周期分批清理，关键审计记录不会被此操作删除。</p></div><div class="resource-actions"><button class="text-button" id="refresh-retention" type="button">更新</button><button id="run-retention" type="button">立即清理一批</button></div></div>
           <div id="retention-summary" class="summary-list"><div class="muted">正在读取保留设置…</div></div>
+          <form id="retention-settings-form" class="model-grid">
+            <label>健康聚合保留（天）<input name="health_days" type="number" min="1" max="36500" required></label>
+            <label>搜索限速记录（小时）<input name="search_use_hours" type="number" min="2" max="8760" required></label>
+            <label>每批删除上限（行）<input name="batch_size" type="number" min="1" max="500" required></label>
+            <label>自动清理间隔（秒）<input name="interval_seconds" type="number" min="60" max="31536000" required></label>
+            <label>清理历史保留（次）<input name="run_history" type="number" min="1" max="10000" required></label>
+            <label>模型内容压缩年龄（天）<input name="runtime_days" type="number" min="1" max="36500" required></label>
+            <button type="submit">保存保留设置</button>
+          </form>
           <p class="form-status" id="retention-status" role="status"></p>
         </article>
+        </details>
       </section>
       <section class="admin-section" data-section-panel="migration" hidden>
         <div class="section-intro"><div><p class="eyebrow">TRUSTED MIGRATION</p><h2>迁移与庇护所</h2><p>迁移默认关闭。开启后默认需要人工审批；目标必须注册、完成签名挑战并通过加密存储与版本检查。</p></div></div>
@@ -141,7 +166,13 @@
       </section>
       <section class="admin-section" data-section-panel="conversation" hidden>
         <div class="section-intro"><div><p class="eyebrow">PRIVATE CHANNEL</p><h2>与主体交流</h2><p>消息会进入认知流程，回复、沉默、延迟和失败都会保留明确状态。</p></div></div>
-        <div class="conversation-layout"><article class="surface-card message-composer"><div class="card-heading"><h2>发送消息</h2><span class="muted">聊天不是命令</span></div><form id="admin-message-form"><label for="admin-message">消息内容</label><textarea id="admin-message" maxlength="20000" placeholder="写下你想交流的内容" required></textarea><div class="composer-footer"><span class="muted">发送后可在右侧查看处理状态</span><button type="submit">发送消息</button></div></form><p class="form-status" id="message-status" role="status"></p></article><article class="surface-card"><div class="card-heading"><h2>最近记录</h2><button class="text-button" id="refresh-mailbox" type="button">更新</button></div><div id="mailbox-list" class="message-list"></div></article></div>
+        <div class="chat-workspace">
+          <aside class="chat-sidebar"><div class="card-heading"><h2>会话</h2><button id="new-conversation" type="button" aria-label="新建会话" title="新建会话">+</button></div><select id="conversation-filter" aria-label="会话状态"><option value="active">当前会话</option><option value="archived">已归档</option></select><div id="conversation-list"></div><button id="conversation-more" type="button" hidden>更多会话</button></aside>
+          <section class="chat-current"><div class="card-heading"><h2 id="conversation-title">选择一个会话</h2><div class="resource-actions"><button id="chat-back" type="button" title="返回会话列表" aria-label="返回会话列表">←</button><button id="rename-conversation" type="button">命名</button><button id="pin-conversation" type="button">置顶</button><button id="archive-conversation" type="button">归档</button><button id="refresh-mailbox" type="button" title="刷新消息" aria-label="刷新消息">↻</button></div></div>
+          <div class="resource-actions"><input id="chat-search" type="search" maxlength="200" placeholder="搜索当前会话" aria-label="搜索当前会话"><button id="chat-search-button" type="button" title="搜索" aria-label="搜索">搜索</button><select id="chat-status" aria-label="消息状态"><option value="">全部状态</option><option value="offered">等待处理</option><option value="accepted">接受</option><option value="deferred">暂缓</option><option value="rejected">拒绝</option><option value="silent">沉默</option><option value="sent">Noyra 回复</option></select><button id="chat-more" type="button" hidden>更早消息</button></div>
+          <div id="mailbox-list" class="chat-messages" aria-live="polite"></div><button id="chat-latest" type="button" hidden>回到最新</button>
+          <form id="admin-message-form"><label for="admin-message">消息</label><textarea id="admin-message" maxlength="20000" rows="3" placeholder="写下想说的话" required></textarea><div class="composer-footer"><span id="chat-source" class="muted">网页私密交流</span><button type="submit">发送消息</button></div></form><p id="message-status" class="form-status" role="status"></p></section>
+        </div>
       </section>
       <section class="admin-section" data-section-panel="public-posts" hidden>
         <div class="section-intro"><div><p class="eyebrow">PUBLIC MODERATION</p><h2>公共帖子审核</h2><p>访客提交的内容不会自动公开。请核对署名、正文和来源语境，填写审核理由后再发布、拒绝或归档。</p></div></div>
@@ -199,18 +230,45 @@
           <div class="field-group" data-channel-field="admin-channel-smtp-password"><label for="admin-channel-smtp-password">SMTP 密码</label><input id="admin-channel-smtp-password" type="password" autocomplete="new-password" maxlength="4096"></div>
           <button type="submit">保存渠道</button>
         </form><p class="form-status" id="channel-status" role="status"></p></article><article class="surface-card"><div class="card-heading"><h2>已配置渠道</h2><button class="text-button" id="refresh-channels" type="button">更新</button></div><div id="channel-list" class="resource-list"></div></article></div>
-        <article class="surface-card channel-binding-card"><div class="card-heading"><h2>入站账号绑定</h2><span class="muted">创建者绑定只影响调度优先级，不强制回复</span></div><form id="admin-binding-form" class="model-grid"><div class="field-group"><label for="admin-binding-transport">渠道</label><select id="admin-binding-transport"></select></div><div class="field-group"><label for="admin-binding-account">平台账号 ID</label><input id="admin-binding-account" maxlength="512" required></div><div class="field-group"><label for="admin-binding-sender">发送者 ID</label><input id="admin-binding-sender" maxlength="512" required></div><div class="field-group"><label for="admin-binding-role">角色</label><select id="admin-binding-role"><option value="participant">普通参与者</option><option value="creator">创建者</option></select></div><div class="field-group"><label for="admin-binding-label">备注（可选）</label><input id="admin-binding-label" maxlength="512"></div><button type="submit">绑定账号</button></form><p class="form-status" id="binding-status" role="status"></p><div id="binding-list" class="resource-list"></div></article>
+        <article class="channel-binding-card"><div class="card-heading"><h2>允许谁与 Noyra 聊天</h2></div>
+          <form id="qq-identity-form" class="model-grid">
+            <div class="field-group"><label for="qq-identity-transport">我的 QQ 机器人</label><select id="qq-identity-transport"></select></div>
+            <button type="submit">关联我的 QQ</button>
+          </form>
+          <div id="qq-identity-challenge" hidden>
+            <div class="summary-list" id="qq-identity-summary"></div>
+            <div class="resource-actions"><button id="qq-identity-check" type="button">检查验证状态</button><button id="qq-identity-confirm" type="button" disabled>确认这是我的 QQ</button></div>
+          </div>
+          <form id="qq-chat-route-form" class="model-grid" hidden>
+            <div class="field-group"><label for="qq-chat-window">私聊所在窗口</label><select id="qq-chat-window"></select></div>
+            <label class="checkbox-field"><input type="checkbox" id="qq-share-history" required>允许已验证的 QQ 私聊使用我的网页聊天历史</label>
+            <label class="checkbox-field"><input type="checkbox" id="qq-push-web-replies">将此窗口的 Noyra 新回复也发给我的 QQ</label>
+            <button type="submit">同步到此会话</button>
+          </form>
+          <p class="form-status" id="qq-identity-status" role="status"></p>
+          <details><summary>其他联系人及高级手动关联</summary><form id="admin-binding-form" class="model-grid"><div class="field-group"><label for="admin-binding-transport">渠道</label><select id="admin-binding-transport"></select></div><div class="field-group"><label for="admin-binding-account">平台账号 ID</label><input id="admin-binding-account" maxlength="512" required></div><div class="field-group"><label for="admin-binding-sender">发送者 ID</label><input id="admin-binding-sender" maxlength="512" required></div><div class="field-group"><label for="admin-binding-role">角色</label><select id="admin-binding-role"><option value="participant">普通参与者</option><option value="creator">创建者</option></select></div><div class="field-group"><label for="admin-binding-label">备注（可选）</label><input id="admin-binding-label" maxlength="512"></div><button type="submit">允许此账号</button></form></details><p class="form-status" id="binding-status" role="status"></p><div id="binding-list" class="resource-list"></div>
+        </article>
       </section>
       <section class="admin-section" data-section-panel="wallet" hidden>
-        <div class="section-intro"><div><p class="eyebrow">CONTROLLED WALLET EXECUTION</p><h2>钱包与转账</h2><p>余额采集与任务赏金转账分开管理。签名凭据不进入此界面；未配置独立签名器时，转账接口保持关闭。</p></div></div>
+        <div class="section-intro"><div><p class="eyebrow">WALLET</p><h2>钱包与付款管理</h2></div></div>
+        <p id="wallet-read-status" class="form-status" role="status"></p>
         <div class="metric-grid wallet-metrics" id="wallet-metrics"></div>
-        <div class="wallet-columns">
-          <article class="surface-card"><div class="card-heading"><div><h2>网络、资产与余额</h2><p class="muted">余额是带时间戳的只读观测。</p></div><button class="text-button" id="refresh-wallet-graph" type="button">更新</button></div><div id="wallet-graph-list" class="resource-list wallet-graph-list"></div></article>
+        <nav id="wallet-tabs" class="resource-actions" aria-label="钱包分区">
+          <button type="button" data-wallet-tab="balances" aria-pressed="true">余额观察</button><button type="button" data-wallet-tab="acquisition" aria-pressed="false">余额采集</button><button type="button" data-wallet-tab="registry" aria-pressed="false">网络与资产</button><button type="button" data-wallet-tab="budget" aria-pressed="false">RPC 预算</button><button type="button" data-wallet-tab="economy" aria-pressed="false">赏金与账本</button><button type="button" data-wallet-tab="payment" aria-pressed="false">付款与执行</button><button type="button" data-wallet-tab="audit" aria-pressed="false">审计记录</button>
+        </nav>
+        <div class="wallet-columns" data-wallet-area="balances">
+          <article class="surface-card"><div class="card-heading"><div><h2>余额快照</h2></div><button class="text-button" id="refresh-wallet-graph" type="button">更新</button></div><div id="wallet-graph-list" class="resource-list wallet-graph-list"></div><details><summary>历史观测</summary><div id="wallet-history-list" class="resource-list"></div><button id="wallet-history-more" type="button">读取历史</button><p id="wallet-history-status" class="form-status" role="status"></p></details></article>
           <article class="surface-card wallet-observation-health-card"><div class="card-heading"><div><h2>观测健康分组</h2><p class="muted">仅显示活动组合的聚合计数，不显示余额、地址或 RPC 凭据。</p></div><button class="text-button" id="refresh-wallet-observation-health" type="button">更新</button></div><label for="wallet-observation-group">分组维度</label><select id="wallet-observation-group"><option value="network">按网络</option><option value="source">按最新来源</option></select><div id="wallet-observation-health-list" class="resource-list wallet-observation-health-list"></div><p class="form-status" id="wallet-observation-health-status" role="status"></p></article>
-          <article class="surface-card"><div class="card-heading"><div><h2>RPC 预算</h2><p class="muted">每个网络独立限制窗口和请求间隔。</p></div><button class="text-button" id="refresh-wallet-budget" type="button">更新</button></div><label for="wallet-budget-network">网络</label><select id="wallet-budget-network"></select><div id="wallet-budget-summary" class="summary-list wallet-budget-summary"></div><p class="form-status" id="wallet-budget-status" role="status"></p></article>
         </div>
-        <div class="wallet-columns wallet-economy-columns">
-          <article class="surface-card wallet-policy-card"><div class="card-heading"><div><h2>自动付款策略</h2><p class="muted">自动付款只受总开关、单笔上限和每日总额上限控制；白名单默认关闭。</p></div><button class="text-button" id="refresh-wallet-policy" type="button">更新</button></div>
+        <article class="surface-card" data-wallet-area="registry" hidden><h2>已登记网络、资产与地址</h2><div class="resource-actions"><label for="wallet-registry-filter">状态</label><select id="wallet-registry-filter"><option value="active">活动</option><option value="revoked">已撤销</option><option value="">全部</option></select><button id="wallet-registry-refresh" type="button">刷新</button></div><h3>网络</h3><div id="wallet-registry-networks" class="resource-list"></div><h3>资产</h3><div id="wallet-registry-assets" class="resource-list"></div><h3>观察地址</h3><div id="wallet-registry-addresses" class="resource-list"></div><p id="wallet-registry-status" class="form-status" role="status"></p>
+          <details><summary>登记网络</summary><form id="wallet-network-form" class="model-grid"><label>网络名称<input name="label" required maxlength="128"></label><label>Chain ID<input name="chain_id" inputmode="numeric" pattern="[1-9][0-9]*" required></label><label>原生币符号<input name="native_symbol" required maxlength="32"></label><label>公共 HTTPS RPC 地址（可选）<input name="rpc_url" type="url" maxlength="512" placeholder="https://rpc.example"></label><button type="submit">登记网络</button></form></details>
+          <details><summary>登记资产</summary><form id="wallet-asset-form" class="model-grid"><label>网络<select name="network_id" data-wallet-network-select required></select></label><label>名称<input name="name" required maxlength="128"></label><label>符号<input name="symbol" required maxlength="32"></label><label>资产类型<select name="asset_type"><option value="native">原生币</option><option value="token">合约代币</option></select></label><label>小数位<input name="decimals" type="number" min="0" max="255" required value="18"></label><label>代币合约地址（原生币留空）<input name="contract_address" maxlength="42" pattern="0x[0-9a-fA-F]{40}"></label><button type="submit">登记资产</button></form></details>
+          <details><summary>登记观察地址</summary><form id="wallet-address-form" class="model-grid"><label>网络<select name="network_id" data-wallet-network-select required></select></label><label>地址名称<input name="label" required maxlength="128"></label><label>公开 EVM 地址<input name="address" required maxlength="42" pattern="0x[0-9a-fA-F]{40}"></label><button type="submit">登记观察地址</button></form></details>
+        </article>
+        <article class="surface-card" data-wallet-area="budget" hidden><div class="card-heading"><h2>RPC 请求预算</h2><button class="text-button" id="refresh-wallet-budget" type="button">更新</button></div><label for="wallet-budget-network">网络</label><select id="wallet-budget-network"></select><div id="wallet-budget-summary" class="summary-list wallet-budget-summary"></div><p class="form-status" id="wallet-budget-status" role="status"></p></article>
+        <div class="wallet-columns wallet-economy-columns" data-wallet-area="payment" hidden>
+          <article class="surface-card wallet-policy-card"><div class="card-heading"><div><h2>付款策略</h2><p class="muted">额度以资产最小单位计，混合资产额度不能视为统一币值。</p></div><button class="text-button" id="refresh-wallet-policy" type="button">更新</button></div>
+            <div id="wallet-policy-effective" class="summary-list"></div>
             <div id="wallet-automation-status" class="wallet-automation-status" role="status" aria-live="polite">正在读取自动付款状态…</div>
             <div id="wallet-automation-failure" class="muted" role="status" aria-live="polite">正在读取最近付款状态…</div>
             <div class="resource-actions wallet-automation-actions"><button id="wallet-automation-pause" type="button">紧急暂停</button><button id="wallet-automation-resume" type="button">解除暂停</button></div>
@@ -225,12 +283,14 @@
             </form>
             <p class="form-status" id="wallet-policy-status" role="status"></p>
           </article>
-          <article class="surface-card"><div class="card-heading"><div><h2>任务赏金</h2><p class="muted">展示任务、奖励额度和帮助提交状态。</p></div><button class="text-button" id="refresh-wallet-economy" type="button">更新</button></div><div id="wallet-bounty-list" class="resource-list"></div></article>
-          <article class="surface-card"><div class="card-heading"><h2>支付订单与账本</h2></div><div id="wallet-order-list" class="resource-list"></div><div id="wallet-ledger-list" class="summary-list"></div></article>
         </div>
-        <article class="surface-card wallet-execution-card"><div class="card-heading"><div><h2>链上转账执行</h2><p class="muted">只允许固定的原生资产或登记 ERC-20 转账。广播未知时必须先查回执，再由操作员明确重试或退款。</p></div><div class="resource-actions"><button class="text-button" id="recover-wallet-executions" type="button">恢复未完成</button><button class="text-button" id="refresh-wallet-executions" type="button">更新</button></div></div><div id="wallet-execution-list" class="resource-list" aria-live="polite"></div><p class="form-status" id="wallet-execution-status" role="status"></p></article>
-        <article class="surface-card wallet-audit-card"><div class="card-heading"><div><h2>钱包审计历史</h2><p class="muted">只展示操作与状态变化，不返回密钥或完整原始载荷。</p></div><button class="text-button" id="refresh-wallet-audits" type="button">更新</button></div><div id="wallet-audit-list" class="resource-list" aria-live="polite"><div class="muted">正在读取审计记录…</div></div><p class="form-status" id="wallet-audit-status" role="status"></p></article>
-        <article class="surface-card wallet-acquisition-card"><div class="card-heading"><div><h2>余额采集队列</h2><p class="muted">运行到期读取会消耗 RPC 预算；未知结果只能由操作员明确重试。</p></div><div class="resource-actions"><label for="wallet-acquisition-status-filter">状态</label><select id="wallet-acquisition-status-filter"><option value="all">全部</option><option value="queued">排队中</option><option value="running">执行中</option><option value="retry_wait">等待重试</option><option value="unknown">结果未知</option><option value="failed">失败</option><option value="succeeded">成功</option><option value="cancelled">已取消</option></select><label for="wallet-run-limit">处理上限</label><input id="wallet-run-limit" type="number" min="1" max="32" value="1"><button id="run-wallet-acquisitions" class="primary" type="button">处理到期读取</button><button class="text-button" id="refresh-wallet-acquisitions" type="button">更新</button></div></div>
+        <div class="wallet-columns wallet-economy-columns" data-wallet-area="economy" hidden>
+          <article class="surface-card"><div class="card-heading"><h2>任务赏金</h2><button class="text-button" id="refresh-wallet-economy" type="button">更新</button></div><div id="wallet-bounty-list" class="resource-list"></div></article>
+          <article class="surface-card"><div class="card-heading"><h2>支付订单与账本</h2></div><label for="wallet-order-filter">订单状态</label><select id="wallet-order-filter"><option value="">全部</option><option value="pending_policy">等待策略</option><option value="awaiting_confirmation">待人工确认</option><option value="reserved">已预留额度</option><option value="signing">签名中</option><option value="broadcast">已广播</option><option value="unknown">结果未知</option><option value="confirmed">已确认付款</option><option value="failed">付款失败</option><option value="cancelled">已取消</option><option value="rejected">已拒绝</option><option value="expired">已过期</option><option value="refunded">内部预留已释放</option></select><div id="wallet-order-list" class="resource-list"></div><div id="wallet-ledger-list" class="summary-list"></div></article>
+        </div>
+        <article class="surface-card wallet-execution-card" data-wallet-area="payment" hidden><div class="card-heading"><div><h2>链上转账执行</h2><p class="muted">结果未知须先查询回执、核对链上结果；内部预留释放不能追回链上资金。</p></div><div class="resource-actions"><button class="text-button" id="recover-wallet-executions" type="button">恢复未完成记录</button><button class="text-button" id="refresh-wallet-executions" type="button">刷新记录</button></div></div><label for="wallet-execution-filter">执行状态</label><select id="wallet-execution-filter"><option value="">全部</option><option value="signing">签名中</option><option value="broadcast">已广播</option><option value="unknown">结果未知</option><option value="confirmed">已确认</option><option value="failed">失败</option></select><div id="wallet-execution-list" class="resource-list" aria-live="polite"></div><p class="form-status" id="wallet-execution-status" role="status"></p></article>
+        <article class="surface-card wallet-audit-card" data-wallet-area="audit" hidden><div class="card-heading"><h2>钱包审计历史</h2><button class="text-button" id="refresh-wallet-audits" type="button">更新</button></div><div id="wallet-audit-list" class="resource-list" aria-live="polite"></div><p class="form-status" id="wallet-audit-status" role="status"></p></article>
+        <article class="surface-card wallet-acquisition-card" data-wallet-area="acquisition" hidden><div class="card-heading"><div><h2>余额采集队列</h2><p class="muted">运行到期读取会消耗 RPC 预算；未知结果只能由操作员明确重试。</p></div><div class="resource-actions"><label for="wallet-acquisition-status-filter">状态</label><select id="wallet-acquisition-status-filter"><option value="all">全部</option><option value="queued">排队中</option><option value="running">执行中</option><option value="retry_wait">等待重试</option><option value="unknown">结果未知</option><option value="failed">失败</option><option value="succeeded">成功</option><option value="cancelled">已取消</option></select><label for="wallet-run-limit">处理上限</label><input id="wallet-run-limit" type="number" min="1" max="32" value="1"><button id="run-wallet-acquisitions" class="primary" type="button">处理到期读取</button><button class="text-button" id="refresh-wallet-acquisitions" type="button">更新</button></div></div>
           <form id="wallet-enqueue-form" class="wallet-enqueue-form"><div class="field-group"><label for="wallet-enqueue-asset">资产</label><select id="wallet-enqueue-asset" required></select></div><div class="field-group"><label for="wallet-enqueue-address">地址</label><select id="wallet-enqueue-address" required></select></div><div class="field-group"><label for="wallet-enqueue-idempotency">幂等键（可选）</label><input id="wallet-enqueue-idempotency" maxlength="128" pattern="[A-Za-z0-9._:-]+" placeholder="相同目标可复用"></div><div class="field-group"><label for="wallet-enqueue-attempts">最大尝试次数</label><input id="wallet-enqueue-attempts" type="number" min="1" max="5" value="5" required></div><button type="submit">加入采集队列</button></form><p class="form-status" id="wallet-acquisition-form-status" role="status"></p>
           <div id="wallet-acquisition-list" class="resource-list wallet-acquisition-list" aria-live="polite"></div><p class="form-status" id="wallet-acquisition-status" role="status"></p>
         </article>
@@ -238,7 +298,26 @@
       <section class="admin-section" data-section-panel="runtime" hidden>
         <div class="section-intro"><div><p class="eyebrow">RUNTIME GUARDRAILS</p><h2>运行防护</h2><p>这里展示认知是否被暂停、等待或模型错误阻断，不显示私密模型上下文。</p></div></div>
         <article class="surface-card"><div class="card-heading"><h2>诊断摘要</h2><button class="text-button" id="refresh-runtime" type="button">更新</button></div><div id="runtime-summary" class="runtime-grid"></div></article>
-        <article class="surface-card"><div class="card-heading"><h2>公共发帖防护</h2><span class="muted">修改后立即生效</span></div><form id="public-post-controls-form" class="model-grid"><input id="public-post-rate-limit" type="number" min="1" max="100000" required placeholder="同一来源每小时帖子数"><input id="public-post-queue-cap" type="number" min="1" max="100000" required placeholder="待审核队列上限"><input id="public-post-captcha-ttl" type="number" min="30" max="3600" required placeholder="验证码有效期（秒）"><input id="public-post-captcha-attempts" type="number" min="1" max="20" required placeholder="验证码最大尝试次数"><select id="public-post-captcha-mode" aria-label="验证码字符模式"><option value="alphanumeric">字母 + 数字</option><option value="letters">纯字母</option><option value="digits">纯数字</option></select><input id="public-post-captcha-issue-limit" type="number" min="1" max="100000" required placeholder="同一来源每小时验证码数"><input id="public-post-captcha-global-rate" type="number" min="1" max="100000" required placeholder="全站每分钟验证码数"><input id="public-post-storage-cap" type="number" min="1000000" max="2000000000" required placeholder="帖子内容字节上限"><button type="submit">保存防护设置</button></form><div id="public-post-usage" class="summary-list"></div><p class="form-status" id="public-post-controls-status" role="status"></p></article>
+        <article class="surface-card"><div class="card-heading"><h2>公共发帖防护</h2><span class="muted">修改后立即生效</span></div>
+          <form id="public-post-controls-form" class="model-grid labeled-form">
+            <label>同一来源每小时帖子数<input id="public-post-rate-limit" name="post_rate" type="number" min="1" max="100000" required></label>
+            <label>待审核队列上限<input id="public-post-queue-cap" name="post_queue" type="number" min="1" max="100000" required></label>
+            <label>验证码有效期（秒）<input id="public-post-captcha-ttl" name="captcha_ttl" type="number" min="30" max="3600" required></label>
+            <label>验证码最大尝试<input id="public-post-captcha-attempts" name="captcha_attempts" type="number" min="1" max="20" required></label>
+            <label>验证码字符模式<select id="public-post-captcha-mode" name="captcha_mode"><option value="digits">纯数字</option><option value="letters">纯字母</option><option value="alphanumeric">字母 + 数字</option></select></label>
+            <label>同一来源每小时验证码数<input id="public-post-captcha-issue-limit" name="captcha_issue" type="number" min="1" max="100000" required></label>
+            <label>全站每分钟验证码数<input id="public-post-captcha-global-rate" name="captcha_global" type="number" min="1" max="100000" required></label>
+            <label>单篇正文字符上限<input id="public-post-max-chars" name="post_chars" type="number" min="1" max="20000" required></label>
+            <label>全部帖子容量<input id="public-post-storage-cap" name="post_capacity" type="text" inputmode="decimal" required></label>
+            <label>容量单位<select id="public-post-storage-unit"><option value="1">字节</option><option value="1000">KB</option><option value="1000000">MB</option><option value="1000000000">GB</option></select></label>
+            <button type="submit">保存防护设置</button>
+          </form><div id="public-post-usage" class="summary-list"></div><p class="form-status" id="public-post-controls-status" role="status"></p>
+        </article>
+      </section>
+      <section class="admin-section" data-section-panel="logs" hidden>
+        <div class="section-intro"><div><p class="eyebrow">ACTIVITY LOG</p><h2>活动日志</h2><p>只显示经过授权和脱敏的运行摘要；不会展示令牌、模型正文或私密反思内容。</p></div><button id="refresh-runtime-logs" type="button">刷新</button></div>
+        <article class="surface-card"><div class="card-heading"><h2>生命周期</h2></div><div id="lifecycle-summary" class="summary-list"></div><details><summary>休眠阶段时间线</summary><ol id="lifecycle-timeline" class="activity-timeline"></ol></details></article>
+        <article class="surface-card"><div class="log-toolbar"><label>记录类别<select id="runtime-log-category"><option value="">全部</option><option value="event">运行事件</option><option value="model_call">模型调用</option><option value="action">行为执行</option><option value="routing">资源路由</option><option value="audit">管理审计</option></select></label><label>状态<select id="runtime-log-status"><option value="">全部</option><option value="succeeded">成功</option><option value="failed">失败</option><option value="unknown">结果未知</option><option value="executing">执行中</option><option value="recorded">已记录</option></select></label><label>开始时间<input id="runtime-log-since" type="datetime-local"></label><label>结束时间<input id="runtime-log-until" type="datetime-local"></label><label class="checkbox-field"><input id="runtime-log-auto" type="checkbox" checked>自动更新</label></div><p id="runtime-log-feedback" class="form-status" role="status"></p><div id="runtime-log-list" class="activity-list" aria-live="polite"></div><button id="runtime-log-more" type="button" hidden>加载更早记录</button></article>
       </section>
     </main>
   </div>
@@ -254,6 +333,7 @@
       </div>
     </form>
   </dialog>
+  <dialog id="parameter-help" aria-labelledby="parameter-help-title" class="parameter-help"><form method="dialog"><div class="card-heading"><h2 id="parameter-help-title"></h2><button value="close" title="关闭解释" aria-label="关闭解释">×</button></div><p id="parameter-help-copy"></p></form></dialog>
   <script src="/admin.js" defer></script>
 </body>
 </html>

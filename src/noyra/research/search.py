@@ -12,7 +12,9 @@ import httpx
 from pydantic import SecretStr
 
 from noyra.core.actions import ActionLedger
+from noyra.core.admission import OperationInvalidated, accounting_scope, assert_current_lease
 from noyra.core.database import Database
+from noyra.core.errors import IntegrityError
 from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
     DEFAULT_MAX_RESPONSE_BYTES,
@@ -26,6 +28,7 @@ from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.world import canonical_public_url
 
 from .provider import SearchProviderStore
+from .routing import list_search_provider_controls
 from .types import SearchExecution, SearchProviderRecord, SearchResult
 
 SEARCH_ENDPOINTS = {
@@ -155,7 +158,7 @@ class SearchExecutor:
         if self.provider_health is not None and route_permit is None:
             route_permit = self._claim_route(subject_id, config.config_id)
             if route_permit is None:
-                self.actions.finish(
+                self._finish_action(
                     action.action_id,
                     "failed",
                     {"error": "search_provider_unavailable"},
@@ -170,6 +173,18 @@ class SearchExecutor:
         try:
             response = await self._request(config, normalized_query, limit)
             results = self._parse(config.provider_type, response, limit)
+        except OperationInvalidated:
+            self._finish_action(
+                action.action_id,
+                "failed",
+                {"error": "runtime_epoch_invalidated", "request_sent": False},
+                public_goal_reference=goal_id,
+                public_explanation=(
+                    "Search stopped before sending because runtime admission closed."
+                ),
+                resource_summary="search request not sent",
+            )
+            raise
         except asyncio.CancelledError:
             with contextlib.suppress(Exception):
                 if self.provider_health is not None:
@@ -184,7 +199,7 @@ class SearchExecutor:
                         permit=route_permit,
                         outcome_unknown=True,
                     )
-            self.actions.finish(
+            self._finish_action(
                 action.action_id,
                 "unknown",
                 {"error": "search_cancelled", "outcome_unknown": True},
@@ -209,7 +224,7 @@ class SearchExecutor:
                         permit=route_permit,
                         outcome_unknown=True,
                     )
-            self.actions.finish(
+            self._finish_action(
                 action.action_id,
                 "unknown",
                 {"error": type(error).__name__, "outcome_unknown": True},
@@ -219,6 +234,7 @@ class SearchExecutor:
                 ),
                 resource_summary="search completion unknown after transport failure",
             )
+            assert_current_lease()
             return SearchExecution(
                 action.action_id,
                 config.config_id,
@@ -229,7 +245,9 @@ class SearchExecutor:
             )
         except Exception as error:
             with contextlib.suppress(Exception):
-                if self.provider_health is not None:
+                if self.provider_health is not None and not isinstance(
+                    error, (PermissionError, IntegrityError)
+                ):
                     self.provider_health.record_attempt(
                         subject_id,
                         "search",
@@ -240,7 +258,7 @@ class SearchExecutor:
                         type(error).__name__,
                         permit=route_permit,
                     )
-            self.actions.finish(
+            self._finish_action(
                 action.action_id,
                 "failed",
                 {"error": type(error).__name__},
@@ -250,6 +268,7 @@ class SearchExecutor:
                 ),
                 resource_summary="search request failed",
             )
+            assert_current_lease()
             return SearchExecution(
                 action.action_id,
                 config.config_id,
@@ -270,7 +289,7 @@ class SearchExecutor:
                     None,
                     permit=route_permit,
                 )
-        self.actions.finish(
+        self._finish_action(
             action.action_id,
             "succeeded",
             {
@@ -286,6 +305,7 @@ class SearchExecutor:
             resource_summary=f"{len(results)} search results",
             redaction_reason="search query withheld as private research context",
         )
+        assert_current_lease()
         return SearchExecution(
             action.action_id,
             config.config_id,
@@ -511,10 +531,30 @@ class SearchExecutor:
         self, config: SearchProviderRecord, query: str, limit: int
     ) -> httpx.Response:
         key = self.providers.api_key(config.config_id, subject_id=config.subject_id)
-        return await self._request_provider(config.provider_type, key, query, limit)
+
+        def before_send() -> None:
+            assert_current_lease()
+            if not list_search_provider_controls(self.database, config.subject_id).get(
+                config.config_id, True
+            ):
+                raise PermissionError("search provider is disabled")
+            current_key = self.providers.api_key(config.config_id, subject_id=config.subject_id)
+            if content_hash(current_key) != content_hash(key):
+                raise PermissionError("search provider credential changed before dispatch")
+            assert_current_lease()
+
+        return await self._request_provider(
+            config.provider_type, key, query, limit, before_send=before_send
+        )
 
     async def _request_provider(
-        self, provider_type: str, key: str, query: str, limit: int
+        self,
+        provider_type: str,
+        key: str,
+        query: str,
+        limit: int,
+        *,
+        before_send: Callable[[], None] | None = None,
     ) -> httpx.Response:
         endpoint = SEARCH_ENDPOINTS[provider_type]
         headers = {
@@ -548,12 +588,23 @@ class SearchExecutor:
                 "json": {"q": query, "num": limit},
             }
         deadline = asyncio.get_running_loop().time() + DEFAULT_TOTAL_TIMEOUT_SECONDS
+
+        async def trace(event: str, info: dict[str, Any]) -> None:
+            if event.endswith("send_request_headers.started"):
+                assert_current_lease()
+                if before_send is not None:
+                    before_send()
+
         try:
             async with asyncio.timeout(DEFAULT_TOTAL_TIMEOUT_SECONDS):
+                assert_current_lease()
+                if before_send is not None:
+                    before_send()
                 async with self._client.stream(
                     method,
                     url,
                     follow_redirects=False,
+                    extensions={"trace": trace},
                     **request_kwargs,
                 ) as response:
                     validate_response_headers(response, max_header_bytes=DEFAULT_MAX_HEADER_BYTES)
@@ -583,6 +634,14 @@ class SearchExecutor:
             httpx.RemoteProtocolError,
         ) as error:
             raise SearchOutcomeUnknownError("search provider outcome is unknown") from error
+
+    def _finish_action(
+        self, action_id: str, status: str, result: dict[str, Any], **kwargs: Any
+    ) -> None:
+        # Only terminal action accounting may outlive the runtime lease. No new
+        # reservations or research state updates run under this narrow bypass.
+        with accounting_scope():
+            self.actions.finish(action_id, status, result, **kwargs)
 
     @staticmethod
     def _parse(

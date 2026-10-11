@@ -22,9 +22,26 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, m
 from noyra.core.at_rest import validate_private_file, validate_private_root
 from noyra.core.credentials import read_secret_file
 from noyra.core.database import Database
-from noyra.core.errors import IntegrityError, NotFoundError, RuntimeOwnershipError
+from noyra.core.errors import (
+    IntegrityError,
+    InvalidTransitionError,
+    NotFoundError,
+    RuntimeOwnershipError,
+)
+from noyra.core.evidence_capacity import (
+    evidence_counts,
+    evidence_row_limit,
+    require_evidence_capacity,
+)
+from noyra.core.evidence_schema import MAX_ROUTE_FAILOVERS
 from noyra.core.locking import ProcessLock
 from noyra.core.provider_health import ProviderHealthStore
+from noyra.core.resource_policy import (
+    LIMIT_DIMENSIONS,
+    read_resource_policy,
+    resource_policy_hash,
+    write_resource_policy,
+)
 from noyra.core.secret_cleanup import SecretCleanupQueue
 from noyra.core.types import (
     content_hash,
@@ -39,6 +56,7 @@ from .config import OpenAICompatibleSettings
 from .errors import (
     BudgetExhaustedError,
     ConfigurationError,
+    ModelAuthorizationError,
     ModelCallStateError,
     ProviderCallError,
     StructuredOutputError,
@@ -198,6 +216,19 @@ class CognitiveResourceGroupInput(BaseModel):
     input_usd_per_million: Decimal = Field(default=Decimal("0"), ge=0)
     output_usd_per_million: Decimal = Field(default=Decimal("0"), ge=0)
     max_attempts: int = Field(default=3, ge=1, le=10)
+    pricing_status: Literal["unknown", "priced", "free"] | None = None
+    limit_enabled: dict[str, bool] = Field(
+        default_factory=lambda: dict.fromkeys(LIMIT_DIMENSIONS, True)
+    )
+
+    @field_validator("limit_enabled", mode="before")
+    @classmethod
+    def validate_limit_switches(cls, value: Any) -> dict[str, bool]:
+        if type(value) is not dict or set(value) != set(LIMIT_DIMENSIONS):
+            raise ValueError("all four limit switches are required")
+        if any(type(item) is not bool for item in value.values()):
+            raise ValueError("limit switches must be booleans")
+        return cast(dict[str, bool], value)
 
     @field_validator(
         "priority",
@@ -237,6 +268,10 @@ class CognitiveResourceGroupInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_keys(self) -> CognitiveResourceGroupInput:
+        if self.pricing_status == "free" and (
+            self.input_usd_per_million or self.output_usd_per_million
+        ):
+            raise ValueError("confirmed free pricing requires zero prices")
         fingerprints = [content_hash({"key": key.get_secret_value()}) for key in self.api_keys]
         if any(not key.get_secret_value().strip() for key in self.api_keys):
             raise ValueError("cognitive resource key cannot be blank")
@@ -266,6 +301,15 @@ class CognitiveResourceGroupUpdate(BaseModel):
     input_usd_per_million: Decimal | None = Field(default=None, ge=0)
     output_usd_per_million: Decimal | None = Field(default=None, ge=0)
     max_attempts: int | None = Field(default=None, ge=1, le=10)
+    limit_enabled: dict[str, bool] | None = None
+    expected_updated_at: str | None = Field(default=None, max_length=40)
+    expected_limit_revision: int | None = Field(default=None, ge=1, strict=True)
+    pricing_status: Literal["unknown", "priced", "free"] | None = None
+
+    @field_validator("limit_enabled", mode="before")
+    @classmethod
+    def validate_limit_switches(cls, value: Any) -> dict[str, bool] | None:
+        return None if value is None else CognitiveResourceGroupInput.validate_limit_switches(value)
 
     @field_validator(
         "priority",
@@ -296,7 +340,8 @@ class CognitiveResourceGroupUpdate(BaseModel):
 
     @model_validator(mode="after")
     def require_change(self) -> CognitiveResourceGroupUpdate:
-        if not any(value is not None for value in self.model_dump(mode="python").values()):
+        changes = self.model_dump(exclude={"expected_updated_at", "expected_limit_revision"})
+        if not any(value is not None for value in changes.values()):
             raise ValueError("cognitive resource update must change at least one field")
         return self
 
@@ -324,6 +369,21 @@ class CognitiveResourceGroupRecord:
     available_key_count: int
     created_at: str
     updated_at: str
+    limit_enabled: dict[str, bool]
+    limit_revision: int
+    pricing_status: str
+
+    @property
+    def cost_limit_effective(self) -> bool:
+        return self.pricing_status == "free" or bool(
+            self.input_microusd_per_million or self.output_microusd_per_million
+        )
+
+    @property
+    def cost_only_blocked(self) -> bool:
+        return not self.cost_limit_effective and tuple(
+            self.limit_enabled[name] for name in LIMIT_DIMENSIONS
+        ) == (False, False, False, True)
 
 
 @dataclass(frozen=True)
@@ -392,7 +452,7 @@ class CognitiveResourceStore:
             with self.database.transaction() as connection:
                 existing = connection.execute(
                     "SELECT group_id FROM cognitive_resource_groups WHERE subject_id = ? "
-                    "AND pool = ? AND label = ?",
+                    "AND pool = ? AND label = ? AND status != 'revoked'",
                     (subject_id, proposal.pool, proposal.label),
                 ).fetchone()
                 if existing is not None:
@@ -416,6 +476,18 @@ class CognitiveResourceStore:
                 )
                 self._insert_group_revision(
                     connection, group_id, "active", "operator configured cognitive resource", now
+                )
+                write_resource_policy(
+                    connection,
+                    group_id,
+                    subject_id,
+                    proposal.limit_enabled,
+                    actor=actor,
+                    reason="operator configured limits",
+                    now=now,
+                    pricing_status=(
+                        "priced" if (values[12] or values[13]) else proposal.pricing_status
+                    ),
                 )
                 for key_id, reference, fingerprint, _ in key_rows:
                     key_hash = self._key_hash(
@@ -544,6 +616,20 @@ class CognitiveResourceStore:
             row = self._get_group_row(connection, group_id, subject_id=subject_id)
             if row["status"] == "revoked":
                 raise ValueError("revoked cognitive resources cannot be updated")
+            if (
+                proposal.expected_updated_at is not None
+                and proposal.expected_updated_at != row["updated_at"]
+            ):
+                raise ValueError("cognitive resource update conflict; refresh before retrying")
+            stored_revision = connection.execute(
+                "SELECT revision FROM cognitive_resource_limit_policies WHERE group_id=?",
+                (group_id,),
+            ).fetchone()[0]
+            if (
+                proposal.expected_limit_revision is not None
+                and proposal.expected_limit_revision != stored_revision
+            ):
+                raise ValueError("cognitive resource update conflict; refresh before retrying")
             try:
                 current = list(self._row_values(row))
                 # _row_values is intentionally kept in the same order as the
@@ -577,8 +663,34 @@ class CognitiveResourceStore:
                 raise IntegrityError(
                     f"cognitive resource group durable state is invalid: {group_id}"
                 ) from error
-            if values == stored_values:
+            current_policy = read_resource_policy(connection, group_id, subject_id)
+            policy_changed = (
+                proposal.limit_enabled is not None and proposal.limit_enabled != current_policy
+            )
+            if proposal.pricing_status == "free" and (values[12] or values[13]):
+                raise ValueError("confirmed free pricing requires zero prices")
+            price_status = "priced" if (values[12] or values[13]) else proposal.pricing_status
+            stored_price_status = connection.execute(
+                "SELECT pricing_status FROM cognitive_resource_limit_policies WHERE group_id=?",
+                (group_id,),
+            ).fetchone()[0]
+            if price_status is None:
+                price_status = "unknown" if stored_price_status == "priced" else stored_price_status
+            policy_changed = policy_changed or (
+                price_status is not None and price_status != stored_price_status
+            )
+            if values == stored_values and not policy_changed:
                 raise ValueError("cognitive resource update has no changes")
+            write_resource_policy(
+                connection,
+                group_id,
+                subject_id,
+                proposal.limit_enabled or current_policy,
+                actor=actor,
+                reason=reason,
+                now=now,
+                pricing_status=price_status,
+            )
             state_hash = self._group_hash(group_id, values, row["status"])
             connection.execute(
                 "UPDATE cognitive_resource_groups SET priority = ?, weight = ?, "
@@ -669,28 +781,91 @@ class CognitiveResourceStore:
         pool: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        status: str | None = None,
+        search: str | None = None,
     ) -> builtins.list[CognitiveResourceGroupRecord]:
         page_limit = self._page_limit(limit)
         page_offset = self._page_offset(offset)
+        if pool not in {None, "economy", "deep"} or status not in {
+            None,
+            "active",
+            "disabled",
+            "revoked",
+        }:
+            raise ValueError("invalid resource filters")
+        clauses = ["subject_id = ?"]
+        parameters: list[Any] = [subject_id]
+        for field, value in (("pool", pool), ("status", status)):
+            if value is not None:
+                clauses.append(f"{field} = ?")
+                parameters.append(value)
+        if search:
+            if len(search) > 128:
+                raise ValueError("resource search too long")
+            clauses.append("(instr(lower(label),lower(?))>0 OR instr(lower(model),lower(?))>0)")
+            parameters.extend((search, search))
         with self.database.connection() as connection:
-            if pool is None:
-                rows = connection.execute(
-                    "SELECT * FROM cognitive_resource_groups WHERE subject_id = ? "
-                    "ORDER BY pool, priority, label, group_id LIMIT ? OFFSET ?",
-                    (subject_id, page_limit, page_offset),
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    "SELECT * FROM cognitive_resource_groups WHERE subject_id = ? AND pool = ? "
-                    "ORDER BY priority, label, group_id LIMIT ? OFFSET ?",
-                    (subject_id, pool, page_limit, page_offset),
-                ).fetchall()
+            rows = connection.execute(
+                "SELECT * FROM cognitive_resource_groups WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY pool, priority, label, group_id LIMIT ? OFFSET ?",
+                (*parameters, page_limit, page_offset),
+            ).fetchall()
             return [self._from_group_row(connection, row) for row in rows]
 
     def active(
         self, subject_id: str, pool: CognitivePool
     ) -> builtins.list[CognitiveResourceGroupRecord]:
         return [record for record in self.list(subject_id, pool=pool) if record.status == "active"]
+
+    def budget_summary(self, group: CognitiveResourceGroupRecord) -> dict[str, Any]:
+        now = datetime.now(UTC)
+        fields = ("attempts", "input_tokens", "output_tokens", "cost_microusd")
+        with self.database.read_transaction() as connection:
+            usage = ModelLedger._budget_status_connection(
+                connection,
+                group.subject_id,
+                RoutedModelGateway._limits_for_group(group),
+                now.date().isoformat(),
+                resource_pool=group.pool,
+                resource_group_id=group.group_id,
+            )
+            reserved = connection.execute(
+                "SELECT COUNT(*) attempts, "
+                "COALESCE(SUM(a.reserved_input_tokens),0) input_tokens, "
+                "COALESCE(SUM(a.reserved_output_tokens),0) output_tokens, "
+                "COALESCE(SUM(a.reserved_cost_microusd),0) cost_microusd "
+                "FROM model_attempts a JOIN model_calls c ON c.call_id=a.call_id "
+                "WHERE c.subject_id=? AND c.resource_group_id=? AND a.budget_day=? "
+                "AND a.status IN ('authorized','executing','unknown')",
+                (group.subject_id, group.group_id, now.date().isoformat()),
+            ).fetchone()
+            pending = connection.execute(
+                "SELECT COUNT(*) FROM secret_cleanup_queue q "
+                "JOIN cognitive_resource_keys k ON k.key_id=q.resource_id "
+                "WHERE k.group_id=? AND q.status != 'removed'",
+                (group.group_id,),
+            ).fetchone()[0]
+            pool_counts = connection.execute(
+                "SELECT COUNT(*) active_resources, COALESCE(SUM(CASE WHEN EXISTS ("
+                "SELECT 1 FROM cognitive_resource_keys k WHERE k.group_id=g.group_id "
+                "AND k.subject_id=g.subject_id AND (k.status='active' OR "
+                "(k.status='cooldown' AND k.cooldown_until<=?))) THEN 1 ELSE 0 END),0) "
+                "available_resources FROM cognitive_resource_groups g "
+                "WHERE g.subject_id=? AND g.pool=? AND g.status='active'",
+                (utc_now(), group.subject_id, group.pool),
+            ).fetchone()
+        return {
+            "today_usage": {field: str(getattr(usage, field)) for field in fields},
+            "cost_limit_effective": group.cost_limit_effective,
+            "cost_only_blocked": group.cost_only_blocked,
+            "reserved": {field: str(reserved[field]) for field in fields},
+            "cleanup_pending": pending,
+            "pool_summary": dict(pool_counts),
+            "reset_at_utc": (now + timedelta(days=1))
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .isoformat(),
+        }
 
     def get(self, group_id: str, *, subject_id: str) -> CognitiveResourceGroupRecord:
         with self.database.connection() as connection:
@@ -913,6 +1088,20 @@ class CognitiveResourceStore:
                     "created_at": created_at,
                     "updated_at": updated_at,
                 }
+                read_resource_policy(connection, group_id, subject_id)
+                expected_revision = 1
+                for policy in connection.execute(
+                    "SELECT * FROM cognitive_resource_limit_revisions WHERE group_id=? "
+                    "ORDER BY revision",
+                    (group_id,),
+                ):
+                    if (
+                        policy["subject_id"] != subject_id
+                        or policy["revision"] != expected_revision
+                        or resource_policy_hash(policy) != policy["state_hash"]
+                    ):
+                        raise IntegrityError("cognitive resource limit history mismatch")
+                    expected_revision += 1
 
             for row in connection.execute(
                 """SELECT k.*, k.rowid AS storage_rowid,
@@ -1645,7 +1834,7 @@ class CognitiveResourceStore:
                 else:
                     if status == "waiting":
                         valid = (
-                            state["previous_status"] == "waiting"
+                            state["previous_status"] in {"waiting", "resolved", "cancelled"}
                             and retry_count == state["previous_retry_count"] + 1
                         )
                     else:
@@ -1775,6 +1964,8 @@ class CognitiveResourceStore:
     def _page_offset(value: int) -> int:
         if type(value) is not int:
             raise TypeError("resource page offset must be an integer")
+        if value > SQLITE_INT64_MAX:
+            raise ValueError("resource page offset is too large")
         return max(0, value)
 
     def add_keys(
@@ -2107,6 +2298,19 @@ class CognitiveResourceStore:
             int(counts["available"] or 0),
             row["created_at"],
             row["updated_at"],
+            read_resource_policy(connection, row["group_id"], row["subject_id"]),
+            int(
+                connection.execute(
+                    "SELECT revision FROM cognitive_resource_limit_policies WHERE group_id=?",
+                    (row["group_id"],),
+                ).fetchone()[0]
+            ),
+            str(
+                connection.execute(
+                    "SELECT pricing_status FROM cognitive_resource_limit_policies WHERE group_id=?",
+                    (row["group_id"],),
+                ).fetchone()[0]
+            ),
         )
 
     @classmethod
@@ -2425,6 +2629,11 @@ class RoutedModelGateway(ModelGateway):
         self.wait_base_seconds = wait_base_seconds
         self.wait_max_seconds = wait_max_seconds
         self.max_group_failovers = max_group_failovers
+        if (
+            type(max_group_failovers) is not int
+            or not 0 <= max_group_failovers <= MAX_ROUTE_FAILOVERS
+        ):
+            raise ValueError("route failovers must be between 0 and 32")
         self.capture_model_io = capture_model_io
         self.capture_model_io_getter = capture_model_io_getter
         self.enforce_training_policy = enforce_training_policy
@@ -2503,13 +2712,21 @@ class RoutedModelGateway(ModelGateway):
                 "idempotency_key": idempotency_key,
             }
         )
-        process_lock = ProcessLock(
+        legacy_path = (
             self.database.path.with_name(f".{self.database.path.name}.model-route-locks")
             / f"{route_digest}.lock"
         )
+        # Fixed files avoid unlink races; hash collisions conservatively refuse work.
+        process_lock = ProcessLock(
+            self.database.path.with_name(f".{self.database.path.name}.model-route-locks-v2")
+            / f"{int(route_digest[:8], 16) % 256:02x}.lock"
+        )
+        legacy_lock = ProcessLock(legacy_path) if legacy_path.exists() else None
         try:
             try:
                 process_lock.acquire()
+                if legacy_lock is not None:
+                    legacy_lock.acquire()
             except RuntimeOwnershipError as error:
                 raise ProviderCallError(
                     "routed_model_call_in_progress",
@@ -2526,8 +2743,14 @@ class RoutedModelGateway(ModelGateway):
                 temperature=temperature,
             )
         finally:
-            process_lock.release()
-            self._release_logical_route(lock_key, lock, acquired=True)
+            try:
+                if legacy_lock is not None:
+                    legacy_lock.release()
+            finally:
+                try:
+                    process_lock.release()
+                finally:
+                    self._release_logical_route(lock_key, lock, acquired=True)
 
     async def _complete_structured_locked(
         self,
@@ -2544,14 +2767,6 @@ class RoutedModelGateway(ModelGateway):
             raise PermissionError("routed model gateway cannot serve another subject")
         pool = self.pool_for_purpose(purpose)
         self.limits = self._aggregate_limits(pool)
-        decision = self._record_decision(
-            purpose,
-            pool,
-            selected_route=f"{pool}_model",
-            group_id=None,
-            key_id=None,
-            reason_code="purpose_classified_locally",
-        )
         # A routed logical request is fenced by its first ambiguous physical
         # call.  This check must happen before cache recovery, retry timers, or
         # key selection: a later key can never prove that the first provider
@@ -2561,17 +2776,6 @@ class RoutedModelGateway(ModelGateway):
             if logical_state.disposition == "retry":
                 forced_state = logical_state
             else:
-                self._record_unavailable(
-                    pool,
-                    purpose,
-                    "model_outcome_unknown_quarantined",
-                    force=True,
-                )
-                self._finish_decision(
-                    decision.decision_id,
-                    "deferred",
-                    "model_outcome_unknown_quarantined",
-                )
                 raise ProviderCallError(
                     "routed_model_call_quarantined",
                     retryable=False,
@@ -2587,24 +2791,21 @@ class RoutedModelGateway(ModelGateway):
         )
         if recovered is not None and forced_state is None:
             self._resolve_wait(pool, purpose)
-            self._finish_decision(
-                decision.decision_id,
-                "cached",
-                "idempotent_route_recovered",
-                result=recovered,
-            )
             return recovered
         if forced_state is None and not self._retry_due(pool, purpose):
-            self._finish_decision(
-                decision.decision_id,
-                "deferred",
-                "resource_retry_not_due",
-            )
             raise ProviderCallError(
                 f"{pool}_pool_waiting",
                 retryable=False,
                 outcome_unknown=False,
             )
+        decision = self._record_decision(
+            purpose,
+            pool,
+            selected_route=f"{pool}_model",
+            group_id=None,
+            key_id=None,
+            reason_code="purpose_classified_locally",
+        )
         groups = self.resources.active(subject_id, pool)
         if forced_state is not None and not groups:
             self._finish_decision(
@@ -2840,13 +3041,31 @@ class RoutedModelGateway(ModelGateway):
                         latency,
                     )
                     terminal_error = error
-                    if isinstance(error, ModelCallStateError):
+                    if isinstance(error, ModelCallStateError) and not isinstance(
+                        error, ModelAuthorizationError
+                    ):
                         # Another worker may have claimed the same logical
                         # request between route inspection and durable
                         # preparation.  This is not a provider failure and
                         # must never trigger credential failover.
                         route_in_progress = True
                     break
+                except InvalidTransitionError as error:
+                    if str(error) != "evidence_capacity_reached":
+                        raise
+                    self._record_attempt(
+                        decision.decision_id,
+                        group.group_id,
+                        key.key_id,
+                        attempt_number,
+                        "failed",
+                        "evidence_capacity_reached",
+                        int((time.monotonic() - started) * 1000),
+                    )
+                    self._finish_decision(
+                        decision.decision_id, "failed", "evidence_capacity_reached"
+                    )
+                    raise
                 else:
                     latency = int((time.monotonic() - started) * 1000)
                     with suppress(Exception):
@@ -3254,9 +3473,13 @@ class RoutedModelGateway(ModelGateway):
                 )
             result[pool] = {
                 "status": "healthy"
-                if any(group.available_key_count > 0 for group in groups)
+                if any(
+                    group.available_key_count > 0 and not group.cost_only_blocked
+                    for group in groups
+                )
                 else "unavailable",
                 "group_count": len(groups),
+                "cost_only_blocked_count": sum(group.cost_only_blocked for group in groups),
                 "key_count": sum(group.key_count for group in groups),
                 "available_key_count": sum(group.available_key_count for group in groups),
                 "today_attempts": usage.attempts,
@@ -3301,6 +3524,9 @@ class RoutedModelGateway(ModelGateway):
             resource_pool=group.pool,
             resource_group_id=group.group_id,
             pool_limits=self._aggregate_limits(group.pool),
+            resource_revision=group.limit_revision,
+            resource_key_id=key.key_id,
+            resource_key_fingerprint=key.key_fingerprint,
             capture_model_io=self.capture_model_io,
             capture_model_io_getter=self.capture_model_io_getter,
             enforce_training_policy=self.enforce_training_policy,
@@ -3371,6 +3597,7 @@ class RoutedModelGateway(ModelGateway):
             "created_at": now,
         }
         with self.database.transaction() as connection:
+            require_evidence_capacity(connection, self.subject_id, "cognitive_route_decisions")
             connection.execute(
                 """INSERT INTO cognitive_route_decisions(
                     decision_id, subject_id, purpose, task_kind, selected_route, pool,
@@ -3435,6 +3662,26 @@ class RoutedModelGateway(ModelGateway):
             "created_at": now,
         }
         with self.database.transaction() as connection:
+            # Selection reserves its matching terminal row; settlement never checks capacity.
+            existing = connection.execute(
+                "SELECT outcome FROM cognitive_route_attempts "
+                "WHERE decision_id=? AND attempt_number=?",
+                (decision_id, attempt_number),
+            ).fetchall()
+            if (
+                any(row[0] != "selected" for row in existing)
+                or (outcome == "selected" and existing)
+                or (outcome != "selected" and not existing)
+            ):
+                raise IntegrityError("routing attempt transition invalid")
+            if outcome == "selected":
+                selected = connection.execute(
+                    "SELECT count(*) FROM cognitive_route_attempts WHERE decision_id=? "
+                    "AND outcome='selected'",
+                    (decision_id,),
+                ).fetchone()[0]
+                if selected >= MAX_ROUTE_FAILOVERS:
+                    raise InvalidTransitionError("evidence_capacity_reached")
             connection.execute(
                 """INSERT INTO cognitive_route_attempts(
                     attempt_id, subject_id, decision_id, group_id, key_id, attempt_number,
@@ -3512,6 +3759,9 @@ class RoutedModelGateway(ModelGateway):
     ) -> None:
         now = utc_now()
         with self.database.transaction() as connection:
+            counts = evidence_counts(connection, self.subject_id)
+            if counts.get("waiting_cognitive_task_revisions", 0) >= evidence_row_limit():
+                return
             row = connection.execute(
                 "SELECT * FROM waiting_cognitive_tasks WHERE subject_id = ? AND pool = ? "
                 "AND purpose = ? AND status = 'waiting'",
@@ -3528,7 +3778,9 @@ class RoutedModelGateway(ModelGateway):
                     (self.subject_id, pool, purpose),
                 ).fetchone()
             retry_count = 1 if row is None else int(row["retry_count"]) + 1
-            delay = min(self.wait_max_seconds, self.wait_base_seconds * (2 ** (retry_count - 1)))
+            delay = min(
+                self.wait_max_seconds, self.wait_base_seconds * (2 ** min(retry_count - 1, 32))
+            )
             next_retry = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat(
                 timespec="milliseconds"
             )
@@ -3546,6 +3798,8 @@ class RoutedModelGateway(ModelGateway):
                 "updated_at": now,
             }
             if row is None:
+                if counts.get("waiting_cognitive_tasks", 0) >= evidence_row_limit():
+                    return
                 connection.execute(
                     """INSERT INTO waiting_cognitive_tasks(
                         task_id, subject_id, pool, purpose, status, reason_code,
@@ -3636,6 +3890,15 @@ class RoutedModelGateway(ModelGateway):
         next_retry_at: str,
         now: str,
     ) -> None:
+        if status == "waiting":
+            owner = connection.execute(
+                "SELECT subject_id FROM waiting_cognitive_tasks WHERE task_id=?", (task_id,)
+            ).fetchone()[0]
+            if (
+                evidence_counts(connection, owner).get("waiting_cognitive_task_revisions", 0)
+                >= evidence_row_limit()
+            ):
+                raise InvalidTransitionError("evidence_capacity_reached")
         payload = {
             "task_id": task_id,
             "status": status,
@@ -3673,6 +3936,7 @@ class RoutedModelGateway(ModelGateway):
             sum(group.daily_input_tokens for group in groups),
             sum(group.daily_output_tokens for group in groups),
             sum(group.daily_cost_microusd for group in groups),
+            tuple(all(group.limit_enabled[name] for group in groups) for name in LIMIT_DIMENSIONS),
         )
 
     @staticmethod
@@ -3687,6 +3951,7 @@ class RoutedModelGateway(ModelGateway):
             group.daily_input_tokens,
             group.daily_output_tokens,
             group.daily_cost_microusd,
+            tuple(group.limit_enabled[name] for name in LIMIT_DIMENSIONS),
         )
 
 

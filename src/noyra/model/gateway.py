@@ -6,12 +6,13 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 from noyra.core.admission import OperationInvalidated, assert_current_lease
-from noyra.core.errors import IntegrityError
+from noyra.core.errors import IntegrityError, InvalidTransitionError
 from noyra.core.redaction import redact_payload
 from noyra.core.types import canonical_json, content_hash
 
 from .errors import (
     BudgetExhaustedError,
+    ModelAuthorizationError,
     ModelCallStateError,
     ProviderCallError,
     StructuredOutputError,
@@ -51,6 +52,9 @@ class ModelGateway:
         capture_model_io: bool = False,
         capture_model_io_getter: Callable[[], bool] | None = None,
         enforce_training_policy: bool = False,
+        resource_revision: int | None = None,
+        resource_key_id: str | None = None,
+        resource_key_fingerprint: str | None = None,
     ):
         if not model.strip():
             raise ValueError("model name is required")
@@ -70,6 +74,9 @@ class ModelGateway:
         self.capture_model_io = capture_model_io
         self.capture_model_io_getter = capture_model_io_getter
         self.enforce_training_policy = enforce_training_policy
+        self.resource_revision = resource_revision
+        self.resource_key_id = resource_key_id
+        self.resource_key_fingerprint = resource_key_fingerprint
 
     async def complete_structured(
         self,
@@ -151,25 +158,103 @@ class ModelGateway:
                     resource_group_id=self.resource_group_id,
                     pool_limits=self.pool_limits,
                     continuation=attempt_index > 1,
+                    expected_resource_revision=self.resource_revision,
+                    refresh_pool_limits=self.resource_revision is not None,
+                    resource_key_id=self.resource_key_id,
+                    resource_key_fingerprint=self.resource_key_fingerprint,
+                    pricing=self.pricing,
                 )
-            except BudgetExhaustedError:
+            except (BudgetExhaustedError, ModelAuthorizationError) as error:
                 self.ledger.finish_call(
                     call.call_id,
                     "failed",
-                    error_code="budget_exhausted",
+                    error_code=(
+                        "cost_only_pricing_unknown"
+                        if str(error) == "cost_only_pricing_unknown"
+                        else "budget_exhausted"
+                    )
+                    if isinstance(error, BudgetExhaustedError)
+                    else "model_authorization_denied",
                 )
                 raise
-            self.ledger.start_attempt(attempt.attempt_id)
+            except InvalidTransitionError as error:
+                if str(error) != "evidence_capacity_reached":
+                    raise
+                # No new attempt was admitted; preserve all earlier settled usage.
+                self.ledger.finish_call(
+                    call.call_id, "failed", error_code="evidence_capacity_reached"
+                )
+                raise
+
+            send_denied = False
+
+            def before_send() -> None:
+                nonlocal send_denied
+                try:
+                    assert_current_lease()
+                except OperationInvalidated:
+                    send_denied = True
+                    raise
+                self.ledger.check_request_authorization(
+                    call.call_id,
+                    resource_key_id=self.resource_key_id,
+                    resource_key_fingerprint=self.resource_key_fingerprint,
+                    expected_resource_revision=self.resource_revision,
+                )
+                try:
+                    assert_current_lease()
+                except OperationInvalidated:
+                    send_denied = True
+                    raise
+
+            try:
+                self.ledger.start_attempt(
+                    attempt.attempt_id,
+                    resource_key_id=self.resource_key_id,
+                    resource_key_fingerprint=self.resource_key_fingerprint,
+                    expected_resource_revision=self.resource_revision,
+                )
+                before_send()
+            except (ModelAuthorizationError, OperationInvalidated) as error:
+                code = (
+                    "runtime_epoch_invalidated"
+                    if isinstance(error, OperationInvalidated)
+                    else "model_authorization_denied"
+                )
+                self.ledger.cancel_unsent_attempt(attempt.attempt_id, error_code=code)
+                self.ledger.finish_call(call.call_id, "failed", error_code=code)
+                raise
+
+            from .openai_compatible import OpenAICompatibleProvider
+
+            if isinstance(self.provider, OpenAICompatibleProvider):
+                self.provider.before_send = before_send
 
             stale_operation = False
             try:
-                assert_current_lease()
+                before_send()
                 provider_response = await self.provider.complete(request)
                 try:
                     assert_current_lease()
                 except OperationInvalidated:
                     stale_operation = True
+            except ModelAuthorizationError:
+                self.ledger.cancel_unsent_attempt(
+                    attempt.attempt_id, error_code="model_authorization_denied"
+                )
+                self.ledger.finish_call(
+                    call.call_id, "failed", error_code="model_authorization_denied"
+                )
+                raise
             except OperationInvalidated:
+                if send_denied:
+                    self.ledger.cancel_unsent_attempt(
+                        attempt.attempt_id, error_code="runtime_epoch_invalidated"
+                    )
+                    self.ledger.finish_call(
+                        call.call_id, "failed", error_code="runtime_epoch_invalidated"
+                    )
+                    raise
                 self.ledger.finish_attempt(
                     attempt.attempt_id,
                     "unknown",
@@ -257,6 +342,7 @@ class ModelGateway:
                 usage=usage,
                 cost_microusd=cost_microusd,
                 provider_request_id=provider_response.provider_request_id,
+                usage_estimated=usage_estimated,
             )
             if stale_operation:
                 # The provider side effect is already complete, so preserve

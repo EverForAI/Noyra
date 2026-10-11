@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .database import Database
 from .errors import IntegrityError
-from .types import content_hash, new_id, utc_now
+from .types import content_hash, new_id, strict_int, strict_json_loads, utc_now
 
 
 def _parse_time(value: str | None) -> datetime | None:
@@ -192,16 +193,57 @@ class ProviderHealthStore:
 
     @classmethod
     def _verify_bucket(cls, row: Any) -> None:
-        attempts = int(row["attempt_count"])
-        successes = int(row["success_count"])
-        failures = int(row["failure_count"])
-        unknown = int(row["unknown_count"])
-        latency = int(row["latency_total_ms"])
         try:
-            error_counts = json.loads(row["error_counts_json"] or "{}")
-            latency_samples = json.loads(row["latency_samples_json"] or "[]")
-        except (TypeError, ValueError) as error:
+            attempts = strict_int(row["attempt_count"])
+            successes = strict_int(row["success_count"])
+            failures = strict_int(row["failure_count"])
+            unknown = strict_int(row["unknown_count"])
+            latency = strict_int(row["latency_total_ms"])
+            error_counts = strict_json_loads(row["error_counts_json"])
+            latency_samples = strict_json_loads(row["latency_samples_json"])
+        except (TypeError, ValueError, OverflowError) as error:
             raise IntegrityError("provider health detail counters are invalid") from error
+        if (
+            not isinstance(error_counts, dict)
+            or any(
+                category
+                not in {"timeout", "rate_limited", "auth", "schema", "server_error", "unknown"}
+                or type(count) is not int
+                or count < 0
+                for category, count in error_counts.items()
+            )
+            or sum(error_counts.values()) > attempts
+            or not isinstance(latency_samples, list)
+            or len(latency_samples) > min(128, attempts)
+            or any(type(sample) is not int or sample < 0 for sample in latency_samples)
+            or sum(latency_samples) > latency
+        ):
+            raise IntegrityError("provider health detail counters are invalid")
+        modern_hash = cls._bucket_hash(
+            row["subject_id"],
+            row["provider_kind"],
+            row["provider_id"],
+            row["bucket_start"],
+            attempts,
+            successes,
+            failures,
+            latency,
+            unknown,
+            row["last_success_at"],
+            row["last_failure_at"],
+            error_counts,
+            latency_samples,
+        )
+        # The old hash authenticates only original counters. It must not lend
+        # authority to any added details or timestamps, even plausible ones.
+        legacy_valid = (
+            row["state_hash"] == cls._legacy_bucket_hash(row)
+            and not error_counts
+            and not latency_samples
+            and unknown == 0
+            and row["last_success_at"] is None
+            and row["last_failure_at"] is None
+        )
         if (
             attempts < 0
             or successes < 0
@@ -209,57 +251,72 @@ class ProviderHealthStore:
             or unknown < 0
             or successes + failures + unknown != attempts
             or latency < 0
-            or row["state_hash"]
-            not in {
-                cls._bucket_hash(
-                    row["subject_id"],
-                    row["provider_kind"],
-                    row["provider_id"],
-                    row["bucket_start"],
-                    attempts,
-                    successes,
-                    failures,
-                    latency,
-                    unknown,
-                    row["last_success_at"],
-                    row["last_failure_at"],
-                    error_counts,
-                    latency_samples,
-                ),
-                cls._legacy_bucket_hash(row),
-            }
+            or (row["state_hash"] != modern_hash and not legacy_valid)
         ):
             raise IntegrityError("provider health bucket integrity check failed")
+        for key in ("bucket_start", "last_success_at", "last_failure_at"):
+            cls._verify_timestamp(row[key], required=key == "bucket_start")
+
+    @staticmethod
+    def _verify_timestamp(value: Any, *, required: bool = False) -> None:
+        if value is None and not required:
+            return
+        try:
+            if not isinstance(value, str) or not value:
+                raise ValueError()
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError()
+        except (TypeError, ValueError, OverflowError) as error:
+            raise IntegrityError("provider health timestamp is invalid") from error
 
     @classmethod
     def _verify_state(cls, row: Any) -> None:
-        consecutive = int(row["consecutive_failures"])
+        try:
+            consecutive = strict_int(row["consecutive_failures"])
+        except (TypeError, ValueError) as error:
+            raise IntegrityError("provider health state counters are invalid") from error
+        modern_hash = cls._state_hash(
+            row["subject_id"],
+            row["provider_kind"],
+            row["provider_id"],
+            row["state"],
+            row["cooldown_until"],
+            row["probe_token"],
+            row["probe_started_at"],
+            consecutive,
+            row["last_success_at"],
+            row["last_failure_at"],
+            row["updated_at"],
+        )
+        legacy_valid = row["state_hash"] == cls._legacy_state_hash(row) and all(
+            row[key] is None
+            for key in ("probe_token", "probe_started_at", "last_success_at", "last_failure_at")
+        )
         if (
             row["state"] not in {"healthy", "degraded", "cooldown", "half_open"}
             or consecutive < 0
             or not isinstance(row["updated_at"], str)
-            or row["state_hash"]
-            not in {
-                cls._state_hash(
-                    row["subject_id"],
-                    row["provider_kind"],
-                    row["provider_id"],
-                    row["state"],
-                    row["cooldown_until"],
-                    row["probe_token"],
-                    row["probe_started_at"],
-                    consecutive,
-                    row["last_success_at"],
-                    row["last_failure_at"],
-                    row["updated_at"],
-                ),
-                cls._legacy_state_hash(row),
-            }
+            or (row["state_hash"] != modern_hash and not legacy_valid)
+            or (row["probe_token"] is None) != (row["probe_started_at"] is None)
+            or (
+                row["probe_token"] is not None
+                and (
+                    row["state"] != "half_open"
+                    or not isinstance(row["probe_token"], str)
+                    or not row["probe_token"].strip()
+                )
+            )
         ):
             raise IntegrityError("provider health state integrity check failed")
-        for key in ("cooldown_until", "probe_started_at", "last_success_at", "last_failure_at"):
-            if row[key] is not None and _parse_time(row[key]) is None:
-                raise IntegrityError("provider health timestamp is invalid")
+        for key in (
+            "updated_at",
+            "cooldown_until",
+            "probe_started_at",
+            "last_success_at",
+            "last_failure_at",
+        ):
+            cls._verify_timestamp(row[key], required=key == "updated_at")
 
     def record_attempt(
         self,
@@ -486,17 +543,22 @@ class ProviderHealthStore:
 
     def list_projection(self, subject_id: str, provider_kind: str) -> list[dict[str, Any]]:
         with self.database.connection() as connection:
+            deadline = time.monotonic() + 5
+            connection.set_progress_handler(lambda: int(time.monotonic() > deadline), 2_000)
             states = connection.execute(
                 """
                 SELECT * FROM provider_health_state
-                WHERE subject_id=? AND provider_kind=? ORDER BY provider_id
+                WHERE subject_id=? AND provider_kind=? ORDER BY provider_id LIMIT 10001
                 """,
                 (subject_id, provider_kind),
             ).fetchall()
             buckets = connection.execute(
-                "SELECT * FROM provider_health_buckets WHERE subject_id=? AND provider_kind=?",
+                "SELECT * FROM provider_health_buckets WHERE subject_id=? AND provider_kind=? "
+                "LIMIT 200001",
                 (subject_id, provider_kind),
             ).fetchall()
+            if len(states) > 10_000 or len(buckets) > 200_000:
+                raise ValueError("provider health read budget exceeded")
         aggregates: dict[str, dict[str, Any]] = {}
         for bucket in buckets:
             self._verify_bucket(bucket)
@@ -586,6 +648,10 @@ class ProviderHealthStore:
                     "window_start": aggregate["window_start"],
                     "window_end": aggregate["window_end"],
                     "bucket_count": int(aggregate["bucket_count"]),
+                    "latency_sample_count": len(samples),
+                    "last_failure_at": row["last_failure_at"],
+                    "probe_in_progress": bool(row["probe_token"]),
+                    "probe_started_at": row["probe_started_at"],
                 }
             )
         # Unknown outcomes may be recorded before a breaker state is created.
@@ -615,6 +681,9 @@ class ProviderHealthStore:
                     "window_start": aggregate["window_start"],
                     "window_end": aggregate["window_end"],
                     "bucket_count": int(aggregate["bucket_count"]),
+                    "latency_sample_count": len(samples),
+                    "probe_in_progress": False,
+                    "last_failure_at": None,
                 }
             )
         return result

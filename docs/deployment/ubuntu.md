@@ -56,6 +56,34 @@ session expires according to `NOYRA_ADMIN_SESSION_TTL_SECONDS` and every write
 requires a CSRF token. The proxy examples include both origins and the complete
 loopback, trusted-proxy, and secure-cookie settings.
 
+### HTTP log privacy
+
+Noyra access logs contain only a fixed event, an allowlisted method, a route
+template (dynamic IDs omitted), and a numeric status. Queries, headers, bodies,
+unknown paths and raw protocol errors are never log fields. This also applies
+to failed/unauthorized requests and webhook paths.
+
+Include the entire nginx example inside the `http` context, for example as
+`/etc/nginx/conf.d/noyra.conf`. Its `map` and `log_format` directives do not
+belong inside a `server` block. Both HTTP and HTTPS servers explicitly use
+`noyra_privacy`: method, status and duration only. Do not replace it with
+`combined`, or append `$request`, `$request_uri`, `$uri`, `$args`, headers or
+upstream payloads. Redirects still preserve their original target, but logging
+does not. nginx cannot field-filter its error records, which can include the
+raw target; these two servers therefore send their raw error logs to
+`/dev/null`. Use their safe access status/timing and Noyra's route/error events
+for request diagnostics. Global startup/configuration error logs are unchanged.
+
+Before applying a proxy change, back up its configuration, run `nginx -t`
+(or `caddy validate` for Caddy), and check an isolated private-search and
+malformed-request sample in **all** active log destinations. The Caddy example
+and generated setup do not enable access logging; do not add unfiltered
+access/debug/request dumps. Existing host-wide proxy error/debug logs,
+default virtual hosts, CDN/tunnel logs, tracing and forwarding agents need
+their own review: updating a repository example does not modify their running
+configuration. Log retention/reader permissions and historical logs must be
+reviewed separately; this fix neither deletes old logs nor rotates credentials.
+
 The optional root-owned `NOYRA_OPERATOR_TOKEN_FILE` keeps the active operator token out of the
 environment file. Rotate it on the server with `sudo scripts/rotate-operator-token.sh`; the script
 atomically replaces the token, updates the environment file, restarts Noyra, and verifies that the
@@ -374,8 +402,12 @@ curl --fail http://127.0.0.1:8765/health
 
 The unit runs without root privileges and applies a read-only system filesystem, private temporary
 directory, no-new-privileges, kernel protection, and an explicit write exception only for
-`/var/lib/noyra`. `NOYRA_REQUEST_TIMEOUT_SECONDS` bounds slow or incomplete HTTP request bodies;
-keep an equivalent or shorter timeout at the reverse proxy as well.
+`/var/lib/noyra`. `NOYRA_REQUEST_TIMEOUT_SECONDS` is one elapsed-time budget from
+the request line through headers and body, also shared with an async handler bridge
+and upgrade metadata reads. Receiving another byte does not reset it. Slow or
+incomplete requests close the connection; bounded async work is cancelled and its
+existing ownership/drain protection remains in effect. Choose a budget that permits
+legitimate uploads, and keep an equivalent or shorter timeout at the reverse proxy.
 
 ## Docker Compose
 

@@ -15,6 +15,7 @@ from noyra.core.types import (
 
 from .errors import CausalValidationError
 from .types import CausalLinkRecord
+from .validation import validate_causal_source_ids
 
 ENTITY_TABLES: dict[str, tuple[str, str]] = {
     "event": ("events", "event_id"),
@@ -154,6 +155,17 @@ class CausalStore:
         ).fetchone()
         if row is None:
             raise CausalValidationError("causal entity is missing or belongs to another subject")
+        if entity_type in {
+            "event",
+            "appraisal",
+            "affect_transition",
+            "goal",
+            "memory",
+            "belief",
+            "relationship",
+            "psychological_snapshot",
+        }:
+            validate_causal_source_ids(connection, subject_id, (entity_id,))
 
     @staticmethod
     def _from_row(row: Any) -> CausalLinkRecord:

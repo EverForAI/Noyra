@@ -6,7 +6,6 @@ const MAX_EXPORT_DOWNLOAD_BYTES = 128 * 1024 * 1024;
 let publicPostCaptchaId = "";
 let publicPostIdempotencyKey = "";
 let publicPostCaptchaGeneration = 0;
-let publicPostCaptchaPresentation = "image";
 
 // Private management routes and forms belong exclusively to /admin.
 // These names document the boundary covered by the compatibility contract:
@@ -48,6 +47,7 @@ const escapeHtml = (value) => String(value ?? "")
   .replaceAll(">", "&gt;")
   .replaceAll('"', "&quot;")
   .replaceAll("'", "&#039;");
+function formatTime(value) { if (!value) return "暂无"; const time = new Date(value); return Number.isNaN(time.getTime()) ? "暂无" : time.toLocaleString(); }
 
 async function getJson(path, options = {}) {
   const response = await fetch(path, {
@@ -67,6 +67,7 @@ function publicErrorMessage(error) {
     public_post_integrity_unavailable: "公开内容服务正在进行完整性检查，请稍后再试。",
     public_post_capacity_full: "当前公开投稿容量已满，请稍后再试。",
     public_post_queue_full: "审核队列暂时已满，请稍后再试。",
+    public_post_too_long: "正文超过当前字符上限，请缩短内容后重试。",
     captcha_rate_limited: "验证码请求过于频繁，请稍后再试。",
     invalid_captcha: "验证码不正确或已过期，请换一张。",
     public_network_unavailable: "公开档案暂时无法连接，请稍后刷新页面。",
@@ -114,20 +115,21 @@ async function loadState(generation, signal) {
   const privatePlanNode = document.querySelector("#private-plan");
   const stateFormatNode = document.querySelector("#state-format");
   if (identity) identity.textContent = state.display_name || state.subject_id || "Noyra";
-  if (lifecycleNode) lifecycleNode.textContent = state.lifecycle?.state || "-";
+  const lifecycleLabels = {active:"活跃",deep_sleep:"深度休眠",sleeping:"休眠",reflecting:"反思",orienting:"定向",booting:"启动",paused:"暂停",stopped:"停止"};
+  if (lifecycleNode) lifecycleNode.textContent = lifecycleLabels[state.lifecycle?.state] || state.lifecycle?.state || "-";
   if (onlineNode) onlineNode.textContent = state.online ? "在线" : "离线";
   if (versionNode) versionNode.textContent = state.schema_version ?? "-";
   if (diaryCountNode) diaryCountNode.textContent = state.public_diary_count ?? "-";
   if (privatePlanNode) privatePlanNode.textContent = "未公开";
   if (stateFormatNode) stateFormatNode.textContent = state.schema || "-";
-  const lifecycle = state.lifecycle?.state || "未知";
+  const lifecycle = lifecycleLabels[state.lifecycle?.state] || state.lifecycle?.state || "未知";
   const dot = document.querySelector("#header-state-dot");
   const label = document.querySelector("#header-state-label");
   dot?.classList.toggle("is-online", Boolean(state.online));
   dot?.classList.toggle("is-offline", !state.online);
   if (label) label.textContent = state.online ? "在线运行" : "暂时离线";
   const status = document.querySelector("#subject-status");
-  if (status) status.textContent = state.online ? "公开状态可读取" : "等待恢复连接";
+  if (status) status.textContent = state.online ? `状态进入于 ${formatTime(state.lifecycle?.changed_at)}` : "等待恢复连接";
   const heroLifecycle = document.querySelector("#hero-lifecycle");
   const heroVersion = document.querySelector("#hero-version");
   const heroUpdated = document.querySelector("#hero-updated");
@@ -141,15 +143,19 @@ async function loadView(generation, signal) {
   let rows;
   if (activeView === "diary") {
     rows = await getJson("/api/diary", { signal });
+    if (!currentViewGeneration(generation)) return;
     content.innerHTML = renderDiary(rows);
   } else if (activeView === "behavior") {
     rows = await getJson("/api/behavior", { signal });
-    content.innerHTML = table(rows, [["occurred_at", "时间"], ["action_type", "行为"], ["result_status", "结果"], ["public_explanation", "说明"]]);
+    if (!currentViewGeneration(generation)) return;
+    content.innerHTML = '<p class="history-context">历史行为记录</p>' + table(rows.map((row) => ({...row, result_status: ({succeeded:"成功",failed:"失败",unknown:"结果未知",pending:"待处理",running:"执行中",rejected:"未执行"})[row.result_status] || row.result_status})), [["occurred_at", "发生时间"], ["action_type", "行为"], ["result_status", "结果"], ["public_explanation", "说明"]]);
   } else if (activeView === "interactions") {
     rows = await getJson("/api/interactions", { signal });
+    if (!currentViewGeneration(generation)) return;
     content.innerHTML = table(rows, [["created_at", "时间"], ["direction", "方向"], ["status", "状态"], ["content", "内容"]]);
   } else if (activeView === "posts") {
     rows = await getJson("/api/public-posts", { signal });
+    if (!currentViewGeneration(generation)) return;
     content.innerHTML = renderPosts(rows);
   } else {
     content.innerHTML = '<div class="empty">该内容仅在管理台中提供。</div>';
@@ -178,22 +184,14 @@ async function loadPublicPostCaptcha() {
   const imageWrap = document.querySelector("#captcha-image-wrap");
   const loading = document.querySelector("#captcha-loading");
   const status = document.querySelector("#captcha-status");
-  const audio = document.querySelector("#public-post-captcha-audio");
-  const audioWrap = document.querySelector("#captcha-audio-wrap");
   if (!image || !answer) return;
-  const presentation = publicPostCaptchaPresentation;
+  const presentation = "image";
   publicPostCaptchaId = "";
   const controller = requestScope("captcha");
-  audio?.pause();
-  audio?.removeAttribute("src");
   image.removeAttribute("src");
-  if (imageWrap) imageWrap.hidden = presentation === "audio";
-  if (audioWrap) audioWrap.hidden = presentation !== "audio";
-  document.querySelector(".captcha-row")?.classList.toggle("audio-mode", presentation === "audio");
-  document.querySelectorAll("[data-captcha-presentation]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.captchaPresentation === presentation)));
   document.querySelector("#public-post-captcha-refresh").textContent = "换一组";
-  answer.inputMode = presentation === "audio" ? "numeric" : "text";
-  answer.placeholder = presentation === "audio" ? "输入六位数字" : "输入验证码";
+  answer.inputMode = "text";
+  answer.placeholder = "输入六位验证码";
   imageWrap?.classList.remove("has-image");
   if (loading) loading.textContent = "正在生成验证码";
   if (status) { status.textContent = ""; status.classList.remove("error"); }
@@ -209,23 +207,26 @@ async function loadPublicPostCaptcha() {
     const payload = await response.json().catch(() => null);
     if (!response.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
     const media = payload?.[presentation];
-    const prefix = presentation === "audio" ? "data:audio/wav;base64," : "data:image/png;base64,";
+    const prefix = "data:image/png;base64,";
     if (typeof payload?.challenge_id !== "string" || typeof media !== "string" || !media.startsWith(prefix)) {
       throw new Error("验证码响应无效");
     }
     if (generation !== publicPostCaptchaGeneration) return;
-    if (presentation === "audio") {
-      audio.src = media;
-      audio.load();
-    } else {
-      image.src = media;
-      await image.decode();
-    }
+    image.src = media;
+    await image.decode();
     if (generation !== publicPostCaptchaGeneration) return;
     publicPostCaptchaId = payload.challenge_id;
     imageWrap?.classList.add("has-image");
     answer.value = "";
-    if (status) status.textContent = presentation === "audio" ? "中文数字音频已就绪" : "图片验证码已就绪";
+    const mode = {digits:"六位数字",letters:"六位字母",alphanumeric:"六位字母与数字"}[payload.mode] || "六位字符";
+    answer.inputMode = payload.mode === "digits" ? "numeric" : "text";
+    answer.placeholder = "输入" + mode;
+    if (status) status.textContent = mode;
+    const body = document.querySelector("#public-post-content");
+    body.dataset.maxCharacters = String(payload.max_content_chars || 20000);
+    body.maxLength = Number(body.dataset.maxCharacters) * 2;
+    const count = document.querySelector("#public-post-length");
+    if (count) count.textContent = `${Array.from(body.value).length} / ${body.dataset.maxCharacters} 字符`;
   } catch (error) {
     if (isAbortError(error) || generation !== publicPostCaptchaGeneration) return;
     publicPostCaptchaId = "";
@@ -248,19 +249,12 @@ document.querySelectorAll(".tab").forEach((button) => button.addEventListener("c
 }));
 document.querySelector("#refresh").addEventListener("click", refresh);
 document.querySelector("#public-post-captcha-refresh")?.addEventListener("click", () => loadPublicPostCaptcha());
-document.querySelectorAll("[data-captcha-presentation]").forEach((button) => button.addEventListener("click", () => {
-  if (publicPostCaptchaPresentation === button.dataset.captchaPresentation) return;
-  publicPostCaptchaPresentation = button.dataset.captchaPresentation;
-  loadPublicPostCaptcha();
-}));
-document.querySelector("#public-post-captcha-audio")?.addEventListener("error", () => {
-  if (publicPostCaptchaPresentation !== "audio") return;
-  publicPostCaptchaId = "";
-  const status = document.querySelector("#captcha-status");
-  if (status) { status.textContent = "音频暂时无法播放，请换一组后重试"; status.classList.add("error"); }
-});
 document.querySelector("#public-post-form")?.addEventListener("input", (event) => {
   if (event.target.id !== "public-post-captcha-answer") publicPostIdempotencyKey = "";
+  const body = document.querySelector("#public-post-content");
+  const count = Array.from(body.value).length; const maximum = Number(body.dataset.maxCharacters || 20000);
+  document.querySelector("#public-post-length").textContent = `${count} / ${maximum} 字符`;
+  body.setCustomValidity(count > maximum ? "正文超过当前字符上限" : "");
 });
 document.querySelector("#public-post-form")?.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -272,6 +266,7 @@ document.querySelector("#public-post-form")?.addEventListener("submit", async (e
   try {
     const title = document.querySelector("#public-post-title").value.trim();
     const body = document.querySelector("#public-post-content").value.trim();
+    if (Array.from(body).length > Number(document.querySelector("#public-post-content").dataset.maxCharacters || 20000)) throw new Error("正文超过当前字符上限，请缩短内容");
     if (!title || !body) throw new Error("标题和内容不能为空");
     const captchaAnswer = document.querySelector("#public-post-captcha-answer").value.trim();
     if (!publicPostCaptchaId || !captchaAnswer) throw new Error("请先输入验证码");

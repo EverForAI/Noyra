@@ -6,10 +6,15 @@ import base64
 import binascii
 import hashlib
 import json
+import os
 import re
+import stat
+import sys
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -25,6 +30,37 @@ from .targets import TargetRegistry
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _SIGNATURE = re.compile(r"[A-Za-z0-9_-]{80,100}={0,2}\Z")
+
+
+@dataclass(frozen=True)
+class _PinnedBackup:
+    path: Path
+    stream: BinaryIO
+    identity: tuple[int, ...]
+
+    @staticmethod
+    def file_identity(info: os.stat_result) -> tuple[int, ...]:
+        if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise ValueError("backup path must be a regular file")
+        # Python 3.12 on Windows can report change-time from fstat but creation
+        # time from lstat in st_ctime. Compare explicit birth-time when present;
+        # deny-write/delete handles remain the Windows mutation boundary. POSIX
+        # must retain ctime to detect same-size writes with restored mtime.
+        stable_time = (
+            getattr(info, "st_birthtime_ns", info.st_ctime_ns)
+            if os.name == "nt"
+            else info.st_ctime_ns
+        )
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, stable_time)
+
+    def assert_unchanged(self) -> None:
+        try:
+            descriptor = self.file_identity(os.fstat(self.stream.fileno()))
+            pathname = self.file_identity(self.path.lstat())
+        except OSError as error:
+            raise ValueError("backup file is unavailable") from error
+        if descriptor != self.identity or pathname != self.identity:
+            raise ValueError("backup file identity changed during verification")
 
 
 @dataclass(frozen=True)
@@ -83,14 +119,37 @@ class RecoveryCoordinator:
         ):
             raise ValueError("backup key metadata is invalid")
         path = self._safe_backup_path(backup_path)
-        try:
-            actual_size = path.stat().st_size
-            actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError as error:
-            raise ValueError("backup file is unavailable") from error
-        if actual_size != byte_size or actual_hash != content_hash_value:
-            raise ValueError("backup file verification failed")
+        with self._pin_verified_file(path, byte_size, content_hash_value) as backup:
+            return self._register_pinned_backup(
+                backup=backup,
+                subject_id=subject_id,
+                backup_id=backup_id,
+                content_hash_value=content_hash_value,
+                byte_size=byte_size,
+                schema_version=schema_version,
+                genesis_hash=genesis_hash,
+                key_id=key_id,
+                keyring_generation=keyring_generation,
+                actor=actor,
+            )
+
+    def _register_pinned_backup(
+        self,
+        *,
+        backup: _PinnedBackup,
+        subject_id: str,
+        backup_id: str,
+        content_hash_value: str,
+        byte_size: int,
+        schema_version: int,
+        genesis_hash: str,
+        key_id: str,
+        keyring_generation: int,
+        actor: str,
+    ) -> dict[str, str | int]:
+        assert self.database is not None
         with self.database.transaction() as connection:
+            backup.assert_unchanged()
             identity = connection.execute(
                 "SELECT genesis_hash FROM subject_identity WHERE subject_id=?", (subject_id,)
             ).fetchone()
@@ -100,7 +159,7 @@ class RecoveryCoordinator:
             values: dict[str, Any] = {
                 "backup_id": backup_id,
                 "subject_id": subject_id,
-                "backup_path": str(path),
+                "backup_path": str(backup.path),
                 "content_hash": content_hash_value,
                 "byte_size": byte_size,
                 "schema_version": schema_version,
@@ -141,6 +200,7 @@ class RecoveryCoordinator:
                 actor,
                 {"backup_id": backup_id, "content_hash": content_hash_value},
             )
+            backup.assert_unchanged()
         return {
             "backup_id": backup_id,
             "subject_id": subject_id,
@@ -181,6 +241,24 @@ class RecoveryCoordinator:
                 "backup_id": request.verified_backup_id,
             }
 
+        with self.database.connection() as connection:
+            registry = self._verified_backup(
+                connection, policy.subject_id, request.verified_backup_id
+            )
+        path = self._safe_backup_path(str(registry["backup_path"]))
+        with self._pin_verified_file(
+            path, int(registry["byte_size"]), str(registry["content_hash"])
+        ) as backup:
+            return self._restore_pinned_standby(request, policy, registry, backup)
+
+    def _restore_pinned_standby(
+        self,
+        request: RecoveryRequest,
+        policy: MigrationPolicy,
+        registry: Mapping[str, Any],
+        backup: _PinnedBackup,
+    ) -> dict[str, str]:
+        assert self.database is not None
         with self.database.transaction() as connection:
             target = connection.execute(
                 "SELECT * FROM migration_targets WHERE target_id=? AND subject_id=?",
@@ -189,7 +267,12 @@ class RecoveryCoordinator:
             if target is None or target["status"] != "active" or not target["attested_at"]:
                 raise ValueError("standby target is not attested")
             TargetRegistry._assert_row_integrity(target)
-            self._verified_backup(connection, policy.subject_id, request.verified_backup_id)
+            current = self._verified_backup(
+                connection, policy.subject_id, request.verified_backup_id
+            )
+            if current != registry:
+                raise ValueError("verified backup registry changed during verification")
+            backup.assert_unchanged()
             if target["attestation_epoch"] != self._current_source_epoch(
                 connection, policy.subject_id
             ):
@@ -286,6 +369,7 @@ class RecoveryCoordinator:
                         **evidence,
                     },
                 )
+            backup.assert_unchanged()
 
         proof = {
             "task_id": request.task_id,
@@ -304,6 +388,7 @@ class RecoveryCoordinator:
             raise ValueError("recovery task disappeared")
         source_epoch = str(task_row["source_epoch"])
         try:
+            backup.assert_unchanged()
             epoch = EpochLease.acquire(
                 self.database,
                 policy.subject_id,
@@ -359,6 +444,78 @@ class RecoveryCoordinator:
         return path.resolve()
 
     @staticmethod
+    def _stream_digest(stream: BinaryIO, expected_size: int) -> str:
+        digest = hashlib.sha256()
+        remaining = expected_size
+        while remaining:
+            chunk = stream.read(min(1024 * 1024, remaining))
+            if not chunk:
+                raise ValueError("backup file size changed during verification")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if stream.read(1):
+            raise ValueError("backup file size changed during verification")
+        return digest.hexdigest()
+
+    @classmethod
+    @contextmanager
+    def _pin_verified_file(
+        cls,
+        path: Path,
+        byte_size: int,
+        expected_hash: str,
+    ) -> Iterator[_PinnedBackup]:
+        try:
+            before = _PinnedBackup.file_identity(path.lstat())
+            descriptor = cls._open_backup(path)
+            with os.fdopen(descriptor, "rb") as stream:
+                backup = _PinnedBackup(path, stream, before)
+                backup.assert_unchanged()
+                if before[2] != byte_size:
+                    raise ValueError("backup file verification failed: size changed")
+                actual_hash = cls._stream_digest(stream, byte_size)
+                backup.assert_unchanged()
+                if actual_hash != expected_hash:
+                    raise ValueError("backup file verification failed: content changed")
+                yield backup
+        except OSError as error:
+            raise ValueError("backup file is unavailable") from error
+
+    @staticmethod
+    def _open_backup(path: Path) -> int:
+        if sys.platform != "win32":
+            return os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        # Windows ctime can mean creation time. Deny write/delete sharing while
+        # pinned instead of trusting a restorable modification timestamp.
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        create = kernel.CreateFileW
+        create.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create.restype = wintypes.HANDLE
+        handle = create(str(path), 0x80000000, 1, None, 3, 0x00200000, None)
+        if handle == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+        except BaseException:
+            close = kernel.CloseHandle
+            close.argtypes = [wintypes.HANDLE]
+            close.restype = wintypes.BOOL
+            close(handle)
+            raise
+
+    @staticmethod
     def _verified_backup(connection: Any, subject_id: str, backup_id: str) -> Any:
         row = connection.execute(
             "SELECT * FROM migration_backup_registry WHERE backup_id=? AND subject_id=?",
@@ -389,12 +546,7 @@ class RecoveryCoordinator:
         )
         if row["state_hash"] != expected:
             raise ValueError("verified backup registry integrity failed")
-        path = RecoveryCoordinator._safe_backup_path(str(row["backup_path"]))
-        if path.stat().st_size != int(row["byte_size"]):
-            raise ValueError("verified backup size changed")
-        if hashlib.sha256(path.read_bytes()).hexdigest() != row["content_hash"]:
-            raise ValueError("verified backup content changed")
-        return row
+        return values
 
     @staticmethod
     def _current_source_epoch(connection: Any, subject_id: str) -> str:

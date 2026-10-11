@@ -13,7 +13,8 @@ import json
 import re
 import secrets
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from types import TracebackType
@@ -23,7 +24,7 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from noyra.core.admission import OperationInvalidated, current_lease
+from noyra.core.admission import OperationInvalidated, accounting_scope, assert_current_lease
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, InvalidTransitionError, NotFoundError
 from noyra.core.http import (
@@ -38,6 +39,12 @@ from noyra.core.http import (
 from noyra.core.identity import validate_subject_id
 from noyra.core.types import canonical_json, content_hash, new_id, strict_json_loads, utc_now
 
+from .dispatch import (
+    WalletDispatchDenied,
+    WalletRequestFence,
+    bind_wallet_dispatch,
+    wallet_policy_scope,
+)
 from .economy import WalletEconomyStore
 from .economy_types import PaymentOrderRecord, canonical_amount
 from .types import SQLITE_INT64_MAX, canonical_evm_address
@@ -262,6 +269,8 @@ class HTTPSWalletSigner:
     transfer envelope and accepts only a bounded transaction result or receipt.
     """
 
+    fences_network_dispatch = True
+
     def __init__(
         self,
         endpoint: str,
@@ -334,9 +343,17 @@ class HTTPSWalletSigner:
 
     def _request(self, path: str, payload: dict[str, Any]) -> tuple[int, bytes]:
         timeout_hook = SyncHTTPTimeoutHook()
+        deadline = time.monotonic() + self.timeout_seconds
 
         def perform_request() -> tuple[int, bytes]:
-            deadline = time.monotonic() + self.timeout_seconds
+            fence = WalletRequestFence(deadline, timeout_hook, payment=path == "/v1/transfer")
+            fence.check_deadline()
+            try:
+                return send(fence)
+            finally:
+                fence.close()
+
+        def send(fence: WalletRequestFence) -> tuple[int, bytes]:
             with self._client.stream(
                 "POST",
                 self.endpoint + path,
@@ -353,6 +370,7 @@ class HTTPSWalletSigner:
                     ),
                 },
                 follow_redirects=False,
+                extensions={"trace": fence.trace},
                 timeout=httpx.Timeout(self.timeout_seconds),
             ) as response:
                 timeout_hook.register(response)
@@ -924,6 +942,7 @@ class WalletPaymentExecutionEngine:
         nonce: int | None = None,
     ) -> WalletExecutionRecord:
         actor = self.economy._operator(actor)
+        policy_version = self.economy.get_policy(subject_id).policy_version
         execution, transfer, request_id = self._prepare(
             order_id,
             subject_id,
@@ -934,9 +953,25 @@ class WalletPaymentExecutionEngine:
             retry_unknown=False,
         )
         try:
-            result = self._sign_and_broadcast(transfer, request_id=request_id)
+            result = self._sign_and_broadcast(
+                transfer, request_id=request_id, execution=execution, policy_version=policy_version
+            )
         except OperationInvalidated:
+            self._mark_unknown(
+                execution.execution_id,
+                subject_id,
+                actor=actor,
+                tx_hash=None,
+                code="dispatch_authorization_changed",
+            )
             raise
+        except WalletDispatchDenied:
+            return self._mark_failed(
+                execution.execution_id,
+                subject_id,
+                actor=actor,
+                code="dispatch_authorization_changed",
+            )
         except WalletBroadcastUnknownError as error:
             return self._mark_unknown(
                 execution.execution_id,
@@ -985,6 +1020,7 @@ class WalletPaymentExecutionEngine:
         if not reason or len(reason) > 2000:
             raise ValueError("unknown retry reason is invalid")
         actor = self.economy._operator(actor)
+        policy_version = self.economy.get_policy(subject_id).policy_version
         existing = self._order_execution(order_id, subject_id)
         if existing is not None:
             receipt, _error = self._lookup_receipt(existing)
@@ -1019,9 +1055,26 @@ class WalletPaymentExecutionEngine:
             reason=reason,
         )
         try:
-            result = self._sign_and_broadcast(transfer, request_id=request_id)
+            result = self._sign_and_broadcast(
+                transfer, request_id=request_id, execution=execution, policy_version=policy_version
+            )
         except OperationInvalidated:
+            self._mark_unknown(
+                execution.execution_id,
+                subject_id,
+                actor=actor,
+                tx_hash=execution.tx_hash,
+                code="dispatch_authorization_changed",
+            )
             raise
+        except WalletDispatchDenied:
+            return self._mark_unknown(
+                execution.execution_id,
+                subject_id,
+                actor=actor,
+                tx_hash=execution.tx_hash,
+                code="dispatch_authorization_changed",
+            )
         except WalletBroadcastUnknownError as error:
             return self._mark_unknown(
                 execution.execution_id,
@@ -2049,7 +2102,7 @@ class WalletPaymentExecutionEngine:
     def _mark_broadcast(
         self, execution_id: str, subject_id: str, *, actor: str, result: WalletBroadcastResult
     ) -> WalletExecutionRecord:
-        with self.database.transaction() as c:
+        with accounting_scope(), self.database.transaction() as c:
             execution = c.execute(
                 "SELECT * FROM wallet_payment_executions WHERE execution_id=? AND subject_id=?",
                 (execution_id, subject_id),
@@ -2108,19 +2161,53 @@ class WalletPaymentExecutionEngine:
             )
 
     def _sign_and_broadcast(
-        self, transfer: WalletUnsignedTransfer, *, request_id: str
+        self,
+        transfer: WalletUnsignedTransfer,
+        *,
+        request_id: str,
+        execution: WalletExecutionRecord,
+        policy_version: int,
     ) -> WalletBroadcastResult:
-        """Call the signer only while the current runtime lease is fenced."""
-        lease = current_lease()
-        if lease is None:
-            return self.signer.sign_and_broadcast(transfer, request_id=request_id)
-        with lease._gate.external_side_effect_scope(lease):
-            return self.signer.sign_and_broadcast(transfer, request_id=request_id)
+        """Bind immutable attempt authorization to the worker writing payment bytes."""
+
+        @contextmanager
+        def authorize() -> Iterator[None]:
+            assert_current_lease()
+            with wallet_policy_scope(self.database):
+                with self.database.read_transaction() as c:
+                    policy = self.economy._policy_row(c, execution.subject_id)
+                    order = self.economy._order_row(c, execution.order_id, execution.subject_id)
+                    current = self.get_execution(execution.execution_id, execution.subject_id)
+                    if (
+                        policy is None
+                        or int(policy["policy_version"]) != policy_version
+                        or policy["state_hash"] != self.economy._policy_state_hash_row(policy)
+                        or current != execution
+                        or current.status != "signing"
+                        or current.request_hash != content_hash(transfer.model_dump(mode="json"))
+                        or request_id != f"{execution.order_id}:attempt:{execution.attempt_count}"
+                        or not self.economy._policy_allows(
+                            c, order, policy, exclude_order_id=execution.order_id
+                        )
+                    ):
+                        raise WalletDispatchDenied("wallet dispatch authorization changed")
+                assert_current_lease()
+                yield
+
+        with bind_wallet_dispatch(authorize):
+            if getattr(self.signer, "fences_network_dispatch", False):
+                # Do not hold the gate in the caller waiting for the HTTP worker.
+                # The copied context owns the same authorization in that worker.
+                with authorize():
+                    pass
+                return self.signer.sign_and_broadcast(transfer, request_id=request_id)
+            with authorize():
+                return self.signer.sign_and_broadcast(transfer, request_id=request_id)
 
     def _mark_unknown(
         self, execution_id: str, subject_id: str, *, actor: str, tx_hash: str | None, code: str
     ) -> WalletExecutionRecord:
-        with self.database.transaction() as c:
+        with accounting_scope(), self.database.transaction() as c:
             execution = c.execute(
                 "SELECT * FROM wallet_payment_executions WHERE execution_id=? AND subject_id=?",
                 (execution_id, subject_id),
@@ -2240,7 +2327,7 @@ class WalletPaymentExecutionEngine:
         receipt_confirmations: int | None = None,
         receipt_effect_hash: str | None = None,
     ) -> WalletExecutionRecord:
-        with self.database.transaction() as c:
+        with accounting_scope(), self.database.transaction() as c:
             execution = c.execute(
                 "SELECT * FROM wallet_payment_executions WHERE execution_id=? AND subject_id=?",
                 (execution_id, subject_id),

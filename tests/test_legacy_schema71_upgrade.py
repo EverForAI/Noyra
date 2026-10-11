@@ -243,6 +243,7 @@ def test_server_upgrade_failure_fingerprint_is_reproduced_before_repair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture = next(item for item in FIXTURES if item.name == "schema-v71-from-v63")
+    monkeypatch.setattr("noyra.core.database.CURRENT_SCHEMA_VERSION", 80)
     path = materialize_historical_database(fixture, tmp_path)
     for name in (
         "_upgrade_provider_health_metrics",
