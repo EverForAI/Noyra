@@ -129,34 +129,6 @@ test("current login error restores submit ownership and allows retry", async () 
   assert.equal(sandbox.$("#login-status").textContent, "current login error");
 });
 
-for (const view of ["diary", "behavior", "interactions", "posts"]) {
-  for (const outcome of ["success", "error"]) {
-    test(`public ${view} ignores late ${outcome} after switching views`, async () => {
-      const body = deferred();
-      const content = { innerHTML: "" };
-      const pub = readFileSync(join(__dirname, "../../src/noyra/web/app.js"), "utf8");
-      const sandbox = vm.createContext({ content, activeView: view, viewGeneration: 0,
-        beginViewGeneration() { return ++sandbox.viewGeneration; },
-        currentViewGeneration: generation => generation === sandbox.viewGeneration,
-        requestScope: () => ({ signal: {} }), loadState: async () => {},
-        getJson: () => body.promise, renderDiary: () => "old diary", renderPosts: () => "new posts",
-        table: () => "old table", isAbortError: () => false, escapeHtml: String,
-        publicErrorMessage: () => "old error" });
-      vm.runInContext(pub.slice(pub.indexOf("async function loadView("),
-        pub.indexOf("async function loadPublicPostCaptcha(")), sandbox);
-      const old = sandbox.refresh();
-      sandbox.activeView = "posts";
-      sandbox.getJson = async () => [];
-      await sandbox.refresh();
-      assert.equal(content.innerHTML, "new posts");
-      if (outcome === "success") body.resolve([]);
-      else body.reject(new Error("old response"));
-      await old;
-      assert.equal(content.innerHTML, "new posts");
-    });
-  }
-}
-
 test("cost-only protection rejects unknown and zero-priced drafts but allows free or bounded alternatives", () => {
   const { sandbox } = modelContext();
   const payload={limit_enabled:{attempts:false,input_tokens:false,output_tokens:false,cost:true},pricing_status:"unknown",input_usd_per_million:"0.000000",output_usd_per_million:"0.000000"};

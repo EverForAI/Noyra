@@ -22,12 +22,10 @@ def test_frontend_request_lifecycle_is_generation_and_abort_safe() -> None:
     assert "archive.blob()" not in APP
 
 
-def test_export_frontend_has_bounded_streaming_and_backoff() -> None:
-    assert "MAX_EXPORT_DOWNLOAD_BYTES" in APP
-    assert "getReader()" in APP
-    assert "Retry-After" in APP
-    assert "delayMs = Math.min(delayMs * 2, 5000)" in APP
-    assert "/api/admin/export-jobs/${encodeURIComponent(jobId)}/cancel" in APP
+def test_public_archive_does_not_offer_export_or_privileged_streams() -> None:
+    assert "/api/admin/export-jobs" not in APP
+    assert "getReader()" not in APP
+    assert "MAX_EXPORT_DOWNLOAD_BYTES" not in APP
 
 
 def test_public_surface_keeps_operator_controls_private() -> None:
@@ -38,7 +36,6 @@ def test_public_surface_keeps_operator_controls_private() -> None:
         'id="knowledge-peer-form"',
     ):
         assert marker not in HTML
-    assert "confirmPrivilegedAction" in APP
     for path in (
         "/api/admin/lifecycle/",
         "/api/admin/actions/",
@@ -47,7 +44,36 @@ def test_public_surface_keeps_operator_controls_private() -> None:
         "/api/config/training-policy",
         "/api/config/common-knowledge/trust",
     ):
-        assert path in APP
+        assert path not in APP
+
+
+def test_public_archive_navigation_and_filters_use_v2_only() -> None:
+    for view in (
+        "overview",
+        "timeline",
+        "diary",
+        "behavior",
+        "lifecycle",
+        "sleep",
+        "goals",
+        "projects",
+        "predictions",
+        "research",
+        "interactions",
+        "posts",
+        "participate",
+        "updates",
+        "about",
+    ):
+        assert f'data-view="{view}"' in HTML
+    for marker in ("period-filter", "status-filter", "category-filter", "archive-search"):
+        assert f'id="{marker}"' in HTML
+    assert "public-contract-v2" in APP
+    assert "MAX_VISIBLE_RECORDS = 200" in APP
+    assert 'credentials: "omit"' in APP
+    assert "document.hidden" in APP
+    assert "/api/state" not in APP
+    assert "chat/delete" not in APP
 
 
 def test_admin_surface_assets_and_session_contract() -> None:
