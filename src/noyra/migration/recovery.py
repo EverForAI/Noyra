@@ -9,6 +9,7 @@ import json
 import os
 import re
 import stat
+import sys
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -482,7 +483,7 @@ class RecoveryCoordinator:
 
     @staticmethod
     def _open_backup(path: Path) -> int:
-        if os.name != "nt":
+        if sys.platform != "win32":
             return os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         # Windows ctime can mean creation time. Deny write/delete sharing while
         # pinned instead of trusting a restorable modification timestamp.
