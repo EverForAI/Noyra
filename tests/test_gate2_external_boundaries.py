@@ -656,6 +656,7 @@ def test_s3_from_env_wires_botocore_timeouts_retries_pool_and_identity(
     boto3_module = ModuleType("boto3")
 
     def create_client(service: str, **kwargs: Any) -> _S3Client:
+        assert captured.get("history_safe") is True
         captured["service"] = service
         captured["client"] = kwargs
         return client
@@ -668,6 +669,10 @@ def test_s3_from_env_wires_botocore_timeouts_retries_pool_and_identity(
     cast(Any, botocore_package).__path__ = []
     monkeypatch.setitem(sys.modules, "botocore", botocore_package)
     monkeypatch.setitem(sys.modules, "botocore.config", botocore_config_module)
+    monkeypatch.setattr(
+        "noyra.core.runtime_logging.install_cloud_history_safety",
+        lambda: captured.update(history_safe=True),
+    )
     monkeypatch.setenv("NOYRA_ARCHIVE_S3_BUCKET", "archive")
     monkeypatch.setenv("NOYRA_ARCHIVE_S3_ACCOUNT_ID", "123456789012")
     monkeypatch.setenv("NOYRA_ARCHIVE_S3_ENDPOINT", "https://s3.example")

@@ -1017,6 +1017,10 @@ class S3ArchiveProvider:
         circuit_failure_threshold: int = 3,
         circuit_cooldown_seconds: float = 30.0,
     ):
+        if type(client).__module__.startswith("botocore."):
+            from .runtime_logging import install_cloud_history_safety
+
+            install_cloud_history_safety()
         if not bucket.strip() or attempts < 1 or backoff_seconds < 0:
             raise ValueError("invalid S3 archive configuration")
         if not 0 < operation_timeout_seconds <= 600:
@@ -1460,6 +1464,8 @@ class S3ArchiveProvider:
 
     @classmethod
     def from_env(cls) -> S3ArchiveProvider:
+        from .runtime_logging import install_cloud_history_safety
+
         bucket = os.getenv("NOYRA_ARCHIVE_S3_BUCKET", "").strip()
         if not bucket:
             raise ValueError("NOYRA_ARCHIVE_S3_BUCKET is required")
@@ -1467,6 +1473,7 @@ class S3ArchiveProvider:
             from importlib import import_module
 
             boto3 = import_module("boto3")
+            install_cloud_history_safety()
         except ImportError as error:
             raise RuntimeError("install Noyra's optional cloud dependency") from error
         endpoint = os.getenv("NOYRA_ARCHIVE_S3_ENDPOINT") or None

@@ -14,6 +14,11 @@ from .redaction import redact_secret_text
 _INSTALL_LOCK = threading.Lock()
 _URL = re.compile(r"(?i)\b(?:https?|smtps?)://[^\s\"'<>]+")
 _NETWORK_EVENT = re.compile(r"[a-z_]+(?:\.[a-z_]+)*\.(?:started|complete|failed)\Z")
+_CLOUD_LOGGERS = ("botocore", "boto3", "urllib3", "s3transfer")
+
+
+def _cloud_logger(name: str) -> bool:
+    return any(name == prefix or name.startswith(prefix + ".") for prefix in _CLOUD_LOGGERS)
 
 
 def _origin(value: object) -> str:
@@ -35,6 +40,11 @@ def _origin(value: object) -> str:
 
 
 def _safe_message(record: logging.LogRecord) -> str:
+    if _cloud_logger(record.name):
+        # SDK messages have evolving positional/dict formats, and even their
+        # apparent event strings can contain canonical requests or signatures.
+        # Keep the logger category, level and exception type, never raw payload.
+        return "cloud_sdk_event_details_withheld"
     network = record.name == "httpx" or record.name.startswith(("httpx.", "httpcore"))
     if network:
         if (
@@ -64,7 +74,7 @@ def install_log_safety() -> None:
 
     Root logger filters do not filter records propagated by child loggers.
     Chaining the record factory protects caplog, journald, file and custom
-    handlers equally. Only Noyra and its HTTP libraries are changed.
+    handlers equally. Only Noyra and its network/cloud libraries are changed.
     """
     with _INSTALL_LOCK:
         previous = logging.getLogRecordFactory()
@@ -74,7 +84,9 @@ def install_log_safety() -> None:
         def safe_record(*args: Any, **kwargs: Any) -> logging.LogRecord:
             record = previous(*args, **kwargs)
             if not (
-                record.name == "noyra" or record.name.startswith(("noyra.", "httpx", "httpcore"))
+                record.name == "noyra"
+                or record.name.startswith(("noyra.", "httpx", "httpcore"))
+                or _cloud_logger(record.name)
             ):
                 return record
             try:
@@ -98,3 +110,45 @@ def install_log_safety() -> None:
 
         safe_record._noyra_log_safety = True  # type: ignore[attr-defined]
         logging.setLogRecordFactory(safe_record)
+
+
+def install_cloud_history_safety() -> None:
+    """Protect botocore's independent, opt-in history handlers as well as logs.
+
+    Install before constructing the production client, including credential
+    discovery. Existing and later handlers receive only a fixed safe schema;
+    enabling DEBUG or history subsequently cannot restore raw request capture.
+    The optional SDK is imported only for the cloud profile.
+    """
+    from importlib import import_module
+
+    install_log_safety()
+    history = import_module("botocore.history")
+    with _INSTALL_LOCK:
+        recorder_type = history.HistoryRecorder
+        previous = recorder_type.record
+        if getattr(previous, "_noyra_history_safety", False):
+            return
+
+        def safe_record(
+            recorder: Any, event_type: Any, payload: Any, source: Any = "BOTOCORE"
+        ) -> None:
+            safe: dict[str, Any] = {}
+            event = (
+                event_type
+                if event_type in {"API_CALL", "HTTP_REQUEST", "HTTP_RESPONSE", "PARSED_RESPONSE"}
+                else "SDK_EVENT"
+            )
+            if isinstance(payload, dict):
+                method = payload.get("method")
+                if isinstance(method, str) and method in {"GET", "HEAD", "PUT", "POST", "DELETE"}:
+                    safe["method"] = method
+                status = payload.get("status_code")
+                if type(status) is int and 100 <= status <= 599:
+                    safe["status_code"] = status
+            # Object/bucket hostnames can themselves identify private data.
+            # History needs no endpoint, headers, body or parameters.
+            previous(recorder, event, safe, "BOTOCORE")
+
+        safe_record._noyra_history_safety = True  # type: ignore[attr-defined]
+        recorder_type.record = safe_record
