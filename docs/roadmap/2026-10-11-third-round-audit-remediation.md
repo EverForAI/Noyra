@@ -23,3 +23,13 @@
 - 不增加聊天/记忆删除入口，不清除聊天原文，不修改历史删除原型和恢复防复活逻辑。
 - 不推送、合并、部署、真实平台发消息、付费模型/搜索调用或资金交易。
 - 不把旧整仓证据冒充新代码的整仓通过；只在有新变更且资源允许时执行对应范围的回归。
+
+## 模块一：SMTP A01/A06 与锁环境 E02
+
+提交 `9136747`：认证前、认证多轮挑战/机制回退的每次实际写入以及 DATA 写入前均核验冻结授权与运行租约。DNS 使用共享有界 resolver；SMTP 从排队前开始计算绝对截止时间，最多四个实际 daemon worker，槽位直到线程真实退出才释放。取消/截止通过 socket shutdown 中断读写，不等待 buffered reader 的 close 锁，也不占用 asyncio 共享 executor。连接完成但计时器先到的窗口由 greeting read 前再次检查封住。已确认 DATA 结果不再等待 QUIT；超时或正文阶段无法证明未发仍记 unknown，不自动重发。
+
+验收：锁环境 101 项通讯/SMTP/对账/身份与删除禁用回归通过（260.31 秒）；公共 HTTP 边界 8 项通过；补充晚连接、真实慢 greeting、DNS 取消和 worker 上限 4 项通过。Ruff check/format、4 文件 Mypy 通过。首次 quiet 运行输出缓冲、未生成完整结果，已中断保留；第二次专项中发现测试将 DATA 阶段撤销期望为 failed，但既有合同应为 unknown，修正期望后上述完整回归通过。没有把中断运行计为通过。
+
+复审：保留 TLS hostname、公共 DNS/peer 固定、Message-ID、unknown 对账、权限错误终止重试和聊天删除关闭。Python 线程/DNS 无法被强杀，迟到 worker 仍保留容量槽位且每次新外发前拒绝取消/过期；已开始的网络写入无法撤回。无 schema 变更，无生产操作。
+
+E02：建立忽略目录 `.runtime/locked-venv`，按 `requirements-dev.lock` 与 `requirements-cloud.lock` 使用 hash 安装，再 no-deps/no-build-isolation editable 安装应用。75 个锁定依赖版本逐一匹配，差异 0，pip check 通过；未修改依赖锁。证据 `.runtime/third-fix-locked-environment.json`、`third-fix-smtp-final.log/xml`、`third-fix-smtp-http.log/xml`、`third-fix-smtp-late.log/xml`。
