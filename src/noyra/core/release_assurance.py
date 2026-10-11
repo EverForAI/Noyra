@@ -7,12 +7,14 @@ import json
 import os
 import re
 import stat
-import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .deadline import operation_deadline
 from .external_gates import validate_external_gates
+from .http import HTTPResponseLimitError
+from .release_http import read_release_metadata
 from .types import strict_json_loads
 
 CHANNEL_PATH = Path("/etc/noyra/upgrade-channel")
@@ -112,18 +114,19 @@ def require_activation_evidence(*, production: bool | None = None) -> None:
 def github_json(url: str, *, maximum: int = 256_000) -> Any:
     if not url.startswith("https://api.github.com/repos/"):
         raise ValueError("invalid_release_metadata_url")
-    request = urllib.request.Request(
-        url,
-        headers={"Accept": "application/vnd.github+json", "User-Agent": "Noyra-release-assurance"},
-    )
-    with urllib.request.urlopen(request, timeout=10) as response:
-        raw = response.read(maximum + 1)
-    if len(raw) > maximum:
-        raise ValueError("release_metadata_oversized")
+    try:
+        raw = read_release_metadata(url, maximum=maximum, timeout=10)
+    except HTTPResponseLimitError as error:
+        raise ValueError("release_metadata_oversized") from error
     return strict_json_loads(raw.decode("utf-8"))
 
 
 def stable_metadata(owner: str, repo: str) -> dict[str, Any]:
+    with operation_deadline(20):
+        return _stable_metadata(owner, repo)
+
+
+def _stable_metadata(owner: str, repo: str) -> dict[str, Any]:
     base = f"https://api.github.com/repos/{owner}/{repo}"
     release = github_json(base + "/releases/latest")
     if not isinstance(release, dict):
@@ -152,6 +155,11 @@ def stable_metadata(owner: str, repo: str) -> dict[str, Any]:
 
 
 def verified_stable_target(expected_sha: str) -> tuple[str, dict[str, Any]]:
+    with operation_deadline(30):
+        return _verified_stable_target(expected_sha)
+
+
+def _verified_stable_target(expected_sha: str) -> tuple[str, dict[str, Any]]:
     metadata = stable_metadata("EverForAI", "Noyra")
     if metadata["sha"] != expected_sha:
         raise ValueError("upgrade_target_stale")
@@ -171,11 +179,10 @@ def verified_stable_target(expected_sha: str) -> tuple[str, dict[str, Any]]:
         + metadata["tag"]
         + "/external-gates.json"
     )
-    request = urllib.request.Request(url, headers={"User-Agent": "Noyra-release-assurance"})
-    with urllib.request.urlopen(request, timeout=15) as response:
-        raw = response.read(256_001)
-    if len(raw) > 256_000:
-        raise ValueError("release_evidence_oversized")
+    try:
+        raw = read_release_metadata(url, maximum=256_000, timeout=15)
+    except HTTPResponseLimitError as error:
+        raise ValueError("release_evidence_oversized") from error
     record = strict_json_loads(raw.decode("utf-8"))
     key = controlled_text(PUBLIC_KEY_PATH, maximum=128).strip()
     published = datetime.fromisoformat(metadata["published_at"].replace("Z", "+00:00"))

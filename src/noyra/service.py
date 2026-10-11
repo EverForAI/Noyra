@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import hmac
 import html
+import io
 import ipaddress
 import json
 import logging
@@ -45,6 +46,7 @@ from noyra.core.archive import CloudArchiveCoordinator, S3ArchiveProvider, Stora
 from noyra.core.at_rest import AtRestConfig, AtRestError, AtRestGuard
 from noyra.core.credentials import CredentialError, read_env_secret, read_secret_file
 from noyra.core.database import Database
+from noyra.core.deadline import operation_deadline, remaining_seconds
 from noyra.core.errors import (
     IntegrityError,
     InvalidTransitionError,
@@ -68,6 +70,7 @@ from noyra.core.operator_controls import (
 from noyra.core.provider_health import ProviderHealthStore
 from noyra.core.redaction import redact_secrets
 from noyra.core.release_assurance import activation_status, upgrade_channel
+from noyra.core.request_io import DeadlineRequestReader
 from noyra.core.retention import RetentionManager, RetentionPolicyConflict, RetentionSettings
 from noyra.core.runtime import SubjectKernel
 from noyra.core.runtime_export import RuntimeLogExporter
@@ -1762,6 +1765,11 @@ class NoyraHTTPServer:
             return True
 
     def run_async_from_handler(self, coroutine: Any) -> Any:
+        try:
+            remaining = remaining_seconds(self.settings.request_timeout_seconds)
+        except TimeoutError:
+            coroutine.close()
+            raise
         loop = self.event_loop
         if loop is not None and loop.is_running():
             bridge: ConcurrentFuture[Any] = ConcurrentFuture()
@@ -1769,10 +1777,21 @@ class NoyraHTTPServer:
             self._register_async_handler(bridge, done)
             task_holder: dict[str, asyncio.Task[Any]] = {}
 
-            def spawn() -> None:
+            async def start_if_current() -> Any:
                 try:
-                    task = loop.create_task(coroutine)
+                    remaining_seconds(remaining)
+                except TimeoutError:
+                    coroutine.close()
+                    raise
+                return await coroutine
+
+            def spawn() -> None:
+                wrapper = start_if_current()
+                try:
+                    task = loop.create_task(wrapper)
                 except BaseException as error:
+                    wrapper.close()
+                    coroutine.close()
                     if not bridge.done():
                         bridge.set_exception(error)
                     done.set()
@@ -1795,6 +1814,8 @@ class NoyraHTTPServer:
                         if not bridge.done():
                             bridge.set_exception(error)
                     finally:
+                        with suppress(Exception):
+                            coroutine.close()
                         done.set()
 
                 task.add_done_callback(finish)
@@ -1810,7 +1831,7 @@ class NoyraHTTPServer:
                 raise
 
             try:
-                return bridge.result(timeout=self.settings.request_timeout_seconds)
+                return bridge.result(timeout=remaining_seconds(remaining))
             except FutureTimeoutError:
                 # Cancel the actual asyncio task, not the bridge future.  A
                 # concurrent Future is marked cancelled immediately, which
@@ -1827,7 +1848,15 @@ class NoyraHTTPServer:
                 # intentional: shutdown must not release the subject lock.
                 done.wait()
                 raise
-        return asyncio.run(coroutine)
+
+        async def bounded() -> Any:
+            try:
+                async with asyncio.timeout(remaining_seconds(remaining)):
+                    return await coroutine
+            finally:
+                coroutine.close()
+
+        return asyncio.run(bounded())
 
     def _quarantined(self) -> bool:
         checker = self.quarantine_checker
@@ -2545,6 +2574,15 @@ class NoyraHTTPServer:
             def setup(self) -> None:
                 super().setup()
                 self.connection.settimeout(owner.settings.request_timeout_seconds)
+                self.rfile = io.BufferedReader(
+                    DeadlineRequestReader(
+                        self.rfile, self.connection, owner.settings.request_timeout_seconds
+                    )
+                )
+
+            def handle_one_request(self) -> None:
+                with operation_deadline(owner.settings.request_timeout_seconds):
+                    super().handle_one_request()
 
             def do_GET(self) -> None:
                 if not owner.allow_request(

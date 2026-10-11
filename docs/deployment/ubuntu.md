@@ -374,8 +374,12 @@ curl --fail http://127.0.0.1:8765/health
 
 The unit runs without root privileges and applies a read-only system filesystem, private temporary
 directory, no-new-privileges, kernel protection, and an explicit write exception only for
-`/var/lib/noyra`. `NOYRA_REQUEST_TIMEOUT_SECONDS` bounds slow or incomplete HTTP request bodies;
-keep an equivalent or shorter timeout at the reverse proxy as well.
+`/var/lib/noyra`. `NOYRA_REQUEST_TIMEOUT_SECONDS` is one elapsed-time budget from
+the request line through headers and body, also shared with an async handler bridge
+and upgrade metadata reads. Receiving another byte does not reset it. Slow or
+incomplete requests close the connection; bounded async work is cancelled and its
+existing ownership/drain protection remains in effect. Choose a budget that permits
+legitimate uploads, and keep an equivalent or shorter timeout at the reverse proxy.
 
 ## Docker Compose
 

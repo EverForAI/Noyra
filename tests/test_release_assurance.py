@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import base64
-import io
 import json
 import os
-import urllib.request
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -142,9 +140,9 @@ def test_stable_artifact_signature_verified_before_target_is_returned(
     )
     monkeypatch.setattr(assurance, "controlled_text", lambda *_, **__: key)
     monkeypatch.setattr(
-        urllib.request,
-        "urlopen",
-        lambda *_, **__: io.BytesIO(json.dumps(record).encode()),
+        assurance,
+        "read_release_metadata",
+        lambda *_, **__: json.dumps(record).encode(),
     )
     assert assurance.verified_stable_target("a" * 40) == ("v0.1.0", record)
     record["gates"][0]["evidence_refs"] = ["tampered.json"]

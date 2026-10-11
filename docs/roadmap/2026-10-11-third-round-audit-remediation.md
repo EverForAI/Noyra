@@ -33,3 +33,19 @@
 复审：保留 TLS hostname、公共 DNS/peer 固定、Message-ID、unknown 对账、权限错误终止重试和聊天删除关闭。Python 线程/DNS 无法被强杀，迟到 worker 仍保留容量槽位且每次新外发前拒绝取消/过期；已开始的网络写入无法撤回。无 schema 变更，无生产操作。
 
 E02：建立忽略目录 `.runtime/locked-venv`，按 `requirements-dev.lock` 与 `requirements-cloud.lock` 使用 hash 安装，再 no-deps/no-build-isolation editable 安装应用。75 个锁定依赖版本逐一匹配，差异 0，pip check 通过；未修改依赖锁。证据 `.runtime/third-fix-locked-environment.json`、`third-fix-smtp-final.log/xml`、`third-fix-smtp-http.log/xml`、`third-fix-smtp-late.log/xml`。
+
+## 模块二：云 SDK 日志 A02
+
+提交 `8ce137d`：在记录工厂中对 botocore/boto3/urllib3/s3transfer 只保留固定安全事件、日志类别、等级、异常类型与栈位置。未知 SDK 消息不尝试按当前模板猜测敏感字段；原始参数、签名、请求和响应不进入 handler。云客户端创建（含凭据发现）前以及注入真实 SDK client 时安装独立 history recorder 的白名单出口，后续开启 history/增加 handler 仍只能得到固定事件、HTTP 方法和状态。可选 cloud 包没有变成基础 profile 的必需依赖。
+
+实际锁定 botocore 签名、S3 200/403 模拟端点、多 handler、异常、history、归档与外部边界共 42 项通过（7.45 秒）；模块 Ruff/format/Mypy 通过。源码复审保留既有云归档加密、readiness、worker 上限及 unknown 合同；没有清理历史日志或轮换生产凭据。证据 `.runtime/third-fix-cloud-final.log/xml`。历史日志是否存在暴露仍需获授权的环境核查，不能由新日志回归推断过去没有泄露。
+
+## 模块三：升级元数据 A03 与 HTTP 接收 A05
+
+用 ContextVar 传递单调时钟绝对截止时间。HTTP 请求行、headers、JSON、webhook、discard 共用 read1 原始读取包装器，每次 socket 读取消耗剩余预算，慢滴数据不会重置预算。嵌套升级读取及异步 handler bridge 继承该预算；bridge 超时仍保留取消后实际排空/主体锁合同，迟到启动前再复核。普通同步业务函数不被强杀，已经进入的副作用不能因请求超时伪装成未发生。
+
+升级 metadata 改为公共 DNS 固定的有界 HTTPX 读取，stable 序列及最多六次重定向共享预算；DNS、TCP、TLS、每次原始读写（包括不完整响应头）均检查剩余时间，发头/发体 trace 拒绝迟到 worker。保留官方入口、HTTPS、大小、严格 stable JSON、SHA、签名、CI、新鲜度及 404/429/403 错误码。CLI 验证也受 30 秒 metadata 序列预算；不通过缩短整个升级安装服务的 TimeoutStartSec 中断数据库升级/备份。
+
+验收：初轮截止时间/升级/签名 42 通过；增加真实 httpcore 头部慢滴和公共网络边界后 48 通过；错误码 5 通过；最终小范围复审 25 通过；异步取消与正常登录补充 2 通过。服务、安全 profile、持久 session、入站和身份、升级部署/workflow 交叉回归 **140 通过、1 跳过、8 子测试通过**（635.72 秒）。跳过 POSIX token 权限是 Windows 条件限制。9 文件 Ruff/format/Mypy 通过。证据 `.runtime/third-fix-deadlines*`、`third-fix-deadline-raw*`、`third-fix-deadline-cross*`、`third-fix-request-bridge-final*`。
+
+复审：没有修改鉴权/CSRF/消息内容、schema、发布门禁或聊天删除合同；原始网络包装器仅对明确传 remaining 的同步 transport 启用，其他现有消费者保持兼容。主机真实 HTTPS/代理和 Linux 权限仍交由 E01，不以本地 loopback TLS 替身证明生产证书验收。

@@ -332,9 +332,12 @@ class _PinnedDNSSyncStream(httpcore.NetworkStream):
 class _PublicDNSSyncBackend(httpcore.NetworkBackend):
     """Resolve once, reject private addresses, and connect to that exact result."""
 
-    def __init__(self, resolver: SyncResolver | None = None) -> None:
+    def __init__(
+        self, resolver: SyncResolver | None = None, remaining: Callable[[], float] | None = None
+    ) -> None:
         self._backend = httpcore.SyncBackend()
         self._resolver = resolver
+        self._remaining = remaining
 
     def connect_tcp(
         self,
@@ -344,6 +347,9 @@ class _PublicDNSSyncBackend(httpcore.NetworkBackend):
         local_address: str | None = None,
         socket_options: Any = None,
     ) -> httpcore.NetworkStream:
+        if self._remaining is not None:
+            budget = self._remaining()
+            timeout = budget if timeout is None else min(timeout, budget)
         deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
         try:
             remaining = None if deadline is None else deadline - time.monotonic()
@@ -372,7 +378,15 @@ class _PublicDNSSyncBackend(httpcore.NetworkBackend):
                     local_address=local_address,
                     socket_options=socket_options,
                 )
-                return _PinnedDNSSyncStream(stream, host)
+                pinned = _PinnedDNSSyncStream(stream, host)
+                if self._remaining is not None:
+                    try:
+                        self._remaining()
+                    except BaseException:
+                        pinned.close()
+                        raise
+                    return _DeadlineSyncStream(pinned, self._remaining)
+                return pinned
             except (OSError, httpcore.ConnectError, httpcore.ConnectTimeout) as error:
                 last_error = error
         raise OSError(f"public HTTP connection failed for {host}") from last_error
@@ -384,6 +398,48 @@ class _PublicDNSSyncBackend(httpcore.NetworkBackend):
         socket_options: Any = None,
     ) -> httpcore.NetworkStream:
         raise OSError("public HTTP transport does not support Unix sockets")
+
+
+class _DeadlineSyncStream(httpcore.NetworkStream):
+    """Enforce one budget on every raw read, including incomplete headers."""
+
+    def __init__(self, stream: httpcore.NetworkStream, remaining: Callable[[], float]):
+        self._stream = stream
+        self._remaining = remaining
+
+    def _timeout(self, timeout: float | None) -> float:
+        remaining = self._remaining()
+        return remaining if timeout is None else min(timeout, remaining)
+
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        value = self._stream.read(max_bytes, timeout=self._timeout(timeout))
+        self._remaining()
+        return value
+
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        self._stream.write(buffer, timeout=self._timeout(timeout))
+
+    def close(self) -> None:
+        self._stream.close()
+
+    def get_extra_info(self, info: str) -> Any:
+        return self._stream.get_extra_info(info)
+
+    def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> httpcore.NetworkStream:
+        stream = self._stream.start_tls(
+            ssl_context, server_hostname=server_hostname, timeout=self._timeout(timeout)
+        )
+        try:
+            self._remaining()
+        except BaseException:
+            stream.close()
+            raise
+        return _DeadlineSyncStream(stream, self._remaining)
 
 
 class _PinnedDNSAsyncStream(httpcore.AsyncNetworkStream):
@@ -495,6 +551,7 @@ class PublicDNSHTTPTransport(httpx.HTTPTransport):
         *,
         max_connections: int = 16,
         resolver: SyncResolver | None = None,
+        remaining: Callable[[], float] | None = None,
     ) -> None:
         from httpx._config import create_ssl_context
 
@@ -507,7 +564,7 @@ class PublicDNSHTTPTransport(httpx.HTTPTransport):
             http1=True,
             http2=False,
             retries=0,
-            network_backend=_PublicDNSSyncBackend(resolver),
+            network_backend=_PublicDNSSyncBackend(resolver, remaining),
         )
 
 

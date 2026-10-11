@@ -9,7 +9,6 @@ import subprocess
 import tempfile
 import threading
 import urllib.error
-import urllib.request
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -20,6 +19,7 @@ from noyra.core.errors import RuntimeOwnershipError
 from noyra.core.locking import ProcessLock
 from noyra.core.redaction import redact_text
 from noyra.core.release_assurance import activation_status, stable_metadata
+from noyra.core.release_http import read_release_metadata
 
 UPGRADE_ROOT = Path("/var/lib/noyra/upgrade")
 UPGRADE_REQUEST_PATH = UPGRADE_ROOT / "requests" / "pending.json"
@@ -182,15 +182,8 @@ class UpgradeManager:
             f"https://api.github.com/repos/{self.github_owner}/{self.github_repo}"
             f"/commits/{self.github_branch}"
         )
-        request = urllib.request.Request(
-            url,
-            headers={"Accept": "application/vnd.github+json", "User-Agent": "Noyra-upgrade-check"},
-        )
         try:
-            with urllib.request.urlopen(request, timeout=8) as response:
-                raw = response.read(65_537)
-            if len(raw) > 65_536:
-                raise ValueError("response too large")
+            raw = read_release_metadata(url, maximum=65_536, timeout=8)
             return json.loads(raw)
         except urllib.error.HTTPError as error:
             raise UpgradeError(self._remote_http_error(error)) from None
