@@ -237,7 +237,7 @@ class HTTPResponseLimitError(ValueError):
     """The upstream response exceeded an explicit header or body bound."""
 
 
-def public_addresses(host: str, port: int) -> list[str]:
+def public_addresses(host: str, port: int, *, timeout: float | None = None) -> list[str]:
     """Resolve a host to public addresses without leaving a DNS-to-connect gap."""
     del port
     literal = host.split("%", 1)[0]
@@ -249,7 +249,15 @@ def public_addresses(host: str, port: int) -> list[str]:
     except ValueError:
         pass
     try:
-        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        resolver = socket.getaddrinfo
+        if timeout is None:
+            infos = resolver(host, None, type=socket.SOCK_STREAM)
+        else:
+            infos = _call_sync_with_timeout(
+                lambda: resolver(host, None, type=socket.SOCK_STREAM), timeout=timeout
+            )
+    except TimeoutError as error:
+        raise OSError("HTTP endpoint DNS resolution timed out") from error
     except OSError as error:
         raise OSError("HTTP endpoint DNS resolution failed") from error
     addresses: list[str] = []

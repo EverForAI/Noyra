@@ -9,9 +9,12 @@ import json
 import logging
 import os
 import smtplib
+import socket
 import ssl
+import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
@@ -32,6 +35,7 @@ from noyra.core.http import (
     HTTPResponseLimitError,
     PublicDNSAsyncHTTPTransport,
     _PublicDNSAsyncBackend,
+    public_addresses,
     read_bounded_response,
     validate_response_headers,
 )
@@ -46,6 +50,7 @@ from noyra.core.types import (
 )
 
 from .outbound import OUTBOUND_ADAPTERS
+from .smtp_deadline import SMTPOperation
 
 TransportChannel = Literal["telegram", "wechat", "qq", "feishu", "email", "webhook"]
 DeliveryReconciliationOutcome = Literal[
@@ -1003,40 +1008,16 @@ class DeliveryDispatcher:
         self._status_client = status_client
         self._recovered_subjects: set[str] = set()
         self._closed = False
-        self._worker_tasks: set[asyncio.Task[Any]] = set()
+        self._smtp_operations: set[SMTPOperation] = set()
         self._provider_tokens: dict[tuple[str, str, str], tuple[str, float]] = {}
         self._provider_token_lock = asyncio.Lock()
 
     async def aclose(self) -> None:
         self._closed = True
-        for worker in tuple(self._worker_tasks):
-            while not worker.done():
-                try:
-                    await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    continue
-                except Exception:
-                    break
+        for operation in tuple(self._smtp_operations):
+            operation.abort()
         if self._owns_client and self._client is not None:
             await self._client.aclose()
-
-    async def _run_blocking(self, function: Any, /, *args: Any) -> Any:
-        worker = asyncio.create_task(asyncio.to_thread(function, *args))
-        self._worker_tasks.add(worker)
-        try:
-            return await asyncio.shield(worker)
-        except asyncio.CancelledError:
-            while not worker.done():
-                try:
-                    await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    continue
-                except Exception:
-                    break
-            raise
-        finally:
-            if worker.done():
-                self._worker_tasks.discard(worker)
 
     def _http_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -1807,18 +1788,29 @@ class DeliveryDispatcher:
         endpoint = str(secret.get("endpoint", transport.endpoint))
         channel = transport.channel
         if channel == "email":
-            return cast(
-                str | None,
-                await self._run_blocking(
-                    self._send_email,
-                    endpoint,
-                    credentials,
-                    interaction["counterparty"],
-                    interaction["content"],
-                    idempotency_key,
-                    before_send,
-                ),
-            )
+            operation = SMTPOperation(SMTP_TIMEOUT_SECONDS)
+            self._smtp_operations.add(operation)
+            try:
+                return await operation.run(
+                    lambda: self._send_email(
+                        endpoint,
+                        credentials,
+                        interaction["counterparty"],
+                        interaction["content"],
+                        idempotency_key,
+                        before_send,
+                        operation=operation,
+                    )
+                )
+            except TimeoutError as error:
+                # A caller timeout can race DATA acceptance. Never resend it
+                # automatically, even when no receipt has returned yet.
+                raise DeliveryOutcomeUnknown(
+                    "SMTP operation deadline exceeded",
+                    provider_message_id=self._smtp_message_id(idempotency_key),
+                ) from error
+            finally:
+                self._smtp_operations.discard(operation)
         adapter = OUTBOUND_ADAPTERS.get(channel)
         if adapter is None:
             raise ValueError("unsupported transport channel")
@@ -2027,7 +2019,10 @@ class DeliveryDispatcher:
         content: str,
         idempotency_key: str,
         authorize_send: Callable[[], None] | None = None,
+        *,
+        operation: SMTPOperation | None = None,
     ) -> str:
+        operation = operation or SMTPOperation(SMTP_TIMEOUT_SECONDS)
         parsed = urlsplit(endpoint)
         host = parsed.hostname
         if not host:
@@ -2043,30 +2038,67 @@ class DeliveryDispatcher:
         message_id = DeliveryDispatcher._smtp_message_id(idempotency_key)
         message["Message-ID"] = message_id
         message.set_content(content)
-        addresses = _PublicDNSBackend._public_addresses(host, port)
+        addresses = public_addresses(host, port, timeout=operation.remaining())
         address = addresses[0]
         if parsed.scheme == "smtps":
             client: smtplib.SMTP = smtplib.SMTP_SSL(
-                timeout=SMTP_TIMEOUT_SECONDS,
+                timeout=operation.remaining(),
                 context=ssl.create_default_context(),
             )
         else:
-            client = smtplib.SMTP(timeout=SMTP_TIMEOUT_SECONDS)
+            client = smtplib.SMTP(timeout=operation.remaining())
+        operation.client = client
         cast(Any, client)._host = host
-        sent = False
+
+        def boundary() -> None:
+            operation.remaining()
+            if authorize_send is not None:
+                authorize_send()
+            remaining = operation.remaining()
+            if isinstance(client.sock, ssl.SSLSocket | socket.socket):
+                client.sock.settimeout(remaining)
+            client.timeout = remaining
+
+        # smtplib AUTH can use several challenge/response writes or fall back
+        # to a different mechanism. Guard every write, including those after
+        # a server wait and the actual DATA body, not just login() entry.
+        raw_send = getattr(client, "send", None)
+        if raw_send is not None:
+
+            def fenced_send(data: Any) -> Any:
+                boundary()
+                return raw_send(data)
+
+            cast(Any, client).send = fenced_send
+        raw_getreply = getattr(client, "getreply", None)
+        if raw_getreply is not None:
+
+            def bounded_getreply() -> Any:
+                # connect() installs its socket only after TCP/TLS succeeds.
+                # Recheck here even if the abort timer fired before that
+                # socket was available to shut down.
+                operation.remaining()
+                return raw_getreply()
+
+            cast(Any, client).getreply = bounded_getreply
+        timer = threading.Timer(max(0.0, operation.deadline - time.monotonic()), operation.abort)
+        timer.daemon = True
         try:
+            timer.start()
+            boundary()
             code, message_text = client.connect(address, port)
             if code != 220:
                 raise smtplib.SMTPConnectError(code, message_text)
             DeliveryDispatcher._verify_smtp_peer(client, address)
+            boundary()
             if parsed.scheme != "smtps":
                 client.starttls(context=ssl.create_default_context())
+            boundary()
             username = credentials.get("username")
             password = credentials.get("password")
             if username and password:
                 client.login(str(username), str(password))
-            if authorize_send is not None:
-                authorize_send()
+            boundary()
             try:
                 client.send_message(message)
             except (TimeoutError, OSError, smtplib.SMTPServerDisconnected) as error:
@@ -2074,14 +2106,11 @@ class DeliveryDispatcher:
                     "SMTP send outcome unknown",
                     provider_message_id=message_id,
                 ) from error
-            sent = True
         finally:
-            if sent:
-                try:
-                    client.quit()
-                except (OSError, smtplib.SMTPException):
-                    client.close()
-            else:
+            timer.cancel()
+            # QUIT is not part of delivery acceptance. Close locally so a
+            # malicious QUIT response cannot delay a confirmed result.
+            with suppress(OSError, smtplib.SMTPException):
                 client.close()
         return message_id
 
