@@ -87,3 +87,16 @@ jobs:
       - run: python -m pip install --no-deps --no-build-isolation .
       - run: python -c "import boto3, noyra; assert boto3.__version__ == '1.43.72'"
       - run: python -m pip check
+      - name: Install locked cloud security test dependencies
+        run: python -m pip install --require-hashes --requirement requirements-dev.lock --requirement requirements-cloud.lock
+      - name: Run cloud security regression without skips
+        run: |
+          python -m pytest tests/test_runtime_logging.py tests/test_cloud_dependency_compatibility.py \
+            -q --junitxml=cloud-security.xml
+          python scripts/verify-cloud-security-results.py --path cloud-security.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: cloud-security-junit
+          path: cloud-security.xml
+          if-no-files-found: error

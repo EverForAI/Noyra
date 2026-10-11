@@ -22,12 +22,26 @@ jobs:
           cache: pip
       - run: python -m pip install --require-hashes --requirement requirements-dev.lock
       - run: python -m pip install --no-deps --no-build-isolation -e ".[dev]"
+      - name: Install locked cloud security dependencies
+        run: python -m pip install --require-hashes --requirement requirements-cloud.lock
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "24.15.0"
       - run: node --version
       - run: node --check src/noyra/web/admin.js
       - run: node --test tests/frontend/admin-optimization.test.cjs
+      - name: Run cloud security regression without skips
+        run: |
+          python -m pytest tests/test_runtime_logging.py tests/test_cloud_dependency_compatibility.py \
+            -q --junitxml=cloud-security.xml
+          python scripts/verify-cloud-security-results.py --path cloud-security.xml
+      - name: Preserve cloud security evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: release-cloud-security-${{ github.sha }}
+          path: cloud-security.xml
+          if-no-files-found: error
       - run: python -m pip_audit -r requirements.lock --no-deps --disable-pip
       - run: python -m pip_audit -r requirements.lock -r requirements-cloud.lock --no-deps --disable-pip
       - run: python -m pip_audit -r requirements-dev.lock --no-deps --disable-pip

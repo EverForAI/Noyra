@@ -39,4 +39,18 @@
 
 鉴权/持久会话/隐私访问日志关联 **47 项通过**（`.runtime/selected-a05-first.xml`）；专门合同复核 **19 项通过**（`.runtime/selected-a05-contract.xml`，与47项重叠）；原服务鉴权/cookie/HTTPS专项 **4 项通过**（`.runtime/selected-a05-service.xml`）。两文件 Ruff/格式和 Mypy 通过，diff仅为鉴权辅助函数及5处比较替换。没有输出真实 token/API key。
 
-其余模块结果在实际验证后追加。保留原审计作为历史证据，不改写旧 SHA 的结果。
+### E02：完成
+
+根因是测试矩阵只装 dev 锁而 cloud profile 只验证导入，实际 SDK 测试 importorskip 后可以绿色跳过。CI 保留原干净基础+cloud 安装/import/pip check 边界，随后显式安装 hash 锁定的 dev+cloud 测试依赖，执行实际合成 S3 200/403 签名、日志/额外 handler/history 和读取兼容回归。release 的现有 quality-gate 也安装 cloud 锁并执行相同门禁，发布仍依赖该 gate；生产基础 runtime 依赖和外部门禁 E01 没有改动。
+
+新增共享 JUnit 校验器逐 testcase 检查：3个必需实际 SDK 案例必须各出现一次且通过，任何 skip/failure/error、空结果、遗漏/重复案例和 collection error 都拒绝，不能以总计 passed 或导入成功代替真实执行。CI/release 均保留 JUnit artifact。全部测试使用合成 AWS 凭据和拦截/stub，不访问真实 bucket/账号。
+
+实际 SDK/日志回归 **12 项通过、0跳过**，校验器确认 required_sdk_cases=3（`.runtime/cloud-security.xml`）；门禁反例/workflow/release 合同 **14 项通过**（`.runtime/selected-e02-final-contract.xml`），覆盖漏项/空/skip/fail/error/重复/collection。合并运行26项通过（`.runtime/selected-e02-final.xml`，与上述有重叠）。dev+cloud 锁解析 dry-run 无需变更已锁环境，pip check 通过；不将此表述为已重新下载并校验全部wheel。新增脚本/测试 Ruff、格式、Mypy 通过。
+
+GitHub runner、实际 artifact 上传和release流程尚未远程运行；这次只完成本地 workflow 及安全回归合同，未推送/发布。
+
+## 最终范围复核
+
+四项授权修复均按模块复审和本地提交。全根 Ruff check、format **625 文件通过**；默认 `mypy src tests` **408 文件通过**；Node语法和 **69 项测试通过**。没有改锁、schema、聊天删除入口或其他未授权问题；A03、E01 继续按第五轮报告暂缓，未放宽发布阻断。保留原审计和初次失败历史，不宣称这轮新提交完成了整仓Python回归或生产验收。
+
+最终应用代码 `b5a1ca5` 的四模块联合回归 **112 项通过、0失败/错误/跳过，260.48秒**（`.runtime/selected-final-integration.log` 和 `.xml`）。覆盖上述全部新增合同、同步围栏及实际cloud回归，证明组合后也通过；与各模块测试有重叠，不累加成独立总数。随后仅将本段证据加入同一模块提交，应用/测试/workflow内容保持该次验证状态。
