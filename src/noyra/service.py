@@ -396,6 +396,16 @@ _MODEL_RESOURCE_EXACT_FIELDS = (
 )
 
 
+def _ascii_token_equal(supplied: object, expected: str) -> bool:
+    """Reject malformed credentials without changing valid token equivalence."""
+    return (
+        isinstance(supplied, str)
+        and supplied.isascii()
+        and expected.isascii()
+        and hmac.compare_digest(supplied, expected)
+    )
+
+
 def _cognitive_resource_payload(record: CognitiveResourceGroupRecord) -> dict[str, Any]:
     payload = dict(record.__dict__)
     payload["exact_budget"] = {
@@ -8529,7 +8539,7 @@ class NoyraHTTPServer:
                 supplied = self.headers.get("Authorization", "")
                 bearer_authorized = any(
                     secret is not None
-                    and hmac.compare_digest(
+                    and _ascii_token_equal(
                         supplied,
                         f"Bearer {secret.get_secret_value()}",
                     )
@@ -8550,7 +8560,7 @@ class NoyraHTTPServer:
                     "/admin/session",
                     "/admin/session/logout",
                 }:
-                    return hmac.compare_digest(
+                    return _ascii_token_equal(
                         self.headers.get("X-CSRF-Token", ""), session.csrf_token
                     )
                 return True
@@ -8562,7 +8572,7 @@ class NoyraHTTPServer:
                     ("operator", owner.settings.operator_token),
                     ("break_glass", owner.settings.break_glass_token),
                 ):
-                    if secret is not None and hmac.compare_digest(
+                    if secret is not None and _ascii_token_equal(
                         supplied, f"Bearer {secret.get_secret_value()}"
                     ):
                         return f"web-{role}"
@@ -8613,7 +8623,7 @@ class NoyraHTTPServer:
                     if (
                         isinstance(token, str)
                         and secret is not None
-                        and hmac.compare_digest(token, secret.get_secret_value())
+                        and _ascii_token_equal(token, secret.get_secret_value())
                     ):
                         role = candidate
                         break
@@ -8664,7 +8674,7 @@ class NoyraHTTPServer:
 
             def _logout_admin_session(self) -> None:
                 session_id, session = self._session_from_cookie()
-                if session is not None and not hmac.compare_digest(
+                if session is not None and not _ascii_token_equal(
                     self.headers.get("X-CSRF-Token", ""), session.csrf_token
                 ):
                     self._json(HTTPStatus.UNAUTHORIZED, {"error": "csrf_required"})

@@ -31,4 +31,12 @@
 
 关联回归 **57 项通过**（`.runtime/selected-a04-final.xml`），含独立 store、真实线程交错、304/空 discovery、固定时钟/相同状态、较新成功/失败与迟到成功/失败、游标推进、key/端点/停用/调度变更、暂停/恢复、导入/游标原子性及主体范围导出。schema71 升级及 schema 合同 **31 项通过**（`.runtime/selected-a04-schema.xml`）；单模块复核 **30 项通过**（`.runtime/selected-a04-debug.xml`，与57项有重叠）。两文件 Ruff/格式、Mypy 和 diff 复审通过。初次运行有1个测试夹具只传 peer_id，未满足强制完整快照合同；补为完整快照后通过。保留此初次结果，未把全部批次称作整仓零失败。
 
+### A05：完成
+
+根因是直接把不可信 Unicode str 传给只接受 ASCII str 的 `hmac.compare_digest`。统一辅助函数先拒绝非字符串和非ASCII，再保留原 constant-time 比较；应用到登录、Bearer 鉴权、actor 解析和会话 CSRF/退出校验。不 trim、normalize、折叠大小写，不改 cookie、权限、登录限速或凭据配置合同。未吞掉数据库/会话完整性异常，也未改 unrelated 签名比较。
+
+真实本地 HTTP 合成输入证明：中文/全角/Latin-1/孤立 surrogate、空/非字符串、带空格错误令牌都得到401而非断连；无未经捕获的 server.handle_error。有效 admin/operator/只读/export/break-glass 角色保持原合同；错误 Bearer 不破坏有效 cookie，非法 CSRF 不写入/不注销，合法 CSRF 正常写入/注销。连续 Unicode 登录失败使用同一持久化限速预算，之后有效 token 仍被429拒绝。
+
+鉴权/持久会话/隐私访问日志关联 **47 项通过**（`.runtime/selected-a05-first.xml`）；专门合同复核 **19 项通过**（`.runtime/selected-a05-contract.xml`，与47项重叠）；原服务鉴权/cookie/HTTPS专项 **4 项通过**（`.runtime/selected-a05-service.xml`）。两文件 Ruff/格式和 Mypy 通过，diff仅为鉴权辅助函数及5处比较替换。没有输出真实 token/API key。
+
 其余模块结果在实际验证后追加。保留原审计作为历史证据，不改写旧 SHA 的结果。
