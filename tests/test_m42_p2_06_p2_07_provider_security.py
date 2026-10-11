@@ -17,7 +17,9 @@ from pydantic import SecretStr, ValidationError
 
 from noyra.core import SubjectKernel
 from noyra.core.http import (
+    PublicAddressRejected,
     PublicDNSAsyncHTTPTransport,
+    PublicEndpointRejected,
     _PublicDNSAsyncBackend,
     _PublicDNSSyncBackend,
 )
@@ -308,18 +310,21 @@ async def test_public_dns_is_pinned_for_model_and_embedding_redirects_and_retrie
     async_connector = _AsyncConnector()
     async_backend._backend = cast(Any, async_connector)
     await async_backend.connect_tcp("model.example", 443)
-    with pytest.raises(OSError, match="non-public"):
+    with pytest.raises(PublicEndpointRejected, match="address rejected") as model_rejected:
         await async_backend.connect_tcp("model.example", 443)
-    with pytest.raises(OSError, match="non-public"):
+    assert isinstance(model_rejected.value.__cause__, PublicAddressRejected)
+    with pytest.raises(PublicEndpointRejected, match="address rejected") as redirect_rejected:
         await async_backend.connect_tcp("redirect.example", 443)
+    assert isinstance(redirect_rejected.value.__cause__, PublicAddressRejected)
     assert async_connector.addresses == ["8.8.8.8"]
 
     sync_backend = _PublicDNSSyncBackend()
     sync_connector = _SyncConnector()
     sync_backend._backend = cast(Any, sync_connector)
     sync_backend.connect_tcp("embedding.example", 443)
-    with pytest.raises(OSError, match="non-public"):
+    with pytest.raises(PublicEndpointRejected, match="address rejected") as embedding_rejected:
         sync_backend.connect_tcp("embedding.example", 443)
+    assert isinstance(embedding_rejected.value.__cause__, PublicAddressRejected)
     assert sync_connector.addresses == ["2606:4700:4700::1111"]
 
     requests: list[str] = []
