@@ -1066,7 +1066,10 @@ class CommonKnowledgeStore:
             raise ValueError("common knowledge sync event budget is invalid")
         with self.database.connection() as connection:
             peer_row = connection.execute(
-                "SELECT * FROM common_knowledge_peers WHERE peer_id = ? AND subject_id = ?",
+                "SELECT peer.*, (SELECT COUNT(*) "
+                "FROM common_knowledge_sync_runs run WHERE run.peer_id=peer.peer_id "
+                "AND run.subject_id=peer.subject_id) AS completion_generation "
+                "FROM common_knowledge_peers peer WHERE peer_id = ? AND subject_id = ?",
                 (peer_id, self.subject_id),
             ).fetchone()
         if peer_row is None:
@@ -1172,7 +1175,7 @@ class CommonKnowledgeStore:
                 revoked,
                 None,
             )
-            self._finish_peer_sync(failed, error_code=code)
+            self._finish_peer_sync(failed, error_code=code, expected_peer=peer_row)
             if isinstance(error, CommonKnowledgeSyncError):
                 raise
             raise CommonKnowledgeSyncError(code) from error
@@ -1679,6 +1682,21 @@ class CommonKnowledgeStore:
             raise PermissionError("common knowledge peer changed")
         if record.cursor != cursor:
             raise CommonKnowledgeSyncError("common_knowledge_peer_cursor_changed")
+        # Append-only completion receipts fence even identical cursor/ETag
+        # results under a fixed clock. Read the receipt and peer together at
+        # start; our own cursor imports do not create a completion receipt.
+        generation = connection.execute(
+            "SELECT COUNT(*) FROM common_knowledge_sync_runs WHERE peer_id=? AND subject_id=?",
+            (peer["peer_id"], self.subject_id),
+        ).fetchone()[0]
+        if generation != peer["completion_generation"]:
+            raise CommonKnowledgeSyncError("common_knowledge_peer_completion_changed")
+        if any(
+            current[field] != peer[field]
+            for field in self._peer_state_values(peer)
+            if field not in {"cursor", "updated_at"}
+        ):
+            raise PermissionError("common knowledge peer state changed")
         key = connection.execute(
             "SELECT public_key FROM common_knowledge_trusted_keys "
             "WHERE key_id=? AND status='active'",
@@ -1835,7 +1853,7 @@ class CommonKnowledgeStore:
         result: CommonKnowledgeSyncResult,
         *,
         error_code: str | None,
-        expected_peer: Any = None,
+        expected_peer: Any,
     ) -> None:
         now = self.clock()
         with self.database.transaction() as connection:
@@ -1845,29 +1863,38 @@ class CommonKnowledgeStore:
             ).fetchone()
             if row is None:
                 raise NotFoundError(f"common knowledge peer not found: {result.peer_id}")
-            if strict_int(row["cursor"]) != result.cursor_after:
-                raise CommonKnowledgeSyncError("common_knowledge_peer_cursor_changed")
             if error_code is None:
                 self._assert_sync_peer(
                     connection,
-                    row if expected_peer is None else expected_peer,
+                    expected_peer,
                     cursor=result.cursor_after,
                 )
+                update_peer = True
+            else:
+                try:
+                    self._assert_sync_peer(connection, expected_peer, cursor=result.cursor_after)
+                except (CommonKnowledgeSyncError, PermissionError):
+                    # Record this attempt's real failure, but never change the
+                    # state/schedule owned by a newer completion or config.
+                    update_peer = False
+                else:
+                    update_peer = True
             interval = strict_int(row["sync_interval_seconds"])
             delay = interval if error_code is None else min(300, interval)
             next_sync = (datetime.fromisoformat(now) + timedelta(seconds=delay)).isoformat(
                 timespec="milliseconds"
             )
-            self._update_peer_connection(
-                connection,
-                result.peer_id,
-                cursor=result.cursor_after,
-                remote_etag=result.remote_etag,
-                next_sync_at=next_sync,
-                last_sync_at=now,
-                last_error_code=error_code,
-                updated_at=now,
-            )
+            if update_peer:
+                self._update_peer_connection(
+                    connection,
+                    result.peer_id,
+                    cursor=result.cursor_after,
+                    remote_etag=result.remote_etag,
+                    next_sync_at=next_sync,
+                    last_sync_at=now,
+                    last_error_code=error_code,
+                    updated_at=now,
+                )
             values = {
                 "sync_id": new_id("knowledge-sync"),
                 "peer_id": result.peer_id,
