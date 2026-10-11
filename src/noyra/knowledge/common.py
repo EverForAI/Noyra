@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from noyra.core.admission import assert_current_lease
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.identity import validate_subject_id
@@ -473,107 +474,111 @@ class CommonKnowledgeStore:
         }
 
     def import_package(self, envelope: dict[str, Any]) -> CommonKnowledgePackage:
+        with self.database.transaction() as connection:
+            package_id = self._import_package_connection(connection, envelope)
+        return self.get(package_id)
+
+    def _import_package_connection(self, connection: Any, envelope: dict[str, Any]) -> str:
         proposal, body, verified_envelope, envelope_json, envelope_hash = self._normalize_envelope(
             envelope
         )
         signature = str(verified_envelope["signature"])
         now = self.clock()
-        with self.database.transaction() as connection:
-            key = connection.execute(
-                "SELECT public_key FROM common_knowledge_trusted_keys "
-                "WHERE key_id = ? AND status = 'active'",
-                (body["key_id"],),
-            ).fetchone()
-            if key is None:
-                raise PermissionError("common knowledge publisher key is not trusted")
-            public_key = str(key["public_key"])
-            if content_hash(public_key)[:32] != body["key_id"]:
-                raise IntegrityError("common knowledge trusted key id mismatch")
-            self._verify(public_key, body, signature)
+        key = connection.execute(
+            "SELECT public_key FROM common_knowledge_trusted_keys "
+            "WHERE key_id = ? AND status = 'active'",
+            (body["key_id"],),
+        ).fetchone()
+        if key is None:
+            raise PermissionError("common knowledge publisher key is not trusted")
+        public_key = str(key["public_key"])
+        if content_hash(public_key)[:32] != body["key_id"]:
+            raise IntegrityError("common knowledge trusted key id mismatch")
+        self._verify(public_key, body, signature)
 
-            existing = connection.execute(
-                "SELECT * FROM common_knowledge_packages WHERE package_id = ?",
-                (body["package_id"],),
-            ).fetchone()
-            if existing is not None:
-                existing_record = self._record_from_row(existing)
-                existing_envelope = self._verified_envelope(existing_record)
-                if canonical_json(existing_envelope) != envelope_json:
-                    raise IntegrityError("common knowledge package id collision")
-                if existing_record.status != "published":
-                    raise PermissionError("common knowledge package is not publishable")
-            else:
-                connection.execute(
-                    "INSERT INTO common_knowledge_packages(package_id, publisher_subject_id, "
-                    "scope, title, summary, payload_json, payload_hash, signature, key_id, "
-                    "version, "
-                    "status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?)",
-                    (
-                        body["package_id"],
-                        body["publisher_subject_id"],
-                        proposal.scope,
-                        proposal.title,
-                        proposal.summary,
-                        canonical_json(proposal.payload),
-                        body["payload_hash"],
-                        signature,
-                        body["key_id"],
-                        proposal.version,
-                        body["created_at"],
-                    ),
-                )
+        existing = connection.execute(
+            "SELECT * FROM common_knowledge_packages WHERE package_id = ?",
+            (body["package_id"],),
+        ).fetchone()
+        if existing is not None:
+            existing_record = self._record_from_row(existing)
+            existing_envelope = self._verified_envelope(existing_record)
+            if canonical_json(existing_envelope) != envelope_json:
+                raise IntegrityError("common knowledge package id collision")
+            if existing_record.status != "published":
+                raise PermissionError("common knowledge package is not publishable")
+        else:
+            connection.execute(
+                "INSERT INTO common_knowledge_packages(package_id, publisher_subject_id, "
+                "scope, title, summary, payload_json, payload_hash, signature, key_id, "
+                "version, "
+                "status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?)",
+                (
+                    body["package_id"],
+                    body["publisher_subject_id"],
+                    proposal.scope,
+                    proposal.title,
+                    proposal.summary,
+                    canonical_json(proposal.payload),
+                    body["payload_hash"],
+                    signature,
+                    body["key_id"],
+                    proposal.version,
+                    body["created_at"],
+                ),
+            )
 
-            imported = connection.execute(
-                "SELECT * FROM common_knowledge_imports WHERE package_id = ? AND subject_id = ?",
-                (body["package_id"], self.subject_id),
-            ).fetchone()
-            if imported is None:
-                import_id = new_id("knowledge-import")
-                connection.execute(
-                    "INSERT INTO common_knowledge_imports(import_id, package_id, subject_id, "
-                    "status, reason, imported_at) VALUES (?, ?, ?, 'quarantined', ?, ?)",
-                    (
-                        import_id,
-                        body["package_id"],
-                        self.subject_id,
-                        "signature verified; awaiting subject evaluation",
-                        now,
-                    ),
-                )
-            else:
-                import_id = str(imported["import_id"])
+        imported = connection.execute(
+            "SELECT * FROM common_knowledge_imports WHERE package_id = ? AND subject_id = ?",
+            (body["package_id"], self.subject_id),
+        ).fetchone()
+        if imported is None:
+            import_id = new_id("knowledge-import")
+            connection.execute(
+                "INSERT INTO common_knowledge_imports(import_id, package_id, subject_id, "
+                "status, reason, imported_at) VALUES (?, ?, ?, 'quarantined', ?, ?)",
+                (
+                    import_id,
+                    body["package_id"],
+                    self.subject_id,
+                    "signature verified; awaiting subject evaluation",
+                    now,
+                ),
+            )
+        else:
+            import_id = str(imported["import_id"])
 
-            provenance = connection.execute(
-                "SELECT * FROM common_knowledge_import_provenance WHERE import_id = ?",
-                (import_id,),
-            ).fetchone()
-            if provenance is None:
-                connection.execute(
-                    "INSERT INTO common_knowledge_import_provenance(provenance_id, import_id, "
-                    "package_id, subject_id, envelope_json, envelope_hash, payload_hash, "
-                    "signer_key_id, signature, verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        new_id("knowledge-provenance"),
-                        import_id,
-                        body["package_id"],
-                        self.subject_id,
-                        envelope_json,
-                        envelope_hash,
-                        body["payload_hash"],
-                        body["key_id"],
-                        signature,
-                        now,
-                    ),
-                )
-            elif (
-                provenance["envelope_json"] != envelope_json
-                or provenance["envelope_hash"] != envelope_hash
-                or provenance["payload_hash"] != body["payload_hash"]
-                or provenance["signer_key_id"] != body["key_id"]
-                or provenance["signature"] != signature
-            ):
-                raise IntegrityError("common knowledge import provenance mismatch")
-        return self.get(str(body["package_id"]))
+        provenance = connection.execute(
+            "SELECT * FROM common_knowledge_import_provenance WHERE import_id = ?",
+            (import_id,),
+        ).fetchone()
+        if provenance is None:
+            connection.execute(
+                "INSERT INTO common_knowledge_import_provenance(provenance_id, import_id, "
+                "package_id, subject_id, envelope_json, envelope_hash, payload_hash, "
+                "signer_key_id, signature, verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_id("knowledge-provenance"),
+                    import_id,
+                    body["package_id"],
+                    self.subject_id,
+                    envelope_json,
+                    envelope_hash,
+                    body["payload_hash"],
+                    body["key_id"],
+                    signature,
+                    now,
+                ),
+            )
+        elif (
+            provenance["envelope_json"] != envelope_json
+            or provenance["envelope_hash"] != envelope_hash
+            or provenance["payload_hash"] != body["payload_hash"]
+            or provenance["signer_key_id"] != body["key_id"]
+            or provenance["signature"] != signature
+        ):
+            raise IntegrityError("common knowledge import provenance mismatch")
+        return str(body["package_id"])
 
     def accept(self, package_id: str, *, reason: str, actor: str = "subject") -> None:
         evaluation = self.begin_evaluation(package_id, reason=reason, actor=actor)
@@ -1055,6 +1060,7 @@ class CommonKnowledgeStore:
         *,
         client: CommonKnowledgeClientProtocol | None = None,
         max_events: int = 100,
+        checkpoint: Callable[[], None] | None = None,
     ) -> CommonKnowledgeSyncResult:
         if not 1 <= max_events <= 1_000:
             raise ValueError("common knowledge sync event budget is invalid")
@@ -1072,15 +1078,25 @@ class CommonKnowledgeStore:
         cursor = cursor_before
         discovered = imported = revoked = 0
         remote_etag: str | None = None
+
+        def check() -> None:
+            assert_current_lease()
+            if checkpoint is not None:
+                checkpoint()
+            with self.database.connection() as connection:
+                self._assert_sync_peer(connection, peer_row, cursor=cursor)
+
         owned_client: CommonKnowledgeHTTPClient | None = None
         active_client: CommonKnowledgeClientProtocol
         if client is None:
-            owned_client = CommonKnowledgeHTTPClient(str(peer_row["endpoint"]))
+            owned_client = CommonKnowledgeHTTPClient(str(peer_row["endpoint"]), checkpoint=check)
             active_client = owned_client
         else:
             active_client = client
         try:
+            check()
             discovery = active_client.discovery(etag=peer.remote_etag)
+            check()
             if discovery is None:
                 result = CommonKnowledgeSyncResult(
                     peer_id,
@@ -1092,16 +1108,19 @@ class CommonKnowledgeStore:
                     0,
                     peer.remote_etag,
                 )
-                self._finish_peer_sync(result, error_code=None)
+                check()
+                self._finish_peer_sync(result, error_code=None, expected_peer=peer_row)
                 return result
             latest_sequence, remote_etag = self._verify_discovery(peer_row, discovery)
             if latest_sequence < cursor:
                 raise IntegrityError("common knowledge peer cursor moved backwards")
             while cursor < latest_sequence and discovered < max_events:
+                check()
                 page = active_client.feed(
                     cursor=cursor,
                     limit=min(50, max_events - discovered),
                 )
+                check()
                 events = self._verify_feed_page(
                     peer_row,
                     page,
@@ -1113,7 +1132,10 @@ class CommonKnowledgeStore:
                 for event in events:
                     if discovered >= max_events:
                         break
-                    sequence = self._apply_remote_event(peer_row, event, expected=cursor + 1)
+                    check()
+                    sequence = self._apply_remote_event(
+                        peer_row, event, expected=cursor + 1, checkpoint=checkpoint
+                    )
                     cursor = sequence
                     discovered += 1
                     if event["event_type"] == "published":
@@ -1131,7 +1153,8 @@ class CommonKnowledgeStore:
                 revoked,
                 remote_etag if outcome == "succeeded" else None,
             )
-            self._finish_peer_sync(result, error_code=None)
+            check()
+            self._finish_peer_sync(result, error_code=None, expected_peer=peer_row)
             return result
         except (CommonKnowledgeSyncError, IntegrityError, PermissionError, ValueError) as error:
             code = (
@@ -1143,7 +1166,7 @@ class CommonKnowledgeStore:
                 peer_id,
                 "failed",
                 cursor_before,
-                self.peer(peer_id).cursor,
+                cursor,
                 discovered,
                 imported,
                 revoked,
@@ -1182,6 +1205,7 @@ class CommonKnowledgeStore:
                 self.sync_peer(
                     str(row["peer_id"]),
                     max_events=max_events_per_peer,
+                    checkpoint=checkpoint,
                 )
             except CommonKnowledgeSyncError:
                 continue
@@ -1639,22 +1663,60 @@ class CommonKnowledgeStore:
             "signature": str(event["signature"]),
         }
 
-    def _apply_remote_event(self, peer: Any, event: Mapping[str, Any], *, expected: int) -> int:
+    def _assert_sync_peer(self, connection: Any, peer: Any, *, cursor: int) -> None:
+        assert_current_lease()
+        current = connection.execute(
+            "SELECT * FROM common_knowledge_peers WHERE peer_id=? AND subject_id=?",
+            (peer["peer_id"], self.subject_id),
+        ).fetchone()
+        if current is None:
+            raise PermissionError("common knowledge peer withdrawn")
+        record = self._peer_from_row(current)
+        if record.status != "active" or any(
+            current[field] != peer[field]
+            for field in ("endpoint", "publisher_subject_id", "key_id", "public_key")
+        ):
+            raise PermissionError("common knowledge peer changed")
+        if record.cursor != cursor:
+            raise CommonKnowledgeSyncError("common_knowledge_peer_cursor_changed")
+        key = connection.execute(
+            "SELECT public_key FROM common_knowledge_trusted_keys "
+            "WHERE key_id=? AND status='active'",
+            (peer["key_id"],),
+        ).fetchone()
+        if key is None or key["public_key"] != peer["public_key"]:
+            raise PermissionError("common knowledge publisher key withdrawn")
+
+    def _apply_remote_event(
+        self,
+        peer: Any,
+        event: Mapping[str, Any],
+        *,
+        expected: int,
+        checkpoint: Callable[[], None] | None = None,
+    ) -> int:
+        assert_current_lease()
         verified = self._verify_sync_event(peer, event, expected=expected)
         envelope = dict(verified["envelope"])
         package_id = str(verified["package_id"])
-        if verified["event_type"] == "published":
-            self.import_package(envelope)
-        else:
-            try:
-                existing = self.get(package_id)
-            except NotFoundError:
-                self.import_package(envelope)
-            else:
-                if self._verified_envelope(existing) != envelope:
-                    raise IntegrityError("common knowledge revocation envelope mismatch")
+        if checkpoint is not None:
+            checkpoint()
         now = self.clock()
+        # Import, signed event and cursor advance commit atomically. A pause
+        # between these steps cannot leave an imported package without its
+        # durable cursor/receipt, or overwrite a concurrent worker's cursor.
         with self.database.transaction() as connection:
+            self._assert_sync_peer(connection, peer, cursor=expected - 1)
+            if verified["event_type"] == "published":
+                self._import_package_connection(connection, envelope)
+            else:
+                existing = connection.execute(
+                    "SELECT * FROM common_knowledge_packages WHERE package_id=?", (package_id,)
+                ).fetchone()
+                if existing is None:
+                    self._import_package_connection(connection, envelope)
+                elif self._verified_envelope(self._record_from_row(existing)) != envelope:
+                    raise IntegrityError("common knowledge revocation envelope mismatch")
             self._insert_version(
                 connection,
                 package_id=package_id,
@@ -1773,6 +1835,7 @@ class CommonKnowledgeStore:
         result: CommonKnowledgeSyncResult,
         *,
         error_code: str | None,
+        expected_peer: Any = None,
     ) -> None:
         now = self.clock()
         with self.database.transaction() as connection:
@@ -1782,6 +1845,14 @@ class CommonKnowledgeStore:
             ).fetchone()
             if row is None:
                 raise NotFoundError(f"common knowledge peer not found: {result.peer_id}")
+            if strict_int(row["cursor"]) != result.cursor_after:
+                raise CommonKnowledgeSyncError("common_knowledge_peer_cursor_changed")
+            if error_code is None:
+                self._assert_sync_peer(
+                    connection,
+                    row if expected_peer is None else expected_peer,
+                    cursor=result.cursor_after,
+                )
             interval = strict_int(row["sync_interval_seconds"])
             delay = interval if error_code is None else min(300, interval)
             next_sync = (datetime.fromisoformat(now) + timedelta(seconds=delay)).isoformat(
