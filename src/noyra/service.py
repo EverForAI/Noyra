@@ -115,6 +115,7 @@ from noyra.interaction import (
 from noyra.interaction.conversations import ConversationConflict, ConversationStore
 from noyra.interaction.erasure import ConversationErasure, ErasureReviewRequired
 from noyra.interaction.errors import InteractionStateConflictError
+from noyra.interaction.public_archive import ARCHIVE_CONTRACT, PublicArchive, PublicationConflict
 from noyra.interaction.public_contract import (
     PUBLIC_CACHE_CONTROL,
     PUBLIC_CONTRACT_ID,
@@ -1420,6 +1421,7 @@ class NoyraHTTPServer:
         self.at_rest: AtRestGuard | None = None
         self.operator_controls: OperatorControlService | None = None
         self.projection = PublicProjection(kernel.database)
+        self.public_archive = PublicArchive(kernel.database)
         self.provider_health = ProviderHealthStore(kernel.database)
         self.retention = RetentionManager(
             kernel.database,
@@ -3027,6 +3029,81 @@ class NoyraHTTPServer:
                     }
                     owner._store_health(health_status, health_payload)
                     self._json(health_status, self._health_projection(health_payload))
+                elif parsed.path.startswith("/api/public/"):
+                    allowed_routes = {
+                        "overview": None,
+                        "timeline": "all",
+                        "diary": "diary",
+                        "behavior": "behavior",
+                        "interactions": "interaction",
+                        "posts": "post",
+                        "goals": "goal",
+                        "projects": "project",
+                        "predictions": "prediction",
+                        "research": "research",
+                        "sleep": "sleep",
+                        "lifecycle": "lifecycle",
+                        "updates": "update",
+                    }
+                    route = parsed.path.removeprefix("/api/public/")
+                    if route not in allowed_routes:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+                        return
+                    try:
+                        params = parse_qs(parsed.query, keep_blank_values=True)
+                        allowed_params = {
+                            "limit",
+                            "cursor",
+                            "since",
+                            "until",
+                            "search",
+                            "status",
+                            "kind",
+                            "id",
+                        }
+                        if set(params) - allowed_params or any(
+                            len(v) != 1 for v in params.values()
+                        ):
+                            raise ValueError("invalid public query")
+                        if route == "overview":
+                            if params:
+                                raise ValueError("overview takes no query")
+                            result = owner.public_archive.overview(owner.kernel.subject_id)
+                        else:
+                            kind = params.get("kind", [allowed_routes[route]])[0]
+                            if route != "timeline" and kind != allowed_routes[route]:
+                                raise ValueError("invalid public category")
+                            result = owner.public_archive.page(
+                                owner.kernel.subject_id,
+                                kind=str(kind),
+                                limit=int(params.get("limit", ["20"])[0]),
+                                cursor=params.get("cursor", [None])[0],
+                                since=params.get("since", [None])[0],
+                                until=params.get("until", [None])[0],
+                                search=params.get("search", [""])[0],
+                                status=params.get("status", [""])[0],
+                                identifier=params.get("id", [None])[0],
+                            )
+                    except (ValueError, TypeError, UnicodeError):
+                        self._json(
+                            HTTPStatus.BAD_REQUEST,
+                            {"error": "invalid_public_query"},
+                            public_contract=ARCHIVE_CONTRACT,
+                        )
+                        return
+                    except IntegrityError:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "public_content_unavailable"},
+                            public_contract=ARCHIVE_CONTRACT,
+                        )
+                        return
+                    self._json(HTTPStatus.OK, result, public_contract=ARCHIVE_CONTRACT)
+                elif parsed.path == "/api/admin/public-publications":
+                    if not self._authorized():
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    self._json(HTTPStatus.OK, owner.public_archive.admin(owner.kernel.subject_id))
                 elif parsed.path == "/api/state":
                     state = owner.projection.state(owner.kernel.subject_id)
                     self._json(HTTPStatus.OK, state, public_contract=True)
@@ -5298,6 +5375,12 @@ class NoyraHTTPServer:
                 if self.path == "/api/public-posts/captcha":
                     self._issue_public_post_captcha()
                     return
+                if self.path == "/api/admin/public-publications" or (
+                    self.path.startswith("/api/admin/public-publications/")
+                    and self.path.endswith("/withdraw")
+                ):
+                    self._public_publication()
+                    return
                 if self.path == "/api/public-posts":
                     if self.headers.get_content_type() != "application/json":
                         self._discard_small_request_body()
@@ -7359,6 +7442,47 @@ class NoyraHTTPServer:
                         "status": record.status,
                     },
                 )
+
+            def _public_publication(self) -> None:
+                if not self._authorized():
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+                    return
+                payload = self._request_json()
+                if payload is None:
+                    return
+                try:
+                    if self.path.endswith("/withdraw"):
+                        if set(payload) != {"expected_revision"}:
+                            raise ValueError("invalid withdrawal")
+                        identifier = self.path.removeprefix(
+                            "/api/admin/public-publications/"
+                        ).removesuffix("/withdraw")
+                        owner.public_archive.withdraw(
+                            owner.kernel.subject_id,
+                            identifier,
+                            payload["expected_revision"],
+                            actor=self._actor(),
+                        )
+                        result = {"status": "withdrawn"}
+                    else:
+                        result = owner.public_archive.publish(
+                            owner.kernel.subject_id, payload, actor=self._actor()
+                        )
+                except NotFoundError:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "public_publication_not_found"})
+                    return
+                except PublicationConflict:
+                    self._json(HTTPStatus.CONFLICT, {"error": "public_publication_conflict"})
+                    return
+                except (ValueError, TypeError, UnicodeError, PermissionError):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_public_publication"})
+                    return
+                self._json(HTTPStatus.OK, result)
 
             def _configure_public_post_controls(self) -> None:
                 if not self._authorized():
@@ -9518,7 +9642,7 @@ class NoyraHTTPServer:
                 payload: Any,
                 *,
                 retry_after: int | None = None,
-                public_contract: bool = False,
+                public_contract: bool | str = False,
             ) -> None:
                 body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
                 if public_contract and len(body) > PUBLIC_MAX_RESPONSE_BYTES:
@@ -9526,7 +9650,9 @@ class NoyraHTTPServer:
                     body = json.dumps(
                         {
                             "error": "public_response_too_large",
-                            "contract": PUBLIC_CONTRACT_ID,
+                            "contract": public_contract
+                            if isinstance(public_contract, str)
+                            else PUBLIC_CONTRACT_ID,
                         },
                         ensure_ascii=False,
                         separators=(",", ":"),
@@ -9551,7 +9677,7 @@ class NoyraHTTPServer:
                 length: int,
                 *,
                 cache_control: str = "no-store",
-                public_contract: bool = False,
+                public_contract: bool | str = False,
             ) -> None:
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(length))
@@ -9564,7 +9690,10 @@ class NoyraHTTPServer:
                 self.send_header("Cross-Origin-Resource-Policy", "same-origin")
                 self.send_header("X-Permitted-Cross-Domain-Policies", "none")
                 if public_contract:
-                    self.send_header("X-Noyra-Public-Contract", PUBLIC_CONTRACT_ID)
+                    self.send_header(
+                        "X-Noyra-Public-Contract",
+                        public_contract if isinstance(public_contract, str) else PUBLIC_CONTRACT_ID,
+                    )
                 if owner.settings.public_site_url or owner.settings.admin_session_cookie_secure:
                     self.send_header(
                         "Strict-Transport-Security",
