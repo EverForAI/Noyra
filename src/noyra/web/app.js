@@ -16,6 +16,7 @@ let overviewData = null,
 let batchPaths = [],
     batchPath = "",
     batchNumber = 1;
+let readingReturn = null;
 let menuReturnFocus = null;
 const requestControllers = new Map(),
     MAX_VISIBLE_RECORDS = 200;
@@ -385,6 +386,17 @@ function emptyState(
 function itemHref(row) {
     return `/public/${encodeURIComponent(row.kind)}/${encodeURIComponent(row.id)}${language === "en" ? "?lang=en" : ""}`;
 }
+function publicReadingClick(event) {
+    const link = event.target.closest("a[href]");
+    if (!link || event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || link.target || link.hasAttribute("download")) return;
+    const url = new URL(link.href, location.href), parts = url.pathname.split("/");
+    if (url.origin !== location.origin || parts.length !== 4 || parts[1] !== "public" || !kinds[parts[2]]) return;
+    if (!activeId && !["overview","about","participate"].includes(activeView)) {
+        readingReturn = {view:activeView,path:batchPath,count:visibleRows.length,query:currentQueryPath,paths:[...batchPaths],number:batchNumber,period:$("#period-filter").value,category:$("#category-filter").value,status:$("#status-filter").value,search:$("#archive-search").value};
+    } else readingReturn = null;
+    event.preventDefault();
+    location.hash = `${kinds[parts[2]]}/${parts[3]}`;
+}
 function provenance(row) {
     return (
         {
@@ -715,23 +727,37 @@ function queryPath() {
     return `/api/public/${activeView}?${query}`;
 }
 let currentQueryPath = "";
-async function loadView(generation, signal, append = false, previous = false) {
+async function loadView(generation, signal, append = false, previous = false, restore = null) {
     const replaceBatch = append && visibleRows.length >= MAX_VISIBLE_RECORDS;
     const path = previous
-        ? batchPaths[batchPaths.length - 1]
+        ? batchPaths[batchPaths.length - 1].path
+        : restore ? restore.path
         : append
           ? `${currentQueryPath}&cursor=${encodeURIComponent(nextCursor)}`
           : queryPath();
-    const page = await getJson(path, { signal });
+    let page = await getJson(path, { signal });
+    const wanted = previous ? batchPaths[batchPaths.length - 1].count : restore?.count;
+    if (wanted) {
+        const rows = [...page.items];
+        for (let reads=1; rows.length < wanted && page.next_cursor && reads < 20; reads++) {
+            const base = new URL(path, location.href);
+            base.searchParams.set("cursor",page.next_cursor);
+            base.searchParams.set("limit",String(Math.min(100,wanted-rows.length)));
+            page = await getJson(base.pathname + base.search, {signal});
+            if (!currentViewGeneration(generation)) return;
+            rows.push(...page.items);
+        }
+        page = {...page,items:rows};
+    }
     if (!currentViewGeneration(generation)) return;
-    if (!append && !previous) {
+    if (!append && !previous && !restore) {
         currentQueryPath = path;
         batchPath = path;
         batchPaths = [];
         batchNumber = 1;
     }
     if (replaceBatch) {
-        batchPaths.push(batchPath);
+        batchPaths.push({path:batchPath,count:visibleRows.length});
         if (batchPaths.length > 128) batchPaths.shift();
         batchPath = path;
         batchNumber++;
@@ -740,6 +766,9 @@ async function loadView(generation, signal, append = false, previous = false) {
         batchPaths.pop();
         batchPath = path;
         batchNumber = Math.max(1, batchNumber - 1);
+    }
+    if (restore) {
+        currentQueryPath=restore.query;batchPaths=[...restore.paths];batchPath=restore.path;batchNumber=restore.number;
     }
     const rows =
         append && !replaceBatch ? [...visibleRows, ...page.items] : page.items;
@@ -766,7 +795,7 @@ async function loadView(generation, signal, append = false, previous = false) {
     $("#list-status").textContent =
         `${tr("批次", "Batch")} ${batchNumber} · ${tr("已显示", "Showing")} ${visibleRows.length} ${tr("条 · 获取于", "records · Fetched at")} ${formatTime(page.generated_at)}`;
 }
-async function refresh({ append = false, previous = false } = {}) {
+async function refresh({ append = false, previous = false, restore = null } = {}) {
     if (["overview", "about", "participate"].includes(activeView)) {
         await loadOverview();
         return;
@@ -775,7 +804,7 @@ async function refresh({ append = false, previous = false } = {}) {
         controller = requestScope("view");
     $("#load-more").disabled = true;
     $("#previous-batch").disabled = true;
-    if (!append && !previous) {
+    if (!append && !previous && !restore) {
         batchPaths = [];
         batchPath = "";
         batchNumber = 1;
@@ -787,7 +816,7 @@ async function refresh({ append = false, previous = false } = {}) {
     }
     $("#list-status").textContent = tr("正在读取…", "Loading…");
     const results = await Promise.allSettled([
-        loadView(generation, controller.signal, append, previous),
+        loadView(generation, controller.signal, append, previous, restore),
         loadOverview(),
     ]);
     if (!currentViewGeneration(generation)) return;
@@ -1052,13 +1081,19 @@ function showView() {
     ].includes(activeView);
     notice.textContent = $("#page-description").textContent;
     configureStatus();
+    const restore = !activeId && readingReturn?.view === activeView ? readingReturn : null;
+    if (restore) {
+        $("#period-filter").value=restore.period;$("#category-filter").value=restore.category;
+        configureStatus();$("#status-filter").value=restore.status;$("#archive-search").value=restore.search;
+        readingReturn=null;
+    }
     visibleRows = [];
     nextCursor = null;
     $("#load-more").hidden = true;
     $("#list-status").textContent = "";
     content.innerHTML = activeView === "about" ? renderAbout() : "";
     setMenu(false);
-    void refresh();
+    void refresh({restore});
     if (activeView === "participate" && !publicPostCaptchaId)
         void loadPublicPostCaptcha();
 }
@@ -1318,6 +1353,7 @@ document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") setMenu(false);
 });
 document.addEventListener("click", (event) => {
+    publicReadingClick(event);
     const sectionLink = event.target.closest(".reading-toc a");
     if (sectionLink) {
         event.preventDefault();

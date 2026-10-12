@@ -40,6 +40,7 @@ function harness(extra = {}) {
         setTimeout,
         clearTimeout,
         Date,
+        location: {href:"https://example.test/",origin:"https://example.test",hash:""},
         console,
         ...extra,
     });
@@ -110,6 +111,8 @@ test("450 records remain reachable in bounded batches with a previous path", asy
     assert.equal(h.get("batchNumber"), 3);
     await h.sandbox.refresh({ previous: true });
     assert.equal(h.get("visibleRows[0].id"), "200");
+    assert.equal(h.get("visibleRows.length"), 200);
+    assert.equal(h.get("visibleRows[199].id"), "399");
     await h.sandbox.refresh();
     assert.equal(h.get("batchPaths.length"), 0);
 });
@@ -551,4 +554,34 @@ test("article links identify independent pages and structured text stays inert",
     assert.ok(markup.includes("&lt;script&gt;"));
     assert.ok(!markup.includes("<script>"));
     assert.ok(!markup.includes('href="javascript:'));
+});
+
+test("ordinary article clicks retain SPA context while modified clicks keep canonical navigation", () => {
+    const h=harness();
+    h.set('activeView="diary";batchPath="/api/public/diary?limit=20&cursor=200";currentQueryPath="/api/public/diary?limit=20";visibleRows=Array.from({length:200},(_,i)=>({id:String(i)}));batchNumber=2');
+    h.node("#archive-search").value="draft search";
+    const link={href:"https://example.test/public/diary/example",target:"",hasAttribute:()=>false};
+    let prevented=0;
+    const event={target:{closest:()=>link},button:0,preventDefault(){prevented++}};
+    h.sandbox.publicReadingClick({...event,ctrlKey:true});
+    assert.equal(prevented,0);
+    h.sandbox.publicReadingClick(event);
+    assert.equal(prevented,1);
+    assert.equal(h.sandbox.location.hash,"diary/example");
+    assert.equal(h.get("readingReturn.count"),200);
+    assert.equal(h.get("readingReturn.search"),"draft search");
+});
+
+test("restoring a reading context rereads content and preserves batch/query metadata",async()=>{
+    const h=harness();
+    h.set('activeView="diary";loadOverview=async()=>{}');
+    let reads=0;
+    h.sandbox.getJson=async path=>{reads++;const q=new URL(path,"https://example.test").searchParams,start=Number(q.get("cursor")||0),limit=Number(q.get("limit"));return {...page(Array.from({length:limit},(_,i)=>record(String(start+i)))),next_cursor:String(start+limit)};};
+    await h.sandbox.refresh({restore:{path:"/api/public/diary?limit=20&cursor=200",count:200,query:"/api/public/diary?limit=20&search=x",paths:[{path:"/api/public/diary?limit=20",count:200}],number:2}});
+    assert.equal(h.get("visibleRows.length"),200);
+    assert.equal(h.get("visibleRows[0].id"),"200");
+    assert.equal(h.get("nextCursor"),"400");
+    assert.equal(h.get("batchNumber"),2);
+    assert.ok(h.get("currentQueryPath").includes("search=x"));
+    assert.equal(reads,3);
 });
