@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import re
 import threading
-import time
 from types import TracebackType
 from typing import Self
 
 import httpx
 
+from noyra.core.deadline import monotonic_time
 from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
     HTTPResponseLimitError,
@@ -173,7 +173,7 @@ class WalletRPCBalanceAcquirer:
         method, params, abi_encoded = self._balance_request(
             asset.asset_type, asset.contract_address, address.address
         )
-        started = time.monotonic()
+        started = monotonic_time()
         if not self._slots.acquire(timeout=self.timeout_seconds):
             raise WalletRPCError("wallet_rpc_capacity_exhausted")
         request_count = 0
@@ -211,7 +211,7 @@ class WalletRPCBalanceAcquirer:
         return result, asset, address
 
     def _remaining_timeout(self, started: float) -> float:
-        remaining = self.timeout_seconds - (time.monotonic() - started)
+        remaining = self.timeout_seconds - (monotonic_time() - started)
         if remaining <= 0:
             raise WalletRPCError("wallet_rpc_timeout")
         return remaining
@@ -234,7 +234,7 @@ class WalletRPCBalanceAcquirer:
         }
 
         def perform_request() -> bytes:
-            deadline = time.monotonic() + timeout_seconds
+            deadline = monotonic_time() + timeout_seconds
             with self._client.stream(
                 "POST",
                 endpoint,

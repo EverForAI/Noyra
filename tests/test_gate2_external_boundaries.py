@@ -145,7 +145,7 @@ def test_sync_http_timeout_hook_closes_when_capacity_wait_uses_deadline(
     gate = threading.BoundedSemaphore(1)
     clock = iter((0.0, 2.0))
     monkeypatch.setattr(http_boundary, "_SYNC_HTTP_GATE", gate)
-    monkeypatch.setattr(http_boundary, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    monkeypatch.setattr(http_boundary, "monotonic_time", lambda: next(clock))
     active = _CloseProbe()
     hook = SyncHTTPTimeoutHook()
     hook.register(active)

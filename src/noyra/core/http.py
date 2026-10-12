@@ -6,7 +6,6 @@ import queue
 import socket
 import ssl
 import threading
-import time
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from contextvars import copy_context
@@ -15,6 +14,7 @@ from typing import Any
 import httpcore
 import httpx
 
+from .deadline import monotonic_time
 from .runtime_logging import install_log_safety
 
 install_log_safety()
@@ -90,10 +90,10 @@ def _call_sync_with_timeout(function: Callable[..., Any], *args: Any, timeout: f
         return function(*args)
     if timeout <= 0:
         raise TimeoutError("HTTP operation deadline exceeded")
-    started = time.monotonic()
+    started = monotonic_time()
     if not _SYNC_RESOLVER_GATE.acquire(timeout=timeout):
         raise TimeoutError("HTTP resolver capacity deadline exceeded")
-    remaining = timeout - (time.monotonic() - started)
+    remaining = timeout - (monotonic_time() - started)
     if remaining <= 0:
         _SYNC_RESOLVER_GATE.release()
         raise TimeoutError("HTTP operation deadline exceeded")
@@ -197,11 +197,11 @@ def call_sync_http_with_deadline(
             with suppress(BaseException):
                 on_timeout()
 
-    started = time.monotonic()
+    started = monotonic_time()
     if not _SYNC_HTTP_GATE.acquire(timeout=timeout):
         notify_timeout()
         raise TimeoutError("HTTP operation capacity deadline exceeded")
-    remaining = timeout - (time.monotonic() - started)
+    remaining = timeout - (monotonic_time() - started)
     if remaining <= 0:
         _SYNC_HTTP_GATE.release()
         notify_timeout()
@@ -360,9 +360,9 @@ class _PublicDNSSyncBackend(httpcore.NetworkBackend):
         if self._remaining is not None:
             budget = self._remaining()
             timeout = budget if timeout is None else min(timeout, budget)
-        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        deadline = None if timeout is None else monotonic_time() + max(0.0, timeout)
         try:
-            remaining = None if deadline is None else deadline - time.monotonic()
+            remaining = None if deadline is None else deadline - monotonic_time()
             raw_addresses = (
                 _call_sync_with_timeout(public_addresses, host, port, timeout=remaining)
                 if self._resolver is None
@@ -381,7 +381,7 @@ class _PublicDNSSyncBackend(httpcore.NetworkBackend):
             raise httpcore.ConnectError("HTTP endpoint DNS resolution failed") from error
         last_error: BaseException | None = None
         for address in resolved:
-            remaining = None if deadline is None else deadline - time.monotonic()
+            remaining = None if deadline is None else deadline - monotonic_time()
             if remaining is not None and remaining <= 0:
                 raise httpcore.ConnectTimeout("HTTP endpoint connection timed out") from last_error
             try:
@@ -701,16 +701,16 @@ def read_bounded_sync_response(
     if declared is not None and int(declared) > max_body_bytes:
         raise HTTPResponseLimitError("HTTP response body is too large")
 
-    end = deadline if deadline is not None else time.monotonic() + total_timeout_seconds
-    if end - time.monotonic() <= 0:
+    end = deadline if deadline is not None else monotonic_time() + total_timeout_seconds
+    if end - monotonic_time() <= 0:
         raise httpx.ReadTimeout("HTTP response deadline exceeded", request=response.request)
     body = bytearray()
     for chunk in response.iter_bytes():
-        if time.monotonic() >= end:
+        if monotonic_time() >= end:
             raise httpx.ReadTimeout("HTTP response deadline exceeded", request=response.request)
         if len(body) + len(chunk) > max_body_bytes:
             raise HTTPResponseLimitError("HTTP response body is too large")
         body.extend(chunk)
-    if time.monotonic() > end:
+    if monotonic_time() > end:
         raise httpx.ReadTimeout("HTTP response deadline exceeded", request=response.request)
     return bytes(body)

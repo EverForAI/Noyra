@@ -239,8 +239,7 @@ def test_policy_update_waits_for_request_body_but_not_response(tmp_path: Path) -
 
 
 def test_cancelled_request_cannot_write_body_after_headers() -> None:
-    import time
-
+    from noyra.core.deadline import monotonic_time
     from noyra.wallet.dispatch import bind_wallet_dispatch
 
     hook = SyncHTTPTimeoutHook()
@@ -255,7 +254,7 @@ def test_cancelled_request_cannot_write_body_after_headers() -> None:
             held.pop()
 
     with bind_wallet_dispatch(scope):
-        fence = WalletRequestFence(time.monotonic() + 10, hook, payment=True)
+        fence = WalletRequestFence(monotonic_time() + 10, hook, payment=True)
     try:
         fence.trace("http11.send_request_headers.started", {})
         assert held == [True]

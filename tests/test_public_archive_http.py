@@ -177,6 +177,7 @@ class PublicArchiveHTTPTests(unittest.TestCase):
             ]
         shards = []
         for location in locations:
+            assert isinstance(location, str)
             parsed = urlsplit(location)
             with urlopen(self.base_url + parsed.path + "?" + parsed.query, timeout=5) as response:
                 shards.append(response.read().decode())
@@ -191,6 +192,7 @@ class PublicArchiveHTTPTests(unittest.TestCase):
         self.assertEqual(absent.exception.headers["Cache-Control"], "no-store")
         shards = []
         for location in locations:
+            assert isinstance(location, str)
             parsed = urlsplit(location)
             with urlopen(self.base_url + parsed.path + "?" + parsed.query, timeout=5) as response:
                 shards.append(response.read().decode())

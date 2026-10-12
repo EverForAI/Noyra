@@ -12,7 +12,6 @@ import ipaddress
 import json
 import re
 import secrets
-import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -26,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from noyra.core.admission import OperationInvalidated, accounting_scope, assert_current_lease
 from noyra.core.database import Database
+from noyra.core.deadline import monotonic_time
 from noyra.core.errors import IntegrityError, InvalidTransitionError, NotFoundError
 from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
@@ -343,7 +343,7 @@ class HTTPSWalletSigner:
 
     def _request(self, path: str, payload: dict[str, Any]) -> tuple[int, bytes]:
         timeout_hook = SyncHTTPTimeoutHook()
-        deadline = time.monotonic() + self.timeout_seconds
+        deadline = monotonic_time() + self.timeout_seconds
 
         def perform_request() -> tuple[int, bytes]:
             fence = WalletRequestFence(deadline, timeout_hook, payment=path == "/v1/transfer")

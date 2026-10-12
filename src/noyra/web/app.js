@@ -593,7 +593,7 @@ function renderRows(rows) {
         : emptyState();
 }
 function renderArticle(row) {
-    return `<article class="article-reader"><a href="#${activeView}">${tr("← 返回列表", "← Back to list")}</a><h2>${escapeHtml(recordTitle(row))}</h2><div class="record-meta"><span class="tag">${escapeHtml(viewLabel(row.kind))}</span><time datetime="${escapeHtml(row.occurred_at)}">${escapeHtml(formatTime(row.occurred_at))}</time><span>${escapeHtml(provenance(row))}</span><span>${escapeHtml(label(row.details?.status || row.status))}</span></div>${row.provenance === "operator_summary" ? `<p class="record-summary">${escapeHtml(row.summary)}</p>` : ""}<div class="article-body">${structuredPublicText(row.body)}</div>${renderDetails(row)}${row.updated_at !== row.occurred_at ? `<p class="module-status">${tr("最近更新", "Last updated")}: ${escapeHtml(formatTime(row.updated_at))}</p>` : ""}</article>`;
+    return `<article class="article-reader"><a href="#${readingReturn?.view || activeView}">${tr("← 返回列表", "← Back to list")}</a><h2>${escapeHtml(recordTitle(row))}</h2><div class="record-meta"><span class="tag">${escapeHtml(viewLabel(row.kind))}</span><time datetime="${escapeHtml(row.occurred_at)}">${escapeHtml(formatTime(row.occurred_at))}</time><span>${escapeHtml(provenance(row))}</span><span>${escapeHtml(label(row.details?.status || row.status))}</span></div>${row.provenance === "operator_summary" ? `<p class="record-summary">${escapeHtml(row.summary)}</p>` : ""}<div class="article-body">${structuredPublicText(row.body)}</div>${renderDetails(row)}${row.updated_at !== row.occurred_at ? `<p class="module-status">${tr("最近更新", "Last updated")}: ${escapeHtml(formatTime(row.updated_at))}</p>` : ""}</article>`;
 }
 function structuredPublicText(value) {
     const blocks = [],

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import time
-
 import httpx
 
 from noyra.core.admission import OperationInvalidated
+from noyra.core.deadline import monotonic_time
 from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
     PublicDNSHTTPTransport,
@@ -72,7 +71,7 @@ class LocalWalletRPC:
     def call(self, chain_id: int, method: str, params: list[object], *, deadline: float) -> object:
         if type(chain_id) is not int or chain_id not in self.urls or method not in _METHODS:
             raise WalletExecutionError("local wallet RPC operation is invalid")
-        remaining = deadline - time.monotonic()
+        remaining = deadline - monotonic_time()
         if remaining <= 0:
             raise WalletExecutionError("local wallet RPC deadline exceeded")
         hook = SyncHTTPTimeoutHook()

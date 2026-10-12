@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from collections.abc import Callable
 from contextlib import nullcontext
 from types import TracebackType
@@ -10,6 +9,7 @@ from urllib.parse import urlencode
 import httpx
 
 from noyra.core.admission import assert_current_lease
+from noyra.core.deadline import monotonic_time
 from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
     HTTPResponseLimitError,
@@ -104,11 +104,11 @@ class CommonKnowledgeHTTPClient:
         allow_304: bool,
     ) -> dict[str, Any] | None:
         timeout_hook = SyncHTTPTimeoutHook()
-        deadline = time.monotonic() + self.timeout_seconds
+        deadline = monotonic_time() + self.timeout_seconds
 
         def remaining_budget() -> float:
             timeout_hook.assert_active()
-            remaining = deadline - time.monotonic()
+            remaining = deadline - monotonic_time()
             if remaining <= 0 or self._closed:
                 raise TimeoutError("common knowledge peer deadline exceeded")
             assert_current_lease()

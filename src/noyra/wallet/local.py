@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import re
 import threading
-import time
 from typing import Any, Literal, cast
 
 import httpx
@@ -17,6 +16,7 @@ from eth_account.signers.local import LocalAccount
 from eth_utils import to_checksum_address  # type: ignore[attr-defined]
 
 from noyra.core.admission import OperationInvalidated
+from noyra.core.deadline import monotonic_time
 from noyra.core.types import content_hash, utc_now
 
 from .dispatch import WalletDispatchDenied
@@ -213,7 +213,7 @@ class LocalWalletSigner:
         with self._lock:
             checked = self._validate(transfer)
             raw, tx_hash = self._signed(checked)
-            deadline = time.monotonic() + self._rpc.timeout_seconds
+            deadline = monotonic_time() + self._rpc.timeout_seconds
             try:
                 self._admit(checked, tx_hash, deadline)
             except WalletBroadcastUnknownError:
@@ -247,7 +247,7 @@ class LocalWalletSigner:
     def get_pending_nonce(self, address: str, *, chain_id: int) -> int:
         if canonical_evm_address(address) != self.address or self._account is None:
             raise WalletSignerError("local wallet source address is invalid")
-        deadline = time.monotonic() + self._rpc.timeout_seconds
+        deadline = monotonic_time() + self._rpc.timeout_seconds
         self._chain(chain_id, deadline)
         return _quantity(
             self._rpc.call(
@@ -261,7 +261,7 @@ class LocalWalletSigner:
 
     def get_fee_quote(self, transfer: WalletUnsignedTransfer) -> tuple[int, str]:
         checked = self._validate(transfer)
-        deadline = time.monotonic() + self._rpc.timeout_seconds
+        deadline = monotonic_time() + self._rpc.timeout_seconds
         self._chain(checked.chain_id, deadline)
         gas = _quantity(
             self._rpc.call(
@@ -346,7 +346,7 @@ class LocalWalletSigner:
 
     def get_receipt(self, tx_hash: str, *, chain_id: int) -> WalletReceipt | None:
         with self._lock:
-            deadline = time.monotonic() + self._rpc.timeout_seconds
+            deadline = monotonic_time() + self._rpc.timeout_seconds
             requested = _hash(tx_hash)
             self._chain(chain_id, deadline)
             raw = self._rpc.call(

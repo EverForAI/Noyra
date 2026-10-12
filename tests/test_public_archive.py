@@ -635,7 +635,8 @@ def test_cold_segment_pages_continue_without_skips_or_filtered_false_end(
             cold.archive_cold(kernel.subject_id, older_than_days=30, limit=1)
         store = PublicArchive(kernel.database)
         for kind, status in [("lifecycle", ""), ("lifecycle", "paused"), ("all", "")]:
-            actual, cursor, pages = [], None, 0
+            actual: list[str] = []
+            cursor, pages = None, 0
             while True:
                 result = store.page(
                     kernel.subject_id,

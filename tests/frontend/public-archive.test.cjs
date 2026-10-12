@@ -570,6 +570,8 @@ test("ordinary article clicks retain SPA context while modified clicks keep cano
     assert.equal(h.sandbox.location.hash,"diary/example");
     assert.equal(h.get("readingReturn.count"),200);
     assert.equal(h.get("readingReturn.search"),"draft search");
+    h.set('readingReturn.view="timeline"');
+    assert.ok(h.sandbox.renderArticle(record()).includes('href="#timeline"'));
 });
 
 test("restoring a reading context rereads content and preserves batch/query metadata",async()=>{

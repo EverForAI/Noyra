@@ -10,6 +10,7 @@ from typing import Any
 
 from noyra.core.admission import current_commit_scope
 from noyra.core.database import Database
+from noyra.core.deadline import monotonic_time
 from noyra.core.errors import RuntimeOwnershipError
 from noyra.core.http import SyncHTTPTimeoutHook
 from noyra.core.locking import ProcessLock
@@ -31,14 +32,14 @@ def wallet_policy_scope(database: Database) -> Iterator[None]:
     # SQLite transaction during external I/O, or acquire the gate from a worker
     # while a caller holds it waiting for that worker.
     lock = ProcessLock(database.path.with_name(database.path.name + ".wallet-dispatch.lock"))
-    deadline = time.monotonic() + 65
+    deadline = monotonic_time() + 65
     with current_commit_scope():
         while True:
             try:
                 lock.acquire()
                 break
             except RuntimeOwnershipError:
-                if time.monotonic() >= deadline:
+                if monotonic_time() >= deadline:
                     raise WalletDispatchDenied("wallet dispatch boundary is busy") from None
                 time.sleep(0.01)
         try:
@@ -68,7 +69,7 @@ class WalletRequestFence:
 
     def check_deadline(self) -> None:
         self.hook.assert_active()
-        if time.monotonic() >= self.deadline:
+        if monotonic_time() >= self.deadline:
             raise TimeoutError("wallet request deadline exceeded")
 
     def trace(self, event: str, info: dict[str, Any]) -> None:

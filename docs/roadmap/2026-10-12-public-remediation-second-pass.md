@@ -58,3 +58,9 @@ SSR正文h1之后从h2开始，SPA h2之后从h3开始，目录最多100节并�
 新增独立PublicWebRouteContract机器清单，明确两条Web路由、参数、HTML/XML类型、状态和no-store，不把HTML伪装成版本化API。文字合同补全主题/返回/分片及错误语义。API合同门禁继续原角色/版本边界。
 
 Web/HTTP/API合同19项及26子测试通过；HTTP覆盖偏好保留、重复/未知参数400、撤回404、损坏/预算503、缓存/内容类型和分片重查。独立HTML不执行脚本、不推导Host域名。初始文档断言发现主题参数遗漏，补齐合同后全部通过。
+
+### S07
+
+共享同步期限使用perf_counter高分辨率单调源，替换Windows约15.625ms计时刻度。遍历同步HTTP绝对期限生产/消费：embedding、release、knowledge、wallet RPC/local/execution/fence和公开预算同步切换，不能混用两个原点。asyncio.timeout_at及async reader维持事件循环时钟域，避免跨域传参；SMTP、归档SDK内部的独立时钟不与该绝对期限互传。保持发送前授权、取消hook、worker准入、未知用量及资金fence语义，未改真实调用或测试时限。
+
+锁定环境159项联动通过（provider、HTTP、DNS/取消、release、钱包/派发/本地RPC、知识同步、embedding资源/预算）；新增精确合成时钟证明低分辨率停滞时60ms仍超50ms、嵌套context恢复。首次新测试使用httpx.Response非contextmanager失败，改closing后通过，未改断言。全Mypy417文件、Node112、全根Ruff check/format646文件通过。综合复审补正timeline文章返回原视图及测试类型注解，未增加数据字段/schema。

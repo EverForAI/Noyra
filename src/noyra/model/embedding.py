@@ -3,7 +3,6 @@ from __future__ import annotations
 import ipaddress
 import math
 import os
-import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
@@ -15,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from noyra.core.admission import OperationInvalidated, assert_current_lease
 from noyra.core.credentials import read_env_secret
+from noyra.core.deadline import monotonic_time
 from noyra.core.errors import IntegrityError
 from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
@@ -257,13 +257,13 @@ class OpenAIEmbeddingProvider:
             payload["dimensions"] = self.settings.dimensions
 
         timeout_hook = SyncHTTPTimeoutHook()
-        deadline = time.monotonic() + self.settings.timeout_seconds
+        deadline = monotonic_time() + self.settings.timeout_seconds
 
         def perform_request() -> tuple[bytes, str | None]:
 
             def trace(event: str, info: dict[str, Any]) -> None:
                 if event.endswith("send_request_headers.started"):
-                    if time.monotonic() >= deadline:
+                    if monotonic_time() >= deadline:
                         raise TimeoutError("embedding operation deadline exceeded")
                     before_send()
 

@@ -2899,7 +2899,7 @@ function addPublicationEntry(key, item = {}) {
 function publicListEntries(key) {
     const field = key === "sources" ? "url" : "status";
     return [...$("#publication-" + key).querySelectorAll(".publication-entry")].map(row => {
-        const title = row.querySelector('[data-public-entry="title"]').value.trim(), value = row.querySelector(`[data-public-entry="${field}"]`).value.trim();
+        const title = publicationTrim(row.querySelector('[data-public-entry="title"]').value), value = publicationTrim(row.querySelector(`[data-public-entry="${field}"]`).value);
         if (!title || !value) throw new Error("请完整填写名称和状态或HTTPS链接，或移除空项");
         return {title, [field]: value};
     });
@@ -2910,7 +2910,7 @@ function collectPublicationDetails() {
     if ($("#publication-status").value)
         details.status = publicationTrim($("#publication-status").value);
     const text = (field, key) => {
-        const value = $("#publication-" + field).value.trim();
+        const value = publicationTrim($("#publication-" + field).value);
         if (value) details[key] = value;
     };
     const percent = (field, key) => {

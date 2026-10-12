@@ -9,7 +9,6 @@ import math
 import re
 import sqlite3
 import threading
-import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -19,7 +18,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from noyra.core.database import Database, action_state_hash, behavior_log_state_hash
-from noyra.core.deadline import remaining_seconds
+from noyra.core.deadline import monotonic_time, remaining_seconds
 from noyra.core.errors import IntegrityError, NotFoundError, PayloadLimitError
 from noyra.core.event_archive import EventPayloadArchive
 from noyra.core.events import EventStore
@@ -85,7 +84,7 @@ _COLD_READ_SLOTS = threading.BoundedSemaphore(2)
 @dataclass
 class _ReadBudget:
     deadline: float = field(
-        default_factory=lambda: time.monotonic() + remaining_seconds(MAX_PUBLIC_QUERY_SECONDS)
+        default_factory=lambda: monotonic_time() + remaining_seconds(MAX_PUBLIC_QUERY_SECONDS)
     )
     steps: int = 0
     bytes_read: int = 0
@@ -94,13 +93,13 @@ class _ReadBudget:
 
     def checkpoint(self, size: int = 0) -> None:
         self.bytes_read += size
-        if self.bytes_read > MAX_PUBLIC_READ_BYTES or time.monotonic() >= self.deadline:
+        if self.bytes_read > MAX_PUBLIC_READ_BYTES or monotonic_time() >= self.deadline:
             self.exhausted = True
             raise PublicQueryBudgetExceeded("public read budget exceeded")
 
     def progress(self) -> int:
         self.steps += 1_000
-        self.exhausted = self.steps > MAX_PUBLIC_SQL_STEPS or time.monotonic() >= self.deadline
+        self.exhausted = self.steps > MAX_PUBLIC_SQL_STEPS or monotonic_time() >= self.deadline
         return int(self.exhausted)
 
 
