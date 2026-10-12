@@ -71,6 +71,24 @@ class PublicArchiveHTTPTests(unittest.TestCase):
             self.get_json("/api/admin/public-publications")
         self.assertEqual(unauthorized.exception.code, 401)
 
+    def test_damaged_public_interaction_returns_safe_503(self) -> None:
+        from noyra.interaction import InteractionStore
+
+        message = InteractionStore(self.kernel.database).send(
+            self.kernel.subject_id, "public:local", "PRIVATE-PEER", "approved text"
+        )
+        with self.kernel.database.transaction() as connection:
+            connection.execute(
+                "UPDATE interactions SET content=? WHERE interaction_id=?",
+                ("TAMPERED-SECRET", message.interaction_id),
+            )
+        with self.assertRaises(HTTPError) as failure:
+            self.get_json("/api/public/interactions")
+        self.assertEqual(failure.exception.code, 503)
+        self.assertEqual(
+            json.loads(failure.exception.read()), {"error": "public_content_unavailable"}
+        )
+
     def test_publish_edit_withdraw_and_anonymous_visibility(self) -> None:
         from test_public_archive import publication
 

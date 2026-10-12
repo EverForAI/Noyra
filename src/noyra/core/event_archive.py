@@ -812,6 +812,7 @@ class EventPayloadArchive:
         connection: Any | None = None,
         max_decompressed_bytes: int | None = None,
         max_events: int | None = None,
+        local_only: bool = False,
     ) -> dict[str, dict[str, Any]]:
         if connection is None:
             with self.database.connection() as owned_connection:
@@ -821,6 +822,7 @@ class EventPayloadArchive:
                     connection=owned_connection,
                     max_decompressed_bytes=max_decompressed_bytes,
                     max_events=max_events,
+                    local_only=local_only,
                 )
         self.keyring.validate_revision(self.database, subject_id, connection=connection)
         return self._load_segment(
@@ -829,6 +831,7 @@ class EventPayloadArchive:
             connection=connection,
             max_decompressed_bytes=max_decompressed_bytes,
             max_events=max_events,
+            local_only=local_only,
         ).payloads
 
     def _load_segment(
@@ -840,6 +843,7 @@ class EventPayloadArchive:
         max_decompressed_bytes: int | None,
         max_events: int | None,
         metadata: Any | None = None,
+        local_only: bool = False,
     ) -> _LoadedEventArchiveSegment:
         row = metadata
         if row is None:
@@ -865,6 +869,10 @@ class EventPayloadArchive:
                 max_bytes=stored_limit,
             )
         except FileNotFoundError:
+            if local_only:
+                raise ArchiveUnavailableError(
+                    "event payload local archive is unavailable"
+                ) from None
             try:
                 compressed = ArchiveReplicaResolver(
                     self.database,

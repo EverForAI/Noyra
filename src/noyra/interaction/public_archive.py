@@ -11,12 +11,15 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
-from noyra.core.database import Database
-from noyra.core.errors import IntegrityError, NotFoundError
-from noyra.core.types import canonical_json, content_hash, utc_now
+from noyra.core.database import Database, action_state_hash, behavior_log_state_hash
+from noyra.core.errors import IntegrityError, NotFoundError, PayloadLimitError
+from noyra.core.event_archive import EventPayloadArchive
+from noyra.core.events import EventStore
+from noyra.core.types import canonical_json, content_hash, strict_json_loads, utc_now
 
 from .diary import PublicDiaryStore
 from .posts import PublicPostStore
+from .store import InteractionStore
 
 ARCHIVE_CONTRACT = "public-contract-v2"
 MAX_PUBLIC_SUMMARIES = 2_000
@@ -48,6 +51,73 @@ SOURCE_TABLES = {
 
 class PublicationConflict(ValueError):
     pass
+
+
+class _LifecycleReader:
+    """Request-local, read-only verification; never perform cloud restores or writes."""
+
+    def __init__(self, database: Database, connection: Any, subject_id: str):
+        self.database, self.connection, self.subject_id = database, connection, subject_id
+        self.archive: EventPayloadArchive | None = None
+        self.segments: dict[str, dict[str, dict[str, Any]]] = {}
+
+    def states(self, row: Any) -> tuple[str, str]:
+        root = self.connection.execute(
+            "SELECT * FROM event_chain_roots WHERE event_id=? AND subject_id=?",
+            (row["event_id"], self.subject_id),
+        ).fetchone()
+        if (
+            root is None
+            or EventStore._chain_hash(row, root["sequence_number"], root["previous_root_hash"])
+            != root["root_hash"]
+        ):
+            raise IntegrityError("public lifecycle metadata mismatch")
+        key = row["payload_archive_key"]
+        if key is None:
+            if len(row["payload_json"].encode()) > 2_000_000:
+                raise IntegrityError("public lifecycle payload exceeds read bound")
+            try:
+                payload = strict_json_loads(row["payload_json"])
+            except (TypeError, ValueError) as exc:
+                raise IntegrityError("public lifecycle payload invalid") from exc
+        else:
+            if key not in self.segments:
+                if len(self.segments) >= 2:
+                    raise IntegrityError("public lifecycle segment budget exceeded")
+                if self.archive is None:
+                    try:
+                        self.archive = EventPayloadArchive(
+                            self.database,
+                            self.database.path.parent / "subject" / "cold",
+                            subject_id=self.subject_id,
+                            create_root=False,
+                            cache_cloud_restores=False,
+                        )
+                    except (OSError, ValueError) as exc:
+                        raise IntegrityError("public lifecycle archive unavailable") from exc
+                try:
+                    self.segments[key] = self.archive.load_segment(
+                        self.subject_id,
+                        key,
+                        connection=self.connection,
+                        max_decompressed_bytes=64_000_000,
+                        max_events=5_000,
+                        local_only=True,
+                    )
+                except PayloadLimitError as exc:
+                    raise IntegrityError("public lifecycle archive exceeds read bound") from exc
+            payload = self.segments[key].get(row["event_id"])
+        if not isinstance(payload, dict) or content_hash(payload) != row["payload_hash"]:
+            raise IntegrityError("public lifecycle payload hash mismatch")
+        old, new = payload.get("from"), payload.get("to")
+        if (
+            not isinstance(old, str)
+            or not isinstance(new, str)
+            or old not in LIFECYCLE_STATES
+            or new not in LIFECYCLE_STATES
+        ):
+            raise IntegrityError("public lifecycle state unsupported")
+        return old, new
 
 
 def _text(value: Any, maximum: int, *, required: bool = False) -> str:
@@ -450,7 +520,8 @@ class PublicArchive:
             raise ValueError("invalid public interval")
         items: list[dict[str, Any]] = []
         with self.database.read_transaction() as connection:
-            # Only public fields are read. No private_state/goals_view/projects_view calls.
+            lifecycle = _LifecycleReader(self.database, connection, subject_id)
+            # Internal verification fields never enter the allowlisted response.
             for category in sorted(TIMELINE_KINDS if kind == "all" else {kind}):
                 spec = self._spec(category)
                 table, columns, where, id_col, time_col, state_col, text_col = spec
@@ -459,7 +530,7 @@ class PublicArchive:
                 if since:
                     clauses.append(f"{time_col}>=?")
                     values.append(since)
-                if status:
+                if status and category != "lifecycle":
                     clauses.append(f"{state_col}=?")
                     values.append(status)
                 if search:
@@ -476,15 +547,39 @@ class PublicArchive:
                     f"ORDER BY {time_col} DESC,{id_col} DESC LIMIT ?"
                 )
                 values.append(limit + 1)
-                for entry in connection.execute(sql, values):
-                    item = self._item(category, entry)
-                    if item is not None:
+                base_values = values[:-1]
+                scanned = 0
+                matched = 0
+                while True:
+                    entries = connection.execute(sql, values).fetchall()
+                    for entry in entries:
+                        scanned += 1
+                        if scanned > 2_000:
+                            raise IntegrityError("public lifecycle scan budget exceeded")
+                        if category == "lifecycle":
+                            old, new = lifecycle.states(entry)
+                            if status and new != status:
+                                continue
+                            entry = {**dict(entry), "old_state": old, "new_state": new}
+                        item = self._item(category, entry, connection=connection)
                         # Lists contain readable excerpts; full public bodies are fetched
                         # only by identifier. Twenty large diaries must not make the
                         # entire archive exceed the HTTP response limit.
                         if identifier is None:
                             item["body"] = ""
                         items.append(item)
+                        matched += 1
+                        if matched >= limit + 1:
+                            break
+                    if category != "lifecycle" or matched >= limit + 1 or len(entries) < limit + 1:
+                        break
+                    last = entries[-1]
+                    sql = (
+                        f"SELECT {columns} FROM {table} WHERE {' AND '.join(clauses)} "
+                        f"AND ({time_col},{id_col})<(?,?) "
+                        f"ORDER BY {time_col} DESC,{id_col} DESC LIMIT ?"
+                    )
+                    values = [*base_values, last[time_col], last[id_col], limit + 1]
         items.sort(key=lambda item: (item["occurred_at"], item["kind"], item["id"]), reverse=True)
         page = items[:limit]
         next_cursor = None
@@ -538,12 +633,11 @@ class PublicArchive:
         if kind == "behavior":
             # Do not return prior revisions that may have been further redacted.
             return (
-                "(SELECT l.subject_id,l.log_id,l.action_type,l.tool,r.* FROM behavior_logs l "
+                "(SELECT r.*,l.subject_id AS log_subject_id FROM behavior_logs l "
                 "JOIN behavior_log_revisions r ON r.log_id=l.log_id AND r.revision_number="
                 "(SELECT MAX(r2.revision_number) FROM behavior_log_revisions r2 "
                 "WHERE r2.log_id=l.log_id))",
-                "log_id,action_type,tool,occurred_at,result_status,public_explanation,"
-                "side_effect_summary,resource_summary,public_target,redaction_reason",
+                "*",
                 "1=1",
                 "log_id",
                 "occurred_at",
@@ -553,8 +647,8 @@ class PublicArchive:
         if kind == "interaction":
             return (
                 "interactions",
-                "interaction_id,kind,content,status,created_at",
-                "direction='outgoing' AND channel LIKE 'public:%'",
+                "*",
+                "direction='outgoing' AND substr(channel,1,7)='public:' COLLATE BINARY",
                 "interaction_id",
                 "created_at",
                 "status",
@@ -562,18 +656,17 @@ class PublicArchive:
             )
         return (
             "events",
-            "event_id,occurred_at,json_extract(payload_json,'$.from') AS old_state,"
-            "json_extract(payload_json,'$.to') AS new_state",
+            "*",
             "event_type IN ('lifecycle_transition','lifecycle_recovery') "
-            "AND privacy_level='public_status' AND json_valid(payload_json)",
+            "AND privacy_level='public_status'",
             "event_id",
             "occurred_at",
-            "json_extract(payload_json,'$.to')",
+            "'published'",
             "'状态变化'",
         )
 
     @classmethod
-    def _item(cls, kind: str, row: Any) -> dict[str, Any] | None:
+    def _item(cls, kind: str, row: Any, *, connection: Any) -> dict[str, Any]:
         if kind in PUBLIC_KINDS:
             return cls._publication(row)
         details: dict[str, Any] = {}
@@ -599,10 +692,35 @@ class PublicArchive:
             provenance = post.author_provenance
             details = {"author_label": post.author_label, "post_kind": post.kind}
         elif kind == "interaction":
+            InteractionStore._from_row(row)
             identifier, timestamp, body = row["interaction_id"], row["created_at"], row["content"]
             title, status = "公开交流", row["status"]
             details = {"interaction_kind": row["kind"]}
         elif kind == "behavior":
+            if row["subject_id"] != row["log_subject_id"] or row[
+                "state_hash"
+            ] != behavior_log_state_hash(row):
+                raise IntegrityError("public behavior revision mismatch")
+            action = connection.execute(
+                "SELECT * FROM actions WHERE action_id=? AND subject_id=?",
+                (row["action_id"], row["subject_id"]),
+            ).fetchone()
+            revision = connection.execute(
+                "SELECT * FROM action_revisions WHERE action_id=? AND subject_id=? "
+                "ORDER BY revision_number DESC LIMIT 1",
+                (row["action_id"], row["subject_id"]),
+            ).fetchone()
+            if (
+                action is None
+                or revision is None
+                or (
+                    revision["state_hash"] != action_state_hash(action)
+                    or revision["status"] != row["result_status"]
+                    or action["action_type"] != row["action_type"]
+                    or action["tool"] != row["tool"]
+                )
+            ):
+                raise IntegrityError("public behavior action mismatch")
             identifier, timestamp, body = (
                 row["log_id"],
                 row["occurred_at"],
@@ -621,7 +739,7 @@ class PublicArchive:
             }
         else:
             if row["old_state"] not in LIFECYCLE_STATES or row["new_state"] not in LIFECYCLE_STATES:
-                return None
+                raise IntegrityError("public lifecycle state unsupported")
             identifier, timestamp, body = row["event_id"], row["occurred_at"], ""
             title, status, provenance = "生命周期变化", row["new_state"], "runtime"
             details = {"from": row["old_state"], "to": row["new_state"]}

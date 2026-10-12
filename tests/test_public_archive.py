@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -7,7 +8,9 @@ from typing import Any
 import pytest
 
 from noyra.core import SubjectKernel
-from noyra.core.errors import NotFoundError
+from noyra.core.errors import IntegrityError, NotFoundError
+from noyra.core.event_archive import EventPayloadArchive
+from noyra.core.events import EventStore
 from noyra.core.types import content_hash
 from noyra.interaction.public_archive import PublicArchive, PublicationConflict
 
@@ -302,6 +305,121 @@ def test_existing_public_records_keep_private_sources_out_of_v2(
     )
     assert store.page(subject, kind="interaction")["items"][0]["id"] == public.interaction_id
     assert store.page(subject, kind="post")["items"][0]["id"] == approved.post_id
+
+
+def test_public_interactions_verify_hashes_and_case_sensitive_namespace(
+    archive: tuple[PublicArchive, SubjectKernel],
+) -> None:
+    from noyra.interaction import InteractionStore
+
+    store, kernel = archive
+    messages = InteractionStore(kernel.database)
+    upper = messages.send(kernel.subject_id, "PUBLIC:local", "peer", "must stay private")
+    lower = messages.send(kernel.subject_id, "public:local", "peer", "approved")
+    assert [item["id"] for item in store.page(kernel.subject_id, kind="interaction")["items"]] == [
+        lower.interaction_id
+    ]
+    with kernel.database.transaction() as connection:
+        connection.execute(
+            "UPDATE interactions SET content=? WHERE interaction_id=?",
+            ("tampered", lower.interaction_id),
+        )
+    with pytest.raises(IntegrityError):
+        store.page(kernel.subject_id, kind="interaction")
+    assert upper.interaction_id != lower.interaction_id
+
+
+def test_public_lifecycle_remains_readable_after_verified_cold_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kernel = SubjectKernel(
+        tmp_path / "archive.sqlite3", "lifecycle-archive", content_hash("lifecycle")
+    )
+    kernel.boot()
+    kernel.orient()
+    kernel.activate()
+    try:
+        event = EventStore(kernel.database).append(
+            kernel.subject_id,
+            "lifecycle_transition",
+            "test",
+            {"from": "active", "to": "paused"},
+            privacy_level="public_status",
+            occurred_at="2020-01-01T00:00:00+00:00",
+        )
+        monkeypatch.setenv(
+            "NOYRA_ARCHIVE_ENCRYPTION_KEY", base64.urlsafe_b64encode(b"A" * 32).decode()
+        )
+        monkeypatch.setenv("NOYRA_ARCHIVE_ENCRYPTION_KEY_ID", "public-lifecycle-test")
+        # Subject-scoped archive roots follow the production resolver contract.
+        root = tmp_path / "subject" / "cold"
+        EventPayloadArchive(kernel.database, root).archive_cold(
+            kernel.subject_id, older_than_days=30
+        )
+        page = PublicArchive(kernel.database).page(
+            kernel.subject_id, kind="lifecycle", until="2020-01-02T00:00:00Z"
+        )
+        assert page["items"][0]["id"] == event.event_id
+        assert page["items"][0]["details"] == {"from": "active", "to": "paused"}
+        monkeypatch.delenv("NOYRA_ARCHIVE_ENCRYPTION_KEY")
+        with pytest.raises(IntegrityError):
+            PublicArchive(kernel.database).page(
+                kernel.subject_id, kind="lifecycle", until="2020-01-02T00:00:00Z"
+            )
+    finally:
+        kernel.close()
+
+
+def test_lifecycle_filtered_pagination_scans_until_matching_page(
+    archive: tuple[PublicArchive, SubjectKernel],
+) -> None:
+    store, kernel = archive
+    events = EventStore(kernel.database)
+    ids = []
+    for index in range(8):
+        record = events.append(
+            kernel.subject_id,
+            "lifecycle_transition",
+            "test",
+            {"from": "active", "to": "paused" if index % 3 == 0 else "active"},
+            privacy_level="public_status",
+            occurred_at=f"2020-01-0{index + 1}T00:00:00Z",
+        )
+        if index % 3 == 0:
+            ids.append(record.event_id)
+    first = store.page(kernel.subject_id, kind="lifecycle", status="paused", limit=1)
+    second = store.page(
+        kernel.subject_id, kind="lifecycle", status="paused", limit=1, cursor=first["next_cursor"]
+    )
+    assert first["items"][0]["id"] == ids[-1]
+    assert second["items"][0]["id"] == ids[-2]
+    events.append(
+        kernel.subject_id,
+        "lifecycle_transition",
+        "test",
+        {"from": "future_state", "to": "active"},
+        privacy_level="public_status",
+    )
+    with pytest.raises(IntegrityError):
+        store.page(kernel.subject_id, kind="lifecycle", limit=1)
+
+
+def test_behavior_checks_current_action_before_public_response(
+    archive: tuple[PublicArchive, SubjectKernel],
+) -> None:
+    store, kernel = archive
+    ledger = kernel.action_ledger
+    action = ledger.prepare(kernel.subject_id, "observe", "test", "private-target", {})
+    ledger.start(action.action_id)
+    ledger.finish(action.action_id, "succeeded", {}, public_explanation="approved explanation")
+    assert store.page(kernel.subject_id, kind="behavior")["items"]
+    with kernel.database.transaction() as connection:
+        connection.execute(
+            "UPDATE actions SET result_json=? WHERE action_id=?",
+            ('{"damaged":true}', action.action_id),
+        )
+    with pytest.raises(IntegrityError):
+        store.page(kernel.subject_id, kind="behavior")
 
 
 def test_schema92_upgrade_preserves_private_history_and_publishes_nothing(
