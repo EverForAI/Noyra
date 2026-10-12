@@ -810,12 +810,13 @@ function configureStatus() {
                     "failed",
                     "unknown",
                     "rejected",
+                    "cancelled",
                     "pending",
                     "running",
                 ]
               : category === "interaction"
                 ? ["sent", "delivered", "failed", "pending"]
-                : ["diary", "post", "update"].includes(category)
+                : ["diary", "post"].includes(category)
                   ? ["published"]
                   : category === "all"
                     ? [

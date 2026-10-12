@@ -658,6 +658,13 @@ _OWNERSHIP_GRAPHS[90] = {
 }
 _OWNERSHIP_GRAPHS[91] = _OWNERSHIP_GRAPHS[90]
 _OWNERSHIP_GRAPHS[92] = {**_OWNERSHIP_GRAPHS[91], "route_evidence_row_counts": _subject_rule()}
+_OWNERSHIP_GRAPHS[93] = {
+    **_OWNERSHIP_GRAPHS[92],
+    "public_publications": _subject_rule(),
+    "public_publication_revisions": _parent_rule(
+        "public_publications", "publication_id", "publication_id"
+    ),
+}
 
 
 @dataclass(frozen=True)

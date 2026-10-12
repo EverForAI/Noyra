@@ -512,7 +512,7 @@ class PublicArchive:
                 f"status='published' AND kind='{kind}'",
                 "publication_id",
                 "published_at",
-                "json_extract(details_json,'$.status')",
+                "COALESCE(json_extract(details_json,'$.status'),'published')",
                 "title || ' ' || summary || ' ' || body",
             )
         if kind == "diary":

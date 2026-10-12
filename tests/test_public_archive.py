@@ -206,6 +206,27 @@ def test_archive_lists_use_excerpts_and_detail_fetches_full_public_body(
         store.page(kernel.subject_id, identifier="")
 
 
+def test_optional_summary_status_uses_the_displayed_default_for_filtering(
+    archive: tuple[PublicArchive, SubjectKernel],
+) -> None:
+    store, kernel = archive
+    default = store.publish(
+        kernel.subject_id, publication(kind="update", details={}), actor="operator"
+    )
+    active = store.publish(
+        kernel.subject_id,
+        publication(publication_id="active-update", kind="update"),
+        actor="operator",
+    )
+    assert [
+        row["id"]
+        for row in store.page(kernel.subject_id, kind="update", status="published")["items"]
+    ] == [default["id"]]
+    assert [
+        row["id"] for row in store.page(kernel.subject_id, kind="update", status="active")["items"]
+    ] == [active["id"]]
+
+
 def test_existing_public_records_keep_private_sources_out_of_v2(
     archive: tuple[PublicArchive, SubjectKernel],
 ) -> None:

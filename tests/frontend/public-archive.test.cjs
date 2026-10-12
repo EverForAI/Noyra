@@ -258,6 +258,9 @@ test("timeline category exposes matching lifecycle status choices", () => {
     h.node("#category-filter").value = "post";
     h.sandbox.configureStatus();
     assert.ok(!h.node("#status-filter").innerHTML.includes('value="active"'));
+    h.node("#category-filter").value = "update";
+    h.sandbox.configureStatus();
+    assert.ok(h.node("#status-filter").innerHTML.includes('value="active"'));
 });
 
 test("mobile navigation returns keyboard focus to its opener on close", () => {
