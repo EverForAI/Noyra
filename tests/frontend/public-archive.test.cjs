@@ -81,6 +81,47 @@ const page = (items) => ({
     items,
     next_cursor: null,
 });
+test("450 records remain reachable in bounded batches with a previous path", async () => {
+    const h = harness();
+    h.set('activeView="diary";loadOverview=async()=>{}');
+    h.sandbox.getJson = async path => {
+        const start = Number(new URL(path,"https://example.test").searchParams.get("cursor") || 0);
+        return {...page(Array.from({length:Math.min(20,450-start)},(_,i)=>record(String(start+i)))),next_cursor:start+20<450?String(start+20):null};
+    };
+    const seen = new Set();
+    await h.sandbox.refresh();
+    do {
+        for (const item of h.get("visibleRows")) seen.add(item.id);
+        assert.ok(h.get("visibleRows.length") <= 200);
+        if (!h.get("nextCursor")) break;
+        await h.sandbox.refresh({append:true});
+    } while(true);
+    assert.equal(seen.size,450);
+    assert.equal(h.get("batchNumber"),3);
+    await h.sandbox.refresh({previous:true});
+    assert.equal(h.get("visibleRows[0].id"),"200");
+    await h.sandbox.refresh();
+    assert.equal(h.get("batchPaths.length"),0);
+});
+test("pause invalidates pending overview and resume performs one read", async () => {
+    const h = harness(), pending = deferred();
+    h.sandbox.applyLanguage = ()=>{};
+    h.sandbox.getJson = ()=>pending.promise;
+    const reading=h.sandbox.loadOverview();
+    h.sandbox.togglePublicUpdates();
+    pending.resolve({});
+    await reading;
+    assert.equal(h.get("overviewData"),null);
+    let reads=0;
+    h.sandbox.loadOverview=async()=>reads++;
+    h.sandbox.togglePublicUpdates();
+    assert.equal(reads,1);
+});
+test("HTTP error status and safe retry guidance survive public reads", async () => {
+    const h=harness({fetch:async()=>({ok:false,status:429,headers:{get:()=>"60"},json:async()=>({error:"rate_limited"})})});
+    await assert.rejects(h.sandbox.getJson('/api/public/timeline'),error=>error.status===429 && error.retryAfter===60 && h.sandbox.publicErrorMessage(error).includes('60'));
+    assert.ok(h.sandbox.publicErrorMessage(new Error('public_query_budget_exceeded')).includes('缩小'));
+});
 for (const view of [
     "diary",
     "behavior",
@@ -253,14 +294,14 @@ test("timeline category exposes matching lifecycle status choices", () => {
     h.node("#category-filter").value = "lifecycle";
     h.sandbox.configureStatus();
     assert.ok(
-        h.node("#status-filter").innerHTML.includes('value="deep_sleep"'),
+        h.node("#status-options").innerHTML.includes('value="deep_sleep"'),
     );
     h.node("#category-filter").value = "post";
     h.sandbox.configureStatus();
-    assert.ok(!h.node("#status-filter").innerHTML.includes('value="active"'));
+    assert.ok(!h.node("#status-options").innerHTML.includes('value="active"'));
     h.node("#category-filter").value = "update";
     h.sandbox.configureStatus();
-    assert.ok(h.node("#status-filter").innerHTML.includes('value="active"'));
+    assert.ok(h.node("#status-options").innerHTML.includes('value="active"'));
 });
 
 test("mobile navigation returns keyboard focus to its opener on close", () => {

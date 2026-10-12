@@ -13,6 +13,7 @@ let overviewData = null,
     overviewFetchedAt = 0,
     overviewFailed = false,
     publicPostSubmitting = false;
+let batchPaths = [], batchPath = "", batchNumber = 1;
 let menuReturnFocus = null;
 const requestControllers = new Map(),
     MAX_VISIBLE_RECORDS = 200;
@@ -270,8 +271,13 @@ async function getJson(path, { signal } = {}) {
             headers: { Accept: "application/json" },
         });
         const payload = await response.json().catch(() => null);
-        if (!response.ok)
-            throw new Error(payload?.error || `HTTP ${response.status}`);
+        if (!response.ok) {
+            const error = new Error(payload?.error || `HTTP ${response.status}`);
+            error.status = response.status;
+            const retry = Number(response.headers?.get("Retry-After"));
+            if (Number.isFinite(retry) && retry > 0 && retry <= 3600) error.retryAfter = retry;
+            throw error;
+        }
         if (!payload || payload.contract !== "public-contract-v2")
             throw new Error("public_contract_invalid");
         return payload;
@@ -326,15 +332,21 @@ function publicErrorMessage(error) {
             "公开档案暂时无法连接，请稍后刷新页面。",
             "Cannot connect to the public archive. Refresh later.",
         ],
+        invalid_public_query: ["筛选条件无效，请检查时间、状态和搜索内容后重试。", "Invalid filters. Check dates, status and search text."],
+        public_response_too_large: ["内容超过单次读取容量，请缩小筛选范围或联系管理员。", "Content exceeds one response. Narrow filters or contact the administrator."],
+        public_query_budget_exceeded: ["读取范围超过查询预算，请缩小时间范围、选择分类或精简搜索。", "The query exceeds its budget. Narrow the dates, category or search."],
+        rate_limited: ["读取过于频繁，请稍后重试。", "Too many requests. Try again later."],
     };
     if (error?.name === "TypeError" || error?.message === "Failed to fetch")
         return tr(...messages.public_network_unavailable);
-    return messages[error?.message]
+    const message = messages[error?.message]
         ? tr(...messages[error.message])
+        : error?.status === 429 ? tr(...messages.rate_limited)
         : tr(
               "公开服务暂时不可用，请稍后刷新页面。",
               "The public service is temporarily unavailable. Refresh later.",
           );
+    return message + (error?.retryAfter ? tr(` 建议等待 ${error.retryAfter} 秒后重试。`, ` Retry after ${error.retryAfter} seconds.`) : "");
 }
 function emptyState(
     detail = tr(
@@ -364,7 +376,11 @@ function recordTitle(row) {
         ? `${label(row.details?.from)} → ${label(row.details?.to)}`
         : row.kind === "interaction"
           ? viewLabel(row.kind)
-          : row.title || viewLabel(row.kind);
+          : row.kind === "behavior" ? actionLabel(row.title) : row.title || viewLabel(row.kind);
+}
+function actionLabel(value) {
+    const names = {observe:["观察","Observe"],research:["研究","Research"],reflect:["反思","Reflect"],communicate:["交流","Communicate"],send_message:["发送消息","Send message"],search:["搜索","Search"],write:["写作","Write"],publish:["发布","Publish"]};
+    return names[value] ? tr(...names[value]) : value || tr("活动","Activity");
 }
 function safePublicLink(value) {
     try {
@@ -491,8 +507,9 @@ function renderDetails(row) {
         );
         field("公开目标说明", "Public target", details.public_target, true);
     }
-    return fields.length
-        ? `<dl class="record-details">${fields.join("")}</dl>`
+    const context = row.kind === "behavior" ? [["工具","Tool",details.tool],["公开资源说明","Public resource summary",details.resource_summary],["省略说明","Redaction note",details.redaction_reason]].filter(([, ,value])=>value).map(([zh,en,value])=>`<div class="detail-field"><dt>${escapeHtml(tr(zh,en))}</dt><dd>${escapeHtml(value)}</dd></div>`).join("") : "";
+    return fields.length || context
+        ? `<dl class="record-details">${fields.join("")}</dl>${context ? `<details class="behavior-context"><summary>${tr("活动背景与说明","Activity context")}</summary><dl class="record-details">${context}</dl></details>` : ""}`
         : "";
 }
 function renderCard(row) {
@@ -541,6 +558,7 @@ function updateConnection(failed = false) {
         : "";
 }
 async function loadOverview() {
+    if (paused) return;
     const generation = ++overviewGeneration,
         controller = requestScope("overview");
     try {
@@ -604,14 +622,17 @@ function queryPath() {
     return `/api/public/${activeView}?${query}`;
 }
 let currentQueryPath = "";
-async function loadView(generation, signal, append = false) {
-    const path = append
+async function loadView(generation, signal, append = false, previous = false) {
+    const replaceBatch = append && visibleRows.length >= MAX_VISIBLE_RECORDS;
+    const path = previous ? batchPaths[batchPaths.length - 1] : append
         ? `${currentQueryPath}&cursor=${encodeURIComponent(nextCursor)}`
         : queryPath();
     const page = await getJson(path, { signal });
     if (!currentViewGeneration(generation)) return;
-    if (!append) currentQueryPath = path;
-    const rows = append ? [...visibleRows, ...page.items] : page.items;
+    if (!append && !previous) {currentQueryPath = path;batchPath=path;batchPaths=[];batchNumber=1;}
+    if (replaceBatch) {batchPaths.push(batchPath);if(batchPaths.length>128)batchPaths.shift();batchPath=path;batchNumber++;}
+    if (previous) {batchPaths.pop();batchPath=path;batchNumber=Math.max(1,batchNumber-1);}
+    const rows = append && !replaceBatch ? [...visibleRows, ...page.items] : page.items;
     visibleRows = [
         ...new Map(rows.map((row) => [`${row.kind}:${row.id}`, row])).values(),
     ].slice(0, MAX_VISIBLE_RECORDS);
@@ -628,12 +649,13 @@ async function loadView(generation, signal, append = false) {
         : renderRows(visibleRows);
     $("#load-more").hidden =
         Boolean(activeId) ||
-        !nextCursor ||
-        visibleRows.length >= MAX_VISIBLE_RECORDS;
+        !nextCursor;
+    $("#previous-batch").hidden = Boolean(activeId) || !batchPaths.length;
+    $("#load-more").textContent = visibleRows.length >= MAX_VISIBLE_RECORDS ? tr("下一批历史","Next batch") : tr("加载更多","Load more");
     $("#list-status").textContent =
-        `${tr("已显示", "Showing")} ${visibleRows.length} ${tr("条 · 获取于", "records · Fetched at")} ${formatTime(page.generated_at)}${visibleRows.length >= MAX_VISIBLE_RECORDS ? tr(" · 请缩小筛选范围后继续阅读", " · Narrow your filters to read more") : ""}`;
+        `${tr("批次", "Batch")} ${batchNumber} · ${tr("已显示", "Showing")} ${visibleRows.length} ${tr("条 · 获取于", "records · Fetched at")} ${formatTime(page.generated_at)}`;
 }
-async function refresh({ append = false } = {}) {
+async function refresh({ append = false, previous = false } = {}) {
     if (["overview", "about", "participate"].includes(activeView)) {
         await loadOverview();
         return;
@@ -641,7 +663,10 @@ async function refresh({ append = false } = {}) {
     const generation = beginViewGeneration(),
         controller = requestScope("view");
     $("#load-more").disabled = true;
-    if (!append) {
+    $("#previous-batch").disabled = true;
+    if (!append && !previous) {
+        batchPaths=[];batchPath="";batchNumber=1;
+        $("#previous-batch").hidden=true;
         visibleRows = [];
         nextCursor = null;
         content.innerHTML = "";
@@ -649,7 +674,7 @@ async function refresh({ append = false } = {}) {
     }
     $("#list-status").textContent = tr("正在读取…", "Loading…");
     const results = await Promise.allSettled([
-        loadView(generation, controller.signal, append),
+        loadView(generation, controller.signal, append, previous),
         loadOverview(),
     ]);
     if (!currentViewGeneration(generation)) return;
@@ -661,6 +686,7 @@ async function refresh({ append = false } = {}) {
         $("#list-status").textContent = "";
     }
     $("#load-more").disabled = false;
+    $("#previous-batch").disabled = false;
 }
 function renderAbout() {
     return `<div class="about-grid">${[
@@ -779,6 +805,8 @@ function applyLanguage() {
         ? tr("恢复自动更新", "Resume updates")
         : tr("暂停自动更新", "Pause updates");
     $("#pause-refresh").setAttribute("aria-pressed", String(paused));
+    $("#previous-batch").textContent = tr("上一批历史","Previous batch");
+    $("#load-more").textContent = visibleRows.length >= MAX_VISIBLE_RECORDS ? tr("下一批历史","Next batch") : tr("加载更多","Load more");
     updatePostLength();
     updateConnection();
 }
@@ -847,11 +875,17 @@ function configureStatus() {
                           "cancelled",
                           "published",
                       ];
-    $("#status-filter").innerHTML =
+    $("#status-options").innerHTML =
         `<option value="">${tr("全部", "All")}</option>` +
         states
             .map((state) => `<option value="${state}">${label(state)}</option>`)
             .join("");
+}
+function togglePublicUpdates() {
+    paused = !paused;
+    if (paused) {overviewGeneration++;abortScope("overview");}
+    applyLanguage();
+    if (!paused) void loadOverview();
 }
 function showView() {
     beginViewGeneration();
@@ -877,6 +911,7 @@ function showView() {
         Boolean(activeId);
     $("#category-control").hidden = activeView !== "timeline";
     $("#pause-refresh").hidden = activeView !== "overview";
+    $("#previous-batch").hidden = true;
     $("#page-title").textContent = label(activeView);
     $("#page-eyebrow").textContent =
         activeView === "overview" ? "THE PRESENT" : "PUBLIC ARCHIVE";
@@ -1120,16 +1155,13 @@ $("#refresh").addEventListener("click", () => void refresh());
 $("#load-more").addEventListener("click", () => {
     if (nextCursor) void refresh({ append: true });
 });
+$("#previous-batch").addEventListener("click", () => { if(batchPaths.length) void refresh({previous:true}); });
 $("#category-filter").addEventListener("change", configureStatus);
 $("#archive-filters").addEventListener("submit", (event) => {
     event.preventDefault();
     void refresh();
 });
-$("#pause-refresh").addEventListener("click", () => {
-    paused = !paused;
-    applyLanguage();
-    if (!paused) void loadOverview();
-});
+$("#pause-refresh").addEventListener("click", togglePublicUpdates);
 $("#language-toggle").addEventListener("click", () => {
     language = language === "en" ? "zh" : "en";
     savePreference("noyra-public-language", language);

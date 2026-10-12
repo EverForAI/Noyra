@@ -324,9 +324,9 @@
                     >
                     <label
                         ><span data-i18n="status">状态</span
-                        ><select id="status-filter">
+                        ><input id="status-filter" list="status-options" maxlength="500"><datalist id="status-options">
                             <option value="" data-i18n="all">全部</option>
-                        </select></label
+                        </datalist></label
                     >
                     <label class="search-field"
                         ><span data-i18n="search">搜索公开文字</span
@@ -350,6 +350,7 @@
                     aria-live="polite"
                 ></section>
                 <div class="list-footer">
+                    <button id="previous-batch" class="outline-button" type="button" hidden>上一批历史</button>
                     <p id="list-status" class="module-status" role="status"></p>
                     <button
                         id="load-more"
