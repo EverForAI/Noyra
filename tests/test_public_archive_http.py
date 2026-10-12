@@ -105,6 +105,37 @@ class PublicArchiveHTTPTests(unittest.TestCase):
                 result = json.loads(response.read())["item"]
                 self.assertEqual(result["id"] if result else None, expected)
 
+    def test_time_overflow_and_budget_failures_keep_http_contract(self) -> None:
+        from unittest.mock import patch
+        from urllib.parse import urlencode
+
+        from noyra.interaction.public_archive import PublicQueryBudgetExceeded
+        from test_public_archive import publication
+
+        timestamp = "9999-12-31T23:59:59-01:00"
+        with self.assertRaises(HTTPError) as invalid:
+            self.get_json("/api/public/goals?" + urlencode({"since": timestamp}))
+        self.assertEqual(invalid.exception.code, 400)
+        with self.assertRaises(HTTPError) as invalid:
+            self.authorized_json(
+                "/api/admin/public-publications",
+                payload=publication(kind="sleep", details={"started_at": timestamp}),
+            )
+        self.assertEqual(invalid.exception.code, 400)
+        with (
+            patch.object(
+                self.http.public_archive, "overview", side_effect=PublicQueryBudgetExceeded()
+            ),
+            self.assertRaises(HTTPError) as exhausted,
+        ):
+            self.get_json("/api/public/overview")
+        self.assertEqual(exhausted.exception.code, 503)
+        self.assertEqual(exhausted.exception.headers["Retry-After"], "5")
+        self.assertEqual(
+            json.loads(exhausted.exception.read()), {"error": "public_query_budget_exceeded"}
+        )
+        self.assertEqual(self.get_json("/api/public/overview")["contract"], "public-contract-v2")
+
     def test_publish_edit_withdraw_and_anonymous_visibility(self) -> None:
         from test_public_archive import publication
 

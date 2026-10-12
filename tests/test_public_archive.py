@@ -437,6 +437,119 @@ def test_behavior_checks_current_action_before_public_response(
         store.page(kernel.subject_id, kind="behavior")
 
 
+@pytest.mark.parametrize("timestamp", ["9999-12-31T23:59:59-01:00", "0001-01-01T00:00:00+01:00"])
+def test_boundary_timezone_conversion_is_invalid_input(
+    archive: tuple[PublicArchive, SubjectKernel], timestamp: str
+) -> None:
+    store, kernel = archive
+    with pytest.raises(ValueError):
+        store.page(kernel.subject_id, since=timestamp)
+    with pytest.raises(ValueError):
+        store.publish(
+            kernel.subject_id,
+            publication(kind="sleep", details={"started_at": timestamp}),
+            actor="operator",
+        )
+
+
+def test_query_scan_and_byte_budgets_reset_after_failure(
+    archive: tuple[PublicArchive, SubjectKernel], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import noyra.interaction.public_archive as module
+    from noyra.interaction import InteractionStore
+
+    store, kernel = archive
+    item = InteractionStore(kernel.database).send(
+        kernel.subject_id, "public:local", "peer", "test text"
+    )
+    with kernel.database.transaction() as connection:
+        template = dict(
+            connection.execute(
+                "SELECT * FROM interactions WHERE interaction_id=?", (item.interaction_id,)
+            ).fetchone()
+        )
+        for index in range(300):
+            row = {
+                **template,
+                "interaction_id": f"budget-{index}",
+                "idempotency_key": f"budget-key-{index}",
+            }
+            connection.execute(
+                f"INSERT INTO interactions({','.join(row)}) VALUES({','.join('?' for _ in row)})",
+                tuple(row.values()),
+            )
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "MAX_PUBLIC_SQL_STEPS", 1000)
+        with pytest.raises(module.PublicQueryBudgetExceeded):
+            store.page(kernel.subject_id, kind="interaction", search="not present")
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "MAX_PUBLIC_READ_BYTES", 1)
+        with pytest.raises(module.PublicQueryBudgetExceeded):
+            store.page(kernel.subject_id, kind="interaction")
+    assert store.page(kernel.subject_id, kind="interaction", limit=1)["items"]
+
+
+def test_revision_capacity_retains_idempotency_and_withdrawal_reserve(
+    archive: tuple[PublicArchive, SubjectKernel], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import noyra.interaction.public_archive as module
+
+    store, kernel = archive
+    monkeypatch.setattr(module, "MAX_PUBLIC_REVISION_ROWS", 4)
+    first = store.publish(kernel.subject_id, publication(), actor="operator")
+    assert store.publish(kernel.subject_id, publication(), actor="operator") == first
+    for revision in (1, 2):
+        store.publish(
+            kernel.subject_id,
+            publication(title=f"edit-{revision}", expected_revision=revision),
+            actor="operator",
+        )
+    with pytest.raises(module.PublicationCapacityError):
+        store.publish(
+            kernel.subject_id, publication(title="edit-3", expected_revision=3), actor="operator"
+        )
+    store.withdraw(kernel.subject_id, first["id"], 3, actor="operator")
+    assert store.admin(kernel.subject_id)[0]["status"] == "withdrawn"
+    with pytest.raises(module.PublicationCapacityError):
+        store.publish(kernel.subject_id, publication(expected_revision=4), actor="operator")
+
+
+def test_empty_search_counts_bytes_and_preserves_sqlite_case_semantics(
+    archive: tuple[PublicArchive, SubjectKernel], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import noyra.interaction.public_archive as module
+    from noyra.interaction import InteractionStore
+
+    store, kernel = archive
+    InteractionStore(kernel.database).send(
+        kernel.subject_id, "public:local", "peer", "ASCII 范围 Ä"
+    )
+    assert store.page(kernel.subject_id, kind="interaction", search="ascii")["items"]
+    assert store.page(kernel.subject_id, kind="interaction", search="范围")["items"]
+    assert not store.page(kernel.subject_id, kind="interaction", search="ä")["items"]
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "MAX_PUBLIC_READ_BYTES", 1)
+        with pytest.raises(module.PublicQueryBudgetExceeded):
+            store.page(kernel.subject_id, kind="interaction", search="no matching text")
+    assert store.page(kernel.subject_id, kind="interaction", search="ASCII")["items"]
+
+
+def test_revision_byte_cap_and_legacy_over_cap_allow_withdrawal(
+    archive: tuple[PublicArchive, SubjectKernel], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import noyra.interaction.public_archive as module
+
+    store, kernel = archive
+    item = store.publish(kernel.subject_id, publication(), actor="operator")
+    monkeypatch.setattr(module, "MAX_PUBLIC_REVISION_BYTES", 1)
+    with pytest.raises(module.PublicationCapacityError):
+        store.publish(
+            kernel.subject_id, publication(title="change", expected_revision=1), actor="operator"
+        )
+    store.withdraw(kernel.subject_id, item["id"], 1, actor="operator")
+    assert store.admin(kernel.subject_id)[0]["revision"] == 2
+
+
 def test_schema92_upgrade_preserves_private_history_and_publishes_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

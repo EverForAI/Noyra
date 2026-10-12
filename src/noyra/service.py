@@ -115,7 +115,13 @@ from noyra.interaction import (
 from noyra.interaction.conversations import ConversationConflict, ConversationStore
 from noyra.interaction.erasure import ConversationErasure, ErasureReviewRequired
 from noyra.interaction.errors import InteractionStateConflictError
-from noyra.interaction.public_archive import ARCHIVE_CONTRACT, PublicArchive, PublicationConflict
+from noyra.interaction.public_archive import (
+    ARCHIVE_CONTRACT,
+    PublicArchive,
+    PublicationCapacityError,
+    PublicationConflict,
+    PublicQueryBudgetExceeded,
+)
 from noyra.interaction.public_contract import (
     PUBLIC_CACHE_CONTROL,
     PUBLIC_CONTRACT_ID,
@@ -3088,6 +3094,13 @@ class NoyraHTTPServer:
                         self._json(
                             HTTPStatus.BAD_REQUEST,
                             {"error": "invalid_public_query"},
+                            public_contract=ARCHIVE_CONTRACT,
+                        )
+                        return
+                    except PublicQueryBudgetExceeded:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "public_query_budget_exceeded"},
                             public_contract=ARCHIVE_CONTRACT,
                         )
                         return
@@ -7516,6 +7529,11 @@ class NoyraHTTPServer:
                     return
                 except PublicationConflict:
                     self._json(HTTPStatus.CONFLICT, {"error": "public_publication_conflict"})
+                    return
+                except PublicationCapacityError:
+                    self._json(
+                        HTTPStatus.BAD_REQUEST, {"error": "public_publication_capacity_full"}
+                    )
                     return
                 except IntegrityError:
                     self._json(

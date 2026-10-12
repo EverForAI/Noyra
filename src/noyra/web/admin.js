@@ -2977,6 +2977,8 @@ function publicationError(error) {
                 "公开字段未通过校验。请检查字符长度、关联归属、参考资料与时间。",
             public_publication_not_found:
                 "摘要或关联记录不存在，或不属于当前主体。",
+            public_publication_capacity_full:
+                "公开摘要或修订容量已满。已有摘要仍可撤回；请先由管理员审查容量，勿反复提交。",
             public_content_unavailable:
                 "公开内容完整性检查暂未通过，请稍后重试。",
         }[error.code] || errorText(error)

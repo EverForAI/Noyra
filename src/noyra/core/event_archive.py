@@ -813,6 +813,7 @@ class EventPayloadArchive:
         max_decompressed_bytes: int | None = None,
         max_events: int | None = None,
         local_only: bool = False,
+        consume_bytes: Callable[[int], None] | None = None,
     ) -> dict[str, dict[str, Any]]:
         if connection is None:
             with self.database.connection() as owned_connection:
@@ -823,16 +824,20 @@ class EventPayloadArchive:
                     max_decompressed_bytes=max_decompressed_bytes,
                     max_events=max_events,
                     local_only=local_only,
+                    consume_bytes=consume_bytes,
                 )
         self.keyring.validate_revision(self.database, subject_id, connection=connection)
-        return self._load_segment(
+        loaded = self._load_segment(
             subject_id,
             object_key,
             connection=connection,
             max_decompressed_bytes=max_decompressed_bytes,
             max_events=max_events,
             local_only=local_only,
-        ).payloads
+        )
+        if consume_bytes is not None:
+            consume_bytes(loaded.decompressed_bytes)
+        return loaded.payloads
 
     def _load_segment(
         self,

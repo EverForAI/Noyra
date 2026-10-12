@@ -7,11 +7,18 @@ import binascii
 import json
 import math
 import re
+import sqlite3
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
 from noyra.core.database import Database, action_state_hash, behavior_log_state_hash
+from noyra.core.deadline import remaining_seconds
 from noyra.core.errors import IntegrityError, NotFoundError, PayloadLimitError
 from noyra.core.event_archive import EventPayloadArchive
 from noyra.core.events import EventStore
@@ -24,6 +31,12 @@ from .store import InteractionStore
 ARCHIVE_CONTRACT = "public-contract-v2"
 MAX_PUBLIC_SUMMARIES = 2_000
 MAX_PUBLIC_SUMMARY_BYTES = 16_000_000
+MAX_PUBLIC_REVISION_ROWS = 100_000
+MAX_PUBLIC_REVISION_BYTES = 32_000_000
+WITHDRAW_REVISION_RESERVE = 4_096
+MAX_PUBLIC_SQL_STEPS = 250_000
+MAX_PUBLIC_READ_BYTES = 128_000_000
+MAX_PUBLIC_QUERY_SECONDS = 2.0
 PUBLIC_KINDS = frozenset({"goal", "project", "prediction", "research", "sleep", "update"})
 TIMELINE_KINDS = PUBLIC_KINDS | {"diary", "behavior", "interaction", "post", "lifecycle"}
 LIFECYCLE_STATES = frozenset(
@@ -51,6 +64,88 @@ SOURCE_TABLES = {
 
 class PublicationConflict(ValueError):
     pass
+
+
+class PublicQueryBudgetExceeded(Exception):
+    pass
+
+
+class PublicationCapacityError(ValueError):
+    pass
+
+
+@dataclass
+class _ReadBudget:
+    deadline: float = field(
+        default_factory=lambda: time.monotonic() + remaining_seconds(MAX_PUBLIC_QUERY_SECONDS)
+    )
+    steps: int = 0
+    bytes_read: int = 0
+    exhausted: bool = False
+
+    def checkpoint(self, size: int = 0) -> None:
+        self.bytes_read += size
+        if self.bytes_read > MAX_PUBLIC_READ_BYTES or time.monotonic() >= self.deadline:
+            self.exhausted = True
+            raise PublicQueryBudgetExceeded("public read budget exceeded")
+
+    def progress(self) -> int:
+        self.steps += 1_000
+        self.exhausted = self.steps > MAX_PUBLIC_SQL_STEPS or time.monotonic() >= self.deadline
+        return int(self.exhausted)
+
+
+_READ_BUDGET: ContextVar[_ReadBudget | None] = ContextVar(
+    "public_archive_read_budget", default=None
+)
+
+
+@contextmanager
+def _request_budget() -> Iterator[_ReadBudget]:
+    previous = _READ_BUDGET.get()
+    if previous is not None:
+        previous.checkpoint()
+        yield previous
+        return
+    try:
+        budget = _ReadBudget()
+    except TimeoutError as exc:
+        raise PublicQueryBudgetExceeded("request deadline exhausted") from exc
+    token = _READ_BUDGET.set(budget)
+    try:
+        yield budget
+        budget.checkpoint()
+    finally:
+        _READ_BUDGET.reset(token)
+
+
+@contextmanager
+def _bounded_read(database: Database) -> Iterator[Any]:
+    with _request_budget() as budget, database.read_transaction() as connection:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA busy_timeout=250")
+        connection.set_progress_handler(budget.progress, 1_000)
+        ascii_lower = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+        def matches(text: str, needle: str) -> int:
+            # Match SQLite lower()/instr semantics while accounting for every
+            # scanned public value, including searches that return no rows.
+            budget.checkpoint(len(text.encode()))
+            return int(needle.translate(ascii_lower) in text.translate(ascii_lower))
+
+        connection.create_function("public_text_match", 2, matches)
+        try:
+            yield connection
+        except sqlite3.OperationalError as exc:
+            if budget.exhausted or str(exc).lower() in {
+                "interrupted",
+                "database is locked",
+                "database is busy",
+            }:
+                raise PublicQueryBudgetExceeded("public SQL read budget exceeded") from exc
+            raise
+        finally:
+            connection.set_progress_handler(None, 0)
 
 
 class _LifecycleReader:
@@ -83,7 +178,7 @@ class _LifecycleReader:
         else:
             if key not in self.segments:
                 if len(self.segments) >= 2:
-                    raise IntegrityError("public lifecycle segment budget exceeded")
+                    raise PublicQueryBudgetExceeded("public lifecycle segment budget exceeded")
                 if self.archive is None:
                     try:
                         self.archive = EventPayloadArchive(
@@ -96,13 +191,20 @@ class _LifecycleReader:
                     except (OSError, ValueError) as exc:
                         raise IntegrityError("public lifecycle archive unavailable") from exc
                 try:
+                    budget = _READ_BUDGET.get()
+                    assert budget is not None
+                    if budget.bytes_read >= MAX_PUBLIC_READ_BYTES:
+                        raise PublicQueryBudgetExceeded("public archive byte budget exceeded")
                     self.segments[key] = self.archive.load_segment(
                         self.subject_id,
                         key,
                         connection=self.connection,
-                        max_decompressed_bytes=64_000_000,
+                        max_decompressed_bytes=min(
+                            64_000_000, MAX_PUBLIC_READ_BYTES - budget.bytes_read
+                        ),
                         max_events=5_000,
                         local_only=True,
+                        consume_bytes=budget.checkpoint,
                     )
                 except PayloadLimitError as exc:
                     raise IntegrityError("public lifecycle archive exceeds read bound") from exc
@@ -136,7 +238,10 @@ def _timestamp(value: Any) -> str:
     parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         raise ValueError("timestamp must include timezone")
-    return parsed.astimezone(UTC).isoformat(timespec="milliseconds")
+    try:
+        return parsed.astimezone(UTC).isoformat(timespec="milliseconds")
+    except OverflowError as exc:
+        raise ValueError("timestamp UTC conversion is outside supported range") from exc
 
 
 def _details(kind: str, value: Any) -> dict[str, Any]:
@@ -217,7 +322,8 @@ class PublicArchive:
             or payload.get("confirm_public") is not True
         ):
             raise ValueError("explicit public confirmation required")
-        if not actor or actor == "subject":
+        actor = _text(actor, 512, required=True)
+        if actor == "subject":
             raise PermissionError("operator public summary required")
         identifier = _text(payload.get("publication_id"), 100, required=True)
         if not re.fullmatch(r"[a-zA-Z0-9_-]{8,100}", identifier):
@@ -288,7 +394,7 @@ class PublicArchive:
             if (old is None and totals[0] >= MAX_PUBLIC_SUMMARIES) or (
                 totals[1] - old_bytes + new_bytes > MAX_PUBLIC_SUMMARY_BYTES
             ):
-                raise ValueError("public summary capacity reached")
+                raise PublicationCapacityError("public summary capacity reached")
             state = {
                 "publication_id": identifier,
                 "subject_id": subject_id,
@@ -298,6 +404,7 @@ class PublicArchive:
                 "published_at": now if old is None else old["published_at"],
                 "updated_at": now,
             }
+            self._revision_capacity(connection, subject_id, state, actor, old)
             digest = content_hash(state)
             if old is None:
                 columns = ",".join(state) + ",state_hash"
@@ -329,6 +436,7 @@ class PublicArchive:
         return self._publication({**state, "state_hash": digest})
 
     def withdraw(self, subject_id: str, identifier: str, expected: int, *, actor: str) -> None:
+        actor = _text(actor, 512, required=True)
         if type(expected) is not int or not actor or actor == "subject":
             raise ValueError("operator revision required")
         with self.database.transaction() as connection:
@@ -346,6 +454,7 @@ class PublicArchive:
             state = dict(row)
             state.pop("state_hash")
             state.update(status="withdrawn", revision=expected + 1, updated_at=utc_now())
+            self._revision_capacity(connection, subject_id, state, actor, row)
             digest = content_hash(state)
             connection.execute(
                 "UPDATE public_publications SET status='withdrawn',revision=?,updated_at=?,"
@@ -355,6 +464,46 @@ class PublicArchive:
             connection.execute(
                 "INSERT INTO public_publication_revisions VALUES(?,?,?,?,?,?)",
                 (identifier, expected + 1, actor, "withdrawn", digest, state["updated_at"]),
+            )
+
+    @staticmethod
+    def _revision_capacity(
+        connection: Any, subject_id: str, state: dict[str, Any], actor: str, old: Any
+    ) -> None:
+        totals = connection.execute(
+            "SELECT COUNT(*),COALESCE(SUM(length(CAST(r.publication_id||r.actor||r.status||"
+            "r.state_hash||r.created_at AS BLOB))+8),0) FROM public_publication_revisions r "
+            "JOIN public_publications p USING(publication_id) WHERE p.subject_id=?",
+            (subject_id,),
+        ).fetchone()
+        active = connection.execute(
+            "SELECT COUNT(*) FROM public_publications WHERE subject_id=? AND status='published'",
+            (subject_id,),
+        ).fetchone()[0]
+        active += int(state["status"] == "published") - int(
+            old is not None and old["status"] == "published"
+        )
+        size = (
+            len(
+                (
+                    state["publication_id"]
+                    + actor
+                    + state["status"]
+                    + "0" * 64
+                    + state["updated_at"]
+                ).encode()
+            )
+            + 8
+        )
+        # Each currently published row keeps one worst-case withdrawal slot.
+        # Legacy databases already above the new cap may still withdraw; no
+        # immutable history is discarded to make room for more publications.
+        if state["status"] == "published" and (
+            totals[0] + 1 + active > MAX_PUBLIC_REVISION_ROWS
+            or totals[1] + size + active * WITHDRAW_REVISION_RESERVE > MAX_PUBLIC_REVISION_BYTES
+        ):
+            raise PublicationCapacityError(
+                "public revision capacity reached; existing summaries may still be withdrawn"
             )
 
     @staticmethod
@@ -443,7 +592,11 @@ class PublicArchive:
         }
 
     def overview(self, subject_id: str) -> dict[str, Any]:
-        with self.database.read_transaction() as connection:
+        with _request_budget():
+            return self._overview(subject_id)
+
+    def _overview(self, subject_id: str) -> dict[str, Any]:
+        with _bounded_read(self.database) as connection:
             row = connection.execute(
                 "SELECT i.personal_name,i.project_name,r.state,r.changed_at "
                 "FROM subject_identity i JOIN runtime_state r ON r.subject_id=i.subject_id "
@@ -484,6 +637,32 @@ class PublicArchive:
         search: str = "",
         status: str = "",
         identifier: str | None = None,
+    ) -> dict[str, Any]:
+        with _request_budget():
+            return self._page(
+                subject_id,
+                kind=kind,
+                limit=limit,
+                cursor=cursor,
+                since=since,
+                until=until,
+                search=search,
+                status=status,
+                identifier=identifier,
+            )
+
+    def _page(
+        self,
+        subject_id: str,
+        *,
+        kind: str,
+        limit: int,
+        cursor: str | None,
+        since: str | None,
+        until: str | None,
+        search: str,
+        status: str,
+        identifier: str | None,
     ) -> dict[str, Any]:
         if kind != "all" and kind not in TIMELINE_KINDS:
             raise ValueError("invalid public category")
@@ -526,7 +705,7 @@ class PublicArchive:
         if since and since > anchor:
             raise ValueError("invalid public interval")
         items: list[dict[str, Any]] = []
-        with self.database.read_transaction() as connection:
+        with _bounded_read(self.database) as connection:
             lifecycle = _LifecycleReader(self.database, connection, subject_id)
             # Internal verification fields never enter the allowlisted response.
             for category in sorted(TIMELINE_KINDS if kind == "all" else {kind}):
@@ -541,7 +720,7 @@ class PublicArchive:
                     clauses.append(f"{state_col}=?")
                     values.append(status)
                 if search:
-                    clauses.append(f"instr(lower({text_col}), lower(?))>0")
+                    clauses.append(f"public_text_match({text_col},?)=1")
                     values.append(search)
                 if identifier:
                     clauses.append(f"{id_col}=?")
@@ -558,11 +737,18 @@ class PublicArchive:
                 scanned = 0
                 matched = 0
                 while True:
-                    entries = connection.execute(sql, values).fetchall()
+                    entries = []
+                    for candidate in connection.execute(sql, values):
+                        budget = _READ_BUDGET.get()
+                        assert budget is not None
+                        budget.checkpoint(
+                            sum(len(v.encode()) for v in candidate if isinstance(v, str))
+                        )
+                        entries.append(candidate)
                     for entry in entries:
                         scanned += 1
                         if scanned > 2_000:
-                            raise IntegrityError("public lifecycle scan budget exceeded")
+                            raise PublicQueryBudgetExceeded("public lifecycle scan budget exceeded")
                         if category == "lifecycle":
                             old, new = lifecycle.states(entry)
                             if status and new != status:
