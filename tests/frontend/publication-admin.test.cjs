@@ -223,3 +223,40 @@ test("precise percentages and custom status survive an unrelated title edit", ()
     assert.equal(details.status,"Custom Status 1");
     assert.equal(details.progress,0.123456);
 });
+
+
+test("invalid structured draft reports validation without starting a write", async () => {
+    const h = context();
+    let writes=0,confirmations=0;
+    h.sandbox.request=async()=>{writes++;throw Error("must not send")};
+    h.sandbox.window.confirm=()=>{confirmations++;return true};
+    h.sandbox.collectPublicationDetails=()=>{throw Error("参考资料必须为不含凭证的HTTPS链接")};
+    await h.sandbox.savePublicPublication({preventDefault(){},currentTarget:h.$("#publication-form")});
+    assert.equal(writes,0);
+    assert.equal(confirmations,0);
+    assert.equal(h.get("publicationEditor"),null);
+    assert.equal(h.get("publicationPending"),null);
+    assert.equal(h.get("publicationWriting"),false);
+    assert.ok(h.$("#publication-editor-status").textContent.includes("HTTPS"));
+    assert.equal(h.$("#publication-kind").disabled,false);
+});
+
+
+test("reconciliation adopts only matching content and preserves CAS after a different edit", async () => {
+    const h = context();
+    h.sandbox.editPublicPublication(row);
+    h.sandbox.request=async()=>{throw Error("network")};
+    await h.sandbox.savePublicPublication({preventDefault(){},currentTarget:h.$("#publication-form")});
+    const pending=h.get("publicationPending");
+    h.sandbox.request=async()=>({item:{...row,...pending, id:pending.publication_id, revision:3, status:"published"}});
+    await h.sandbox.reconcilePublicPublication();
+    assert.equal(h.get("publicationPending"),null);
+    assert.equal(h.get("publicationEditor.revision"),3);
+    h.sandbox.request=async()=>{throw Error("network")};
+    await h.sandbox.savePublicPublication({preventDefault(){},currentTarget:h.$("#publication-form")});
+    h.sandbox.request=async()=>({item:{...row,revision:4,title:"Other operator edit"}});
+    await h.sandbox.reconcilePublicPublication();
+    assert.equal(h.get("publicationPending"),null);
+    assert.equal(h.get("publicationEditor.revision"),3);
+    assert.ok(h.$("#publication-editor-status").textContent.includes("不能覆盖"));
+});

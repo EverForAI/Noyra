@@ -214,6 +214,25 @@ class PublicArchiveHTTPTests(unittest.TestCase):
                 urlopen(self.base_url + path, timeout=5)
             self.assertEqual(invalid.exception.code, 400)
 
+    def test_standalone_render_failure_is_safe_and_next_request_recovers(self) -> None:
+        from unittest.mock import patch
+
+        from test_public_archive import publication
+
+        _, item = self.authorized_json("/api/admin/public-publications", payload=publication())
+        path = "/public/goal/" + item["id"]
+        with (
+            patch("noyra.service.public_article_html", side_effect=TypeError("PRIVATE-SENTINEL")),
+            self.assertRaises(HTTPError) as failed,
+        ):
+            urlopen(self.base_url + path, timeout=5)
+        self.assertEqual(failed.exception.code, 503)
+        self.assertEqual(
+            json.loads(failed.exception.read()), {"error": "public_content_unavailable"}
+        )
+        with urlopen(self.base_url + path, timeout=5) as response:
+            self.assertEqual(response.status, 200)
+
     def test_publish_edit_withdraw_and_anonymous_visibility(self) -> None:
         from test_public_archive import publication
 

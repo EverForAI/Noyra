@@ -163,3 +163,30 @@ def test_shared_http_boundary_errors_are_explicitly_contractual() -> None:
 
 def test_runtime_server_exposes_the_same_route_inventory() -> None:
     assert NoyraHTTPServer.api_route_contracts() == route_contracts()
+
+
+def test_all_local_component_references_have_definitions() -> None:
+    """Check every ref, including references within response aliases and schemas.
+
+    All current refs target named top-level components. Reject a new ref form
+    until this guard supports it, rather than silently skipping nested refs.
+    This checks resolution, not YAML grammar or the full OpenAPI schema.
+    """
+    text = OPENAPI.read_text(encoding="utf-8")
+    definitions: set[str] = set()
+    section = ""
+    for line in text.split("components:\n", 1)[1].splitlines():
+        group = re.fullmatch(r"  ([A-Za-z][A-Za-z0-9]*):", line)
+        if group:
+            section = group[1]
+        name = re.match(r"    ([A-Za-z][A-Za-z0-9]*):", line)
+        if name:
+            definitions.add(f"#/components/{section}/{name[1]}")
+    references = re.findall(r"\$ref:\s*['\"]([^'\"]+)['\"]", text)
+    assert len(references) == text.count("$ref:"), "Every reference must be captured"
+    assert references
+    for reference in references:
+        assert re.fullmatch(r"#/components/[A-Za-z0-9]+/[A-Za-z0-9]+", reference), reference
+        assert reference in definitions, reference
+    operations = re.findall(r"^      operationId: (\S+)$", text, flags=re.MULTILINE)
+    assert len(operations) == len(set(operations))

@@ -2670,6 +2670,21 @@ components:
       content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     TooManyRequests:
       description: Bounded queue or rate limit exhausted
+      headers:
+        Retry-After: { description: Suggested wait in seconds., schema: { type: integer, minimum: 1 } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    RateLimited:
+      $ref: '#/components/responses/TooManyRequests'
+    LengthRequired:
+      description: Content-Length is missing or invalid; error is length_required.
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    RequestEntityTooLarge:
+      description: Request body exceeds the configured byte limit; error is too_large.
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    RequestTooLarge:
+      $ref: '#/components/responses/RequestEntityTooLarge'
+    NotImplemented:
+      description: Provider does not support model discovery; error is model_discovery_unsupported.
       content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     ServiceUnavailable:
       description: Runtime dependency is degraded

@@ -9676,9 +9676,19 @@ class NoyraHTTPServer:
                     )
                     return
                 language = params.get("lang", ["zh"])[0]
-                body = public_article_html(
-                    page["items"][0], owner.settings.public_site_url or "", english=language == "en"
-                )
+                try:
+                    body = public_article_html(
+                        page["items"][0],
+                        owner.settings.public_site_url or "",
+                        english=language == "en",
+                    )
+                except (KeyError, TypeError, ValueError):
+                    self._json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "public_content_unavailable"},
+                        public_contract=ARCHIVE_CONTRACT,
+                    )
+                    return
                 if len(body) > PUBLIC_MAX_RESPONSE_BYTES:
                     self._json(
                         HTTPStatus.REQUEST_ENTITY_TOO_LARGE,

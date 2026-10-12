@@ -241,7 +241,9 @@ def test_status_filter_and_management_identity_preserve_legacy_legal_values(
         store.page(kernel.subject_id, kind="goal", status="Custom Status 1")["items"][0]["id"]
         == item["id"]
     )
-    assert store.admin_item(kernel.subject_id, item["id"])["revision"] == 1
+    exact = store.admin_item(kernel.subject_id, item["id"])
+    assert exact is not None
+    assert exact["revision"] == 1
     assert store.admin_item("other-subject", item["id"]) is None
 
 

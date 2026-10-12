@@ -3081,7 +3081,13 @@ async function savePublicPublication(event) {
     const form = event.currentTarget,
         current = beginAdminAction();
     if (!publicationPending && (!form.reportValidity() || !$("#publication-confirm").checked)) return;
-    const details = publicationPending?.details || collectPublicationDetails();
+    let details;
+    try {
+        details = publicationPending?.details || collectPublicationDetails();
+    } catch (error) {
+        setStatus("#publication-editor-status", publicationError(error), true);
+        return;
+    }
     if (
         !window.confirm(
             "发布后任何访客都可阅读这些文字和字段。确认已审核且允许匿名公开？",
