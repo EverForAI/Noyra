@@ -587,3 +587,18 @@ test("restoring a reading context rereads content and preserves batch/query meta
     assert.ok(h.get("currentQueryPath").includes("search=x"));
     assert.equal(reads,3);
 });
+
+test("irregular bounded pages cannot skip rows at the 200 record batch boundary",async()=>{
+    const h=harness();
+    h.set('activeView="diary";loadOverview=async()=>{}');
+    h.sandbox.getJson=async path=>{const q=new URL(path,"https://example.test").searchParams,start=Number(q.get("cursor")||0),count=Math.min(Number(q.get("limit")),13,450-start);return {...page(Array.from({length:count},(_,i)=>record(String(start+i)))),next_cursor:start+count<450?String(start+count):null};};
+    const ids=new Set();
+    await h.sandbox.refresh();
+    for(let reads=0;reads<100;reads++){
+        h.get("visibleRows").forEach(row=>ids.add(row.id));
+        assert.ok(h.get("visibleRows.length")<=200);
+        if(!h.get("nextCursor"))break;
+        await h.sandbox.refresh({append:true});
+    }
+    assert.equal(ids.size,450);
+});

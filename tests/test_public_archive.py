@@ -697,3 +697,13 @@ def test_partitioned_sitemap_exceeds_old_thousand_record_ceiling(
         store.sitemap_partition("other-subject", tokens[0])
     with pytest.raises(ValueError):
         store.sitemap_partition(kernel.subject_id, "not-a-token")
+    assert all(
+        kernel.subject_id.encode() not in base64.urlsafe_b64decode(token) for token in tokens
+    )
+    assert all(b"large-sitemap" not in base64.urlsafe_b64decode(token) for token in tokens)
+    sealed = bytearray(base64.urlsafe_b64decode(tokens[0]))
+    sealed[-1] ^= 1
+    with pytest.raises(ValueError):
+        store.sitemap_partition(kernel.subject_id, base64.urlsafe_b64encode(sealed).decode())
+    with pytest.raises(ValueError):
+        PublicArchive(kernel.database).sitemap_partition(kernel.subject_id, tokens[0])

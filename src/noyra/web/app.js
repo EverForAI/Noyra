@@ -734,12 +734,17 @@ function queryPath() {
 let currentQueryPath = "";
 async function loadView(generation, signal, append = false, previous = false, restore = null) {
     const replaceBatch = append && visibleRows.length >= MAX_VISIBLE_RECORDS;
-    const path = previous
+    let path = previous
         ? batchPaths[batchPaths.length - 1].path
         : restore ? restore.path
         : append
           ? `${currentQueryPath}&cursor=${encodeURIComponent(nextCursor)}`
           : queryPath();
+    if (append && !replaceBatch && visibleRows.length) {
+        const request = new URL(path,location.href);
+        request.searchParams.set("limit",String(Math.min(20,MAX_VISIBLE_RECORDS-visibleRows.length)));
+        path=request.pathname+request.search;
+    }
     let page = await getJson(path, { signal });
     const wanted = previous ? batchPaths[batchPaths.length - 1].count : restore?.count;
     if (wanted) {

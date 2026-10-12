@@ -7,6 +7,7 @@ import binascii
 import json
 import math
 import re
+import secrets
 import sqlite3
 import threading
 from collections.abc import Iterator
@@ -16,6 +17,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
+
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from noyra.core.database import Database, action_state_hash, behavior_log_state_hash
 from noyra.core.deadline import monotonic_time, remaining_seconds
@@ -318,6 +322,22 @@ def _details(kind: str, value: Any) -> dict[str, Any]:
 class PublicArchive:
     def __init__(self, database: Database):
         self.database = database
+        # Index routing metadata is not itself verified public content. Seal
+        # descriptors so logical subject IDs / unchecked boundaries cannot be
+        # decoded from anonymous XML. Restarting requires a fresh index.
+        self._sitemap_cipher = AESGCM(secrets.token_bytes(32))
+
+    def _sitemap_descriptor(self, value: dict[str, Any]) -> str:
+        nonce = secrets.token_bytes(12)
+        token = base64.urlsafe_b64encode(
+            nonce
+            + self._sitemap_cipher.encrypt(
+                nonce, canonical_json(value).encode(), b"noyra-public-sitemap-v1"
+            )
+        ).decode()
+        if len(token) > 1500:
+            raise IntegrityError("invalid sitemap routing metadata")
+        return token
 
     def publish(self, subject_id: str, payload: dict[str, Any], *, actor: str) -> dict[str, Any]:
         allowed = {
@@ -647,6 +667,11 @@ class PublicArchive:
                     ).fetchall()
                     if not rows:
                         break
+                    budget = _READ_BUDGET.get()
+                    assert budget is not None
+                    budget.checkpoint(
+                        sum(len(v.encode()) for row in rows for v in row if isinstance(v, str))
+                    )
                     if kind == "lifecycle":
                         keys: set[str] = set()
                         for index, row in enumerate(rows):
@@ -657,17 +682,15 @@ class PublicArchive:
                                 break
                     end = (rows[-1][0], kind, rows[-1][1])
                     result.append(
-                        base64.urlsafe_b64encode(
-                            canonical_json(
-                                {
-                                    "subject": subject_id,
-                                    "kind": kind,
-                                    "anchor": anchor,
-                                    "start": start,
-                                    "end": end,
-                                }
-                            ).encode()
-                        ).decode()
+                        self._sitemap_descriptor(
+                            {
+                                "subject": subject_id,
+                                "kind": kind,
+                                "anchor": anchor,
+                                "start": start,
+                                "end": end,
+                            }
+                        )
                     )
                     if len(result) > 50_000:
                         raise PublicQueryBudgetExceeded("sitemap partition budget exceeded")
@@ -682,7 +705,10 @@ class PublicArchive:
         try:
             if len(token) > 1500:
                 raise ValueError("invalid sitemap partition")
-            data = json.loads(base64.b64decode(token, altchars=b"-_", validate=True))
+            sealed = base64.b64decode(token, altchars=b"-_", validate=True)
+            data = json.loads(
+                self._sitemap_cipher.decrypt(sealed[:12], sealed[12:], b"noyra-public-sitemap-v1")
+            )
             if (
                 not isinstance(data, dict)
                 or set(data) != {"subject", "kind", "anchor", "start", "end"}
@@ -706,7 +732,14 @@ class PublicArchive:
             start = bound(data["start"]) if data["start"] is not None else None
             if end[0] > anchor or (start is not None and start <= end):
                 raise ValueError("invalid sitemap range")
-        except (KeyError, TypeError, binascii.Error, UnicodeError, json.JSONDecodeError) as exc:
+        except (
+            InvalidTag,
+            KeyError,
+            TypeError,
+            binascii.Error,
+            UnicodeError,
+            json.JSONDecodeError,
+        ) as exc:
             raise ValueError("invalid sitemap partition") from exc
         query = {
             "subject": subject_id,

@@ -64,3 +64,9 @@ Web/HTTP/API合同19项及26子测试通过；HTTP覆盖偏好保留、重复/�
 共享同步期限使用perf_counter高分辨率单调源，替换Windows约15.625ms计时刻度。遍历同步HTTP绝对期限生产/消费：embedding、release、knowledge、wallet RPC/local/execution/fence和公开预算同步切换，不能混用两个原点。asyncio.timeout_at及async reader维持事件循环时钟域，避免跨域传参；SMTP、归档SDK内部的独立时钟不与该绝对期限互传。保持发送前授权、取消hook、worker准入、未知用量及资金fence语义，未改真实调用或测试时限。
 
 锁定环境159项联动通过（provider、HTTP、DNS/取消、release、钱包/派发/本地RPC、知识同步、embedding资源/预算）；新增精确合成时钟证明低分辨率停滞时60ms仍超50ms、嵌套context恢复。首次新测试使用httpx.Response非contextmanager失败，改closing后通过，未改断言。全Mypy417文件、Node112、全根Ruff check/format646文件通过。综合复审补正timeline文章返回原视图及测试类型注解，未增加数据字段/schema。
+
+### S08 综合复审补正
+
+复审发现两处新联动，先停止刚启动的8f274a8整仓任务（无完整结论），补正后再验收最终SHA。公开短页使批次条数不再20整倍数，追加请求按200条剩余容量限制，450条13条短页验收无跳失。站点图索引边界尚未验证正文，不应在base64描述符暴露逻辑主体/路由字段；描述符采用进程内AES-GCM认证加密，无持久密钥、正文缓存或可核验证据功能。重启后旧描述符400需重新取索引，伪造/跨主体拒绝，分片仍每次验证正文。元数据读取也计字节预算。
+
+最终补充公开store/HTTP/reading/Web57通过、26子测试；Node113、Mypy417文件、全根Ruff646文件check/format通过；共享期限最终24项复验通过。Chromium375宽无脚本SSR确认英语/深色/回timeline、h2/h3、无横向溢出；会话和合成服务已关闭。最终整仓尚待新应用SHA验证。
