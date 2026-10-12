@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from html.parser import HTMLParser
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -9,14 +10,34 @@ STATIC_HTML = (ROOT / "site/index.html").read_text(encoding="utf-8")
 STATIC_CSS = (ROOT / "site/assets/site.css").read_text(encoding="utf-8")
 
 
+class PublicMarkup(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.elements: list[tuple[str, dict[str, str | None]]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.elements.append((tag, dict(attrs)))
+
+
 def test_runtime_public_visual_contract() -> None:
     assert 'name="twitter:card" content="summary_large_image"' in PUBLIC_HTML
-    assert 'width="1536" height="1024"' in PUBLIC_HTML
-    assert 'fetchpriority="high"' in PUBLIC_HTML
-    assert 'alt="晨雾湖畔的阅读空间与轻柔流动的青蓝微光"' in PUBLIC_HTML
-    assert (
-        'srcset="/assets/public-hero-mobile.webp?v=__PUBLIC_HERO_MOBILE_VERSION__"' in PUBLIC_HTML
+    markup = PublicMarkup()
+    markup.feed(PUBLIC_HTML)
+    hero = next(
+        attrs for tag, attrs in markup.elements if tag == "img" and attrs.get("class") == "hero-art"
     )
+    assert (hero["width"], hero["height"]) == ("1536", "1024")
+    assert hero["fetchpriority"] == "high"
+    assert hero["alt"] == "晨雾湖畔的阅读空间与轻柔流动的青蓝微光"
+    mobile = next(
+        attrs
+        for tag, attrs in markup.elements
+        if tag == "source" and attrs.get("media") == "(max-width: 620px)"
+    )
+    assert (mobile.get("srcset") or "").strip() == (
+        "/assets/public-hero-mobile.webp?v=__PUBLIC_HERO_MOBILE_VERSION__"
+    )
+    assert (mobile["width"], mobile["height"]) == ("768", "1024")
     assert "<!-- NOYRA_SEO_METADATA -->" in PUBLIC_HTML
     assert "prefers-reduced-motion" in PUBLIC_CSS
     assert "验证码暂时不可用" in (ROOT / "src/noyra/web/app.js").read_text(encoding="utf-8")

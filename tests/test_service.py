@@ -1763,7 +1763,7 @@ class ServiceTestCase(unittest.TestCase):
                 html = response.read().decode()
                 self.assertIn('href="https://archive.noyra.example/"', html)
                 self.assertIn('src="/assets/public-hero.webp?v=', html)
-                self.assertIn('srcset="/assets/public-hero-mobile.webp?v=', html)
+                self.assertRegex(html, r'srcset="\s*/assets/public-hero-mobile\.webp\?v=')
                 self.assertIn(
                     'property="og:image" content="https://archive.noyra.example/assets/public-social.png"',
                     html,

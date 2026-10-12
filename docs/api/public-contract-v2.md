@@ -34,3 +34,5 @@ Operator-authenticated `GET/POST /api/admin/public-publications`, and `POST /api
 A published text remains downloadable by visitors until withdrawn, and withdrawal cannot erase visitors' copies. The UI explicitly warns before publishing. External links are never fetched by the archive itself. Each research source link is user-approved and must not contain embedded credentials.
 
 Management GET with `?view=management&limit=20&cursor=...` returns `{items,next_cursor}` (maximum 50 per page), including withdrawn summaries and private source identifiers only after operator authentication. No-query GET retains the bounded legacy list. Cookie writes require the existing CSRF token; stale revisions return 409. No publication operation mutates its private source.
+
+List requests return excerpts in `summary` and an empty `body`; query `id` on the matching category to fetch the current full public body. This keeps large diaries from making a whole list exceed the HTTP size limit. A blank id is invalid. Visibility and integrity are checked again for detail requests, so withdrawn summaries cannot be read from a cached list ID.

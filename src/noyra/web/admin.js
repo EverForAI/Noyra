@@ -3013,7 +3013,7 @@ function publicationLocalTime(value) {
     if (Number.isNaN(date.getTime())) return "";
     return new Date(date.getTime() - date.getTimezoneOffset() * 60000)
         .toISOString()
-        .slice(0, 16);
+        .slice(0, 23);
 }
 function editPublicPublication(row) {
     if (publicationWriting) return;

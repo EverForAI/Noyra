@@ -23,6 +23,10 @@ function harness(extra = {}) {
                     this.innerHTML = "";
                 },
                 setCustomValidity() {},
+                removeAttribute(key) {
+                    delete this[key];
+                },
+                async decode() {},
             });
         return nodes.get(selector);
     };
@@ -33,15 +37,14 @@ function harness(extra = {}) {
         URLSearchParams,
         URL,
         AbortController,
+        setTimeout,
+        clearTimeout,
         Date,
         console,
         ...extra,
     });
     vm.runInContext(
-        source.slice(
-            0,
-            source.indexOf("async function loadPublicPostCaptcha("),
-        ),
+        source.slice(0, source.indexOf("function savePreference(")),
         sandbox,
     );
     return {
@@ -218,6 +221,192 @@ test("public requests omit management cookies and reject wrong contracts", async
     );
     assert.equal(options.credentials, "omit");
     assert.equal(options.cache, "no-store");
+});
+test("request timeout reports a local network error and releases its timer", async () => {
+    let timer,
+        cleared = false;
+    const h = harness({
+        setTimeout: (fn) => {
+            timer = fn;
+            return 1;
+        },
+        clearTimeout: () => {
+            cleared = true;
+        },
+        fetch: async (_path, options) =>
+            new Promise((_yes, no) =>
+                options.signal.addEventListener("abort", () => {
+                    const error = new Error("aborted");
+                    error.name = "AbortError";
+                    no(error);
+                }),
+            ),
+    });
+    const pending = h.sandbox.getJson("/api/public/timeline");
+    timer();
+    await assert.rejects(pending, /public_network_unavailable/);
+    assert.ok(cleared);
+});
+test("timeline category exposes matching lifecycle status choices", () => {
+    const h = harness();
+    h.set('activeView="timeline"');
+    h.node("#category-filter").value = "lifecycle";
+    h.sandbox.configureStatus();
+    assert.ok(
+        h.node("#status-filter").innerHTML.includes('value="deep_sleep"'),
+    );
+    h.node("#category-filter").value = "post";
+    h.sandbox.configureStatus();
+    assert.ok(!h.node("#status-filter").innerHTML.includes('value="active"'));
+});
+
+test("mobile navigation returns keyboard focus to its opener on close", () => {
+    const h = harness();
+    const nav = h.node("#public-navigation"),
+        firstLink = h.node("#public-navigation a"),
+        opener = h.node("#mobile-more");
+    let open = false;
+    nav.classList = {
+        contains: () => open,
+        toggle: (_name, value) => {
+            open = value;
+        },
+    };
+    nav.contains = (node) => node === firstLink;
+    for (const node of [firstLink, opener])
+        node.focus = () => {
+            h.sandbox.document.activeElement = node;
+        };
+    for (const node of [h.node("#menu-toggle"), opener])
+        node.setAttribute = (name, value) => {
+            node[name] = value;
+        };
+    h.sandbox.document.activeElement = opener;
+    h.sandbox.setMenu(true);
+    assert.equal(h.sandbox.document.activeElement, firstLink);
+    assert.equal(opener["aria-expanded"], "true");
+    h.sandbox.setMenu(false);
+    assert.equal(h.sandbox.document.activeElement, opener);
+    assert.equal(opener["aria-expanded"], "false");
+    assert.equal(open, false);
+});
+
+test("captcha timeout shows a retryable error without clearing the draft", async () => {
+    let timer,
+        cleared = false;
+    const h = harness({
+        setTimeout: (fn) => {
+            timer = fn;
+            return 1;
+        },
+        clearTimeout: () => {
+            cleared = true;
+        },
+        fetch: async (_path, options) =>
+            new Promise((_yes, no) =>
+                options.signal.addEventListener("abort", () => {
+                    const error = new Error("aborted");
+                    error.name = "AbortError";
+                    no(error);
+                }),
+            ),
+    });
+    h.node("#public-post-content").value = "unsent draft";
+    const pending = h.sandbox.loadPublicPostCaptcha();
+    timer();
+    await pending;
+    assert.ok(cleared);
+    assert.equal(h.get("publicPostCaptchaId"), "");
+    assert.match(h.node("#captcha-status").textContent, /无法连接/);
+    assert.equal(h.node("#public-post-content").value, "unsent draft");
+});
+
+test("older captcha response cannot replace the current challenge", async () => {
+    const old = deferred();
+    const response = (id, mode = "digits") => ({
+        ok: true,
+        json: async () => ({
+            challenge_id: id,
+            mode,
+            image: "data:image/png;base64,synthetic",
+            max_content_chars: 7,
+        }),
+    });
+    const h = harness({ fetch: () => old.promise });
+    const first = h.sandbox.loadPublicPostCaptcha();
+    h.sandbox.fetch = async () => response("new", "letters");
+    await h.sandbox.loadPublicPostCaptcha();
+    old.resolve(response("old"));
+    await first;
+    assert.equal(h.get("publicPostCaptchaId"), "new");
+    assert.equal(h.node("#public-post-captcha-answer").inputMode, "text");
+    assert.equal(h.node("#public-post-content").dataset.maxCharacters, "7");
+    h.set('language="en"');
+    h.sandbox.renderCaptchaMode();
+    assert.equal(
+        h.node("#public-post-captcha-answer").placeholder,
+        "Enter 6 letters",
+    );
+    assert.equal(h.get("publicPostCaptchaId"), "new");
+});
+
+function submissionHarness(fetch) {
+    const h = harness({
+        fetch,
+        crypto: { randomUUID: () => "same-submission-id" },
+    });
+    h.set('publicPostCaptchaId="captcha"');
+    h.node("#public-post-title").value = "A title";
+    h.node("#public-post-content").value = "An unsent thought";
+    h.node("#public-post-captcha-answer").value = "ABCDEF";
+    h.node("#public-post-kind").value = "post";
+    const controls = [
+        h.node("#public-post-title"),
+        h.node("#public-post-content"),
+    ];
+    const form = {
+        reportValidity: () => true,
+        querySelectorAll: () => controls,
+        reset: () => {
+            for (const node of controls) node.value = "";
+        },
+    };
+    return { h, event: { preventDefault() {}, currentTarget: form } };
+}
+
+test("unconfirmed post retry retains the draft and same payload across language changes", async () => {
+    const writes = [];
+    const { h, event } = submissionHarness(async (_path, options) => {
+        writes.push(JSON.parse(options.body));
+        throw new TypeError("network failed after send");
+    });
+    await h.sandbox.submitPublicPost(event);
+    assert.equal(h.node("#public-post-content").value, "An unsent thought");
+    assert.equal(h.node("#public-post-submit").disabled, false);
+    assert.match(h.node("#public-post-status").textContent, /尚未确认/);
+    h.set('language="en"');
+    await h.sandbox.submitPublicPost(event);
+    assert.deepEqual(writes[0], writes[1]);
+    assert.equal(writes[1].idempotency_key, "same-submission-id");
+});
+
+test("duplicate post clicks send only once and successful submission clears the draft", async () => {
+    const pending = deferred();
+    let writes = 0;
+    const { h, event } = submissionHarness(() => {
+        writes++;
+        return pending.promise;
+    });
+    h.sandbox.loadPublicPostCaptcha = async () => {};
+    const first = h.sandbox.submitPublicPost(event);
+    await h.sandbox.submitPublicPost(event);
+    assert.equal(writes, 1);
+    pending.resolve({ ok: true, json: async () => ({ status: "pending" }) });
+    await first;
+    assert.equal(h.node("#public-post-content").value, "");
+    assert.equal(h.node("#public-post-submit").disabled, false);
+    assert.equal(h.get("publicPostIdempotencyKey"), "");
+    assert.match(h.node("#public-post-status").textContent, /等待管理者审核/);
 });
 
 test("structured summaries render zero progress and probability without private fields", () => {

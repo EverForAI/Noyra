@@ -13,9 +13,11 @@ let overviewData = null,
     overviewFetchedAt = 0,
     overviewFailed = false,
     publicPostSubmitting = false;
+let menuReturnFocus = null;
 const requestControllers = new Map(),
     MAX_VISIBLE_RECORDS = 200;
 let publicPostCaptchaId = "",
+    publicPostCaptchaMode = "",
     publicPostIdempotencyKey = "",
     publicPostCaptchaGeneration = 0;
 const tr = (zh, en) => (language === "en" ? en : zh);
@@ -157,7 +159,10 @@ const i18n = {
         "阅读已公开的记录。私人交流、记忆与内部判断保持私密。",
         "Read public records. Private conversations, memories and judgments stay private.",
     ],
-    heroTitle: ["在时间里，持续成为。", "Continuously becoming, through time."],
+    heroTitle: [
+        "在时间里，\n持续成为。",
+        "Continuously becoming,\nthrough time.",
+    ],
     heroLede: [
         "观察一个持续运行的人工主体。阅读它选择公开的日记、活动，以及经过审核公开的目标与项目摘要。",
         "Observe a continuously running artificial subject: public diaries, activity and approved goal and project summaries.",
@@ -252,18 +257,32 @@ function isAbortError(error) {
     return error?.name === "AbortError";
 }
 async function getJson(path, { signal } = {}) {
-    const response = await fetch(path, {
-        cache: "no-store",
-        credentials: "omit",
-        signal,
-        headers: { Accept: "application/json" },
-    });
-    const payload = await response.json().catch(() => null);
-    if (!response.ok)
-        throw new Error(payload?.error || `HTTP ${response.status}`);
-    if (!payload || payload.contract !== "public-contract-v2")
-        throw new Error("public_contract_invalid");
-    return payload;
+    const timeout = new AbortController();
+    const abort = () => timeout.abort();
+    const timer = setTimeout(abort, 30000);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) timeout.abort();
+    try {
+        const response = await fetch(path, {
+            cache: "no-store",
+            credentials: "omit",
+            signal: timeout.signal,
+            headers: { Accept: "application/json" },
+        });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok)
+            throw new Error(payload?.error || `HTTP ${response.status}`);
+        if (!payload || payload.contract !== "public-contract-v2")
+            throw new Error("public_contract_invalid");
+        return payload;
+    } catch (error) {
+        if (timeout.signal.aborted && !signal?.aborted)
+            throw new Error("public_network_unavailable");
+        throw error;
+    } finally {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+    }
 }
 function publicErrorMessage(error) {
     const messages = {
@@ -698,9 +717,18 @@ function renderAbout() {
         .join("")}</div>`;
 }
 function setMenu(open) {
-    $("#public-navigation").classList.toggle("is-open", open);
+    const navigation = $("#public-navigation");
+    if (open && !navigation.classList.contains("is-open"))
+        menuReturnFocus = document.activeElement;
+    navigation.classList.toggle("is-open", open);
     $("#menu-toggle").setAttribute("aria-expanded", String(open));
     $("#mobile-more").setAttribute("aria-expanded", String(open));
+    if (open) $("#public-navigation a").focus();
+    else {
+        if (navigation.contains(document.activeElement))
+            menuReturnFocus?.focus();
+        menuReturnFocus = null;
+    }
 }
 function applyLanguage() {
     document.documentElement.lang = language === "en" ? "en" : "zh-CN";
@@ -721,6 +749,32 @@ function applyLanguage() {
         "aria-label",
         tr("切换导航", "Toggle navigation"),
     );
+    $("#language-toggle").setAttribute(
+        "aria-label",
+        tr("切换为英语", "Switch to Chinese"),
+    );
+    $("#public-navigation nav").setAttribute(
+        "aria-label",
+        tr("公开档案导航", "Public archive navigation"),
+    );
+    $(".mobile-nav").setAttribute(
+        "aria-label",
+        tr("快捷导航", "Quick navigation"),
+    );
+    $("#overview-panel").setAttribute(
+        "aria-label",
+        tr("当前状态", "Current state"),
+    );
+    $(".hero-art").alt = tr(
+        "晨雾湖畔的阅读空间与轻柔流动的青蓝微光",
+        "A lakeside reading space in morning mist with a soft teal glow",
+    );
+    $("#public-post-captcha-image").alt = tr(
+        "验证码图片",
+        "Verification image",
+    );
+    $("#public-post-author").placeholder = tr("访客", "Visitor");
+    if (publicPostCaptchaId) renderCaptchaMode();
     $("#pause-refresh").textContent = paused
         ? tr("恢复自动更新", "Resume updates")
         : tr("暂停自动更新", "Pause updates");
@@ -729,31 +783,69 @@ function applyLanguage() {
     updateConnection();
 }
 function configureStatus() {
+    const category =
+        activeView === "timeline"
+            ? $("#category-filter").value
+            : Object.entries(kinds).find(
+                  ([, view]) => view === activeView,
+              )?.[0];
+    const lifecycleStates = [
+        "active",
+        "deep_sleep",
+        "reflective_sleep",
+        "paused",
+        "waking",
+        "winding_down",
+        "booting",
+        "orienting",
+        "stopped",
+        "resetting",
+    ];
     const states =
-        activeView === "lifecycle"
-            ? [
-                  "active",
-                  "deep_sleep",
-                  "reflective_sleep",
-                  "paused",
-                  "waking",
-                  "winding_down",
-                  "booting",
-                  "orienting",
-                  "stopped",
-                  "resetting",
-              ]
-            : activeView === "behavior"
-              ? ["succeeded", "failed", "unknown", "rejected"]
-              : [
-                    "active",
-                    "planned",
+        category === "lifecycle"
+            ? lifecycleStates
+            : category === "behavior"
+              ? [
+                    "succeeded",
+                    "failed",
+                    "unknown",
+                    "rejected",
+                    "pending",
                     "running",
-                    "completed",
-                    "paused",
-                    "cancelled",
-                    "published",
-                ];
+                ]
+              : category === "interaction"
+                ? ["sent", "delivered", "failed", "pending"]
+                : ["diary", "post", "update"].includes(category)
+                  ? ["published"]
+                  : category === "all"
+                    ? [
+                          ...new Set([
+                              ...lifecycleStates,
+                              "planned",
+                              "running",
+                              "completed",
+                              "complete",
+                              "cancelled",
+                              "published",
+                              "succeeded",
+                              "failed",
+                              "unknown",
+                              "pending",
+                              "rejected",
+                              "sent",
+                              "delivered",
+                          ]),
+                      ]
+                    : [
+                          "active",
+                          "planned",
+                          "running",
+                          "completed",
+                          "complete",
+                          "paused",
+                          "cancelled",
+                          "published",
+                      ];
     $("#status-filter").innerHTML =
         `<option value="">${tr("全部", "All")}</option>` +
         states
@@ -828,6 +920,19 @@ function updatePostLength() {
     );
 }
 
+function renderCaptchaMode() {
+    const mode =
+        {
+            digits: tr("六位数字", "6 digits"),
+            letters: tr("六位字母", "6 letters"),
+            alphanumeric: tr("六位字母与数字", "6 letters and digits"),
+        }[publicPostCaptchaMode] || tr("六位字符", "6 characters");
+    const answer = $("#public-post-captcha-answer");
+    answer.inputMode = publicPostCaptchaMode === "digits" ? "numeric" : "text";
+    answer.placeholder = tr("输入", "Enter ") + mode;
+    $("#captcha-status").textContent = mode;
+}
+
 async function loadPublicPostCaptcha() {
     const generation = ++publicPostCaptchaGeneration;
     const image = document.querySelector("#public-post-captcha-image");
@@ -838,7 +943,13 @@ async function loadPublicPostCaptcha() {
     if (!image || !answer) return;
     const presentation = "image";
     publicPostCaptchaId = "";
+    publicPostCaptchaMode = "";
     const controller = requestScope("captcha");
+    let timedOut = false;
+    const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+    }, 30000);
     image.removeAttribute("src");
     document.querySelector("#public-post-captcha-refresh").textContent = tr(
         "换一张",
@@ -881,32 +992,32 @@ async function loadPublicPostCaptcha() {
         await image.decode();
         if (generation !== publicPostCaptchaGeneration) return;
         publicPostCaptchaId = payload.challenge_id;
+        publicPostCaptchaMode = payload.mode;
         imageWrap?.classList.add("has-image");
         answer.value = "";
-        const mode =
-            {
-                digits: tr("六位数字", "6 digits"),
-                letters: tr("六位字母", "6 letters"),
-                alphanumeric: tr("六位字母与数字", "6 letters and digits"),
-            }[payload.mode] || tr("六位字符", "6 characters");
-        answer.inputMode = payload.mode === "digits" ? "numeric" : "text";
-        answer.placeholder = tr("输入", "Enter ") + mode;
-        if (status) status.textContent = mode;
+        renderCaptchaMode();
         const body = document.querySelector("#public-post-content");
         body.dataset.maxCharacters = String(payload.max_content_chars || 20000);
         body.maxLength = Number(body.dataset.maxCharacters) * 2;
         updatePostLength();
     } catch (error) {
-        if (isAbortError(error) || generation !== publicPostCaptchaGeneration)
+        if (
+            generation !== publicPostCaptchaGeneration ||
+            (isAbortError(error) && !timedOut)
+        )
             return;
         publicPostCaptchaId = "";
         image.removeAttribute("src");
         if (loading)
             loading.textContent = tr("验证码暂时不可用", "Image unavailable");
         if (status) {
-            status.textContent = publicErrorMessage(error);
+            status.textContent = publicErrorMessage(
+                timedOut ? new Error("public_network_unavailable") : error,
+            );
             status.classList.add("error");
         }
+    } finally {
+        clearTimeout(timer);
     }
 }
 
@@ -952,9 +1063,7 @@ async function submitPublicPost(event) {
                 kind: $("#public-post-kind").value,
                 title,
                 content: body,
-                author_label:
-                    $("#public-post-author").value.trim() ||
-                    tr("访客", "Visitor"),
+                author_label: $("#public-post-author").value.trim() || "访客",
                 captcha_id: publicPostCaptchaId,
                 captcha_answer: answer,
                 idempotency_key: publicPostIdempotencyKey,
@@ -1010,6 +1119,7 @@ $("#refresh").addEventListener("click", () => void refresh());
 $("#load-more").addEventListener("click", () => {
     if (nextCursor) void refresh({ append: true });
 });
+$("#category-filter").addEventListener("change", configureStatus);
 $("#archive-filters").addEventListener("submit", (event) => {
     event.preventDefault();
     void refresh();
@@ -1027,6 +1137,7 @@ $("#language-toggle").addEventListener("click", () => {
     $("#page-description").textContent = descriptions[activeView]
         ? tr(...descriptions[activeView])
         : tr("仅展示经过审核的公开摘要。", "Only approved public summaries.");
+    $("#reading-notice").textContent = $("#page-description").textContent;
     const status = $("#status-filter").value;
     configureStatus();
     $("#status-filter").value = status;
@@ -1048,13 +1159,15 @@ $("#menu-toggle").addEventListener("click", () =>
 );
 $("#mobile-more").addEventListener("click", () => {
     setMenu(!$("#public-navigation").classList.contains("is-open"));
-    if ($("#public-navigation").classList.contains("is-open"))
-        $("#public-navigation a").focus();
 });
 document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") setMenu(false);
 });
 document.addEventListener("click", (event) => {
+    if (event.target.closest(".skip-link")) {
+        event.preventDefault();
+        $("#archive").focus();
+    }
     if (event.target.closest("[data-view]")) setMenu(false);
 });
 $("#public-post-form").addEventListener("input", (event) => {
@@ -1077,7 +1190,6 @@ window.addEventListener("beforeunload", () => {
 });
 document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
-        beginViewGeneration();
         overviewGeneration++;
         abortScope("overview");
     } else {

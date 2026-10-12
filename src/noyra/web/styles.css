@@ -296,6 +296,7 @@ textarea:focus {
     color: #d3e8dd;
 }
 .hero h1 {
+    white-space: pre-line;
     font:
         clamp(32px, 3.6vw, 46px)/1.3 Georgia,
         "Songti SC",
@@ -854,9 +855,6 @@ textarea:focus {
     .hero-caption {
         display: none;
     }
-    .theme-control {
-        display: none;
-    }
 }
 @media (max-width: 800px) {
     .site-layout {
@@ -948,18 +946,23 @@ textarea:focus {
     .connection-state {
         font-size: 11px;
     }
-    .theme-control {
-        position: absolute;
-        right: 20px;
-        top: 88px;
-        z-index: 10;
+    .header-inner {
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+    .header-actions {
+        flex: 1 1 100%;
+        justify-content: space-between;
+    }
+    .theme-control select {
+        max-width: 115px;
     }
     .site-layout {
         padding: 18px 16px 85px;
     }
     .hero {
         min-height: 340px;
-        margin-top: 40px;
+        margin-top: 0;
         border-radius: 13px;
     }
     .hero-copy {
@@ -1052,7 +1055,7 @@ textarea:focus {
         font-size: 13px;
     }
     .sidebar {
-        top: 72px;
+        top: 116px;
     }
 }
 @media (prefers-reduced-motion: reduce) {

@@ -79,6 +79,9 @@ class PublicArchiveHTTPTests(unittest.TestCase):
         assert isinstance(records, dict)
         self.assertEqual(records["items"][0]["id"], item["id"])
         self.assertNotIn("source_id", records["items"][0])
+        self.assertEqual(records["items"][0]["body"], "")
+        detail = self.get_json(f"/api/public/goals?id={item['id']}")
+        self.assertEqual(detail["items"][0]["body"], item["body"])
         self.authorized_json(
             f"/api/admin/public-publications/{item['id']}/withdraw",
             payload={"expected_revision": 1},
@@ -86,6 +89,7 @@ class PublicArchiveHTTPTests(unittest.TestCase):
         records = self.get_json("/api/public/goals")
         assert isinstance(records, dict)
         self.assertEqual(records["items"], [])
+        self.assertEqual(self.get_json(f"/api/public/goals?id={item['id']}")["items"], [])
 
     def test_invalid_queries_and_unauthenticated_mutations_are_rejected(self) -> None:
         for query in (
@@ -98,6 +102,8 @@ class PublicArchiveHTTPTests(unittest.TestCase):
             "kind=private",
             "status=",
             "until=",
+            "id=",
+            "id=example&id=another",
         ):
             if query == "status=":
                 continue  # An empty status means all public statuses.

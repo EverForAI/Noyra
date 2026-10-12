@@ -412,6 +412,7 @@ class PublicArchive:
             raise ValueError("invalid public page size")
         search = _text(search, 120)
         status = _text(status, 64)
+        identifier = _text(identifier, 256, required=True) if identifier is not None else None
         if status and not re.fullmatch(r"[a-z][a-z_]{0,63}", status):
             raise ValueError("invalid public status")
         since = _timestamp(since) if since is not None else None
@@ -423,6 +424,7 @@ class PublicArchive:
             "until": until,
             "search": search,
             "status": status,
+            "identifier": identifier,
         }
         query_hash = content_hash(query)
         key = None
@@ -465,7 +467,7 @@ class PublicArchive:
                     values.append(search)
                 if identifier:
                     clauses.append(f"{id_col}=?")
-                    values.append(_text(identifier, 256, required=True))
+                    values.append(identifier)
                 if key:
                     clauses.append(f"({time_col}, ?, {id_col}) < (?,?,?)")
                     values.extend([category, *key])
@@ -477,6 +479,11 @@ class PublicArchive:
                 for entry in connection.execute(sql, values):
                     item = self._item(category, entry)
                     if item is not None:
+                        # Lists contain readable excerpts; full public bodies are fetched
+                        # only by identifier. Twenty large diaries must not make the
+                        # entire archive exceed the HTTP response limit.
+                        if identifier is None:
+                            item["body"] = ""
                         items.append(item)
         items.sort(key=lambda item: (item["occurred_at"], item["kind"], item["id"]), reverse=True)
         page = items[:limit]
