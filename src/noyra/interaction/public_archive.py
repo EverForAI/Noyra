@@ -595,6 +595,19 @@ class PublicArchive:
         with _request_budget():
             return self._overview(subject_id)
 
+    def sitemap_items(self, subject_id: str) -> list[dict[str, Any]]:
+        """Complete within 1,000 records; never present a truncated sitemap as complete."""
+        with _request_budget():
+            items: list[dict[str, Any]] = []
+            cursor = None
+            for _ in range(10):
+                result = self.page(subject_id, limit=100, cursor=cursor)
+                items.extend(result["items"])
+                cursor = result["next_cursor"]
+                if cursor is None:
+                    return items
+            raise PublicQueryBudgetExceeded("sitemap record budget exceeded")
+
     def _overview(self, subject_id: str) -> dict[str, Any]:
         with _bounded_read(self.database) as connection:
             row = connection.execute(

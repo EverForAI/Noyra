@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, Concatenate, Literal, ParamSpec, TypeVar, cast
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
@@ -127,6 +127,7 @@ from noyra.interaction.public_contract import (
     PUBLIC_CONTRACT_ID,
     PUBLIC_MAX_RESPONSE_BYTES,
 )
+from noyra.interaction.public_reading import PUBLIC_VIEWS, public_article_html, public_item_path
 from noyra.knowledge import (
     CommonKnowledgePeerInput,
     CommonKnowledgeStore,
@@ -2624,6 +2625,9 @@ class NoyraHTTPServer:
                     self._wechat_webhook_challenge()
                     return
                 parsed = urlsplit(self.path)
+                if parsed.path.startswith("/public/"):
+                    self._public_article(parsed)
+                    return
                 wallet_list_path = parsed.path.replace("/api/v1/", "/api/", 1)
                 if wallet_list_path.startswith("/api/admin/wallet-lists/"):
                     if not self._authorized("operator"):
@@ -9621,6 +9625,72 @@ class NoyraHTTPServer:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _public_article(self, parsed: Any) -> None:
+                parts = parsed.path.split("/")
+                if len(parts) != 4 or parts[2] not in PUBLIC_VIEWS or not parts[3]:
+                    self._text(
+                        HTTPStatus.NOT_FOUND,
+                        "text/plain; charset=utf-8",
+                        b"Not found\n",
+                        cache_control="no-store",
+                    )
+                    return
+                kind = parts[2]
+                try:
+                    identifier = unquote(parts[3], errors="strict")
+                    params = parse_qs(parsed.query, keep_blank_values=True)
+                    if set(params) - {"lang"} or (
+                        params and params.get("lang") not in [["zh"], ["en"]]
+                    ):
+                        raise ValueError("invalid reading language")
+                    page = owner.public_archive.page(
+                        owner.kernel.subject_id, kind=kind, limit=1, identifier=identifier
+                    )
+                except (ValueError, UnicodeError):
+                    self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "invalid_public_query"},
+                        public_contract=ARCHIVE_CONTRACT,
+                    )
+                    return
+                except PublicQueryBudgetExceeded:
+                    self._json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "public_query_budget_exceeded"},
+                        public_contract=ARCHIVE_CONTRACT,
+                    )
+                    return
+                except IntegrityError:
+                    self._json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "public_content_unavailable"},
+                        public_contract=ARCHIVE_CONTRACT,
+                    )
+                    return
+                if not page["items"]:
+                    self._text(
+                        HTTPStatus.NOT_FOUND,
+                        "text/plain; charset=utf-8",
+                        b"Not found\n",
+                        cache_control="no-store",
+                    )
+                    return
+                language = params.get("lang", ["zh"])[0]
+                body = public_article_html(
+                    page["items"][0], owner.settings.public_site_url or "", english=language == "en"
+                )
+                if len(body) > PUBLIC_MAX_RESPONSE_BYTES:
+                    self._json(
+                        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                        {"error": "public_response_too_large"},
+                        public_contract=ARCHIVE_CONTRACT,
+                    )
+                    return
+                self.send_response(HTTPStatus.OK)
+                self._headers("text/html; charset=utf-8", len(body), cache_control="no-store")
+                self.end_headers()
+                self.wfile.write(body)
+
             def _robots_txt(self) -> None:
                 lines = [
                     "User-agent: *",
@@ -9644,21 +9714,53 @@ class NoyraHTTPServer:
                     )
                     return
                 location = html.escape(site_url + "/", quote=False)
+                try:
+                    items = owner.public_archive.sitemap_items(owner.kernel.subject_id)
+                except PublicQueryBudgetExceeded:
+                    self._json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "public_query_budget_exceeded"},
+                        public_contract=ARCHIVE_CONTRACT,
+                    )
+                    return
+                except IntegrityError:
+                    self._json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "public_content_unavailable"},
+                        public_contract=ARCHIVE_CONTRACT,
+                    )
+                    return
+                entries = "".join(
+                    "<url><loc>"
+                    f"{html.escape(site_url + public_item_path(item['kind'], item['id']))}"
+                    "</loc>"
+                    f"<lastmod>{html.escape(item['updated_at'])}</lastmod></url>\n"
+                    for item in items
+                )
                 body = (
                     '<?xml version="1.0" encoding="UTF-8"?>\n'
                     '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
                     f"  <url><loc>{location}</loc></url>\n"
+                    f"{entries}"
                     "</urlset>\n"
                 ).encode()
                 self._text(
                     HTTPStatus.OK,
                     "application/xml; charset=utf-8",
                     body,
+                    cache_control="no-store",
                 )
 
-            def _text(self, status: HTTPStatus, content_type: str, body: bytes) -> None:
+            def _text(
+                self,
+                status: HTTPStatus,
+                content_type: str,
+                body: bytes,
+                *,
+                cache_control: str = "public, max-age=300",
+            ) -> None:
                 self.send_response(status)
-                self._headers(content_type, len(body), cache_control="public, max-age=300")
+                self._headers(content_type, len(body), cache_control=cache_control)
                 self.end_headers()
                 self.wfile.write(body)
 

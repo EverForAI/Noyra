@@ -136,6 +136,84 @@ class PublicArchiveHTTPTests(unittest.TestCase):
         )
         self.assertEqual(self.get_json("/api/public/overview")["contract"], "public-contract-v2")
 
+    def test_standalone_public_article_and_sitemap_recheck_withdrawal(self) -> None:
+        from test_public_archive import publication
+
+        self.http.settings = self.http.settings.model_copy(
+            update={"public_site_url": "https://public.example"}
+        )
+        _, item = self.authorized_json(
+            "/api/admin/public-publications",
+            payload=publication(
+                title="Share title", body="# First\nBody\n\n## Second\n<script>bad()</script>"
+            ),
+        )
+        path = f"/public/goal/{item['id']}"
+        with urlopen(self.base_url + path, timeout=5) as response:
+            markup = response.read().decode()
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+            self.assertIn("<title>Share title · Noyra</title>", markup)
+            self.assertIn("https://public.example" + path, markup)
+            self.assertNotIn("<script>", markup)
+            self.assertIn("reading-toc", markup)
+        with urlopen(self.base_url + "/sitemap.xml", timeout=5) as response:
+            self.assertIn(path, response.read().decode())
+        self.authorized_json(
+            f"/api/admin/public-publications/{item['id']}/withdraw",
+            payload={"expected_revision": 1},
+        )
+        with self.assertRaises(HTTPError) as absent:
+            urlopen(self.base_url + path, timeout=5)
+        self.assertEqual(absent.exception.code, 404)
+        self.assertEqual(absent.exception.headers["Cache-Control"], "no-store")
+        with urlopen(self.base_url + "/sitemap.xml", timeout=5) as response:
+            self.assertNotIn(path, response.read().decode())
+
+    def test_standalone_reader_uses_public_visibility_and_safe_failures(self) -> None:
+        from unittest.mock import patch
+
+        from noyra.interaction import InteractionStore
+        from noyra.interaction.public_archive import PublicQueryBudgetExceeded
+
+        store = InteractionStore(self.kernel.database)
+        for channel in ("private:local", "PUBLIC:local", "Public:local"):
+            message = store.send(
+                self.kernel.subject_id, channel, "private-peer", "PRIVATE-SENTINEL"
+            )
+            with self.assertRaises(HTTPError) as absent:
+                urlopen(self.base_url + "/public/interaction/" + message.interaction_id, timeout=5)
+            self.assertEqual(absent.exception.code, 404)
+            self.assertNotIn(b"PRIVATE-SENTINEL", absent.exception.read())
+        message = store.send(self.kernel.subject_id, "public:local", "private-peer", "Public text")
+        with self.kernel.database.transaction() as connection:
+            connection.execute(
+                "UPDATE interactions SET content=? WHERE interaction_id=?",
+                ("TAMPERED-SENTINEL", message.interaction_id),
+            )
+        with self.assertRaises(HTTPError) as damaged:
+            urlopen(self.base_url + "/public/interaction/" + message.interaction_id, timeout=5)
+        self.assertEqual(damaged.exception.code, 503)
+        self.assertNotIn(b"TAMPERED-SENTINEL", damaged.exception.read())
+        with (
+            patch.object(self.http.public_archive, "page", side_effect=PublicQueryBudgetExceeded()),
+            self.assertRaises(HTTPError) as exhausted,
+        ):
+            urlopen(self.base_url + "/public/goal/example", timeout=5)
+        self.assertEqual(exhausted.exception.code, 503)
+        self.assertEqual(exhausted.exception.headers["Retry-After"], "5")
+        self.assertEqual(
+            json.loads(exhausted.exception.read()), {"error": "public_query_budget_exceeded"}
+        )
+        for suffix in ("?lang=en&lang=zh", "?private=1", "/%FF", "/%00"):
+            path = (
+                "/public/goal/example" + suffix
+                if suffix.startswith("?")
+                else "/public/goal" + suffix
+            )
+            with self.assertRaises(HTTPError) as invalid:
+                urlopen(self.base_url + path, timeout=5)
+            self.assertEqual(invalid.exception.code, 400)
+
     def test_publish_edit_withdraw_and_anonymous_visibility(self) -> None:
         from test_public_archive import publication
 

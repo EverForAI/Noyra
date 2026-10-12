@@ -573,3 +573,19 @@ def test_schema92_upgrade_preserves_private_history_and_publishes_nothing(
         assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM public_publications").fetchone()[0] == 0
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_sitemap_covers_multiple_pages_and_rereads_visibility(
+    archive: tuple[PublicArchive, SubjectKernel],
+) -> None:
+    store, kernel = archive
+    for i in range(121):
+        store.publish(
+            kernel.subject_id, publication(publication_id=f"sitemap-{i:03}"), actor="test"
+        )
+    items = store.sitemap_items(kernel.subject_id)
+    assert {item["id"] for item in items if item["kind"] == "goal"} == {
+        f"sitemap-{i:03}" for i in range(121)
+    }
+    store.withdraw(kernel.subject_id, "sitemap-000", 1, actor="test")
+    assert "sitemap-000" not in {item["id"] for item in store.sitemap_items(kernel.subject_id)}

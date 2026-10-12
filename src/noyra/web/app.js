@@ -13,7 +13,9 @@ let overviewData = null,
     overviewFetchedAt = 0,
     overviewFailed = false,
     publicPostSubmitting = false;
-let batchPaths = [], batchPath = "", batchNumber = 1;
+let batchPaths = [],
+    batchPath = "",
+    batchNumber = 1;
 let menuReturnFocus = null;
 const requestControllers = new Map(),
     MAX_VISIBLE_RECORDS = 200;
@@ -272,10 +274,13 @@ async function getJson(path, { signal } = {}) {
         });
         const payload = await response.json().catch(() => null);
         if (!response.ok) {
-            const error = new Error(payload?.error || `HTTP ${response.status}`);
+            const error = new Error(
+                payload?.error || `HTTP ${response.status}`,
+            );
             error.status = response.status;
             const retry = Number(response.headers?.get("Retry-After"));
-            if (Number.isFinite(retry) && retry > 0 && retry <= 3600) error.retryAfter = retry;
+            if (Number.isFinite(retry) && retry > 0 && retry <= 3600)
+                error.retryAfter = retry;
             throw error;
         }
         if (!payload || payload.contract !== "public-contract-v2")
@@ -332,21 +337,42 @@ function publicErrorMessage(error) {
             "公开档案暂时无法连接，请稍后刷新页面。",
             "Cannot connect to the public archive. Refresh later.",
         ],
-        invalid_public_query: ["筛选条件无效，请检查时间、状态和搜索内容后重试。", "Invalid filters. Check dates, status and search text."],
-        public_response_too_large: ["内容超过单次读取容量，请缩小筛选范围或联系管理员。", "Content exceeds one response. Narrow filters or contact the administrator."],
-        public_query_budget_exceeded: ["读取范围超过查询预算，请缩小时间范围、选择分类或精简搜索。", "The query exceeds its budget. Narrow the dates, category or search."],
-        rate_limited: ["读取过于频繁，请稍后重试。", "Too many requests. Try again later."],
+        invalid_public_query: [
+            "筛选条件无效，请检查时间、状态和搜索内容后重试。",
+            "Invalid filters. Check dates, status and search text.",
+        ],
+        public_response_too_large: [
+            "内容超过单次读取容量，请缩小筛选范围或联系管理员。",
+            "Content exceeds one response. Narrow filters or contact the administrator.",
+        ],
+        public_query_budget_exceeded: [
+            "读取范围超过查询预算，请缩小时间范围、选择分类或精简搜索。",
+            "The query exceeds its budget. Narrow the dates, category or search.",
+        ],
+        rate_limited: [
+            "读取过于频繁，请稍后重试。",
+            "Too many requests. Try again later.",
+        ],
     };
     if (error?.name === "TypeError" || error?.message === "Failed to fetch")
         return tr(...messages.public_network_unavailable);
     const message = messages[error?.message]
         ? tr(...messages[error.message])
-        : error?.status === 429 ? tr(...messages.rate_limited)
-        : tr(
-              "公开服务暂时不可用，请稍后刷新页面。",
-              "The public service is temporarily unavailable. Refresh later.",
-          );
-    return message + (error?.retryAfter ? tr(` 建议等待 ${error.retryAfter} 秒后重试。`, ` Retry after ${error.retryAfter} seconds.`) : "");
+        : error?.status === 429
+          ? tr(...messages.rate_limited)
+          : tr(
+                "公开服务暂时不可用，请稍后刷新页面。",
+                "The public service is temporarily unavailable. Refresh later.",
+            );
+    return (
+        message +
+        (error?.retryAfter
+            ? tr(
+                  ` 建议等待 ${error.retryAfter} 秒后重试。`,
+                  ` Retry after ${error.retryAfter} seconds.`,
+              )
+            : "")
+    );
 }
 function emptyState(
     detail = tr(
@@ -357,7 +383,7 @@ function emptyState(
     return `<div class="empty-state"><span class="empty-mark" aria-hidden="true">N</span><strong>${escapeHtml(tr("这里还没有公开记录", "No public records here yet"))}</strong><p>${escapeHtml(detail)}</p></div>`;
 }
 function itemHref(row) {
-    return `#${kinds[row.kind] || "timeline"}/${encodeURIComponent(row.id)}`;
+    return `/public/${encodeURIComponent(row.kind)}/${encodeURIComponent(row.id)}${language === "en" ? "?lang=en" : ""}`;
 }
 function provenance(row) {
     return (
@@ -376,11 +402,22 @@ function recordTitle(row) {
         ? `${label(row.details?.from)} → ${label(row.details?.to)}`
         : row.kind === "interaction"
           ? viewLabel(row.kind)
-          : row.kind === "behavior" ? actionLabel(row.title) : row.title || viewLabel(row.kind);
+          : row.kind === "behavior"
+            ? actionLabel(row.title)
+            : row.title || viewLabel(row.kind);
 }
 function actionLabel(value) {
-    const names = {observe:["观察","Observe"],research:["研究","Research"],reflect:["反思","Reflect"],communicate:["交流","Communicate"],send_message:["发送消息","Send message"],search:["搜索","Search"],write:["写作","Write"],publish:["发布","Publish"]};
-    return names[value] ? tr(...names[value]) : value || tr("活动","Activity");
+    const names = {
+        observe: ["观察", "Observe"],
+        research: ["研究", "Research"],
+        reflect: ["反思", "Reflect"],
+        communicate: ["交流", "Communicate"],
+        send_message: ["发送消息", "Send message"],
+        search: ["搜索", "Search"],
+        write: ["写作", "Write"],
+        publish: ["发布", "Publish"],
+    };
+    return names[value] ? tr(...names[value]) : value || tr("活动", "Activity");
 }
 function safePublicLink(value) {
     try {
@@ -507,9 +544,26 @@ function renderDetails(row) {
         );
         field("公开目标说明", "Public target", details.public_target, true);
     }
-    const context = row.kind === "behavior" ? [["工具","Tool",details.tool],["公开资源说明","Public resource summary",details.resource_summary],["省略说明","Redaction note",details.redaction_reason]].filter(([, ,value])=>value).map(([zh,en,value])=>`<div class="detail-field"><dt>${escapeHtml(tr(zh,en))}</dt><dd>${escapeHtml(value)}</dd></div>`).join("") : "";
+    const context =
+        row.kind === "behavior"
+            ? [
+                  ["工具", "Tool", details.tool],
+                  [
+                      "公开资源说明",
+                      "Public resource summary",
+                      details.resource_summary,
+                  ],
+                  ["省略说明", "Redaction note", details.redaction_reason],
+              ]
+                  .filter(([, , value]) => value)
+                  .map(
+                      ([zh, en, value]) =>
+                          `<div class="detail-field"><dt>${escapeHtml(tr(zh, en))}</dt><dd>${escapeHtml(value)}</dd></div>`,
+                  )
+                  .join("")
+            : "";
     return fields.length || context
-        ? `<dl class="record-details">${fields.join("")}</dl>${context ? `<details class="behavior-context"><summary>${tr("活动背景与说明","Activity context")}</summary><dl class="record-details">${context}</dl></details>` : ""}`
+        ? `<dl class="record-details">${fields.join("")}</dl>${context ? `<details class="behavior-context"><summary>${tr("活动背景与说明", "Activity context")}</summary><dl class="record-details">${context}</dl></details>` : ""}`
         : "";
 }
 function renderCard(row) {
@@ -522,7 +576,46 @@ function renderRows(rows) {
         : emptyState();
 }
 function renderArticle(row) {
-    return `<article class="article-reader"><a href="#${activeView}">${tr("← 返回列表", "← Back to list")}</a><h2>${escapeHtml(recordTitle(row))}</h2><div class="record-meta"><span class="tag">${escapeHtml(viewLabel(row.kind))}</span><time datetime="${escapeHtml(row.occurred_at)}">${escapeHtml(formatTime(row.occurred_at))}</time><span>${escapeHtml(provenance(row))}</span><span>${escapeHtml(label(row.details?.status || row.status))}</span></div>${row.provenance === "operator_summary" ? `<p class="record-summary">${escapeHtml(row.summary)}</p>` : ""}<div class="article-body">${escapeHtml(row.body)}</div>${renderDetails(row)}${row.updated_at !== row.occurred_at ? `<p class="module-status">${tr("最近更新", "Last updated")}: ${escapeHtml(formatTime(row.updated_at))}</p>` : ""}</article>`;
+    return `<article class="article-reader"><a href="#${activeView}">${tr("← 返回列表", "← Back to list")}</a><h2>${escapeHtml(recordTitle(row))}</h2><div class="record-meta"><span class="tag">${escapeHtml(viewLabel(row.kind))}</span><time datetime="${escapeHtml(row.occurred_at)}">${escapeHtml(formatTime(row.occurred_at))}</time><span>${escapeHtml(provenance(row))}</span><span>${escapeHtml(label(row.details?.status || row.status))}</span></div>${row.provenance === "operator_summary" ? `<p class="record-summary">${escapeHtml(row.summary)}</p>` : ""}<div class="article-body">${structuredPublicText(row.body)}</div>${renderDetails(row)}${row.updated_at !== row.occurred_at ? `<p class="module-status">${tr("最近更新", "Last updated")}: ${escapeHtml(formatTime(row.updated_at))}</p>` : ""}</article>`;
+}
+function structuredPublicText(value) {
+    const blocks = [],
+        headings = [],
+        paragraph = [];
+    const flush = () => {
+        if (paragraph.length) {
+            blocks.push(`<p>${escapeHtml(paragraph.join("\n"))}</p>`);
+            paragraph.length = 0;
+        }
+    };
+    for (const line of String(value || "")
+        .replaceAll("\r\n", "\n")
+        .replaceAll("\r", "\n")
+        .split("\n")) {
+        const match = /^(#{1,3})\s+(.+)$/.exec(line);
+        if (match) {
+            flush();
+            const id = `reading-section-${headings.length + 1}`,
+                level = match[1].length + 2;
+            headings.push([id, match[2]]);
+            blocks.push(
+                `<h${level} id="${id}">${escapeHtml(match[2])}</h${level}>`,
+            );
+        } else if (!line.trim()) flush();
+        else paragraph.push(line);
+    }
+    flush();
+    return (
+        (headings.length >= 2
+            ? `<details class="reading-toc"><summary>${tr("目录", "Contents")}</summary><ol>${headings
+                  .slice(0, 100)
+                  .map(
+                      ([id, title]) =>
+                          `<li><a href="#${id}">${escapeHtml(title)}</a></li>`,
+                  )
+                  .join("")}</ol></details>`
+            : "") + blocks.join("")
+    );
 }
 function renderOverview() {
     if (!overviewData) return;
@@ -624,15 +717,32 @@ function queryPath() {
 let currentQueryPath = "";
 async function loadView(generation, signal, append = false, previous = false) {
     const replaceBatch = append && visibleRows.length >= MAX_VISIBLE_RECORDS;
-    const path = previous ? batchPaths[batchPaths.length - 1] : append
-        ? `${currentQueryPath}&cursor=${encodeURIComponent(nextCursor)}`
-        : queryPath();
+    const path = previous
+        ? batchPaths[batchPaths.length - 1]
+        : append
+          ? `${currentQueryPath}&cursor=${encodeURIComponent(nextCursor)}`
+          : queryPath();
     const page = await getJson(path, { signal });
     if (!currentViewGeneration(generation)) return;
-    if (!append && !previous) {currentQueryPath = path;batchPath=path;batchPaths=[];batchNumber=1;}
-    if (replaceBatch) {batchPaths.push(batchPath);if(batchPaths.length>128)batchPaths.shift();batchPath=path;batchNumber++;}
-    if (previous) {batchPaths.pop();batchPath=path;batchNumber=Math.max(1,batchNumber-1);}
-    const rows = append && !replaceBatch ? [...visibleRows, ...page.items] : page.items;
+    if (!append && !previous) {
+        currentQueryPath = path;
+        batchPath = path;
+        batchPaths = [];
+        batchNumber = 1;
+    }
+    if (replaceBatch) {
+        batchPaths.push(batchPath);
+        if (batchPaths.length > 128) batchPaths.shift();
+        batchPath = path;
+        batchNumber++;
+    }
+    if (previous) {
+        batchPaths.pop();
+        batchPath = path;
+        batchNumber = Math.max(1, batchNumber - 1);
+    }
+    const rows =
+        append && !replaceBatch ? [...visibleRows, ...page.items] : page.items;
     visibleRows = [
         ...new Map(rows.map((row) => [`${row.kind}:${row.id}`, row])).values(),
     ].slice(0, MAX_VISIBLE_RECORDS);
@@ -647,11 +757,12 @@ async function loadView(generation, signal, append = false, previous = false) {
                   ),
               )
         : renderRows(visibleRows);
-    $("#load-more").hidden =
-        Boolean(activeId) ||
-        !nextCursor;
+    $("#load-more").hidden = Boolean(activeId) || !nextCursor;
     $("#previous-batch").hidden = Boolean(activeId) || !batchPaths.length;
-    $("#load-more").textContent = visibleRows.length >= MAX_VISIBLE_RECORDS ? tr("下一批历史","Next batch") : tr("加载更多","Load more");
+    $("#load-more").textContent =
+        visibleRows.length >= MAX_VISIBLE_RECORDS
+            ? tr("下一批历史", "Next batch")
+            : tr("加载更多", "Load more");
     $("#list-status").textContent =
         `${tr("批次", "Batch")} ${batchNumber} · ${tr("已显示", "Showing")} ${visibleRows.length} ${tr("条 · 获取于", "records · Fetched at")} ${formatTime(page.generated_at)}`;
 }
@@ -665,8 +776,10 @@ async function refresh({ append = false, previous = false } = {}) {
     $("#load-more").disabled = true;
     $("#previous-batch").disabled = true;
     if (!append && !previous) {
-        batchPaths=[];batchPath="";batchNumber=1;
-        $("#previous-batch").hidden=true;
+        batchPaths = [];
+        batchPath = "";
+        batchNumber = 1;
+        $("#previous-batch").hidden = true;
         visibleRows = [];
         nextCursor = null;
         content.innerHTML = "";
@@ -805,8 +918,11 @@ function applyLanguage() {
         ? tr("恢复自动更新", "Resume updates")
         : tr("暂停自动更新", "Pause updates");
     $("#pause-refresh").setAttribute("aria-pressed", String(paused));
-    $("#previous-batch").textContent = tr("上一批历史","Previous batch");
-    $("#load-more").textContent = visibleRows.length >= MAX_VISIBLE_RECORDS ? tr("下一批历史","Next batch") : tr("加载更多","Load more");
+    $("#previous-batch").textContent = tr("上一批历史", "Previous batch");
+    $("#load-more").textContent =
+        visibleRows.length >= MAX_VISIBLE_RECORDS
+            ? tr("下一批历史", "Next batch")
+            : tr("加载更多", "Load more");
     updatePostLength();
     updateConnection();
 }
@@ -883,7 +999,10 @@ function configureStatus() {
 }
 function togglePublicUpdates() {
     paused = !paused;
-    if (paused) {overviewGeneration++;abortScope("overview");}
+    if (paused) {
+        overviewGeneration++;
+        abortScope("overview");
+    }
     applyLanguage();
     if (!paused) void loadOverview();
 }
@@ -1155,7 +1274,9 @@ $("#refresh").addEventListener("click", () => void refresh());
 $("#load-more").addEventListener("click", () => {
     if (nextCursor) void refresh({ append: true });
 });
-$("#previous-batch").addEventListener("click", () => { if(batchPaths.length) void refresh({previous:true}); });
+$("#previous-batch").addEventListener("click", () => {
+    if (batchPaths.length) void refresh({ previous: true });
+});
 $("#category-filter").addEventListener("change", configureStatus);
 $("#archive-filters").addEventListener("submit", (event) => {
     event.preventDefault();
@@ -1197,6 +1318,15 @@ document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") setMenu(false);
 });
 document.addEventListener("click", (event) => {
+    const sectionLink = event.target.closest(".reading-toc a");
+    if (sectionLink) {
+        event.preventDefault();
+        const target = document.getElementById(
+            sectionLink.getAttribute("href").slice(1),
+        );
+        target?.scrollIntoView();
+        return;
+    }
     if (event.target.closest(".skip-link")) {
         event.preventDefault();
         $("#archive").focus();

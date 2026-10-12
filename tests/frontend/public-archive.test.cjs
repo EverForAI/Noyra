@@ -84,9 +84,19 @@ const page = (items) => ({
 test("450 records remain reachable in bounded batches with a previous path", async () => {
     const h = harness();
     h.set('activeView="diary";loadOverview=async()=>{}');
-    h.sandbox.getJson = async path => {
-        const start = Number(new URL(path,"https://example.test").searchParams.get("cursor") || 0);
-        return {...page(Array.from({length:Math.min(20,450-start)},(_,i)=>record(String(start+i)))),next_cursor:start+20<450?String(start+20):null};
+    h.sandbox.getJson = async (path) => {
+        const start = Number(
+            new URL(path, "https://example.test").searchParams.get("cursor") ||
+                0,
+        );
+        return {
+            ...page(
+                Array.from({ length: Math.min(20, 450 - start) }, (_, i) =>
+                    record(String(start + i)),
+                ),
+            ),
+            next_cursor: start + 20 < 450 ? String(start + 20) : null,
+        };
     };
     const seen = new Set();
     await h.sandbox.refresh();
@@ -94,33 +104,51 @@ test("450 records remain reachable in bounded batches with a previous path", asy
         for (const item of h.get("visibleRows")) seen.add(item.id);
         assert.ok(h.get("visibleRows.length") <= 200);
         if (!h.get("nextCursor")) break;
-        await h.sandbox.refresh({append:true});
-    } while(true);
-    assert.equal(seen.size,450);
-    assert.equal(h.get("batchNumber"),3);
-    await h.sandbox.refresh({previous:true});
-    assert.equal(h.get("visibleRows[0].id"),"200");
+        await h.sandbox.refresh({ append: true });
+    } while (true);
+    assert.equal(seen.size, 450);
+    assert.equal(h.get("batchNumber"), 3);
+    await h.sandbox.refresh({ previous: true });
+    assert.equal(h.get("visibleRows[0].id"), "200");
     await h.sandbox.refresh();
-    assert.equal(h.get("batchPaths.length"),0);
+    assert.equal(h.get("batchPaths.length"), 0);
 });
 test("pause invalidates pending overview and resume performs one read", async () => {
-    const h = harness(), pending = deferred();
-    h.sandbox.applyLanguage = ()=>{};
-    h.sandbox.getJson = ()=>pending.promise;
-    const reading=h.sandbox.loadOverview();
+    const h = harness(),
+        pending = deferred();
+    h.sandbox.applyLanguage = () => {};
+    h.sandbox.getJson = () => pending.promise;
+    const reading = h.sandbox.loadOverview();
     h.sandbox.togglePublicUpdates();
     pending.resolve({});
     await reading;
-    assert.equal(h.get("overviewData"),null);
-    let reads=0;
-    h.sandbox.loadOverview=async()=>reads++;
+    assert.equal(h.get("overviewData"), null);
+    let reads = 0;
+    h.sandbox.loadOverview = async () => reads++;
     h.sandbox.togglePublicUpdates();
-    assert.equal(reads,1);
+    assert.equal(reads, 1);
 });
 test("HTTP error status and safe retry guidance survive public reads", async () => {
-    const h=harness({fetch:async()=>({ok:false,status:429,headers:{get:()=>"60"},json:async()=>({error:"rate_limited"})})});
-    await assert.rejects(h.sandbox.getJson('/api/public/timeline'),error=>error.status===429 && error.retryAfter===60 && h.sandbox.publicErrorMessage(error).includes('60'));
-    assert.ok(h.sandbox.publicErrorMessage(new Error('public_query_budget_exceeded')).includes('缩小'));
+    const h = harness({
+        fetch: async () => ({
+            ok: false,
+            status: 429,
+            headers: { get: () => "60" },
+            json: async () => ({ error: "rate_limited" }),
+        }),
+    });
+    await assert.rejects(
+        h.sandbox.getJson("/api/public/timeline"),
+        (error) =>
+            error.status === 429 &&
+            error.retryAfter === 60 &&
+            h.sandbox.publicErrorMessage(error).includes("60"),
+    );
+    assert.ok(
+        h.sandbox
+            .publicErrorMessage(new Error("public_query_budget_exceeded"))
+            .includes("缩小"),
+    );
 });
 for (const view of [
     "diary",
@@ -505,4 +533,22 @@ test("research references reject script, HTTP and credential-bearing URLs", () =
     });
     assert.ok(html.includes('rel="noopener noreferrer"'));
     assert.ok(html.includes('referrerpolicy="no-referrer"'));
+});
+
+test("article links identify independent pages and structured text stays inert", () => {
+    const h = harness();
+    h.set('language="en"');
+    assert.equal(
+        h.sandbox.itemHref({ ...record("id/?x"), kind: "research" }),
+        "/public/research/id%2F%3Fx?lang=en",
+    );
+    const markup = h.sandbox.structuredPublicText(
+        "# First\ntext\n\n## <script>bad()</script>\njavascript:bad()",
+    );
+    assert.ok(markup.includes('id="reading-section-1"'));
+    assert.ok(markup.includes('href="#reading-section-2"'));
+    assert.ok(markup.includes("Contents"));
+    assert.ok(markup.includes("&lt;script&gt;"));
+    assert.ok(!markup.includes("<script>"));
+    assert.ok(!markup.includes('href="javascript:'));
 });
