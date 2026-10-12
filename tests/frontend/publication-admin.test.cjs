@@ -260,3 +260,73 @@ test("reconciliation adopts only matching content and preserves CAS after a diff
     assert.equal(h.get("publicationEditor.revision"),3);
     assert.ok(h.$("#publication-editor-status").textContent.includes("不能覆盖"));
 });
+
+test("withdrawal invalidates only the current editor and preserves unsaved text", async () => {
+    const h=context();
+    h.sandbox.editPublicPublication(row);
+    h.$("#publication-title").value="Unsaved text";
+    h.set('publicationRows.set("public-row-1",' + JSON.stringify(row) + ')');
+    h.sandbox.request=async(path,options)=>options ? {status:"withdrawn",revision:3} : {items:[],next_cursor:null};
+    await h.sandbox.withdrawPublicPublication(row.id);
+    assert.equal(h.$("#publication-title").value,"Unsaved text");
+    assert.equal(h.get("publicationEditor.invalidBase"),true);
+    let writes=0;
+    h.sandbox.request=async()=>{writes++};
+    await h.sandbox.savePublicPublication({preventDefault(){},currentTarget:h.$("#publication-form")});
+    assert.equal(writes,0);
+    h.sandbox.editPublicPublication(row);
+    h.set('publicationRows.set("other",' + JSON.stringify({...row,id:"other"}) + ')');
+    h.sandbox.request=async(path,options)=>options ? {} : {items:[],next_cursor:null};
+    await h.sandbox.withdrawPublicPublication("other");
+    assert.equal(h.get("publicationEditor.invalidBase"),undefined);
+});
+
+test("fresh 409 is a rejection; 409 after unknown outcome retains reconciliation", async () => {
+    const h=context();
+    h.sandbox.editPublicPublication(row);
+    const event={preventDefault(){},currentTarget:h.$("#publication-form")};
+    h.sandbox.request=async()=>{throw Object.assign(Error("conflict"),{status:409,code:"public_publication_conflict"})};
+    await h.sandbox.savePublicPublication(event);
+    assert.equal(h.get("publicationPending"),null);
+    assert.equal(h.get("publicationEditor.invalidBase"),true);
+    h.sandbox.editPublicPublication(row);
+    h.sandbox.request=async()=>{throw Error("network")};
+    await h.sandbox.savePublicPublication(event);
+    const pending=h.get("publicationPending");
+    h.sandbox.request=async()=>{throw Object.assign(Error("conflict"),{status:409})};
+    await h.sandbox.savePublicPublication(event);
+    assert.equal(h.get("publicationPending"),pending);
+    assert.equal(h.get("publicationEditor.invalidBase"),undefined);
+});
+
+test("reconciliation canonicalizes status, offsets, milliseconds and ordered entries", async () => {
+    const h=context();
+    h.sandbox.editPublicPublication({...row,kind:"prediction",details:{status:" active ",target_at:"2026-11-01T01:30:00.123-05:00"}});
+    h.sandbox.request=async()=>{throw Error("network")};
+    await h.sandbox.savePublicPublication({preventDefault(){},currentTarget:h.$("#publication-form")});
+    const pending=h.get("publicationPending");
+    assert.equal(pending.details.status,"active");
+    assert.equal(pending.details.target_at,"2026-11-01T06:30:00.123+00:00");
+    h.sandbox.request=async()=>({item:{...row,...pending,id:pending.publication_id,status:"published",revision:3}});
+    await h.sandbox.reconcilePublicPublication();
+    assert.equal(h.get("publicationEditor.revision"),3);
+    const a=h.sandbox.canonicalPublicationDetails({phases:[{title:" A ",status:" ready "},{title:"B",status:"x"}]});
+    const b=h.sandbox.canonicalPublicationDetails({phases:[{title:"B",status:"x"},{title:"A",status:"ready"}]});
+    assert.notEqual(JSON.stringify(a),JSON.stringify(b));
+});
+
+test("timestamp editing preserves instants across DST folds, gaps and zones", () => {
+    const originalZone=process.env.TZ;
+    try {
+        for(const zone of ["UTC","Asia/Shanghai","America/New_York"]){
+            process.env.TZ=zone;
+            const h=context();
+            for(const value of ["2026-11-01T06:30:00.123Z","2026-03-08T02:30:00.456-05:00","2026-10-12T10:30:00.123456+08:00"]){
+                h.sandbox.editPublicPublication({...row,kind:"prediction",details:{target_at:value}});
+                assert.equal(h.sandbox.collectPublicationDetails().target_at,new Date(value).toISOString().replace("Z","+00:00"));
+            }
+            assert.throws(()=>h.sandbox.publicationTimestamp("2026-11-01T01:30:00"),/时区/);
+            assert.throws(()=>h.sandbox.publicationTimestamp("2026-02-30T01:30:00Z"),/无效/);
+        }
+    } finally {if(originalZone===undefined) delete process.env.TZ; else process.env.TZ=originalZone;}
+});

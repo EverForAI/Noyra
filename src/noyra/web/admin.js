@@ -2883,7 +2883,7 @@ function publicationFields() {
     $("#publication-reconcile").hidden = !publicationPending;
     $("#publication-reconcile").disabled = publicationWriting;
     const submit = $("#publication-form").querySelector('button[type="submit"]');
-    if (submit) submit.disabled = publicationWriting;
+    if (submit) submit.disabled = publicationWriting || Boolean(publicationEditor?.invalidBase);
 }
 function addPublicationEntry(key, item = {}) {
     const container = $("#publication-" + key), field = key === "sources" ? "url" : "status";
@@ -2908,7 +2908,7 @@ function collectPublicationDetails() {
     const kind = $("#publication-kind").value,
         details = {};
     if ($("#publication-status").value)
-        details.status = $("#publication-status").value;
+        details.status = publicationTrim($("#publication-status").value);
     const text = (field, key) => {
         const value = $("#publication-" + field).value.trim();
         if (value) details[key] = value;
@@ -2926,9 +2926,7 @@ function collectPublicationDetails() {
     const timestamp = (field, key) => {
         const value = $("#publication-" + field).value;
         if (value) {
-            const date = new Date(value);
-            if (Number.isNaN(date.getTime())) throw new Error("公开时间无效");
-            details[key] = date.toISOString();
+            details[key] = publicationTimestamp(value);
         }
     };
     if (["goal", "project"].includes(kind)) {
@@ -3018,12 +3016,40 @@ async function loadPublicPublications({ append = false } = {}) {
     }
 }
 function publicationLocalTime(value) {
-    if (!value) return "";
+    return value || "";
+}
+function publicationTrim(value) {
+    // Python str.strip whitespace, excluding controls rejected by _text.
+    return value.replace(/^[\t\n\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t\n\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g, "");
+}
+function publicationTimestamp(value) {
+    value = publicationTrim(value);
+    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,6}))?)?(Z|[+-]\d{2}:\d{2})$/.exec(value);
+    if (!match || match[1] === "0000") throw new Error("公开时间须包含时区，例如 2026-10-12T10:30:00+08:00 或 2026-10-12T02:30:00Z");
     const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return "";
-    return new Date(date.getTime() - date.getTimezoneOffset() * 60000)
-        .toISOString()
-        .slice(0, 23);
+    if (Number.isNaN(date.getTime())) throw new Error("公开时间无效");
+    const zone = match[8], offset = zone === "Z" ? 0 : (zone[0] === "-" ? -1 : 1) * (Number(zone.slice(1,3)) * 60 + Number(zone.slice(4)));
+    const local = new Date(date.getTime() + offset * 60000).toISOString().slice(0,19);
+    if (local !== `${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6] || "00"}`) throw new Error("公开日期或时间无效");
+    const iso = date.toISOString();
+    if (!/^\d{4}-/.test(iso) || iso.startsWith("0000")) throw new Error("公开时间超出支持范围");
+    return iso.replace(/Z$/, "+00:00");
+}
+function canonicalPublicationDetails(details) {
+    const result = {};
+    for (const [key,value] of Object.entries(details)) {
+        if (["target_at","started_at","completed_at"].includes(key)) result[key] = publicationTimestamp(value);
+        else if (["sources","phases"].includes(key)) result[key] = value.map(entry => Object.fromEntries(Object.entries(entry).map(([name,text]) => [name,publicationTrim(text)])));
+        else if (["status","next_step","uncertainty"].includes(key)) result[key] = publicationTrim(value);
+        else result[key] = value;
+    }
+    return result;
+}
+function invalidatePublicationBase(id) {
+    if (publicationEditor?.id !== id) return;
+    publicationEditor.invalidBase = true;
+    $("#publication-editor-heading").textContent = "草稿保留 · 基准修订已失效";
+    setStatus("#publication-editor-status", "此摘要已撤回或修订已变化。当前文字保留；请先复制需要保留的修改，再从列表重新打开最新摘要并逐项核对后审核发布。", true);
 }
 function editPublicPublication(row) {
     if (publicationWriting || publicationPending) return;
@@ -3077,13 +3103,13 @@ function editPublicPublication(row) {
 }
 async function savePublicPublication(event) {
     event.preventDefault();
-    if (publicationWriting || !csrfToken) return;
+    if (publicationWriting || !csrfToken || publicationEditor?.invalidBase) return;
     const form = event.currentTarget,
         current = beginAdminAction();
     if (!publicationPending && (!form.reportValidity() || !$("#publication-confirm").checked)) return;
     let details;
     try {
-        details = publicationPending?.details || collectPublicationDetails();
+        details = publicationPending?.details || canonicalPublicationDetails(collectPublicationDetails());
     } catch (error) {
         setStatus("#publication-editor-status", publicationError(error), true);
         return;
@@ -3108,9 +3134,9 @@ async function savePublicPublication(event) {
             publication_id: editor.id,
             kind: editor.kind,
             source_id: editor.source,
-            title: $("#publication-title").value.trim(),
-            summary: $("#publication-summary").value.trim(),
-            body: $("#publication-body").value.trim(),
+            title: publicationTrim($("#publication-title").value),
+            summary: publicationTrim($("#publication-summary").value),
+            body: publicationTrim($("#publication-body").value),
             details,
             expected_revision: editor.revision,
             confirm_public: true,
@@ -3146,8 +3172,9 @@ async function savePublicPublication(event) {
         }
     } catch (error) {
         if (!current()) return;
-        const rejected = [400,401,403,404,411,413,415,429].includes(error.status);
+        const rejected = [400,401,403,404,409,411,413,415,429].includes(error.status);
         if (rejected && editor.revision === 0 && !publicationPending) publicationEditor = null;
+        if (error.status === 409 && !publicationPending && editor.revision > 0) invalidatePublicationBase(editor.id);
         if (!rejected || publicationPending) publicationPending = payload;
         setStatus("#publication-editor-status", publicationPending ? "发布结果尚未确认。请核对结果，或保持原内容使用同一编号重试；当前草稿已保留。" : publicationError(error), true);
         if (error.status === 401) await logout();
@@ -3179,10 +3206,12 @@ async function withdrawPublicPublication(id) {
             },
         );
         if (!current()) return;
+        invalidatePublicationBase(id);
         setStatus("#publication-list-status", "已撤回，正在刷新公开状态。");
         await loadPublicPublications();
     } catch (error) {
         if (current()) {
+            if (error.status === 409 || ![400,401,403,404,411,413,415,429].includes(error.status)) invalidatePublicationBase(id);
             setStatus(
                 "#publication-list-status",
                 publicationError(error),
@@ -3204,10 +3233,11 @@ async function reconcilePublicPublication() {
         if (!current()) return;
         if (result.item && (result.item.kind !== pending.kind || (result.item.source_id || null) !== pending.source_id)) throw new Error("服务器记录的类型或来源不同，请联系管理员核对，不可覆盖。");
         const normalize = value => Array.isArray(value) ? value.map(normalize) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map(key => [key,normalize(value[key])])) : value;
-        const same = result.item && result.item.id === pending.publication_id && result.item.status === "published" && ["title","summary","body"].every(key => result.item[key] === pending[key]) && JSON.stringify(normalize(result.item.details)) === JSON.stringify(normalize(pending.details));
+        const same = result.item && result.item.id === pending.publication_id && result.item.status === "published" && ["title","summary","body"].every(key => publicationTrim(result.item[key]) === publicationTrim(pending[key])) && JSON.stringify(normalize(canonicalPublicationDetails(result.item.details))) === JSON.stringify(normalize(canonicalPublicationDetails(pending.details)));
         publicationPending = null;
-        if (same) publicationEditor = { ...publicationEditor, revision:result.item.revision, details:result.item.details };
+        if (same) publicationEditor = { ...publicationEditor, revision:result.item.revision, details:result.item.details, invalidBase:false };
         else if (!result.item) publicationEditor = null;
+        else invalidatePublicationBase(pending.publication_id);
         setStatus("#publication-editor-status", same ? `已确认发布成功，修订 ${result.item.revision}。` : result.item ? "服务器记录与草稿不同。保留原修订，请刷新列表、重新打开最新摘要并核对，不能覆盖他人修订。" : "服务器确认尚无此摘要。草稿已保留，可修改后重新审核发布。");
     } catch (error) {
         if (current()) {setStatus("#publication-editor-status", "仍无法确认结果，保留原编号与草稿。" + publicationError(error), true); if (error.status === 401) await logout();}
