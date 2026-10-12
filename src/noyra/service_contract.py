@@ -7,6 +7,34 @@ from typing import Literal
 
 RouteRole = Literal["none", "read", "operator", "export"]
 
+
+@dataclass(frozen=True)
+class PublicWebRouteContract:
+    """Anonymous documents, separate from versioned JSON API contracts."""
+
+    path: str
+    parameters: tuple[str, ...]
+    responses: tuple[int, ...]
+    success_content_type: str
+    cache_control: str = "no-store"
+    method: str = "GET"
+
+
+PUBLIC_WEB_ROUTE_CONTRACTS = (
+    PublicWebRouteContract(
+        "/public/{kind}/{id}",
+        ("kind", "id", "lang", "theme", "return"),
+        (200, 400, 404, 413, 429, 503),
+        "text/html; charset=utf-8",
+    ),
+    PublicWebRouteContract(
+        "/sitemap.xml",
+        ("part",),
+        (200, 400, 404, 413, 429, 503),
+        "application/xml; charset=utf-8",
+    ),
+)
+
 # These failures are produced by the HTTP boundary before (or around) the
 # individual route handler.  Keeping them explicit prevents the OpenAPI
 # inventory from claiming that a route can only return its happy-path status.
