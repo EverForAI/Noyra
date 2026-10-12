@@ -16,11 +16,60 @@ from noyra.core import Database, IdentityStore
 from noyra.core.archive import ArchiveTransferQueue
 from noyra.core.errors import IntegrityError
 from noyra.core.runtime_export import RuntimeLogExporter
+from noyra.core.subject_storage import SubjectStorageDirectory
 from noyra.core.training_export import TrainingDatasetExporter
 from noyra.core.types import content_hash
 from noyra.service import ServiceSettings
 
 _STORAGE_KEY = re.compile(r"^subject_[0-9a-f]{32}$")
+
+
+@pytest.mark.parametrize(
+    "layout", ["missing", "legacy", "keyed", "legacy-empty", "keyed-empty", "dual"]
+)
+def test_read_only_resolution_preserves_directory_tree(tmp_path: Path, layout: str) -> None:
+    key, subject = "subject_" + "a" * 32, "legacy-subject"
+    root = tmp_path / "subject"
+    root.mkdir()
+    for name, enabled, filled in (
+        (
+            subject,
+            layout in {"legacy", "legacy-empty", "keyed-empty", "dual"},
+            layout != "legacy-empty",
+        ),
+        (key, layout in {"keyed", "legacy-empty", "keyed-empty", "dual"}, layout != "keyed-empty"),
+    ):
+        if enabled:
+            (root / name).mkdir()
+            if filled:
+                (root / name / "data").write_bytes(b"unchanged")
+    before = sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+    if layout == "dual":
+        with pytest.raises(ValueError, match="both contain data"):
+            SubjectStorageDirectory.locate(root, key, legacy_subject_id=subject, read_only=True)
+    else:
+        resolved = SubjectStorageDirectory.locate(
+            root, key, legacy_subject_id=subject, read_only=True
+        )
+        expected = (
+            None
+            if layout == "missing"
+            else root / (subject if layout in {"legacy", "keyed-empty"} else key)
+        )
+        assert resolved == expected
+    assert sorted(str(p.relative_to(root)) for p in root.rglob("*")) == before
+
+
+def test_read_only_resolution_rejects_ambiguity_and_creation(tmp_path: Path) -> None:
+    key, subject = "subject_" + "b" * 32, "legacy-subject"
+    (tmp_path / subject).mkdir()
+    with pytest.raises(ValueError, match="ambiguous"):
+        SubjectStorageDirectory.locate(
+            tmp_path, key, legacy_subject_id=subject, legacy_migration_allowed=False, read_only=True
+        )
+    with pytest.raises(ValueError, match="cannot create"):
+        SubjectStorageDirectory.locate(tmp_path / "absent", key, create=True, read_only=True)
+    assert not (tmp_path / "absent").exists()
 
 
 def _identity(database: Database, subject_id: str) -> str:

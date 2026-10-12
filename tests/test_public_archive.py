@@ -346,8 +346,9 @@ def test_public_interactions_verify_hashes_and_case_sensitive_namespace(
     assert upper.interaction_id != lower.interaction_id
 
 
+@pytest.mark.parametrize("legacy_layout", [False, True])
 def test_public_lifecycle_remains_readable_after_verified_cold_archive(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_layout: bool
 ) -> None:
     kernel = SubjectKernel(
         tmp_path / "archive.sqlite3", "lifecycle-archive", content_hash("lifecycle")
@@ -370,14 +371,28 @@ def test_public_lifecycle_remains_readable_after_verified_cold_archive(
         monkeypatch.setenv("NOYRA_ARCHIVE_ENCRYPTION_KEY_ID", "public-lifecycle-test")
         # Subject-scoped archive roots follow the production resolver contract.
         root = tmp_path / "subject" / "cold"
-        EventPayloadArchive(kernel.database, root).archive_cold(
-            kernel.subject_id, older_than_days=30
+        writer = EventPayloadArchive(kernel.database, root, subject_id=kernel.subject_id)
+        writer.archive_cold(kernel.subject_id, older_than_days=30)
+        if legacy_layout:
+            writer.root.parent.rename(writer.root.parent.with_name(kernel.subject_id))
+        provider_root = (
+            writer.root if not legacy_layout else root.parent / kernel.subject_id / "cold"
         )
+        existing = EventPayloadArchive(kernel.database, provider_root, create_root=False)
+        tree = sorted(str(p.relative_to(tmp_path)) for p in (tmp_path / "subject").rglob("*"))
         page = PublicArchive(kernel.database).page(
             kernel.subject_id, kind="lifecycle", until="2020-01-02T00:00:00Z"
         )
         assert page["items"][0]["id"] == event.event_id
         assert page["items"][0]["details"] == {"from": "active", "to": "paused"}
+        assert (
+            sorted(str(p.relative_to(tmp_path)) for p in (tmp_path / "subject").rglob("*")) == tree
+        )
+        with kernel.database.connection() as connection:
+            key = connection.execute(
+                "SELECT payload_archive_key FROM events WHERE event_id=?", (event.event_id,)
+            ).fetchone()[0]
+        assert existing.provider.get(key)
         monkeypatch.delenv("NOYRA_ARCHIVE_ENCRYPTION_KEY")
         with pytest.raises(IntegrityError):
             PublicArchive(kernel.database).page(

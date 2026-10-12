@@ -503,6 +503,7 @@ def resolve_subject_archive_root(
     root: Path | str,
     *,
     create: bool = False,
+    read_only: bool = False,
 ) -> Path:
     """Resolve the keyed archive directory while retaining legacy fallback.
 
@@ -512,6 +513,8 @@ def resolve_subject_archive_root(
     keep that directory when it contains legacy data, so migration is gradual
     and never silently moves an existing object tree during a read.
     """
+    if read_only and create:
+        raise ValueError("read-only archive resolution cannot create directories")
     # Validate the un-resolved path first.  Resolving a symlink/junction before
     # checking it would turn an archive root that escapes the data directory
     # into an apparently trusted absolute path and bypass the provider's
@@ -564,6 +567,7 @@ def resolve_subject_archive_root(
         legacy_subject_id=subject_id,
         legacy_migration_allowed=legacy_allowed,
         create=create,
+        read_only=read_only,
     )
     if keyed is not None:
         keyed_archive = keyed / "cold"

@@ -106,16 +106,21 @@ class EventPayloadArchive:
         root: Path | str,
         *,
         create_root: bool = True,
+        read_only_root: bool = False,
         keyring: ArchiveKeyring | None = None,
         cloud_provider: ArchiveProvider | None = None,
         cache_cloud_restores: bool = True,
         subject_id: str | None = None,
     ):
+        if read_only_root and create_root:
+            raise ValueError("read-only archive resolution cannot create directories")
         self.database = database
         self.root = (
             Path(root).resolve()
             if subject_id is None
-            else resolve_subject_archive_root(database, subject_id, root, create=create_root)
+            else resolve_subject_archive_root(
+                database, subject_id, root, create=create_root, read_only=read_only_root
+            )
         )
         self.keyring = keyring or ArchiveKeyring.from_env()
         active = self.keyring.active

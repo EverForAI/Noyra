@@ -186,6 +186,7 @@ class _LifecycleReader:
                             self.database.path.parent / "subject" / "cold",
                             subject_id=self.subject_id,
                             create_root=False,
+                            read_only_root=True,
                             cache_cloud_restores=False,
                         )
                     except (OSError, ValueError) as exc:
