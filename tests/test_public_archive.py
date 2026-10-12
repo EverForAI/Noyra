@@ -606,3 +606,93 @@ def test_sitemap_covers_multiple_pages_and_rereads_visibility(
     }
     store.withdraw(kernel.subject_id, "sitemap-000", 1, actor="test")
     assert "sitemap-000" not in {item["id"] for item in store.sitemap_items(kernel.subject_id)}
+
+
+def test_cold_segment_pages_continue_without_skips_or_filtered_false_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NOYRA_ARCHIVE_ENCRYPTION_KEY", base64.urlsafe_b64encode(b"S" * 32).decode())
+    monkeypatch.setenv("NOYRA_ARCHIVE_ENCRYPTION_KEY_ID", "segment-continuation")
+    kernel = SubjectKernel(tmp_path / "db.sqlite3", "segment-test", content_hash("segments"))
+    try:
+        kernel.boot()
+        kernel.orient()
+        kernel.activate()
+        cold = EventPayloadArchive(
+            kernel.database, tmp_path / "subject" / "cold", subject_id=kernel.subject_id
+        )
+        ids = []
+        for i in range(5):
+            row = EventStore(kernel.database).append(
+                kernel.subject_id,
+                "lifecycle_transition",
+                "test",
+                {"from": "active", "to": "paused" if i == 0 else "active"},
+                privacy_level="public_status",
+                occurred_at=f"2020-01-0{i + 1}T00:00:00+00:00",
+            )
+            ids.append(row.event_id)
+            cold.archive_cold(kernel.subject_id, older_than_days=30, limit=1)
+        store = PublicArchive(kernel.database)
+        for kind, status in [("lifecycle", ""), ("lifecycle", "paused"), ("all", "")]:
+            actual, cursor, pages = [], None, 0
+            while True:
+                result = store.page(
+                    kernel.subject_id,
+                    kind=kind,
+                    status=status,
+                    until="2020-01-06T00:00:00Z",
+                    cursor=cursor,
+                )
+                actual.extend(item["id"] for item in result["items"])
+                pages += 1
+                cursor = result["next_cursor"]
+                if cursor is None:
+                    break
+                assert pages <= 5
+            assert actual == ([ids[0]] if status else ids[::-1])
+        tokens = store.sitemap_partitions(kernel.subject_id)
+        items = [
+            item for token in tokens for item in store.sitemap_partition(kernel.subject_id, token)
+        ]
+        assert set(ids) <= {item["id"] for item in items}
+        assert len(items) == len({(item["kind"], item["id"]) for item in items})
+        from noyra.interaction.public_archive import _COLD_READ_SLOTS, PublicQueryBudgetExceeded
+
+        assert _COLD_READ_SLOTS.acquire(False) and _COLD_READ_SLOTS.acquire(False)
+        try:
+            with pytest.raises(PublicQueryBudgetExceeded, match="admission"):
+                store.page(kernel.subject_id, kind="lifecycle", identifier=ids[0])
+        finally:
+            _COLD_READ_SLOTS.release()
+            _COLD_READ_SLOTS.release()
+        assert store.page(kernel.subject_id, kind="lifecycle", identifier=ids[0])["items"]
+    finally:
+        kernel.close()
+
+
+def test_partitioned_sitemap_exceeds_old_thousand_record_ceiling(
+    archive: tuple[PublicArchive, SubjectKernel],
+) -> None:
+    store, kernel = archive
+    store.publish(kernel.subject_id, publication(publication_id="large-sitemap-base"), actor="test")
+    # Build hash-valid synthetic current rows in one transaction. This test
+    # exercises anonymous capacity, not the separately tested write ledger.
+    with kernel.database.transaction() as connection:
+        template = dict(connection.execute("SELECT * FROM public_publications").fetchone())
+        for i in range(1001):
+            row = {**template, "publication_id": f"large-sitemap-{i:04}"}
+            row.pop("state_hash")
+            row["state_hash"] = content_hash(row)
+            connection.execute(
+                f"INSERT INTO public_publications ({','.join(row)}) "
+                f"VALUES ({','.join('?' for _ in row)})",
+                tuple(row.values()),
+            )
+    tokens = store.sitemap_partitions(kernel.subject_id)
+    items = [item for token in tokens for item in store.sitemap_partition(kernel.subject_id, token)]
+    assert len([item for item in items if item["kind"] == "goal"]) == 1002
+    with pytest.raises(ValueError):
+        store.sitemap_partition("other-subject", tokens[0])
+    with pytest.raises(ValueError):
+        store.sitemap_partition(kernel.subject_id, "not-a-token")

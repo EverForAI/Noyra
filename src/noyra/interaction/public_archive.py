@@ -8,6 +8,7 @@ import json
 import math
 import re
 import sqlite3
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -74,6 +75,13 @@ class PublicationCapacityError(ValueError):
     pass
 
 
+class _SegmentPageBoundary(Exception):
+    """Continue before the next unverified segment, without skipping it."""
+
+
+_COLD_READ_SLOTS = threading.BoundedSemaphore(2)
+
+
 @dataclass
 class _ReadBudget:
     deadline: float = field(
@@ -82,6 +90,7 @@ class _ReadBudget:
     steps: int = 0
     bytes_read: int = 0
     exhausted: bool = False
+    cold_admitted: bool = False
 
     def checkpoint(self, size: int = 0) -> None:
         self.bytes_read += size
@@ -116,6 +125,8 @@ def _request_budget() -> Iterator[_ReadBudget]:
         yield budget
         budget.checkpoint()
     finally:
+        if budget.cold_admitted:
+            _COLD_READ_SLOTS.release()
         _READ_BUDGET.reset(token)
 
 
@@ -178,7 +189,7 @@ class _LifecycleReader:
         else:
             if key not in self.segments:
                 if len(self.segments) >= 2:
-                    raise PublicQueryBudgetExceeded("public lifecycle segment budget exceeded")
+                    raise _SegmentPageBoundary
                 if self.archive is None:
                     try:
                         self.archive = EventPayloadArchive(
@@ -196,6 +207,10 @@ class _LifecycleReader:
                     assert budget is not None
                     if budget.bytes_read >= MAX_PUBLIC_READ_BYTES:
                         raise PublicQueryBudgetExceeded("public archive byte budget exceeded")
+                    if not budget.cold_admitted:
+                        if not _COLD_READ_SLOTS.acquire(blocking=False):
+                            raise PublicQueryBudgetExceeded("public cold reader admission exceeded")
+                        budget.cold_admitted = True
                     self.segments[key] = self.archive.load_segment(
                         self.subject_id,
                         key,
@@ -609,6 +624,140 @@ class PublicArchive:
                     return items
             raise PublicQueryBudgetExceeded("sitemap record budget exceeded")
 
+    def sitemap_partitions(self, subject_id: str) -> list[str]:
+        """Enumerate bounded metadata partitions; each shard verifies its current contents."""
+        result = []
+        with _bounded_read(self.database) as connection:
+            for kind in sorted(TIMELINE_KINDS):
+                table, _, where, id_col, time_col, _, _ = self._spec(kind)
+                start = None
+                anchor = utc_now()
+                while True:
+                    seek = "" if start is None else f" AND ({time_col},{id_col})<(?,?)"
+                    values = (
+                        (subject_id, anchor)
+                        if start is None
+                        else (subject_id, anchor, start[0], start[2])
+                    )
+                    rows = connection.execute(
+                        f"SELECT {time_col},{id_col}"
+                        + (",payload_archive_key" if kind == "lifecycle" else "")
+                        + f" FROM {table} WHERE subject_id=? AND {where} "
+                        f"AND {time_col}<=?{seek} ORDER BY {time_col} DESC,{id_col} DESC LIMIT 100",
+                        values,
+                    ).fetchall()
+                    if not rows:
+                        break
+                    if kind == "lifecycle":
+                        keys: set[str] = set()
+                        for index, row in enumerate(rows):
+                            if row[2] is not None:
+                                keys.add(row[2])
+                            if len(keys) > 2:
+                                rows = rows[:index]
+                                break
+                    end = (rows[-1][0], kind, rows[-1][1])
+                    result.append(
+                        base64.urlsafe_b64encode(
+                            canonical_json(
+                                {
+                                    "subject": subject_id,
+                                    "kind": kind,
+                                    "anchor": anchor,
+                                    "start": start,
+                                    "end": end,
+                                }
+                            ).encode()
+                        ).decode()
+                    )
+                    if len(result) > 50_000:
+                        raise PublicQueryBudgetExceeded("sitemap partition budget exceeded")
+                    start = end
+        return result
+
+    def sitemap_partition(self, subject_id: str, token: str) -> list[dict[str, Any]]:
+        with _request_budget():
+            return self._sitemap_partition(subject_id, token)
+
+    def _sitemap_partition(self, subject_id: str, token: str) -> list[dict[str, Any]]:
+        try:
+            if len(token) > 1500:
+                raise ValueError("invalid sitemap partition")
+            data = json.loads(base64.b64decode(token, altchars=b"-_", validate=True))
+            if (
+                not isinstance(data, dict)
+                or set(data) != {"subject", "kind", "anchor", "start", "end"}
+                or data["subject"] != subject_id
+                or data["kind"] not in TIMELINE_KINDS
+            ):
+                raise ValueError("invalid sitemap partition")
+            kind, anchor = data["kind"], _timestamp(data["anchor"])
+
+            def bound(value: Any) -> tuple[str, str, str]:
+                if not isinstance(value, list) or len(value) != 3 or value[1] != kind:
+                    raise ValueError("invalid sitemap boundary")
+                _timestamp(value[0])
+                return (
+                    _text(value[0], 256, required=True),
+                    kind,
+                    _text(value[2], 256, required=True),
+                )
+
+            end = bound(data["end"])
+            start = bound(data["start"]) if data["start"] is not None else None
+            if end[0] > anchor or (start is not None and start <= end):
+                raise ValueError("invalid sitemap range")
+        except (KeyError, TypeError, binascii.Error, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError("invalid sitemap partition") from exc
+        query = {
+            "subject": subject_id,
+            "kind": kind,
+            "since": None,
+            "until": anchor,
+            "search": "",
+            "status": "",
+            "identifier": None,
+            "end_key": end,
+        }
+        cursor = (
+            None
+            if start is None
+            else base64.urlsafe_b64encode(
+                canonical_json(
+                    {"query": content_hash(query), "anchor": anchor, "key": start}
+                ).encode()
+            ).decode()
+        )
+        items: list[dict[str, Any]] = []
+        # Segment continuations share a total request work budget; each page
+        # releases its decrypted segments before continuing, with no disk cache.
+        for _ in range(100):
+            page = self._sitemap_page(subject_id, kind, anchor, end, cursor)
+            items.extend(page["items"])
+            if len(items) > 100:
+                raise PublicQueryBudgetExceeded("sitemap partition changed; refresh index")
+            cursor = page["next_cursor"]
+            if cursor is None:
+                return items
+        raise PublicQueryBudgetExceeded("sitemap partition continuation exceeded")
+
+    def _sitemap_page(
+        self, subject_id: str, kind: str, anchor: str, end: tuple[str, str, str], cursor: str | None
+    ) -> dict[str, Any]:
+        with _request_budget():
+            return self._page(
+                subject_id,
+                kind=kind,
+                limit=100,
+                cursor=cursor,
+                since=None,
+                until=anchor,
+                search="",
+                status="",
+                identifier=None,
+                end_key=end,
+            )
+
     def _overview(self, subject_id: str) -> dict[str, Any]:
         with _bounded_read(self.database) as connection:
             row = connection.execute(
@@ -677,6 +826,7 @@ class PublicArchive:
         search: str,
         status: str,
         identifier: str | None,
+        end_key: tuple[str, str, str] | None = None,
     ) -> dict[str, Any]:
         if kind != "all" and kind not in TIMELINE_KINDS:
             raise ValueError("invalid public category")
@@ -695,6 +845,7 @@ class PublicArchive:
             "search": search,
             "status": status,
             "identifier": identifier,
+            "end_key": end_key,
         }
         query_hash = content_hash(query)
         key = None
@@ -719,8 +870,23 @@ class PublicArchive:
         if since and since > anchor:
             raise ValueError("invalid public interval")
         items: list[dict[str, Any]] = []
+        continuation = None
         with _bounded_read(self.database) as connection:
             lifecycle = _LifecycleReader(self.database, connection, subject_id)
+            streams: dict[str, Any] = {}
+            heads: dict[str, Any] = {}
+            ordering: dict[str, tuple[str, str]] = {}
+            budget = _READ_BUDGET.get()
+            assert budget is not None
+
+            def advance(category: str) -> None:
+                row = streams[category].fetchone()
+                if row is None:
+                    heads.pop(category, None)
+                else:
+                    budget.checkpoint(sum(len(v.encode()) for v in row if isinstance(v, str)))
+                    heads[category] = row
+
             # Internal verification fields never enter the allowlisted response.
             for category in sorted(TIMELINE_KINDS if kind == "all" else {kind}):
                 spec = self._spec(category)
@@ -742,60 +908,60 @@ class PublicArchive:
                 if key:
                     clauses.append(f"({time_col}, ?, {id_col}) < (?,?,?)")
                     values.extend([category, *key])
+                if end_key:
+                    clauses.append(f"({time_col}, ?, {id_col}) >= (?,?,?)")
+                    values.extend([category, *end_key])
                 sql = (
                     f"SELECT {columns} FROM {table} WHERE {' AND '.join(clauses)} "
                     f"ORDER BY {time_col} DESC,{id_col} DESC LIMIT ?"
                 )
-                values.append(limit + 1)
-                base_values = values[:-1]
-                scanned = 0
-                matched = 0
-                while True:
-                    entries = []
-                    for candidate in connection.execute(sql, values):
-                        budget = _READ_BUDGET.get()
-                        assert budget is not None
-                        budget.checkpoint(
-                            sum(len(v.encode()) for v in candidate if isinstance(v, str))
-                        )
-                        entries.append(candidate)
-                    for entry in entries:
-                        scanned += 1
-                        if scanned > 2_000:
-                            raise PublicQueryBudgetExceeded("public lifecycle scan budget exceeded")
-                        if category == "lifecycle":
-                            old, new = lifecycle.states(entry)
-                            if status and new != status:
-                                continue
-                            entry = {**dict(entry), "old_state": old, "new_state": new}
-                        item = self._item(category, entry, connection=connection)
-                        # Lists contain readable excerpts; full public bodies are fetched
-                        # only by identifier. Twenty large diaries must not make the
-                        # entire archive exceed the HTTP response limit.
-                        if identifier is None:
-                            item["body"] = ""
-                        items.append(item)
-                        matched += 1
-                        if matched >= limit + 1:
-                            break
-                    if category != "lifecycle" or matched >= limit + 1 or len(entries) < limit + 1:
+                values.append(2_001)
+                streams[category] = connection.execute(sql, values)
+                ordering[category] = (time_col, id_col)
+                advance(category)
+            scanned = 0
+            last_verified = None
+            while heads:
+                category = max(
+                    heads,
+                    key=lambda cat: (
+                        heads[cat][ordering[cat][0]],
+                        cat,
+                        heads[cat][ordering[cat][1]],
+                    ),
+                )
+                entry = heads[category]
+                time_col, id_col = ordering[category]
+                position = (entry[time_col], category, entry[id_col])
+                matches = True
+                if category == "lifecycle":
+                    try:
+                        old, new = lifecycle.states(entry)
+                    except _SegmentPageBoundary:
+                        assert last_verified is not None
+                        continuation = last_verified
                         break
-                    last = entries[-1]
-                    sql = (
-                        f"SELECT {columns} FROM {table} WHERE {' AND '.join(clauses)} "
-                        f"AND ({time_col},{id_col})<(?,?) "
-                        f"ORDER BY {time_col} DESC,{id_col} DESC LIMIT ?"
-                    )
-                    values = [*base_values, last[time_col], last[id_col], limit + 1]
-        items.sort(key=lambda item: (item["occurred_at"], item["kind"], item["id"]), reverse=True)
-        page = items[:limit]
+                    matches = not status or new == status
+                    entry = {**dict(entry), "old_state": old, "new_state": new}
+                if matches:
+                    item = self._item(category, entry, connection=connection)
+                    if identifier is None:
+                        item["body"] = ""
+                    items.append(item)
+                scanned += 1
+                last_verified = position
+                advance(category)
+                if len(items) >= limit or scanned >= 2_000:
+                    if heads:
+                        continuation = position
+                    break
+        page = items
         next_cursor = None
-        if len(items) > limit:
-            last = page[-1]
+        if continuation is not None:
             data = {
                 "query": query_hash,
                 "anchor": anchor,
-                "key": [last["occurred_at"], last["kind"], last["id"]],
+                "key": continuation,
             }
             next_cursor = base64.urlsafe_b64encode(canonical_json(data).encode()).decode()
         return {

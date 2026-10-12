@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, Concatenate, Literal, ParamSpec, TypeVar, cast
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
@@ -2703,7 +2703,7 @@ class NoyraHTTPServer:
                     self._robots_txt()
                     return
                 if parsed.path == "/sitemap.xml":
-                    self._sitemap_xml()
+                    self._sitemap_xml(parsed)
                     return
                 if parsed.path == "/favicon.ico":
                     self.send_response(HTTPStatus.NO_CONTENT)
@@ -9714,7 +9714,7 @@ class NoyraHTTPServer:
                 body = ("\n".join(lines) + "\n").encode("utf-8")
                 self._text(HTTPStatus.OK, "text/plain; charset=utf-8", body)
 
-            def _sitemap_xml(self) -> None:
+            def _sitemap_xml(self, parsed: Any) -> None:
                 site_url = owner.settings.public_site_url
                 if not site_url:
                     self._text(
@@ -9723,9 +9723,45 @@ class NoyraHTTPServer:
                         b"Configure NOYRA_PUBLIC_SITE_URL to publish a sitemap.\n",
                     )
                     return
-                location = html.escape(site_url + "/", quote=False)
                 try:
-                    items = owner.public_archive.sitemap_items(owner.kernel.subject_id)
+                    params = parse_qs(parsed.query, keep_blank_values=True)
+                    if set(params) - {"part"} or (params and len(params["part"]) != 1):
+                        raise ValueError("invalid sitemap query")
+                    if params:
+                        if params["part"] == ["home"]:
+                            items = []
+                        else:
+                            items = owner.public_archive.sitemap_partition(
+                                owner.kernel.subject_id, params["part"][0]
+                            )
+                        entries = "".join(
+                            "<url><loc>"
+                            f"{html.escape(site_url + public_item_path(item['kind'], item['id']))}"
+                            "</loc>"
+                            f"<lastmod>{html.escape(item['updated_at'])}</lastmod></url>\n"
+                            for item in items
+                        )
+                        if params["part"] == ["home"]:
+                            entries = f"<url><loc>{html.escape(site_url + '/')}</loc></url>\n"
+                        root_tag = "urlset"
+                    else:
+                        partitions = owner.public_archive.sitemap_partitions(
+                            owner.kernel.subject_id
+                        )
+                        entries = "".join(
+                            "<sitemap><loc>"
+                            f"{html.escape(site_url + '/sitemap.xml?part=' + quote(part, safe=''))}"
+                            "</loc></sitemap>\n"
+                            for part in ["home", *partitions]
+                        )
+                        root_tag = "sitemapindex"
+                except (ValueError, UnicodeError):
+                    self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "invalid_public_query"},
+                        public_contract=ARCHIVE_CONTRACT,
+                    )
+                    return
                 except PublicQueryBudgetExceeded:
                     self._json(
                         HTTPStatus.SERVICE_UNAVAILABLE,
@@ -9740,20 +9776,19 @@ class NoyraHTTPServer:
                         public_contract=ARCHIVE_CONTRACT,
                     )
                     return
-                entries = "".join(
-                    "<url><loc>"
-                    f"{html.escape(site_url + public_item_path(item['kind'], item['id']))}"
-                    "</loc>"
-                    f"<lastmod>{html.escape(item['updated_at'])}</lastmod></url>\n"
-                    for item in items
-                )
                 body = (
                     '<?xml version="1.0" encoding="UTF-8"?>\n'
-                    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
-                    f"  <url><loc>{location}</loc></url>\n"
+                    f'<{root_tag} xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
                     f"{entries}"
-                    "</urlset>\n"
+                    f"</{root_tag}>\n"
                 ).encode()
+                if len(body) > PUBLIC_MAX_RESPONSE_BYTES:
+                    self._json(
+                        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                        {"error": "public_response_too_large"},
+                        public_contract=ARCHIVE_CONTRACT,
+                    )
+                    return
                 self._text(
                     HTTPStatus.OK,
                     "application/xml; charset=utf-8",

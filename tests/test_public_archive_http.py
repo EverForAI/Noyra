@@ -157,7 +157,19 @@ class PublicArchiveHTTPTests(unittest.TestCase):
             self.assertNotIn("<script>", markup)
             self.assertIn("reading-toc", markup)
         with urlopen(self.base_url + "/sitemap.xml", timeout=5) as response:
-            self.assertIn(path, response.read().decode())
+            from urllib.parse import urlsplit
+            from xml.etree.ElementTree import fromstring
+
+            index = fromstring(response.read())
+            locations = [
+                node.text for node in index.iter("{http://www.sitemaps.org/schemas/sitemap/0.9}loc")
+            ]
+        shards = []
+        for location in locations:
+            parsed = urlsplit(location)
+            with urlopen(self.base_url + parsed.path + "?" + parsed.query, timeout=5) as response:
+                shards.append(response.read().decode())
+        self.assertIn(path, "".join(shards))
         self.authorized_json(
             f"/api/admin/public-publications/{item['id']}/withdraw",
             payload={"expected_revision": 1},
@@ -166,8 +178,12 @@ class PublicArchiveHTTPTests(unittest.TestCase):
             urlopen(self.base_url + path, timeout=5)
         self.assertEqual(absent.exception.code, 404)
         self.assertEqual(absent.exception.headers["Cache-Control"], "no-store")
-        with urlopen(self.base_url + "/sitemap.xml", timeout=5) as response:
-            self.assertNotIn(path, response.read().decode())
+        shards = []
+        for location in locations:
+            parsed = urlsplit(location)
+            with urlopen(self.base_url + parsed.path + "?" + parsed.query, timeout=5) as response:
+                shards.append(response.read().decode())
+        self.assertNotIn(path, "".join(shards))
 
     def test_standalone_reader_uses_public_visibility_and_safe_failures(self) -> None:
         from unittest.mock import patch
