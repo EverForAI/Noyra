@@ -19,7 +19,9 @@ from pathlib import Path
 from typing import Any, Self, cast
 from unittest.mock import AsyncMock, Mock, patch
 from urllib.error import HTTPError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
+from xml.etree import ElementTree
 
 from pydantic import SecretStr, ValidationError
 
@@ -1784,7 +1786,36 @@ class ServiceTestCase(unittest.TestCase):
                 self.assertIn("Sitemap: https://archive.noyra.example/sitemap.xml", robots)
             with urlopen(f"{site_base_url}/sitemap.xml", timeout=5) as response:
                 sitemap = response.read().decode()
-                self.assertIn("<loc>https://archive.noyra.example/</loc>", sitemap)
+                self.assertEqual(response.headers["Cache-Control"], "no-store")
+                self.assertEqual(
+                    response.headers["Content-Type"].split(";", 1)[0], "application/xml"
+                )
+            namespace = {"s": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+            index = ElementTree.fromstring(sitemap)
+            self.assertEqual(index.tag, "{" + namespace["s"] + "}sitemapindex")
+            partitions = [node.text for node in index.findall("s:sitemap/s:loc", namespace)]
+            self.assertIn("https://archive.noyra.example/sitemap.xml?part=home", partitions)
+            self.assertGreater(len(partitions), 1)
+            locations: list[str | None] = []
+            for partition in partitions:
+                assert partition is not None
+                parsed = urlsplit(partition)
+                self.assertEqual((parsed.scheme, parsed.netloc), ("https", "archive.noyra.example"))
+                self.assertEqual(parsed.path, "/sitemap.xml")
+                # Follow the advertised route against this isolated server,
+                # never the configured external canonical origin.
+                with urlopen(f"{site_base_url}{parsed.path}?{parsed.query}", timeout=5) as response:
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+                    self.assertEqual(
+                        response.headers["Content-Type"].split(";", 1)[0], "application/xml"
+                    )
+                    shard = ElementTree.fromstring(response.read())
+                self.assertEqual(shard.tag, "{" + namespace["s"] + "}urlset")
+                locations.extend(node.text for node in shard.findall("s:url/s:loc", namespace))
+            self.assertIn("https://archive.noyra.example/", locations)
+            self.assertTrue(
+                any(location and "/public/lifecycle/" in location for location in locations)
+            )
 
             with urlopen(f"{site_base_url}/app.js", timeout=5) as response:
                 self.assertEqual(
