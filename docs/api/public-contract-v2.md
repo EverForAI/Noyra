@@ -2,6 +2,8 @@
 
 The v1 endpoints and `X-Noyra-Public-Contract: public-contract-v1` remain unchanged. New `/api/public/*` responses use `public-contract-v2`, `Cache-Control: no-store` and the existing 2,000,000 UTF-8 byte ceiling. There is no evidence module, manifest, proof or public export endpoint.
 
+The existing versioned path normalization also supports `/api/v1/public/*` and `/api/v1/admin/public-publications*` aliases. Both public aliases return the v2 data contract; the path version and public projection contract are distinct. These operations and their error statuses are included in the central `service_contract.py` inventory and `openapi.yaml`.
+
 ## Routes
 
 - `overview`: display_name, lifecycle `{state, changed_at}`, generated_at, public_diary_count, last_sleep_completed_at, recent/goals/projects (at most 3/2/2 approved public items). HTTP success means the public HTTP service answered; lifecycle is separate. Reasons, fatigue, expenses and diagnostic details are excluded.

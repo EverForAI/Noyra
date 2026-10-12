@@ -13,6 +13,7 @@ from pydantic import SecretStr
 from noyra.core import SubjectKernel
 from noyra.core.types import content_hash
 from noyra.service import NoyraHTTPServer, ServiceSettings
+from noyra.service_contract import route_contracts
 
 
 class PublicArchiveHTTPTests(unittest.TestCase):
@@ -90,6 +91,48 @@ class PublicArchiveHTTPTests(unittest.TestCase):
         assert isinstance(records, dict)
         self.assertEqual(records["items"], [])
         self.assertEqual(self.get_json(f"/api/public/goals?id={item['id']}")["items"], [])
+
+    def test_public_routes_and_versioned_aliases_match_central_inventory(self) -> None:
+        routes = (
+            "overview",
+            "timeline",
+            "diary",
+            "behavior",
+            "interactions",
+            "posts",
+            "goals",
+            "projects",
+            "predictions",
+            "research",
+            "sleep",
+            "lifecycle",
+            "updates",
+        )
+        inventory = {route.path: route for route in route_contracts() if route.method == "GET"}
+        for route in routes:
+            versioned = f"/api/v1/public/{route}"
+            self.assertEqual(inventory[versioned].role, "none")
+            self.assertTrue(
+                {200, 400, 413, 429, 503} <= set(inventory[versioned].effective_responses)
+            )
+            for prefix in ("/api/public/", "/api/v1/public/"):
+                with (
+                    self.subTest(route=route, prefix=prefix),
+                    urlopen(self.base_url + prefix + route, timeout=5) as response,
+                ):
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(
+                        response.headers["X-Noyra-Public-Contract"], "public-contract-v2"
+                    )
+                    self.assertEqual(json.loads(response.read())["contract"], "public-contract-v2")
+        from test_public_archive import publication
+
+        _, item = self.authorized_json("/api/v1/admin/public-publications", payload=publication())
+        self.authorized_json(
+            f"/api/v1/admin/public-publications/{item['id']}/withdraw",
+            payload={"expected_revision": 1},
+        )
+        self.assertEqual(self.get_json(f"/api/v1/public/goals?id={item['id']}")["items"], [])
 
     def test_invalid_queries_and_unauthenticated_mutations_are_rejected(self) -> None:
         for query in (
