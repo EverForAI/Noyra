@@ -9639,8 +9639,13 @@ class NoyraHTTPServer:
                 try:
                     identifier = unquote(parts[3], errors="strict")
                     params = parse_qs(parsed.query, keep_blank_values=True)
-                    if set(params) - {"lang"} or (
-                        params and params.get("lang") not in [["zh"], ["en"]]
+                    if (
+                        set(params) - {"lang", "theme", "return"}
+                        or any(len(values) != 1 for values in params.values())
+                        or params.get("lang", ["zh"]) not in [["zh"], ["en"]]
+                        or params.get("theme", ["system"]) not in [["system"], ["light"], ["dark"]]
+                        or params.get("return", [PUBLIC_VIEWS[kind]])[0]
+                        not in {*PUBLIC_VIEWS.values(), "overview", "timeline"}
                     ):
                         raise ValueError("invalid reading language")
                     page = owner.public_archive.page(
@@ -9681,6 +9686,8 @@ class NoyraHTTPServer:
                         page["items"][0],
                         owner.settings.public_site_url or "",
                         english=language == "en",
+                        theme=params.get("theme", ["system"])[0],
+                        return_view=params.get("return", [None])[0],
                     )
                 except (KeyError, TypeError, ValueError):
                     self._json(

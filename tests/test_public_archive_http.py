@@ -149,6 +149,17 @@ class PublicArchiveHTTPTests(unittest.TestCase):
             ),
         )
         path = f"/public/goal/{item['id']}"
+        with urlopen(
+            self.base_url + path + "?lang=en&theme=dark&return=timeline", timeout=5
+        ) as response:
+            markup = response.read().decode()
+            self.assertIn('data-theme="dark"', markup)
+            self.assertIn("#timeline", markup)
+            self.assertIn("lang=en", markup)
+        for query in ("?theme=unknown", "?return=https://other.test", "?lang=en&lang=zh"):
+            with self.assertRaises(HTTPError) as invalid:
+                urlopen(self.base_url + path + query, timeout=5)
+            self.assertEqual(invalid.exception.code, 400)
         with urlopen(self.base_url + path, timeout=5) as response:
             markup = response.read().decode()
             self.assertEqual(response.headers["Cache-Control"], "no-store")

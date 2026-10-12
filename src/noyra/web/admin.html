@@ -210,7 +210,7 @@
             <label for="publication-title"><span>公开标题</span><input id="publication-title" maxlength="240" required></label>
             <label for="publication-status"><span>公开状态（可选）</span><textarea id="publication-status" maxlength="500" rows="1" placeholder="例如 planned、active、complete 或自定义状态"></textarea><small>原有状态会完整保留；可不填写。</small></label>
             <label for="publication-summary"><span>公开摘要</span><textarea id="publication-summary" maxlength="1000" rows="3" required></textarea></label>
-            <label for="publication-body"><span>公开正文（可选）</span><textarea id="publication-body" maxlength="20000" rows="6"></textarea></label>
+            <label for="publication-body"><span>公开正文（可选）</span><textarea id="publication-body" maxlength="20000" rows="6"></textarea><small>空行分段，行首 #、##、### 加空格表示三级标题。目录最多列出100节；正文完整保留。不执行HTML、图片或Markdown链接。</small></label>
             <label for="publication-progress" data-publication-field="goal project" hidden><span>公开进度（可选，0–100%）</span><input id="publication-progress" type="number" min="0" max="100" step="any"></label>
             <label for="publication-next" data-publication-field="goal project" hidden><span>公开下一步（可选）</span><textarea id="publication-next" maxlength="500" rows="2"></textarea></label>
             <label for="publication-resources" data-publication-field="project" hidden><span>公开资源状态（可选）</span><select id="publication-resources"><option value="">未说明</option><option value="normal">正常</option><option value="limited">有限</option><option value="paused">暂停</option><option value="undisclosed">不公开</option></select></label>

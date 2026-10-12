@@ -384,7 +384,12 @@ function emptyState(
     return `<div class="empty-state"><span class="empty-mark" aria-hidden="true">N</span><strong>${escapeHtml(tr("这里还没有公开记录", "No public records here yet"))}</strong><p>${escapeHtml(detail)}</p></div>`;
 }
 function itemHref(row) {
-    return `/public/${encodeURIComponent(row.kind)}/${encodeURIComponent(row.id)}${language === "en" ? "?lang=en" : ""}`;
+    const query = new URLSearchParams();
+    if (language === "en") query.set("lang","en");
+    const theme = document.documentElement?.dataset?.theme;
+    if (["light","dark"].includes(theme)) query.set("theme",theme);
+    if (activeView !== "overview" && !activeId) query.set("return",activeView);
+    return `/public/${encodeURIComponent(row.kind)}/${encodeURIComponent(row.id)}${query.size ? "?"+query : ""}`;
 }
 function publicReadingClick(event) {
     const link = event.target.closest("a[href]");
@@ -625,7 +630,7 @@ function structuredPublicText(value) {
                       ([id, title]) =>
                           `<li><a href="#${id}">${escapeHtml(title)}</a></li>`,
                   )
-                  .join("")}</ol></details>`
+                  .join("")}</ol>${headings.length > 100 ? `<p>${tr("目录仅列出前100节，正文完整保留。","Only the first 100 sections are listed; the full text remains below.")}</p>` : ""}</details>`
             : "") + blocks.join("")
     );
 }
@@ -1304,6 +1309,14 @@ try {
     }
 } catch {
     /* No storage is needed to browse. */
+}
+const readingPreferences = new URLSearchParams(location.search);
+if (["zh","en"].includes(readingPreferences.get("lang"))) language=readingPreferences.get("lang");
+if (["system","light","dark"].includes(readingPreferences.get("theme"))) {
+    const theme=readingPreferences.get("theme");
+    if(theme==="system") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme=theme;
+    $("#theme-select").value=theme;
 }
 $("#refresh").addEventListener("click", () => void refresh());
 $("#load-more").addEventListener("click", () => {
