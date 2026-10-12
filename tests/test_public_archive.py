@@ -230,6 +230,21 @@ def test_optional_summary_status_uses_the_displayed_default_for_filtering(
     ] == [active["id"]]
 
 
+def test_status_filter_and_management_identity_preserve_legacy_legal_values(
+    archive: tuple[PublicArchive, SubjectKernel],
+) -> None:
+    store, kernel = archive
+    item = store.publish(
+        kernel.subject_id, publication(details={"status": "Custom Status 1"}), actor="operator"
+    )
+    assert (
+        store.page(kernel.subject_id, kind="goal", status="Custom Status 1")["items"][0]["id"]
+        == item["id"]
+    )
+    assert store.admin_item(kernel.subject_id, item["id"])["revision"] == 1
+    assert store.admin_item("other-subject", item["id"]) is None
+
+
 def test_existing_public_records_keep_private_sources_out_of_v2(
     archive: tuple[PublicArchive, SubjectKernel],
 ) -> None:

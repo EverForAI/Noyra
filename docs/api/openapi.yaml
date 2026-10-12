@@ -335,6 +335,7 @@ paths:
         No query retains the legacy list capped at 100. Pagination requires view=management.
       parameters:
         - { name: view, in: query, schema: { type: string, enum: [management] } }
+        - { name: id, in: query, description: Authenticated outcome reconciliation; use with view=management and without limit or cursor. Returns item or null., schema: { type: string, minLength: 1, maxLength: 100 } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
         - { $ref: '#/components/parameters/PublicArchiveCursor' }
       responses:
@@ -344,6 +345,10 @@ paths:
             application/json:
               schema:
                 oneOf:
+                  - type: object
+                    required: [item]
+                    properties:
+                      item: { type: object, nullable: true }
                   - { type: array, maxItems: 100, items: { type: object } }
                   - type: object
                     required: [items, next_cursor]
@@ -2550,8 +2555,8 @@ components:
     PublicArchiveStatus:
       name: status
       in: query
-      description: Empty means all statuses; otherwise a lowercase status identifier.
-      schema: { type: string, maxLength: 64 }
+      description: Empty means all statuses; otherwise exact approved public status text, including legacy custom values.
+      schema: { type: string, maxLength: 500 }
     PublicArchiveId:
       name: id
       in: query

@@ -89,6 +89,22 @@ class PublicArchiveHTTPTests(unittest.TestCase):
             json.loads(failure.exception.read()), {"error": "public_content_unavailable"}
         )
 
+    def test_reconciliation_requires_authentication_and_reads_exact_identity(self) -> None:
+        from test_public_archive import publication
+
+        _, item = self.authorized_json("/api/admin/public-publications", payload=publication())
+        for identifier, expected in [(item["id"], item["id"]), ("absent-id", None)]:
+            path = "/api/admin/public-publications?view=management&id=" + identifier
+            with self.assertRaises(HTTPError) as failure:
+                self.get_json(path)
+            self.assertEqual(failure.exception.code, 401)
+            with urlopen(
+                Request(self.base_url + path, headers={"Authorization": "Bearer " + self.token}),
+                timeout=5,
+            ) as response:
+                result = json.loads(response.read())["item"]
+                self.assertEqual(result["id"] if result else None, expected)
+
     def test_publish_edit_withdraw_and_anonymous_visibility(self) -> None:
         from test_public_archive import publication
 

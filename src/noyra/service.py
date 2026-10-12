@@ -3109,6 +3109,16 @@ class NoyraHTTPServer:
                             management_result: Any = owner.public_archive.admin(
                                 owner.kernel.subject_id
                             )
+                        elif (
+                            set(params) == {"view", "id"}
+                            and params.get("view") == ["management"]
+                            and len(params["id"]) == 1
+                        ):
+                            management_result = {
+                                "item": owner.public_archive.admin_item(
+                                    owner.kernel.subject_id, params["id"][0]
+                                )
+                            }
                         else:
                             if (
                                 set(params) - {"view", "limit", "cursor"}

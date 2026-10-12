@@ -390,6 +390,15 @@ class PublicArchive:
             )
             return [{**self._publication(r), "source_id": r["source_id"]} for r in rows]
 
+    def admin_item(self, subject_id: str, identifier: str) -> dict[str, Any] | None:
+        identifier = _text(identifier, 100, required=True)
+        with self.database.read_transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM public_publications WHERE subject_id=? AND publication_id=?",
+                (subject_id, identifier),
+            ).fetchone()
+        return None if row is None else {**self._publication(row), "source_id": row["source_id"]}
+
     def admin_page(
         self, subject_id: str, *, limit: int = 20, cursor: str | None = None
     ) -> dict[str, Any]:
@@ -481,10 +490,8 @@ class PublicArchive:
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("invalid public page size")
         search = _text(search, 120)
-        status = _text(status, 64)
+        status = _text(status, 500)
         identifier = _text(identifier, 256, required=True) if identifier is not None else None
-        if status and not re.fullmatch(r"[a-z][a-z_]{0,63}", status):
-            raise ValueError("invalid public status")
         since = _timestamp(since) if since is not None else None
         until = _timestamp(until) if until is not None else None
         query = {

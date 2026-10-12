@@ -274,6 +274,8 @@ textarea { min-height: 112px; resize: vertical; }
 .publication-confirm { grid-column:1/-1;display:flex!important;align-items:flex-start;gap:10px; }
 .publication-confirm input { width:18px;min-width:18px;height:18px;margin-top:3px; }
 .publication-summary { white-space:pre-wrap;overflow-wrap:anywhere; }
+.publication-entry { display:grid;gap:8px;padding:12px 0;border-bottom:1px solid #dce4de; }
+#publication-form fieldset { min-width:0;margin:0;border:1px solid #dce4de;border-radius:6px;padding:12px; }
 #publication-form small { font-size:12px;color:#52685c;line-height:1.6; }
 @media(max-width:680px) { .chat-workspace { grid-template-columns:minmax(0,1fr); }.chat-workspace:not(.has-current) .chat-current { display:none; }.chat-workspace.has-current .chat-sidebar { display:none; }#chat-back { display:inline-block; }.chat-current { padding:8px 0; }.chat-message { max-width:92%; }.chat-messages { height: min(52vh,420px); min-height:200px; } }
 @media (max-width: 680px) { .activity-item { grid-template-columns: 1fr 1fr; } .activity-item .activity-summary, .activity-item details { grid-column: 1 / -1; } .log-toolbar label { min-width: 0; flex: 1 1 150px; } }

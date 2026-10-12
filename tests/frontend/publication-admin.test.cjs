@@ -24,6 +24,7 @@ function context(extra = {}) {
                 checked: true,
                 dataset: {},
                 querySelectorAll: () => [],
+                querySelector: () => null,
                 focus() {},
                 reset() {},
                 reportValidity: () => true,
@@ -182,7 +183,7 @@ test("unsupported optional fields do not cross category boundary", () => {
     assert.equal(h.sandbox.collectPublicationDetails().progress, 0);
     assert.equal(h.sandbox.collectPublicationDetails().probability, undefined);
     h.$("#publication-kind").value = "research";
-    h.$("#publication-sources").value = "Source | javascript:alert(1)";
+    h.$("#publication-sources").querySelectorAll = () => [{ querySelector: sel => ({value: sel.includes('title') ? "Source" : "javascript:alert(1)"}) }];
     assert.throws(() => h.sandbox.collectPublicationDetails(), /HTTPS/);
 });
 test("publication logout clears summaries, drafts and revision identity", () => {
@@ -194,4 +195,31 @@ test("publication logout clears summaries, drafts and revision identity", () => 
     assert.equal(h.get("publicationRows.size"), 0);
     assert.equal(h.get("publicationEditor"), null);
     assert.equal(h.$("#publication-list").innerHTML, "");
+});
+
+test("explicit rejection unlocks a new draft while ambiguous outcome keeps identity", async () => {
+    const h = context();
+    h.sandbox.request = async () => { throw Object.assign(new Error("rejected"), {status:404}); };
+    const event = {preventDefault(){},currentTarget:h.$("#publication-form")};
+    await h.sandbox.savePublicPublication(event);
+    assert.equal(h.get("publicationEditor"), null);
+    assert.equal(h.$("#publication-kind").disabled, false);
+    h.sandbox.request = async () => { throw new Error("network"); };
+    await h.sandbox.savePublicPublication(event);
+    assert.ok(h.get("publicationPending"));
+    assert.equal(h.$("#publication-kind").disabled, true);
+    assert.equal(h.$("#publication-new").disabled, true);
+    h.sandbox.request = async () => ({item:null});
+    await h.sandbox.reconcilePublicPublication();
+    assert.equal(h.get("publicationPending"), null);
+    assert.equal(h.$("#publication-kind").disabled, false);
+});
+
+test("precise percentages and custom status survive an unrelated title edit", () => {
+    const h = context();
+    h.sandbox.editPublicPublication({...row,details:{status:"Custom Status 1",progress:0.123456}});
+    h.$("#publication-progress").value = String(h.$("#publication-progress").value);
+    const details = h.sandbox.collectPublicationDetails();
+    assert.equal(details.status,"Custom Status 1");
+    assert.equal(details.progress,0.123456);
 });

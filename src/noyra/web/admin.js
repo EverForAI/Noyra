@@ -2839,6 +2839,7 @@ let publicationRows = new Map(),
     publicationCursor = null,
     publicationEditor = null;
 let publicationWriting = false;
+let publicationPending = null;
 const publicationKindLabels = {
     goal: "目标",
     project: "项目",
@@ -2852,8 +2853,10 @@ function clearPublicPublications() {
     publicationCursor = null;
     publicationEditor = null;
     publicationWriting = false;
+    publicationPending = null;
     $("#publication-list").replaceChildren();
     $("#publication-form").reset();
+    for (const key of ["phases", "sources"]) $("#publication-" + key).replaceChildren();
     for (const control of $("#publication-form").querySelectorAll(
         "input,textarea,select,button",
     ))
@@ -2866,29 +2869,39 @@ function clearPublicPublications() {
 }
 function publicationFields() {
     const kind = $("#publication-kind").value;
+    const blocked = publicationWriting || Boolean(publicationPending);
+    $("#publication-form").querySelectorAll("input,textarea,select,button").forEach(node => node.disabled = blocked);
     document.querySelectorAll("[data-publication-field]").forEach((node) => {
         node.hidden = !node.dataset.publicationField.split(" ").includes(kind);
-        node.querySelectorAll("input,textarea,select").forEach(
-            (input) => (input.disabled = node.hidden || publicationWriting),
+        node.querySelectorAll("input,textarea,select,button").forEach(
+            (input) => (input.disabled = node.hidden || blocked),
         );
     });
-    if (!publicationEditor)
-        $("#publication-source").disabled = kind === "update";
+    $("#publication-kind").disabled = blocked || Boolean(publicationEditor?.revision);
+    $("#publication-source").disabled = blocked || Boolean(publicationEditor?.revision) || kind === "update";
+    $("#publication-new").disabled = blocked;
+    $("#publication-reconcile").hidden = !publicationPending;
+    $("#publication-reconcile").disabled = publicationWriting;
+    const submit = $("#publication-form").querySelector('button[type="submit"]');
+    if (submit) submit.disabled = publicationWriting;
 }
-function publicListEntries(value, key) {
-    const lines = value
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean);
-    if (lines.length > 10) throw new Error("最多填写10个公开阶段或参考链接");
-    return lines.map((line) => {
-        const split = line.indexOf("|");
-        if (split < 1 || !line.slice(split + 1).trim())
-            throw new Error("每行请填写：名称 | 状态或HTTPS链接");
-        return {
-            title: line.slice(0, split).trim(),
-            [key]: line.slice(split + 1).trim(),
-        };
+function addPublicationEntry(key, item = {}) {
+    const container = $("#publication-" + key), field = key === "sources" ? "url" : "status";
+    if (container.children.length >= 10) throw new Error("最多填写10个公开阶段或参考链接");
+    const row = document.createElement("div");
+    row.className = "publication-entry";
+    row.innerHTML = `<label>名称<textarea data-public-entry="title" maxlength="500" rows="2" required></textarea></label><label>${key === "sources" ? "HTTPS链接" : "状态"}<textarea data-public-entry="${field}" maxlength="500" rows="2" required></textarea></label><button type="button" data-public-entry-remove>移除此项</button>`;
+    row.querySelector('[data-public-entry="title"]').value = item.title || "";
+    row.querySelector(`[data-public-entry="${field}"]`).value = item[field] || "";
+    container.append(row);
+    publicationFields();
+}
+function publicListEntries(key) {
+    const field = key === "sources" ? "url" : "status";
+    return [...$("#publication-" + key).querySelectorAll(".publication-entry")].map(row => {
+        const title = row.querySelector('[data-public-entry="title"]').value.trim(), value = row.querySelector(`[data-public-entry="${field}"]`).value.trim();
+        if (!title || !value) throw new Error("请完整填写名称和状态或HTTPS链接，或移除空项");
+        return {title, [field]: value};
     });
 }
 function collectPublicationDetails() {
@@ -2906,7 +2919,8 @@ function collectPublicationDetails() {
             const number = Number(value);
             if (!Number.isFinite(number) || number < 0 || number > 100)
                 throw new Error("公开进度或概率须为0至100");
-            details[key] = number / 100;
+            const original = publicationEditor?.details?.[key];
+            details[key] = original != null && String(original * 100) === String(value) ? original : number / 100;
         }
     };
     const timestamp = (field, key) => {
@@ -2923,11 +2937,8 @@ function collectPublicationDetails() {
     }
     if (kind === "project") {
         text("resources", "resource_state");
-        const phases = publicListEntries(
-            $("#publication-phases").value,
-            "status",
-        );
-        if (phases.length) details.phases = phases;
+        const phases = publicListEntries("phases");
+        if (phases.length || publicationEditor?.details?.phases) details.phases = phases;
     }
     if (kind === "prediction") {
         percent("probability", "probability");
@@ -2936,16 +2947,13 @@ function collectPublicationDetails() {
     }
     if (kind === "research") {
         text("uncertainty", "uncertainty");
-        const sources = publicListEntries(
-            $("#publication-sources").value,
-            "url",
-        );
+        const sources = publicListEntries("sources");
         for (const source of sources) {
             const url = new URL(source.url);
             if (url.protocol !== "https:" || url.username || url.password)
                 throw new Error("参考资料必须为不含凭证的HTTPS链接");
         }
-        if (sources.length) details.sources = sources;
+        if (sources.length || publicationEditor?.details?.sources) details.sources = sources;
     }
     if (kind === "sleep") {
         timestamp("start", "started_at");
@@ -3016,7 +3024,7 @@ function publicationLocalTime(value) {
         .slice(0, 23);
 }
 function editPublicPublication(row) {
-    if (publicationWriting) return;
+    if (publicationWriting || publicationPending) return;
     if (
         $("#publication-form").dataset.dirty &&
         !window.confirm("放弃当前未保存的摘要草稿并打开此记录？")
@@ -3030,6 +3038,7 @@ function editPublicPublication(row) {
         revision: row.revision,
         source: row.source_id,
         kind: row.kind,
+        details: row.details,
     };
     $("#publication-kind").value = row.kind;
     $("#publication-source").value = row.source_id || "";
@@ -3055,12 +3064,10 @@ function editPublicPublication(row) {
         ["end", "completed_at"],
     ])
         $("#publication-" + field).value = publicationLocalTime(d[key]);
-    $("#publication-phases").value = (d.phases || [])
-        .map((item) => `${item.title} | ${item.status}`)
-        .join("\n");
-    $("#publication-sources").value = (d.sources || [])
-        .map((item) => `${item.title} | ${item.url}`)
-        .join("\n");
+    for (const key of ["phases", "sources"]) {
+        $("#publication-" + key).replaceChildren();
+        for (const item of d[key] || []) addPublicationEntry(key, item);
+    }
     $("#publication-editor-heading").textContent =
         `编辑公开摘要 · 修订 ${row.revision}`;
     publicationFields();
@@ -3071,8 +3078,8 @@ async function savePublicPublication(event) {
     if (publicationWriting || !csrfToken) return;
     const form = event.currentTarget,
         current = beginAdminAction();
-    if (!form.reportValidity() || !$("#publication-confirm").checked) return;
-    const details = collectPublicationDetails();
+    if (!publicationPending && (!form.reportValidity() || !$("#publication-confirm").checked)) return;
+    const details = publicationPending?.details || collectPublicationDetails();
     if (
         !window.confirm(
             "发布后任何访客都可阅读这些文字和字段。确认已审核且允许匿名公开？",
@@ -3089,7 +3096,7 @@ async function savePublicPublication(event) {
             kind: $("#publication-kind").value,
         };
     const editor = publicationEditor,
-        payload = {
+        payload = publicationPending || {
             publication_id: editor.id,
             kind: editor.kind,
             source_id: editor.source,
@@ -3101,16 +3108,15 @@ async function savePublicPublication(event) {
             confirm_public: true,
         };
     publicationWriting = true;
-    const controls = [...form.querySelectorAll("input,select,textarea,button")];
-    controls.forEach((node) => (node.disabled = true));
-    $("#publication-new").disabled = true;
+    publicationFields();
     try {
         const row = await request("/api/admin/public-publications", {
             method: "POST",
             body: JSON.stringify(payload),
         });
         if (!current()) return;
-        publicationEditor = { ...editor, revision: row.revision };
+        publicationPending = null;
+        publicationEditor = { ...editor, revision: row.revision, details: row.details };
         delete form.dataset.dirty;
         $("#publication-confirm").checked = false;
         $("#publication-editor-heading").textContent =
@@ -3132,22 +3138,21 @@ async function savePublicPublication(event) {
         }
     } catch (error) {
         if (!current()) return;
-        setStatus("#publication-editor-status", publicationError(error), true);
+        const rejected = [400,401,403,404,411,413,415,429].includes(error.status);
+        if (rejected && editor.revision === 0 && !publicationPending) publicationEditor = null;
+        if (!rejected || publicationPending) publicationPending = payload;
+        setStatus("#publication-editor-status", publicationPending ? "发布结果尚未确认。请核对结果，或保持原内容使用同一编号重试；当前草稿已保留。" : publicationError(error), true);
         if (error.status === 401) await logout();
     } finally {
         if (current()) {
             publicationWriting = false;
-            controls.forEach((node) => (node.disabled = false));
-            $("#publication-new").disabled = false;
-            $("#publication-kind").disabled = true;
-            $("#publication-source").disabled = true;
             publicationFields();
         }
     }
 }
 async function withdrawPublicPublication(id) {
     const row = publicationRows.get(id);
-    if (!row || publicationWriting || !csrfToken) return;
+    if (!row || publicationWriting || publicationPending || !csrfToken) return;
     if (
         !window.confirm(
             `撤回“${row.title}”的公开展示？不删除原始记录，也不能撤回访客已复制的内容。`,
@@ -3156,6 +3161,7 @@ async function withdrawPublicPublication(id) {
         return;
     const current = beginAdminAction();
     publicationWriting = true;
+    publicationFields();
     try {
         await request(
             `/api/admin/public-publications/${encodeURIComponent(id)}/withdraw`,
@@ -3177,10 +3183,41 @@ async function withdrawPublicPublication(id) {
             if (error.status === 401) await logout();
         }
     } finally {
-        if (current()) publicationWriting = false;
+        if (current()) { publicationWriting = false; publicationFields(); }
+    }
+}
+async function reconcilePublicPublication() {
+    if (!publicationPending || publicationWriting || !csrfToken) return;
+    const current = beginAdminAction(), pending = publicationPending;
+    publicationWriting = true;
+    publicationFields();
+    try {
+        const result = await request("/api/admin/public-publications?view=management&id=" + encodeURIComponent(pending.publication_id));
+        if (!current()) return;
+        if (result.item && (result.item.kind !== pending.kind || (result.item.source_id || null) !== pending.source_id)) throw new Error("服务器记录的类型或来源不同，请联系管理员核对，不可覆盖。");
+        const normalize = value => Array.isArray(value) ? value.map(normalize) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map(key => [key,normalize(value[key])])) : value;
+        const same = result.item && result.item.id === pending.publication_id && result.item.status === "published" && ["title","summary","body"].every(key => result.item[key] === pending[key]) && JSON.stringify(normalize(result.item.details)) === JSON.stringify(normalize(pending.details));
+        publicationPending = null;
+        if (same) publicationEditor = { ...publicationEditor, revision:result.item.revision, details:result.item.details };
+        else if (!result.item) publicationEditor = null;
+        setStatus("#publication-editor-status", same ? `已确认发布成功，修订 ${result.item.revision}。` : result.item ? "服务器记录与草稿不同。保留原修订，请刷新列表、重新打开最新摘要并核对，不能覆盖他人修订。" : "服务器确认尚无此摘要。草稿已保留，可修改后重新审核发布。");
+    } catch (error) {
+        if (current()) {setStatus("#publication-editor-status", "仍无法确认结果，保留原编号与草稿。" + publicationError(error), true); if (error.status === 401) await logout();}
+    } finally {
+        if (current()) {publicationWriting = false; publicationFields();}
     }
 }
 $("#publication-kind").addEventListener("change", publicationFields);
+$("#publication-reconcile").addEventListener("click", () => void reconcilePublicPublication());
+$("#publication-form").addEventListener("click", event => {
+    if (publicationWriting || publicationPending) return;
+    const add = event.target.closest("[data-publication-add]"), remove = event.target.closest("[data-public-entry-remove]");
+    try {
+        if (add) addPublicationEntry(add.dataset.publicationAdd);
+        if (remove) remove.closest(".publication-entry").remove();
+        if (add || remove) $("#publication-form").dataset.dirty = "true";
+    } catch (error) {setStatus("#publication-editor-status", publicationError(error), true);}
+});
 $("#publication-form").addEventListener("input", () => {
     $("#publication-form").dataset.dirty = "true";
 });
@@ -3196,13 +3233,14 @@ $("#publication-form").addEventListener("submit", (event) => {
     });
 });
 $("#publication-new").addEventListener("click", () => {
-    if (publicationWriting) return;
+    if (publicationWriting || publicationPending) return;
     if (
         $("#publication-form").dataset.dirty &&
         !window.confirm("放弃当前未保存的摘要并新建？")
     )
         return;
     $("#publication-form").reset();
+    for (const key of ["phases", "sources"]) $("#publication-" + key).replaceChildren();
     delete $("#publication-form").dataset.dirty;
     publicationEditor = null;
     $("#publication-kind").disabled = false;
