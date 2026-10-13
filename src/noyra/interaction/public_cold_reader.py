@@ -82,7 +82,9 @@ def _memory_limit(maximum: int) -> Any:
             ("PeakJobMemoryUsed", ctypes.c_size_t),
         ]
 
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    # Windows-only ctypes exports are absent from the POSIX type stubs.
+    ctypes_api: Any = ctypes
+    kernel = ctypes_api.WinDLL("kernel32", use_last_error=True)
     kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
     kernel.CreateJobObjectW.restype = wintypes.HANDLE
     kernel.SetInformationJobObject.argtypes = [
@@ -98,17 +100,17 @@ def _memory_limit(maximum: int) -> Any:
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     job = kernel.CreateJobObjectW(None, None)
     if not job:
-        raise ctypes.WinError(ctypes.get_last_error())
+        raise ctypes_api.WinError(ctypes_api.get_last_error())
     limits = ExtendedLimits()
     # JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
     limits.BasicLimitInformation.LimitFlags = 0x100 | 0x2000
     limits.ProcessMemoryLimit = maximum
     if not kernel.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
-        error = ctypes.WinError(ctypes.get_last_error())
+        error = ctypes_api.WinError(ctypes_api.get_last_error())
         kernel.CloseHandle(job)
         raise error
     if not kernel.AssignProcessToJobObject(job, kernel.GetCurrentProcess()):
-        error = ctypes.WinError(ctypes.get_last_error())
+        error = ctypes_api.WinError(ctypes_api.get_last_error())
         kernel.CloseHandle(job)
         raise error
     return job  # Keep the handle alive until process exit, never close it during work.
