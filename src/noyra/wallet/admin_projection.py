@@ -6,11 +6,11 @@ import base64
 import binascii
 import re
 import sqlite3
-import time
 from dataclasses import asdict
 from typing import Any, ClassVar
 
 from noyra.core.database import Database
+from noyra.core.deadline import monotonic_time, remaining_seconds
 from noyra.core.errors import IntegrityError
 from noyra.core.identity import validate_subject_id
 from noyra.core.redaction import redact_secret_text
@@ -86,9 +86,12 @@ class WalletAdminProjection:
         scope = [subject_id, kind, status, network_id]
         if decoded is not None and decoded["scope"] != scope:
             raise ValueError("wallet cursor scope mismatch")
-        deadline = time.monotonic() + 3
+        try:
+            deadline = monotonic_time() + remaining_seconds(3)
+        except TimeoutError as error:
+            raise WalletListLimit("wallet list read budget exceeded") from error
         with self.database.read_transaction() as connection:
-            connection.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
+            connection.set_progress_handler(lambda: int(monotonic_time() >= deadline), 1000)
             try:
                 high_water = int(
                     connection.execute(
@@ -136,10 +139,10 @@ class WalletAdminProjection:
                     (*values, limit + 1),
                 ).fetchall()
                 items = [self._record(kind, row) for row in rows[:limit]]
-                if time.monotonic() > deadline:
+                if monotonic_time() >= deadline:
                     raise WalletListLimit("wallet list read budget exceeded")
             except sqlite3.OperationalError as error:
-                if time.monotonic() > deadline:
+                if monotonic_time() >= deadline:
                     raise WalletListLimit("wallet list read budget exceeded") from error
                 raise
             finally:

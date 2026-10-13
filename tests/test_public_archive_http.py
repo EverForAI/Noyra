@@ -71,6 +71,88 @@ class PublicArchiveHTTPTests(unittest.TestCase):
             self.get_json("/api/admin/public-publications")
         self.assertEqual(unauthorized.exception.code, 401)
 
+    def test_unconfigured_sitemap_has_no_negative_cache(self) -> None:
+        with self.assertRaises(HTTPError) as absent:
+            urlopen(self.base_url + "/sitemap.xml", timeout=5)
+        self.assertEqual(absent.exception.code, 404)
+        self.assertEqual(absent.exception.headers["Cache-Control"], "no-store")
+        # Static text keeps its independent cache contract.
+        with urlopen(self.base_url + "/robots.txt", timeout=5) as response:
+            self.assertEqual(response.headers["Cache-Control"], "public, max-age=300")
+
+    def test_saved_sitemap_route_survives_http_owner_restart(self) -> None:
+        from urllib.parse import urlsplit
+        from xml.etree.ElementTree import fromstring
+
+        from test_public_archive import publication
+
+        self.http.settings = self.http.settings.model_copy(
+            update={"public_site_url": "https://public.example"}
+        )
+        _, item = self.authorized_json("/api/admin/public-publications", payload=publication())
+        with urlopen(self.base_url + "/sitemap.xml", timeout=5) as response:
+            locations = [
+                node.text
+                for node in fromstring(response.read()).iter(
+                    "{http://www.sitemaps.org/schemas/sitemap/0.9}loc"
+                )
+            ]
+        self.http.close()
+        self.http = NoyraHTTPServer(self.kernel, self.http.settings)
+        self.http.start()
+        self.base_url = f"http://127.0.0.1:{self.http.address[1]}"
+        bodies = []
+        for location in locations:
+            assert isinstance(location, str)
+            url = urlsplit(location)
+            with urlopen(self.base_url + url.path + "?" + url.query, timeout=5) as response:
+                bodies.append(response.read().decode())
+        self.assertIn(item["id"], "".join(bodies))
+        with urlopen(self.base_url + "/sitemap.xml", timeout=5) as response:
+            self.assertEqual(
+                [
+                    node.text
+                    for node in fromstring(response.read()).iter(
+                        "{http://www.sitemaps.org/schemas/sitemap/0.9}loc"
+                    )
+                ],
+                locations,
+            )
+
+    def test_homepage_preserves_document_structure_and_form_help(self) -> None:
+        from html.parser import HTMLParser
+
+        class Structure(HTMLParser):
+            def __init__(self) -> None:
+                super().__init__()
+                self.declarations: list[str] = []
+                self.stack: list[str] = []
+                self.metadata_in_head = True
+                self.form_help = False
+
+            def handle_decl(self, decl: str) -> None:
+                self.declarations.append(decl.lower())
+
+            def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+                if tag in {"title", "meta", "link"}:
+                    self.metadata_in_head &= "head" in self.stack
+                if dict(attrs).get("id") == "public-post-syntax-help":
+                    self.form_help = "form" in self.stack
+                if tag not in {"meta", "link", "input", "img", "source", "br", "hr"}:
+                    self.stack.append(tag)
+
+            def handle_endtag(self, tag: str) -> None:
+                if tag in self.stack:
+                    self.stack = self.stack[: self.stack.index(tag)]
+
+        with urlopen(self.base_url + "/", timeout=5) as response:
+            markup = response.read().decode()
+        document = Structure()
+        document.feed(markup)
+        self.assertEqual(document.declarations, ["doctype html"])
+        self.assertTrue(document.metadata_in_head)
+        self.assertTrue(document.form_help)
+
     def test_damaged_public_interaction_returns_safe_503(self) -> None:
         from noyra.interaction import InteractionStore
 

@@ -602,3 +602,52 @@ test("irregular bounded pages cannot skip rows at the 200 record batch boundary"
     }
     assert.equal(ids.size,450);
 });
+
+test("reading return is confined to its article navigation chain", () => {
+    const h = harness();
+    h.sandbox.document.querySelectorAll = () => [];
+    vm.runInContext(source.slice(source.indexOf("function showView()"), source.indexOf("function updatePostLength()")), h.sandbox);
+    h.sandbox.setMenu = () => {};
+    let options;
+    h.sandbox.refresh = input => { options = input; };
+    h.set('activeView="diary";activeId="example";readingReturn={article:"diary/example",view:"diary",search:"old",period:"all",category:"all",status:""}');
+    h.sandbox.location.hash = "#about";
+    h.sandbox.showView();
+    assert.equal(h.get("readingReturn"), null);
+    h.node("#archive-search").value = "new";
+    h.sandbox.location.hash = "#diary";
+    h.sandbox.showView();
+    assert.equal(options.restore, null);
+    assert.equal(h.node("#archive-search").value, "new");
+    h.set('activeView="diary";activeId="example";readingReturn={article:"diary/example",view:"diary",search:"old",period:"all",category:"all",status:""}');
+    h.sandbox.showView();
+    assert.equal(options.restore.search, "old");
+    assert.equal(h.get("readingReturn"), null);
+    assert.equal(h.node("#archive-search").value, "old");
+});
+
+test("extremely short and empty pages restore only with bounded user continuations", async () => {
+    const h = harness();
+    h.set('activeView="diary";loadOverview=async()=>{}');
+    let reads = 0;
+    h.sandbox.getJson = async path => {
+        reads++;
+        const q = new URL(path, "https://example.test").searchParams;
+        const position = Number(q.get("cursor") || 0);
+        const empty = position % 7 === 0;
+        return {...page(empty ? [] : [record(String(position))]), next_cursor: String(position + 1)};
+    };
+    await h.sandbox.refresh({restore:{path:"/api/public/diary?limit=20",count:200,query:"/api/public/diary?limit=20",paths:[],number:1}});
+    assert.equal(reads, 20);
+    assert.ok(h.get("visibleRows.length") < 200);
+    assert.equal(h.get("restoreTarget"), 200);
+    assert.match(h.node("#list-status").textContent, /尚未恢复完/);
+    while (h.get("restoreTarget")) {
+        const before = reads;
+        await h.sandbox.refresh({append:true});
+        assert.ok(reads - before <= 20);
+    }
+    assert.equal(h.get("visibleRows.length"), 200);
+    assert.equal(new Set(h.get("visibleRows").map(row => row.id)).size, 200);
+    assert.doesNotMatch(h.node("#list-status").textContent, /尚未恢复完/);
+});

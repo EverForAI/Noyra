@@ -665,6 +665,7 @@ _OWNERSHIP_GRAPHS[93] = {
         "public_publications", "publication_id", "publication_id"
     ),
 }
+_OWNERSHIP_GRAPHS[94] = {**_OWNERSHIP_GRAPHS[93], "public_sitemap_slots": _subject_rule()}
 
 
 @dataclass(frozen=True)

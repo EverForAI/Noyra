@@ -7,7 +7,6 @@ import binascii
 import json
 import math
 import re
-import secrets
 import sqlite3
 import threading
 from collections.abc import Iterator
@@ -19,17 +18,17 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from noyra.core.database import Database, action_state_hash, behavior_log_state_hash
 from noyra.core.deadline import monotonic_time, remaining_seconds
 from noyra.core.errors import IntegrityError, NotFoundError, PayloadLimitError
-from noyra.core.event_archive import EventPayloadArchive
 from noyra.core.events import EventStore
 from noyra.core.types import canonical_json, content_hash, strict_json_loads, utc_now
 
 from .diary import PublicDiaryStore
 from .posts import PublicPostStore
+from .public_cold_reader import PublicColdReader
+from .sitemap_tokens import SitemapTokens
 from .store import InteractionStore
 
 ARCHIVE_CONTRACT = "public-contract-v2"
@@ -94,6 +93,7 @@ class _ReadBudget:
     bytes_read: int = 0
     exhausted: bool = False
     cold_admitted: bool = False
+    cold_reader: PublicColdReader | None = None
 
     def checkpoint(self, size: int = 0) -> None:
         self.bytes_read += size
@@ -128,7 +128,9 @@ def _request_budget() -> Iterator[_ReadBudget]:
         yield budget
         budget.checkpoint()
     finally:
-        if budget.cold_admitted:
+        if budget.cold_reader is not None:
+            budget.cold_reader.close(_COLD_READ_SLOTS.release)
+        elif budget.cold_admitted:
             _COLD_READ_SLOTS.release()
         _READ_BUDGET.reset(token)
 
@@ -167,7 +169,6 @@ class _LifecycleReader:
 
     def __init__(self, database: Database, connection: Any, subject_id: str):
         self.database, self.connection, self.subject_id = database, connection, subject_id
-        self.archive: EventPayloadArchive | None = None
         self.segments: dict[str, dict[str, dict[str, Any]]] = {}
 
     def states(self, row: Any) -> tuple[str, str]:
@@ -193,18 +194,6 @@ class _LifecycleReader:
             if key not in self.segments:
                 if len(self.segments) >= 2:
                     raise _SegmentPageBoundary
-                if self.archive is None:
-                    try:
-                        self.archive = EventPayloadArchive(
-                            self.database,
-                            self.database.path.parent / "subject" / "cold",
-                            subject_id=self.subject_id,
-                            create_root=False,
-                            read_only_root=True,
-                            cache_cloud_restores=False,
-                        )
-                    except (OSError, ValueError) as exc:
-                        raise IntegrityError("public lifecycle archive unavailable") from exc
                 try:
                     budget = _READ_BUDGET.get()
                     assert budget is not None
@@ -214,21 +203,68 @@ class _LifecycleReader:
                         if not _COLD_READ_SLOTS.acquire(blocking=False):
                             raise PublicQueryBudgetExceeded("public cold reader admission exceeded")
                         budget.cold_admitted = True
-                    self.segments[key] = self.archive.load_segment(
+                    metadata = self.connection.execute(
+                        "SELECT event_count,compressed_hash,archive_format,encryption_key_id,"
+                        "encryption_key_fingerprint FROM event_payload_segments "
+                        "WHERE subject_id=? AND object_key=?",
+                        (self.subject_id, key),
+                    ).fetchone()
+                    if metadata is None:
+                        raise IntegrityError("public lifecycle archive metadata missing")
+                    identifiers = self.connection.execute(
+                        "SELECT event_id FROM events WHERE subject_id=? AND payload_archive_key=? "
+                        "AND event_type IN ('lifecycle_transition','lifecycle_recovery') "
+                        "AND privacy_level='public_status' LIMIT 5001",
+                        (self.subject_id, key),
+                    ).fetchall()
+                    if len(identifiers) > 5000:
+                        raise IntegrityError("public lifecycle archive event bound exceeded")
+                    budget.checkpoint(
+                        sum(len(identifier[0].encode()) for identifier in identifiers)
+                    )
+                    if budget.cold_reader is None:
+                        identities, keys = [], []
+                        for identity in self.connection.execute(
+                            "SELECT subject_id FROM subject_identity"
+                        ):
+                            budget.checkpoint(len(identity[0].encode()))
+                            identities.append(identity[0])
+                            if len(identities) > 10000:
+                                raise PublicQueryBudgetExceeded("public namespace budget exceeded")
+                        for storage_key in self.connection.execute(
+                            "SELECT subject_id,storage_key FROM subject_storage_keys"
+                        ):
+                            budget.checkpoint(sum(len(value.encode()) for value in storage_key))
+                            keys.append(tuple(storage_key))
+                            if len(keys) > 10000:
+                                raise PublicQueryBudgetExceeded("public namespace budget exceeded")
+                        budget.cold_reader = PublicColdReader(
+                            self.database.path, self.subject_id, identities, keys, budget.deadline
+                        )
+                        keyring = budget.cold_reader.prepare()
+                        keyring.validate_revision(
+                            self.database, self.subject_id, connection=self.connection
+                        )
+                    states, size = budget.cold_reader.load(
                         self.subject_id,
                         key,
-                        connection=self.connection,
-                        max_decompressed_bytes=min(
-                            64_000_000, MAX_PUBLIC_READ_BYTES - budget.bytes_read
-                        ),
-                        max_events=5_000,
-                        local_only=True,
-                        consume_bytes=budget.checkpoint,
+                        dict(metadata),
+                        min(64_000_000, MAX_PUBLIC_READ_BYTES - budget.bytes_read),
+                        [identifier[0] for identifier in identifiers],
                     )
+                    budget.checkpoint(size)
+                    self.segments[key] = states
                 except PayloadLimitError as exc:
                     raise IntegrityError("public lifecycle archive exceeds read bound") from exc
+                except TimeoutError as exc:
+                    raise PublicQueryBudgetExceeded("public cold reader deadline exceeded") from exc
             payload = self.segments[key].get(row["event_id"])
-        if not isinstance(payload, dict) or content_hash(payload) != row["payload_hash"]:
+        verified_hash = (
+            (content_hash(payload) if key is None else payload.get("hash"))
+            if isinstance(payload, dict)
+            else None
+        )
+        if not isinstance(payload, dict) or verified_hash != row["payload_hash"]:
             raise IntegrityError("public lifecycle payload hash mismatch")
         old, new = payload.get("from"), payload.get("to")
         if (
@@ -320,21 +356,16 @@ def _details(kind: str, value: Any) -> dict[str, Any]:
 
 
 class PublicArchive:
-    def __init__(self, database: Database):
+    def __init__(self, database: Database, *, sitemap_tokens: SitemapTokens | None = None):
         self.database = database
         # Index routing metadata is not itself verified public content. Seal
         # descriptors so logical subject IDs / unchecked boundaries cannot be
-        # decoded from anonymous XML. Restarting requires a fresh index.
-        self._sitemap_cipher = AESGCM(secrets.token_bytes(32))
+        # decoded from anonymous XML. Persistent routing keys are injected at
+        # owner startup; anonymous requests never create keys or write files.
+        self.sitemap_tokens = sitemap_tokens or SitemapTokens()
 
     def _sitemap_descriptor(self, value: dict[str, Any]) -> str:
-        nonce = secrets.token_bytes(12)
-        token = base64.urlsafe_b64encode(
-            nonce
-            + self._sitemap_cipher.encrypt(
-                nonce, canonical_json(value).encode(), b"noyra-public-sitemap-v1"
-            )
-        ).decode()
+        token = self.sitemap_tokens.seal(value)
         if len(token) > 1500:
             raise IntegrityError("invalid sitemap routing metadata")
         return token
@@ -644,57 +675,27 @@ class PublicArchive:
             raise PublicQueryBudgetExceeded("sitemap record budget exceeded")
 
     def sitemap_partitions(self, subject_id: str) -> list[str]:
-        """Enumerate bounded metadata partitions; each shard verifies its current contents."""
+        """Read indexed high-water marks instead of rescanning the public history."""
         result = []
         with _bounded_read(self.database) as connection:
             for kind in sorted(TIMELINE_KINDS):
-                table, _, where, id_col, time_col, _, _ = self._spec(kind)
-                start = None
-                anchor = utc_now()
-                while True:
-                    seek = "" if start is None else f" AND ({time_col},{id_col})<(?,?)"
-                    values = (
-                        (subject_id, anchor)
-                        if start is None
-                        else (subject_id, anchor, start[0], start[2])
-                    )
-                    rows = connection.execute(
-                        f"SELECT {time_col},{id_col}"
-                        + (",payload_archive_key" if kind == "lifecycle" else "")
-                        + f" FROM {table} WHERE subject_id=? AND {where} "
-                        f"AND {time_col}<=?{seek} ORDER BY {time_col} DESC,{id_col} DESC LIMIT 100",
-                        values,
-                    ).fetchall()
-                    if not rows:
-                        break
+                latest = connection.execute(
+                    "SELECT MAX(slot) FROM public_sitemap_slots WHERE subject_id=? AND kind=?",
+                    (subject_id, kind),
+                ).fetchone()
+                highest = latest[0] or 0
+                if type(highest) is not int or highest < 0 or highest > 5_000_000:
+                    raise PublicQueryBudgetExceeded("sitemap partition budget exceeded")
+                for start in range(1, highest + 1, 100):
                     budget = _READ_BUDGET.get()
                     assert budget is not None
-                    budget.checkpoint(
-                        sum(len(v.encode()) for row in rows for v in row if isinstance(v, str))
+                    token = self._sitemap_descriptor(
+                        {"subject": subject_id, "kind": kind, "start": start, "end": start + 99}
                     )
-                    if kind == "lifecycle":
-                        keys: set[str] = set()
-                        for index, row in enumerate(rows):
-                            if row[2] is not None:
-                                keys.add(row[2])
-                            if len(keys) > 2:
-                                rows = rows[:index]
-                                break
-                    end = (rows[-1][0], kind, rows[-1][1])
-                    result.append(
-                        self._sitemap_descriptor(
-                            {
-                                "subject": subject_id,
-                                "kind": kind,
-                                "anchor": anchor,
-                                "start": start,
-                                "end": end,
-                            }
-                        )
-                    )
+                    budget.checkpoint(len(token.encode()))
+                    result.append(token)
                     if len(result) > 50_000:
                         raise PublicQueryBudgetExceeded("sitemap partition budget exceeded")
-                    start = end
         return result
 
     def sitemap_partition(self, subject_id: str, token: str) -> list[dict[str, Any]]:
@@ -705,32 +706,22 @@ class PublicArchive:
         try:
             if len(token) > 1500:
                 raise ValueError("invalid sitemap partition")
-            sealed = base64.b64decode(token, altchars=b"-_", validate=True)
-            data = json.loads(
-                self._sitemap_cipher.decrypt(sealed[:12], sealed[12:], b"noyra-public-sitemap-v1")
-            )
+            data = self.sitemap_tokens.open(token)
             if (
                 not isinstance(data, dict)
-                or set(data) != {"subject", "kind", "anchor", "start", "end"}
+                or set(data) != {"subject", "kind", "start", "end"}
                 or data["subject"] != subject_id
                 or data["kind"] not in TIMELINE_KINDS
             ):
                 raise ValueError("invalid sitemap partition")
-            kind, anchor = data["kind"], _timestamp(data["anchor"])
-
-            def bound(value: Any) -> tuple[str, str, str]:
-                if not isinstance(value, list) or len(value) != 3 or value[1] != kind:
-                    raise ValueError("invalid sitemap boundary")
-                _timestamp(value[0])
-                return (
-                    _text(value[0], 256, required=True),
-                    kind,
-                    _text(value[2], 256, required=True),
-                )
-
-            end = bound(data["end"])
-            start = bound(data["start"]) if data["start"] is not None else None
-            if end[0] > anchor or (start is not None and start <= end):
+            kind, start, end = data["kind"], data["start"], data["end"]
+            if (
+                type(start) is not int
+                or type(end) is not int
+                or start < 1
+                or end != start + 99
+                or end > 5_000_000
+            ):
                 raise ValueError("invalid sitemap range")
         except (
             InvalidTag,
@@ -741,54 +732,42 @@ class PublicArchive:
             json.JSONDecodeError,
         ) as exc:
             raise ValueError("invalid sitemap partition") from exc
-        query = {
-            "subject": subject_id,
-            "kind": kind,
-            "since": None,
-            "until": anchor,
-            "search": "",
-            "status": "",
-            "identifier": None,
-            "end_key": end,
-        }
-        cursor = (
-            None
-            if start is None
-            else base64.urlsafe_b64encode(
-                canonical_json(
-                    {"query": content_hash(query), "anchor": anchor, "key": start}
-                ).encode()
-            ).decode()
-        )
-        items: list[dict[str, Any]] = []
-        # Segment continuations share a total request work budget; each page
-        # releases its decrypted segments before continuing, with no disk cache.
-        for _ in range(100):
-            page = self._sitemap_page(subject_id, kind, anchor, end, cursor)
-            items.extend(page["items"])
-            if len(items) > 100:
-                raise PublicQueryBudgetExceeded("sitemap partition changed; refresh index")
-            cursor = page["next_cursor"]
-            if cursor is None:
-                return items
-        raise PublicQueryBudgetExceeded("sitemap partition continuation exceeded")
-
-    def _sitemap_page(
-        self, subject_id: str, kind: str, anchor: str, end: tuple[str, str, str], cursor: str | None
-    ) -> dict[str, Any]:
-        with _request_budget():
-            return self._page(
-                subject_id,
-                kind=kind,
-                limit=100,
-                cursor=cursor,
-                since=None,
-                until=anchor,
-                search="",
-                status="",
-                identifier=None,
-                end_key=end,
-            )
+        with _bounded_read(self.database) as connection:
+            table, columns, where, id_col, time_col, _, _ = self._spec(kind)
+            identifiers = connection.execute(
+                "SELECT item_id FROM public_sitemap_slots WHERE subject_id=? AND kind=? "
+                "AND slot BETWEEN ? AND ? ORDER BY slot",
+                (subject_id, kind, start, end),
+            ).fetchall()
+            reader = _LifecycleReader(self.database, connection, subject_id)
+            items = []
+            budget = _READ_BUDGET.get()
+            assert budget is not None
+            for identifier in identifiers:
+                row = connection.execute(
+                    f"SELECT {columns} FROM {table} WHERE subject_id=? AND {where} "
+                    f"AND {id_col}=? AND {time_col}<=?",
+                    (subject_id, identifier[0], utc_now()),
+                ).fetchone()
+                if row is None:
+                    continue
+                budget.checkpoint(
+                    sum(len(value.encode()) for value in row if isinstance(value, str))
+                )
+                if kind == "lifecycle":
+                    # Avoid retaining arbitrarily many decoded segments; all
+                    # work still consumes this request's total byte/deadline budget.
+                    if (
+                        row["payload_archive_key"] not in reader.segments
+                        and len(reader.segments) >= 2
+                    ):
+                        reader.segments.clear()
+                    old, new = reader.states(row)
+                    row = {**dict(row), "old_state": old, "new_state": new}
+                item = self._item(kind, row, connection=connection)
+                item["body"] = ""
+                items.append(item)
+            return items
 
     def _overview(self, subject_id: str) -> dict[str, Any]:
         with _bounded_read(self.database) as connection:

@@ -827,6 +827,7 @@ class ServiceSettings(BaseModel):
     public_post_captcha_global_rate_per_minute: int = Field(default=300, ge=1, le=100_000)
     public_hash_key_file: Path | None = None
     public_site_url: str | None = None
+    public_sitemap_keyring_path: Path | None = None
     active_interval_seconds: float = Field(default=30, ge=1, le=86_400)
     sleep_interval_seconds: float = Field(default=60, ge=1, le=86_400)
     deep_sleep_seconds: float = Field(default=21_600, ge=0, le=604_800)
@@ -1190,6 +1191,11 @@ class ServiceSettings(BaseModel):
                 else None
             ),
             public_site_url=os.getenv("NOYRA_PUBLIC_SITE_URL"),
+            public_sitemap_keyring_path=(
+                Path(os.environ["NOYRA_PUBLIC_SITEMAP_KEYRING_PATH"])
+                if os.getenv("NOYRA_PUBLIC_SITEMAP_KEYRING_PATH")
+                else None
+            ),
             active_interval_seconds=float(os.getenv("NOYRA_ACTIVE_INTERVAL_SECONDS", "30")),
             sleep_interval_seconds=float(os.getenv("NOYRA_SLEEP_INTERVAL_SECONDS", "60")),
             deep_sleep_seconds=float(os.getenv("NOYRA_DEEP_SLEEP_SECONDS", "21600")),
@@ -1428,7 +1434,14 @@ class NoyraHTTPServer:
         self.at_rest: AtRestGuard | None = None
         self.operator_controls: OperatorControlService | None = None
         self.projection = PublicProjection(kernel.database)
-        self.public_archive = PublicArchive(kernel.database)
+        from noyra.interaction.sitemap_tokens import SitemapTokens
+
+        sitemap_tokens = (
+            SitemapTokens.from_file(settings.public_sitemap_keyring_path)
+            if settings.public_sitemap_keyring_path is not None
+            else SitemapTokens()
+        )
+        self.public_archive = PublicArchive(kernel.database, sitemap_tokens=sitemap_tokens)
         self.provider_health = ProviderHealthStore(kernel.database)
         self.retention = RetentionManager(
             kernel.database,
@@ -1722,6 +1735,12 @@ class NoyraHTTPServer:
             return
         if not self.kernel.process_lock.held:
             raise RuntimeError("HTTP server cannot start without subject ownership")
+        if self.settings.public_sitemap_keyring_path is None:
+            from noyra.interaction.sitemap_tokens import SitemapTokens
+
+            self.public_archive.sitemap_tokens = SitemapTokens.managed(
+                self.settings.data_dir / "secrets"
+            )
         if not self.defer_export_ownership:
             self._start_export_ownership()
         self.thread = threading.Thread(
@@ -9728,6 +9747,7 @@ class NoyraHTTPServer:
                         HTTPStatus.NOT_FOUND,
                         "text/plain; charset=utf-8",
                         b"Configure NOYRA_PUBLIC_SITE_URL to publish a sitemap.\n",
+                        cache_control="no-store",
                     )
                     return
                 try:

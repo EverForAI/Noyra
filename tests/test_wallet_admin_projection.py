@@ -23,6 +23,49 @@ from noyra.wallet import (
 from noyra.wallet.admin_projection import WalletAdminProjection
 
 
+def test_projection_obeys_parent_deadline_and_preserves_read_only_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import noyra.core.deadline as clock
+    import noyra.wallet.admin_projection as projection
+    from noyra.core.deadline import operation_deadline
+    from noyra.wallet.admin_projection import WalletListLimit
+
+    kernel = SubjectKernel(tmp_path / "deadline.sqlite3", "wallet-deadline", content_hash("clock"))
+    try:
+        current = [1000.0]
+        monkeypatch.setattr(clock, "monotonic_time", lambda: current[0])
+        monkeypatch.setattr(projection, "monotonic_time", lambda: current[0])
+        store = WalletAdminProjection(kernel.database)
+        original = store._record
+
+        def slow_record(kind: str, row: object) -> dict[str, object]:
+            current[0] += 0.3
+            return original(kind, row)
+
+        network = WalletStore(kernel.database).register_network(
+            kernel.subject_id,
+            WalletNetworkInput(label="Clock test", chain_id=1, native_symbol="ETH"),
+            actor="operator",
+        )
+        monkeypatch.setattr(store, "_record", slow_record)
+        with operation_deadline(0.25), pytest.raises(WalletListLimit):
+            store.page(kernel.subject_id, "networks")
+        assert (
+            WalletStore(kernel.database).get_network(
+                network.network_id, subject_id=kernel.subject_id
+            )
+            == network
+        )
+        assert store.page(kernel.subject_id, "networks")["total"] == 1
+        with operation_deadline(0.1):
+            current[0] += 0.1
+            with pytest.raises(WalletListLimit):
+                store.page(kernel.subject_id, "networks")
+    finally:
+        kernel.close()
+
+
 def test_pages_exclude_concurrent_insert_and_bind_filters(tmp_path: Path) -> None:
     kernel = SubjectKernel(tmp_path / "noyra.sqlite3", "wallet-pages", content_hash("pages"))
     try:
