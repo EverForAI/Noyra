@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import time
 from email.message import Message
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit
 
 import httpx
+
+from noyra.core.deadline import monotonic_time
 
 from .deadline import remaining_seconds
 from .http import (
@@ -22,12 +23,12 @@ from .http import (
 
 def read_release_metadata(url: str, *, maximum: int, timeout: float) -> bytes:
     timeout = remaining_seconds(timeout)
-    deadline = time.monotonic() + timeout
+    deadline = monotonic_time() + timeout
     hook = SyncHTTPTimeoutHook()
 
     def active() -> float:
         hook.assert_active()
-        remaining = deadline - time.monotonic()
+        remaining = deadline - monotonic_time()
         if remaining <= 0:
             raise TimeoutError("release metadata deadline exceeded")
         return remaining

@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, Concatenate, Literal, ParamSpec, TypeVar, cast
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
@@ -115,11 +115,19 @@ from noyra.interaction import (
 from noyra.interaction.conversations import ConversationConflict, ConversationStore
 from noyra.interaction.erasure import ConversationErasure, ErasureReviewRequired
 from noyra.interaction.errors import InteractionStateConflictError
+from noyra.interaction.public_archive import (
+    ARCHIVE_CONTRACT,
+    PublicArchive,
+    PublicationCapacityError,
+    PublicationConflict,
+    PublicQueryBudgetExceeded,
+)
 from noyra.interaction.public_contract import (
     PUBLIC_CACHE_CONTROL,
     PUBLIC_CONTRACT_ID,
     PUBLIC_MAX_RESPONSE_BYTES,
 )
+from noyra.interaction.public_reading import PUBLIC_VIEWS, public_article_html, public_item_path
 from noyra.knowledge import (
     CommonKnowledgePeerInput,
     CommonKnowledgeStore,
@@ -1420,6 +1428,7 @@ class NoyraHTTPServer:
         self.at_rest: AtRestGuard | None = None
         self.operator_controls: OperatorControlService | None = None
         self.projection = PublicProjection(kernel.database)
+        self.public_archive = PublicArchive(kernel.database)
         self.provider_health = ProviderHealthStore(kernel.database)
         self.retention = RetentionManager(
             kernel.database,
@@ -2616,6 +2625,9 @@ class NoyraHTTPServer:
                     self._wechat_webhook_challenge()
                     return
                 parsed = urlsplit(self.path)
+                if parsed.path.startswith("/public/"):
+                    self._public_article(parsed)
+                    return
                 wallet_list_path = parsed.path.replace("/api/v1/", "/api/", 1)
                 if wallet_list_path.startswith("/api/admin/wallet-lists/"):
                     if not self._authorized("operator"):
@@ -2691,7 +2703,7 @@ class NoyraHTTPServer:
                     self._robots_txt()
                     return
                 if parsed.path == "/sitemap.xml":
-                    self._sitemap_xml()
+                    self._sitemap_xml(parsed)
                     return
                 if parsed.path == "/favicon.ico":
                     self.send_response(HTTPStatus.NO_CONTENT)
@@ -3027,6 +3039,126 @@ class NoyraHTTPServer:
                     }
                     owner._store_health(health_status, health_payload)
                     self._json(health_status, self._health_projection(health_payload))
+                elif parsed.path.startswith("/api/public/"):
+                    allowed_routes = {
+                        "overview": None,
+                        "timeline": "all",
+                        "diary": "diary",
+                        "behavior": "behavior",
+                        "interactions": "interaction",
+                        "posts": "post",
+                        "goals": "goal",
+                        "projects": "project",
+                        "predictions": "prediction",
+                        "research": "research",
+                        "sleep": "sleep",
+                        "lifecycle": "lifecycle",
+                        "updates": "update",
+                    }
+                    route = parsed.path.removeprefix("/api/public/")
+                    if route not in allowed_routes:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+                        return
+                    try:
+                        params = parse_qs(parsed.query, keep_blank_values=True)
+                        allowed_params = {
+                            "limit",
+                            "cursor",
+                            "since",
+                            "until",
+                            "search",
+                            "status",
+                            "kind",
+                            "id",
+                        }
+                        if set(params) - allowed_params or any(
+                            len(v) != 1 for v in params.values()
+                        ):
+                            raise ValueError("invalid public query")
+                        if route == "overview":
+                            if params:
+                                raise ValueError("overview takes no query")
+                            result = owner.public_archive.overview(owner.kernel.subject_id)
+                        else:
+                            kind = params.get("kind", [allowed_routes[route]])[0]
+                            if route != "timeline" and kind != allowed_routes[route]:
+                                raise ValueError("invalid public category")
+                            result = owner.public_archive.page(
+                                owner.kernel.subject_id,
+                                kind=str(kind),
+                                limit=int(params.get("limit", ["20"])[0]),
+                                cursor=params.get("cursor", [None])[0],
+                                since=params.get("since", [None])[0],
+                                until=params.get("until", [None])[0],
+                                search=params.get("search", [""])[0],
+                                status=params.get("status", [""])[0],
+                                identifier=params.get("id", [None])[0],
+                            )
+                    except (ValueError, TypeError, UnicodeError):
+                        self._json(
+                            HTTPStatus.BAD_REQUEST,
+                            {"error": "invalid_public_query"},
+                            public_contract=ARCHIVE_CONTRACT,
+                        )
+                        return
+                    except PublicQueryBudgetExceeded:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "public_query_budget_exceeded"},
+                            public_contract=ARCHIVE_CONTRACT,
+                        )
+                        return
+                    except IntegrityError:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "public_content_unavailable"},
+                            public_contract=ARCHIVE_CONTRACT,
+                        )
+                        return
+                    self._json(HTTPStatus.OK, result, public_contract=ARCHIVE_CONTRACT)
+                elif parsed.path == "/api/admin/public-publications":
+                    if not self._authorized():
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    try:
+                        params = parse_qs(parsed.query, keep_blank_values=True)
+                        if not params:
+                            management_result: Any = owner.public_archive.admin(
+                                owner.kernel.subject_id
+                            )
+                        elif (
+                            set(params) == {"view", "id"}
+                            and params.get("view") == ["management"]
+                            and len(params["id"]) == 1
+                        ):
+                            management_result = {
+                                "item": owner.public_archive.admin_item(
+                                    owner.kernel.subject_id, params["id"][0]
+                                )
+                            }
+                        else:
+                            if (
+                                set(params) - {"view", "limit", "cursor"}
+                                or any(len(value) != 1 for value in params.values())
+                                or params.get("view") != ["management"]
+                            ):
+                                raise ValueError("invalid public management query")
+                            management_result = owner.public_archive.admin_page(
+                                owner.kernel.subject_id,
+                                limit=int(params.get("limit", ["20"])[0]),
+                                cursor=params.get("cursor", [None])[0],
+                            )
+                    except (ValueError, TypeError, UnicodeError):
+                        self._json(
+                            HTTPStatus.BAD_REQUEST, {"error": "invalid_public_publication_query"}
+                        )
+                        return
+                    except IntegrityError:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE, {"error": "public_content_unavailable"}
+                        )
+                        return
+                    self._json(HTTPStatus.OK, management_result)
                 elif parsed.path == "/api/state":
                     state = owner.projection.state(owner.kernel.subject_id)
                     self._json(HTTPStatus.OK, state, public_contract=True)
@@ -5298,6 +5430,12 @@ class NoyraHTTPServer:
                 if self.path == "/api/public-posts/captcha":
                     self._issue_public_post_captcha()
                     return
+                if self.path == "/api/admin/public-publications" or (
+                    self.path.startswith("/api/admin/public-publications/")
+                    and self.path.endswith("/withdraw")
+                ):
+                    self._public_publication()
+                    return
                 if self.path == "/api/public-posts":
                     if self.headers.get_content_type() != "application/json":
                         self._discard_small_request_body()
@@ -7359,6 +7497,57 @@ class NoyraHTTPServer:
                         "status": record.status,
                     },
                 )
+
+            def _public_publication(self) -> None:
+                if not self._authorized():
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._discard_small_request_body()
+                    self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+                    return
+                payload = self._request_json()
+                if payload is None:
+                    return
+                try:
+                    if self.path.endswith("/withdraw"):
+                        if set(payload) != {"expected_revision"}:
+                            raise ValueError("invalid withdrawal")
+                        identifier = self.path.removeprefix(
+                            "/api/admin/public-publications/"
+                        ).removesuffix("/withdraw")
+                        owner.public_archive.withdraw(
+                            owner.kernel.subject_id,
+                            identifier,
+                            payload["expected_revision"],
+                            actor=self._actor(),
+                        )
+                        result = {"status": "withdrawn"}
+                    else:
+                        result = owner.public_archive.publish(
+                            owner.kernel.subject_id, payload, actor=self._actor()
+                        )
+                except NotFoundError:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "public_publication_not_found"})
+                    return
+                except PublicationConflict:
+                    self._json(HTTPStatus.CONFLICT, {"error": "public_publication_conflict"})
+                    return
+                except PublicationCapacityError:
+                    self._json(
+                        HTTPStatus.BAD_REQUEST, {"error": "public_publication_capacity_full"}
+                    )
+                    return
+                except IntegrityError:
+                    self._json(
+                        HTTPStatus.SERVICE_UNAVAILABLE, {"error": "public_content_unavailable"}
+                    )
+                    return
+                except (ValueError, TypeError, UnicodeError, PermissionError):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_public_publication"})
+                    return
+                self._json(HTTPStatus.OK, result)
 
             def _configure_public_post_controls(self) -> None:
                 if not self._authorized():
@@ -9436,6 +9625,89 @@ class NoyraHTTPServer:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _public_article(self, parsed: Any) -> None:
+                parts = parsed.path.split("/")
+                if len(parts) != 4 or parts[2] not in PUBLIC_VIEWS or not parts[3]:
+                    self._text(
+                        HTTPStatus.NOT_FOUND,
+                        "text/plain; charset=utf-8",
+                        b"Not found\n",
+                        cache_control="no-store",
+                    )
+                    return
+                kind = parts[2]
+                try:
+                    identifier = unquote(parts[3], errors="strict")
+                    params = parse_qs(parsed.query, keep_blank_values=True)
+                    if (
+                        set(params) - {"lang", "theme", "return"}
+                        or any(len(values) != 1 for values in params.values())
+                        or params.get("lang", ["zh"]) not in [["zh"], ["en"]]
+                        or params.get("theme", ["system"]) not in [["system"], ["light"], ["dark"]]
+                        or params.get("return", [PUBLIC_VIEWS[kind]])[0]
+                        not in {*PUBLIC_VIEWS.values(), "overview", "timeline"}
+                    ):
+                        raise ValueError("invalid reading language")
+                    page = owner.public_archive.page(
+                        owner.kernel.subject_id, kind=kind, limit=1, identifier=identifier
+                    )
+                except (ValueError, UnicodeError):
+                    self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "invalid_public_query"},
+                        public_contract=ARCHIVE_CONTRACT,
+                    )
+                    return
+                except PublicQueryBudgetExceeded:
+                    self._json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "public_query_budget_exceeded"},
+                        public_contract=ARCHIVE_CONTRACT,
+                    )
+                    return
+                except IntegrityError:
+                    self._json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "public_content_unavailable"},
+                        public_contract=ARCHIVE_CONTRACT,
+                    )
+                    return
+                if not page["items"]:
+                    self._text(
+                        HTTPStatus.NOT_FOUND,
+                        "text/plain; charset=utf-8",
+                        b"Not found\n",
+                        cache_control="no-store",
+                    )
+                    return
+                language = params.get("lang", ["zh"])[0]
+                try:
+                    body = public_article_html(
+                        page["items"][0],
+                        owner.settings.public_site_url or "",
+                        english=language == "en",
+                        theme=params.get("theme", ["system"])[0],
+                        return_view=params.get("return", [None])[0],
+                    )
+                except (KeyError, TypeError, ValueError):
+                    self._json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "public_content_unavailable"},
+                        public_contract=ARCHIVE_CONTRACT,
+                    )
+                    return
+                if len(body) > PUBLIC_MAX_RESPONSE_BYTES:
+                    self._json(
+                        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                        {"error": "public_response_too_large"},
+                        public_contract=ARCHIVE_CONTRACT,
+                    )
+                    return
+                self.send_response(HTTPStatus.OK)
+                self._headers("text/html; charset=utf-8", len(body), cache_control="no-store")
+                self.end_headers()
+                self.wfile.write(body)
+
             def _robots_txt(self) -> None:
                 lines = [
                     "User-agent: *",
@@ -9449,7 +9721,7 @@ class NoyraHTTPServer:
                 body = ("\n".join(lines) + "\n").encode("utf-8")
                 self._text(HTTPStatus.OK, "text/plain; charset=utf-8", body)
 
-            def _sitemap_xml(self) -> None:
+            def _sitemap_xml(self, parsed: Any) -> None:
                 site_url = owner.settings.public_site_url
                 if not site_url:
                     self._text(
@@ -9458,22 +9730,89 @@ class NoyraHTTPServer:
                         b"Configure NOYRA_PUBLIC_SITE_URL to publish a sitemap.\n",
                     )
                     return
-                location = html.escape(site_url + "/", quote=False)
+                try:
+                    params = parse_qs(parsed.query, keep_blank_values=True)
+                    if set(params) - {"part"} or (params and len(params["part"]) != 1):
+                        raise ValueError("invalid sitemap query")
+                    if params:
+                        if params["part"] == ["home"]:
+                            items = []
+                        else:
+                            items = owner.public_archive.sitemap_partition(
+                                owner.kernel.subject_id, params["part"][0]
+                            )
+                        entries = "".join(
+                            "<url><loc>"
+                            f"{html.escape(site_url + public_item_path(item['kind'], item['id']))}"
+                            "</loc>"
+                            f"<lastmod>{html.escape(item['updated_at'])}</lastmod></url>\n"
+                            for item in items
+                        )
+                        if params["part"] == ["home"]:
+                            entries = f"<url><loc>{html.escape(site_url + '/')}</loc></url>\n"
+                        root_tag = "urlset"
+                    else:
+                        partitions = owner.public_archive.sitemap_partitions(
+                            owner.kernel.subject_id
+                        )
+                        entries = "".join(
+                            "<sitemap><loc>"
+                            f"{html.escape(site_url + '/sitemap.xml?part=' + quote(part, safe=''))}"
+                            "</loc></sitemap>\n"
+                            for part in ["home", *partitions]
+                        )
+                        root_tag = "sitemapindex"
+                except (ValueError, UnicodeError):
+                    self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "invalid_public_query"},
+                        public_contract=ARCHIVE_CONTRACT,
+                    )
+                    return
+                except PublicQueryBudgetExceeded:
+                    self._json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "public_query_budget_exceeded"},
+                        public_contract=ARCHIVE_CONTRACT,
+                    )
+                    return
+                except IntegrityError:
+                    self._json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "public_content_unavailable"},
+                        public_contract=ARCHIVE_CONTRACT,
+                    )
+                    return
                 body = (
                     '<?xml version="1.0" encoding="UTF-8"?>\n'
-                    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
-                    f"  <url><loc>{location}</loc></url>\n"
-                    "</urlset>\n"
+                    f'<{root_tag} xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+                    f"{entries}"
+                    f"</{root_tag}>\n"
                 ).encode()
+                if len(body) > PUBLIC_MAX_RESPONSE_BYTES:
+                    self._json(
+                        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                        {"error": "public_response_too_large"},
+                        public_contract=ARCHIVE_CONTRACT,
+                    )
+                    return
                 self._text(
                     HTTPStatus.OK,
                     "application/xml; charset=utf-8",
                     body,
+                    cache_control="no-store",
                 )
 
-            def _text(self, status: HTTPStatus, content_type: str, body: bytes) -> None:
+            def _text(
+                self,
+                status: HTTPStatus,
+                content_type: str,
+                body: bytes,
+                *,
+                cache_control: str = "public, max-age=300",
+            ) -> None:
                 self.send_response(status)
-                self._headers(content_type, len(body), cache_control="public, max-age=300")
+                self._headers(content_type, len(body), cache_control=cache_control)
                 self.end_headers()
                 self.wfile.write(body)
 
@@ -9518,7 +9857,7 @@ class NoyraHTTPServer:
                 payload: Any,
                 *,
                 retry_after: int | None = None,
-                public_contract: bool = False,
+                public_contract: bool | str = False,
             ) -> None:
                 body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
                 if public_contract and len(body) > PUBLIC_MAX_RESPONSE_BYTES:
@@ -9526,7 +9865,9 @@ class NoyraHTTPServer:
                     body = json.dumps(
                         {
                             "error": "public_response_too_large",
-                            "contract": PUBLIC_CONTRACT_ID,
+                            "contract": public_contract
+                            if isinstance(public_contract, str)
+                            else PUBLIC_CONTRACT_ID,
                         },
                         ensure_ascii=False,
                         separators=(",", ":"),
@@ -9551,7 +9892,7 @@ class NoyraHTTPServer:
                 length: int,
                 *,
                 cache_control: str = "no-store",
-                public_contract: bool = False,
+                public_contract: bool | str = False,
             ) -> None:
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(length))
@@ -9564,7 +9905,10 @@ class NoyraHTTPServer:
                 self.send_header("Cross-Origin-Resource-Policy", "same-origin")
                 self.send_header("X-Permitted-Cross-Domain-Policies", "none")
                 if public_contract:
-                    self.send_header("X-Noyra-Public-Contract", PUBLIC_CONTRACT_ID)
+                    self.send_header(
+                        "X-Noyra-Public-Contract",
+                        public_contract if isinstance(public_contract, str) else PUBLIC_CONTRACT_ID,
+                    )
                 if owner.settings.public_site_url or owner.settings.admin_session_cookie_secure:
                     self.send_header(
                         "Strict-Transport-Security",

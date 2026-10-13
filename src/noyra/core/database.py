@@ -25,6 +25,7 @@ from .private_erasure_schema import (
     PRIVATE_ROUTE_PUSH_COLUMNS,
 )
 from .private_sources import MIGRATION_V86, assert_private_inputs_available
+from .public_archive_schema import MIGRATION_V93
 from .public_policy import MIGRATION_V82
 from .resource_policy import (
     LIMIT_DIMENSIONS,
@@ -308,7 +309,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 92
+CURRENT_SCHEMA_VERSION = 93
 
 # The schema DDL fingerprint is checked after every successful initialization.
 # Update this value only alongside a reviewed schema migration and its tests.
@@ -316,6 +317,7 @@ CURRENT_SCHEMA_VERSION = 92
 # installations persist this value in ``schema_meta`` and therefore require
 # the value to remain stable across compatible runtime fixes.
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
+    93: "8968045531bd80f2f1d487cb9a4b01e2b84767b10b8a85fc4ce85d0c956022bb",
     92: "28e3601ed49497ace746afc16374512e35491c6a3cd30299d4fd8122eab4c543",
     91: "7747814bce9f944f0b64f407da16524a7728671272797273eefc5ba72193daab",
     90: "649a64f023b29e3dddc355e0e45598e77446876884f3adeb0c199b1677ba8eb5",
@@ -339,6 +341,7 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 # auditable P0 finding.  Tables, indexes, and views still fail closed during
 # database construction because they define the storage contract itself.
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
+    93: "bd4f12a88b407fc6f3fe4ab713401afb9c1a4ba73d79146927898a2ca8211b36",
     92: "09ccb3fabc0eb74acae5bb8b3a6fa540d1fda3a436f1b62ab32755e9d46226a6",
     91: "ab84d8a689063a3e2313c587f3dc7bd20795bac4187f00f2fade22b794de43c4",
     90: "96618523ee767b8249c9c03775ff330c28195e68579a7e344475a369cf29400d",
@@ -6903,6 +6906,7 @@ SELECT 1;
     90: MIGRATION_V90,
     91: MIGRATION_V91,
     92: migration_v92(),
+    93: MIGRATION_V93,
 }
 
 

@@ -106,16 +106,21 @@ class EventPayloadArchive:
         root: Path | str,
         *,
         create_root: bool = True,
+        read_only_root: bool = False,
         keyring: ArchiveKeyring | None = None,
         cloud_provider: ArchiveProvider | None = None,
         cache_cloud_restores: bool = True,
         subject_id: str | None = None,
     ):
+        if read_only_root and create_root:
+            raise ValueError("read-only archive resolution cannot create directories")
         self.database = database
         self.root = (
             Path(root).resolve()
             if subject_id is None
-            else resolve_subject_archive_root(database, subject_id, root, create=create_root)
+            else resolve_subject_archive_root(
+                database, subject_id, root, create=create_root, read_only=read_only_root
+            )
         )
         self.keyring = keyring or ArchiveKeyring.from_env()
         active = self.keyring.active
@@ -812,6 +817,8 @@ class EventPayloadArchive:
         connection: Any | None = None,
         max_decompressed_bytes: int | None = None,
         max_events: int | None = None,
+        local_only: bool = False,
+        consume_bytes: Callable[[int], None] | None = None,
     ) -> dict[str, dict[str, Any]]:
         if connection is None:
             with self.database.connection() as owned_connection:
@@ -821,15 +828,21 @@ class EventPayloadArchive:
                     connection=owned_connection,
                     max_decompressed_bytes=max_decompressed_bytes,
                     max_events=max_events,
+                    local_only=local_only,
+                    consume_bytes=consume_bytes,
                 )
         self.keyring.validate_revision(self.database, subject_id, connection=connection)
-        return self._load_segment(
+        loaded = self._load_segment(
             subject_id,
             object_key,
             connection=connection,
             max_decompressed_bytes=max_decompressed_bytes,
             max_events=max_events,
-        ).payloads
+            local_only=local_only,
+        )
+        if consume_bytes is not None:
+            consume_bytes(loaded.decompressed_bytes)
+        return loaded.payloads
 
     def _load_segment(
         self,
@@ -840,6 +853,7 @@ class EventPayloadArchive:
         max_decompressed_bytes: int | None,
         max_events: int | None,
         metadata: Any | None = None,
+        local_only: bool = False,
     ) -> _LoadedEventArchiveSegment:
         row = metadata
         if row is None:
@@ -865,6 +879,10 @@ class EventPayloadArchive:
                 max_bytes=stored_limit,
             )
         except FileNotFoundError:
+            if local_only:
+                raise ArchiveUnavailableError(
+                    "event payload local archive is unavailable"
+                ) from None
             try:
                 compressed = ArchiveReplicaResolver(
                     self.database,

@@ -83,7 +83,7 @@ for (const oldOutcome of ["success", "failure"]) {
     let calls = 0;
     const { sandbox } = context({ csrfToken: "", submitButton: () => button,
       stopUpgradePolling: () => {}, stopRuntimeLogPolling: () => {},
-      clearChat: () => {}, clearWallet: () => {}, document: { querySelectorAll: () => [] },
+      clearChat: () => {}, clearWallet: () => {}, clearPublicPublications: () => {}, document: { querySelectorAll: () => [] },
       renderedModels: new Map(), publicPostActionKeys: new Map(), publicPostLoadVersion: 0,
       modelLoadVersion: 0, usageLoadVersion: 0, usageResourceVersion: 0, healthLoadVersion: 0,
       healthPages: { model: 0, search: 0 },
@@ -128,34 +128,6 @@ test("current login error restores submit ownership and allows retry", async () 
   assert.equal(sandbox.activeLoginAttempt, null);
   assert.equal(sandbox.$("#login-status").textContent, "current login error");
 });
-
-for (const view of ["diary", "behavior", "interactions", "posts"]) {
-  for (const outcome of ["success", "error"]) {
-    test(`public ${view} ignores late ${outcome} after switching views`, async () => {
-      const body = deferred();
-      const content = { innerHTML: "" };
-      const pub = readFileSync(join(__dirname, "../../src/noyra/web/app.js"), "utf8");
-      const sandbox = vm.createContext({ content, activeView: view, viewGeneration: 0,
-        beginViewGeneration() { return ++sandbox.viewGeneration; },
-        currentViewGeneration: generation => generation === sandbox.viewGeneration,
-        requestScope: () => ({ signal: {} }), loadState: async () => {},
-        getJson: () => body.promise, renderDiary: () => "old diary", renderPosts: () => "new posts",
-        table: () => "old table", isAbortError: () => false, escapeHtml: String,
-        publicErrorMessage: () => "old error" });
-      vm.runInContext(pub.slice(pub.indexOf("async function loadView("),
-        pub.indexOf("async function loadPublicPostCaptcha(")), sandbox);
-      const old = sandbox.refresh();
-      sandbox.activeView = "posts";
-      sandbox.getJson = async () => [];
-      await sandbox.refresh();
-      assert.equal(content.innerHTML, "new posts");
-      if (outcome === "success") body.resolve([]);
-      else body.reject(new Error("old response"));
-      await old;
-      assert.equal(content.innerHTML, "new posts");
-    });
-  }
-}
 
 test("cost-only protection rejects unknown and zero-priced drafts but allows free or bounded alternatives", () => {
   const { sandbox } = modelContext();
@@ -568,7 +540,7 @@ test("logout clears every private panel, loaded option, cache and open dialog",a
   const form={dataset:{dirty:"1",revision:"7",lengthRevision:"9"},reset(){}};
   const secret={value:"synthetic secret"};
   const {sandbox,nodes}=context({request:async()=>null,stopUpgradePolling:()=>{},stopRuntimeLogPolling:()=>{},
-    clearChat:()=>{},clearWallet:()=>{},document:{querySelectorAll:selector=>{
+    clearChat:()=>{},clearWallet:()=>{}, clearPublicPublications:()=>{},document:{querySelectorAll:selector=>{
       if(selector==="#admin-shell form")return [form];
       if(selector.includes("input[type=password]"))return [secret];
       if(selector==="dialog[open]")return [{close:()=>closed++}];

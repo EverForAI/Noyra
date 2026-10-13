@@ -7,6 +7,34 @@ from typing import Literal
 
 RouteRole = Literal["none", "read", "operator", "export"]
 
+
+@dataclass(frozen=True)
+class PublicWebRouteContract:
+    """Anonymous documents, separate from versioned JSON API contracts."""
+
+    path: str
+    parameters: tuple[str, ...]
+    responses: tuple[int, ...]
+    success_content_type: str
+    cache_control: str = "no-store"
+    method: str = "GET"
+
+
+PUBLIC_WEB_ROUTE_CONTRACTS = (
+    PublicWebRouteContract(
+        "/public/{kind}/{id}",
+        ("kind", "id", "lang", "theme", "return"),
+        (200, 400, 404, 413, 429, 503),
+        "text/html; charset=utf-8",
+    ),
+    PublicWebRouteContract(
+        "/sitemap.xml",
+        ("part",),
+        (200, 400, 404, 413, 429, 503),
+        "application/xml; charset=utf-8",
+    ),
+)
+
 # These failures are produced by the HTTP boundary before (or around) the
 # individual route handler.  Keeping them explicit prevents the OpenAPI
 # inventory from claiming that a route can only return its happy-path status.
@@ -74,6 +102,32 @@ API_ROUTE_CONTRACTS: tuple[APIRouteContract, ...] = (
     _get("/health", "none", 200, 503),
     _get("/health/live", "none", 200),
     _get("/health/ready", "none", 200, 503),
+    _get("/api/v1/public/overview", "none", 200, 400, 413, 503),
+    _get("/api/v1/public/timeline", "none", 200, 400, 413, 503),
+    _get("/api/v1/public/diary", "none", 200, 400, 413, 503),
+    _get("/api/v1/public/behavior", "none", 200, 400, 413, 503),
+    _get("/api/v1/public/interactions", "none", 200, 400, 413, 503),
+    _get("/api/v1/public/posts", "none", 200, 400, 413, 503),
+    _get("/api/v1/public/goals", "none", 200, 400, 413, 503),
+    _get("/api/v1/public/projects", "none", 200, 400, 413, 503),
+    _get("/api/v1/public/predictions", "none", 200, 400, 413, 503),
+    _get("/api/v1/public/research", "none", 200, 400, 413, 503),
+    _get("/api/v1/public/sleep", "none", 200, 400, 413, 503),
+    _get("/api/v1/public/lifecycle", "none", 200, 400, 413, 503),
+    _get("/api/v1/public/updates", "none", 200, 400, 413, 503),
+    _get("/api/v1/admin/public-publications", "operator", 200, 400, 401, 503),
+    _post("/api/v1/admin/public-publications", "operator", 200, 400, 401, 404, 409, 415, 503),
+    _post(
+        "/api/v1/admin/public-publications/{publicationId}/withdraw",
+        "operator",
+        200,
+        400,
+        401,
+        404,
+        409,
+        415,
+        503,
+    ),
     _get("/api/v1/state"),
     _get("/api/v1/state/details", "read", 200, 401),
     _get("/api/v1/diary"),

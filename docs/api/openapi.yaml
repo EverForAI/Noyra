@@ -57,6 +57,363 @@ paths:
           description: Startup or runtime admission dependency is unavailable
           content:
             application/json: { schema: { $ref: '#/components/schemas/Readiness' } }
+  /api/v1/public/overview:
+    get:
+      tags: [observation]
+      operationId: publicArchiveOverview
+      description: |
+        Anonymous public-contract-v2 archive. The /api/public/overview alias is equivalent.
+        Reads approved public fields only; no private source text, credentials or diagnostics.
+      responses:
+        '200': { $ref: '#/components/responses/PublicArchiveOverview' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PublicArchiveTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/public/timeline:
+    get:
+      tags: [observation]
+      operationId: publicArchiveTimeline
+      description: |
+        Anonymous public-contract-v2 archive. The /api/public/timeline alias is equivalent.
+        Reads approved public fields only; no private source text, credentials or diagnostics.
+      parameters:
+        - { $ref: '#/components/parameters/PublicArchiveLimit' }
+        - { $ref: '#/components/parameters/PublicArchiveCursor' }
+        - { $ref: '#/components/parameters/PublicArchiveSince' }
+        - { $ref: '#/components/parameters/PublicArchiveUntil' }
+        - { $ref: '#/components/parameters/PublicArchiveSearch' }
+        - { $ref: '#/components/parameters/PublicArchiveStatus' }
+        - { $ref: '#/components/parameters/PublicArchiveId' }
+        - name: kind
+          in: query
+          schema: { type: string, enum: [all, diary, behavior, interaction, post, lifecycle, goal, project, prediction, research, sleep, update], default: all }
+      responses:
+        '200': { $ref: '#/components/responses/PublicArchivePage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PublicArchiveTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/public/diary:
+    get:
+      tags: [observation]
+      operationId: publicArchiveDiary
+      description: |
+        Anonymous public-contract-v2 archive. The /api/public/diary alias is equivalent.
+        Reads approved public fields only; no private source text, credentials or diagnostics.
+      parameters:
+        - { $ref: '#/components/parameters/PublicArchiveLimit' }
+        - { $ref: '#/components/parameters/PublicArchiveCursor' }
+        - { $ref: '#/components/parameters/PublicArchiveSince' }
+        - { $ref: '#/components/parameters/PublicArchiveUntil' }
+        - { $ref: '#/components/parameters/PublicArchiveSearch' }
+        - { $ref: '#/components/parameters/PublicArchiveStatus' }
+        - { $ref: '#/components/parameters/PublicArchiveId' }
+      responses:
+        '200': { $ref: '#/components/responses/PublicArchivePage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PublicArchiveTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/public/behavior:
+    get:
+      tags: [observation]
+      operationId: publicArchiveBehavior
+      description: |
+        Anonymous public-contract-v2 archive. The /api/public/behavior alias is equivalent.
+        Reads approved public fields only; no private source text, credentials or diagnostics.
+      parameters:
+        - { $ref: '#/components/parameters/PublicArchiveLimit' }
+        - { $ref: '#/components/parameters/PublicArchiveCursor' }
+        - { $ref: '#/components/parameters/PublicArchiveSince' }
+        - { $ref: '#/components/parameters/PublicArchiveUntil' }
+        - { $ref: '#/components/parameters/PublicArchiveSearch' }
+        - { $ref: '#/components/parameters/PublicArchiveStatus' }
+        - { $ref: '#/components/parameters/PublicArchiveId' }
+      responses:
+        '200': { $ref: '#/components/responses/PublicArchivePage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PublicArchiveTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/public/interactions:
+    get:
+      tags: [observation]
+      operationId: publicArchiveInteractions
+      description: |
+        Anonymous public-contract-v2 archive. The /api/public/interactions alias is equivalent.
+        Reads approved public fields only; no private source text, credentials or diagnostics.
+      parameters:
+        - { $ref: '#/components/parameters/PublicArchiveLimit' }
+        - { $ref: '#/components/parameters/PublicArchiveCursor' }
+        - { $ref: '#/components/parameters/PublicArchiveSince' }
+        - { $ref: '#/components/parameters/PublicArchiveUntil' }
+        - { $ref: '#/components/parameters/PublicArchiveSearch' }
+        - { $ref: '#/components/parameters/PublicArchiveStatus' }
+        - { $ref: '#/components/parameters/PublicArchiveId' }
+      responses:
+        '200': { $ref: '#/components/responses/PublicArchivePage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PublicArchiveTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/public/posts:
+    get:
+      tags: [observation]
+      operationId: publicArchivePosts
+      description: |
+        Anonymous public-contract-v2 archive. The /api/public/posts alias is equivalent.
+        Reads approved public fields only; no private source text, credentials or diagnostics.
+      parameters:
+        - { $ref: '#/components/parameters/PublicArchiveLimit' }
+        - { $ref: '#/components/parameters/PublicArchiveCursor' }
+        - { $ref: '#/components/parameters/PublicArchiveSince' }
+        - { $ref: '#/components/parameters/PublicArchiveUntil' }
+        - { $ref: '#/components/parameters/PublicArchiveSearch' }
+        - { $ref: '#/components/parameters/PublicArchiveStatus' }
+        - { $ref: '#/components/parameters/PublicArchiveId' }
+      responses:
+        '200': { $ref: '#/components/responses/PublicArchivePage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PublicArchiveTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/public/goals:
+    get:
+      tags: [observation]
+      operationId: publicArchiveGoals
+      description: |
+        Anonymous public-contract-v2 archive. The /api/public/goals alias is equivalent.
+        Reads approved public fields only; no private source text, credentials or diagnostics.
+      parameters:
+        - { $ref: '#/components/parameters/PublicArchiveLimit' }
+        - { $ref: '#/components/parameters/PublicArchiveCursor' }
+        - { $ref: '#/components/parameters/PublicArchiveSince' }
+        - { $ref: '#/components/parameters/PublicArchiveUntil' }
+        - { $ref: '#/components/parameters/PublicArchiveSearch' }
+        - { $ref: '#/components/parameters/PublicArchiveStatus' }
+        - { $ref: '#/components/parameters/PublicArchiveId' }
+      responses:
+        '200': { $ref: '#/components/responses/PublicArchivePage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PublicArchiveTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/public/projects:
+    get:
+      tags: [observation]
+      operationId: publicArchiveProjects
+      description: |
+        Anonymous public-contract-v2 archive. The /api/public/projects alias is equivalent.
+        Reads approved public fields only; no private source text, credentials or diagnostics.
+      parameters:
+        - { $ref: '#/components/parameters/PublicArchiveLimit' }
+        - { $ref: '#/components/parameters/PublicArchiveCursor' }
+        - { $ref: '#/components/parameters/PublicArchiveSince' }
+        - { $ref: '#/components/parameters/PublicArchiveUntil' }
+        - { $ref: '#/components/parameters/PublicArchiveSearch' }
+        - { $ref: '#/components/parameters/PublicArchiveStatus' }
+        - { $ref: '#/components/parameters/PublicArchiveId' }
+      responses:
+        '200': { $ref: '#/components/responses/PublicArchivePage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PublicArchiveTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/public/predictions:
+    get:
+      tags: [observation]
+      operationId: publicArchivePredictions
+      description: |
+        Anonymous public-contract-v2 archive. The /api/public/predictions alias is equivalent.
+        Reads approved public fields only; no private source text, credentials or diagnostics.
+      parameters:
+        - { $ref: '#/components/parameters/PublicArchiveLimit' }
+        - { $ref: '#/components/parameters/PublicArchiveCursor' }
+        - { $ref: '#/components/parameters/PublicArchiveSince' }
+        - { $ref: '#/components/parameters/PublicArchiveUntil' }
+        - { $ref: '#/components/parameters/PublicArchiveSearch' }
+        - { $ref: '#/components/parameters/PublicArchiveStatus' }
+        - { $ref: '#/components/parameters/PublicArchiveId' }
+      responses:
+        '200': { $ref: '#/components/responses/PublicArchivePage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PublicArchiveTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/public/research:
+    get:
+      tags: [observation]
+      operationId: publicArchiveResearch
+      description: |
+        Anonymous public-contract-v2 archive. The /api/public/research alias is equivalent.
+        Reads approved public fields only; no private source text, credentials or diagnostics.
+      parameters:
+        - { $ref: '#/components/parameters/PublicArchiveLimit' }
+        - { $ref: '#/components/parameters/PublicArchiveCursor' }
+        - { $ref: '#/components/parameters/PublicArchiveSince' }
+        - { $ref: '#/components/parameters/PublicArchiveUntil' }
+        - { $ref: '#/components/parameters/PublicArchiveSearch' }
+        - { $ref: '#/components/parameters/PublicArchiveStatus' }
+        - { $ref: '#/components/parameters/PublicArchiveId' }
+      responses:
+        '200': { $ref: '#/components/responses/PublicArchivePage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PublicArchiveTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/public/sleep:
+    get:
+      tags: [observation]
+      operationId: publicArchiveSleep
+      description: |
+        Anonymous public-contract-v2 archive. The /api/public/sleep alias is equivalent.
+        Reads approved public fields only; no private source text, credentials or diagnostics.
+      parameters:
+        - { $ref: '#/components/parameters/PublicArchiveLimit' }
+        - { $ref: '#/components/parameters/PublicArchiveCursor' }
+        - { $ref: '#/components/parameters/PublicArchiveSince' }
+        - { $ref: '#/components/parameters/PublicArchiveUntil' }
+        - { $ref: '#/components/parameters/PublicArchiveSearch' }
+        - { $ref: '#/components/parameters/PublicArchiveStatus' }
+        - { $ref: '#/components/parameters/PublicArchiveId' }
+      responses:
+        '200': { $ref: '#/components/responses/PublicArchivePage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PublicArchiveTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/public/lifecycle:
+    get:
+      tags: [observation]
+      operationId: publicArchiveLifecycle
+      description: |
+        Anonymous public-contract-v2 archive. The /api/public/lifecycle alias is equivalent.
+        Reads approved public fields only; no private source text, credentials or diagnostics.
+      parameters:
+        - { $ref: '#/components/parameters/PublicArchiveLimit' }
+        - { $ref: '#/components/parameters/PublicArchiveCursor' }
+        - { $ref: '#/components/parameters/PublicArchiveSince' }
+        - { $ref: '#/components/parameters/PublicArchiveUntil' }
+        - { $ref: '#/components/parameters/PublicArchiveSearch' }
+        - { $ref: '#/components/parameters/PublicArchiveStatus' }
+        - { $ref: '#/components/parameters/PublicArchiveId' }
+      responses:
+        '200': { $ref: '#/components/responses/PublicArchivePage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PublicArchiveTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/public/updates:
+    get:
+      tags: [observation]
+      operationId: publicArchiveUpdates
+      description: |
+        Anonymous public-contract-v2 archive. The /api/public/updates alias is equivalent.
+        Reads approved public fields only; no private source text, credentials or diagnostics.
+      parameters:
+        - { $ref: '#/components/parameters/PublicArchiveLimit' }
+        - { $ref: '#/components/parameters/PublicArchiveCursor' }
+        - { $ref: '#/components/parameters/PublicArchiveSince' }
+        - { $ref: '#/components/parameters/PublicArchiveUntil' }
+        - { $ref: '#/components/parameters/PublicArchiveSearch' }
+        - { $ref: '#/components/parameters/PublicArchiveStatus' }
+        - { $ref: '#/components/parameters/PublicArchiveId' }
+      responses:
+        '200': { $ref: '#/components/responses/PublicArchivePage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PublicArchiveTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/public-publications:
+    get:
+      tags: [configuration]
+      operationId: listPublicPublications
+      security: [{ operatorBearer: [] }]
+      description: |
+        Operator-only approved summaries, including withdrawn entries and private source IDs.
+        No query retains the legacy list capped at 100. Pagination requires view=management.
+      parameters:
+        - { name: view, in: query, schema: { type: string, enum: [management] } }
+        - { name: id, in: query, description: Authenticated outcome reconciliation; use with view=management and without limit or cursor. Returns item or null., schema: { type: string, minLength: 1, maxLength: 100 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+        - { $ref: '#/components/parameters/PublicArchiveCursor' }
+      responses:
+        '200':
+          description: Legacy list or management page with items and next_cursor.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [item]
+                    properties:
+                      item: { type: object, nullable: true }
+                  - { type: array, maxItems: 100, items: { type: object } }
+                  - type: object
+                    required: [items, next_cursor]
+                    properties:
+                      items: { type: array, maxItems: 50, items: { type: object } }
+                      next_cursor: { type: string, nullable: true }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    post:
+      tags: [configuration]
+      operationId: publishPublicSummary
+      security: [{ operatorBearer: [] }]
+      description: |
+        Explicitly approved independent summary; never copies or modifies private source text.
+        Creation uses expected_revision=0; edits use the current revision. Identical retries
+        do not append a revision. Source/kind changes and stale revisions are rejected.
+        Cookie sessions require the existing X-CSRF-Token. Withdrawal cannot erase visitor copies.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/PublicPublicationInput' } } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '411': { description: Content-Length is required }
+        '413': { description: Request body exceeds the configured byte limit }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/public-publications/{publicationId}/withdraw:
+    post:
+      tags: [configuration]
+      operationId: withdrawPublicSummary
+      security: [{ operatorBearer: [] }]
+      description: |
+        Stops anonymous reading of the independent summary, retaining private originals and
+        immutable revision metadata. Requires current revision; identical withdrawal is idempotent.
+        Cookie sessions require the existing X-CSRF-Token.
+      parameters:
+        - { name: publicationId, in: path, required: true, schema: { type: string, minLength: 8, maxLength: 100 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_revision]
+              properties:
+                expected_revision: { type: integer, minimum: 1 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '411': { description: Content-Length is required }
+        '413': { description: Request body exceeds the configured byte limit }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/v1/state:
     get:
       tags: [observation]
@@ -2173,6 +2530,38 @@ components:
       scheme: bearer
       description: NOYRA_EXPORT_TOKEN (or break-glass/admin token)
   parameters:
+    PublicArchiveLimit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    PublicArchiveCursor:
+      name: cursor
+      in: query
+      description: Cursor returned by the preceding page; bound to subject and filters.
+      schema: { type: string, maxLength: 1500 }
+    PublicArchiveSince:
+      name: since
+      in: query
+      schema: { type: string, format: date-time, maxLength: 40 }
+    PublicArchiveUntil:
+      name: until
+      in: query
+      schema: { type: string, format: date-time, maxLength: 40 }
+    PublicArchiveSearch:
+      name: search
+      in: query
+      description: Search approved public text only.
+      schema: { type: string, maxLength: 120 }
+    PublicArchiveStatus:
+      name: status
+      in: query
+      description: Empty means all statuses; otherwise exact approved public status text, including legacy custom values.
+      schema: { type: string, maxLength: 500 }
+    PublicArchiveId:
+      name: id
+      in: query
+      description: Recheck current visibility and fetch the full public body in its matching category.
+      schema: { type: string, minLength: 1, maxLength: 256 }
     Limit:
       name: limit
       in: query
@@ -2243,6 +2632,21 @@ components:
       required: true
       schema: { type: string, minLength: 1, maxLength: 256 }
   responses:
+    PublicArchivePage:
+      description: Public-contract-v2 bounded page; list bodies are empty, detail bodies are rechecked.
+      headers:
+        Cache-Control: { schema: { type: string, enum: [no-store] } }
+        X-Noyra-Public-Contract: { schema: { type: string, enum: [public-contract-v2] } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/PublicArchivePage' } } }
+    PublicArchiveOverview:
+      description: Public state metadata and small excerpts of explicitly public records.
+      headers:
+        Cache-Control: { schema: { type: string, enum: [no-store] } }
+        X-Noyra-Public-Contract: { schema: { type: string, enum: [public-contract-v2] } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/PublicArchiveOverview' } } }
+    PublicArchiveTooLarge:
+      description: public_response_too_large; response exceeds 2000000 UTF-8 bytes.
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     JsonList:
       description: JSON list
       content: { application/json: { schema: { type: array, items: { type: object } } } }
@@ -2266,6 +2670,21 @@ components:
       content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     TooManyRequests:
       description: Bounded queue or rate limit exhausted
+      headers:
+        Retry-After: { description: Suggested wait in seconds., schema: { type: integer, minimum: 1 } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    RateLimited:
+      $ref: '#/components/responses/TooManyRequests'
+    LengthRequired:
+      description: Content-Length is missing or invalid; error is length_required.
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    RequestEntityTooLarge:
+      description: Request body exceeds the configured byte limit; error is too_large.
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    RequestTooLarge:
+      $ref: '#/components/responses/RequestEntityTooLarge'
+    NotImplemented:
+      description: Provider does not support model discovery; error is model_discovery_unsupported.
       content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     ServiceUnavailable:
       description: Runtime dependency is degraded
@@ -2277,6 +2696,65 @@ components:
       description: JSON request body is required
       content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
   schemas:
+    PublicArchiveItem:
+      type: object
+      additionalProperties: false
+      required: [id, kind, title, summary, body, status, details, occurred_at, updated_at, provenance]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [diary, behavior, interaction, post, lifecycle, goal, project, prediction, research, sleep, update] }
+        title: { type: string }
+        summary: { type: string }
+        body: { type: string, description: Empty in lists; current approved body for an id query. }
+        status: { type: string }
+        details: { type: object, description: Approved category fields only; see public-contract-v2.md. }
+        occurred_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        provenance: { type: string }
+        revision: { type: integer, minimum: 1 }
+    PublicArchivePage:
+      type: object
+      additionalProperties: false
+      required: [contract, generated_at, items, next_cursor]
+      properties:
+        contract: { type: string, enum: [public-contract-v2] }
+        generated_at: { type: string, format: date-time }
+        items: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/PublicArchiveItem' } }
+        next_cursor: { type: string, nullable: true }
+    PublicArchiveOverview:
+      type: object
+      additionalProperties: false
+      required: [contract, generated_at, display_name, lifecycle, public_diary_count, last_sleep_completed_at, recent, goals, projects]
+      properties:
+        contract: { type: string, enum: [public-contract-v2] }
+        generated_at: { type: string, format: date-time }
+        display_name: { type: string }
+        lifecycle:
+          type: object
+          additionalProperties: false
+          required: [state, changed_at]
+          properties:
+            state: { type: string, enum: [booting, orienting, active, paused, winding_down, reflective_sleep, deep_sleep, waking, stopped, resetting] }
+            changed_at: { type: string, format: date-time }
+        public_diary_count: { type: integer, minimum: 0 }
+        last_sleep_completed_at: { type: string, format: date-time, nullable: true }
+        recent: { type: array, maxItems: 3, items: { $ref: '#/components/schemas/PublicArchiveItem' } }
+        goals: { type: array, maxItems: 2, items: { $ref: '#/components/schemas/PublicArchiveItem' } }
+        projects: { type: array, maxItems: 2, items: { $ref: '#/components/schemas/PublicArchiveItem' } }
+    PublicPublicationInput:
+      type: object
+      additionalProperties: false
+      required: [publication_id, kind, title, summary, expected_revision, confirm_public]
+      properties:
+        publication_id: { type: string, pattern: '^[a-zA-Z0-9_-]{8,100}$' }
+        kind: { type: string, enum: [goal, project, prediction, research, sleep, update] }
+        source_id: { type: string, minLength: 1, maxLength: 256, nullable: true, description: Optional current-subject source; forbidden for updates; never returned anonymously. }
+        title: { type: string, minLength: 1, maxLength: 240 }
+        summary: { type: string, minLength: 1, maxLength: 1000 }
+        body: { type: string, maxLength: 20000, default: '' }
+        details: { type: object, description: Category-specific approved optional fields; see public-contract-v2.md. }
+        expected_revision: { type: integer, minimum: 0 }
+        confirm_public: { type: boolean, enum: [true] }
     RuntimeLogPage:
       type: object
       additionalProperties: false

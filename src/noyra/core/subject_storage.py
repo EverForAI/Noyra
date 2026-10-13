@@ -25,7 +25,10 @@ class SubjectStorageDirectory:
         legacy_subject_id: str | None = None,
         legacy_migration_allowed: bool = True,
         create: bool = False,
+        read_only: bool = False,
     ) -> Path | None:
+        if read_only and create:
+            raise ValueError("read-only subject resolution cannot create directories")
         validate_subject_storage_key(storage_key)
         if legacy_subject_id is not None:
             validate_subject_id(legacy_subject_id)
@@ -50,6 +53,7 @@ class SubjectStorageDirectory:
                 legacy_subject_id=legacy_subject_id,
                 legacy_migration_allowed=legacy_migration_allowed,
                 create=create,
+                read_only=read_only,
             )
 
     @classmethod
@@ -61,6 +65,7 @@ class SubjectStorageDirectory:
         legacy_subject_id: str | None,
         legacy_migration_allowed: bool,
         create: bool,
+        read_only: bool,
     ) -> Path | None:
         target = base / storage_key
         legacy = None if legacy_subject_id is None else base / legacy_subject_id
@@ -73,6 +78,15 @@ class SubjectStorageDirectory:
                 raise ValueError("legacy subject directory is unavailable")
             if not legacy_migration_allowed:
                 raise ValueError("legacy subject workspace is ambiguous on this filesystem")
+            if read_only:
+                # Resolve the same authoritative tree without removing even
+                # empty directories or invalidating an existing provider path.
+                if target_exists:
+                    if cls._directory_is_empty(legacy):
+                        return target
+                    if not cls._directory_is_empty(target):
+                        raise ValueError("legacy and keyed subject directories both contain data")
+                return legacy
             if target_exists:
                 cls._remove_empty_legacy_or_target(legacy, target)
                 target_exists = cls._validated_directory(target, base, allow_missing=True)
