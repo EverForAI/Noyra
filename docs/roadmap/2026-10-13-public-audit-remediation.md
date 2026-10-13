@@ -28,6 +28,8 @@
 
 锁定Python3.11公开store/HTTP/keyring55通过、26子测试通过，另HTTP实际owner关闭/重建、保存链接继续可读且index不变1通过；独立子进程、双key轮换、篡改/错误主体、损坏keyring和撤回均覆盖。相关Ruff/Mypy通过。复审无schema/身份/资金/供应商改动，默认key与所有其他凭证分离；真实systemd滚动属于R07的环境验收。
 
+以上时间锚是R02当时的阶段实现。R04最终以持久不可变slot范围替代时间锚，新增记录不再改变已有范围URL；持久key、轮换和撤回重查合同保留。最终状态以R04及公开v2合同为准。
+
 ### R03：A04/C01
 
 返回元数据绑定具体阅读路由，仅该文章直接返回来源列表时消费；进入无关视图或其他文章立即清除。短/空页每次最多20读取，未补足旧条数时明确显示部分恢复、目标条数和继续按钮；用户继续仍用当前游标与代次，达到目标或历史结束清除目标。刷新/错误清除旧目标，不保存正文或凭证。公开Node38项通过，包含1条与空页混合、持续分步恢复200条无重复/丢失、无关菜单及直返，以及既有迟到响应/撤回/草稿合同。JS语法通过；复审无无限循环、无服务器写入或撤回缓存。
@@ -49,3 +51,13 @@ Windows公开/HTTP/归档keyring与integrity98项、26子测试通过；OS限制
 钱包只读投影的期限生产、SQL progress和结果检查统一用高分辨率同步时钟，取父请求剩余时限与3秒上限中较短值，耗尽仍映射原WalletListLimit。没有跨asyncio时钟、网络/支付/签名/资金流程修改。新增合成精确时钟测试覆盖父期限、边界等于deadline、取消后只读记录不变及后续请求恢复；钱包投影、dispatch fencing、automation controls共40通过，相关Mypy/Ruff通过。复审保持主体、游标、hash、SQL取消及未知结果原合同。
 
 R05补充：WSL Ubuntu24.04/root/Python3.12.3、固定开发锁依赖的公开/HTTP/capacity/资源59项、26子测试通过。实际Linux地址空间限制拒绝1GiB分配，部分IPC帧阻塞按deadline退出。该Linux隔离证据不等于生产硬件或签名外部八门禁通过。
+
+### R07：综合复审与E01验收边界
+
+应用/测试提交为`f280fb189351c323e4fce8652e3766e254c77cd4`，schema94。全根Ruff0.16.2 check通过、format655文件通过；默认Mypy423文件通过；JS语法与Node115项通过、0失败；pip check以及base/base+cloud/dev锁已知漏洞扫描通过。唯一整仓回归2515通过、56跳过、285子测试通过、0失败/错误，4826.29秒，XML共2856 tests；日志/XML为`.runtime/remediation-full.log`、`.runtime/remediation-full.xml`。运行期间无应用/测试修改，仅起草最终文档；没有重复启动，结束后无测试在跑。跳过保持平台限制，不计为通过。
+
+Linux/root首次127通过、7失败：临时venv位于/root700导致nobody不可执行，及未安装应用导致subprocess import失败。修复隔离验收环境后，相关升级存储/打包脚本/迁移存储/迁移激活69项全通过、0跳过。五组Bash安装/单盘/控制/升级/迁移回滚脚本exit0；预期拒绝非空目录的诊断保留。两次运行不能合称一次Linux134零失败。
+
+精确SHA源码在WSL真实systemd临时unit以nobody运行合成NoyraHTTPServer，重启后3条保存路由继续200且index相同。20个大私有冷事件加1个公开事件，8请求/4并发实测2次200（1.986/1.991秒）与6次两slot准入503（0.059–0.110秒），最多2worker；父RSS峰值111780KiB、childRSS151952KiB、VMS165104KiB。随后单请求200，私有标记不出现，smoke三个健康端点200。unit/fixture/临时等待进程及浏览器均已关闭或删除。不是完整生产服务、物理LUKS、HTTPS代理或真实平台验收。
+
+最后实际Chromium375×812再次确认标准DOM/head/SEO/帮助归属与无横向溢出。最终复审见`docs/audit/2026-10-13-public-audit-remediation-final-review.md`。E01仍需最终发布完整SHA、目标硬件、物理加密卷/跨机恢复、HTTPS/真实平台、24/72小时soak与独立签名八门禁。历史8小时soak和本地合成不能替代；本轮不解除发布阻断。
