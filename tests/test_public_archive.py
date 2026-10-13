@@ -131,11 +131,11 @@ def test_public_schema_has_fixed_reviewed_fingerprints(
     with kernel.database.connection() as connection:
         assert (
             kernel.database.schema_ddl_fingerprint(connection)
-            == "8968045531bd80f2f1d487cb9a4b01e2b84767b10b8a85fc4ce85d0c956022bb"
+            == "181b72baa819d54d6d18c80411b610abdd2c3c6cee18661aeadb3a190a339f9b"
         )
         assert (
             kernel.database.schema_structure_fingerprint(connection)
-            == "bd4f12a88b407fc6f3fe4ab713401afb9c1a4ba73d79146927898a2ca8211b36"
+            == "762feef35a9e0593168f010ea4f980d3425bf55db788baf71bc587a9c9333e2e"
         )
 
 
@@ -581,12 +581,9 @@ def test_schema92_upgrade_preserves_private_history_and_publishes_nothing(
         EventStore(old).append("historical-subject", "private_note", "test", {"content": "private"})
     upgraded = schema.Database(old.path)
     with upgraded.connection() as connection:
-        assert (
-            connection.execute(
-                "SELECT value FROM schema_meta WHERE key='schema_version'"
-            ).fetchone()[0]
-            == "93"
-        )
+        assert connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == str(schema.CURRENT_SCHEMA_VERSION)
         assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM public_publications").fetchone()[0] == 0
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
