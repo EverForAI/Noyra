@@ -21,3 +21,9 @@
 ### R01：A01/A03
 
 恢复标准 DOCTYPE，把帮助放回投稿正文控件内；未配置 sitemap 的404显式 no-store，robots等静态文本缓存保留。实际 Noyra HTTP 合成服务的 Chromium375×812 验证 CSS1Compat、doctype=html、viewport/canonical位于head、帮助位于form、body不含head、无横向溢出。浏览器与临时服务已关闭。锁定Python3.11回归17通过、26子测试通过；相关Ruff/check-format及Mypy通过。复审没有改变投稿处理、SEO内容、权限或静态资源缓存。
+
+### R02：A02
+
+专用持久路由keyring在HTTP start的主体所有权门禁之后、接入请求之前初始化；不在只读构造或匿名请求中写入。默认私有文件完整加密备份携带；可配置共享外部keyring，最多4把key、首把发布/旧把验证。损坏、链接、不安全文件拒绝，不静默换key。使用AES-SIV确定性认证加密，锚取最新合法记录，使未变化范围URL稳定；不是复用AES-GCM nonce。正文仍每次按当前主体、撤回/hash验证，无正文缓存。文档明确滚动分发、移除旧key、数据库导出单独保存key和内部无注入helper仅进程生命周期。
+
+锁定Python3.11公开store/HTTP/keyring55通过、26子测试通过，另HTTP实际owner关闭/重建、保存链接继续可读且index不变1通过；独立子进程、双key轮换、篡改/错误主体、损坏keyring和撤回均覆盖。相关Ruff/Mypy通过。复审无schema/身份/资金/供应商改动，默认key与所有其他凭证分离；真实systemd滚动属于R07的环境验收。

@@ -7,7 +7,6 @@ import binascii
 import json
 import math
 import re
-import secrets
 import sqlite3
 import threading
 from collections.abc import Iterator
@@ -19,7 +18,6 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from noyra.core.database import Database, action_state_hash, behavior_log_state_hash
 from noyra.core.deadline import monotonic_time, remaining_seconds
@@ -30,6 +28,7 @@ from noyra.core.types import canonical_json, content_hash, strict_json_loads, ut
 
 from .diary import PublicDiaryStore
 from .posts import PublicPostStore
+from .sitemap_tokens import SitemapTokens
 from .store import InteractionStore
 
 ARCHIVE_CONTRACT = "public-contract-v2"
@@ -320,21 +319,16 @@ def _details(kind: str, value: Any) -> dict[str, Any]:
 
 
 class PublicArchive:
-    def __init__(self, database: Database):
+    def __init__(self, database: Database, *, sitemap_tokens: SitemapTokens | None = None):
         self.database = database
         # Index routing metadata is not itself verified public content. Seal
         # descriptors so logical subject IDs / unchecked boundaries cannot be
-        # decoded from anonymous XML. Restarting requires a fresh index.
-        self._sitemap_cipher = AESGCM(secrets.token_bytes(32))
+        # decoded from anonymous XML. Persistent routing keys are injected at
+        # owner startup; anonymous requests never create keys or write files.
+        self.sitemap_tokens = sitemap_tokens or SitemapTokens()
 
     def _sitemap_descriptor(self, value: dict[str, Any]) -> str:
-        nonce = secrets.token_bytes(12)
-        token = base64.urlsafe_b64encode(
-            nonce
-            + self._sitemap_cipher.encrypt(
-                nonce, canonical_json(value).encode(), b"noyra-public-sitemap-v1"
-            )
-        ).decode()
+        token = self.sitemap_tokens.seal(value)
         if len(token) > 1500:
             raise IntegrityError("invalid sitemap routing metadata")
         return token
@@ -650,7 +644,14 @@ class PublicArchive:
             for kind in sorted(TIMELINE_KINDS):
                 table, _, where, id_col, time_col, _, _ = self._spec(kind)
                 start = None
-                anchor = utc_now()
+                latest = connection.execute(
+                    f"SELECT {time_col} FROM {table} WHERE subject_id=? AND {where} "
+                    f"AND {time_col}<=? ORDER BY {time_col} DESC,{id_col} DESC LIMIT 1",
+                    (subject_id, utc_now()),
+                ).fetchone()
+                if latest is None:
+                    continue
+                anchor = latest[0]
                 while True:
                     seek = "" if start is None else f" AND ({time_col},{id_col})<(?,?)"
                     values = (
@@ -705,10 +706,7 @@ class PublicArchive:
         try:
             if len(token) > 1500:
                 raise ValueError("invalid sitemap partition")
-            sealed = base64.b64decode(token, altchars=b"-_", validate=True)
-            data = json.loads(
-                self._sitemap_cipher.decrypt(sealed[:12], sealed[12:], b"noyra-public-sitemap-v1")
-            )
+            data = self.sitemap_tokens.open(token)
             if (
                 not isinstance(data, dict)
                 or set(data) != {"subject", "kind", "anchor", "start", "end"}

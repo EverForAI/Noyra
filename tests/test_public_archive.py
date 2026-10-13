@@ -705,5 +705,5 @@ def test_partitioned_sitemap_exceeds_old_thousand_record_ceiling(
     sealed[-1] ^= 1
     with pytest.raises(ValueError):
         store.sitemap_partition(kernel.subject_id, base64.urlsafe_b64encode(sealed).decode())
-    with pytest.raises(ValueError):
-        PublicArchive(kernel.database).sitemap_partition(kernel.subject_id, tokens[0])
+    assert PublicArchive(kernel.database).sitemap_partition(kernel.subject_id, tokens[0])
+    assert store.sitemap_partitions(kernel.subject_id) == tokens
