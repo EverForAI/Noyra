@@ -17,6 +17,7 @@ let batchPaths = [],
     batchPath = "",
     batchNumber = 1;
 let readingReturn = null;
+let restoreTarget = null;
 let menuReturnFocus = null;
 const requestControllers = new Map(),
     MAX_VISIBLE_RECORDS = 200;
@@ -397,7 +398,7 @@ function publicReadingClick(event) {
     const url = new URL(link.href, location.href), parts = url.pathname.split("/");
     if (url.origin !== location.origin || parts.length !== 4 || parts[1] !== "public" || !kinds[parts[2]]) return;
     if (!activeId && !["overview","about","participate"].includes(activeView)) {
-        readingReturn = {view:activeView,path:batchPath,count:visibleRows.length,query:currentQueryPath,paths:[...batchPaths],number:batchNumber,period:$("#period-filter").value,category:$("#category-filter").value,status:$("#status-filter").value,search:$("#archive-search").value};
+        readingReturn = {article:`${kinds[parts[2]]}/${parts[3]}`,view:activeView,path:batchPath,count:visibleRows.length,query:currentQueryPath,paths:[...batchPaths],number:batchNumber,period:$("#period-filter").value,category:$("#category-filter").value,status:$("#status-filter").value,search:$("#archive-search").value};
     } else readingReturn = null;
     event.preventDefault();
     location.hash = `${kinds[parts[2]]}/${parts[3]}`;
@@ -742,11 +743,11 @@ async function loadView(generation, signal, append = false, previous = false, re
           : queryPath();
     if (append && !replaceBatch && visibleRows.length) {
         const request = new URL(path,location.href);
-        request.searchParams.set("limit",String(Math.min(20,MAX_VISIBLE_RECORDS-visibleRows.length)));
+        request.searchParams.set("limit",String(Math.min(20,MAX_VISIBLE_RECORDS-visibleRows.length,restoreTarget ? restoreTarget-visibleRows.length : MAX_VISIBLE_RECORDS)));
         path=request.pathname+request.search;
     }
     let page = await getJson(path, { signal });
-    const wanted = previous ? batchPaths[batchPaths.length - 1].count : restore?.count;
+    const wanted = previous ? batchPaths[batchPaths.length - 1].count : restore?.count ?? (append && restoreTarget ? restoreTarget - visibleRows.length : null);
     if (wanted) {
         const rows = [...page.items];
         for (let reads=1; rows.length < wanted && page.next_cursor && reads < 20; reads++) {
@@ -761,23 +762,27 @@ async function loadView(generation, signal, append = false, previous = false, re
     }
     if (!currentViewGeneration(generation)) return;
     if (!append && !previous && !restore) {
+        restoreTarget = null;
         currentQueryPath = path;
         batchPath = path;
         batchPaths = [];
         batchNumber = 1;
     }
     if (replaceBatch) {
+        restoreTarget = null;
         batchPaths.push({path:batchPath,count:visibleRows.length});
         if (batchPaths.length > 128) batchPaths.shift();
         batchPath = path;
         batchNumber++;
     }
     if (previous) {
+        restoreTarget = wanted;
         batchPaths.pop();
         batchPath = path;
         batchNumber = Math.max(1, batchNumber - 1);
     }
     if (restore) {
+        restoreTarget = wanted;
         currentQueryPath=restore.query;batchPaths=[...restore.paths];batchPath=restore.path;batchNumber=restore.number;
     }
     const rows =
@@ -786,6 +791,7 @@ async function loadView(generation, signal, append = false, previous = false, re
         ...new Map(rows.map((row) => [`${row.kind}:${row.id}`, row])).values(),
     ].slice(0, MAX_VISIBLE_RECORDS);
     nextCursor = page.next_cursor;
+    if (restoreTarget && (visibleRows.length >= restoreTarget || !nextCursor)) restoreTarget = null;
     content.innerHTML = activeId
         ? visibleRows.length
             ? renderArticle(visibleRows[0])
@@ -799,11 +805,12 @@ async function loadView(generation, signal, append = false, previous = false, re
     $("#load-more").hidden = Boolean(activeId) || !nextCursor;
     $("#previous-batch").hidden = Boolean(activeId) || !batchPaths.length;
     $("#load-more").textContent =
-        visibleRows.length >= MAX_VISIBLE_RECORDS
+        restoreTarget ? tr("继续恢复原批次", "Continue restoring this batch") : visibleRows.length >= MAX_VISIBLE_RECORDS
             ? tr("下一批历史", "Next batch")
             : tr("加载更多", "Load more");
     $("#list-status").textContent =
         `${tr("批次", "Batch")} ${batchNumber} · ${tr("已显示", "Showing")} ${visibleRows.length} ${tr("条 · 获取于", "records · Fetched at")} ${formatTime(page.generated_at)}`;
+    if (restoreTarget) $("#list-status").textContent += tr(` · 尚未恢复完原批次（目标 ${restoreTarget} 条），可继续`, ` · Previous batch partly restored (target ${restoreTarget}); continue to read`);
 }
 async function refresh({ append = false, previous = false, restore = null } = {}) {
     if (["overview", "about", "participate"].includes(activeView)) {
@@ -815,6 +822,7 @@ async function refresh({ append = false, previous = false, restore = null } = {}
     $("#load-more").disabled = true;
     $("#previous-batch").disabled = true;
     if (!append && !previous && !restore) {
+        restoreTarget = null;
         batchPaths = [];
         batchPath = "";
         batchNumber = 1;
@@ -833,6 +841,7 @@ async function refresh({ append = false, previous = false, restore = null } = {}
     if (results[0].status === "rejected" && !isAbortError(results[0].reason)) {
         visibleRows = [];
         nextCursor = null;
+        restoreTarget = null;
         $("#load-more").hidden = true;
         content.innerHTML = `<div class="empty-state error-state"><strong>${escapeHtml(publicErrorMessage(results[0].reason))}</strong><p>${tr("请点击刷新重试。", "Use Refresh to retry.")}</p></div>`;
         $("#list-status").textContent = "";
@@ -1046,6 +1055,7 @@ function togglePublicUpdates() {
     if (!paused) void loadOverview();
 }
 function showView() {
+    const previousRoute = `${activeView}/${encodeURIComponent(activeId)}`;
     beginViewGeneration();
     const match = location.hash.slice(1).split("/");
     activeView = views.includes(match[0]) ? match[0] : "overview";
@@ -1091,11 +1101,11 @@ function showView() {
     ].includes(activeView);
     notice.textContent = $("#page-description").textContent;
     configureStatus();
-    const restore = !activeId && readingReturn?.view === activeView ? readingReturn : null;
+    const restore = !activeId && readingReturn?.view === activeView && previousRoute === readingReturn.article ? readingReturn : null;
+    if (restore || !activeId || `${activeView}/${encodeURIComponent(activeId)}` !== readingReturn?.article) readingReturn = null;
     if (restore) {
         $("#period-filter").value=restore.period;$("#category-filter").value=restore.category;
         configureStatus();$("#status-filter").value=restore.status;$("#archive-search").value=restore.search;
-        readingReturn=null;
     }
     visibleRows = [];
     nextCursor = null;
