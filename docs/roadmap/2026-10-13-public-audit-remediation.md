@@ -43,3 +43,9 @@ schema94增量slot索引与源写入同事务；匿名根索引仅读取各主�
 完整冷段的物理读、解密、解压、JSON/hash不再进入HTTP主进程：每个准入请求一个spawn进程，Windows Job限制512MiB进程提交内存、POSIX限制512MiB地址空间；无法设置限制则拒绝。父SQL快照只传有界主体目录映射、manifest及当前公开事件ID，子进程只用内存目录表，不开启live数据库、不云恢复、不写目录。所有段条目仍验证，返回仅from/to/hash且最多2MB；父保持keyring代次、链hash及payload hash校验。IPC含部分帧阻塞按原2秒预算等待，超时终止；实际未退出的进程继续占槽，回收后才释放。保留热SQL检查点与全服务RSS的真实边界，不宣称任意OS调度/进程启动都硬实时。
 
 Windows公开/HTTP/归档keyring与integrity98项、26子测试通过；OS限制实际拒绝1GiB分配、阻塞/释放、大私有段不泄露且目录不变专项通过。最初测试错误使用POSIX私有pipe方法于Windows、期待错误的详情字段，两项fixture补正后通过，未放宽期限或权限。相关Mypy/Ruff通过。Linux专项另记最终复审。复审重点为父快照/子manifest一致、只读namespace、异常不能成功空图、最多两进程与实际退出释放，不改变通用归档恢复或runtime副作用。
+
+### R06：C04
+
+钱包只读投影的期限生产、SQL progress和结果检查统一用高分辨率同步时钟，取父请求剩余时限与3秒上限中较短值，耗尽仍映射原WalletListLimit。没有跨asyncio时钟、网络/支付/签名/资金流程修改。新增合成精确时钟测试覆盖父期限、边界等于deadline、取消后只读记录不变及后续请求恢复；钱包投影、dispatch fencing、automation controls共40通过，相关Mypy/Ruff通过。复审保持主体、游标、hash、SQL取消及未知结果原合同。
+
+R05补充：WSL Ubuntu24.04/root/Python3.12.3、固定开发锁依赖的公开/HTTP/capacity/资源59项、26子测试通过。实际Linux地址空间限制拒绝1GiB分配，部分IPC帧阻塞按deadline退出。该Linux隔离证据不等于生产硬件或签名外部八门禁通过。
