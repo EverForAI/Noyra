@@ -9728,6 +9728,7 @@ class NoyraHTTPServer:
                         HTTPStatus.NOT_FOUND,
                         "text/plain; charset=utf-8",
                         b"Configure NOYRA_PUBLIC_SITE_URL to publish a sitemap.\n",
+                        cache_control="no-store",
                     )
                     return
                 try:
