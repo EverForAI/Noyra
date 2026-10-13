@@ -22,12 +22,12 @@ from cryptography.exceptions import InvalidTag
 from noyra.core.database import Database, action_state_hash, behavior_log_state_hash
 from noyra.core.deadline import monotonic_time, remaining_seconds
 from noyra.core.errors import IntegrityError, NotFoundError, PayloadLimitError
-from noyra.core.event_archive import EventPayloadArchive
 from noyra.core.events import EventStore
 from noyra.core.types import canonical_json, content_hash, strict_json_loads, utc_now
 
 from .diary import PublicDiaryStore
 from .posts import PublicPostStore
+from .public_cold_reader import PublicColdReader
 from .sitemap_tokens import SitemapTokens
 from .store import InteractionStore
 
@@ -93,6 +93,7 @@ class _ReadBudget:
     bytes_read: int = 0
     exhausted: bool = False
     cold_admitted: bool = False
+    cold_reader: PublicColdReader | None = None
 
     def checkpoint(self, size: int = 0) -> None:
         self.bytes_read += size
@@ -127,7 +128,9 @@ def _request_budget() -> Iterator[_ReadBudget]:
         yield budget
         budget.checkpoint()
     finally:
-        if budget.cold_admitted:
+        if budget.cold_reader is not None:
+            budget.cold_reader.close(_COLD_READ_SLOTS.release)
+        elif budget.cold_admitted:
             _COLD_READ_SLOTS.release()
         _READ_BUDGET.reset(token)
 
@@ -166,7 +169,6 @@ class _LifecycleReader:
 
     def __init__(self, database: Database, connection: Any, subject_id: str):
         self.database, self.connection, self.subject_id = database, connection, subject_id
-        self.archive: EventPayloadArchive | None = None
         self.segments: dict[str, dict[str, dict[str, Any]]] = {}
 
     def states(self, row: Any) -> tuple[str, str]:
@@ -192,18 +194,6 @@ class _LifecycleReader:
             if key not in self.segments:
                 if len(self.segments) >= 2:
                     raise _SegmentPageBoundary
-                if self.archive is None:
-                    try:
-                        self.archive = EventPayloadArchive(
-                            self.database,
-                            self.database.path.parent / "subject" / "cold",
-                            subject_id=self.subject_id,
-                            create_root=False,
-                            read_only_root=True,
-                            cache_cloud_restores=False,
-                        )
-                    except (OSError, ValueError) as exc:
-                        raise IntegrityError("public lifecycle archive unavailable") from exc
                 try:
                     budget = _READ_BUDGET.get()
                     assert budget is not None
@@ -213,21 +203,68 @@ class _LifecycleReader:
                         if not _COLD_READ_SLOTS.acquire(blocking=False):
                             raise PublicQueryBudgetExceeded("public cold reader admission exceeded")
                         budget.cold_admitted = True
-                    self.segments[key] = self.archive.load_segment(
+                    metadata = self.connection.execute(
+                        "SELECT event_count,compressed_hash,archive_format,encryption_key_id,"
+                        "encryption_key_fingerprint FROM event_payload_segments "
+                        "WHERE subject_id=? AND object_key=?",
+                        (self.subject_id, key),
+                    ).fetchone()
+                    if metadata is None:
+                        raise IntegrityError("public lifecycle archive metadata missing")
+                    identifiers = self.connection.execute(
+                        "SELECT event_id FROM events WHERE subject_id=? AND payload_archive_key=? "
+                        "AND event_type IN ('lifecycle_transition','lifecycle_recovery') "
+                        "AND privacy_level='public_status' LIMIT 5001",
+                        (self.subject_id, key),
+                    ).fetchall()
+                    if len(identifiers) > 5000:
+                        raise IntegrityError("public lifecycle archive event bound exceeded")
+                    budget.checkpoint(
+                        sum(len(identifier[0].encode()) for identifier in identifiers)
+                    )
+                    if budget.cold_reader is None:
+                        identities, keys = [], []
+                        for identity in self.connection.execute(
+                            "SELECT subject_id FROM subject_identity"
+                        ):
+                            budget.checkpoint(len(identity[0].encode()))
+                            identities.append(identity[0])
+                            if len(identities) > 10000:
+                                raise PublicQueryBudgetExceeded("public namespace budget exceeded")
+                        for storage_key in self.connection.execute(
+                            "SELECT subject_id,storage_key FROM subject_storage_keys"
+                        ):
+                            budget.checkpoint(sum(len(value.encode()) for value in storage_key))
+                            keys.append(tuple(storage_key))
+                            if len(keys) > 10000:
+                                raise PublicQueryBudgetExceeded("public namespace budget exceeded")
+                        budget.cold_reader = PublicColdReader(
+                            self.database.path, self.subject_id, identities, keys, budget.deadline
+                        )
+                        keyring = budget.cold_reader.prepare()
+                        keyring.validate_revision(
+                            self.database, self.subject_id, connection=self.connection
+                        )
+                    states, size = budget.cold_reader.load(
                         self.subject_id,
                         key,
-                        connection=self.connection,
-                        max_decompressed_bytes=min(
-                            64_000_000, MAX_PUBLIC_READ_BYTES - budget.bytes_read
-                        ),
-                        max_events=5_000,
-                        local_only=True,
-                        consume_bytes=budget.checkpoint,
+                        dict(metadata),
+                        min(64_000_000, MAX_PUBLIC_READ_BYTES - budget.bytes_read),
+                        [identifier[0] for identifier in identifiers],
                     )
+                    budget.checkpoint(size)
+                    self.segments[key] = states
                 except PayloadLimitError as exc:
                     raise IntegrityError("public lifecycle archive exceeds read bound") from exc
+                except TimeoutError as exc:
+                    raise PublicQueryBudgetExceeded("public cold reader deadline exceeded") from exc
             payload = self.segments[key].get(row["event_id"])
-        if not isinstance(payload, dict) or content_hash(payload) != row["payload_hash"]:
+        verified_hash = (
+            (content_hash(payload) if key is None else payload.get("hash"))
+            if isinstance(payload, dict)
+            else None
+        )
+        if not isinstance(payload, dict) or verified_hash != row["payload_hash"]:
             raise IntegrityError("public lifecycle payload hash mismatch")
         old, new = payload.get("from"), payload.get("to")
         if (
