@@ -2,19 +2,27 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import SecretStr
 
-from noyra.core.integrity import IntegrityRegistry
+from noyra.core.errors import IntegrityError
+from noyra.core.integrity import IntegrityRegistry, _verify_management_audit_provenance
 from noyra.core.operator_controls import OperatorControlService
 from noyra.core.provider_health import ProviderHealthStore
 from noyra.core.retention import RetentionManager
 from noyra.core.types import canonical_json
 from noyra.interaction import InboundEnvelope, PublicPostInput, TransportInput
+from noyra.model.errors import ProviderCallError
+from noyra.model.openai_compatible import OpenAICompatibleProvider
+from noyra.research.search import SearchExecutor, SearchOutcomeUnknownError
 from noyra.service import NoyraService
 from test_m42_p1_02_integrity_runtime import _active_kernel
 from test_m42_p3_06_operator_controls import _put_kernel_to_deep_sleep
+from test_m42_p3_06_operator_controls import _request as management_request
 from test_m42_p3_06_operator_controls import service as management_service  # noqa: F401
 
 
@@ -185,6 +193,437 @@ def test_admin_audits_accept_the_service_json_format_and_validate_roles(
         check_ids=("core.actions",),
     )
     assert report.status == ("ok" if damage == "none" else "corrupt"), report.to_dict()
+
+
+@pytest.mark.usefixtures("management_service")
+@pytest.mark.parametrize(
+    ("action", "payload"),
+    [
+        ("model_resource_discovery_succeeded", {"model_count": 2}),
+        ("model_resource_discovery_failed", {"error": "provider_auth_failed"}),
+        ("model_resource_discovery_rejected", {"error": "invalid_model_discovery"}),
+        ("model_resource_draft_test_succeeded", {"model": "测试模型"}),
+        ("model_resource_draft_test_failed", {"error": "provider_http_429"}),
+        ("model_resource_draft_test_rejected", {"error": "invalid_model_resource_test"}),
+    ],
+)
+@pytest.mark.parametrize("encoding", ["service", "canonical"])
+def test_model_management_audits_keep_core_integrity_without_rewriting_history(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    action: str,
+    payload: dict[str, Any],
+    encoding: str,
+) -> None:
+    instance: NoyraService = request.getfixturevalue("management_service")[0]
+    database = instance.kernel.database
+    if encoding == "service":
+        instance.http.audit_admin_event(action, "web-operator", payload)
+    else:
+        with database.transaction() as connection:
+            connection.execute(
+                "INSERT INTO audit_records VALUES(?,?,?,?,?,?)",
+                (
+                    "audit_model_compatibility",
+                    instance.kernel.subject_id,
+                    action,
+                    "web-operator",
+                    canonical_json(payload),
+                    "2026-10-14T00:00:00+00:00",
+                ),
+            )
+    with database.connection() as connection:
+        before = [tuple(row) for row in connection.execute("SELECT * FROM audit_records")]
+    report = IntegrityRegistry().run(
+        database,
+        instance.kernel.subject_id,
+        tmp_path,
+        profile="manual",
+        policy_mode="alert",
+        deadline_seconds=10,
+        check_ids=("core.actions",),
+    )
+    assert report.status == "ok", report.to_dict()
+    with database.connection() as connection:
+        after = [tuple(row) for row in connection.execute("SELECT * FROM audit_records")]
+    assert after == before
+
+
+@pytest.mark.usefixtures("management_service")
+@pytest.mark.parametrize(
+    ("action", "payload"),
+    [
+        ("model_resource_discovery_succeeded", {"model_count": True}),
+        ("model_resource_discovery_succeeded", {"model_count": -1}),
+        ("model_resource_discovery_succeeded", {"model_count": 501}),
+        ("model_resource_discovery_succeeded", {"model_count": "2"}),
+        ("model_resource_discovery_succeeded", {"model_count": 2, "extra": "ignored"}),
+        ("model_resource_draft_test_succeeded", {"model": None}),
+        ("model_resource_draft_test_succeeded", {"model": []}),
+        ("model_resource_draft_test_succeeded", {"model": " "}),
+        ("model_resource_draft_test_succeeded", {"model": "x" * 257}),
+        ("model_resource_draft_test_failed", {"error": " "}),
+        ("model_resource_draft_test_failed", {"error": {"secret": "value"}}),
+        ("model_resource_discovery_failed", {"error": "provider error with raw details"}),
+        ("model_resource_discovery_rejected", {"error": "provider_auth_failed"}),
+        ("model_resource_draft_test_rejected", {"error": "invalid_model_discovery"}),
+        ("model_resource_discovery_unrecognized", {"model_count": 2}),
+    ],
+)
+def test_model_management_audits_reject_invalid_summaries_and_unknown_actions(
+    request: pytest.FixtureRequest, tmp_path: Path, action: str, payload: dict[str, Any]
+) -> None:
+    instance: NoyraService = request.getfixturevalue("management_service")[0]
+    instance.http.audit_admin_event(action, "web-operator", payload)
+    report = IntegrityRegistry().run(
+        instance.kernel.database,
+        instance.kernel.subject_id,
+        tmp_path,
+        profile="manual",
+        policy_mode="alert",
+        deadline_seconds=10,
+        check_ids=("core.actions",),
+    )
+    assert report.p0 == ("core.actions:integrity_error",), report.to_dict()
+
+
+@pytest.mark.parametrize("encoding", ["service", "canonical"])
+def test_search_management_history_keeps_integrity_and_original_bytes(
+    tmp_path: Path, encoding: str
+) -> None:
+    kernel = _active_kernel(tmp_path, "Noyra-search-management-history")
+    try:
+        summaries = (
+            [
+                ("search_routing_updated", {"mode": mode})
+                for mode in ("model_first", "api_first", "auto")
+            ]
+            + [
+                (
+                    "search_provider_test_succeeded",
+                    {"provider_type": provider, "result_count": count},
+                )
+                for provider in ("brave", "bing", "tavily", "serper")
+                for count in (0, 3)
+            ]
+            + [
+                ("search_provider_test_failed", {"provider_type": "brave", "error": error})
+                for error in ("search_provider_test_failed", "search_provider_test_unknown")
+            ]
+        )
+        with kernel.database.transaction() as connection:
+            for index, (action, payload) in enumerate(summaries):
+                connection.execute(
+                    "INSERT INTO audit_records VALUES(?,?,?,?,?,?)",
+                    (
+                        f"audit_search_history_{index}",
+                        kernel.subject_id,
+                        action,
+                        "web-operator",
+                        json.dumps(payload, sort_keys=True)
+                        if encoding == "service"
+                        else canonical_json(payload),
+                        "2026-10-14T00:00:00+00:00",
+                    ),
+                )
+        with kernel.database.connection() as connection:
+            before = [tuple(row) for row in connection.execute("SELECT * FROM audit_records")]
+        report = IntegrityRegistry().run(
+            kernel.database,
+            kernel.subject_id,
+            tmp_path,
+            profile="manual",
+            policy_mode="alert",
+            deadline_seconds=10,
+            check_ids=("core.actions",),
+        )
+        assert report.status == "ok", report.to_dict()
+        with kernel.database.connection() as connection:
+            after = [tuple(row) for row in connection.execute("SELECT * FROM audit_records")]
+        assert after == before
+    finally:
+        kernel.close()
+
+
+@pytest.mark.parametrize(
+    ("action", "payload", "actor"),
+    [
+        ("search_routing_updated", {"mode": "invalid"}, "web-operator"),
+        ("search_routing_updated", {"mode": []}, "web-operator"),
+        ("search_routing_updated", {"mode": "auto", "extra": 1}, "web-operator"),
+        ("search_routing_updated", {"mode": "auto"}, " Subject "),
+        ("search_routing_updated", {"mode": "auto"}, "x" * 257),
+        *[
+            (
+                "search_provider_test_succeeded",
+                {"provider_type": "brave", "result_count": count},
+                "web-operator",
+            )
+            for count in (True, -1, 4, "1", 1.5, None)
+        ],
+        (
+            "search_provider_test_succeeded",
+            {"provider_type": "unknown", "result_count": 1},
+            "web-operator",
+        ),
+        (
+            "search_provider_test_succeeded",
+            {"provider_type": [], "result_count": 1},
+            "web-operator",
+        ),
+        ("search_provider_test_failed", {"provider_type": "brave"}, "web-operator"),
+        (
+            "search_provider_test_failed",
+            {"provider_type": "brave", "error": "raw private error"},
+            "web-operator",
+        ),
+        (
+            "search_provider_test_failed",
+            {"provider_type": "brave", "error": []},
+            "web-operator",
+        ),
+    ],
+)
+def test_search_management_validator_rejects_invalid_contracts(
+    action: str, payload: dict[str, Any], actor: str
+) -> None:
+    # These summaries intentionally need no database reference. Full registry
+    # round trips and actual HTTP writers are tested separately below.
+    row = {"audit_id": "audit_invalid_search", "action": action, "actor": actor}
+    with pytest.raises(IntegrityError):
+        _verify_management_audit_provenance(cast(Any, SimpleNamespace()), row, payload)
+
+
+@pytest.mark.usefixtures("management_service")
+def test_search_http_writers_keep_integrity_without_network_calls_or_saved_drafts(
+    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance, token, _ = request.getfixturevalue("management_service")
+    probe = AsyncMock(
+        side_effect=[
+            {"ok": True, "provider_type": "brave", "result_count": 3},
+            RuntimeError("private supplier error must not be audited"),
+            SearchOutcomeUnknownError("private unknown response"),
+        ]
+    )
+    monkeypatch.setattr(SearchExecutor, "test_unstored", probe)
+    for expected_status in (200, 502, 502):
+        status, _ = management_request(
+            instance,
+            "/api/config/search-providers/test",
+            token=token,
+            payload={"provider_type": "brave", "api_key": "search-secret-never-in-audit"},
+        )
+        assert status == expected_status
+    for mode in ("model_first", "api_first", "auto"):
+        status, _ = management_request(
+            instance, "/api/config/search-routing", token=token, payload={"mode": mode}
+        )
+        assert status == 200
+    assert probe.await_count == 3
+    database = instance.kernel.database
+    with database.connection() as connection:
+        rows = [tuple(row) for row in connection.execute("SELECT * FROM audit_records")]
+        assert len(rows) == 6
+        assert "private" not in repr(rows)
+        assert "search-secret-never-in-audit" not in repr(rows)
+        assert connection.execute("SELECT COUNT(*) FROM search_provider_configs").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM actions").fetchone()[0] == 0
+    report = IntegrityRegistry().run(
+        database,
+        instance.kernel.subject_id,
+        tmp_path,
+        profile="manual",
+        policy_mode="alert",
+        deadline_seconds=10,
+        check_ids=("core.actions",),
+    )
+    assert report.status == "ok", report.to_dict()
+
+
+@pytest.mark.usefixtures("management_service")
+@pytest.mark.parametrize("length_fields", [False, True])
+def test_public_controls_audits_accept_both_writer_versions_and_small_capacity(
+    request: pytest.FixtureRequest, tmp_path: Path, length_fields: bool
+) -> None:
+    instance: NoyraService = request.getfixturevalue("management_service")[0]
+    payload = {
+        "rate_limit_per_hour": 10,
+        "queue_cap": 50,
+        "captcha_ttl_seconds": 300,
+        "captcha_max_attempts": 3,
+        "captcha_mode": "letters",
+        "storage_cap_bytes": 1_000,
+        "captcha_issue_limit_per_hour": 10,
+        "captcha_global_rate_per_minute": 300,
+    }
+    if length_fields:
+        payload.update(max_content_chars=100, length_revision=1)
+    instance.http.audit_admin_event("public_post_controls_updated", "web-operator", payload)
+    report = IntegrityRegistry().run(
+        instance.kernel.database,
+        instance.kernel.subject_id,
+        tmp_path,
+        profile="manual",
+        policy_mode="alert",
+        deadline_seconds=10,
+        check_ids=("core.actions",),
+    )
+    assert report.status == "ok", report.to_dict()
+
+
+@pytest.mark.usefixtures("management_service")
+def test_model_draft_http_paths_preserve_integrity_without_real_provider_calls(
+    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance, token, _ = request.getfixturevalue("management_service")
+    probe = AsyncMock(
+        side_effect=[
+            {"ok": True, "model": "draft-model"},
+            ProviderCallError("provider_http_429", retryable=False, outcome_unknown=False),
+        ]
+    )
+    discover = AsyncMock(
+        side_effect=[
+            ["draft-model", "other-model"],
+            ProviderCallError("provider_auth_failed", retryable=False, outcome_unknown=False),
+        ]
+    )
+    monkeypatch.setattr(OpenAICompatibleProvider, "probe_unstored", probe)
+    monkeypatch.setattr(OpenAICompatibleProvider, "list_models_unstored", discover)
+    payload: dict[str, object] = {
+        "base_url": "https://models.example/v1",
+        "model": "draft-model",
+        "api_keys": ["draft-secret-never-in-audit"],
+    }
+    for endpoint in ("test", "models"):
+        for expected_status in (200, 502):
+            status, _ = management_request(
+                instance,
+                f"/api/config/model-resources/{endpoint}",
+                token=token,
+                payload=payload,
+            )
+            assert status == expected_status
+        status, _ = management_request(
+            instance, f"/api/config/model-resources/{endpoint}", token=token, payload={}
+        )
+        assert status == 400
+    assert probe.await_count == discover.await_count == 2
+    database = instance.kernel.database
+    assert instance.http.cognitive_resources.list(instance.kernel.subject_id) == []
+    with database.connection() as connection:
+        rows = connection.execute("SELECT action, payload_json FROM audit_records").fetchall()
+        assert len(rows) == 6
+        assert "draft-secret-never-in-audit" not in repr([tuple(row) for row in rows])
+    report = IntegrityRegistry().run(
+        database,
+        instance.kernel.subject_id,
+        tmp_path,
+        profile="manual",
+        policy_mode="alert",
+        deadline_seconds=10,
+        check_ids=("core.actions",),
+    )
+    assert report.status == "ok", report.to_dict()
+
+
+@pytest.mark.parametrize(
+    ("payload_json", "actor"),
+    [
+        ('{"model_count": 1, "model_count": 2}', "web-operator"),
+        ('{"model_count": NaN}', "web-operator"),
+        ('{"model_count": Infinity}', "web-operator"),
+        ('{ "model_count" : 2 }', "web-operator"),
+        ('{"model_count":2}', "subject"),
+    ],
+)
+def test_new_management_compatibility_keeps_malformed_json_and_subject_actor_blocked(
+    tmp_path: Path, payload_json: str, actor: str
+) -> None:
+    kernel = _active_kernel(tmp_path, "Noyra-model-management-damage")
+    try:
+        with kernel.database.transaction() as connection:
+            connection.execute(
+                "INSERT INTO audit_records VALUES(?,?,?,?,?,?)",
+                (
+                    "audit_malformed_model_summary",
+                    kernel.subject_id,
+                    "model_resource_discovery_succeeded",
+                    actor,
+                    payload_json,
+                    "2026-10-14T00:00:00+00:00",
+                ),
+            )
+        report = IntegrityRegistry().run(
+            kernel.database,
+            kernel.subject_id,
+            tmp_path,
+            profile="manual",
+            policy_mode="alert",
+            deadline_seconds=10,
+            check_ids=("core.actions",),
+        )
+        assert report.p0 == ("core.actions:integrity_error",), report.to_dict()
+    finally:
+        kernel.close()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"max_content_chars": 100},
+        {"length_revision": 1},
+        {"max_content_chars": True, "length_revision": 1},
+        {"max_content_chars": 0, "length_revision": 1},
+        {"max_content_chars": 20_001, "length_revision": 1},
+        {"max_content_chars": 100, "length_revision": 0},
+        {"max_content_chars": 100, "length_revision": True},
+        {"storage_cap_bytes": 999},
+        {"storage_cap_bytes": 2_000_000_001},
+        {"extra": 1},
+    ],
+)
+def test_public_control_audit_compatibility_rejects_invalid_versions_and_limits(
+    tmp_path: Path, changes: dict[str, Any]
+) -> None:
+    kernel = _active_kernel(tmp_path, "Noyra-post-management-damage")
+    try:
+        payload = {
+            "rate_limit_per_hour": 10,
+            "queue_cap": 50,
+            "captcha_ttl_seconds": 300,
+            "captcha_max_attempts": 3,
+            "captcha_mode": "letters",
+            "storage_cap_bytes": 1_000,
+            "captcha_issue_limit_per_hour": 10,
+            "captcha_global_rate_per_minute": 300,
+            **changes,
+        }
+        with kernel.database.transaction() as connection:
+            connection.execute(
+                "INSERT INTO audit_records VALUES(?,?,?,?,?,?)",
+                (
+                    "audit_invalid_control_summary",
+                    kernel.subject_id,
+                    "public_post_controls_updated",
+                    "web-operator",
+                    canonical_json(payload),
+                    "2026-10-14T00:00:00+00:00",
+                ),
+            )
+        report = IntegrityRegistry().run(
+            kernel.database,
+            kernel.subject_id,
+            tmp_path,
+            profile="manual",
+            policy_mode="alert",
+            deadline_seconds=10,
+            check_ids=("core.actions",),
+        )
+        assert report.p0 == ("core.actions:integrity_error",), report.to_dict()
+    finally:
+        kernel.close()
 
 
 @pytest.mark.usefixtures("management_service")

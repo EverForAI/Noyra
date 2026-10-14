@@ -1244,6 +1244,19 @@ _OPERATOR_AUDIT_ACTIONS = frozenset(
         "operator_model_call_reconcile",
     }
 )
+_MODEL_RESOURCE_AUDIT_FIELDS = {
+    "model_resource_discovery_succeeded": {"model_count"},
+    "model_resource_discovery_failed": {"error"},
+    "model_resource_discovery_rejected": {"error"},
+    "model_resource_draft_test_succeeded": {"model"},
+    "model_resource_draft_test_failed": {"error"},
+    "model_resource_draft_test_rejected": {"error"},
+}
+_SEARCH_MANAGEMENT_AUDIT_FIELDS = {
+    "search_routing_updated": {"mode"},
+    "search_provider_test_succeeded": {"provider_type", "result_count"},
+    "search_provider_test_failed": {"provider_type", "error"},
+}
 _ADMIN_AUDIT_ACTIONS = frozenset(
     {
         "admin_login_succeeded",
@@ -1253,6 +1266,8 @@ _ADMIN_AUDIT_ACTIONS = frozenset(
         "public_post_moderated",
         "public_post_controls_updated",
         "inbound_message_received",
+        *_MODEL_RESOURCE_AUDIT_FIELDS,
+        *_SEARCH_MANAGEMENT_AUDIT_FIELDS,
     }
 )
 _TRAINING_POLICY_FIELDS = (
@@ -2778,7 +2793,65 @@ def _verify_management_audit_provenance(
         return True
     if action not in _ADMIN_AUDIT_ACTIONS:
         return False
-    if action in {"admin_login_succeeded", "admin_logout"}:
+    if action in _MODEL_RESOURCE_AUDIT_FIELDS:
+        # These drafts intentionally have no persisted resource to reference.
+        # Validate the exact redacted writer summary, never infer provider
+        # success from it or relax validation of unrelated audit actions.
+        _provenance_keys(payload, _MODEL_RESOURCE_AUDIT_FIELDS[action], label)
+        if actor.strip().casefold() == "subject" or len(actor) > 256:
+            raise IntegrityError(f"{label} model management actor is invalid")
+        if action == "model_resource_discovery_succeeded":
+            count = _provenance_int(payload["model_count"], f"{label} model count")
+            if count > 500:
+                raise IntegrityError(f"{label} model count is invalid")
+        elif action == "model_resource_draft_test_succeeded":
+            model = _provenance_text(payload["model"], f"{label} model")
+            if len(model) > 256:
+                raise IntegrityError(f"{label} model is invalid")
+        else:
+            code = _provenance_text(payload["error"], f"{label} error code")
+            if len(code) > 128 or any(
+                character not in "abcdefghijklmnopqrstuvwxyz0123456789_" for character in code
+            ):
+                raise IntegrityError(f"{label} error code is invalid")
+            rejected_codes = {
+                "model_resource_discovery_rejected": "invalid_model_discovery",
+                "model_resource_draft_test_rejected": "invalid_model_resource_test",
+            }
+            if action in rejected_codes and code != rejected_codes[action]:
+                raise IntegrityError(f"{label} rejection code is invalid")
+    elif action in _SEARCH_MANAGEMENT_AUDIT_FIELDS:
+        _provenance_keys(payload, _SEARCH_MANAGEMENT_AUDIT_FIELDS[action], label)
+        if actor.strip().casefold() == "subject" or len(actor) > 256:
+            raise IntegrityError(f"{label} search management actor is invalid")
+        if action == "search_routing_updated":
+            # This is an immutable historical summary. A later routing change
+            # must not invalidate an earlier valid mode.
+            if _provenance_text(payload["mode"], f"{label} routing mode") not in {
+                "model_first",
+                "api_first",
+                "auto",
+            }:
+                raise IntegrityError(f"{label} routing mode is invalid")
+        else:
+            # Draft probes create neither a provider record nor a search action.
+            if _provenance_text(payload["provider_type"], f"{label} provider type") not in {
+                "brave",
+                "bing",
+                "tavily",
+                "serper",
+            }:
+                raise IntegrityError(f"{label} search provider type is invalid")
+            if action == "search_provider_test_succeeded":
+                count = _provenance_int(payload["result_count"], f"{label} result count")
+                if count > 3:
+                    raise IntegrityError(f"{label} search result count is invalid")
+            elif _provenance_text(payload["error"], f"{label} error code") not in {
+                "search_provider_test_failed",
+                "search_provider_test_unknown",
+            }:
+                raise IntegrityError(f"{label} search error code is invalid")
+    elif action in {"admin_login_succeeded", "admin_logout"}:
         _provenance_keys(payload, {"role"}, label)
         if _provenance_text(payload["role"], f"{label} role") not in {"operator", "admin"}:
             raise IntegrityError(f"{label} session role is invalid")
@@ -2820,17 +2893,26 @@ def _verify_management_audit_provenance(
             or actor != f"transport:{event['channel']}"
         ):
             raise IntegrityError(f"{label} inbound evidence is invalid")
-    else:
+    elif action == "public_post_controls_updated":
+        from .public_policy import MIN_PUBLIC_POST_STORAGE_BYTES
+
         bounds = {
             "rate_limit_per_hour": (1, 100_000),
             "queue_cap": (1, None),
             "captcha_ttl_seconds": (30, 3600),
             "captcha_max_attempts": (1, 20),
-            "storage_cap_bytes": (1_000_000, None),
+            "storage_cap_bytes": (MIN_PUBLIC_POST_STORAGE_BYTES, 2_000_000_000),
             "captcha_issue_limit_per_hour": (1, 100_000),
             "captcha_global_rate_per_minute": (1, 100_000),
         }
-        _provenance_keys(payload, set(bounds) | {"captcha_mode"}, label)
+        # The schema-82 writer added both length fields. Historical summaries
+        # retain their original eight fields and must not be rewritten. A
+        # partial pair or any other extra field remains an integrity failure.
+        expected = set(bounds) | {"captcha_mode"}
+        if {"max_content_chars", "length_revision"} & payload.keys():
+            bounds.update(max_content_chars=(1, 20_000), length_revision=(1, None))
+            expected.update({"max_content_chars", "length_revision"})
+        _provenance_keys(payload, expected, label)
         for key, (minimum, maximum) in bounds.items():
             value = _provenance_int(payload[key], f"{label} {key}", minimum=minimum)
             if maximum is not None and value > maximum:
@@ -2841,6 +2923,8 @@ def _verify_management_audit_provenance(
             "alphanumeric",
         }:
             raise IntegrityError(f"{label} CAPTCHA mode is invalid")
+    else:
+        raise IntegrityError(f"{label} management action has no validator")
     return True
 
 
