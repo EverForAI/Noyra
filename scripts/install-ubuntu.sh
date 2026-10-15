@@ -78,6 +78,7 @@ DATA_DIR=/var/lib/noyra
 CONFIG_DIR=/etc/noyra
 CREDENTIALS_DIR="$CONFIG_DIR/credentials"
 UNIT_FILE=/etc/systemd/system/noyra.service
+SIGNER_UNIT=/etc/systemd/system/noyra-signer.service
 PROFILE_DROPIN_DIR=/etc/systemd/system/noyra.service.d
 PROFILE_DROPIN="$PROFILE_DROPIN_DIR/profile.conf"
 UPGRADE_HANDOFF_LOCK="$DATA_DIR/upgrade/manager.lock"
@@ -288,6 +289,7 @@ if [[ -e "$upgrade_state_dir/status.json" ]]; then
 fi
 }
 install -d -o noyra -g noyra -m 0700 "$DATA_DIR"
+install -d -o noyra -g noyra -m 0700 "$DATA_DIR/secrets"
 install -d -o root -g noyra -m 0750 "$CONFIG_DIR"
 install -d -o root -g noyra -m 0750 "$CREDENTIALS_DIR"
 
@@ -578,7 +580,8 @@ on_error() {
   fi
   if [[ "$UPGRADE_COMPONENTS_CHANGED" == true ]]; then
     if ! noyra_upgrade_components_restore \
-      "$UPGRADE_RUNNER" "$UPGRADE_PATH_UNIT" "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT" "$UNIT_FILE"; then
+      "$UPGRADE_RUNNER" "$UPGRADE_PATH_UNIT" "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT" \
+      "$UNIT_FILE" "$SIGNER_UNIT"; then
       upgrade_components_restored=false
       echo 'Failed to restore root upgrade components; Noyra will remain stopped.' >&2
       status=1
@@ -928,19 +931,21 @@ UPGRADE_RUNNER="$LIBEXEC_DIR/noyra-upgrade-runner.sh"
 UPGRADE_COMPONENT_BACKUP_DIR="$INSTALL_DIR/.upgrade-components.$$.$RANDOM"
 noyra_upgrade_components_snapshot \
   "$UPGRADE_COMPONENT_BACKUP_DIR" "$UPGRADE_RUNNER" "$UPGRADE_PATH_UNIT" \
-  "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT" "$UNIT_FILE"
+  "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT" "$UNIT_FILE" "$SIGNER_UNIT"
 noyra_upgrade_components_mark_changed
 install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra.service" "$UNIT_FILE"
 for upgrade_file in \
   "$UPGRADE_RUNNER" \
   "$UPGRADE_PATH_UNIT" \
   "$UPGRADE_RUNNER_UNIT" \
-  "$UPGRADE_RECOVER_UNIT"; do
+  "$UPGRADE_RECOVER_UNIT" \
+  "$SIGNER_UNIT"; do
   if [[ -L "$upgrade_file" || ( -e "$upgrade_file" && ! -f "$upgrade_file" ) ]]; then
     echo "Upgrade system file must be regular and not a symlink: $upgrade_file" >&2
     exit 1
   fi
 done
+install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-signer.service" "$SIGNER_UNIT"
 install -d -o root -g root -m 0755 "$LIBEXEC_DIR"
 install -o root -g root -m 0750 "$SOURCE_DIR/scripts/upgrade-ubuntu-runner.sh" "$UPGRADE_RUNNER"
 install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-upgrade.path" "$UPGRADE_PATH_UNIT"

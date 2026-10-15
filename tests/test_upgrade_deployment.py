@@ -77,6 +77,21 @@ def test_installer_rolls_back_root_upgrade_components_with_failed_release() -> N
     assert rollback < readiness < commit
 
 
+def test_installer_installs_signer_unit_without_starting_it_and_rolls_it_back() -> None:
+    installer = (ROOT / "scripts" / "install-ubuntu.sh").read_text(encoding="utf-8")
+    helper = (ROOT / "scripts" / "lib" / "upgrade-components.sh").read_text(encoding="utf-8")
+
+    assert 'SIGNER_UNIT=/etc/systemd/system/noyra-signer.service' in installer
+    assert 'deploy/systemd/noyra-signer.service" "$SIGNER_UNIT"' in installer
+    assert '"$SIGNER_UNIT"' in installer
+    assert 'systemctl enable --now noyra-signer.service' not in installer
+    assert 'systemctl start noyra-signer.service' not in installer
+    assert 'noyra_upgrade_components_snapshot ' in installer
+    assert 'noyra_upgrade_components_restore ' in installer
+    assert '"$UNIT_FILE" "$SIGNER_UNIT"' in installer
+    assert 'at least four component paths' in helper
+
+
 def test_manager_and_runner_support_fresh_install_checkout_permissions() -> None:
     manager = (ROOT / "src" / "noyra" / "core" / "upgrade.py").read_text(encoding="utf-8")
     runner = (ROOT / "scripts" / "upgrade-ubuntu-runner.sh").read_text(encoding="utf-8")
