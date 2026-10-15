@@ -1,0 +1,39 @@
+[Unit]
+Description=Noyra self-hosted wallet signer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=noyra-signer
+Group=noyra-signer
+WorkingDirectory=/var/lib/noyra-signer
+ExecStart=/opt/noyra/current/.venv/bin/python -m noyra signer \
+  --keystore /var/lib/noyra-signer/wallet.json \
+  --state /var/lib/noyra-signer/signer.sqlite3 \
+  --wallet-password-credential %d/wallet-password \
+  --rpc-url-credential %d/sepolia-rpc-url \
+  --bearer-token-credential %d/signer-token \
+  --host 127.0.0.1 --port 8780 --chain-id 11155111
+ExecStartPre=/usr/bin/test -x /opt/noyra/current/.venv/bin/python
+LoadCredential=wallet-password:/etc/noyra-signer/credentials/wallet-password
+LoadCredential=sepolia-rpc-url:/etc/noyra-signer/credentials/sepolia-rpc-url
+LoadCredential=signer-token:/etc/noyra/credentials/staging-signer-token
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/noyra-signer
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

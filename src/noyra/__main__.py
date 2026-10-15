@@ -173,6 +173,41 @@ def _wallet_command(arguments: list[str]) -> None:
     _wallet_setup_command(forwarded)
 
 
+def _signer_command(arguments: list[str]) -> None:
+    from noyra.signer_service import CHAIN_ID, HTTPRPC, SignerEngine, SignerHTTPServer, SignerState
+    from noyra.wallet.keystore import load_account, read_password_file
+
+    parser = argparse.ArgumentParser(prog="python -m noyra signer")
+    parser.add_argument("--keystore", type=Path, required=True)
+    parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument("--wallet-password-credential", type=Path, required=True)
+    parser.add_argument("--rpc-url-credential", type=Path, required=True)
+    parser.add_argument("--bearer-token-credential", type=Path, required=True)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8780)
+    parser.add_argument("--chain-id", type=int, default=CHAIN_ID)
+    options = parser.parse_args(arguments)
+    if options.host != "127.0.0.1" or options.chain_id != CHAIN_ID:
+        raise SystemExit("signer configuration is invalid")
+    account = load_account(options.keystore, read_password_file(options.wallet_password_credential))
+    token = options.bearer_token_credential.read_text(encoding="utf-8").strip()
+    rpc_url = options.rpc_url_credential.read_text(encoding="utf-8").strip()
+    state = SignerState.open(options.state)
+    engine = SignerEngine(
+        account=account,
+        signer_id="staging-signer-01",
+        chain_id=options.chain_id,
+        rpc=HTTPRPC(rpc_url, options.chain_id),
+        state=state,
+    )
+    server = SignerHTTPServer(engine, bearer_token=token, host=options.host, port=options.port)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        state.close()
+
+
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "setup":
         _setup_command(sys.argv[2:])
@@ -197,6 +232,9 @@ def main() -> None:
         return
     if len(sys.argv) > 1 and sys.argv[1] == "wallet":
         _wallet_command(sys.argv[2:])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "signer":
+        _signer_command(sys.argv[2:])
         return
     print(f"Noyra {__version__} - artificial subject runtime")
 
