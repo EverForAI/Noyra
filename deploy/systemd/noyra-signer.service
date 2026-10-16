@@ -11,11 +11,16 @@ WorkingDirectory=/var/lib/noyra-signer
 ExecStart=/opt/noyra/current/.venv/bin/python -m noyra signer \
   --keystore /var/lib/noyra-signer/wallet.json \
   --state /var/lib/noyra-signer/signer.sqlite3 \
-  --wallet-password-credential %d/wallet-password \
-  --rpc-url-credential %d/sepolia-rpc-url \
-  --bearer-token-credential %d/signer-token \
+  --wallet-password-credential /var/lib/noyra-signer/.wallet-password \
+  --rpc-url-credential /var/lib/noyra-signer/.sepolia-rpc-url \
+  --bearer-token-credential /var/lib/noyra-signer/.signer-token \
   --host 127.0.0.1 --port 8780 --chain-id 11155111
 ExecStartPre=/usr/bin/test -x /opt/noyra/current/.venv/bin/python
+PermissionsStartOnly=true
+ExecStartPre=/usr/bin/install -o noyra-signer -g noyra-signer -m 0600 %d/wallet-password /var/lib/noyra-signer/.wallet-password
+ExecStartPre=/usr/bin/install -o noyra-signer -g noyra-signer -m 0600 %d/sepolia-rpc-url /var/lib/noyra-signer/.sepolia-rpc-url
+ExecStartPre=/usr/bin/install -o noyra-signer -g noyra-signer -m 0600 %d/signer-token /var/lib/noyra-signer/.signer-token
+ExecStopPost=/usr/bin/rm -f /var/lib/noyra-signer/.wallet-password /var/lib/noyra-signer/.sepolia-rpc-url /var/lib/noyra-signer/.signer-token
 LoadCredential=wallet-password:/etc/noyra-signer/credentials/wallet-password
 LoadCredential=sepolia-rpc-url:/etc/noyra-signer/credentials/sepolia-rpc-url
 LoadCredential=signer-token:/etc/noyra/credentials/staging-signer-token

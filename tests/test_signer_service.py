@@ -281,6 +281,13 @@ def test_systemd_unit_is_loopback_only_and_credential_backed() -> None:
     assert "User=noyra-signer" in text
     assert "127.0.0.1" in text and "8780" in text
     assert text.count("LoadCredential=") == 3
+    assert "PermissionsStartOnly=true" in text
+    assert (
+        "ExecStartPre=/usr/bin/install -o noyra-signer -g noyra-signer -m 0600 "
+        "%d/wallet-password /var/lib/noyra-signer/.wallet-password"
+    ) in text
+    assert "--wallet-password-credential /var/lib/noyra-signer/.wallet-password" in text
+    assert "ExecStopPost=/usr/bin/rm -f /var/lib/noyra-signer/.wallet-password" in text
     assert "ProtectSystem=strict" in text
 
 
