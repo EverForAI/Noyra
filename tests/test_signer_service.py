@@ -301,3 +301,12 @@ def _sha256_json(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def test_transfer_accepts_canonical_lowercase_recipient_address(engine: SignerEngine) -> None:
+    payload = valid_transfer_payload()
+    payload["to_address"] = "0xb5ac3ebb4fd1be6561d0f56dcb2c4a114c98d5af"
+    transfer = parse_transfer(payload)
+    result = engine.transfer("mixed-case-recipient-regression", transfer)
+    assert result.chain_id == CHAIN_ID
+    assert len(engine.rpc.sent_raw_transactions) == 1

@@ -19,6 +19,7 @@ from typing import Any, Protocol
 import httpx
 from eth_account.messages import encode_defunct
 from eth_account.signers.local import LocalAccount
+from eth_utils import to_checksum_address  # type: ignore[attr-defined]
 
 from noyra.core.types import canonical_json, utc_now
 from noyra.wallet.execution import (
@@ -239,7 +240,7 @@ class SignerEngine:
                 "nonce": transfer.nonce,
                 "gas": transfer.gas_limit,
                 "gasPrice": int(transfer.max_fee_per_gas),
-                "to": transfer.to_address,
+                "to": to_checksum_address(transfer.to_address),
                 "value": int(transfer.value),
                 "data": transfer.data,
             }
