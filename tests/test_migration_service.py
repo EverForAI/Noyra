@@ -14,13 +14,14 @@ from pydantic import SecretStr
 
 from noyra.core import SubjectKernel
 from noyra.core.types import content_hash
+from noyra.migration.policy import ApprovalMode
 from noyra.service import NoyraHTTPServer, ServiceSettings
 
 ADMIN_TOKEN = "migration-test-admin-token-with-enough-entropy"
 
 
 @pytest.mark.parametrize("approval_mode", ["self_attested", "dual_review"])
-def test_service_settings_accept_review_approval_modes(approval_mode: str) -> None:
+def test_service_settings_accept_review_approval_modes(approval_mode: ApprovalMode) -> None:
     settings = ServiceSettings(
         data_dir=Path("/tmp/noyra-settings-test"),
         subject_id="Noyra-settings-test",

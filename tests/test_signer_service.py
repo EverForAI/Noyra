@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from eth_account import Account
@@ -61,7 +61,7 @@ class FakeRPC:
             return "0x5208"
         if method == "eth_sendRawTransaction":
             raw = str(params[0])
-            from eth_utils import keccak
+            from eth_hash.auto import keccak
 
             tx_hash = "0x" + keccak(bytes.fromhex(raw[2:])).hex()
             self.sent_raw_transactions.append(tx_hash)
@@ -77,6 +77,10 @@ class FakeRPC:
         if method == "eth_blockNumber":
             return "0x1"
         raise AssertionError(f"unexpected RPC method: {method}")
+
+
+def fake_rpc(engine: SignerEngine) -> FakeRPC:
+    return cast(FakeRPC, engine.rpc)
 
 
 @pytest.fixture
@@ -116,7 +120,7 @@ def test_duplicate_request_id_returns_original_result_without_second_broadcast(
     first = engine.transfer("request-1", native_transfer())
     second = engine.transfer("request-1", native_transfer())
     assert second == first
-    assert len(engine.rpc.sent_raw_transactions) == 1
+    assert len(fake_rpc(engine).sent_raw_transactions) == 1
 
 
 def test_reusing_request_id_for_different_transfer_is_rejected(engine: SignerEngine) -> None:
@@ -126,13 +130,13 @@ def test_reusing_request_id_for_different_transfer_is_rejected(engine: SignerEng
 
 
 def test_ambiguous_broadcast_is_persisted_and_never_retried(engine: SignerEngine) -> None:
-    engine.rpc.raise_after_send = TimeoutError()
+    fake_rpc(engine).raise_after_send = TimeoutError()
     with pytest.raises(SignerError, match="broadcast unknown"):
         engine.transfer("request-2", native_transfer())
-    engine.rpc.raise_after_send = None
+    fake_rpc(engine).raise_after_send = None
     with pytest.raises(SignerError, match="broadcast unknown"):
         engine.transfer("request-2", native_transfer())
-    assert len(engine.rpc.sent_raw_transactions) == 1
+    assert len(fake_rpc(engine).sent_raw_transactions) == 1
 
 
 def test_pending_request_is_fail_closed_after_restart(tmp_path: Path, account: Any) -> None:
@@ -309,4 +313,4 @@ def test_transfer_accepts_canonical_lowercase_recipient_address(engine: SignerEn
     transfer = parse_transfer(payload)
     result = engine.transfer("mixed-case-recipient-regression", transfer)
     assert result.chain_id == CHAIN_ID
-    assert len(engine.rpc.sent_raw_transactions) == 1
+    assert len(fake_rpc(engine).sent_raw_transactions) == 1

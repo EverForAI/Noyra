@@ -537,9 +537,12 @@ class CutoverCoordinator:
 
     def has_self_attestation(self, task_id: str) -> bool:
         with self.database.connection() as connection:
-            return connection.execute(
-                "SELECT 1 FROM migration_self_attestations WHERE task_id=?", (task_id,)
-            ).fetchone() is not None
+            return (
+                connection.execute(
+                    "SELECT 1 FROM migration_self_attestations WHERE task_id=?", (task_id,)
+                ).fetchone()
+                is not None
+            )
 
     def _proof_for_task(self, task_id: str) -> dict[str, object]:
         """Load the proof digests recorded when the task entered validation."""

@@ -77,6 +77,9 @@ from noyra.core.runtime_export import RuntimeLogExporter
 from noyra.core.storage import StorageLayout, TrainingStore
 from noyra.core.storage_lifecycle import StorageLifecycleManager
 from noyra.core.storage_mode import (
+    StorageLayout as StorageContract,
+)
+from noyra.core.storage_mode import (
     StorageMode,
     StorageUnavailableError,
     detect_storage_layout,
@@ -1416,6 +1419,8 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
 
 
 class NoyraHTTPServer:
+    storage_contract: StorageContract
+
     def __init__(
         self,
         kernel: SubjectKernel,
@@ -5097,8 +5102,9 @@ class NoyraHTTPServer:
                             idempotency_key=str(payload.get("idempotency_key", proposal_id)),
                         )
                     except Exception as error:
-                        if getattr(error, "code", None) is not None:
-                            self._json(HTTPStatus.CONFLICT, {"error": error.code})
+                        code = getattr(error, "code", None)
+                        if code is not None:
+                            self._json(HTTPStatus.CONFLICT, {"error": code})
                             return
                         status = (
                             HTTPStatus.NOT_FOUND
@@ -5618,7 +5624,7 @@ class NoyraHTTPServer:
                         idempotency_key = payload.get("idempotency_key")
                         if idempotency_key is not None and not isinstance(idempotency_key, str):
                             raise TypeError("idempotency_key must be text")
-                        proposal = PublicPostInput.model_validate(
+                        post_input = PublicPostInput.model_validate(
                             {
                                 key: value
                                 for key, value in payload.items()
@@ -5627,7 +5633,7 @@ class NoyraHTTPServer:
                         )
                         post_record = owner.public_posts.create(
                             owner.kernel.subject_id,
-                            proposal,
+                            post_input,
                             idempotency_key=idempotency_key,
                             client_ip=owner.client_ip(
                                 str(self.client_address[0]), self.headers.get("X-Forwarded-For")

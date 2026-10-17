@@ -135,9 +135,7 @@ def test_dual_review_rejects_stale_policy_after_first_approval(tmp_path: Any) ->
         reason="low space",
         expires_at="2099-01-01T00:00:00+00:00",
     )
-    task = manager.approve(
-        proposal.proposal_id, actor="web-operator", idempotency_key="dual-stale"
-    )
+    task = manager.approve(proposal.proposal_id, actor="web-operator", idempotency_key="dual-stale")
     current = manager.policy_store.read_policy("Noyra-0001")
     manager.policy_store.update_policy(
         "Noyra-0001", current.revision, {"trust_level": 4}, "web-admin"

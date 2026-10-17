@@ -77,9 +77,7 @@ class MigrationPolicy:
         policy = cls(
             subject_id=validate_subject_id(str(row["subject_id"])),
             enabled=bool(row["enabled"]),
-            approval_mode=cast(
-                ApprovalMode, str(review_mode or row["approval_mode"])
-            ),
+            approval_mode=cast(ApprovalMode, str(review_mode or row["approval_mode"])),
             emergency_recovery_enabled=bool(row["emergency_recovery_enabled"]),
             local_wallet_transfer_enabled=bool(row["local_wallet_transfer_enabled"]),
             wallet_mode=cast(WalletMode, str(row["wallet_mode"])),
@@ -326,11 +324,7 @@ class MigrationStore:
     def _row_values(policy: MigrationPolicy, include_subject: bool) -> tuple[Any, ...]:
         values = (
             int(policy.enabled),
-            (
-                "manual"
-                if policy.approval_mode in _REVIEW_APPROVAL_MODES
-                else policy.approval_mode
-            ),
+            ("manual" if policy.approval_mode in _REVIEW_APPROVAL_MODES else policy.approval_mode),
             int(policy.emergency_recovery_enabled),
             int(policy.local_wallet_transfer_enabled),
             policy.wallet_mode,

@@ -99,6 +99,8 @@ class UpgradeManager:
     @staticmethod
     def recommendation(code: str | None) -> str | None:
         """Return a bounded operator action for a durable upgrade error."""
+        if code is None:
+            return None
         return _RECOMMENDATIONS.get(code)
 
     @contextmanager
@@ -425,7 +427,7 @@ class UpgradeManager:
                     "release": None,
                     "logs": [],
                     "error_code": None,
-                "recommendation": None,
+                    "recommendation": None,
                 }
             )
 

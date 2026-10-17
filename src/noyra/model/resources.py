@@ -2444,7 +2444,10 @@ class CognitiveResourceStore:
         ):
             raise IntegrityError("cognitive resource group durable state is invalid")
         if reasoning_effort is not None and reasoning_effort not in {
-            "low", "medium", "high", "xhigh"
+            "low",
+            "medium",
+            "high",
+            "xhigh",
         }:
             raise IntegrityError("cognitive resource reasoning effort is invalid")
         try:
@@ -2706,6 +2709,7 @@ class RoutedModelGateway(ModelGateway):
         idempotency_key: str,
         max_output_tokens: int = 1024,
         temperature: float = 0.2,
+        reasoning_effort: str | None = None,
     ) -> GatewayResult[OutputT]:
         """Serialize one logical request and fail closed on a concurrent owner.
 
@@ -2758,6 +2762,7 @@ class RoutedModelGateway(ModelGateway):
                 idempotency_key=idempotency_key,
                 max_output_tokens=max_output_tokens,
                 temperature=temperature,
+                reasoning_effort=reasoning_effort,
             )
         finally:
             try:
@@ -2779,6 +2784,7 @@ class RoutedModelGateway(ModelGateway):
         idempotency_key: str,
         max_output_tokens: int = 1024,
         temperature: float = 0.2,
+        reasoning_effort: str | None = None,
     ) -> GatewayResult[OutputT]:
         if subject_id != self.subject_id:
             raise PermissionError("routed model gateway cannot serve another subject")
@@ -2864,6 +2870,7 @@ class RoutedModelGateway(ModelGateway):
                     idempotency_key=idempotency_key,
                     max_output_tokens=max_output_tokens,
                     temperature=temperature,
+                    reasoning_effort=reasoning_effort,
                 )
             except Exception:
                 self._record_unavailable(pool, purpose, "legacy_pool_failed")
@@ -2993,6 +3000,7 @@ class RoutedModelGateway(ModelGateway):
                         idempotency_key=routed_idempotency,
                         max_output_tokens=max_output_tokens,
                         temperature=temperature,
+                        reasoning_effort=reasoning_effort,
                     )
                 except (ProviderCallError, StructuredOutputError) as error:
                     latency = int((time.monotonic() - started) * 1000)

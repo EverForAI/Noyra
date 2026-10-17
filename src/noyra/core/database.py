@@ -7565,9 +7565,7 @@ class Database:
         is started again.
         """
         with self.connection() as connection:
-            self._validate_schema_contract_connection(
-                connection, strict=True, persist_marker=False
-            )
+            self._validate_schema_contract_connection(connection, strict=True, persist_marker=False)
 
     def _validate_schema_contract(self, *, strict: bool = False) -> None:
         """Verify the complete versioned DDL inventory before opening service."""
@@ -7591,7 +7589,9 @@ class Database:
         try:
             version = int(version_row[0])
         except (TypeError, ValueError) as error:
-            raise SchemaContractError("schema contract mismatch: schema version is invalid") from error
+            raise SchemaContractError(
+                "schema contract mismatch: schema version is invalid"
+            ) from error
         expected = _SCHEMA_DDL_FINGERPRINTS.get(version)
         latest_contract_version = max(_SCHEMA_DDL_FINGERPRINTS)
         if expected is None and version < latest_contract_version:
@@ -7654,9 +7654,12 @@ class Database:
         self, connection: sqlite3.Connection, schema_version: int
     ) -> None:
         """Check every installed feature marker against its actual objects."""
-        if connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='persistent_features'"
-        ).fetchone() is None:
+        if (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='persistent_features'"
+            ).fetchone()
+            is None
+        ):
             if schema_version < min(_PERSISTENT_FEATURE_MIN_SCHEMA.values(), default=0):
                 return
             raise SchemaContractError(

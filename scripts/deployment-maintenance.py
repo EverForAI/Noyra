@@ -422,8 +422,7 @@ def gc_plan(
         )
         summary["recovery_points_status"] = (
             "satisfied"
-            if summary["verified_recovery_points_after_plan"]
-            >= summary["minimum_recovery_points"]
+            if summary["verified_recovery_points_after_plan"] >= summary["minimum_recovery_points"]
             else "below_minimum"
         )
         summary["space_status"] = _backup_space_status(

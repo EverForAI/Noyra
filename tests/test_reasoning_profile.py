@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
@@ -29,7 +30,7 @@ def test_known_model_rejects_unknown_effort() -> None:
 
 
 def test_provider_payload_only_contains_optional_field_when_selected() -> None:
-    base = dict(
+    base: dict[str, Any] = dict(
         model="gpt-5-mini",
         messages=(ModelMessage(role="user", content="hello"),),
         max_output_tokens=8,

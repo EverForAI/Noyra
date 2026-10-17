@@ -137,9 +137,7 @@ class OpenAICompatibleProvider:
                     return await self._parse_response(response, deadline=deadline)
         except ProviderCallError as error:
             if error.latency_ms is None:
-                error.latency_ms = max(
-                    0, min(int((loop.time() - started) * 1000), 86_400_000)
-                )
+                error.latency_ms = max(0, min(int((loop.time() - started) * 1000), 86_400_000))
             raise
         except HTTPResponseLimitError:
             raise ProviderCallError(

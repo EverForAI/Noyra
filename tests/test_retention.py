@@ -171,16 +171,23 @@ def test_retention_reports_sqlite_space_without_vacuum_side_effect(tmp_path: Any
             for pragma in ("page_count", "freelist_count")
         )
 
+    physical_bytes = metrics["physical_bytes"]
+    wal_bytes = metrics["wal_bytes"]
+    shm_bytes = metrics["shm_bytes"]
+    page_size = metrics["page_size"]
+    page_count = metrics["page_count"]
+    freelist_pages = metrics["freelist_pages"]
+    freelist_bytes = metrics["freelist_bytes"]
     assert metrics["database_bytes"] == db.path.stat().st_size
-    assert metrics["physical_bytes"] >= metrics["database_bytes"]
-    assert metrics["wal_bytes"] >= 0
-    assert metrics["shm_bytes"] >= 0
-    assert metrics["page_size"] > 0
-    assert metrics["page_count"] > 0
-    assert metrics["freelist_pages"] >= 0
-    assert metrics["freelist_bytes"] == metrics["page_size"] * metrics["freelist_pages"]
+    assert physical_bytes is not None and physical_bytes >= metrics["database_bytes"]
+    assert wal_bytes is not None and wal_bytes >= 0
+    assert shm_bytes is not None and shm_bytes >= 0
+    assert page_size is not None and page_size > 0
+    assert page_count is not None and page_count > 0
+    assert freelist_pages is not None and freelist_pages >= 0
+    assert freelist_bytes == page_size * freelist_pages
     assert before == after
-    assert metrics["freelist_pages"] > 0
+    assert freelist_pages is not None and freelist_pages > 0
 
 
 def test_retention_90_day_cutoff_deletes_only_rows_strictly_older_than_cutoff(

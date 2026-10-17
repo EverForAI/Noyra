@@ -325,8 +325,12 @@ class MigrationManager:
                         actor.strip(),
                         {
                             "proposal_id": proposal_id,
-                            "task_id": None if task_row is None and result_task is None else (
-                                result_task.task_id if result_task is not None else task_row["task_id"]
+                            "task_id": None
+                            if task_row is None and result_task is None
+                            else (
+                                result_task.task_id
+                                if result_task is not None
+                                else task_row["task_id"]
                             ),
                             "approval_mode": row["approval_mode"],
                             "approval_count": len(approvals),
@@ -703,8 +707,7 @@ class MigrationManager:
                 (subject_id, limit),
             ).fetchall()
             approvals = {
-                str(row["proposal_id"]): self._proposal_approvals(connection, row)
-                for row in rows
+                str(row["proposal_id"]): self._proposal_approvals(connection, row) for row in rows
             }
         return [
             self._proposal_projection(row, approvals=approvals[str(row["proposal_id"])])
@@ -721,10 +724,9 @@ class MigrationManager:
         approvals = []
         for approval in rows:
             self._assert_approval_integrity(approval)
-            if (
-                approval["subject_id"] != row["subject_id"]
-                or int(approval["policy_revision"]) != int(row["policy_revision"])
-            ):
+            if approval["subject_id"] != row["subject_id"] or int(
+                approval["policy_revision"]
+            ) != int(row["policy_revision"]):
                 raise ValueError("migration approval binding mismatch")
             approvals.append(
                 {"actor": str(approval["actor"]), "created_at": str(approval["created_at"])}
@@ -1016,10 +1018,9 @@ class MigrationManager:
         values = dict(row)
         if values.get("state_hash") == cls._proposal_hash(values):
             return
-        if (
-            values.get("approval_mode") == "manual"
-            and values.get("state_hash") == cls._legacy_proposal_hash(values)
-        ):
+        if values.get("approval_mode") == "manual" and values.get(
+            "state_hash"
+        ) == cls._legacy_proposal_hash(values):
             return
         else:
             raise ValueError("migration proposal integrity check failed")

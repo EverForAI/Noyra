@@ -431,8 +431,10 @@ def test_self_attested_cutover_rejects_mismatched_target_identity(tmp_path: Any)
         ).decode("ascii"),
     }
     _add_disabled_binding_proof(proof, task=task, target_identity="host-1")
+    wallet_binding = proof.get("wallet_binding")
+    assert isinstance(wallet_binding, dict)
     proof["wallet_binding"] = {
-        **proof["wallet_binding"],
+        **wallet_binding,
         "target_identity": "different-host",
     }
     cutover = CutoverCoordinator(database, executor=_ProofExecutor())
@@ -441,9 +443,12 @@ def test_self_attested_cutover_rejects_mismatched_target_identity(tmp_path: Any)
         cutover.commit(task.task_id)
     assert manager.get_task(task.task_id).status == "validating"
     with database.connection() as connection:
-        assert connection.execute(
-            "SELECT 1 FROM migration_self_attestations WHERE task_id=?", (task.task_id,)
-        ).fetchone() is None
+        assert (
+            connection.execute(
+                "SELECT 1 FROM migration_self_attestations WHERE task_id=?", (task.task_id,)
+            ).fetchone()
+            is None
+        )
 
 
 def test_cutover_commit_rolls_back_task_when_epoch_completion_fails(

@@ -66,9 +66,7 @@ class ProviderCallError(ModelGatewayError):
         self.outcome_unknown = outcome_unknown
         self.usage_unknown = usage_unknown
         self.status_code = status_code
-        self.latency_ms = (
-            None if latency_ms is None else max(0, min(int(latency_ms), 86_400_000))
-        )
+        self.latency_ms = None if latency_ms is None else max(0, min(int(latency_ms), 86_400_000))
         self.provider_request_id = (
             provider_request_id[:256] if isinstance(provider_request_id, str) else None
         )

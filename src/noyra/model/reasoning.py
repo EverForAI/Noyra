@@ -21,7 +21,7 @@ class ReasoningProfile:
             return None
         if value not in self.efforts:
             raise ValueError("reasoning effort is not supported by this model")
-        return value  # type: ignore[return-value]
+        return value
 
 
 def reasoning_profile(model: str, provider_type: str = "openai_compatible") -> ReasoningProfile:

@@ -80,8 +80,7 @@ def build_recovery_manifest(
     latest_backup = backup_path or backup_dir
     return {
         "format": "noyra-recovery-manifest/v1",
-        "generated_at": generated_at
-        or datetime.now(UTC).isoformat(timespec="milliseconds"),
+        "generated_at": generated_at or datetime.now(UTC).isoformat(timespec="milliseconds"),
         "release": {
             "id": release_id,
             "source_sha": source_sha,
@@ -141,4 +140,3 @@ def write_recovery_manifest(path: Path, manifest: dict[str, Any]) -> None:
     finally:
         if temporary.exists():
             temporary.unlink()
-

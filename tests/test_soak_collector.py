@@ -2,14 +2,17 @@ import importlib.util
 import io
 import json
 import sqlite3
+from http.client import HTTPMessage
 from pathlib import Path
+from types import ModuleType
+from typing import Literal
 from unittest.mock import patch
 from urllib.error import HTTPError
 
 import pytest
 
 
-def _helper():
+def _helper() -> ModuleType:
     path = Path(__file__).resolve().parents[1] / "scripts" / "noyra-soak-collector.py"
     spec = importlib.util.spec_from_file_location("noyra_soak_collector", path)
     assert spec is not None and spec.loader is not None
@@ -111,13 +114,13 @@ def test_health_sanitizes_untrusted_json_fields() -> None:
     class Response:
         status = 200
 
-        def __enter__(self):
+        def __enter__(self) -> "Response":
             return self
 
-        def __exit__(self, *_args):
+        def __exit__(self, *_args: object) -> Literal[False]:
             return False
 
-        def read(self, _limit):
+        def read(self, _limit: int) -> bytes:
             return json.dumps(
                 {
                     "status": "ok",
@@ -147,13 +150,11 @@ def test_http_health_failure_preserves_status_without_body_secrets() -> None:
         "http://health",
         503,
         "unavailable",
-        {},
+        HTTPMessage(),
         None,
     )
     body = io.BytesIO(
-        json.dumps(
-            {"status": "degraded", "service": "noyra", "token": "secret"}
-        ).encode()
+        json.dumps({"status": "degraded", "service": "noyra", "token": "secret"}).encode()
     )
     error.fp = body
     with patch.object(helper, "urlopen", side_effect=error):
