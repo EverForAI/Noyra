@@ -981,14 +981,15 @@ class ServiceTestCase(unittest.TestCase):
     def test_unstored_model_probe_and_discovery_do_not_create_resource(self: Self) -> None:
         payload = {
             "base_url": "https://models.example/v1",
-            "model": "draft-model",
+            "model": "gpt-5-mini",
             "api_keys": ["draft-secret"],
+            "reasoning_effort": "high",
         }
         with (
             patch.object(
                 OpenAICompatibleProvider,
                 "probe_unstored",
-                new=AsyncMock(return_value={"ok": True, "model": "draft-model"}),
+                new=AsyncMock(return_value={"ok": True, "model": "gpt-5-mini"}),
             ) as probe,
             patch.object(
                 OpenAICompatibleProvider,
@@ -1002,8 +1003,17 @@ class ServiceTestCase(unittest.TestCase):
             self.assertEqual(status, 200)
             assert isinstance(result, dict)
             self.assertEqual(result["ok"], True)
-            self.assertEqual(result["model"], "draft-model")
-            self.assertEqual(result["reasoning_profile"]["supported"], False)
+            self.assertEqual(result["model"], "gpt-5-mini")
+            self.assertEqual(result["reasoning_profile"]["supported"], True)
+            self.assertEqual(result["reasoning_profile"]["tested_efforts"], ["high"])
+            status, observed = self.authorized_json(
+                "/api/config/model-capabilities?model=gpt-5-mini&base_url=https%3A%2F%2Fmodels.example%2Fv1"
+            )
+            self.assertEqual(status, 200)
+            assert isinstance(observed, dict)
+            self.assertEqual(observed["status"], "known")
+            self.assertEqual(observed["source"], "probe")
+            self.assertEqual(observed["tested_efforts"], ["high"])
             status, result = self.authorized_json(
                 "/api/config/model-resources/models",
                 payload={"base_url": payload["base_url"], "api_keys": payload["api_keys"]},
@@ -1031,6 +1041,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(status, 200)
         assert isinstance(supported, dict)
         self.assertEqual(supported["source"], "server_profile")
+        self.assertEqual(supported["status"], "unobserved")
         self.assertEqual(supported["supported"], True)
         self.assertEqual(supported["efforts"], ["low", "medium", "high", "xhigh"])
         self.assertTrue(supported["revision"])
@@ -1177,6 +1188,16 @@ class ServiceTestCase(unittest.TestCase):
         with self.assertRaises(HTTPError) as error:
             urlopen(unauthorized, timeout=5)
         self.assertEqual(error.exception.code, 401)
+
+        unverified_reasoning = {
+            **payload,
+            "label": "unverified-reasoning",
+            "model": "gpt-5-mini",
+            "reasoning_effort": "high",
+        }
+        with self.assertRaises(HTTPError) as unverified:
+            self.authorized_json("/api/config/model-resources", payload=unverified_reasoning)
+        self.assertEqual(unverified.exception.code, 409)
 
         status, created = self.authorized_json("/api/config/model-resources", payload=payload)
         self.assertEqual(status, 201)

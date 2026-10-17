@@ -172,6 +172,7 @@ from noyra.model import (
     RoutedModelGateway,
     resource_groups_from_env,
 )
+from noyra.model.capabilities import CapabilityProfileStore
 from noyra.model.errors import (
     BudgetExhaustedError,
     ModelCallStateError,
@@ -4442,12 +4443,25 @@ class NoyraHTTPServer:
                                 {"error": "invalid_model_capability"},
                             )
                             return
-                    profile = reasoning_profile_payload(model, provider_type)
+                    stored = None
+                    if base_url:
+                        stored = CapabilityProfileStore(owner.kernel.database).get(
+                            owner.kernel.subject_id,
+                            provider_type,
+                            base_url,
+                            model.strip(),
+                        )
+                    profile = (
+                        stored.public()
+                        if stored is not None
+                        else reasoning_profile_payload(model, provider_type)
+                    )
                     profile.update(
                         {
                             "model": model.strip(),
                             "provider_type": provider_type,
-                            "source": "server_profile",
+                            "source": profile.get("source", "server_profile"),
+                            "status": profile.get("status", "unobserved"),
                         }
                     )
                     self._json(HTTPStatus.OK, profile)
@@ -8277,9 +8291,27 @@ class NoyraHTTPServer:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_model_resource"})
                     return
                 try:
+                    proposal = CognitiveResourceGroupInput.model_validate(payload)
+                    if proposal.reasoning_effort is not None:
+                        capability = CapabilityProfileStore(owner.kernel.database).get(
+                            owner.kernel.subject_id,
+                            proposal.provider_type,
+                            proposal.base_url,
+                            proposal.model,
+                        )
+                        if (
+                            capability is None
+                            or capability.status != "known"
+                            or proposal.reasoning_effort not in capability.tested_efforts
+                        ):
+                            self._json(
+                                HTTPStatus.CONFLICT,
+                                {"error": "model_capability_probe_required"},
+                            )
+                            return
                     record = owner.cognitive_resources.configure(
                         owner.kernel.subject_id,
-                        CognitiveResourceGroupInput.model_validate(payload),
+                        proposal,
                         actor=self._actor(),
                     )
                 except ValueError as error:
@@ -8391,10 +8423,25 @@ class NoyraHTTPServer:
                     self._actor(),
                     {"model": result.get("model")},
                 )
-                result["reasoning_profile"] = reasoning_profile_payload(
-                    model,
-                    "openai_compatible",
-                    selected=reasoning_effort,
+                stored = (
+                    CapabilityProfileStore(owner.kernel.database).record_probe_success(
+                        owner.kernel.subject_id,
+                        "openai_compatible",
+                        base_url,
+                        model,
+                        reasoning_effort,
+                    )
+                    if reasoning_effort is not None
+                    else None
+                )
+                result["reasoning_profile"] = (
+                    stored.public(selected=reasoning_effort)
+                    if stored is not None
+                    else reasoning_profile_payload(
+                        model,
+                        "openai_compatible",
+                        selected=reasoning_effort,
+                    )
                 )
                 self._json(HTTPStatus.OK, result)
 

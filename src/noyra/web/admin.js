@@ -2604,6 +2604,7 @@ $("#admin-model-test").addEventListener("click", async (event) => {
   try {
     const result = await request("/api/config/model-resources/test", { method: "POST", body: JSON.stringify(draftModelPayload(true)) }); if (!currentAction()) return;
     setStatus("#model-status", `连接测试成功：${result.model}`);
+    if (result.reasoning_profile) applyReasoningProfile(result.reasoning_profile);
   } catch (error) { if (!currentAction()) return; setStatus("#model-status", errorText(error), true); }
   finally { if (!currentAction()) return; button.disabled = false; }
 });
@@ -2844,7 +2845,7 @@ const draftPricing = document.createElement("details"); draftPricing.className =
 draftPricing.innerHTML = '<summary>价格与重试</summary><label>输入 USD／百万 Token<input name="input_usd_per_million" value="0" inputmode="decimal" required></label><label>输出 USD／百万 Token<input name="output_usd_per_million" value="0" inputmode="decimal" required></label><label>价格依据<select name="pricing_status"><option value="unknown">尚未确认价格</option><option value="priced">已填写单价（估算）</option><option value="free">确认免费</option></select></label><label>最大尝试<input name="max_attempts" value="3" inputmode="numeric" required></label>';
 $("#admin-model-form .resource-actions").before(draftPricing);
 const reasoningField = document.createElement("label"); reasoningField.id = "admin-model-reasoning-field"; reasoningField.hidden = true;
-reasoningField.innerHTML = '<span>思考强度</span><select id="admin-model-reasoning"><option value="">不设置</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option></select>';
+reasoningField.innerHTML = '<span>思考强度</span><select id="admin-model-reasoning"><option value="">不设置</option></select><small id="admin-model-reasoning-status"></small>';
 $("#admin-model-form .resource-actions").before(reasoningField);
 let reasoningCapabilityGeneration = 0;
 let reasoningCapabilityTimer = null;
@@ -2853,10 +2854,32 @@ const applyReasoningProfile = (profile) => {
   const selected = select.value;
   const efforts = Array.isArray(profile?.efforts) ? profile.efforts.filter((item) => typeof item === "string") : [];
   select.replaceChildren(new Option("不设置", ""), ...efforts.map((effort) => new Option({low:"低",medium:"中",high:"高",xhigh:"极高"}[effort] || effort, effort)));
+  const observed = profile?.status === "known" && profile?.source === "probe";
   reasoningField.hidden = profile?.supported !== true || efforts.length === 0;
   select.value = efforts.includes(selected) ? selected : "";
-  if (profile?.revision) reasoningField.dataset.profileRevision = String(profile.revision);
+  if (profile?.revision !== undefined) reasoningField.dataset.profileRevision = String(profile.revision);
   else delete reasoningField.dataset.profileRevision;
+  const tested = Array.isArray(profile?.tested_efforts) ? profile.tested_efforts : [];
+  const selectionVerified = observed && (!select.value || tested.includes(select.value));
+  reasoningField.dataset.capabilityObserved = observed ? "true" : "false";
+  reasoningField.dataset.testedEfforts = JSON.stringify(tested);
+  if (!selectionVerified && profile?.supported === true) reasoningField.dataset.capabilityStatus = "unverified";
+  else delete reasoningField.dataset.capabilityStatus;
+  updateReasoningCapabilityStatus();
+};
+const updateReasoningCapabilityStatus = () => {
+  const select = $("#admin-model-reasoning");
+  if (reasoningField.hidden || !select.value) {
+    $("#admin-model-reasoning-status").textContent = "";
+    return;
+  }
+  const observed = reasoningField.dataset.capabilityObserved === "true";
+  const tested = JSON.parse(reasoningField.dataset.testedEfforts || "[]");
+  $("#admin-model-reasoning-status").textContent = observed && tested.includes(select.value)
+    ? ""
+    : observed
+      ? "此端点尚未验证所选强度；保存前需要测试一次配置。"
+      : "此端点尚未验证思考强度。测试所选强度后才能保存。";
 };
 const updateReasoningField = async () => {
   const generation = ++reasoningCapabilityGeneration;
@@ -2865,6 +2888,8 @@ const updateReasoningField = async () => {
   reasoningField.hidden = true;
   $("#admin-model-reasoning").value = "";
   delete reasoningField.dataset.profileRevision;
+  delete reasoningField.dataset.capabilityStatus;
+  $("#admin-model-reasoning-status").textContent = "";
   if (!csrfToken || !model) return;
   const query = new URLSearchParams({model, provider_type: "openai_compatible"});
   if (baseUrl) query.set("base_url", baseUrl);
@@ -2886,6 +2911,7 @@ const scheduleReasoningFieldUpdate = () => {
 };
 $("#admin-model-name").addEventListener("input", scheduleReasoningFieldUpdate);
 $("#admin-model-url").addEventListener("input", scheduleReasoningFieldUpdate);
+$("#admin-model-reasoning").addEventListener("change", updateReasoningCapabilityStatus);
 $("#admin-model-form").addEventListener("input", () => { $("#admin-model-form").dataset.dirty = "true"; });
 window.addEventListener("beforeunload", (event) => { if (document.querySelector("form[data-dirty]")) { event.preventDefault(); event.returnValue = ""; } });
 addParameterHelp($("#admin-model-form"));

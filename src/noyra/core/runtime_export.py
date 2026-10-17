@@ -670,6 +670,7 @@ _OWNERSHIP_GRAPHS[95] = _OWNERSHIP_GRAPHS[94]
 _OWNERSHIP_GRAPHS[96] = _OWNERSHIP_GRAPHS[95]
 _OWNERSHIP_GRAPHS[97] = _OWNERSHIP_GRAPHS[96]
 _OWNERSHIP_GRAPHS[98] = _OWNERSHIP_GRAPHS[97]
+_OWNERSHIP_GRAPHS[99] = _OWNERSHIP_GRAPHS[98]
 
 
 @dataclass(frozen=True)
@@ -998,6 +999,7 @@ class RuntimeLogExporter:
             "migration_self_attestations",
             "backup_retention_policies",
             "backup_retention_runs",
+            "model_capability_profiles",
         }
         graph = {
             **graph,

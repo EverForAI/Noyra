@@ -64,6 +64,50 @@ function modelContext(extra = {}) {
   return { sandbox, nodes };
 }
 
+test("reasoning choices distinguish candidates from endpoint-tested efforts", () => {
+  const nodes = new Map();
+  const node = (selector) => {
+    if (!nodes.has(selector)) nodes.set(selector, {
+      value: "", textContent: "", dataset: {}, options: [],
+      before() {}, addEventListener() {},
+      replaceChildren(...options) { this.options = options; },
+    });
+    return nodes.get(selector);
+  };
+  const { sandbox } = context({
+    $: node,
+    document: { createElement: () => ({ dataset: {}, before() {} }) },
+    Option: function Option(label, value) { this.label = label; this.value = value; },
+  });
+  const code = functionsBetween(
+    'const reasoningField = document.createElement("label")',
+    "const updateReasoningField =",
+  );
+  vm.runInContext(`${code}\nthis.applyReasoningProfile = applyReasoningProfile; this.reasoningField = reasoningField; this.updateReasoningCapabilityStatus = updateReasoningCapabilityStatus;`, sandbox);
+
+  sandbox.applyReasoningProfile({
+    supported: true,
+    efforts: ["low", "medium", "high", "xhigh"],
+    tested_efforts: [],
+    source: "server_profile",
+    status: "unobserved",
+  });
+  assert.equal(sandbox.reasoningField.hidden, false);
+  sandbox.$("#admin-model-reasoning").value = "high";
+  sandbox.updateReasoningCapabilityStatus();
+  assert.match(sandbox.$("#admin-model-reasoning-status").textContent, /尚未验证/);
+
+  sandbox.applyReasoningProfile({
+    supported: true,
+    efforts: ["low", "medium", "high", "xhigh"],
+    tested_efforts: ["high"],
+    source: "probe",
+    status: "known",
+  });
+  assert.equal(sandbox.$("#admin-model-reasoning").value, "high");
+  assert.equal(sandbox.$("#admin-model-reasoning-status").textContent, "");
+});
+
 function requestContext(extra = {}) {
   const { sandbox, nodes } = context({ upgradeErrorLabels: {}, ...extra });
   vm.runInContext(functionsBetween("const describeRequestError =", "function showSection("), sandbox);
