@@ -178,7 +178,11 @@ from noyra.model.errors import (
     ProviderCallError,
     StructuredOutputError,
 )
-from noyra.model.reasoning import reasoning_profile
+from noyra.model.reasoning import (
+    ReasoningEffort,
+    normalize_reasoning_effort,
+    reasoning_profile_payload,
+)
 from noyra.research import SearchExecutor, SearchProviderInput, SearchProviderStore
 from noyra.research.routing import (
     get_search_routing_mode,
@@ -428,14 +432,11 @@ def _cognitive_resource_payload(record: CognitiveResourceGroupRecord) -> dict[st
     payload["exact_budget"] = {
         field: str(getattr(record, field)) for field in _MODEL_RESOURCE_EXACT_FIELDS
     }
-    profile = reasoning_profile(record.model, record.provider_type)
-    payload["reasoning_profile"] = {
-        "supported": profile.supported,
-        "efforts": list(profile.efforts),
-        "parameter": profile.parameter,
-        "version": profile.version,
-        "selected": record.reasoning_effort,
-    }
+    payload["reasoning_profile"] = reasoning_profile_payload(
+        record.model,
+        record.provider_type,
+        selected=record.reasoning_effort,
+    )
     return payload
 
 
@@ -4388,6 +4389,42 @@ class NoyraHTTPServer:
                         HTTPStatus.OK,
                         owner.inbound.list_bindings(owner.kernel.subject_id, limit=limit),
                     )
+                elif parsed.path == "/api/config/model-capabilities":
+                    if not self._authorized():
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    model = query.get("model", [""])[0]
+                    provider_type = query.get("provider_type", ["openai_compatible"])[0]
+                    base_url = query.get("base_url", [""])[0]
+                    if (
+                        not isinstance(model, str)
+                        or not 1 <= len(model.strip()) <= 256
+                        or provider_type != "openai_compatible"
+                    ):
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_model_capability"})
+                        return
+                    if base_url:
+                        try:
+                            OpenAICompatibleSettings(
+                                base_url=base_url,
+                                model=model.strip(),
+                                api_key=SecretStr("capability-probe"),
+                            )
+                        except (TypeError, ValueError):
+                            self._json(
+                                HTTPStatus.BAD_REQUEST,
+                                {"error": "invalid_model_capability"},
+                            )
+                            return
+                    profile = reasoning_profile_payload(model, provider_type)
+                    profile.update(
+                        {
+                            "model": model.strip(),
+                            "provider_type": provider_type,
+                            "source": "server_profile",
+                        }
+                    )
+                    self._json(HTTPStatus.OK, profile)
                 elif parsed.path.startswith("/api/config/model-resources/"):
                     # Treat the whole resource namespace as protected before
                     # inspecting path shape.  This keeps malformed URLs from
@@ -8236,7 +8273,7 @@ class NoyraHTTPServer:
 
             def _draft_model_credentials(
                 self, payload: object, *, require_model: bool
-            ) -> tuple[str, str, SecretStr]:
+            ) -> tuple[str, str, SecretStr, ReasoningEffort | None]:
                 if not isinstance(payload, dict):
                     raise ValueError("model draft must be an object")
                 allowed = {"base_url", "model", "api_keys", "api_key", "reasoning_effort"}
@@ -8263,7 +8300,11 @@ class NoyraHTTPServer:
                     )
                 ):
                     raise ValueError("model draft API key is invalid")
-                return base_url, model, SecretStr(keys[0])
+                selected = payload.get("reasoning_effort")
+                if selected is not None and not isinstance(selected, str):
+                    raise ValueError("model draft reasoning effort is invalid")
+                reasoning_effort = normalize_reasoning_effort(model, selected)
+                return base_url, model, SecretStr(keys[0]), reasoning_effort
 
             def _test_unstored_model_resource(self) -> None:
                 if not self._authorized():
@@ -8278,12 +8319,15 @@ class NoyraHTTPServer:
                 if payload is None:
                     return
                 try:
-                    base_url, model, api_key = self._draft_model_credentials(
+                    base_url, model, api_key, reasoning_effort = self._draft_model_credentials(
                         payload, require_model=True
                     )
                     result = asyncio.run(
                         OpenAICompatibleProvider.probe_unstored(
-                            base_url=base_url, model=model, api_key=api_key
+                            base_url=base_url,
+                            model=model,
+                            api_key=api_key,
+                            reasoning_effort=reasoning_effort,
                         )
                     )
                 except (ValueError, TypeError):
@@ -8307,6 +8351,11 @@ class NoyraHTTPServer:
                     self._actor(),
                     {"model": result.get("model")},
                 )
+                result["reasoning_profile"] = reasoning_profile_payload(
+                    model,
+                    "openai_compatible",
+                    selected=reasoning_effort,
+                )
                 self._json(HTTPStatus.OK, result)
 
             def _discover_unstored_models(self) -> None:
@@ -8322,7 +8371,7 @@ class NoyraHTTPServer:
                 if payload is None:
                     return
                 try:
-                    base_url, _, api_key = self._draft_model_credentials(
+                    base_url, _, api_key, _ = self._draft_model_credentials(
                         payload, require_model=False
                     )
                     models = asyncio.run(

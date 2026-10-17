@@ -179,6 +179,7 @@ class OpenAICompatibleProvider:
         base_url: str,
         model: str,
         api_key: Any,
+        reasoning_effort: str | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> dict[str, Any]:
         """Probe draft credentials without creating a durable resource."""
@@ -203,6 +204,11 @@ class OpenAICompatibleProvider:
                         "messages": [{"role": "user", "content": "Reply with OK."}],
                         "max_tokens": 8,
                         "temperature": 0,
+                        **(
+                            {"reasoning_effort": reasoning_effort}
+                            if reasoning_effort is not None
+                            else {}
+                        ),
                     },
                     follow_redirects=False,
                 ) as response:

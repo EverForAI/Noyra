@@ -6,7 +6,11 @@ from typing import Any
 import pytest
 
 from noyra.model.openai_compatible import OpenAICompatibleProvider
-from noyra.model.reasoning import normalize_reasoning_effort, reasoning_profile
+from noyra.model.reasoning import (
+    normalize_reasoning_effort,
+    reasoning_profile,
+    reasoning_profile_payload,
+)
 from noyra.model.types import CompletionRequest, ModelMessage
 
 
@@ -27,6 +31,17 @@ def test_unknown_models_fail_closed_without_reasoning() -> None:
 def test_known_model_rejects_unknown_effort() -> None:
     with pytest.raises(ValueError, match="not supported"):
         normalize_reasoning_effort("o3-mini", "extreme")
+
+
+def test_public_profile_is_server_owned_and_clears_unsupported_selection() -> None:
+    supported = reasoning_profile_payload("gpt-5-mini", selected="high")
+    unsupported = reasoning_profile_payload("deepseek-chat", selected="high")
+    assert supported["supported"] is True
+    assert supported["selected"] == "high"
+    assert isinstance(supported["revision"], str)
+    assert unsupported["supported"] is False
+    assert unsupported["efforts"] == []
+    assert unsupported["selected"] is None
 
 
 def test_provider_payload_only_contains_optional_field_when_selected() -> None:

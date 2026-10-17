@@ -1688,6 +1688,7 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
             base_url="https://models.example/v1",
             model="remote-model",
             api_key=SecretStr("unstored-secret"),
+            reasoning_effort="high",
             client=client,
         )
         await client.aclose()
@@ -1695,6 +1696,7 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["model"], "remote-model")
         self.assertEqual(captured["path"], "/v1/chat/completions")
         self.assertEqual(captured["authorization"], "Bearer unstored-secret")
+        self.assertEqual(captured["body"]["reasoning_effort"], "high")
         self.assertNotIn("unstored-secret", repr(result))
 
     async def test_provider_lists_models_from_openai_compatible_endpoint(self: Self) -> None:

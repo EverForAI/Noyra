@@ -1000,7 +1000,10 @@ class ServiceTestCase(unittest.TestCase):
                 "/api/config/model-resources/test", payload=payload
             )
             self.assertEqual(status, 200)
-            self.assertEqual(result, {"ok": True, "model": "draft-model"})
+            assert isinstance(result, dict)
+            self.assertEqual(result["ok"], True)
+            self.assertEqual(result["model"], "draft-model")
+            self.assertEqual(result["reasoning_profile"]["supported"], False)
             status, result = self.authorized_json(
                 "/api/config/model-resources/models",
                 payload={"base_url": payload["base_url"], "api_keys": payload["api_keys"]},
@@ -1012,6 +1015,39 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(self.authorized_json("/api/config/model-resources")[1], [])
         secret_dir = self.data_dir / "secrets" / "models"
         self.assertEqual(list(secret_dir.glob("*")), [])
+
+    def test_model_capability_endpoint_is_authenticated_and_server_owned(self: Self) -> None:
+        unauthorized_request = Request(
+            f"{self.base_url}/api/config/model-capabilities?model=gpt-5-mini",
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+        with self.assertRaises(HTTPError) as unauthorized:
+            urlopen(unauthorized_request, timeout=5)
+        self.assertEqual(unauthorized.exception.code, 401)
+
+        status, supported = self.authorized_json(
+            "/api/config/model-capabilities?model=gpt-5-mini&base_url=https%3A%2F%2Fmodels.example%2Fv1"
+        )
+        self.assertEqual(status, 200)
+        assert isinstance(supported, dict)
+        self.assertEqual(supported["source"], "server_profile")
+        self.assertEqual(supported["supported"], True)
+        self.assertEqual(supported["efforts"], ["low", "medium", "high", "xhigh"])
+        self.assertTrue(supported["revision"])
+
+        status, unsupported = self.authorized_json(
+            "/api/config/model-capabilities?model=deepseek-chat"
+        )
+        self.assertEqual(status, 200)
+        assert isinstance(unsupported, dict)
+        self.assertEqual(unsupported["supported"], False)
+        self.assertEqual(unsupported["efforts"], [])
+
+        with self.assertRaises(HTTPError) as invalid:
+            self.authorized_json(
+                "/api/config/model-capabilities?model=gpt-5-mini&base_url=http%3A%2F%2Fmodels.example%2Fv1"
+            )
+        self.assertEqual(invalid.exception.code, 400)
 
     def test_search_routing_mode_is_authenticated_persistent_and_audited(self: Self) -> None:
         status, current = self.authorized_json("/api/config/search-routing")

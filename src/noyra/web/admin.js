@@ -2839,12 +2839,46 @@ $("#admin-model-form .resource-actions").before(draftPricing);
 const reasoningField = document.createElement("label"); reasoningField.id = "admin-model-reasoning-field"; reasoningField.hidden = true;
 reasoningField.innerHTML = '<span>思考强度</span><select id="admin-model-reasoning"><option value="">不设置</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option></select>';
 $("#admin-model-form .resource-actions").before(reasoningField);
-const updateReasoningField = () => {
-  const model = $("#admin-model-name").value.trim().toLowerCase();
-  reasoningField.hidden = !(model.startsWith("o1") || model.startsWith("o3") || model.startsWith("o4") || model.startsWith("gpt-5") || model.startsWith("codex"));
-  if (reasoningField.hidden) $("#admin-model-reasoning").value = "";
+let reasoningCapabilityGeneration = 0;
+let reasoningCapabilityTimer = null;
+const applyReasoningProfile = (profile) => {
+  const select = $("#admin-model-reasoning");
+  const selected = select.value;
+  const efforts = Array.isArray(profile?.efforts) ? profile.efforts.filter((item) => typeof item === "string") : [];
+  select.replaceChildren(new Option("不设置", ""), ...efforts.map((effort) => new Option({low:"低",medium:"中",high:"高",xhigh:"极高"}[effort] || effort, effort)));
+  reasoningField.hidden = profile?.supported !== true || efforts.length === 0;
+  select.value = efforts.includes(selected) ? selected : "";
+  if (profile?.revision) reasoningField.dataset.profileRevision = String(profile.revision);
+  else delete reasoningField.dataset.profileRevision;
 };
-$("#admin-model-name").addEventListener("input", updateReasoningField); updateReasoningField();
+const updateReasoningField = async () => {
+  const generation = ++reasoningCapabilityGeneration;
+  const model = $("#admin-model-name").value.trim();
+  const baseUrl = $("#admin-model-url").value.trim();
+  reasoningField.hidden = true;
+  $("#admin-model-reasoning").value = "";
+  delete reasoningField.dataset.profileRevision;
+  if (!csrfToken || !model) return;
+  const query = new URLSearchParams({model, provider_type: "openai_compatible"});
+  if (baseUrl) query.set("base_url", baseUrl);
+  try {
+    const profile = await request(`/api/config/model-capabilities?${query}`);
+    if (generation !== reasoningCapabilityGeneration || !csrfToken) return;
+    applyReasoningProfile(profile);
+  } catch {
+    if (generation !== reasoningCapabilityGeneration) return;
+    reasoningField.hidden = true;
+    $("#admin-model-reasoning").value = "";
+  }
+};
+const scheduleReasoningFieldUpdate = () => {
+  reasoningField.hidden = true;
+  $("#admin-model-reasoning").value = "";
+  clearTimeout(reasoningCapabilityTimer);
+  reasoningCapabilityTimer = setTimeout(() => void updateReasoningField(), 250);
+};
+$("#admin-model-name").addEventListener("input", scheduleReasoningFieldUpdate);
+$("#admin-model-url").addEventListener("input", scheduleReasoningFieldUpdate);
 $("#admin-model-form").addEventListener("input", () => { $("#admin-model-form").dataset.dirty = "true"; });
 window.addEventListener("beforeunload", (event) => { if (document.querySelector("form[data-dirty]")) { event.preventDefault(); event.returnValue = ""; } });
 addParameterHelp($("#admin-model-form"));

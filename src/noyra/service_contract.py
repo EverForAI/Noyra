@@ -382,6 +382,7 @@ API_ROUTE_CONTRACTS: tuple[APIRouteContract, ...] = (
         503,
     ),
     _get("/api/v1/config/model-resources", "operator", 200, 401),
+    _get("/api/v1/config/model-capabilities", "operator", 200, 400, 401),
     _post("/api/v1/config/model-resources/test", "operator", 200, 400, 401, 415, 502),
     _post("/api/v1/config/model-resources/models", "operator", 200, 400, 401, 415, 502, 501),
     _get("/api/v1/config/model-resources/{groupId}/keys", "operator", 200, 401, 404),
