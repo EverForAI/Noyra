@@ -50,6 +50,18 @@ recover_only=false
 
 utc_now() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 
+storage_identity_mount_available() {
+  local data_root="$1" identity
+  for identity in /etc/noyra/storage.conf /etc/noyra/storage-identity.conf; do
+    if [[ -L "$identity" || ( -e "$identity" && ! -f "$identity" ) ]]; then
+      return 1
+    fi
+    if [[ -f "$identity" ]] && ! mountpoint -q "$data_root"; then
+      return 1
+    fi
+  done
+}
+
 ensure_native_storage_layout() {
   local data_root=/var/lib/noyra
   local upgrade_root="$data_root/upgrade"
@@ -57,15 +69,9 @@ ensure_native_storage_layout() {
   local processing_root="$upgrade_root/processing"
   local noyra_uid noyra_gid
   [[ -d "$data_root" && ! -L "$data_root" ]] || return 78
-  # storage.conf is written outside the encrypted image. If it exists, the
-  # path is expected to be a dedicated mount and must fail closed when absent.
-  if [[ -L /etc/noyra/storage.conf ||
-    ( -e /etc/noyra/storage.conf && ! -f /etc/noyra/storage.conf ) ]]; then
-    return 78
-  fi
-  if [[ -f /etc/noyra/storage.conf ]] && ! mountpoint -q "$data_root"; then
-    return 78
-  fi
+  # Root-owned storage identities live outside the data path and must fail
+  # closed when the dedicated volume is absent.
+  storage_identity_mount_available "$data_root" || return 78
   noyra_uid="$(id -u noyra 2>/dev/null || true)"
   noyra_gid="$(id -g noyra 2>/dev/null || true)"
   [[ -n "$noyra_uid" && -n "$noyra_gid" ]] || return 78
@@ -89,13 +95,7 @@ ensure_native_storage_layout() {
 storage_is_available() {
   local data_root=/var/lib/noyra
   [[ -d "$data_root" && ! -L "$data_root" ]] || return 1
-  if [[ -L /etc/noyra/storage.conf ||
-    ( -e /etc/noyra/storage.conf && ! -f /etc/noyra/storage.conf ) ]]; then
-    return 1
-  fi
-  if [[ -f /etc/noyra/storage.conf ]] && ! mountpoint -q "$data_root"; then
-    return 1
-  fi
+  storage_identity_mount_available "$data_root" || return 1
   return 0
 }
 

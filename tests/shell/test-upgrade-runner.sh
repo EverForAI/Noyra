@@ -126,6 +126,8 @@ grep -Fq 'ExecStart=/usr/local/libexec/noyra-upgrade-runner.sh' "$service_unit" 
   fail 'privileged runner inherits Noyra secrets'
 grep -Fq 'ExecStart=/usr/local/libexec/noyra-upgrade-runner.sh --recover-only' "$recover_unit" || \
   fail 'boot recovery is not wired to the fixed runner'
+grep -Fq '/etc/noyra/storage-identity.conf' "$runner" || \
+  fail 'boot recovery does not honor the external storage identity'
 
 # On boot, a persisted active task becomes a stable interrupted status.
 printf '{"task_id":"task-reboot-0001","status":"running","target_sha":"%s","started_at":"2026-10-01T00:00:00Z"}\n' \
