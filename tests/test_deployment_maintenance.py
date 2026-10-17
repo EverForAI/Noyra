@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -123,6 +124,85 @@ def test_backup_policy_plan_keeps_recovery_floor_and_records_sha_size_reason(
         "max_bytes_exceeded",
     }
     assert "noyra-verified-3.noyra-backup" in plan["backup_protected"]
+
+
+def test_persisted_backup_policy_and_gc_run_history_are_read_by_root_helper(
+    tmp_path: Path,
+) -> None:
+    from noyra.core import Database, IdentityStore
+    from noyra.core.retention import RetentionManager, RetentionSettings
+    from noyra.core.types import content_hash
+
+    helper = _helper()
+    database = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-maintenance-policy"
+    IdentityStore(database).ensure(subject, content_hash(subject))
+    manager = RetentionManager(database)
+    policy = helper.BackupRetentionPolicy(
+        keep_verified_count=3,
+        max_age_days=14,
+        max_bytes=100,
+        unverified_grace_days=5,
+        minimum_recovery_points=2,
+    ).public()
+    manager.configure(
+        subject,
+        asdict(RetentionSettings()),
+        expected_revision=0,
+        actor="operator",
+        backup_settings=policy,
+        backup_expected_revision=0,
+    )
+    loaded_subject, loaded_policy = helper._database_subject_and_backup_policy(
+        database.path,
+        helper.BackupRetentionPolicy(),
+    )
+    assert loaded_subject == subject
+    assert loaded_policy.public() == policy
+
+    plan = {"plan_id": "a" * 64, "cursor": {"version": 1, "pending_names": []}}
+    helper._record_backup_gc_run(
+        database.path,
+        subject,
+        plan,
+        status="planned",
+    )
+    with database.connection() as connection:
+        row = connection.execute(
+            "SELECT status, completed_at, cursor_json FROM backup_retention_runs"
+        ).fetchone()
+    assert row["status"] == "planned"
+    assert row["completed_at"] is None
+    assert json.loads(row["cursor_json"]) == plan["cursor"]
+
+
+def test_persisted_backup_policy_hash_failure_blocks_root_helper(tmp_path: Path) -> None:
+    from noyra.core import Database, IdentityStore
+    from noyra.core.retention import RetentionManager, RetentionSettings
+    from noyra.core.types import content_hash
+
+    helper = _helper()
+    database = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-maintenance-corruption"
+    IdentityStore(database).ensure(subject, content_hash(subject))
+    RetentionManager(database).configure(
+        subject,
+        asdict(RetentionSettings()),
+        expected_revision=0,
+        actor="operator",
+        backup_settings=helper.BackupRetentionPolicy().public(),
+        backup_expected_revision=0,
+    )
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE backup_retention_policies SET settings_json='{}' WHERE subject_id=?",
+            (subject,),
+        )
+    with pytest.raises(ValueError, match="backup_retention_policy_unavailable"):
+        helper._database_subject_and_backup_policy(
+            database.path,
+            helper.BackupRetentionPolicy(),
+        )
 
 
 def test_minimum_recovery_points_override_keep_count(tmp_path: Path) -> None:

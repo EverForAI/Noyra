@@ -6038,8 +6038,18 @@ class NoyraHTTPServer:
                 if payload is None:
                     return
                 try:
-                    if set(payload) != {"settings", "expected_revision"} or not isinstance(
-                        payload["settings"], dict
+                    if (
+                        set(payload)
+                        - {
+                            "settings",
+                            "expected_revision",
+                            "backup",
+                            "backup_expected_revision",
+                        }
+                        or "settings" not in payload
+                        or "expected_revision" not in payload
+                        or not isinstance(payload["settings"], dict)
+                        or ("backup" in payload and not isinstance(payload["backup"], dict))
                     ):
                         raise ValueError("invalid fields")
                     result = owner.retention.configure(
@@ -6047,6 +6057,8 @@ class NoyraHTTPServer:
                         payload["settings"],
                         expected_revision=payload["expected_revision"],
                         actor=self._actor(),
+                        backup_settings=payload.get("backup"),
+                        backup_expected_revision=payload.get("backup_expected_revision"),
                     )
                 except RetentionPolicyConflict:
                     self._json(HTTPStatus.CONFLICT, {"error": "retention_policy_conflict"})

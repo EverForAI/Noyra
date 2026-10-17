@@ -310,7 +310,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 97
+CURRENT_SCHEMA_VERSION = 98
 
 # The schema DDL fingerprint is checked after every successful initialization.
 # Update this value only alongside a reviewed schema migration and its tests.
@@ -318,6 +318,7 @@ CURRENT_SCHEMA_VERSION = 97
 # installations persist this value in ``schema_meta`` and therefore require
 # the value to remain stable across compatible runtime fixes.
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
+    98: "8a16f2c86d53e37f52f96154d49dda2630a22b411650f62f33fdaa05d230c415",
     97: "39d19922cfd11f01d60b4d2085f50fdc8eb0fa6b1a213d0594aaa5e39d46ad36",
     96: "f851774364cf13313d4a670104d5098ed362cb4c1e4422b76c7efd68c2e6e9dc",
     95: "4d897bceb70f95ea1310b2a637d0606ff26dc70a8ff73e0f71094ce98e95fca5",
@@ -346,6 +347,7 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 # auditable P0 finding.  Tables, indexes, and views still fail closed during
 # database construction because they define the storage contract itself.
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
+    98: "1c71052010dca131f02eeb04c66f9c38422be66a3374d31d3a39c4e4ec1f20b0",
     97: "2f1a1176f4b0882132078c303add11e9b525d9901b9f421023f9c78d1f45c7fc",
     96: "96413e10b9c7d69bf591d15fc84be46a942aff186c6b40a923ee968243dcabf6",
     95: "58c35537c7ed5fd43b871c53d925ba4f8cdc3dcefdb2d65a72172c89f4ba29c0",
@@ -7019,6 +7021,34 @@ CREATE TRIGGER prevent_migration_proposal_approval_update
 CREATE TRIGGER prevent_migration_proposal_approval_delete
     BEFORE DELETE ON migration_proposal_approvals
     BEGIN SELECT RAISE(ABORT, 'migration proposal approvals cannot be deleted'); END;
+""",
+    98: """
+CREATE TABLE IF NOT EXISTS backup_retention_policies (
+    subject_id TEXT PRIMARY KEY REFERENCES subject_identity(subject_id),
+    settings_json TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    updated_at TEXT NOT NULL,
+    updated_by TEXT NOT NULL,
+    state_hash TEXT NOT NULL CHECK (
+        length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'
+    )
+);
+CREATE TABLE IF NOT EXISTS backup_retention_runs (
+    run_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    plan_id TEXT NOT NULL CHECK (length(plan_id) = 64 AND plan_id NOT GLOB '*[^0-9a-f]*'),
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    status TEXT NOT NULL CHECK (status IN ('planned', 'applied', 'failed')),
+    cursor_json TEXT NOT NULL,
+    deleted_count INTEGER NOT NULL DEFAULT 0 CHECK (deleted_count >= 0),
+    failure_code TEXT,
+    state_hash TEXT NOT NULL CHECK (
+        length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_backup_retention_runs_subject_time
+    ON backup_retention_runs(subject_id, started_at DESC);
 """,
 }
 

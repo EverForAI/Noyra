@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -488,23 +489,75 @@ class RetentionManager:
                 "SELECT * FROM retention_policies WHERE subject_id=?", (subject_id,)
             ).fetchone()
         if row is None:
-            return {"settings": asdict(self.settings), "revision": 0, "source": "environment"}
+            result = {"settings": asdict(self.settings), "revision": 0, "source": "environment"}
+            result["backup"] = self.backup_policy_record(subject_id, connection=connection)
+            return result
         state = dict(row)
         state.pop("state_hash")
         if content_hash(state) != row["state_hash"]:
             raise IntegrityError("retention policy hash mismatch")
         settings = RetentionSettings.from_payload(strict_json_loads(row["settings_json"]))
-        return {
+        result = {
             "settings": asdict(settings),
             "revision": row["revision"],
             "source": "saved",
             "updated_at": row["updated_at"],
         }
+        result["backup"] = self.backup_policy_record(subject_id, connection=connection)
+        return result
+
+    def backup_policy_record(
+        self, subject_id: str, connection: Any | None = None
+    ) -> dict[str, Any]:
+        from contextlib import nullcontext
+
+        with (
+            self.database.connection() if connection is None else nullcontext(connection) as reader
+        ):
+            if not self._table_exists(reader, "backup_retention_policies"):
+                return {
+                    "settings": self.backup_policy.public(),
+                    "revision": 0,
+                    "source": "environment",
+                }
+            row = reader.execute(
+                "SELECT * FROM backup_retention_policies WHERE subject_id=?", (subject_id,)
+            ).fetchone()
+        if row is None:
+            return {
+                "settings": self.backup_policy.public(),
+                "revision": 0,
+                "source": "environment",
+            }
+        state = dict(row)
+        state.pop("state_hash")
+        if content_hash(state) != row["state_hash"]:
+            raise IntegrityError("backup retention policy hash mismatch")
+        settings = BackupRetentionPolicy.from_payload(strict_json_loads(row["settings_json"]))
+        return {
+            "settings": settings.public(),
+            "revision": int(row["revision"]),
+            "source": "saved",
+            "updated_at": row["updated_at"],
+            "updated_by": row["updated_by"],
+        }
 
     def configure(
-        self, subject_id: str, settings: Mapping[str, Any], *, expected_revision: int, actor: str
+        self,
+        subject_id: str,
+        settings: Mapping[str, Any],
+        *,
+        expected_revision: int,
+        actor: str,
+        backup_settings: Mapping[str, Any] | None = None,
+        backup_expected_revision: int | None = None,
     ) -> dict[str, Any]:
         validated = RetentionSettings.from_payload(settings)
+        validated_backup = (
+            None
+            if backup_settings is None
+            else BackupRetentionPolicy.from_payload(dict(backup_settings))
+        )
         if not actor.strip() or actor.casefold() == "subject":
             raise PermissionError("operator required")
         if type(expected_revision) is not int or expected_revision < 0:
@@ -527,6 +580,32 @@ class RetentionManager:
                 "state_hash=excluded.state_hash",
                 (*state.values(), content_hash(state)),
             )
+            if validated_backup is not None:
+                current_backup = self.backup_policy_record(subject_id, connection=connection)
+                expected_backup = (
+                    current_backup["revision"]
+                    if backup_expected_revision is None
+                    else backup_expected_revision
+                )
+                if (
+                    type(expected_backup) is not int
+                    or expected_backup != current_backup["revision"]
+                ):
+                    raise RetentionPolicyConflict("backup retention policy changed")
+                backup_state = {
+                    "subject_id": subject_id,
+                    "settings_json": canonical_json(validated_backup.public()),
+                    "revision": expected_backup + 1,
+                    "updated_at": utc_now(),
+                    "updated_by": actor,
+                }
+                connection.execute(
+                    "INSERT INTO backup_retention_policies VALUES(?,?,?,?,?,?) "
+                    "ON CONFLICT(subject_id) DO UPDATE SET settings_json=excluded.settings_json, "
+                    "revision=excluded.revision, updated_at=excluded.updated_at, "
+                    "updated_by=excluded.updated_by, state_hash=excluded.state_hash",
+                    (*backup_state.values(), content_hash(backup_state)),
+                )
         return self.policy(subject_id)
 
     def effective_settings(self, subject_id: str) -> RetentionSettings:
@@ -548,30 +627,32 @@ class RetentionManager:
 
         policy = self.policy(subject_id)
         latest = self.latest(subject_id)
+        effective_backup_settings = policy["backup"]["settings"]
         backup: dict[str, Any]
         if self.backup_root is None:
             backup = {
                 "status": "unconfigured",
                 "reason_code": "backup_root_unconfigured",
                 "apply_allowed": False,
-                "policy": self.backup_policy.public(),
+                "policy": effective_backup_settings,
             }
         elif not self.backup_root.exists() or not self.backup_root.is_dir():
             backup = {
                 "status": "unavailable",
                 "reason_code": "backup_path_missing",
                 "apply_allowed": False,
-                "policy": self.backup_policy.public(),
+                "policy": effective_backup_settings,
             }
         else:
             try:
-                backup = backup_gc_plan(self.backup_root, self.backup_policy, now=now)
+                effective_backup = BackupRetentionPolicy.from_payload(policy["backup"]["settings"])
+                backup = backup_gc_plan(self.backup_root, effective_backup, now=now)
                 backup.update(
                     {
                         "status": "planned",
                         "reason_code": None,
                         "apply_allowed": False,
-                        "policy": self.backup_policy.public(),
+                        "policy": effective_backup.public(),
                         "apply_requires": "root_maintenance_lock_and_hash_recheck",
                     }
                 )
@@ -581,7 +662,7 @@ class RetentionManager:
                     "reason_code": "backup_inventory_unavailable",
                     "error_type": type(error).__name__,
                     "apply_allowed": False,
-                    "policy": self.backup_policy.public(),
+                    "policy": policy["backup"]["settings"],
                 }
         sqlite = {
             "estimate": self.estimate(subject_id, now=now),
@@ -609,6 +690,42 @@ class RetentionManager:
             "backup": backup,
             "apply_allowed": False,
         }
+
+    def record_backup_gc_run(
+        self,
+        subject_id: str,
+        *,
+        plan_id: str,
+        status: str,
+        cursor: Mapping[str, Any],
+        deleted_count: int = 0,
+        failure_code: str | None = None,
+    ) -> str:
+        if status not in {"planned", "applied", "failed"}:
+            raise ValueError("backup retention run status is invalid")
+        if type(deleted_count) is not int or deleted_count < 0:
+            raise ValueError("backup retention deleted count is invalid")
+        if not isinstance(plan_id, str) or not re.fullmatch(r"[0-9a-f]{64}", plan_id):
+            raise ValueError("backup retention plan id is invalid")
+        run_id = new_id("backupretention")
+        started = utc_now()
+        values = {
+            "run_id": run_id,
+            "subject_id": subject_id,
+            "plan_id": plan_id,
+            "started_at": started,
+            "completed_at": started if status != "planned" else None,
+            "status": status,
+            "cursor_json": canonical_json(dict(cursor)),
+            "deleted_count": deleted_count,
+            "failure_code": failure_code,
+        }
+        with self.database.transaction() as connection:
+            connection.execute(
+                "INSERT INTO backup_retention_runs VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (*values.values(), content_hash(values)),
+            )
+        return run_id
 
     def estimate(self, subject_id: str, *, now: datetime | None = None) -> dict[str, int]:
         snapshot = copy(self)

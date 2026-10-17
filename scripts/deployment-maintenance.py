@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import stat
 import tempfile
 from datetime import UTC, datetime
@@ -19,18 +20,12 @@ from noyra.core.backup_retention import (
     BackupRetentionPolicy,
     _backup_space_status,
 )
-from noyra.core.backup_retention import (
-    backup_gc_plan as _backup_gc_plan,
-)
-from noyra.core.backup_retention import (
-    backup_inventory as _backup_inventory,
-)
-from noyra.core.backup_retention import (
-    file_hash as _file_hash,
-)
-from noyra.core.backup_retention import (
-    read_marker as _read_marker,
-)
+from noyra.core.backup_retention import backup_gc_plan as _backup_gc_plan
+from noyra.core.backup_retention import backup_gc_plan_id as _backup_gc_plan_id
+from noyra.core.backup_retention import backup_inventory as _backup_inventory
+from noyra.core.backup_retention import file_hash as _file_hash
+from noyra.core.backup_retention import read_marker as _read_marker
+from noyra.core.types import content_hash
 
 SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 MARKER = ".noyra-verified-install.json"
@@ -59,6 +54,84 @@ def backup_gc_plan(
         marker_reader=read_marker,
         hash_file=file_hash,
     )
+
+
+def _database_subject_and_backup_policy(
+    database_path: Path, fallback: BackupRetentionPolicy
+) -> tuple[str | None, BackupRetentionPolicy]:
+    """Read the persisted policy without making the root CLI depend on service code."""
+    if not database_path.is_file() or database_path.is_symlink():
+        return None, fallback
+    try:
+        with sqlite3.connect(database_path) as connection:
+            connection.row_factory = sqlite3.Row
+            subject = connection.execute(
+                "SELECT subject_id FROM subject_identity ORDER BY subject_id LIMIT 1"
+            ).fetchone()
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='backup_retention_policies'"
+            ).fetchone()
+            if subject is None or table is None:
+                return None if subject is None else str(subject["subject_id"]), fallback
+            row = connection.execute(
+                "SELECT * FROM backup_retention_policies WHERE subject_id=?",
+                (subject["subject_id"],),
+            ).fetchone()
+            if row is None:
+                return str(subject["subject_id"]), fallback
+            state = dict(row)
+            state_hash = state.pop("state_hash")
+            if content_hash(state) != state_hash:
+                raise ValueError("backup_retention_policy_integrity")
+            return str(subject["subject_id"]), BackupRetentionPolicy.from_payload(
+                json.loads(row["settings_json"])
+            )
+    except (OSError, sqlite3.DatabaseError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("backup_retention_policy_unavailable") from error
+
+
+def _record_backup_gc_run(
+    database_path: Path,
+    subject_id: str | None,
+    plan: dict[str, Any],
+    *,
+    status: str,
+    deleted_count: int = 0,
+    failure_code: str | None = None,
+) -> None:
+    if subject_id is None or not database_path.is_file() or database_path.is_symlink():
+        return
+    values = {
+        "run_id": f"backupretention_{os.urandom(16).hex()}",
+        "subject_id": subject_id,
+        "plan_id": str(plan["plan_id"]),
+        "started_at": datetime.now(UTC).isoformat(timespec="milliseconds"),
+        "completed_at": (
+            None if status == "planned" else datetime.now(UTC).isoformat(timespec="milliseconds")
+        ),
+        "status": status,
+        "cursor_json": json.dumps(plan.get("cursor", {}), sort_keys=True, separators=(",", ":")),
+        "deleted_count": deleted_count,
+        "failure_code": failure_code,
+    }
+    state_hash = content_hash(values)
+    try:
+        with sqlite3.connect(database_path) as connection:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='backup_retention_runs'"
+            ).fetchone()
+            if table is None:
+                return
+            connection.execute(
+                "INSERT INTO backup_retention_runs VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (*values.values(), state_hash),
+            )
+    except sqlite3.DatabaseError:
+        # Artifact cleanup remains authoritative; a missing history row is
+        # surfaced by the next maintenance diagnostic rather than changing
+        # deletion safety.
+        return
 
 
 def safe_directory(path: Path, *, owned: bool = True) -> Path:
@@ -264,6 +337,11 @@ def gc_plan(
     if not valid_replacement:
         artifact_plan["backups"] = []
         artifact_plan["backup_details"] = []
+        artifact_plan["cursor"] = {
+            "version": 1,
+            "next_name": None,
+            "pending_names": [],
+        }
         inventory = artifact_plan["backup_inventory"]
         verified_bytes = sum(int(item["size"]) for item in inventory if item["verified"])
         unverified_bytes = sum(int(item["size"]) for item in inventory if not item["verified"])
@@ -284,6 +362,12 @@ def gc_plan(
             summary["max_bytes"],
         )
         artifact_plan["backup_gc_blocked_reason"] = "verified_replacement_unavailable"
+        artifact_plan["plan_id"] = _backup_gc_plan_id(
+            policy,
+            inventory,
+            set(artifact_plan["backup_protected"]),
+            [],
+        )
     return {
         "releases": [p.name for p in candidates if p.name not in retained],
         **artifact_plan,
@@ -350,6 +434,7 @@ def main() -> int:
     parser.add_argument("--releases", type=Path, default=Path("/opt/noyra/releases"))
     parser.add_argument("--backups", type=Path, default=Path("/var/backups/noyra"))
     parser.add_argument("--data", type=Path, default=Path("/var/lib/noyra"))
+    parser.add_argument("--database", type=Path)
     parser.add_argument("--backup", type=Path)
     parser.add_argument("--release")
     parser.add_argument("--keep", type=int, default=5)
@@ -402,7 +487,7 @@ def main() -> int:
                 if (metadata.st_dev, metadata.st_ino) != (held.st_dev, held.st_ino):
                     raise ValueError("install_lock_mismatch")
                 lock_module.flock(descriptor, lock_module.LOCK_EX | lock_module.LOCK_NB)
-                policy = BackupRetentionPolicy(
+                fallback_policy = BackupRetentionPolicy(
                     keep_verified_count=(
                         args.keep if args.keep_verified_count is None else args.keep_verified_count
                     ),
@@ -411,14 +496,36 @@ def main() -> int:
                     unverified_grace_days=args.unverified_grace_days,
                     minimum_recovery_points=args.minimum_recovery_points,
                 )
+                database_path = args.database or (args.data / "noyra.sqlite3")
+                subject_id, policy = _database_subject_and_backup_policy(
+                    database_path, fallback_policy
+                )
                 plan = gc_plan(
                     args.releases,
                     args.backups,
                     keep=args.keep,
                     backup_policy=policy,
                 )
+                _record_backup_gc_run(database_path, subject_id, plan, status="planned")
                 if args.apply:
-                    apply_gc(args.releases, args.backups, plan)
+                    try:
+                        apply_gc(args.releases, args.backups, plan)
+                    except Exception as error:
+                        _record_backup_gc_run(
+                            database_path,
+                            subject_id,
+                            plan,
+                            status="failed",
+                            failure_code=type(error).__name__,
+                        )
+                        raise
+                    _record_backup_gc_run(
+                        database_path,
+                        subject_id,
+                        plan,
+                        status="applied",
+                        deleted_count=len(plan["backups"]),
+                    )
             finally:
                 if opened:
                     os.close(descriptor)

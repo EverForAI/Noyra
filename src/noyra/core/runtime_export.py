@@ -669,6 +669,7 @@ _OWNERSHIP_GRAPHS[94] = {**_OWNERSHIP_GRAPHS[93], "public_sitemap_slots": _subje
 _OWNERSHIP_GRAPHS[95] = _OWNERSHIP_GRAPHS[94]
 _OWNERSHIP_GRAPHS[96] = _OWNERSHIP_GRAPHS[95]
 _OWNERSHIP_GRAPHS[97] = _OWNERSHIP_GRAPHS[96]
+_OWNERSHIP_GRAPHS[98] = _OWNERSHIP_GRAPHS[97]
 
 
 @dataclass(frozen=True)
@@ -995,6 +996,8 @@ class RuntimeLogExporter:
             "migration_policy_review_modes",
             "migration_proposal_approvals",
             "migration_self_attestations",
+            "backup_retention_policies",
+            "backup_retention_runs",
         }
         graph = {
             **graph,

@@ -8,6 +8,7 @@ import pytest
 
 from noyra.core import Database, IdentityStore
 from noyra.core.actions import ActionLedger
+from noyra.core.backup_retention import BackupRetentionPolicy
 from noyra.core.provider_health import ProviderHealthStore
 from noyra.core.retention import (
     RETENTION_REGISTRY,
@@ -65,6 +66,39 @@ def test_saved_policy_survives_restart_and_rejects_conflicts_and_corruption(tmp_
         connection.execute("UPDATE retention_policies SET settings_json='{}'")
     with pytest.raises(IntegrityError):
         reopened.run_batch(subject)
+
+
+def test_backup_policy_and_gc_run_are_durable(tmp_path: Any) -> None:
+    db = Database(tmp_path / "backup-policy.sqlite3")
+    subject = "Noyra-backup-policy"
+    IdentityStore(db).ensure(subject, content_hash(subject))
+    manager = RetentionManager(db)
+    backup = BackupRetentionPolicy(keep_verified_count=3, max_age_days=14).public()
+    result = manager.configure(
+        subject,
+        asdict(RetentionSettings()),
+        expected_revision=0,
+        actor="operator",
+        backup_settings=backup,
+        backup_expected_revision=0,
+    )
+    assert result["backup"]["revision"] == 1
+    assert result["backup"]["settings"] == backup
+    plan = manager.retention_plan(subject)
+    assert plan["backup"]["policy"] == backup
+    run_id = manager.record_backup_gc_run(
+        subject,
+        plan_id=plan["backup"].get("plan_id", "0" * 64),
+        status="applied",
+        cursor=plan["backup"].get("cursor", {}),
+        deleted_count=0,
+    )
+    with db.connection() as connection:
+        row = connection.execute(
+            "SELECT status,plan_id FROM backup_retention_runs WHERE run_id=?", (run_id,)
+        ).fetchone()
+    assert row["status"] == "applied"
+    assert len(row["plan_id"]) == 64
 
 
 def test_retention_settings_http_auth_revision_and_validation(tmp_path: Any) -> None:

@@ -53,6 +53,27 @@ class BackupRetentionPolicy:
             "minimum_recovery_points": self.minimum_recovery_points,
         }
 
+    @classmethod
+    def from_payload(cls, payload: Any) -> BackupRetentionPolicy:
+        if not isinstance(payload, dict):
+            raise ValueError("backup retention policy is invalid")
+        expected = {
+            "keep_verified_count",
+            "max_age_days",
+            "max_bytes",
+            "unverified_grace_days",
+            "minimum_recovery_points",
+        }
+        if set(payload) != expected:
+            raise ValueError("backup retention policy fields are invalid")
+        for key, value in payload.items():
+            if key == "max_age_days" or key == "max_bytes":
+                if value is not None and type(value) is not int:
+                    raise ValueError("backup retention policy value is invalid")
+            elif type(value) is not int:
+                raise ValueError("backup retention policy value is invalid")
+        return cls(**payload)
+
 
 def read_marker(path: Path) -> dict[str, Any] | None:
     try:
@@ -142,6 +163,26 @@ def _backup_space_status(verified_bytes: int, unverified_bytes: int, max_bytes: 
     return "protected_recovery_points_exceed_limit"
 
 
+def backup_gc_plan_id(
+    policy: BackupRetentionPolicy,
+    inventory: list[dict[str, Any]],
+    protected: set[str],
+    deletions: list[dict[str, Any]],
+) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "policy": policy.public(),
+                "inventory": inventory,
+                "protected": sorted(protected),
+                "deletions": deletions,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+
 def backup_gc_plan(
     backups: Path,
     policy: BackupRetentionPolicy,
@@ -201,8 +242,9 @@ def backup_gc_plan(
     remaining_verified = [item for item in verified if item["name"] not in deleted_names]
     remaining_verified_bytes = sum(int(item["size"]) for item in remaining_verified)
     unverified_bytes = sum(int(item["size"]) for item in inventory if not item["verified"])
-    return {
-        "backups": [row["name"] for row in deletions],
+    backup_names = [str(row["name"]) for row in deletions]
+    plan = {
+        "backups": backup_names,
         "backup_details": deletions,
         "backup_attention": attention,
         "backup_inventory": inventory,
@@ -224,3 +266,10 @@ def backup_gc_plan(
             ),
         },
     }
+    plan["cursor"] = {
+        "version": 1,
+        "next_name": backup_names[0] if backup_names else None,
+        "pending_names": backup_names,
+    }
+    plan["plan_id"] = backup_gc_plan_id(policy, inventory, protected, deletions)
+    return plan
