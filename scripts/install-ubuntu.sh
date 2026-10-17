@@ -99,6 +99,7 @@ SOAK_COLLECTOR=/usr/local/libexec/noyra-soak-collector.py
 SOAK_SERVICE_UNIT=/etc/systemd/system/noyra-soak.service
 SOAK_TIMER_UNIT=/etc/systemd/system/noyra-soak.timer
 BACKUP_KEYRING="$CONFIG_DIR/backup-keyring.json"
+BACKUP_STORAGE_IDENTITY="$CONFIG_DIR/backup-storage-identity.conf"
 RECOVERY_MANIFEST="$CONFIG_DIR/recovery-manifest.json"
 STORAGE_IDENTITY="$CONFIG_DIR/storage-identity.conf"
 STORAGE_IDENTITY_TEMPORARY=""
@@ -616,6 +617,71 @@ ensure_storage_identity() {
   STORAGE_IDENTITY_TEMPORARY=""
 }
 
+validate_backup_storage_identity_path() {
+  local metadata owner group mode links
+  if [[ -L "$BACKUP_STORAGE_IDENTITY" || ( -e "$BACKUP_STORAGE_IDENTITY" && ! -f "$BACKUP_STORAGE_IDENTITY" ) ]]; then
+    echo "Backup storage identity must be a regular file: $BACKUP_STORAGE_IDENTITY" >&2
+    return 1
+  fi
+  [[ -e "$BACKUP_STORAGE_IDENTITY" ]] || return 0
+  metadata="$(stat -c '%u:%g:%a:%h' -- "$BACKUP_STORAGE_IDENTITY" 2>/dev/null || true)"
+  IFS=: read -r owner group mode links <<< "$metadata"
+  [[ "$owner" == 0 && "$links" == 1 && "$group" =~ ^[0-9]+$ && "$mode" =~ ^[0-9]+$ ]] || {
+    echo "Backup storage identity must be root-owned and single-linked: $BACKUP_STORAGE_IDENTITY" >&2
+    return 1
+  }
+  case "$mode" in
+    *[2367][0-7]|*[0-7][2367])
+      echo "Backup storage identity must not be group/other writable: $BACKUP_STORAGE_IDENTITY" >&2
+      return 1
+      ;;
+  esac
+  if grep -Evq '^(NOYRA_BACKUP_STORAGE_IDENTITY_FORMAT|NOYRA_BACKUP_STORAGE_DIR|NOYRA_BACKUP_STORAGE_MODE|NOYRA_BACKUP_STORAGE_SOURCE)=.+$' "$BACKUP_STORAGE_IDENTITY" ||
+    [[ "$(wc -l < "$BACKUP_STORAGE_IDENTITY")" != 4 ]]; then
+    echo "Backup storage identity has invalid fields: $BACKUP_STORAGE_IDENTITY" >&2
+    return 1
+  fi
+}
+
+ensure_backup_storage_identity() {
+  local source target
+  validate_backup_storage_identity_path
+  if [[ -e "$BACKUP_STORAGE_IDENTITY" ]]; then
+    mountpoint -q "$backup_dir" || {
+      echo "Configured dedicated backup storage is not mounted: $backup_dir" >&2
+      return 1
+    }
+    read -r source target < <(findmnt -n -o SOURCE,TARGET --target "$backup_dir")
+    [[ "$target" == "$backup_dir" && -n "$source" ]] || {
+      echo "Could not verify the configured backup storage mount: $backup_dir" >&2
+      return 1
+    }
+    grep -Fqx "NOYRA_BACKUP_STORAGE_IDENTITY_FORMAT=noyra-backup-storage-identity/v1" "$BACKUP_STORAGE_IDENTITY" || return 1
+    grep -Fqx "NOYRA_BACKUP_STORAGE_DIR=$backup_dir" "$BACKUP_STORAGE_IDENTITY" || return 1
+    grep -Fqx 'NOYRA_BACKUP_STORAGE_MODE=dedicated_mount' "$BACKUP_STORAGE_IDENTITY" || return 1
+    grep -Fqx "NOYRA_BACKUP_STORAGE_SOURCE=$source" "$BACKUP_STORAGE_IDENTITY" || {
+      echo "Configured backup storage mount identity changed: $backup_dir" >&2
+      return 1
+    }
+    return 0
+  fi
+  if ! mountpoint -q "$backup_dir"; then
+    return 0
+  fi
+  read -r source target < <(findmnt -n -o SOURCE,TARGET --target "$backup_dir")
+  [[ "$target" == "$backup_dir" && -n "$source" ]] || {
+    echo "Could not identify the dedicated backup storage mount: $backup_dir" >&2
+    return 1
+  }
+  local temporary
+  temporary="$(mktemp "$CONFIG_DIR/.backup-storage-identity.conf.tmp.XXXXXX")"
+  printf 'NOYRA_BACKUP_STORAGE_IDENTITY_FORMAT=noyra-backup-storage-identity/v1\nNOYRA_BACKUP_STORAGE_DIR=%s\nNOYRA_BACKUP_STORAGE_MODE=dedicated_mount\nNOYRA_BACKUP_STORAGE_SOURCE=%s\n' \
+    "$backup_dir" "$source" > "$temporary"
+  chown root:root -- "$temporary"
+  chmod 0644 -- "$temporary"
+  mv -Tf -- "$temporary" "$BACKUP_STORAGE_IDENTITY"
+}
+
 stop_old_service() {
   if systemctl is-active --quiet noyra; then
     service_active=true
@@ -900,6 +966,7 @@ if [[ -n "$old_current" || -n "$legacy_venv" ]]; then
   assert_absolute_backup_dir
 fi
 assert_absolute_backup_dir
+ensure_backup_storage_identity
 python3 "$SOURCE_DIR/scripts/deployment-maintenance.py" preflight \
   --releases "$RELEASES_DIR" --backups "$backup_dir" --data "$DATA_DIR"
 

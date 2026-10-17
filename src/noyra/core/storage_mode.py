@@ -30,6 +30,8 @@ STORAGE_MARKER_NAME = ".noyra-storage.json"
 STORAGE_MARKER_FORMAT = "noyra-storage/v1"
 STORAGE_IDENTITY_PATH = Path("/etc/noyra/storage-identity.conf")
 STORAGE_IDENTITY_FORMAT = "noyra-storage-identity/v1"
+BACKUP_STORAGE_IDENTITY_PATH = Path("/etc/noyra/backup-storage-identity.conf")
+BACKUP_STORAGE_IDENTITY_FORMAT = "noyra-backup-storage-identity/v1"
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,7 @@ class StorageLayout:
     backup_device: str | None
     writable: bool
     reason_code: str | None = None
+    backup_reason: str | None = None
 
     @property
     def runtime_ready(self) -> bool:
@@ -60,13 +63,13 @@ class StorageLayout:
         requiring the unprivileged service account to write a root-owned path.
         """
 
-        return self.backup_root.exists() and self.backup_root.is_dir()
+        return self.backup_reason is None and self.backup_root.exists() and self.backup_root.is_dir()
 
     @property
     def backup_reason_code(self) -> str | None:
         if self.backup_ready:
             return None
-        return "backup_path_missing"
+        return self.backup_reason or "backup_path_missing"
 
     def public(self) -> dict[str, Any]:
         return {
@@ -115,12 +118,10 @@ class StorageUnavailableError(RuntimeError):
 
 def _reject_reparse_path(path: Path) -> None:
     current = path
-    missing: list[Path] = []
     while True:
         try:
             metadata = current.lstat()
         except FileNotFoundError:
-            missing.append(current)
             if current.parent == current:
                 break
             current = current.parent
@@ -131,7 +132,9 @@ def _reject_reparse_path(path: Path) -> None:
             raise StorageUnavailableError("storage_symlink_rejected")
         if not stat.S_ISDIR(metadata.st_mode):
             raise StorageUnavailableError("storage_path_not_directory")
-        break
+        if current.parent == current:
+            break
+        current = current.parent
 
 
 def _findmnt(path: Path) -> tuple[str | None, bool]:
@@ -252,6 +255,51 @@ def _external_mount_identity(data_root: Path) -> dict[str, str] | None:
     }
 
 
+def _external_backup_mount_identity(backup_root: Path) -> dict[str, str] | None:
+    """Read the optional root-owned identity for a dedicated backup mount."""
+    path = BACKUP_STORAGE_IDENTITY_PATH
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise StorageUnavailableError("backup_storage_identity_unreadable") from error
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or (os.name == "posix" and (metadata.st_uid != 0 or metadata.st_mode & 0o022))
+    ):
+        raise StorageUnavailableError("backup_storage_identity_unsafe")
+    try:
+        values: dict[str, str] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            if not separator or not key or key in values or not value:
+                raise ValueError("invalid backup storage identity")
+            values[key] = value
+    except (OSError, UnicodeError, ValueError) as error:
+        raise StorageUnavailableError("backup_storage_identity_invalid") from error
+    expected = {
+        "NOYRA_BACKUP_STORAGE_IDENTITY_FORMAT",
+        "NOYRA_BACKUP_STORAGE_DIR",
+        "NOYRA_BACKUP_STORAGE_MODE",
+        "NOYRA_BACKUP_STORAGE_SOURCE",
+    }
+    if (
+        set(values) != expected
+        or values["NOYRA_BACKUP_STORAGE_IDENTITY_FORMAT"] != BACKUP_STORAGE_IDENTITY_FORMAT
+        or values["NOYRA_BACKUP_STORAGE_MODE"] != StorageMode.DEDICATED_MOUNT.value
+    ):
+        raise StorageUnavailableError("backup_storage_identity_invalid")
+    identity_root = Path(values["NOYRA_BACKUP_STORAGE_DIR"])
+    if not identity_root.is_absolute():
+        raise StorageUnavailableError("backup_storage_identity_invalid")
+    if identity_root.resolve() != backup_root.resolve():
+        return None
+    return {"source": values["NOYRA_BACKUP_STORAGE_SOURCE"]}
+
+
 def _fstab_expects_mount(data_root: Path) -> bool:
     """Return whether fstab declares ``data_root`` as a mount target.
 
@@ -309,10 +357,12 @@ def detect_storage_layout(
             )
     if not backup.exists() or not backup.is_dir():
         backup_device = None
+        backup_is_mount = False
     else:
-        backup_device, _ = _findmnt(backup)
+        backup_device, backup_is_mount = _findmnt(backup)
     marker = _read_marker(data)
     external_identity = _external_mount_identity(data)
+    backup_identity = _external_backup_mount_identity(backup)
     data_device, data_is_mount = _findmnt(data)
     dedicated_expected = (
         bool(marker and marker.get("mode") == StorageMode.DEDICATED_MOUNT.value)
@@ -345,6 +395,13 @@ def detect_storage_layout(
             False,
             "storage_mount_identity_mismatch",
         )
+    backup_reason: str | None = None
+    if backup_identity is not None and not backup_is_mount:
+        backup_reason = "backup_mount_missing"
+    elif backup_identity is not None and backup_device != backup_identity["source"]:
+        backup_reason = "backup_mount_identity_mismatch"
+    elif _fstab_expects_mount(backup) and not backup_is_mount:
+        backup_reason = "backup_mount_missing"
     mode = StorageMode.DEDICATED_MOUNT if data_is_mount else StorageMode.SYSTEM_DISK
     try:
         writable = os.access(data, os.W_OK | os.X_OK)
@@ -361,6 +418,7 @@ def detect_storage_layout(
         ("backup_path_missing" if not backup.exists() else None)
         if writable
         else "storage_not_writable",
+        backup_reason,
     )
 
 

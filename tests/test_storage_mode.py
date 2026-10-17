@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from noyra.core.storage_mode import (
+    BACKUP_STORAGE_IDENTITY_FORMAT,
     STORAGE_IDENTITY_FORMAT,
     STORAGE_MARKER_FORMAT,
     STORAGE_MARKER_NAME,
@@ -43,6 +44,107 @@ def test_backup_directory_is_reported_separately_from_runtime_readiness(tmp_path
     assert layout.runtime_ready is True
     assert layout.backup_ready is True
     assert layout.backup_reason_code is None
+
+
+def _write_backup_identity(path: Path, backup: Path, source: str) -> None:
+    path.write_text(
+        "\n".join(
+            (
+                f"NOYRA_BACKUP_STORAGE_IDENTITY_FORMAT={BACKUP_STORAGE_IDENTITY_FORMAT}",
+                f"NOYRA_BACKUP_STORAGE_DIR={backup}",
+                "NOYRA_BACKUP_STORAGE_MODE=dedicated_mount",
+                f"NOYRA_BACKUP_STORAGE_SOURCE={source}",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_backup_mount_identity_accepts_expected_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = tmp_path / "data"
+    backups = tmp_path / "backups"
+    data.mkdir()
+    backups.mkdir()
+    identity = tmp_path / "backup-storage-identity.conf"
+    _write_backup_identity(identity, backups, "/dev/backup")
+    monkeypatch.setattr("noyra.core.storage_mode.BACKUP_STORAGE_IDENTITY_PATH", identity)
+    monkeypatch.setattr(
+        "noyra.core.storage_mode._findmnt",
+        lambda path: (("/dev/backup", True) if path == backups else (None, False)),
+    )
+    monkeypatch.setattr("noyra.core.storage_mode._fstab_expects_mount", lambda path: False)
+
+    layout = detect_storage_layout(data, backups)
+
+    assert layout.backup_ready is True
+    assert layout.backup_reason_code is None
+
+
+@pytest.mark.parametrize(
+    ("mounted", "source", "reason"),
+    [
+        (False, None, "backup_mount_missing"),
+        (True, "/dev/other", "backup_mount_identity_mismatch"),
+    ],
+)
+def test_backup_mount_identity_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mounted: bool,
+    source: str | None,
+    reason: str,
+) -> None:
+    data = tmp_path / "data"
+    backups = tmp_path / "backups"
+    data.mkdir()
+    backups.mkdir()
+    identity = tmp_path / "backup-storage-identity.conf"
+    _write_backup_identity(identity, backups, "/dev/expected")
+    monkeypatch.setattr("noyra.core.storage_mode.BACKUP_STORAGE_IDENTITY_PATH", identity)
+    monkeypatch.setattr(
+        "noyra.core.storage_mode._findmnt",
+        lambda path: ((source, mounted) if path == backups else (None, False)),
+    )
+    monkeypatch.setattr("noyra.core.storage_mode._fstab_expects_mount", lambda path: False)
+
+    layout = detect_storage_layout(data, backups)
+
+    assert layout.backup_ready is False
+    assert layout.backup_reason_code == reason
+
+
+def test_system_disk_backup_directory_without_identity_remains_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = tmp_path / "data"
+    backups = tmp_path / "backups"
+    data.mkdir()
+    backups.mkdir()
+    monkeypatch.setattr(
+        "noyra.core.storage_mode.BACKUP_STORAGE_IDENTITY_PATH",
+        tmp_path / "missing-identity",
+    )
+    monkeypatch.setattr("noyra.core.storage_mode._findmnt", lambda path: ("/dev/root", False))
+    monkeypatch.setattr("noyra.core.storage_mode._fstab_expects_mount", lambda path: False)
+
+    layout = detect_storage_layout(data, backups)
+
+    assert layout.backup_ready is True
+
+
+def test_reparse_check_walks_existing_ancestors(tmp_path: Path) -> None:
+    data = tmp_path / "link" / "data"
+    target = tmp_path / "real"
+    target.mkdir()
+    try:
+        (tmp_path / "link").symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("symbolic links are unavailable")
+    with pytest.raises(StorageUnavailableError, match="storage_symlink_rejected"):
+        detect_storage_layout(data)
 
 
 def test_dedicated_marker_without_mount_fails_closed(
