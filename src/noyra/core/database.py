@@ -310,7 +310,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 96
+CURRENT_SCHEMA_VERSION = 97
 
 # The schema DDL fingerprint is checked after every successful initialization.
 # Update this value only alongside a reviewed schema migration and its tests.
@@ -318,6 +318,7 @@ CURRENT_SCHEMA_VERSION = 96
 # installations persist this value in ``schema_meta`` and therefore require
 # the value to remain stable across compatible runtime fixes.
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
+    97: "39d19922cfd11f01d60b4d2085f50fdc8eb0fa6b1a213d0594aaa5e39d46ad36",
     96: "f851774364cf13313d4a670104d5098ed362cb4c1e4422b76c7efd68c2e6e9dc",
     95: "4d897bceb70f95ea1310b2a637d0606ff26dc70a8ff73e0f71094ce98e95fca5",
     94: "181b72baa819d54d6d18c80411b610abdd2c3c6cee18661aeadb3a190a339f9b",
@@ -345,6 +346,7 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 # auditable P0 finding.  Tables, indexes, and views still fail closed during
 # database construction because they define the storage contract itself.
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
+    97: "2f1a1176f4b0882132078c303add11e9b525d9901b9f421023f9c78d1f45c7fc",
     96: "96413e10b9c7d69bf591d15fc84be46a942aff186c6b40a923ee968243dcabf6",
     95: "58c35537c7ed5fd43b871c53d925ba4f8cdc3dcefdb2d65a72172c89f4ba29c0",
     94: "762feef35a9e0593168f010ea4f980d3425bf55db788baf71bc587a9c9333e2e",
@@ -6976,6 +6978,48 @@ CREATE TRIGGER IF NOT EXISTS prevent_migration_self_attestation_delete
     BEFORE DELETE ON migration_self_attestations
     BEGIN SELECT RAISE(ABORT, 'migration self-attestations cannot be deleted'); END;
 """,
+    97: """
+DROP TRIGGER IF EXISTS prevent_migration_proposal_approval_update;
+DROP TRIGGER IF EXISTS prevent_migration_proposal_approval_delete;
+DROP INDEX IF EXISTS idx_migration_proposal_approvals_subject;
+DROP INDEX IF EXISTS idx_migration_proposal_approvals_proposal_binding;
+ALTER TABLE migration_proposal_approvals RENAME TO migration_proposal_approvals_v96;
+CREATE TABLE migration_proposal_approvals (
+    approval_id TEXT PRIMARY KEY,
+    proposal_id TEXT NOT NULL REFERENCES migration_proposals(proposal_id),
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    actor TEXT NOT NULL CHECK (length(actor) BETWEEN 1 AND 128),
+    identity_binding TEXT CHECK (
+        identity_binding IS NULL OR (
+            length(identity_binding) = 64 AND identity_binding NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 1),
+    created_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL CHECK (
+        length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'
+    )
+);
+INSERT INTO migration_proposal_approvals(
+    approval_id, proposal_id, subject_id, actor, identity_binding,
+    policy_revision, created_at, state_hash
+)
+SELECT approval_id, proposal_id, subject_id, actor, NULL,
+       policy_revision, created_at, state_hash
+FROM migration_proposal_approvals_v96;
+DROP TABLE migration_proposal_approvals_v96;
+CREATE INDEX idx_migration_proposal_approvals_subject
+    ON migration_proposal_approvals(subject_id, proposal_id, created_at);
+CREATE UNIQUE INDEX idx_migration_proposal_approvals_proposal_binding
+    ON migration_proposal_approvals(proposal_id, identity_binding)
+    WHERE identity_binding IS NOT NULL;
+CREATE TRIGGER prevent_migration_proposal_approval_update
+    BEFORE UPDATE ON migration_proposal_approvals
+    BEGIN SELECT RAISE(ABORT, 'migration proposal approvals are append-only'); END;
+CREATE TRIGGER prevent_migration_proposal_approval_delete
+    BEFORE DELETE ON migration_proposal_approvals
+    BEGIN SELECT RAISE(ABORT, 'migration proposal approvals cannot be deleted'); END;
+""",
 }
 
 
@@ -10746,6 +10790,38 @@ END;
                     try:
                         connection.execute("BEGIN IMMEDIATE")
                         self._ensure_migration_proposal_approval_mode(connection)
+                        self._execute_sql_script(connection, migration)
+                        self._set_schema_version(connection, target_version)
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
+                if target_version == 97:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        # A fresh database may not have reached the additive
+                        # model-call columns yet.  Install those columns
+                        # before any DDL that causes SQLite to reparse the
+                        # historical erasure triggers referring to them.
+                        model_columns = {
+                            str(row["name"])
+                            for row in connection.execute(
+                                "PRAGMA table_info(model_calls)"
+                            ).fetchall()
+                        }
+                        if "resource_group_id" not in model_columns:
+                            connection.execute(
+                                "ALTER TABLE model_calls ADD COLUMN resource_group_id TEXT"
+                            )
+                        if "request_json" not in model_columns:
+                            connection.execute(
+                                "ALTER TABLE model_calls ADD COLUMN request_json TEXT"
+                            )
+                        if "capture_policy_version" not in model_columns:
+                            connection.execute(
+                                "ALTER TABLE model_calls ADD COLUMN capture_policy_version INTEGER"
+                            )
                         self._execute_sql_script(connection, migration)
                         self._set_schema_version(connection, target_version)
                         connection.commit()

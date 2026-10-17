@@ -179,9 +179,17 @@ class MigrationManager:
                 expires_at,
             )
 
-    def approve(self, proposal_id: str, *, actor: str, idempotency_key: str) -> MigrationTask:
+    def approve(
+        self,
+        proposal_id: str,
+        *,
+        actor: str,
+        idempotency_key: str,
+        identity_binding: str | None = None,
+    ) -> MigrationTask:
         assert_current_lease()
         self._validate_actor(actor)
+        identity_binding = self._normalize_identity_binding(identity_binding)
         if (
             not isinstance(idempotency_key, str)
             or not idempotency_key.strip()
@@ -236,8 +244,23 @@ class MigrationManager:
                 ).fetchall()
                 for approval in approval_rows:
                     self._assert_approval_integrity(approval)
+                required = 2 if row["approval_mode"] == "dual_review" else 1
+                if required == 2 and identity_binding is None:
+                    raise MigrationApprovalError("migration_dual_review_identity_required")
                 existing_approval = next(
-                    (approval for approval in approval_rows if approval["actor"] == actor.strip()),
+                    (
+                        approval
+                        for approval in approval_rows
+                        if (
+                            identity_binding is not None
+                            and approval["identity_binding"] == identity_binding
+                        )
+                        or (
+                            identity_binding is None
+                            and approval["identity_binding"] is None
+                            and approval["actor"] == actor.strip()
+                        )
+                    ),
                     None,
                 )
                 if existing_approval is None:
@@ -246,19 +269,31 @@ class MigrationManager:
                         "proposal_id": proposal_id,
                         "subject_id": row["subject_id"],
                         "actor": actor.strip(),
+                        "identity_binding": identity_binding,
                         "policy_revision": int(row["policy_revision"]),
                         "created_at": utc_now(),
                     }
                     connection.execute(
-                        "INSERT INTO migration_proposal_approvals(approval_id,proposal_id,subject_id,actor,policy_revision,created_at,state_hash) "
-                        "VALUES(?,?,?,?,?,?,?)",
+                        "INSERT INTO migration_proposal_approvals(approval_id,proposal_id,subject_id,actor,identity_binding,policy_revision,created_at,state_hash) "
+                        "VALUES(?,?,?,?,?,?,?,?)",
                         (*approval_values.values(), self._approval_hash(approval_values)),
                     )
                     approval_rows = [*approval_rows, approval_values]
                 else:
                     result_task = self._task(task_row) if task_row is not None else None
-                required = 2 if row["approval_mode"] == "dual_review" else 1
-                approvals = {str(item["actor"]) for item in approval_rows}
+                if required == 2:
+                    approvals = {
+                        str(item["identity_binding"])
+                        for item in approval_rows
+                        if item["identity_binding"] is not None
+                    }
+                else:
+                    approvals = {
+                        str(item["identity_binding"])
+                        if item["identity_binding"] is not None
+                        else f"actor:{item['actor']}"
+                        for item in approval_rows
+                    }
                 if task_row is None:
                     now = utc_now()
                     epoch_row = connection.execute(
@@ -728,6 +763,10 @@ class MigrationManager:
                 approval["policy_revision"]
             ) != int(row["policy_revision"]):
                 raise ValueError("migration approval binding mismatch")
+            if row["approval_mode"] == "dual_review" and approval["identity_binding"] is None:
+                # Historical approvals are retained for audit, but cannot
+                # satisfy the identity-bound dual-review gate.
+                continue
             approvals.append(
                 {"actor": str(approval["actor"]), "created_at": str(approval["created_at"])}
             )
@@ -864,6 +903,16 @@ class MigrationManager:
             raise ValueError("migration actor is invalid")
 
     @staticmethod
+    def _normalize_identity_binding(identity_binding: str | None) -> str | None:
+        if identity_binding is None:
+            return None
+        if not isinstance(identity_binding, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", identity_binding
+        ):
+            raise ValueError("migration identity binding is invalid")
+        return identity_binding
+
+    @staticmethod
     def _parse_timestamp(value: str) -> datetime:
         try:
             parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -924,16 +973,17 @@ class MigrationManager:
 
     @staticmethod
     def _approval_hash(values: Any) -> str:
-        return content_hash(
-            {
-                "approval_id": values["approval_id"],
-                "proposal_id": values["proposal_id"],
-                "subject_id": values["subject_id"],
-                "actor": values["actor"],
-                "policy_revision": int(values["policy_revision"]),
-                "created_at": values["created_at"],
-            }
-        )
+        payload = {
+            "approval_id": values["approval_id"],
+            "proposal_id": values["proposal_id"],
+            "subject_id": values["subject_id"],
+            "actor": values["actor"],
+            "policy_revision": int(values["policy_revision"]),
+            "created_at": values["created_at"],
+        }
+        if values.get("identity_binding") is not None:
+            payload["identity_binding"] = values["identity_binding"]
+        return content_hash(payload)
 
     @staticmethod
     def _task_hash(values: Any) -> str:

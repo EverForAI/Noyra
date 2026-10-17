@@ -358,3 +358,37 @@ def test_migration_proposal_detail_is_subject_scoped_and_integrity_checked(
     )
     assert status == 503
     assert error == {"error": "migration_proposal_integrity_unavailable"}
+
+
+def test_migration_approval_ignores_request_actor_and_records_binding(
+    migration_http: tuple[NoyraHTTPServer, str],
+) -> None:
+    server, base_url = migration_http
+    policy = server.migration_store.read_policy(server.kernel.subject_id)
+    policy = server.migration_store.update_policy(
+        server.kernel.subject_id, policy.revision, {"enabled": True}, "operator"
+    )
+    _add_attested_target(server)
+    proposal = server.migration_manager.create_proposal(
+        subject_id=server.kernel.subject_id,
+        target_id="migration-target-1",
+        policy_revision=policy.revision,
+        reason_code="maintenance",
+        reason="planned maintenance",
+        expires_at="2099-01-01T00:00:00+00:00",
+    )
+
+    status, result = _json_post(
+        f"{base_url}/api/v1/admin/migration/proposals/{proposal.proposal_id}/approve",
+        {"actor": "forged-operator", "idempotency_key": "service-approval"},
+    )
+    assert status == 202
+    assert result["approval_status"] == "approved"
+    with server.kernel.database.connection() as connection:
+        approval = connection.execute(
+            "SELECT actor, identity_binding FROM migration_proposal_approvals WHERE proposal_id=?",
+            (proposal.proposal_id,),
+        ).fetchone()
+    assert approval["actor"] == "web-admin"
+    assert len(str(approval["identity_binding"])) == 64
+    assert "forged-operator" not in json.dumps(dict(approval))

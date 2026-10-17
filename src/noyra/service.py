@@ -5159,10 +5159,12 @@ class NoyraHTTPServer:
                     if payload is None:
                         return
                     try:
+                        actor, identity_binding = self._approval_identity()
                         task = owner.migration_manager.approve(
                             proposal_id,
-                            actor=self._actor(),
+                            actor=actor,
                             idempotency_key=str(payload.get("idempotency_key", proposal_id)),
+                            identity_binding=identity_binding,
                         )
                     except Exception as error:
                         code = getattr(error, "code", None)
@@ -9019,6 +9021,26 @@ class NoyraHTTPServer:
                         return f"web-{role}"
                 _session_id, session = self._session_from_cookie()
                 return session.actor if session is not None else "web-operator"
+
+            def _approval_identity(self) -> tuple[str, str | None]:
+                """Return an audit label and a non-secret review binding."""
+                supplied = self.headers.get("Authorization", "")
+                for role, secret in (
+                    ("admin", owner.settings.admin_token),
+                    ("operator", owner.settings.operator_token),
+                    ("break_glass", owner.settings.break_glass_token),
+                ):
+                    if secret is not None and _ascii_token_equal(
+                        supplied, f"Bearer {secret.get_secret_value()}"
+                    ):
+                        binding = hashlib.sha256(
+                            f"noyra-admin-principal:{owner.kernel.subject_id}:{role}".encode()
+                        ).hexdigest()
+                        return f"web-{role}", binding
+                session_id, session = self._session_from_cookie()
+                if session is None:
+                    return self._actor(), None
+                return session.actor, owner._admin_session_hash(session_id)
 
             def _session_from_cookie(self) -> tuple[str, _AdminSession | None]:
                 cookie = SimpleCookie()
