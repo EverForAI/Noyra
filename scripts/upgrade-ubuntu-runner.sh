@@ -51,13 +51,37 @@ recover_only=false
 utc_now() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 
 storage_identity_mount_available() {
-  local data_root="$1" identity
-  for identity in /etc/noyra/storage.conf /etc/noyra/storage-identity.conf; do
+  # Production identity: /etc/noyra/storage-identity.conf.
+  local data_root="$1" identity identity_root current_source current_target expected_dir expected_mode expected_format expected_source
+  identity_root=/etc/noyra
+  if [[ "$TEST_MODE" == true && -n "${NOYRA_UPGRADE_TEST_IDENTITY_ROOT:-}" ]]; then
+    identity_root="$NOYRA_UPGRADE_TEST_IDENTITY_ROOT"
+  fi
+  for identity in "$identity_root/storage.conf" "$identity_root/storage-identity.conf"; do
     if [[ -L "$identity" || ( -e "$identity" && ! -f "$identity" ) ]]; then
       return 1
     fi
     if [[ -f "$identity" ]] && ! mountpoint -q "$data_root"; then
       return 1
+    fi
+    if [[ "$identity" == "$identity_root/storage-identity.conf" && -f "$identity" ]]; then
+      read -r current_source current_target < <(findmnt -n -o SOURCE,TARGET --target "$data_root")
+      [[ -n "$current_source" && "$current_target" == "$data_root" ]] || return 1
+      [[ "$(grep -c '^NOYRA_STORAGE_IDENTITY_FORMAT=' "$identity")" == 1 ]] || return 1
+      [[ "$(grep -c '^NOYRA_STORAGE_DATA_DIR=' "$identity")" == 1 ]] || return 1
+      [[ "$(grep -c '^NOYRA_STORAGE_MODE=' "$identity")" == 1 ]] || return 1
+      [[ "$(grep -c '^NOYRA_STORAGE_SOURCE=' "$identity")" == 1 ]] || return 1
+      [[ "$(wc -l < "$identity")" == 4 ]] || return 1
+      ! grep -Eqv '^(NOYRA_STORAGE_IDENTITY_FORMAT|NOYRA_STORAGE_DATA_DIR|NOYRA_STORAGE_MODE|NOYRA_STORAGE_SOURCE)=.+$' "$identity" || return 1
+      expected_format="$(sed -n 's/^NOYRA_STORAGE_IDENTITY_FORMAT=\(.*\)$/\1/p' "$identity")"
+      expected_dir="$(sed -n 's/^NOYRA_STORAGE_DATA_DIR=\(.*\)$/\1/p' "$identity")"
+      expected_mode="$(sed -n 's/^NOYRA_STORAGE_MODE=\(.*\)$/\1/p' "$identity")"
+      expected_source="$(sed -n 's/^NOYRA_STORAGE_SOURCE=\(.*\)$/\1/p' "$identity")"
+      [[ "$expected_format" == noyra-storage-identity/v1 &&
+        "$expected_dir" == "$data_root" &&
+        "$expected_mode" == dedicated_mount &&
+        -n "$expected_source" &&
+        "$expected_source" == "$current_source" ]] || return 1
     fi
   done
 }

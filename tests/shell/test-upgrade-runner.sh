@@ -142,6 +142,39 @@ bash "$runner" --recover-only
 [[ "$(cat "$test_root/state/status.json")" == "$recovered_status" ]] || \
   fail 'repeated boot recovery changed an already interrupted task'
 
+# The persisted data mount identity is checked against the current source,
+# rather than merely checking that the mountpoint exists.
+identity_root="$test_root/identity"
+mkdir -p "$identity_root" "$test_root/storage-bin" "$test_root/data"
+cat > "$identity_root/storage-identity.conf" <<IDENTITY
+NOYRA_STORAGE_IDENTITY_FORMAT=noyra-storage-identity/v1
+NOYRA_STORAGE_DATA_DIR=$test_root/data
+NOYRA_STORAGE_MODE=dedicated_mount
+NOYRA_STORAGE_SOURCE=/dev/expected
+IDENTITY
+cat > "$test_root/storage-bin/mountpoint" <<'MOUNTPOINT'
+#!/usr/bin/env bash
+exit 0
+MOUNTPOINT
+cat > "$test_root/storage-bin/findmnt" <<'FINDMNT'
+#!/usr/bin/env bash
+printf '%s %s\n' "${NOYRA_TEST_MOUNT_SOURCE:-/dev/expected}" "$NOYRA_TEST_MOUNT_TARGET"
+FINDMNT
+chmod 0755 "$test_root/storage-bin/mountpoint" "$test_root/storage-bin/findmnt"
+storage_function="$(sed -n '/^storage_identity_mount_available()/,/^ensure_native_storage_layout()/ { /^ensure_native_storage_layout()/d; p; }' "$runner")"
+PATH="$test_root/storage-bin:$PATH" \
+NOYRA_TEST_MOUNT_TARGET="$test_root/data" \
+NOYRA_UPGRADE_TEST_IDENTITY_ROOT="$identity_root" \
+bash -c "$storage_function; TEST_MODE=true; storage_identity_mount_available \"\$1\"" bash "$test_root/data" || \
+  fail 'runner rejected the expected storage source'
+if PATH="$test_root/storage-bin:$PATH" \
+  NOYRA_TEST_MOUNT_SOURCE=/dev/wrong \
+  NOYRA_TEST_MOUNT_TARGET="$test_root/data" \
+  NOYRA_UPGRADE_TEST_IDENTITY_ROOT="$identity_root" \
+  bash -c "$storage_function; TEST_MODE=true; storage_identity_mount_available \"\$1\"" bash "$test_root/data"; then
+  fail 'runner accepted a wrong storage source'
+fi
+
 # A missing test storage root is an explicit skipped recovery, not a generic
 # runner failure, and the recovery path must not recreate the directory.
 rm -rf -- "$test_root/state"
