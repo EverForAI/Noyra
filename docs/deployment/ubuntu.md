@@ -322,6 +322,14 @@ files are not included. Back up secret files separately using an encrypted, acce
 backup process. Legacy inline `NOYRA_MODEL_API_KEY` and `NOYRA_EMBEDDING_API_KEY` values remain a
 compatibility fallback, so clear them after moving existing deployments to protected files.
 
+After a successful native Ubuntu install, the installer writes a secret-free recovery manifest at
+`/etc/noyra/recovery-manifest.json` with mode `0600`. It records the active release and schema,
+storage mode, and the paths and metadata for the backup keyring, credential directory, server
+identity, database, and latest backup. It never contains credential contents, keys, tokens, or
+database rows. Preserve the manifest together with the protected files before an operating-system
+reinstall; it is a checklist of what must be restored, not a replacement for the encrypted backup
+or keyring.
+
 Autonomous cognition is disabled by default. Before enabling it, configure the remote model budget
 and a compact JSON array of HTTPS sources. Environment files require the JSON to stay on one line:
 

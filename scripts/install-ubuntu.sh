@@ -94,6 +94,7 @@ TARGET_ACTIVATION_UNIT=/etc/systemd/system/noyra-target-activation.service
 TARGET_ACTIVATION_PATH_UNIT=/etc/systemd/system/noyra-target-activation.path
 TARGET_ACTIVATION_RECOVER_UNIT=/etc/systemd/system/noyra-target-activation-recover.service
 BACKUP_KEYRING="$CONFIG_DIR/backup-keyring.json"
+RECOVERY_MANIFEST="$CONFIG_DIR/recovery-manifest.json"
 
 assert_absolute_backup_dir() {
   local parent base canonical_parent current component metadata perm remainder
@@ -373,6 +374,38 @@ ensure_backup_keyring() {
   }
   chown root:noyra "$BACKUP_KEYRING"
   chmod 0640 "$BACKUP_KEYRING"
+}
+
+write_recovery_manifest() {
+  local python_path="$1"
+  if [[ -L "$RECOVERY_MANIFEST" || ( -e "$RECOVERY_MANIFEST" && ! -f "$RECOVERY_MANIFEST" ) ]]; then
+    echo "Recovery manifest must be a regular file: $RECOVERY_MANIFEST" >&2
+    return 1
+  fi
+  "$python_path" - "$RECOVERY_MANIFEST" "$release_id" "${source_sha:-}" \
+    "$DATA_DIR" "$backup_dir" "${backup_path:-}" "$BACKUP_KEYRING" \
+    "$CREDENTIALS_DIR" "$CONFIG_DIR/migration/identity.json" "$DATA_DIR/noyra.sqlite3" <<'PY'
+import sys
+from pathlib import Path
+
+from noyra.core.recovery_manifest import build_recovery_manifest, write_recovery_manifest
+
+manifest_path = Path(sys.argv[1])
+manifest = build_recovery_manifest(
+    release_id=sys.argv[2],
+    source_sha=sys.argv[3] or None,
+    data_dir=Path(sys.argv[4]),
+    backup_dir=Path(sys.argv[5]),
+    backup_path=Path(sys.argv[6]) if sys.argv[6] else None,
+    backup_keyring_path=Path(sys.argv[7]),
+    credentials_dir=Path(sys.argv[8]),
+    server_identity_path=Path(sys.argv[9]),
+    database_path=Path(sys.argv[10]),
+)
+write_recovery_manifest(manifest_path, manifest)
+PY
+  chown root:root "$RECOVERY_MANIFEST"
+  chmod 0600 "$RECOVERY_MANIFEST"
 }
 
 service_active=false
@@ -1174,6 +1207,8 @@ if [[ "$service_active" == true ]]; then
   fi
 fi
 
+write_recovery_manifest "$release_root/.venv/bin/python"
+
 echo "Installed Noyra profile: $profile"
 echo "Release: $release_id"
 if [[ -n "$old_current" ]]; then
@@ -1182,6 +1217,7 @@ fi
 if [[ -n "$backup_path" ]]; then
   echo "Cold backup: $backup_path"
 fi
+echo "Recovery manifest: $RECOVERY_MANIFEST"
 echo 'Edit /etc/noyra/noyra.env, then run: systemctl enable --now noyra'
 rm -f -- "$profile_dropin_backup"
 noyra_upgrade_components_commit

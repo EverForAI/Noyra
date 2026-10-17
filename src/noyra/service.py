@@ -879,9 +879,14 @@ class ServiceSettings(BaseModel):
     admin_session_max_count: int = Field(default=256, ge=8, le=10_000)
     admin_session_cookie_secure: bool = False
     migration_enabled: bool = False
-    migration_approval_mode: Literal["disabled", "manual", "policy_auto", "emergency_recovery"] = (
-        "disabled"
-    )
+    migration_approval_mode: Literal[
+        "disabled",
+        "manual",
+        "self_attested",
+        "dual_review",
+        "policy_auto",
+        "emergency_recovery",
+    ] = "disabled"
     migration_rejection_cooldown_days: int = Field(default=7, ge=0, le=365)
     migration_proposal_expiry_seconds: int = Field(default=86400, ge=300, le=604800)
     migration_wallet_mode: Literal[
@@ -2975,13 +2980,47 @@ class NoyraHTTPServer:
                             {"error": "migration_task_integrity_unavailable"},
                         )
                         return
-                    self._json(HTTPStatus.OK, [task.__dict__ for task in tasks])
+                    projections = []
+                    for task in tasks:
+                        projection = dict(task.__dict__)
+                        projection["self_attestation_available"] = (
+                            owner.migration_cutover.has_self_attestation(task.task_id)
+                        )
+                        projections.append(projection)
+                    self._json(HTTPStatus.OK, projections)
                     return
                 if parsed.path.startswith("/api/admin/migration/tasks/"):
                     if not self._authorized("operator"):
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
-                    task_id = parsed.path.removeprefix("/api/admin/migration/tasks/").strip("/")
+                    task_path = parsed.path.removeprefix("/api/admin/migration/tasks/").strip("/")
+                    if task_path.endswith("/self-attestation"):
+                        task_id = task_path.removesuffix("/self-attestation").strip("/")
+                        if not task_id or "/" in task_id:
+                            self._json(
+                                HTTPStatus.NOT_FOUND,
+                                {"error": "migration_task_not_found"},
+                            )
+                            return
+                        try:
+                            report = owner.migration_cutover.get_self_attestation(
+                                task_id, subject_id=owner.kernel.subject_id
+                            )
+                        except NotFoundError:
+                            self._json(
+                                HTTPStatus.NOT_FOUND,
+                                {"error": "migration_task_not_found"},
+                            )
+                            return
+                        except ValueError:
+                            self._json(
+                                HTTPStatus.SERVICE_UNAVAILABLE,
+                                {"error": "migration_self_attestation_unavailable"},
+                            )
+                            return
+                        self._json(HTTPStatus.OK, report)
+                        return
+                    task_id = task_path
                     if not task_id or "/" in task_id:
                         self._json(HTTPStatus.NOT_FOUND, {"error": "migration_task_not_found"})
                         return
@@ -5059,6 +5098,9 @@ class NoyraHTTPServer:
                             idempotency_key=str(payload.get("idempotency_key", proposal_id)),
                         )
                     except Exception as error:
+                        if getattr(error, "code", None) is not None:
+                            self._json(HTTPStatus.CONFLICT, {"error": error.code})
+                            return
                         status = (
                             HTTPStatus.NOT_FOUND
                             if isinstance(error, NotFoundError)
@@ -5066,7 +5108,22 @@ class NoyraHTTPServer:
                         )
                         self._json(status, {"error": "migration_proposal_approval_failed"})
                         return
-                    self._json(HTTPStatus.ACCEPTED, task.__dict__)
+                    proposal = owner.migration_manager.get_proposal(
+                        owner.kernel.subject_id, proposal_id
+                    )
+                    self._json(
+                        HTTPStatus.ACCEPTED,
+                        dict(task.__dict__)
+                        | {
+                            "approval_count": proposal["approval_count"],
+                            "required_approvals": proposal["required_approvals"],
+                            "approval_status": (
+                                "approved"
+                                if task.status == "approved"
+                                else "awaiting_second_approval"
+                            ),
+                        },
+                    )
                     return
                 if self.path.startswith("/api/admin/migration/proposals/") and self.path.endswith(
                     "/reject"

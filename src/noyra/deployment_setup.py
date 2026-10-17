@@ -19,6 +19,12 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from typing import Protocol
 
+from noyra.core.storage_mode import (
+    StorageMode,
+    StorageUnavailableError,
+    detect_storage_layout,
+)
+
 
 class SetupError(Exception):
     def __init__(self, code: str, message: str):
@@ -357,11 +363,21 @@ class SetupRunner:
             raise SetupError("OPERATOR_TOKEN_MISSING", "an operator token source is required")
         actions.append("validate operator token source")
 
+        storage_layout = None
+        if platform.system().lower() == "linux":
+            try:
+                storage_layout = detect_storage_layout()
+            except StorageUnavailableError as error:
+                raise SetupError("STORAGE_UNAVAILABLE", str(error)) from error
+            if storage_layout.mode == StorageMode.UNAVAILABLE or not storage_layout.writable:
+                reason = storage_layout.reason_code or "storage_unavailable"
+                raise SetupError("STORAGE_UNAVAILABLE", reason)
+            actions.append(f"validate Noyra storage mode: {storage_layout.mode.value}")
+
         if self.options.dry_run:
             actions.extend(
                 [
                     "check root execution (deferred in dry-run)",
-                    "check /var/lib/noyra mount visibility (deferred in dry-run)",
                     "check systemctl is-active noyra (deferred in dry-run)",
                     "check live and ready health endpoints (deferred in dry-run)",
                     f"SSH: ssh -N -L 8765:127.0.0.1:8765 {self.options.server}",
@@ -372,13 +388,8 @@ class SetupRunner:
         if platform.system().lower() == "linux":
             if hasattr(os, "geteuid") and os.geteuid() != 0:
                 raise SetupError("ROOT_REQUIRED", "local checks require root")
-            mount = self.runner.run(
-                ("findmnt", "-n", "-o", "SOURCE", "--target", "/var/lib/noyra"),
-                check=False,
-            )
-            if mount.returncode != 0 or not mount.stdout.strip():
-                raise SetupError("DATA_MOUNT_MISSING", "/var/lib/noyra is not visible")
-            actions.append("validate /var/lib/noyra mount visibility")
+            if storage_layout is None:
+                raise SetupError("STORAGE_UNAVAILABLE", "Noyra storage mode is unavailable")
             active = self.runner.run(("systemctl", "is-active", "noyra"), check=False)
             if active.returncode != 0 or active.stdout.strip() != "active":
                 raise SetupError("SERVICE_INACTIVE", "noyra service is not active")

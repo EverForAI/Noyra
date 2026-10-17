@@ -289,6 +289,7 @@ src/noyra/core/lifecycle.py
 src/noyra/core/locking.py
 src/noyra/core/operator_controls.py
 src/noyra/core/payload_codec.py
+src/noyra/core/recovery_manifest.py
 src/noyra/core/redaction.py
 src/noyra/core/resilience.py
 src/noyra/core/runtime.py

@@ -19,6 +19,17 @@ from noyra.service import NoyraHTTPServer, ServiceSettings
 ADMIN_TOKEN = "migration-test-admin-token-with-enough-entropy"
 
 
+@pytest.mark.parametrize("approval_mode", ["self_attested", "dual_review"])
+def test_service_settings_accept_review_approval_modes(approval_mode: str) -> None:
+    settings = ServiceSettings(
+        data_dir=Path("/tmp/noyra-settings-test"),
+        subject_id="Noyra-settings-test",
+        genesis_hash="a" * 64,
+        migration_approval_mode=approval_mode,
+    )
+    assert settings.migration_approval_mode == approval_mode
+
+
 @pytest.fixture
 def migration_http(tmp_path: Path) -> Iterator[tuple[NoyraHTTPServer, str]]:
     settings = ServiceSettings(

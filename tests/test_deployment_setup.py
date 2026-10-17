@@ -9,6 +9,7 @@ from typing import Any, Self
 import pytest
 
 from noyra.__main__ import _setup_command
+from noyra.core.storage_mode import StorageMode
 from noyra.deployment_setup import (
     SetupError,
     SetupOptions,
@@ -109,9 +110,12 @@ def test_backup_restore(tmp_path: Path) -> None:
     assert "secret" not in record.metadata_path.read_text(encoding="utf-8")
 
 
-def test_setup_local_dry_run_does_not_mutate(tmp_path: Path) -> None:
+def test_setup_local_dry_run_does_not_mutate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     env_path = tmp_path / "noyra.env"
     env_path.write_text("NOYRA_HOST=127.0.0.1\nNOYRA_OPERATOR_TOKEN=test-token\n", encoding="utf-8")
+    monkeypatch.setattr(platform, "system", lambda: "Windows")
     result = invoke_setup(["--mode", "local", "--dry-run", "--env-file", str(env_path)])
     assert result.exit_code == 0
     assert env_path.read_text(encoding="utf-8") == (
@@ -149,20 +153,48 @@ def test_setup_requires_domains_with_stable_error(tmp_path: Path) -> None:
     assert "NOYRA_SETUP_DOMAINS_REQUIRED" in result.stderr
 
 
-def test_local_mount_check_uses_findmnt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_local_preflight_accepts_system_disk_storage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     env_path = tmp_path / "noyra.env"
     env_path.write_text("NOYRA_HOST=127.0.0.1\nNOYRA_OPERATOR_TOKEN=test-token\n", encoding="utf-8")
 
     class Runner:
         def run(self: Self, argv: Any, *, check: Any = True, input_text: Any = None) -> Any:
             del check, input_text
-            assert argv[:1] == ("findmnt",)
-            return CompletedProcess(argv, 1, "", "")
+            return CompletedProcess(argv, 0, "active\n", "")
 
     monkeypatch.setattr(platform, "system", lambda: "Linux")
     monkeypatch.setattr("os.geteuid", lambda: 0, raising=False)
-    with pytest.raises(SetupError, match="NOYRA_SETUP_DATA_MOUNT_MISSING"):
-        SetupRunner(SetupOptions(env_path=env_path), Runner()).run_local()
+    monkeypatch.setattr(
+        "noyra.deployment_setup.detect_storage_layout",
+        lambda: SimpleNamespace(
+            mode=StorageMode.SYSTEM_DISK,
+            writable=True,
+            reason_code=None,
+        ),
+    )
+    result = SetupRunner(SetupOptions(env_path=env_path), Runner()).run_local()
+    assert result.exit_code == 0
+    assert "system_disk" in result.stdout
+
+
+def test_local_preflight_rejects_unavailable_storage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_path = tmp_path / "noyra.env"
+    env_path.write_text("NOYRA_HOST=127.0.0.1\nNOYRA_OPERATOR_TOKEN=test-token\n", encoding="utf-8")
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        "noyra.deployment_setup.detect_storage_layout",
+        lambda: SimpleNamespace(
+            mode=StorageMode.UNAVAILABLE,
+            writable=False,
+            reason_code="storage_mount_missing",
+        ),
+    )
+    with pytest.raises(SetupError, match="NOYRA_SETUP_STORAGE_UNAVAILABLE"):
+        SetupRunner(SetupOptions(env_path=env_path), FakeRunner()).run_local()
 
 
 def test_public_mode_generates_two_https_origins_and_env_updates(tmp_path: Path) -> None:

@@ -310,7 +310,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 95
+CURRENT_SCHEMA_VERSION = 96
 
 # The schema DDL fingerprint is checked after every successful initialization.
 # Update this value only alongside a reviewed schema migration and its tests.
@@ -318,6 +318,7 @@ CURRENT_SCHEMA_VERSION = 95
 # installations persist this value in ``schema_meta`` and therefore require
 # the value to remain stable across compatible runtime fixes.
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
+    96: "f851774364cf13313d4a670104d5098ed362cb4c1e4422b76c7efd68c2e6e9dc",
     95: "4d897bceb70f95ea1310b2a637d0606ff26dc70a8ff73e0f71094ce98e95fca5",
     94: "181b72baa819d54d6d18c80411b610abdd2c3c6cee18661aeadb3a190a339f9b",
     93: "8968045531bd80f2f1d487cb9a4b01e2b84767b10b8a85fc4ce85d0c956022bb",
@@ -344,6 +345,7 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 # auditable P0 finding.  Tables, indexes, and views still fail closed during
 # database construction because they define the storage contract itself.
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
+    96: "96413e10b9c7d69bf591d15fc84be46a942aff186c6b40a923ee968243dcabf6",
     95: "58c35537c7ed5fd43b871c53d925ba4f8cdc3dcefdb2d65a72172c89f4ba29c0",
     94: "762feef35a9e0593168f010ea4f980d3425bf55db788baf71bc587a9c9333e2e",
     93: "bd4f12a88b407fc6f3fe4ab713401afb9c1a4ba73d79146927898a2ca8211b36",
@@ -6919,6 +6921,61 @@ ALTER TABLE cognitive_resource_groups
         reasoning_effort IS NULL OR reasoning_effort IN ('low', 'medium', 'high', 'xhigh')
     );
 """,
+    96: """
+CREATE TABLE IF NOT EXISTS migration_policy_review_modes (
+    subject_id TEXT PRIMARY KEY REFERENCES migration_policies(subject_id),
+    mode TEXT NOT NULL CHECK (mode IN ('self_attested', 'dual_review')),
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS migration_proposal_approvals (
+    approval_id TEXT PRIMARY KEY,
+    proposal_id TEXT NOT NULL REFERENCES migration_proposals(proposal_id),
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    actor TEXT NOT NULL CHECK (length(actor) BETWEEN 1 AND 128),
+    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 1),
+    created_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL CHECK (
+        length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    UNIQUE (proposal_id, actor)
+);
+CREATE INDEX IF NOT EXISTS idx_migration_proposal_approvals_subject
+    ON migration_proposal_approvals(subject_id, proposal_id, created_at);
+CREATE TRIGGER IF NOT EXISTS prevent_migration_proposal_approval_update
+    BEFORE UPDATE ON migration_proposal_approvals
+    BEGIN SELECT RAISE(ABORT, 'migration proposal approvals are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS prevent_migration_proposal_approval_delete
+    BEFORE DELETE ON migration_proposal_approvals
+    BEGIN SELECT RAISE(ABORT, 'migration proposal approvals cannot be deleted'); END;
+CREATE TABLE IF NOT EXISTS migration_self_attestations (
+    task_id TEXT PRIMARY KEY REFERENCES migration_tasks(task_id),
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    actor TEXT NOT NULL CHECK (length(actor) BETWEEN 1 AND 128),
+    target_id TEXT NOT NULL REFERENCES migration_targets(target_id),
+    target_identity_digest TEXT NOT NULL CHECK (
+        length(target_identity_digest) = 64 AND target_identity_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    manifest_digest TEXT NOT NULL CHECK (
+        length(manifest_digest) = 64 AND manifest_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    gates_json TEXT NOT NULL,
+    gates_digest TEXT NOT NULL CHECK (
+        length(gates_digest) = 64 AND gates_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    completed_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL CHECK (
+        length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_migration_self_attestations_subject_time
+    ON migration_self_attestations(subject_id, completed_at DESC);
+CREATE TRIGGER IF NOT EXISTS prevent_migration_self_attestation_update
+    BEFORE UPDATE ON migration_self_attestations
+    BEGIN SELECT RAISE(ABORT, 'migration self-attestations are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS prevent_migration_self_attestation_delete
+    BEFORE DELETE ON migration_self_attestations
+    BEGIN SELECT RAISE(ABORT, 'migration self-attestations cannot be deleted'); END;
+""",
 }
 
 
@@ -10309,6 +10366,18 @@ END;
             "ON migration_tasks(target_epoch_id) WHERE target_epoch_id IS NOT NULL"
         )
 
+    @staticmethod
+    def _ensure_migration_proposal_approval_mode(connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(migration_proposals)")
+        }
+        if "approval_mode" not in columns:
+            connection.execute(
+                "ALTER TABLE migration_proposals ADD COLUMN approval_mode TEXT NOT NULL "
+                "DEFAULT 'manual' CHECK (approval_mode IN ("
+                "'disabled','manual','self_attested','dual_review','policy_auto','emergency_recovery'))"
+            )
+
     def _set_schema_version(self, connection: sqlite3.Connection, version: int) -> None:
         """Advance the marker only after the complete migration stage is valid."""
         connection.execute(
@@ -10663,6 +10732,17 @@ END;
                                 connection.execute(
                                     f"ALTER TABLE {table} ADD COLUMN {name} {declaration}"
                                 )
+                        self._execute_sql_script(connection, migration)
+                        self._set_schema_version(connection, target_version)
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
+                if target_version == 96:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._ensure_migration_proposal_approval_mode(connection)
                         self._execute_sql_script(connection, migration)
                         self._set_schema_version(connection, target_version)
                         connection.commit()
