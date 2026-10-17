@@ -99,9 +99,12 @@ def _record_backup_gc_run(
     status: str,
     deleted_count: int = 0,
     failure_code: str | None = None,
-) -> None:
+    required: bool = False,
+) -> bool:
     if subject_id is None or not database_path.is_file() or database_path.is_symlink():
-        return
+        if required:
+            raise RuntimeError("backup_retention_audit_unavailable")
+        return False
     values = {
         "run_id": f"backupretention_{os.urandom(16).hex()}",
         "subject_id": subject_id,
@@ -122,16 +125,18 @@ def _record_backup_gc_run(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='backup_retention_runs'"
             ).fetchone()
             if table is None:
-                return
+                if required:
+                    raise RuntimeError("backup_retention_audit_unavailable")
+                return False
             connection.execute(
                 "INSERT INTO backup_retention_runs VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (*values.values(), state_hash),
             )
-    except sqlite3.DatabaseError:
-        # Artifact cleanup remains authoritative; a missing history row is
-        # surfaced by the next maintenance diagnostic rather than changing
-        # deletion safety.
-        return
+    except sqlite3.DatabaseError as error:
+        if required:
+            raise RuntimeError("backup_retention_audit_unavailable") from error
+        return False
+    return True
 
 
 def safe_directory(path: Path, *, owned: bool = True) -> Path:
@@ -506,7 +511,13 @@ def main() -> int:
                     keep=args.keep,
                     backup_policy=policy,
                 )
-                _record_backup_gc_run(database_path, subject_id, plan, status="planned")
+                _record_backup_gc_run(
+                    database_path,
+                    subject_id,
+                    plan,
+                    status="planned",
+                    required=args.apply,
+                )
                 if args.apply:
                     try:
                         apply_gc(args.releases, args.backups, plan)

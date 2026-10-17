@@ -176,6 +176,22 @@ def test_persisted_backup_policy_and_gc_run_history_are_read_by_root_helper(
     assert json.loads(row["cursor_json"]) == plan["cursor"]
 
 
+def test_backup_gc_required_audit_blocks_when_history_table_is_missing(tmp_path: Path) -> None:
+    helper = _helper()
+    database = tmp_path / "noyra.sqlite3"
+    database.touch()
+    plan = {"plan_id": "a" * 64, "cursor": {"version": 1}}
+
+    with pytest.raises(RuntimeError, match="backup_retention_audit_unavailable"):
+        helper._record_backup_gc_run(
+            database,
+            "Noyra-retention-audit",
+            plan,
+            status="planned",
+            required=True,
+        )
+
+
 def test_persisted_backup_policy_hash_failure_blocks_root_helper(tmp_path: Path) -> None:
     from noyra.core import Database, IdentityStore
     from noyra.core.retention import RetentionManager, RetentionSettings
