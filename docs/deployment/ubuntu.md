@@ -213,8 +213,9 @@ sudo ./scripts/install-ubuntu.sh --profile base
 
 The initializer is deliberately separate from the installer. It refuses to overwrite an existing
 image, non-empty mount point, active mapper, or existing helper/configuration path. It asks
-`cryptsetup` for the passphrase interactively, never writes that passphrase to disk, and installs a
-systemd drop-in that prevents Noyra from starting while `/var/lib/noyra` is not a mount point.
+`cryptsetup` for the passphrase interactively and never writes that passphrase to disk. The runtime
+checks the configured storage contract before opening SQLite, so a missing encrypted mount fails
+closed instead of falling back to an empty directory.
 `--dry-run` performs only read-only validation; `--yes` skips only the explicit `CREATE` confirmation,
 not the passphrase prompt.
 
@@ -259,10 +260,13 @@ private or tunnel-only installation; the sitemap stays unpublished in that mode.
 
 The installer creates `/var/lib/noyra` as `noyra:noyra` mode `0700`, installs a separate backup
 keyring at `/etc/noyra/backup-keyring.json` as `root:noyra` mode `0640`, and enables
-`NOYRA_AT_REST_MODE=required`. It does not format or encrypt a disk. Mount the intended LUKS volume
-at `/var/lib/noyra` first and verify the device-mapper chain with `findmnt`, `lsblk`, and
-`cryptsetup status`. The runtime independently walks the Linux sysfs block-device ancestry and
-fails before database creation when it cannot find a `CRYPT-LUKS` mapping.
+`NOYRA_AT_REST_MODE=required`. It does not format or encrypt a disk. With an ordinary system-disk
+directory, the installer can start Noyra directly; the at-rest guard still requires the configured
+encrypted-volume contract in production. When `/etc/noyra/storage.conf` exists, it identifies the
+single-disk encrypted container and the runtime refuses to use the unmounted path. For a dedicated
+LUKS volume, mount the intended device at `/var/lib/noyra` and verify the device-mapper chain with
+`findmnt`, `lsblk`, and `cryptsetup status`. The runtime independently walks the Linux sysfs block-device
+ancestry and fails before database creation when it cannot find a `CRYPT-LUKS` mapping.
 
 Generate secrets on the server instead of moving them through chat or source control:
 

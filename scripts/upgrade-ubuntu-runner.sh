@@ -48,6 +48,30 @@ processing_file=""
 
 utc_now() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 
+ensure_native_storage_layout() {
+  local data_root=/var/lib/noyra
+  local upgrade_root="$data_root/upgrade"
+  local request_root="$upgrade_root/requests"
+  local processing_root="$upgrade_root/processing"
+  [[ -d "$data_root" && ! -L "$data_root" ]] || return 78
+  # storage.conf is written outside the encrypted image. If it exists, the
+  # path is expected to be a dedicated mount and must fail closed when absent.
+  if [[ -L /etc/noyra/storage.conf ||
+    ( -e /etc/noyra/storage.conf && ! -f /etc/noyra/storage.conf ) ]]; then
+    return 78
+  fi
+  if [[ -f /etc/noyra/storage.conf ]] && ! mountpoint -q "$data_root"; then
+    return 78
+  fi
+  for path in "$upgrade_root" "$request_root" "$processing_root"; do
+    [[ ! -L "$path" && ( ! -e "$path" || -d "$path" ) ]] || return 78
+  done
+  install -d -o root -g noyra -m 0750 "$upgrade_root"
+  install -d -o noyra -g noyra -m 0700 "$request_root"
+  install -d -o root -g root -m 0700 "$processing_root"
+  return 0
+}
+
 write_status() {
   local status="$1" next_phase="$2" code="${3:-}" ended="${4:-}"
   local log1="${5:-}" log2="${6:-}" log3="${7:-}"
@@ -124,6 +148,14 @@ if [[ "$TEST_MODE" == true ]]; then
   mkdir -p -- "$INSTALL_ROOT" "$PROCESSING_DIR"
 fi
 if [[ "$TEST_MODE" != true ]]; then
+  ensure_native_storage_layout || {
+    storage_rc=$?
+    if [[ "${1:-}" == --recover-only ]]; then
+      exit 0
+    fi
+    error_code=storage_unavailable
+    exit "$storage_rc"
+  }
   for path in /opt /var/lib/noyra "$INSTALL_ROOT" "$UPGRADE_ROOT" "$REQUEST_DIR" "$PROCESSING_DIR"; do
     [[ ! -L "$path" && -d "$path" ]] || exit 1
   done

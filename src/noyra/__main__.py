@@ -124,6 +124,20 @@ def _backup_command(arguments: list[str], *, restore: bool) -> None:
         print(json.dumps(artifact.public(), sort_keys=True))
 
 
+def _storage_check_command(arguments: list[str]) -> None:
+    """Validate the native data path without creating or modifying state."""
+    from noyra.core.storage_mode import StorageMode, detect_storage_layout
+
+    parser = argparse.ArgumentParser(prog="python -m noyra storage-check")
+    parser.add_argument("--data-dir", type=Path, default=Path("/var/lib/noyra"))
+    parser.add_argument("--backup-dir", type=Path, default=Path("/var/backups/noyra"))
+    options = parser.parse_args(arguments)
+    layout = detect_storage_layout(options.data_dir, options.backup_dir)
+    print(json.dumps(layout.public(), sort_keys=True))
+    if layout.mode is StorageMode.UNAVAILABLE or not layout.writable:
+        raise SystemExit(78)
+
+
 class _WalletArgumentParser(argparse.ArgumentParser):
     """Argument parser that never echoes untrusted argument values."""
 
@@ -226,6 +240,9 @@ def main() -> None:
         return
     if len(sys.argv) > 1 and sys.argv[1] == "restore-backup":
         _backup_command(sys.argv[2:], restore=True)
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "storage-check":
+        _storage_check_command(sys.argv[2:])
         return
     if len(sys.argv) > 1 and sys.argv[1] == "wallet-setup":
         _wallet_setup_command(sys.argv[2:])

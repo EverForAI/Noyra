@@ -84,6 +84,8 @@ def test_target_readiness_binds_subject_and_migration_target_identity(
             payload = json.loads(response.read())
         assert payload["subject_id"] == settings.subject_id
         assert payload["migration_target_id"] == "shelter-1"
+        assert payload["storage"]["mode"] == "system_disk"
+        assert payload["storage"]["writable"] is True
     finally:
         service.http.close()
         service.kernel.close()

@@ -76,6 +76,11 @@ from noyra.core.runtime import SubjectKernel
 from noyra.core.runtime_export import RuntimeLogExporter
 from noyra.core.storage import StorageLayout, TrainingStore
 from noyra.core.storage_lifecycle import StorageLifecycleManager
+from noyra.core.storage_mode import (
+    StorageMode,
+    StorageUnavailableError,
+    detect_storage_layout,
+)
 from noyra.core.training_export import TrainingDatasetExporter, TrainingExportLimits
 from noyra.core.types import content_hash, strict_json_loads, utc_now
 from noyra.core.upgrade import (
@@ -2762,6 +2767,7 @@ class NoyraHTTPServer:
                             "subject_id": owner.kernel.subject_id,
                             "migration_target_id": owner.kernel.migration_target_id,
                             "lifecycle": lifecycle,
+                            "storage": owner.storage_contract.public(),
                             "at_rest": at_rest,
                             "cloud_archive": owner.cloud_archive_status,
                         }
@@ -10065,6 +10071,14 @@ class NoyraService:
             )
         )
         self.at_rest.prepare()
+        self.storage_contract = detect_storage_layout(settings.data_dir)
+        if (
+            self.storage_contract.mode is StorageMode.UNAVAILABLE
+            or not self.storage_contract.writable
+        ):
+            raise StorageUnavailableError(
+                self.storage_contract.reason_code or "storage_unavailable"
+            )
         self.storage_layout = StorageLayout.create(settings.data_dir)
         self._pending_cognitive_resource_proposals: tuple[CognitiveResourceGroupInput, ...] = ()
         # Keep the historical database path for compatibility with existing
@@ -10112,6 +10126,7 @@ class NoyraService:
             close_wallet_signer=close_wallet_signer,
         )
         self.http.at_rest = self.at_rest
+        self.http.storage_contract = self.storage_contract
         self._initialize_common_key_after_integrity = initialize_common_key_after_integrity
         self.cognition: CognitionCycle | None = None
         self.http.migration_runtime.to_thread = self._tracked_to_thread

@@ -81,6 +81,7 @@ UNIT_FILE=/etc/systemd/system/noyra.service
 SIGNER_UNIT=/etc/systemd/system/noyra-signer.service
 PROFILE_DROPIN_DIR=/etc/systemd/system/noyra.service.d
 PROFILE_DROPIN="$PROFILE_DROPIN_DIR/profile.conf"
+STORAGE_DROPIN="$PROFILE_DROPIN_DIR/storage.conf"
 UPGRADE_HANDOFF_LOCK="$DATA_DIR/upgrade/manager.lock"
 UPGRADE_RUNNER_UNIT=/etc/systemd/system/noyra-upgrade.service
 UPGRADE_PATH_UNIT=/etc/systemd/system/noyra-upgrade.path
@@ -581,7 +582,7 @@ on_error() {
   if [[ "$UPGRADE_COMPONENTS_CHANGED" == true ]]; then
     if ! noyra_upgrade_components_restore \
       "$UPGRADE_RUNNER" "$UPGRADE_PATH_UNIT" "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT" \
-      "$UNIT_FILE" "$SIGNER_UNIT"; then
+      "$UNIT_FILE" "$SIGNER_UNIT" "$STORAGE_DROPIN"; then
       upgrade_components_restored=false
       echo 'Failed to restore root upgrade components; Noyra will remain stopped.' >&2
       status=1
@@ -931,7 +932,7 @@ UPGRADE_RUNNER="$LIBEXEC_DIR/noyra-upgrade-runner.sh"
 UPGRADE_COMPONENT_BACKUP_DIR="$INSTALL_DIR/.upgrade-components.$$.$RANDOM"
 noyra_upgrade_components_snapshot \
   "$UPGRADE_COMPONENT_BACKUP_DIR" "$UPGRADE_RUNNER" "$UPGRADE_PATH_UNIT" \
-  "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT" "$UNIT_FILE" "$SIGNER_UNIT"
+  "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT" "$UNIT_FILE" "$SIGNER_UNIT" "$STORAGE_DROPIN"
 noyra_upgrade_components_mark_changed
 install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra.service" "$UNIT_FILE"
 for upgrade_file in \
@@ -946,6 +947,14 @@ for upgrade_file in \
   fi
 done
 install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-signer.service" "$SIGNER_UNIT"
+# Older single-disk helpers installed a mountpoint condition here. The native
+# service now validates storage explicitly and supports system-disk directories,
+# so remove only this known generated drop-in.
+if [[ -L "$STORAGE_DROPIN" || ( -e "$STORAGE_DROPIN" && ! -f "$STORAGE_DROPIN" ) ]]; then
+  echo "Storage drop-in must be a regular file: $STORAGE_DROPIN" >&2
+  on_error 1
+fi
+rm -f -- "$STORAGE_DROPIN"
 install -d -o root -g root -m 0755 "$LIBEXEC_DIR"
 install -o root -g root -m 0750 "$SOURCE_DIR/scripts/upgrade-ubuntu-runner.sh" "$UPGRADE_RUNNER"
 install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-upgrade.path" "$UPGRADE_PATH_UNIT"

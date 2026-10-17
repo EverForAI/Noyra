@@ -18,15 +18,11 @@ MOUNTED=false
 MAPPER_OPEN=false
 CREATED_MOUNT_POINT=false
 CONFIG_DIR_CREATED=false
-DROPDIR_CREATED=false
 CREATED_CONFIG=false
-CREATED_DROPDIR=false
 CREATED_HELPER=false
 TEMPORARY_PATH=''
 CONFIG_DIR=/etc/noyra
 CONFIG_PATH=/etc/noyra/storage.conf
-DROPIN_DIR=/etc/systemd/system/noyra.service.d
-DROPIN_PATH=/etc/systemd/system/noyra.service.d/storage.conf
 HELPER_PATH=/usr/local/sbin/noyra-storage-unlock
 
 usage() {
@@ -155,7 +151,7 @@ validate_space() {
 }
 
 validate_install_targets() {
-  local path config_mode dropin_mode
+  local path config_mode
   if [[ -e "$CONFIG_DIR" || -L "$CONFIG_DIR" ]]; then
     [[ -d "$CONFIG_DIR" && ! -L "$CONFIG_DIR" ]] || fail "Configuration directory must be a real directory: $CONFIG_DIR"
     [[ "$(stat -c '%u' -- "$CONFIG_DIR")" == '0' ]] || fail "Configuration directory must be root-owned: $CONFIG_DIR"
@@ -164,26 +160,15 @@ validate_install_targets() {
   elif [[ "$DRY_RUN" != true ]]; then
     CONFIG_DIR_CREATED=true
   fi
-  for path in "$CONFIG_PATH" "$DROPIN_PATH" "$HELPER_PATH"; do
+  for path in "$CONFIG_PATH" "$HELPER_PATH"; do
     [[ ! -e "$path" && ! -L "$path" ]] || fail "Refusing to overwrite existing path: $path"
   done
-  if [[ -e "$DROPIN_DIR" || -L "$DROPIN_DIR" ]]; then
-    [[ -d "$DROPIN_DIR" && ! -L "$DROPIN_DIR" ]] || fail "Systemd drop-in directory must be real: $DROPIN_DIR"
-    [[ "$(stat -c '%u:%g' -- "$DROPIN_DIR")" == '0:0' ]] || fail "Systemd drop-in directory must be root-owned: $DROPIN_DIR"
-    dropin_mode="$(stat -c '%a' -- "$DROPIN_DIR")"
-    case "$dropin_mode" in *[2367][0-7]|*[0-7][2367]) fail "Systemd drop-in directory must not be group/other writable: $DROPIN_DIR" ;; esac
-  elif [[ "$DRY_RUN" != true ]]; then
-    DROPDIR_CREATED=true
-  fi
 }
 
-write_config_and_dropin() {
+write_config() {
   local temporary
   if [[ ! -d "$CONFIG_DIR" ]]; then
     install -d -o root -g root -m 0700 -- "$CONFIG_DIR"
-  fi
-  if [[ ! -d "$DROPIN_DIR" ]]; then
-    install -d -o root -g root -m 0755 -- "$DROPIN_DIR"
   fi
   temporary="$(mktemp "$CONFIG_DIR/.storage.conf.tmp.XXXXXX")"
   TEMPORARY_PATH="$temporary"
@@ -196,14 +181,6 @@ write_config_and_dropin() {
   CREATED_CONFIG=true
   install -o root -g root -m 0755 -- "$SCRIPT_DIR/unlock-ubuntu-single-disk-storage.sh" "$HELPER_PATH"
   CREATED_HELPER=true
-  temporary="$(mktemp "$DROPIN_DIR/.storage.conf.tmp.XXXXXX")"
-  TEMPORARY_PATH="$temporary"
-  printf '%s\n' '[Unit]' 'ConditionPathIsMountPoint=/var/lib/noyra' > "$temporary"
-  chown root:root -- "$temporary"
-  chmod 0644 -- "$temporary"
-  mv -Tf -- "$temporary" "$DROPIN_PATH"
-  TEMPORARY_PATH=''
-  CREATED_DROPDIR=true
   systemctl daemon-reload
 }
 
@@ -225,8 +202,6 @@ cleanup_on_error() {
   fi
   [[ "$CREATED_CONFIG" == true ]] && rm -f -- "$CONFIG_PATH"
   [[ "$CREATED_HELPER" == true ]] && rm -f -- "$HELPER_PATH"
-  [[ "$CREATED_DROPDIR" == true ]] && rm -f -- "$DROPIN_PATH"
-  [[ "${DROPDIR_CREATED:-false}" == true ]] && rmdir -- "$DROPIN_DIR" >/dev/null 2>&1 || true
   [[ "${CONFIG_DIR_CREATED:-false}" == true ]] && rmdir -- "$CONFIG_DIR" >/dev/null 2>&1 || true
   [[ "$CREATED_MOUNT_POINT" == true ]] && rmdir -- "$MOUNT_POINT" >/dev/null 2>&1 || true
   exit "$status"
@@ -284,7 +259,7 @@ else
   echo 'Service account noyra is not installed yet; install-ubuntu.sh will assign mount ownership.'
 fi
 chmod 0700 -- "$MOUNT_POINT"
-write_config_and_dropin
+write_config
 
 trap - EXIT
 echo 'Single-disk encrypted storage is ready.'
