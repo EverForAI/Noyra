@@ -31,6 +31,13 @@ _SHA = re.compile(r"[0-9a-f]{40,64}\Z")
 _RELEASE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _IDEMPOTENCY_KEY = re.compile(r"[A-Za-z0-9._:-]{8,128}\Z")
 _ACTIVE_STATES = frozenset({"queued", "running", "rolling_back"})
+_RECOMMENDATIONS = {
+    "upgrade_interrupted": "检查磁盘和服务状态后重新执行版本检查, 再发起升级。",
+    "storage_unavailable": "确认 /var/lib/noyra 的存储已挂载且可写, 然后重试升级或恢复。",
+    "upgrade_install_failed": (
+        "保留当前版本, 查看升级日志和 /health/ready; 确认旧版本健康后再重试。"
+    ),
+}
 
 
 class UpgradeError(RuntimeError):
@@ -88,6 +95,11 @@ class UpgradeManager:
     def _require_available(self) -> None:
         if not self.runner_trigger_path.is_file():
             raise UpgradeError("upgrade_unavailable")
+
+    @staticmethod
+    def recommendation(code: str | None) -> str | None:
+        """Return a bounded operator action for a durable upgrade error."""
+        return _RECOMMENDATIONS.get(code)
 
     @contextmanager
     def _process_guard(self) -> Iterator[None]:
@@ -309,6 +321,7 @@ class UpgradeManager:
                 "release": None,
                 "logs": [],
                 "error_code": None,
+                "recommendation": None,
             }
         except (OSError, ValueError, json.JSONDecodeError):
             raise UpgradeError("upgrade_unavailable") from None
@@ -322,6 +335,7 @@ class UpgradeManager:
             "release",
             "logs",
             "error_code",
+            "recommendation",
         )
         result: dict[str, Any] = {field: payload.get(field) for field in fields}
         raw_logs = result["logs"]
@@ -339,6 +353,7 @@ class UpgradeManager:
         for field in ("target_sha", "release"):
             value = result[field]
             result[field] = value if isinstance(value, str) and _SHA.fullmatch(value) else None
+        result["recommendation"] = self.recommendation(result["error_code"])
         return result
 
     def start(
@@ -410,6 +425,7 @@ class UpgradeManager:
                     "release": None,
                     "logs": [],
                     "error_code": None,
+                "recommendation": None,
                 }
             )
 
@@ -461,6 +477,7 @@ class UpgradeManager:
                 "release",
                 "logs",
                 "error_code",
+                "recommendation",
             )
         }
         for field, maximum in (
@@ -476,6 +493,7 @@ class UpgradeManager:
         for field in ("target_sha", "release"):
             item = result[field]
             result[field] = item if isinstance(item, str) and _SHA.fullmatch(item) else None
+        result["recommendation"] = UpgradeManager.recommendation(result["error_code"])
         logs = result["logs"]
         result["logs"] = (
             [redact_text(line[:240]) for line in logs[:20] if isinstance(line, str)]

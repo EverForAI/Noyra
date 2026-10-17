@@ -77,6 +77,19 @@ def test_installer_rolls_back_root_upgrade_components_with_failed_release() -> N
     assert rollback < readiness < commit
 
 
+def test_installer_migrates_before_pointer_switch_and_validates_old_release_on_rollback() -> None:
+    installer = (ROOT / "scripts" / "install-ubuntu.sh").read_text(encoding="utf-8")
+    migration_call = installer.index("migrate_database_before_switch\n")
+    switch = installer.index('atomic_pointer "$CURRENT_LINK" "$release_id"')
+    assert migration_call < switch
+    rollback_check = installer.index(
+        "verify_release_schema_contract", installer.index("on_error()")
+    )
+    restart = installer.index("systemctl start noyra", rollback_check)
+    assert rollback_check < restart
+    assert "schema contract check after rollback" in installer
+
+
 def test_installer_installs_signer_unit_without_starting_it_and_rolls_it_back() -> None:
     installer = (ROOT / "scripts" / "install-ubuntu.sh").read_text(encoding="utf-8")
     helper = (ROOT / "scripts" / "lib" / "upgrade-components.sh").read_text(encoding="utf-8")

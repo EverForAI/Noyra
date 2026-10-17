@@ -522,6 +522,46 @@ stop_old_service() {
   fi
 }
 
+migrate_database_before_switch() {
+  [[ -f "$DATA_DIR/noyra.sqlite3" ]] || return 0
+  [[ -x "$release_root/.venv/bin/python" ]] || {
+    echo 'The staged release has no usable migration Python.' >&2
+    return 1
+  }
+  runuser --user=noyra --group=noyra -- /usr/bin/env \
+    NOYRA_DATA_DIR="$DATA_DIR" \
+    "$release_root/.venv/bin/python" - "$DATA_DIR/noyra.sqlite3" <<'PY'
+import sys
+from pathlib import Path
+
+from noyra.core.database import Database
+
+Database(Path(sys.argv[1]), strict_schema_contract=True)
+PY
+}
+
+verify_release_schema_contract() {
+  local release_path="$1"
+  [[ -x "$release_path/.venv/bin/python" && -f "$DATA_DIR/noyra.sqlite3" ]] || return 1
+  "$release_path/.venv/bin/python" - "$DATA_DIR/noyra.sqlite3" <<'PY'
+import inspect
+import sys
+from pathlib import Path
+
+from noyra.core.database import Database
+
+path = Path(sys.argv[1])
+parameters = inspect.signature(Database).parameters
+if "strict_schema_contract" in parameters:
+    Database(path, initialize=False, strict_schema_contract=True)
+else:
+    # Releases from before the strict contract API can still perform their
+    # read-only open check during rollback; readiness below remains the final
+    # compatibility gate for those releases.
+    Database(path, initialize=False)
+PY
+}
+
 start_and_check() {
   local port elapsed
   port="$(env_value NOYRA_PORT 8765)"
@@ -613,6 +653,11 @@ on_error() {
     fi
     if [[ "$upgrade_components_restored" != true || "$migration_components_restored" != true ]]; then
       restored=false
+    fi
+    if [[ "$restored" == true && -n "$old_current" && -f "$DATA_DIR/noyra.sqlite3" ]] && \
+      ! verify_release_schema_contract "$RELEASES_DIR/$old_current"; then
+      restored=false
+      echo 'Previous release failed the schema contract check after rollback; leaving Noyra stopped.' >&2
     fi
     restore_profile_dropin_after_failure
     if [[ "$service_active" == true && "$restored" == true && "$cleanup_failed" == false ]]; then
@@ -913,6 +958,11 @@ chown -R root:root "$release_root"
 chmod 0755 "$release_root" "$release_root/.venv" "$release_root/.venv/bin"
 
 ensure_backup_keyring "$release_root/.venv/bin/python"
+
+# Migrate the durable database while the old pointer is still intact.  A
+# failed migration therefore removes only the unpublished release and leaves
+# the old service and pointer untouched.
+migrate_database_before_switch
 
 noyra_control_layout_snapshot "$DATA_DIR" \
   "$DATA_DIR/upgrade" "$DATA_DIR/upgrade/requests" "$DATA_DIR/upgrade/processing" \

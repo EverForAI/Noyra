@@ -1,6 +1,7 @@
 [Unit]
 Description=Watch for an administrator-approved Noyra upgrade
 After=noyra-upgrade-recover.service
+ConditionPathIsDirectory=/var/lib/noyra/upgrade/requests
 
 [Path]
 PathExists=/var/lib/noyra/upgrade/requests/pending.json

@@ -3309,7 +3309,10 @@ class NoyraHTTPServer:
                     except UpgradeError as error:
                         self._json(
                             HTTPStatus.SERVICE_UNAVAILABLE,
-                            {"error": error.code},
+                            {
+                                "error": error.code,
+                                "recommendation": owner.upgrade_manager.recommendation(error.code),
+                            },
                         )
                         return
                     self._json(HTTPStatus.OK, payload)
@@ -8700,7 +8703,9 @@ class NoyraHTTPServer:
                         "upgrade_source_dirty": HTTPStatus.CONFLICT,
                         "upgrade_in_progress": HTTPStatus.CONFLICT,
                         "upgrade_unavailable": HTTPStatus.SERVICE_UNAVAILABLE,
+                        "storage_unavailable": HTTPStatus.SERVICE_UNAVAILABLE,
                         "upgrade_start_failed": HTTPStatus.SERVICE_UNAVAILABLE,
+                        "upgrade_install_failed": HTTPStatus.CONFLICT,
                         "upgrade_interrupted": HTTPStatus.CONFLICT,
                     }.get(error.code, HTTPStatus.SERVICE_UNAVAILABLE)
                     owner.audit_admin_event(
@@ -8708,7 +8713,13 @@ class NoyraHTTPServer:
                         self._actor(),
                         {"error_code": error.code},
                     )
-                    self._json(status, {"error": error.code})
+                    self._json(
+                        status,
+                        {
+                            "error": error.code,
+                            "recommendation": owner.upgrade_manager.recommendation(error.code),
+                        },
+                    )
                     return
                 owner.audit_admin_event(
                     "admin_upgrade_started",

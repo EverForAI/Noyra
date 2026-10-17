@@ -135,5 +135,15 @@ status="$(cat "$test_root/state/status.json")"
 [[ "$status" == *'"status":"interrupted"'* ]] || fail 'boot recovery did not mark the interrupted task'
 [[ "$status" == *'"error_code":"upgrade_interrupted"'* ]] || \
   fail 'boot recovery did not use the stable interrupted code'
+recovered_status="$status"
+bash "$runner" --recover-only
+[[ "$(cat "$test_root/state/status.json")" == "$recovered_status" ]] || \
+  fail 'repeated boot recovery changed an already interrupted task'
+
+# A missing test storage root is an explicit skipped recovery, not a generic
+# runner failure, and the recovery path must not recreate the directory.
+rm -rf -- "$test_root/state"
+bash "$runner" --recover-only
+[[ ! -e "$test_root/state" ]] || fail 'recovery recreated unavailable storage'
 
 echo 'upgrade runner contract checks passed'

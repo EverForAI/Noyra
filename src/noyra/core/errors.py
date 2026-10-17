@@ -26,6 +26,12 @@ class IntegrityError(KernelError):
     """Persisted content failed its recorded integrity hash."""
 
 
+class SchemaContractError(RuntimeError):
+    """The installed database schema does not match this runtime contract."""
+
+    code = "schema_contract_mismatch"
+
+
 class ArchiveKeyUnavailableError(IntegrityError):
     """An encrypted archive cannot be verified because its key is unavailable."""
 

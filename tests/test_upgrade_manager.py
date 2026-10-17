@@ -228,6 +228,29 @@ class UpgradeManagerTestCase(unittest.TestCase):
             self.manager.check_version()
         self.assertEqual(error.exception.code, "upgrade_unavailable")
 
+    def test_status_exposes_operator_recommendation_for_interrupted_upgrade(
+        self: Self,
+    ) -> None:
+        self.status_path.parent.mkdir(parents=True, exist_ok=True)
+        self.status_path.write_text(
+            json.dumps(
+                {
+                    "task_id": "interrupted-task",
+                    "status": "failed",
+                    "phase": "failed",
+                    "error_code": "upgrade_interrupted",
+                    "logs": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        status = self.manager.status()
+        self.assertEqual(
+            status["recommendation"],
+            UpgradeManager.recommendation("upgrade_interrupted"),
+        )
+        self.assertTrue(status["recommendation"])
+
 
 if __name__ == "__main__":
     unittest.main()

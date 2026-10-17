@@ -6,6 +6,7 @@ import pytest
 
 from noyra.core import IdentityStore, IntegrityRegistry
 from noyra.core.database import CURRENT_SCHEMA_VERSION, Database, _canonical_schema_sql
+from noyra.core.errors import SchemaContractError
 from noyra.core.types import content_hash
 
 
@@ -78,6 +79,23 @@ def test_trigger_contract_drift_reopens_for_integrity_quarantine(tmp_path: Path)
     )
 
     assert report.p0 == ("core.schema_contract:schema_trigger_contract_mismatch",)
+
+
+def test_strict_runtime_rejects_ddl_drift_before_service_admission(tmp_path: Path) -> None:
+    database = Database(tmp_path / "noyra.sqlite3")
+
+    with database.transaction() as connection:
+        connection.execute("DROP TRIGGER prevent_training_record_delete")
+        connection.execute(
+            """CREATE TRIGGER prevent_training_record_delete
+               BEFORE DELETE ON training_records BEGIN
+                   SELECT 1;
+               END"""
+        )
+
+    with pytest.raises(SchemaContractError) as error:
+        Database(database.path, strict_schema_contract=True)
+    assert error.value.code == "schema_contract_mismatch"
 
 
 def test_schema_contract_rejects_modified_persistent_feature_ddl(tmp_path: Path) -> None:
@@ -161,6 +179,21 @@ def test_missing_persistent_feature_marker_fails_closed(tmp_path: Path) -> None:
         pytest.raises(RuntimeError, match="persistent schema feature search_provider_routing"),
     ):
         database.require_persistent_feature(connection, "search_provider_routing")
+
+
+def test_strict_runtime_rejects_persistent_feature_marker_ahead_of_runtime(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "noyra.sqlite3")
+
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE persistent_features SET feature_version=2 "
+            "WHERE feature_id='search_provider_routing'"
+        )
+
+    with pytest.raises(SchemaContractError, match="schema contract mismatch"):
+        Database(database.path, strict_schema_contract=True)
 
 
 def test_schema_ddl_canonicalizer_ignores_formatting_but_preserves_literals() -> None:
