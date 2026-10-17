@@ -110,6 +110,15 @@ def test_retention_settings_http_auth_revision_and_validation(tmp_path: Any) -> 
         with submit() as response:
             result = json.loads(response.read())
         assert result["revision"] == 1
+        with urlopen(
+            Request(
+                f"http://127.0.0.1:{http.address[1]}/api/admin/retention",
+                headers=headers,
+            ),
+            timeout=10,
+        ) as response:
+            status = json.loads(response.read())
+        assert status["sqlite_space"]["page_size"] > 0
         with pytest.raises(HTTPError) as conflict:
             submit()
         assert conflict.value.code == 409
@@ -136,6 +145,84 @@ def test_retention_run_history_is_bounded(tmp_path: Any) -> None:
             "SELECT COUNT(*) FROM retention_runs WHERE subject_id=?", (subject,)
         ).fetchone()[0]
     assert count == 2
+
+
+def test_retention_reports_sqlite_space_without_vacuum_side_effect(tmp_path: Any) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-retention-space"
+    IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
+    with db.connection() as connection:
+        connection.execute("CREATE TABLE space_probe(payload BLOB NOT NULL)")
+        connection.executemany(
+            "INSERT INTO space_probe(payload) VALUES (zeroblob(4096))", [() for _ in range(32)]
+        )
+        connection.commit()
+        connection.execute("DELETE FROM space_probe")
+        connection.commit()
+        before = tuple(
+            connection.execute(f"PRAGMA {pragma}").fetchone()[0]
+            for pragma in ("page_count", "freelist_count")
+        )
+    manager = RetentionManager(db)
+    metrics = manager.sqlite_space()
+    with db.connection() as connection:
+        after = tuple(
+            connection.execute(f"PRAGMA {pragma}").fetchone()[0]
+            for pragma in ("page_count", "freelist_count")
+        )
+
+    assert metrics["database_bytes"] == db.path.stat().st_size
+    assert metrics["physical_bytes"] >= metrics["database_bytes"]
+    assert metrics["wal_bytes"] >= 0
+    assert metrics["shm_bytes"] >= 0
+    assert metrics["page_size"] > 0
+    assert metrics["page_count"] > 0
+    assert metrics["freelist_pages"] >= 0
+    assert metrics["freelist_bytes"] == metrics["page_size"] * metrics["freelist_pages"]
+    assert before == after
+    assert metrics["freelist_pages"] > 0
+
+
+def test_retention_90_day_cutoff_deletes_only_rows_strictly_older_than_cutoff(
+    tmp_path: Any,
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-retention-cutoff-90d"
+    IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
+    health = ProviderHealthStore(db)
+    now = datetime(2026, 10, 18, 12, tzinfo=UTC)
+    cutoff = now - timedelta(days=90)
+    samples = {
+        "older": cutoff - timedelta(seconds=1),
+        "at-cutoff": cutoff,
+        "newer": cutoff + timedelta(seconds=1),
+    }
+    for provider in samples:
+        health.record_attempt(subject, "model", provider, f"attempt-{provider}", True, 1, None)
+    with db.transaction() as connection:
+        for provider, timestamp in samples.items():
+            connection.execute(
+                "UPDATE provider_health_buckets SET bucket_start=?, state_hash=? "
+                "WHERE subject_id=? AND provider_id=?",
+                (timestamp.isoformat(), content_hash({"provider": provider}), subject, provider),
+            )
+
+    result = RetentionManager(db, RetentionSettings(health_days=90)).run_batch(
+        subject, now=now, batch_size=50
+    )
+
+    assert result["failed_reason"] is None
+    assert result["deleted_by_table"]["provider_health_buckets"] == 1
+    with db.connection() as connection:
+        remaining = {
+            row["provider_id"]: row["bucket_start"]
+            for row in connection.execute(
+                "SELECT provider_id, bucket_start FROM provider_health_buckets WHERE subject_id=?",
+                (subject,),
+            )
+        }
+    assert set(remaining) == {"at-cutoff", "newer"}
+    assert remaining["at-cutoff"] == cutoff.isoformat()
 
 
 def test_retention_compacts_cold_model_payloads_without_deleting_ledger_rows(

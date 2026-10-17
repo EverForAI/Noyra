@@ -77,6 +77,32 @@ def test_installer_rolls_back_root_upgrade_components_with_failed_release() -> N
     assert rollback < readiness < commit
 
 
+def test_soak_timer_is_bounded_sandboxed_and_rolled_back_with_release() -> None:
+    installer = (ROOT / "scripts" / "install-ubuntu.sh").read_text(encoding="utf-8")
+    helper = (ROOT / "scripts" / "lib" / "upgrade-components.sh").read_text(encoding="utf-8")
+    service_path = ROOT / "deploy" / "systemd" / "noyra-soak.service"
+    timer_path = ROOT / "deploy" / "systemd" / "noyra-soak.timer"
+    service = configparser.ConfigParser(interpolation=None)
+    timer = configparser.ConfigParser(interpolation=None)
+    service.read(service_path, encoding="utf-8")
+    timer.read(timer_path, encoding="utf-8")
+
+    assert service.get("Service", "User") == "root"
+    assert service.get("Service", "Group") == "noyra"
+    assert service.get("Service", "ProtectSystem") == "strict"
+    assert service.get("Service", "ReadWritePaths") == "/var/log/noyra"
+    assert "noyra-soak-collector.py" in service.get("Service", "ExecStart")
+    assert timer.get("Timer", "OnBootSec") == "2min"
+    assert timer.get("Timer", "OnUnitActiveSec") == "5min"
+    assert "systemctl enable --now noyra-soak.timer" in installer
+    assert installer.index(
+        "if start_and_check; then", installer.index('atomic_pointer "$CURRENT_LINK"')
+    ) < installer.index("systemctl enable --now noyra-soak.timer")
+    assert '"$SOAK_COLLECTOR" "$SOAK_SERVICE_UNIT" "$SOAK_TIMER_UNIT"' in installer
+    assert "SOAK_TIMER_WAS_ACTIVE" in helper
+    assert "systemctl stop noyra-soak.timer" in helper
+
+
 def test_installer_migrates_before_pointer_switch_and_validates_old_release_on_rollback() -> None:
     installer = (ROOT / "scripts" / "install-ubuntu.sh").read_text(encoding="utf-8")
     migration_call = installer.index("migrate_database_before_switch\n")
@@ -94,15 +120,15 @@ def test_installer_installs_signer_unit_without_starting_it_and_rolls_it_back() 
     installer = (ROOT / "scripts" / "install-ubuntu.sh").read_text(encoding="utf-8")
     helper = (ROOT / "scripts" / "lib" / "upgrade-components.sh").read_text(encoding="utf-8")
 
-    assert 'SIGNER_UNIT=/etc/systemd/system/noyra-signer.service' in installer
+    assert "SIGNER_UNIT=/etc/systemd/system/noyra-signer.service" in installer
     assert 'deploy/systemd/noyra-signer.service" "$SIGNER_UNIT"' in installer
     assert '"$SIGNER_UNIT"' in installer
-    assert 'systemctl enable --now noyra-signer.service' not in installer
-    assert 'systemctl start noyra-signer.service' not in installer
-    assert 'noyra_upgrade_components_snapshot ' in installer
-    assert 'noyra_upgrade_components_restore ' in installer
+    assert "systemctl enable --now noyra-signer.service" not in installer
+    assert "systemctl start noyra-signer.service" not in installer
+    assert "noyra_upgrade_components_snapshot " in installer
+    assert "noyra_upgrade_components_restore " in installer
     assert '"$UNIT_FILE" "$SIGNER_UNIT"' in installer
-    assert 'at least four component paths' in helper
+    assert "at least four component paths" in helper
 
 
 def test_manager_and_runner_support_fresh_install_checkout_permissions() -> None:

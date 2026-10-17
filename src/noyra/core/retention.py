@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sqlite3
+import stat
 from collections.abc import Mapping
 from copy import copy, deepcopy
 from dataclasses import asdict, dataclass
@@ -524,6 +526,11 @@ class RetentionManager:
     def effective_settings(self, subject_id: str) -> RetentionSettings:
         return RetentionSettings(**self.policy(subject_id)["settings"])
 
+    def sqlite_space(self) -> dict[str, int | None]:
+        """Return current SQLite page and freelist metrics for operator diagnostics."""
+
+        return self._sqlite_space_metrics()
+
     def estimate(self, subject_id: str, *, now: datetime | None = None) -> dict[str, int]:
         snapshot = copy(self)
         snapshot.settings = self.effective_settings(subject_id)
@@ -806,6 +813,7 @@ class RetentionManager:
                 LOGGER.warning(
                     "retention failure could not be persisted: %s", type(recording_error).__name__
                 )
+        sqlite_space = self._sqlite_space_metrics()
         return {
             "run_id": run_id,
             "deleted_by_table": deleted,
@@ -819,7 +827,58 @@ class RetentionManager:
             "compaction_skipped": compaction_skipped,
             "next_cursor": cursor,
             "compacted_by_table": compacted,
+            "sqlite_space": sqlite_space,
         }
+
+    def _sqlite_space_metrics(self) -> dict[str, int | None]:
+        """Expose bounded SQLite growth signals without checkpoint/VACUUM side effects."""
+
+        try:
+            with self.database.connection() as connection:
+                page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+                page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+                freelist_count = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+            database_bytes = self.database.path.stat().st_size
+            wal_bytes = self._sidecar_size("-wal")
+            shm_bytes = self._sidecar_size("-shm")
+            physical_bytes = (
+                None
+                if wal_bytes is None or shm_bytes is None
+                else database_bytes + wal_bytes + shm_bytes
+            )
+            return {
+                "database_bytes": database_bytes,
+                "wal_bytes": wal_bytes,
+                "shm_bytes": shm_bytes,
+                "physical_bytes": physical_bytes,
+                "page_size": page_size,
+                "page_count": page_count,
+                "freelist_pages": freelist_count,
+                "freelist_bytes": page_size * freelist_count,
+            }
+        except (OSError, sqlite3.Error, TypeError, ValueError, IndexError):
+            return {
+                "database_bytes": None,
+                "wal_bytes": None,
+                "shm_bytes": None,
+                "physical_bytes": None,
+                "page_size": None,
+                "page_count": None,
+                "freelist_pages": None,
+                "freelist_bytes": None,
+            }
+
+    def _sidecar_size(self, suffix: str) -> int | None:
+        path = self.database.path.with_name(self.database.path.name + suffix)
+        try:
+            metadata = path.lstat()
+            if not stat.S_ISREG(metadata.st_mode):
+                return None
+            return metadata.st_size
+        except FileNotFoundError:
+            return 0
+        except OSError:
+            return None
 
     @staticmethod
     def _cursor_compatible(previous: Mapping[str, Any], current: Mapping[str, Any]) -> bool:

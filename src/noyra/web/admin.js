@@ -1231,6 +1231,7 @@ function renderRetention(payload) {
   const settings = payload?.settings || {};
   const estimate = payload?.estimate || {};
   const latest = payload?.latest;
+  const sqliteSpace = payload?.sqlite_space || {};
   const capacity = payload?.evidence_capacity;
   const latestDeleted = latest?.deleted_by_table ? Object.entries(latest.deleted_by_table).map(([key,value]) => `${key}: ${formatInteger(value)}`).join(" · ") : "暂无清理记录";
   const form = $("#retention-settings-form");
@@ -1246,6 +1247,9 @@ function renderRetention(payload) {
     ["待清理运行记录", formatInteger(estimate.retention_runs)],
     ["最近清理", latest ? formatTimestamp(latest.completed_at || latest.started_at) : "暂无"],
     ["最近删除", latestDeleted],
+    ["SQLite 文件 / WAL", `${formatInteger(sqliteSpace.database_bytes)} / ${formatInteger(sqliteSpace.wal_bytes)} 字节`],
+    ["SQLite 磁盘占用 / 空闲页", `${formatInteger(sqliteSpace.physical_bytes)} 字节 · ${formatInteger(sqliteSpace.freelist_pages)} 页`],
+    ["SQLite 可回收空间", `${formatInteger(sqliteSpace.freelist_bytes)} 字节`],
     ["证据容量", capacity?.blocked ? "已达上限，暂停新增认知工作" : "可用"],
     ["必要证据每表上限", formatInteger(capacity?.limit_per_table)],
     ["模型调用 / 尝试", `${formatInteger(capacity?.counts?.model_calls)} / ${formatInteger(capacity?.counts?.model_attempts)}`],

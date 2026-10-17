@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -52,6 +53,191 @@ def test_volume_preflight_groups_requirements_on_same_device(tmp_path: Path) -> 
         pytest.raises(ValueError, match="headroom"),
     ):
         helper.preflight(tmp_path / "releases", tmp_path / "backups", tmp_path / "data")
+
+
+def test_backup_policy_reports_unverified_attention_without_deleting_it(tmp_path: Path) -> None:
+    helper = _helper(root_markers=True)
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    backup = backups / "noyra-unverified.noyra-backup"
+    backup.write_bytes(b"backup")
+    old = 1_700_000_000
+    os.utime(backup, (old, old))
+
+    plan = helper.backup_gc_plan(
+        backups,
+        helper.BackupRetentionPolicy(
+            keep_verified_count=3,
+            max_age_days=1,
+            max_bytes=1,
+            unverified_grace_days=1,
+            minimum_recovery_points=1,
+        ),
+        now=helper.datetime.fromtimestamp(old + 3 * 86400, helper.UTC),
+    )
+
+    assert plan["backups"] == []
+    assert plan["backup_attention"][0]["name"] == backup.name
+    assert plan["backup_attention"][0]["reason"] == "unverified_backup_attention"
+
+
+def test_backup_policy_plan_keeps_recovery_floor_and_records_sha_size_reason(
+    tmp_path: Path,
+) -> None:
+    helper = _helper(root_markers=True)
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    now = helper.datetime(2026, 10, 17, tzinfo=helper.UTC)
+    for index in range(4):
+        backup = backups / f"noyra-verified-{index}.noyra-backup"
+        backup.write_bytes(f"backup-{index}".encode())
+        marker = {
+            "format": "noyra-verified-upgrade-backup/v1",
+            "backup": backup.name,
+            "restore_verified": True,
+            "sha256": helper.file_hash(backup),
+            "verified_at": (now - timedelta(days=index)).isoformat(),
+        }
+        (backup.parent / f"{backup.name}.verified.json").write_text(json.dumps(marker))
+
+    plan = helper.backup_gc_plan(
+        backups,
+        helper.BackupRetentionPolicy(
+            keep_verified_count=3,
+            max_age_days=1,
+            max_bytes=1,
+            unverified_grace_days=7,
+            minimum_recovery_points=1,
+        ),
+        protected_names={"noyra-verified-3.noyra-backup"},
+        now=now,
+    )
+
+    assert {row["name"] for row in plan["backup_details"]} == {
+        "noyra-verified-2.noyra-backup",
+        "noyra-verified-1.noyra-backup",
+    }
+    assert all(row["size"] > 0 and row["sha256"] for row in plan["backup_details"])
+    assert {row["reason"] for row in plan["backup_details"]} == {
+        "max_age_exceeded",
+        "max_bytes_exceeded",
+    }
+    assert "noyra-verified-3.noyra-backup" in plan["backup_protected"]
+
+
+def test_minimum_recovery_points_override_keep_count(tmp_path: Path) -> None:
+    helper = _helper(root_markers=True)
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    now = helper.datetime(2026, 10, 17, tzinfo=helper.UTC)
+    for index in range(3):
+        backup = backups / f"noyra-floor-{index}.noyra-backup"
+        backup.write_bytes(f"backup-{index}".encode())
+        marker = {
+            "format": "noyra-verified-upgrade-backup/v1",
+            "backup": backup.name,
+            "restore_verified": True,
+            "sha256": helper.file_hash(backup),
+            "verified_at": (now - timedelta(days=index)).isoformat(),
+        }
+        backup.with_name(backup.name + ".verified.json").write_text(json.dumps(marker))
+
+    plan = helper.backup_gc_plan(
+        backups,
+        helper.BackupRetentionPolicy(
+            keep_verified_count=1,
+            max_age_days=None,
+            max_bytes=None,
+            minimum_recovery_points=2,
+        ),
+        now=now,
+    )
+
+    assert plan["backups"] == ["noyra-floor-2.noyra-backup"]
+    assert plan["backup_summary"]["verified_recovery_points_after_plan"] == 2
+    assert plan["backup_summary"]["recovery_points_status"] == "satisfied"
+
+
+def test_backup_space_summary_exposes_unverified_pressure(tmp_path: Path) -> None:
+    helper = _helper(root_markers=True)
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    now = helper.datetime(2026, 10, 17, tzinfo=helper.UTC)
+    for index in range(2):
+        backup = backups / f"noyra-verified-{index}.noyra-backup"
+        backup.write_bytes(b"v" * 20)
+        marker = {
+            "format": "noyra-verified-upgrade-backup/v1",
+            "backup": backup.name,
+            "restore_verified": True,
+            "sha256": helper.file_hash(backup),
+            "verified_at": (now - timedelta(days=index)).isoformat(),
+        }
+        backup.with_name(backup.name + ".verified.json").write_text(json.dumps(marker))
+    (backups / "noyra-unverified.noyra-backup").write_bytes(b"u" * 30)
+
+    plan = helper.backup_gc_plan(
+        backups,
+        helper.BackupRetentionPolicy(
+            keep_verified_count=2,
+            max_age_days=None,
+            max_bytes=1,
+            minimum_recovery_points=2,
+        ),
+        now=now,
+    )
+
+    assert (
+        plan["backup_summary"]["space_status"]
+        == "unverified_and_protected_recovery_points_exceed_limit"
+    )
+    assert plan["backup_summary"]["total_bytes_after_plan"] == 70
+    assert plan["backup_attention"] == []
+
+
+def test_apply_gc_rechecks_backup_digest_after_preview(tmp_path: Path) -> None:
+    helper = _helper(root_markers=True)
+    releases, backups = tmp_path / "releases", tmp_path / "backups"
+    releases.mkdir()
+    backups.mkdir()
+    now = helper.datetime(2026, 10, 17, tzinfo=helper.UTC)
+    original_by_name = {}
+    for index in range(3):
+        backup = backups / f"noyra-apply-{index}.noyra-backup"
+        original = f"backup-{index}".encode()
+        original_by_name[backup.name] = original
+        backup.write_bytes(original)
+        marker = {
+            "format": "noyra-verified-upgrade-backup/v1",
+            "backup": backup.name,
+            "restore_verified": True,
+            "sha256": helper.file_hash(backup),
+            "verified_at": (now - timedelta(days=index)).isoformat(),
+        }
+        backup.with_name(backup.name + ".verified.json").write_text(json.dumps(marker))
+    plan = {
+        "releases": [],
+        **helper.backup_gc_plan(
+            backups,
+            helper.BackupRetentionPolicy(
+                keep_verified_count=2,
+                max_age_days=None,
+                max_bytes=None,
+                minimum_recovery_points=1,
+            ),
+            now=now,
+        ),
+    }
+    target = backups / plan["backups"][0]
+    target.write_bytes(b"changed after preview")
+
+    with pytest.raises(ValueError, match="unsafe_backup_path"):
+        helper.apply_gc(releases, backups, plan)
+    assert target.exists()
+    target.write_bytes(original_by_name[target.name])
+    helper.apply_gc(releases, backups, plan)
+    assert not target.exists()
+    assert not target.with_name(target.name + ".verified.json").exists()
 
 
 def test_gc_ignores_unmanaged_releases_and_requires_verified_replacement(tmp_path: Path) -> None:

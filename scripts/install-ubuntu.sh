@@ -93,6 +93,9 @@ TARGET_ACTIVATION_RUNNER=/usr/local/libexec/noyra-target-activation-runner.py
 TARGET_ACTIVATION_UNIT=/etc/systemd/system/noyra-target-activation.service
 TARGET_ACTIVATION_PATH_UNIT=/etc/systemd/system/noyra-target-activation.path
 TARGET_ACTIVATION_RECOVER_UNIT=/etc/systemd/system/noyra-target-activation-recover.service
+SOAK_COLLECTOR=/usr/local/libexec/noyra-soak-collector.py
+SOAK_SERVICE_UNIT=/etc/systemd/system/noyra-soak.service
+SOAK_TIMER_UNIT=/etc/systemd/system/noyra-soak.timer
 BACKUP_KEYRING="$CONFIG_DIR/backup-keyring.json"
 RECOVERY_MANIFEST="$CONFIG_DIR/recovery-manifest.json"
 
@@ -655,7 +658,8 @@ on_error() {
   if [[ "$UPGRADE_COMPONENTS_CHANGED" == true ]]; then
     if ! noyra_upgrade_components_restore \
       "$UPGRADE_RUNNER" "$UPGRADE_PATH_UNIT" "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT" \
-      "$UNIT_FILE" "$SIGNER_UNIT" "$STORAGE_DROPIN"; then
+      "$UNIT_FILE" "$SIGNER_UNIT" "$STORAGE_DROPIN" \
+      "$SOAK_COLLECTOR" "$SOAK_SERVICE_UNIT" "$SOAK_TIMER_UNIT"; then
       upgrade_components_restored=false
       echo 'Failed to restore root upgrade components; Noyra will remain stopped.' >&2
       status=1
@@ -1015,21 +1019,29 @@ UPGRADE_RUNNER="$LIBEXEC_DIR/noyra-upgrade-runner.sh"
 UPGRADE_COMPONENT_BACKUP_DIR="$INSTALL_DIR/.upgrade-components.$$.$RANDOM"
 noyra_upgrade_components_snapshot \
   "$UPGRADE_COMPONENT_BACKUP_DIR" "$UPGRADE_RUNNER" "$UPGRADE_PATH_UNIT" \
-  "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT" "$UNIT_FILE" "$SIGNER_UNIT" "$STORAGE_DROPIN"
+  "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT" "$UNIT_FILE" "$SIGNER_UNIT" "$STORAGE_DROPIN" \
+  "$SOAK_COLLECTOR" "$SOAK_SERVICE_UNIT" "$SOAK_TIMER_UNIT"
 noyra_upgrade_components_mark_changed
+systemctl stop noyra-soak.timer >/dev/null 2>&1 || true
 install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra.service" "$UNIT_FILE"
 for upgrade_file in \
   "$UPGRADE_RUNNER" \
   "$UPGRADE_PATH_UNIT" \
   "$UPGRADE_RUNNER_UNIT" \
   "$UPGRADE_RECOVER_UNIT" \
-  "$SIGNER_UNIT"; do
+  "$SIGNER_UNIT" \
+  "$SOAK_COLLECTOR" \
+  "$SOAK_SERVICE_UNIT" \
+  "$SOAK_TIMER_UNIT"; do
   if [[ -L "$upgrade_file" || ( -e "$upgrade_file" && ! -f "$upgrade_file" ) ]]; then
     echo "Upgrade system file must be regular and not a symlink: $upgrade_file" >&2
     exit 1
   fi
 done
 install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-signer.service" "$SIGNER_UNIT"
+install -o root -g root -m 0644 "$SOURCE_DIR/scripts/noyra-soak-collector.py" "$SOAK_COLLECTOR"
+install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-soak.service" "$SOAK_SERVICE_UNIT"
+install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-soak.timer" "$SOAK_TIMER_UNIT"
 # Older single-disk helpers installed a mountpoint condition here. The native
 # service now validates storage explicitly and supports system-disk directories,
 # so remove only this known generated drop-in.
@@ -1206,6 +1218,23 @@ if [[ "$service_active" == true ]]; then
     on_error 1
   fi
 fi
+
+soak_log_dir=/var/log/noyra
+if [[ -L "$soak_log_dir" || ( -e "$soak_log_dir" && ! -d "$soak_log_dir" ) ]]; then
+  echo 'Soak log directory must be a real directory.' >&2
+  on_error 1
+fi
+if [[ -d "$soak_log_dir" ]]; then
+  [[ "$(stat -c '%u:%g' -- "$soak_log_dir")" == "0:$(id -g noyra)" ]] || {
+    echo 'Soak log directory has an unexpected owner.' >&2
+    on_error 1
+  }
+  chmod 0750 "$soak_log_dir"
+else
+  install -d -o root -g noyra -m 0750 "$soak_log_dir"
+fi
+systemctl daemon-reload
+systemctl enable --now noyra-soak.timer
 
 write_recovery_manifest "$release_root/.venv/bin/python"
 

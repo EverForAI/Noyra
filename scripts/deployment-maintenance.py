@@ -11,6 +11,7 @@ import re
 import shutil
 import stat
 import tempfile
+from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,173 @@ from typing import Any
 SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 MARKER = ".noyra-verified-install.json"
 PROCESS_REFERENCE_BYTES = 1_048_576
+
+
+class BackupRetentionPolicy:
+    """Conservative artifact policy with a separately enforced recovery floor."""
+
+    def __init__(
+        self,
+        keep_verified_count: int = 5,
+        max_age_days: int | None = 90,
+        max_bytes: int | None = 10_000_000_000,
+        unverified_grace_days: int = 7,
+        minimum_recovery_points: int = 2,
+    ) -> None:
+        if not 1 <= keep_verified_count <= 100:
+            raise ValueError("deployment_retention_out_of_range")
+        if max_age_days is not None and not 1 <= max_age_days <= 36_500:
+            raise ValueError("backup_max_age_out_of_range")
+        if max_bytes is not None and max_bytes < 1:
+            raise ValueError("backup_max_bytes_out_of_range")
+        if not 1 <= unverified_grace_days <= 36_500:
+            raise ValueError("backup_unverified_grace_out_of_range")
+        if not 1 <= minimum_recovery_points <= 100:
+            raise ValueError("backup_minimum_recovery_points_out_of_range")
+        self.keep_verified_count = keep_verified_count
+        self.max_age_days = max_age_days
+        self.max_bytes = max_bytes
+        self.unverified_grace_days = unverified_grace_days
+        self.minimum_recovery_points = minimum_recovery_points
+
+
+def _backup_timestamp(path: Path, marker: dict[str, Any] | None = None) -> datetime:
+    value = (marker or {}).get("verified_at")
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                return parsed.astimezone(UTC)
+        except ValueError:
+            pass
+    return datetime.fromtimestamp(path.stat().st_mtime, UTC)
+
+
+def backup_inventory(backups: Path, *, now: datetime | None = None) -> list[dict[str, Any]]:
+    """Return a secret-free inventory of backup artifacts."""
+
+    moment = now or datetime.now(UTC)
+    inventory: list[dict[str, Any]] = []
+    for path in sorted(backups.glob("noyra-*.noyra-backup")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        marker = read_marker(path.with_name(path.name + ".verified.json"))
+        try:
+            digest = file_hash(path)
+        except (OSError, ValueError):
+            digest = None
+        verified = (
+            marker is not None
+            and digest is not None
+            and marker.get("format") == "noyra-verified-upgrade-backup/v1"
+            and marker.get("backup") == path.name
+            and marker.get("restore_verified") is True
+            and marker.get("size", path.stat().st_size) == path.stat().st_size
+            and isinstance(marker.get("sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", str(marker["sha256"])) is not None
+            and marker.get("sha256") == digest
+        )
+        timestamp = _backup_timestamp(path, marker)
+        inventory.append(
+            {
+                "name": path.name,
+                "size": path.stat().st_size,
+                "sha256": marker.get("sha256") if verified and marker else None,
+                "verified": verified,
+                "created_at": timestamp.isoformat(),
+                "age_days": max(0, int((moment - timestamp).total_seconds() // 86400)),
+            }
+        )
+    return inventory
+
+
+def backup_gc_plan(
+    backups: Path,
+    policy: BackupRetentionPolicy,
+    *,
+    protected_names: set[str] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Plan artifact deletion while preserving a recoverable verified floor."""
+
+    inventory = backup_inventory(backups, now=now)
+    protected = set(protected_names or ())
+    verified = sorted(
+        (item for item in inventory if item["verified"]),
+        key=lambda item: (item["created_at"], item["name"]),
+        reverse=True,
+    )
+    required_count = max(policy.keep_verified_count, policy.minimum_recovery_points)
+    floor = {item["name"] for item in verified[: policy.minimum_recovery_points]} | protected
+    keep = {item["name"] for item in verified[:required_count]} | protected
+    deletions = [
+        {**item, "reason": "count_exceeded"}
+        for item in verified
+        if item["name"] not in keep and item["name"] not in protected
+    ]
+    remaining = [item for item in verified if item["name"] in keep and item["name"] not in floor]
+    if policy.max_age_days is not None:
+        for item in remaining:
+            if item["age_days"] > policy.max_age_days:
+                keep.discard(item["name"])
+                deletions.append({**item, "reason": "max_age_exceeded"})
+        deleted_names = {row["name"] for row in deletions}
+        remaining = [item for item in remaining if item["name"] not in deleted_names]
+    if policy.max_bytes is not None:
+        current_bytes = sum(
+            int(item["size"])
+            for item in verified
+            if item["name"] not in {row["name"] for row in deletions}
+        )
+        for item in sorted(remaining, key=lambda row: (row["created_at"], row["name"])):
+            if current_bytes <= policy.max_bytes:
+                break
+            current_bytes -= int(item["size"])
+            keep.discard(item["name"])
+            deletions.append({**item, "reason": "max_bytes_exceeded"})
+    attention = [
+        {**item, "reason": "unverified_backup_attention"}
+        for item in inventory
+        if not item["verified"] and item["age_days"] > policy.unverified_grace_days
+    ]
+    deleted_names = {row["name"] for row in deletions}
+    remaining_verified = [item for item in verified if item["name"] not in deleted_names]
+    remaining_verified_bytes = sum(int(item["size"]) for item in remaining_verified)
+    unverified_bytes = sum(int(item["size"]) for item in inventory if not item["verified"])
+    total_bytes = remaining_verified_bytes + unverified_bytes
+    pressure = _backup_space_status(remaining_verified_bytes, unverified_bytes, policy.max_bytes)
+    return {
+        "backups": [row["name"] for row in deletions],
+        "backup_details": deletions,
+        "backup_attention": attention,
+        "backup_inventory": inventory,
+        "backup_protected": sorted(keep | protected),
+        "backup_summary": {
+            "verified_bytes_after_plan": remaining_verified_bytes,
+            "unverified_bytes": unverified_bytes,
+            "total_bytes_after_plan": total_bytes,
+            "max_bytes": policy.max_bytes,
+            "space_status": pressure,
+            "verified_recovery_points_after_plan": len(remaining_verified),
+            "minimum_recovery_points": policy.minimum_recovery_points,
+            "recovery_points_status": (
+                "satisfied"
+                if len(remaining_verified) >= policy.minimum_recovery_points
+                else "below_minimum"
+            ),
+        },
+    }
+
+
+def _backup_space_status(verified_bytes: int, unverified_bytes: int, max_bytes: int | None) -> str:
+    total_bytes = verified_bytes + unverified_bytes
+    if max_bytes is None or total_bytes <= max_bytes:
+        return "within_limit"
+    if unverified_bytes:
+        if verified_bytes > max_bytes:
+            return "unverified_and_protected_recovery_points_exceed_limit"
+        return "unverified_backups_exceed_limit"
+    return "protected_recovery_points_exceed_limit"
 
 
 def safe_directory(path: Path, *, owned: bool = True) -> Path:
@@ -145,6 +313,8 @@ def verify_backup(backup: Path, data: Path, keyring: Path) -> None:
                 "format": "noyra-verified-upgrade-backup/v1",
                 "sha256": digest,
                 "backup": backup.name,
+                "size": backup.stat().st_size,
+                "verified_at": datetime.now(UTC).isoformat(timespec="milliseconds"),
                 "restore_verified": True,
             },
         )
@@ -153,8 +323,14 @@ def verify_backup(backup: Path, data: Path, keyring: Path) -> None:
 
 
 def gc_plan(
-    releases: Path, backups: Path, *, keep: int = 5, proc_root: Path = Path("/proc")
-) -> dict[str, list[str]]:
+    releases: Path,
+    backups: Path,
+    *,
+    keep: int = 5,
+    proc_root: Path = Path("/proc"),
+    backup_policy: BackupRetentionPolicy | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     if keep < 3 or keep > 100:
         raise ValueError("deployment_retention_out_of_range")
     protected: set[str] = set()
@@ -223,31 +399,97 @@ def gc_plan(
         marker = read_marker(releases / name / MARKER) or {}
         if isinstance(marker.get("backup"), str):
             kept_backups.add(marker["backup"])
+    policy = backup_policy or BackupRetentionPolicy(keep_verified_count=keep)
+    artifact_plan = backup_gc_plan(
+        backups,
+        policy,
+        protected_names=kept_backups,
+        now=now,
+    )
+    # Keep the historical replacement guard: a tampered newest backup must
+    # never turn into a deletion plan even when a size/age policy is present.
+    if not valid_replacement:
+        artifact_plan["backups"] = []
+        artifact_plan["backup_details"] = []
+        inventory = artifact_plan["backup_inventory"]
+        verified_bytes = sum(int(item["size"]) for item in inventory if item["verified"])
+        unverified_bytes = sum(int(item["size"]) for item in inventory if not item["verified"])
+        summary = artifact_plan["backup_summary"]
+        summary["verified_bytes_after_plan"] = verified_bytes
+        summary["total_bytes_after_plan"] = verified_bytes + unverified_bytes
+        summary["verified_recovery_points_after_plan"] = sum(
+            1 for item in inventory if item["verified"]
+        )
+        summary["recovery_points_status"] = (
+            "satisfied"
+            if summary["verified_recovery_points_after_plan"]
+            >= summary["minimum_recovery_points"]
+            else "below_minimum"
+        )
+        summary["space_status"] = _backup_space_status(
+            verified_bytes,
+            unverified_bytes,
+            summary["max_bytes"],
+        )
+        artifact_plan["backup_gc_blocked_reason"] = "verified_replacement_unavailable"
     return {
         "releases": [p.name for p in candidates if p.name not in retained],
-        "backups": [
-            p.name for p in backup_candidates if valid_replacement and p.name not in kept_backups
-        ],
+        **artifact_plan,
     }
 
 
-def apply_gc(releases: Path, backups: Path, plan: dict[str, list[str]]) -> None:
+def apply_gc(releases: Path, backups: Path, plan: dict[str, Any]) -> None:
     # Caller holds the install lock; privileged parent directories exclude other writers.
-    for name in plan["releases"]:
+    release_paths: list[Path] = []
+    release_names = plan["releases"]
+    if len(set(release_names)) != len(release_names):
+        raise ValueError("duplicate_release_name")
+    for name in release_names:
         if not SEGMENT.fullmatch(name):
             raise ValueError("invalid_release_name")
         path = releases / name
-        if path.is_symlink() or path.resolve().parent != releases.resolve():
+        if (
+            path.is_symlink()
+            or path.resolve().parent != releases.resolve()
+            or not verified_release(path)
+        ):
             raise ValueError("unsafe_release_path")
-        shutil.rmtree(path)
-    for name in plan["backups"]:
+        release_paths.append(path)
+
+    backup_paths: list[tuple[Path, Path]] = []
+    backup_names = plan["backups"]
+    if len(set(backup_names)) != len(backup_names):
+        raise ValueError("duplicate_backup_name")
+    details = {
+        item.get("name"): item for item in plan.get("backup_details", []) if isinstance(item, dict)
+    }
+    if len(details) != len(plan.get("backup_details", [])) or set(details) != set(backup_names):
+        raise ValueError("backup_plan_details_mismatch")
+    for name in backup_names:
         if Path(name).name != name or not name.endswith(".noyra-backup"):
             raise ValueError("invalid_backup_name")
         path = backups / name
-        if path.is_symlink():
+        marker_path = path.with_name(path.name + ".verified.json")
+        detail = details.get(name)
+        marker = read_marker(marker_path)
+        if (
+            path.is_symlink()
+            or detail is None
+            or not verified_backup(path)
+            or marker is None
+            or marker.get("sha256") != detail.get("sha256")
+            or marker.get("sha256") != file_hash(path)
+            or path.stat().st_size != detail.get("size")
+            or marker_path.is_symlink()
+        ):
             raise ValueError("unsafe_backup_path")
+        backup_paths.append((path, marker_path))
+
+    for path in release_paths:
+        shutil.rmtree(path)
+    for path, marker_path in backup_paths:
         path.unlink()
-        path.with_name(path.name + ".verified.json").unlink()
+        marker_path.unlink()
 
 
 def main() -> int:
@@ -259,6 +501,11 @@ def main() -> int:
     parser.add_argument("--backup", type=Path)
     parser.add_argument("--release")
     parser.add_argument("--keep", type=int, default=5)
+    parser.add_argument("--keep-verified-count", type=int)
+    parser.add_argument("--max-age-days", type=int, default=90)
+    parser.add_argument("--max-bytes", type=int, default=10_000_000_000)
+    parser.add_argument("--unverified-grace-days", type=int, default=7)
+    parser.add_argument("--minimum-recovery-points", type=int, default=2)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--lock-fd", type=int)
     args = parser.parse_args()
@@ -303,7 +550,21 @@ def main() -> int:
                 if (metadata.st_dev, metadata.st_ino) != (held.st_dev, held.st_ino):
                     raise ValueError("install_lock_mismatch")
                 lock_module.flock(descriptor, lock_module.LOCK_EX | lock_module.LOCK_NB)
-                plan = gc_plan(args.releases, args.backups, keep=args.keep)
+                policy = BackupRetentionPolicy(
+                    keep_verified_count=(
+                        args.keep if args.keep_verified_count is None else args.keep_verified_count
+                    ),
+                    max_age_days=args.max_age_days,
+                    max_bytes=args.max_bytes,
+                    unverified_grace_days=args.unverified_grace_days,
+                    minimum_recovery_points=args.minimum_recovery_points,
+                )
+                plan = gc_plan(
+                    args.releases,
+                    args.backups,
+                    keep=args.keep,
+                    backup_policy=policy,
+                )
                 if args.apply:
                     apply_gc(args.releases, args.backups, plan)
             finally:

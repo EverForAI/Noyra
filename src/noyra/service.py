@@ -3931,9 +3931,7 @@ class NoyraHTTPServer:
                                     "resource_status": group.status,
                                     "key_count": len(keys),
                                     "available_key_count": available,
-                                    "resource_health": (
-                                        "healthy" if available else "cooldown"
-                                    ),
+                                    "resource_health": ("healthy" if available else "cooldown"),
                                 }
                         else:
                             for provider in owner.search_providers.list(owner.kernel.subject_id):
@@ -4000,6 +3998,7 @@ class NoyraHTTPServer:
                             },
                             "estimate": owner.retention.estimate(owner.kernel.subject_id),
                             "latest": owner.retention.latest(owner.kernel.subject_id),
+                            "sqlite_space": owner.retention.sqlite_space(),
                             "evidence_capacity": owner.retention.evidence_capacity(
                                 owner.kernel.subject_id
                             ),
@@ -11064,7 +11063,11 @@ class NoyraService:
             result = manager.run_batch(
                 self.kernel.subject_id, now=now, allow_compaction=allow_compaction
             )
-            LOGGER.info("retention batch completed: %s", result.get("deleted_by_table", {}))
+            LOGGER.info(
+                "retention batch completed: deleted=%s sqlite_space=%s",
+                result.get("deleted_by_table", {}),
+                result.get("sqlite_space", {}),
+            )
         except Exception as error:
             LOGGER.warning("retention batch deferred: %s", type(error).__name__)
 
