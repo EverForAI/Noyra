@@ -310,7 +310,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 94
+CURRENT_SCHEMA_VERSION = 95
 
 # The schema DDL fingerprint is checked after every successful initialization.
 # Update this value only alongside a reviewed schema migration and its tests.
@@ -318,6 +318,7 @@ CURRENT_SCHEMA_VERSION = 94
 # installations persist this value in ``schema_meta`` and therefore require
 # the value to remain stable across compatible runtime fixes.
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
+    95: "4d897bceb70f95ea1310b2a637d0606ff26dc70a8ff73e0f71094ce98e95fca5",
     94: "181b72baa819d54d6d18c80411b610abdd2c3c6cee18661aeadb3a190a339f9b",
     93: "8968045531bd80f2f1d487cb9a4b01e2b84767b10b8a85fc4ce85d0c956022bb",
     92: "28e3601ed49497ace746afc16374512e35491c6a3cd30299d4fd8122eab4c543",
@@ -343,6 +344,7 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 # auditable P0 finding.  Tables, indexes, and views still fail closed during
 # database construction because they define the storage contract itself.
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
+    95: "58c35537c7ed5fd43b871c53d925ba4f8cdc3dcefdb2d65a72172c89f4ba29c0",
     94: "762feef35a9e0593168f010ea4f980d3425bf55db788baf71bc587a9c9333e2e",
     93: "bd4f12a88b407fc6f3fe4ab713401afb9c1a4ba73d79146927898a2ca8211b36",
     92: "09ccb3fabc0eb74acae5bb8b3a6fa540d1fda3a436f1b62ab32755e9d46226a6",
@@ -6911,6 +6913,12 @@ SELECT 1;
     92: migration_v92(),
     93: MIGRATION_V93,
     94: MIGRATION_V94,
+    95: """
+ALTER TABLE cognitive_resource_groups
+    ADD COLUMN reasoning_effort TEXT CHECK (
+        reasoning_effort IS NULL OR reasoning_effort IN ('low', 'medium', 'high', 'xhigh')
+    );
+""",
 }
 
 

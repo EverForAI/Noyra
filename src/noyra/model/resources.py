@@ -64,6 +64,7 @@ from .errors import (
 from .gateway import ModelGateway
 from .ledger import ModelLedger
 from .openai_compatible import OpenAICompatibleProvider
+from .reasoning import ReasoningEffort, normalize_reasoning_effort, reasoning_profile
 from .types import (
     BudgetLimits,
     CallRecord,
@@ -206,6 +207,7 @@ class CognitiveResourceGroupInput(BaseModel):
     provider_type: Literal["openai_compatible"] = "openai_compatible"
     base_url: str
     model: str = Field(min_length=1, max_length=256)
+    reasoning_effort: ReasoningEffort | None = None
     api_keys: tuple[SecretStr, ...] = Field(min_length=1, max_length=64)
     priority: int = Field(default=100, ge=0, le=1000)
     weight: int = Field(default=100, ge=1, le=1000)
@@ -277,6 +279,11 @@ class CognitiveResourceGroupInput(BaseModel):
             raise ValueError("cognitive resource key cannot be blank")
         if len(fingerprints) != len(set(fingerprints)):
             raise ValueError("duplicate cognitive resource keys are not allowed")
+        if self.reasoning_effort is not None:
+            profile = reasoning_profile(self.model, self.provider_type)
+            if not profile.supported:
+                raise ValueError("reasoning effort is not supported by this model")
+            normalize_reasoning_effort(self.model, self.reasoning_effort, self.provider_type)
         return self
 
 
@@ -355,6 +362,7 @@ class CognitiveResourceGroupRecord:
     provider_type: str
     base_url: str
     model: str
+    reasoning_effort: ReasoningEffort | None
     priority: int
     weight: int
     daily_attempts: int
@@ -463,8 +471,8 @@ class CognitiveResourceStore:
                         priority, weight, daily_attempts, daily_input_tokens,
                         daily_output_tokens, daily_cost_microusd,
                         input_microusd_per_million, output_microusd_per_million,
-                        max_attempts, status, state_hash, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        max_attempts, reasoning_effort, status, state_hash, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                               'active', ?, ?, ?)""",
                     (
                         group_id,
@@ -2284,6 +2292,7 @@ class CognitiveResourceStore:
             row["provider_type"],
             row["base_url"],
             row["model"],
+            values[15],
             values[6],
             values[7],
             values[8],
@@ -2373,6 +2382,7 @@ class CognitiveResourceStore:
             CognitiveResourceStore._usd_to_microusd(proposal.input_usd_per_million),
             CognitiveResourceStore._usd_to_microusd(proposal.output_usd_per_million),
             proposal.max_attempts,
+            proposal.reasoning_effort,
         )
 
     @staticmethod
@@ -2394,13 +2404,14 @@ class CognitiveResourceStore:
                 row["input_microusd_per_million"],
                 row["output_microusd_per_million"],
                 row["max_attempts"],
+                row["reasoning_effort"],
             )
         except (KeyError, IndexError, TypeError, ValueError, ArithmeticError) as error:
             raise IntegrityError("cognitive resource group durable state is invalid") from error
 
     @staticmethod
     def _validate_group_values(values: tuple[Any, ...], status: Any) -> None:
-        if type(values) is not tuple or len(values) != 15:
+        if type(values) is not tuple or len(values) != 16:
             raise IntegrityError("cognitive resource group durable state is invalid")
         (
             subject_id,
@@ -2418,6 +2429,7 @@ class CognitiveResourceStore:
             input_microusd_per_million,
             output_microusd_per_million,
             max_attempts,
+            reasoning_effort,
         ) = values
         text_values = (subject_id, label, base_url, model)
         if any(type(value) is not str or not value.strip() for value in text_values):
@@ -2431,6 +2443,10 @@ class CognitiveResourceStore:
             or status not in {"active", "disabled", "revoked"}
         ):
             raise IntegrityError("cognitive resource group durable state is invalid")
+        if reasoning_effort is not None and reasoning_effort not in {
+            "low", "medium", "high", "xhigh"
+        }:
+            raise IntegrityError("cognitive resource reasoning effort is invalid")
         try:
             normalized_url = _normalize_public_model_url(base_url)
         except (TypeError, ValueError) as error:
@@ -2471,7 +2487,8 @@ class CognitiveResourceStore:
 
     @staticmethod
     def _group_hash(group_id: str, values: tuple[Any, ...], status: str) -> str:
-        return content_hash({"group_id": group_id, "values": list(values), "status": status})
+        hashed_values = values[:-1] if len(values) == 16 and values[-1] is None else values
+        return content_hash({"group_id": group_id, "values": list(hashed_values), "status": status})
 
     @staticmethod
     def _key_hash(
@@ -3000,7 +3017,7 @@ class RoutedModelGateway(ModelGateway):
                         )
                     self.resources.record_failure(
                         key.key_id,
-                        type(error).__name__,
+                        getattr(error, "category", getattr(error, "code", type(error).__name__)),
                         cooldown_seconds=self.cooldown_seconds,
                         subject_id=self.subject_id,
                     )
@@ -3419,7 +3436,7 @@ class RoutedModelGateway(ModelGateway):
         except ProviderCallError as error:
             self.resources.record_failure(
                 key.key_id,
-                getattr(error, "code", type(error).__name__),
+                getattr(error, "category", getattr(error, "code", type(error).__name__)),
                 cooldown_seconds=self.cooldown_seconds,
                 subject_id=subject_id,
             )
@@ -3527,6 +3544,7 @@ class RoutedModelGateway(ModelGateway):
             resource_revision=group.limit_revision,
             resource_key_id=key.key_id,
             resource_key_fingerprint=key.key_fingerprint,
+            reasoning_effort=group.reasoning_effort,
             capture_model_io=self.capture_model_io,
             capture_model_io_getter=self.capture_model_io_getter,
             enforce_training_policy=self.enforce_training_policy,

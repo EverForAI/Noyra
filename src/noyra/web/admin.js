@@ -1765,6 +1765,8 @@ function draftModelPayload(includeModel = true) {
   const keys = $("#admin-model-keys").value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
   const payload = { base_url: $("#admin-model-url").value.trim(), api_keys: keys };
   if (includeModel) payload.model = $("#admin-model-name").value.trim();
+  const reasoning = $("#admin-model-reasoning")?.value;
+  if (includeModel && reasoning) payload.reasoning_effort = reasoning;
   return payload;
 }
 async function loadSearchProviders() {
@@ -2556,6 +2558,7 @@ $("#admin-model-form").addEventListener("submit", async (event) => {
   if (button) button.disabled = true;
   try {
     const payload = { pool: $("#admin-model-pool").value, label: $("#admin-model-label").value.trim(), base_url: $("#admin-model-url").value.trim(), model: $("#admin-model-name").value.trim(), api_keys: $("#admin-model-keys").value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean), ...readModelLimits(form, "data-draft-limit") };
+    if ($("#admin-model-reasoning")?.value) payload.reasoning_effort = $("#admin-model-reasoning").value;
     if (!confirmUnlimitedLimits(payload.limit_enabled)) return;
     payload.input_usd_per_million = normalizeBudgetCost(form.elements.input_usd_per_million.value);
     payload.output_usd_per_million = normalizeBudgetCost(form.elements.output_usd_per_million.value);
@@ -2821,6 +2824,15 @@ draftLimits.addEventListener("change", (event) => { const toggle = event.target.
 const draftPricing = document.createElement("details"); draftPricing.className = "draft-limits";
 draftPricing.innerHTML = '<summary>价格与重试</summary><label>输入 USD／百万 Token<input name="input_usd_per_million" value="0" inputmode="decimal" required></label><label>输出 USD／百万 Token<input name="output_usd_per_million" value="0" inputmode="decimal" required></label><label>价格依据<select name="pricing_status"><option value="unknown">尚未确认价格</option><option value="priced">已填写单价（估算）</option><option value="free">确认免费</option></select></label><label>最大尝试<input name="max_attempts" value="3" inputmode="numeric" required></label>';
 $("#admin-model-form .resource-actions").before(draftPricing);
+const reasoningField = document.createElement("label"); reasoningField.id = "admin-model-reasoning-field"; reasoningField.hidden = true;
+reasoningField.innerHTML = '<span>思考强度</span><select id="admin-model-reasoning"><option value="">不设置</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option></select>';
+$("#admin-model-form .resource-actions").before(reasoningField);
+const updateReasoningField = () => {
+  const model = $("#admin-model-name").value.trim().toLowerCase();
+  reasoningField.hidden = !(model.startsWith("o1") || model.startsWith("o3") || model.startsWith("o4") || model.startsWith("gpt-5") || model.startsWith("codex"));
+  if (reasoningField.hidden) $("#admin-model-reasoning").value = "";
+};
+$("#admin-model-name").addEventListener("input", updateReasoningField); updateReasoningField();
 $("#admin-model-form").addEventListener("input", () => { $("#admin-model-form").dataset.dirty = "true"; });
 window.addEventListener("beforeunload", (event) => { if (document.querySelector("form[data-dirty]")) { event.preventDefault(); event.returnValue = ""; } });
 addParameterHelp($("#admin-model-form"));

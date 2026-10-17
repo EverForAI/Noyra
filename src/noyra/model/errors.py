@@ -57,6 +57,8 @@ class ProviderCallError(ModelGatewayError):
         outcome_unknown: bool,
         usage_unknown: bool = False,
         status_code: int | None = None,
+        latency_ms: int | None = None,
+        provider_request_id: str | None = None,
     ):
         super().__init__(code)
         self.code = code
@@ -64,3 +66,33 @@ class ProviderCallError(ModelGatewayError):
         self.outcome_unknown = outcome_unknown
         self.usage_unknown = usage_unknown
         self.status_code = status_code
+        self.latency_ms = (
+            None if latency_ms is None else max(0, min(int(latency_ms), 86_400_000))
+        )
+        self.provider_request_id = (
+            provider_request_id[:256] if isinstance(provider_request_id, str) else None
+        )
+
+    @property
+    def category(self) -> str:
+        if self.code in {"provider_auth_failed", "provider_http_401", "provider_http_403"}:
+            return "provider_auth_failed"
+        if self.code in {"provider_http_404", "provider_model_mismatch"}:
+            return "provider_http_404"
+        if self.code in {"provider_http_429", "provider_rate_limited"}:
+            return "provider_rate_limited"
+        if self.code == "provider_http_5xx" or self.code.startswith("provider_http_5"):
+            return "provider_http_5xx"
+        if self.code in {"provider_connect_failed", "provider_endpoint_rejected"}:
+            return "provider_connect_failed"
+        if self.code in {"provider_timeout", "provider_transport_timeout"}:
+            return "provider_timeout"
+        if self.code in {
+            "provider_response_invalid",
+            "provider_response_empty",
+            "provider_response_too_large",
+        }:
+            return "provider_response_invalid"
+        if self.outcome_unknown or self.code == "provider_outcome_unknown":
+            return "provider_outcome_unknown"
+        return self.code

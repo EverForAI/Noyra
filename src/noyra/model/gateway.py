@@ -19,6 +19,7 @@ from .errors import (
 )
 from .ledger import ModelLedger
 from .provider import ModelProvider
+from .reasoning import normalize_reasoning_effort
 from .types import (
     BudgetLimits,
     CallRecord,
@@ -55,6 +56,7 @@ class ModelGateway:
         resource_revision: int | None = None,
         resource_key_id: str | None = None,
         resource_key_fingerprint: str | None = None,
+        reasoning_effort: str | None = None,
     ):
         if not model.strip():
             raise ValueError("model name is required")
@@ -77,6 +79,7 @@ class ModelGateway:
         self.resource_revision = resource_revision
         self.resource_key_id = resource_key_id
         self.resource_key_fingerprint = resource_key_fingerprint
+        self.reasoning_effort = reasoning_effort
 
     async def complete_structured(
         self,
@@ -88,6 +91,7 @@ class ModelGateway:
         idempotency_key: str,
         max_output_tokens: int = 1024,
         temperature: float = 0.2,
+        reasoning_effort: str | None = None,
     ) -> GatewayResult[OutputT]:
         if not subject_id.strip() or not purpose.strip() or not idempotency_key.strip():
             raise ValueError("subject_id, purpose and idempotency_key are required")
@@ -99,6 +103,9 @@ class ModelGateway:
             raise ModelCallStateError(
                 f"model calls are disabled while lifecycle is {lifecycle['state']}"
             )
+        normalized_reasoning = normalize_reasoning_effort(
+            self.model, self.reasoning_effort if reasoning_effort is None else reasoning_effort
+        )
         request = CompletionRequest(
             model=self.model,
             messages=tuple(messages),
@@ -106,6 +113,7 @@ class ModelGateway:
             temperature=temperature,
             schema_name=output_type.__name__,
             output_schema=output_type.model_json_schema(),
+            reasoning_effort=normalized_reasoning,
         )
         request_hash = content_hash(request.model_dump(mode="json"))
         call, created = self.ledger.prepare_call(

@@ -175,6 +175,7 @@ from noyra.model.errors import (
     ProviderCallError,
     StructuredOutputError,
 )
+from noyra.model.reasoning import reasoning_profile
 from noyra.research import SearchExecutor, SearchProviderInput, SearchProviderStore
 from noyra.research.routing import (
     get_search_routing_mode,
@@ -423,6 +424,14 @@ def _cognitive_resource_payload(record: CognitiveResourceGroupRecord) -> dict[st
     payload = dict(record.__dict__)
     payload["exact_budget"] = {
         field: str(getattr(record, field)) for field in _MODEL_RESOURCE_EXACT_FIELDS
+    }
+    profile = reasoning_profile(record.model, record.provider_type)
+    payload["reasoning_profile"] = {
+        "supported": profile.supported,
+        "efforts": list(profile.efforts),
+        "parameter": profile.parameter,
+        "version": profile.version,
+        "selected": record.reasoning_effort,
     }
     return payload
 
@@ -2761,6 +2770,31 @@ class NoyraHTTPServer:
                             and not owner.cloud_archive_status["ready"]
                         )
                         ready = at_rest_ready and integrity_ready and cloud_ready
+                        checked_at = utc_now()
+                        components = {
+                            "storage": {
+                                "status": "ok" if at_rest_ready else "degraded",
+                                "reason_code": "ready" if at_rest_ready else "storage_unavailable",
+                                "since": None,
+                                "checked_at": checked_at,
+                            },
+                            "integrity": {
+                                "status": "ok" if integrity_ready else "degraded",
+                                "reason_code": (
+                                    "ready" if integrity_ready else "integrity_quarantine"
+                                ),
+                                "since": None,
+                                "checked_at": checked_at,
+                            },
+                            "cloud_archive": {
+                                "status": "ok" if cloud_ready else "degraded",
+                                "reason_code": (
+                                    "ready" if cloud_ready else "cloud_archive_unavailable"
+                                ),
+                                "since": None,
+                                "checked_at": checked_at,
+                            },
+                        }
                         payload = {
                             "status": "ok" if ready else "degraded",
                             "service": "noyra",
@@ -2770,6 +2804,7 @@ class NoyraHTTPServer:
                             "storage": owner.storage_contract.public(),
                             "at_rest": at_rest,
                             "cloud_archive": owner.cloud_archive_status,
+                            "components": components,
                         }
                         if not detailed:
                             payload = {"status": payload["status"], "service": "noyra"}
@@ -3049,6 +3084,7 @@ class NoyraHTTPServer:
                         or secret_cleanup_pending != 0
                     )
                     health_status = HTTPStatus.SERVICE_UNAVAILABLE if degraded else HTTPStatus.OK
+                    loop_open = loop_state is not None and loop_state["circuit_status"] == "open"
                     health_payload = {
                         "status": "degraded" if degraded else "ok",
                         "lifecycle": state["lifecycle"],
@@ -3061,6 +3097,32 @@ class NoyraHTTPServer:
                         "operator_health": operator_health,
                         "wallet_acquisition": wallet_acquisition_health,
                         "health": operator_health,
+                        "components": {
+                            "http": {
+                                "status": "ok",
+                                "reason_code": "http_thread_running",
+                                "since": None,
+                                "checked_at": utc_now(),
+                            },
+                            "autonomy": {
+                                "status": "degraded" if loop_open else "ok",
+                                "reason_code": "loop_circuit_open" if loop_open else "loop_running",
+                                "since": None,
+                                "checked_at": utc_now(),
+                            },
+                            "provider": {
+                                "status": "ok",
+                                "reason_code": "provider_health_isolated",
+                                "since": None,
+                                "checked_at": utc_now(),
+                            },
+                            "reflection": {
+                                "status": "ok",
+                                "reason_code": "reflection_idle",
+                                "since": None,
+                                "checked_at": utc_now(),
+                            },
+                        },
                     }
                     owner._store_health(health_status, health_payload)
                     self._json(health_status, self._health_projection(health_payload))
@@ -3810,12 +3872,29 @@ class NoyraHTTPServer:
                         metadata: dict[str, dict[str, Any]] = {}
                         if kind == "model":
                             for group in owner.cognitive_resources.list(owner.kernel.subject_id):
+                                keys = owner.cognitive_resources.keys(
+                                    group.group_id, subject_id=owner.kernel.subject_id, limit=1000
+                                )
+                                available = sum(
+                                    key.status == "active"
+                                    or (
+                                        key.status == "cooldown"
+                                        and key.cooldown_until is not None
+                                        and key.cooldown_until <= utc_now()
+                                    )
+                                    for key in keys
+                                )
                                 metadata[group.group_id] = {
                                     "label": group.label,
                                     "pool": group.pool,
                                     "model": group.model,
                                     "host": urlsplit(group.base_url).hostname,
                                     "resource_status": group.status,
+                                    "key_count": len(keys),
+                                    "available_key_count": available,
+                                    "resource_health": (
+                                        "healthy" if available else "cooldown"
+                                    ),
                                 }
                         else:
                             for provider in owner.search_providers.list(owner.kernel.subject_id):
@@ -8098,7 +8177,7 @@ class NoyraHTTPServer:
             ) -> tuple[str, str, SecretStr]:
                 if not isinstance(payload, dict):
                     raise ValueError("model draft must be an object")
-                allowed = {"base_url", "model", "api_keys", "api_key"}
+                allowed = {"base_url", "model", "api_keys", "api_key", "reasoning_effort"}
                 if set(payload) - allowed:
                     raise ValueError("unknown model draft field")
                 base_url = payload.get("base_url")
@@ -9909,19 +9988,30 @@ class NoyraHTTPServer:
                         ensure_ascii=False,
                         separators=(",", ":"),
                     ).encode()
-                self.send_response(status)
-                if status == HTTPStatus.TOO_MANY_REQUESTS:
-                    self.send_header("Retry-After", str(60 if retry_after is None else retry_after))
-                elif status == HTTPStatus.SERVICE_UNAVAILABLE:
-                    self.send_header("Retry-After", str(5 if retry_after is None else retry_after))
-                self._headers(
-                    "application/json; charset=utf-8",
-                    len(body),
-                    cache_control=PUBLIC_CACHE_CONTROL if public_contract else "no-store",
-                    public_contract=public_contract,
-                )
-                self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.send_response(status)
+                    if status == HTTPStatus.TOO_MANY_REQUESTS:
+                        self.send_header(
+                            "Retry-After", str(60 if retry_after is None else retry_after)
+                        )
+                    elif status == HTTPStatus.SERVICE_UNAVAILABLE:
+                        self.send_header(
+                            "Retry-After", str(5 if retry_after is None else retry_after)
+                        )
+                    self._headers(
+                        "application/json; charset=utf-8",
+                        len(body),
+                        cache_control=PUBLIC_CACHE_CONTROL if public_contract else "no-store",
+                        public_contract=public_contract,
+                    )
+                    self.end_headers()
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    # Clients routinely cancel health polling or large admin
+                    # responses.  The request is already gone; avoid a noisy
+                    # traceback while allowing the worker to be reused.
+                    self.close_connection = True
+                    return
 
             def _headers(
                 self,

@@ -110,6 +110,7 @@ class OpenAICompatibleProvider:
             headers["Authorization"] = f"Bearer {api_key}"
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.settings.timeout_seconds
+        started = loop.time()
         before_send = self.before_send
 
         async def trace(event: str, info: dict[str, Any]) -> None:
@@ -134,7 +135,11 @@ class OpenAICompatibleProvider:
                     extensions={"trace": trace},
                 ) as response:
                     return await self._parse_response(response, deadline=deadline)
-        except ProviderCallError:
+        except ProviderCallError as error:
+            if error.latency_ms is None:
+                error.latency_ms = max(
+                    0, min(int((loop.time() - started) * 1000), 86_400_000)
+                )
             raise
         except HTTPResponseLimitError:
             raise ProviderCallError(
@@ -449,7 +454,7 @@ class OpenAICompatibleProvider:
 
     @staticmethod
     def _request_payload(request: CompletionRequest) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "model": request.model,
             "messages": [message.model_dump() for message in request.messages],
             "max_tokens": request.max_output_tokens,
@@ -463,3 +468,7 @@ class OpenAICompatibleProvider:
                 },
             },
         }
+        # Only capability-validated requests carry this optional field.
+        if request.reasoning_effort is not None:
+            payload["reasoning_effort"] = request.reasoning_effort
+        return payload
