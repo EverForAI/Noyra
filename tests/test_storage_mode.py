@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from noyra.core.storage_mode import (
+    STORAGE_IDENTITY_FORMAT,
     STORAGE_MARKER_FORMAT,
     STORAGE_MARKER_NAME,
     StorageMode,
@@ -99,6 +100,60 @@ def test_explicit_dedicated_mount_without_mount_fails_closed(
 
     assert layout.mode is StorageMode.UNAVAILABLE
     assert layout.reason_code == "storage_mount_missing"
+
+
+def test_external_mount_identity_fails_closed_when_mount_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    identity = tmp_path / "storage-identity.conf"
+    identity.write_text(
+        "\n".join(
+            (
+                f"NOYRA_STORAGE_IDENTITY_FORMAT={STORAGE_IDENTITY_FORMAT}",
+                f"NOYRA_STORAGE_DATA_DIR={data}",
+                "NOYRA_STORAGE_MODE=dedicated_mount",
+                "NOYRA_STORAGE_SOURCE=/dev/test-data",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("noyra.core.storage_mode.STORAGE_IDENTITY_PATH", identity)
+    monkeypatch.setattr("noyra.core.storage_mode._findmnt", lambda path: (None, False))
+
+    layout = detect_storage_layout(data, tmp_path / "backups")
+
+    assert layout.mode is StorageMode.UNAVAILABLE
+    assert layout.reason_code == "storage_mount_missing"
+
+
+def test_external_mount_identity_rejects_wrong_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    identity = tmp_path / "storage-identity.conf"
+    identity.write_text(
+        "\n".join(
+            (
+                f"NOYRA_STORAGE_IDENTITY_FORMAT={STORAGE_IDENTITY_FORMAT}",
+                f"NOYRA_STORAGE_DATA_DIR={data}",
+                "NOYRA_STORAGE_MODE=dedicated_mount",
+                "NOYRA_STORAGE_SOURCE=/dev/expected",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("noyra.core.storage_mode.STORAGE_IDENTITY_PATH", identity)
+    monkeypatch.setattr("noyra.core.storage_mode._findmnt", lambda path: ("/dev/other", True))
+
+    layout = detect_storage_layout(data, tmp_path / "backups")
+
+    assert layout.mode is StorageMode.UNAVAILABLE
+    assert layout.reason_code == "storage_mount_identity_mismatch"
 
 
 def test_invalid_explicit_storage_mode_fails_closed(

@@ -28,6 +28,8 @@ class StorageMode(StrEnum):
 
 STORAGE_MARKER_NAME = ".noyra-storage.json"
 STORAGE_MARKER_FORMAT = "noyra-storage/v1"
+STORAGE_IDENTITY_PATH = Path("/etc/noyra/storage-identity.conf")
+STORAGE_IDENTITY_FORMAT = "noyra-storage-identity/v1"
 
 
 @dataclass(frozen=True)
@@ -201,6 +203,55 @@ def _native_mount_config(data_root: Path) -> bool:
     return True
 
 
+def _external_mount_identity(data_root: Path) -> dict[str, str] | None:
+    """Read the root-owned mount identity that survives an unmounted volume."""
+    path = STORAGE_IDENTITY_PATH
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise StorageUnavailableError("storage_identity_unreadable") from error
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or (os.name == "posix" and (metadata.st_uid != 0 or metadata.st_mode & 0o022))
+    ):
+        raise StorageUnavailableError("storage_identity_unsafe")
+    try:
+        values: dict[str, str] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            if not separator or not key or key in values or not value:
+                raise ValueError("invalid storage identity")
+            values[key] = value
+    except (OSError, UnicodeError, ValueError) as error:
+        raise StorageUnavailableError("storage_identity_invalid") from error
+    expected = {
+        "NOYRA_STORAGE_IDENTITY_FORMAT",
+        "NOYRA_STORAGE_DATA_DIR",
+        "NOYRA_STORAGE_MODE",
+        "NOYRA_STORAGE_SOURCE",
+    }
+    if (
+        set(values) != expected
+        or values["NOYRA_STORAGE_IDENTITY_FORMAT"] != STORAGE_IDENTITY_FORMAT
+    ):
+        raise StorageUnavailableError("storage_identity_invalid")
+    if values["NOYRA_STORAGE_MODE"] != StorageMode.DEDICATED_MOUNT.value:
+        raise StorageUnavailableError("storage_identity_invalid")
+    identity_data_root = Path(values["NOYRA_STORAGE_DATA_DIR"])
+    if not identity_data_root.is_absolute():
+        raise StorageUnavailableError("storage_identity_invalid")
+    if identity_data_root.resolve() != data_root.resolve():
+        return None
+    return {
+        "source": values["NOYRA_STORAGE_SOURCE"],
+        "data_dir": values["NOYRA_STORAGE_DATA_DIR"],
+    }
+
+
 def _fstab_expects_mount(data_root: Path) -> bool:
     """Return whether fstab declares ``data_root`` as a mount target.
 
@@ -261,10 +312,12 @@ def detect_storage_layout(
     else:
         backup_device, _ = _findmnt(backup)
     marker = _read_marker(data)
+    external_identity = _external_mount_identity(data)
     data_device, data_is_mount = _findmnt(data)
     dedicated_expected = (
         bool(marker and marker.get("mode") == StorageMode.DEDICATED_MOUNT.value)
         or _native_mount_config(data)
+        or external_identity is not None
         or _fstab_expects_mount(data)
         or _explicit_mount_expectation()
     )
@@ -278,6 +331,19 @@ def detect_storage_layout(
             backup_device,
             False,
             "storage_mount_missing",
+        )
+    if external_identity is not None and (
+        not data_is_mount or data_device != external_identity["source"]
+    ):
+        return StorageLayout(
+            data,
+            backup,
+            data / "upgrade",
+            StorageMode.UNAVAILABLE,
+            data_device,
+            backup_device,
+            False,
+            "storage_mount_identity_mismatch",
         )
     mode = StorageMode.DEDICATED_MOUNT if data_is_mount else StorageMode.SYSTEM_DISK
     try:

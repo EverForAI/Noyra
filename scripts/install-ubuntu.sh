@@ -62,6 +62,8 @@ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
 fi
 command -v flock >/dev/null 2>&1 || { echo 'flock is required (install util-linux).' >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo 'curl is required for the readiness check.' >&2; exit 1; }
+command -v findmnt >/dev/null 2>&1 || { echo 'findmnt is required for storage identity checks.' >&2; exit 1; }
+command -v mountpoint >/dev/null 2>&1 || { echo 'mountpoint is required for storage identity checks.' >&2; exit 1; }
 
 SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SOURCE_DIR/scripts/lib/upgrade-components.sh"
@@ -98,6 +100,8 @@ SOAK_SERVICE_UNIT=/etc/systemd/system/noyra-soak.service
 SOAK_TIMER_UNIT=/etc/systemd/system/noyra-soak.timer
 BACKUP_KEYRING="$CONFIG_DIR/backup-keyring.json"
 RECOVERY_MANIFEST="$CONFIG_DIR/recovery-manifest.json"
+STORAGE_IDENTITY="$CONFIG_DIR/storage-identity.conf"
+STORAGE_IDENTITY_TEMPORARY=""
 
 assert_absolute_backup_dir() {
   local parent base canonical_parent current component metadata perm remainder
@@ -293,6 +297,10 @@ if [[ -e "$upgrade_state_dir/status.json" ]]; then
   chmod 0640 "$upgrade_state_dir/status.json"
 fi
 }
+if [[ -e "$STORAGE_IDENTITY" || -L "$STORAGE_IDENTITY" ]] && ! mountpoint -q "$DATA_DIR"; then
+  echo "Configured dedicated storage is not mounted: $DATA_DIR" >&2
+  exit 1
+fi
 install -d -o noyra -g noyra -m 0700 "$DATA_DIR"
 install -d -o noyra -g noyra -m 0700 "$DATA_DIR/secrets"
 install -d -o root -g noyra -m 0750 "$CONFIG_DIR"
@@ -494,6 +502,10 @@ cleanup_stale_backup_staging() {
 
 cleanup_staging() {
   local failed=false
+  if [[ -n "${STORAGE_IDENTITY_TEMPORARY:-}" && ( -e "$STORAGE_IDENTITY_TEMPORARY" || -L "$STORAGE_IDENTITY_TEMPORARY" ) ]]; then
+    rm -f -- "$STORAGE_IDENTITY_TEMPORARY" || failed=true
+    STORAGE_IDENTITY_TEMPORARY=""
+  fi
   if [[ -n "${staging:-}" && ( -e "$staging" || -L "$staging" ) ]]; then
     if ! rm -rf --one-file-system -- "$staging"; then
       failed=true
@@ -539,6 +551,69 @@ validate_native_config_paths() {
     echo 'NOYRA_BACKUP_KEYRING_PATH must remain /etc/noyra/backup-keyring.json for the native Ubuntu service.' >&2
     return 1
   }
+}
+
+validate_storage_identity_path() {
+  local metadata owner group mode links
+  if [[ -L "$STORAGE_IDENTITY" || ( -e "$STORAGE_IDENTITY" && ! -f "$STORAGE_IDENTITY" ) ]]; then
+    echo "Storage identity must be a regular file: $STORAGE_IDENTITY" >&2
+    return 1
+  fi
+  [[ -e "$STORAGE_IDENTITY" ]] || return 0
+  metadata="$(stat -c '%u:%g:%a:%h' -- "$STORAGE_IDENTITY" 2>/dev/null || true)"
+  IFS=: read -r owner group mode links <<< "$metadata"
+  [[ "$owner" == 0 && "$links" == 1 && "$group" =~ ^[0-9]+$ && "$mode" =~ ^[0-9]+$ ]] || {
+    echo "Storage identity must be root-owned and single-linked: $STORAGE_IDENTITY" >&2
+    return 1
+  }
+  case "$mode" in
+    *[2367][0-7]|*[0-7][2367])
+      echo "Storage identity must not be group/other writable: $STORAGE_IDENTITY" >&2
+      return 1
+      ;;
+  esac
+  if grep -Evq '^(NOYRA_STORAGE_IDENTITY_FORMAT|NOYRA_STORAGE_DATA_DIR|NOYRA_STORAGE_MODE|NOYRA_STORAGE_SOURCE)=.+$' "$STORAGE_IDENTITY" ||
+    [[ "$(wc -l < "$STORAGE_IDENTITY")" != 4 ]]; then
+    echo "Storage identity has invalid fields: $STORAGE_IDENTITY" >&2
+    return 1
+  fi
+}
+
+ensure_storage_identity() {
+  local source target current_source
+  validate_storage_identity_path
+  if [[ -e "$STORAGE_IDENTITY" ]]; then
+    if ! mountpoint -q "$DATA_DIR"; then
+      echo "Configured dedicated storage is not mounted: $DATA_DIR" >&2
+      return 1
+    fi
+    read -r current_source target < <(findmnt -n -o SOURCE,TARGET --target "$DATA_DIR")
+    [[ "$target" == "$DATA_DIR" && -n "$current_source" ]] || {
+      echo "Could not verify the configured storage mount: $DATA_DIR" >&2
+      return 1
+    }
+    grep -Fqx "NOYRA_STORAGE_IDENTITY_FORMAT=noyra-storage-identity/v1" "$STORAGE_IDENTITY" || return 1
+    grep -Fqx "NOYRA_STORAGE_DATA_DIR=$DATA_DIR" "$STORAGE_IDENTITY" || return 1
+    grep -Fqx 'NOYRA_STORAGE_MODE=dedicated_mount' "$STORAGE_IDENTITY" || return 1
+    grep -Fqx "NOYRA_STORAGE_SOURCE=$current_source" "$STORAGE_IDENTITY" || {
+      echo "Configured storage mount identity changed: $DATA_DIR" >&2
+      return 1
+    }
+    return 0
+  fi
+  mountpoint -q "$DATA_DIR" || return 0
+  read -r source target < <(findmnt -n -o SOURCE,TARGET --target "$DATA_DIR")
+  [[ "$target" == "$DATA_DIR" && -n "$source" ]] || {
+    echo "Could not identify the dedicated storage mount: $DATA_DIR" >&2
+    return 1
+  }
+  STORAGE_IDENTITY_TEMPORARY="$(mktemp "$CONFIG_DIR/.storage-identity.conf.tmp.XXXXXX")"
+  printf 'NOYRA_STORAGE_IDENTITY_FORMAT=noyra-storage-identity/v1\nNOYRA_STORAGE_DATA_DIR=%s\nNOYRA_STORAGE_MODE=dedicated_mount\nNOYRA_STORAGE_SOURCE=%s\n' \
+    "$DATA_DIR" "$source" > "$STORAGE_IDENTITY_TEMPORARY"
+  chown root:root -- "$STORAGE_IDENTITY_TEMPORARY"
+  chmod 0644 -- "$STORAGE_IDENTITY_TEMPORARY"
+  mv -Tf -- "$STORAGE_IDENTITY_TEMPORARY" "$STORAGE_IDENTITY"
+  STORAGE_IDENTITY_TEMPORARY=""
 }
 
 stop_old_service() {
@@ -735,6 +810,7 @@ trap on_error ERR
 
 install -d -o root -g root -m 0755 "$INSTALL_DIR" "$RELEASES_DIR"
 validate_native_config_paths
+ensure_storage_identity
 if [[ -L "$LOCK_FILE" || ( -e "$LOCK_FILE" && ! -f "$LOCK_FILE" ) ]]; then
   echo "Installer lock is not a regular file: $LOCK_FILE" >&2
   exit 1

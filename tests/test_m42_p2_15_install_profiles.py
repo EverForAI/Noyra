@@ -59,6 +59,10 @@ def test_ubuntu_installer_uses_atomic_release_lifecycle_and_rollback() -> None:
     assert "requirements-cloud.lock" in installer
     assert "cold encrypted backup" in installer
     assert "NOYRA_UPGRADE_BACKUP_DIR" in installer
+    assert 'STORAGE_IDENTITY="$CONFIG_DIR/storage-identity.conf"' in installer
+    assert "ensure_storage_identity" in installer
+    assert "NOYRA_STORAGE_IDENTITY_FORMAT=noyra-storage-identity/v1" in installer
+    assert "Configured dedicated storage is not mounted" in installer
     assert "Backup directory path must be root-owned and not group/other writable" in installer
     assert "--backup-dir must be root:root and not group/other writable" in installer
     assert "backup_dir_default" in installer
