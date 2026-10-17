@@ -818,6 +818,7 @@ class ServiceSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     data_dir: Path
+    backup_root: Path = Path("/var/backups/noyra")
     subject_id: str = Field(min_length=8, max_length=128)
     genesis_hash: str = Field(min_length=64, max_length=64)
     profile: Literal["development", "test", "production"] = "development"
@@ -1219,6 +1220,7 @@ class ServiceSettings(BaseModel):
                 if os.getenv("NOYRA_PUBLIC_SITEMAP_KEYRING_PATH")
                 else None
             ),
+            backup_root=Path(os.getenv("NOYRA_BACKUP_ROOT", "/var/backups/noyra")),
             active_interval_seconds=float(os.getenv("NOYRA_ACTIVE_INTERVAL_SECONDS", "30")),
             sleep_interval_seconds=float(os.getenv("NOYRA_SLEEP_INTERVAL_SECONDS", "60")),
             deep_sleep_seconds=float(os.getenv("NOYRA_DEEP_SLEEP_SECONDS", "21600")),
@@ -1472,6 +1474,7 @@ class NoyraHTTPServer:
             kernel.database,
             RetentionSettings.from_env(),
             minimum_free_bytes=settings.minimum_free_storage_bytes,
+            backup_root=settings.backup_root,
         )
         self.capabilities = CapabilityStore(kernel.database)
         self.common_knowledge = CommonKnowledgeStore(
@@ -2780,12 +2783,34 @@ class NoyraHTTPServer:
                             owner.cloud_archive_status["configured"]
                             and not owner.cloud_archive_status["ready"]
                         )
-                        ready = at_rest_ready and integrity_ready and cloud_ready
+                        storage_runtime_ready = owner.storage_contract.runtime_ready
+                        storage_backup_ready = owner.storage_contract.backup_ready
+                        ready = (
+                            storage_runtime_ready
+                            and at_rest_ready
+                            and integrity_ready
+                            and cloud_ready
+                        )
                         checked_at = utc_now()
                         components = {
                             "storage": {
-                                "status": "ok" if at_rest_ready else "degraded",
-                                "reason_code": "ready" if at_rest_ready else "storage_unavailable",
+                                "status": "ok" if storage_runtime_ready else "degraded",
+                                "reason_code": (
+                                    "ready"
+                                    if storage_runtime_ready
+                                    else owner.storage_contract.reason_code or "storage_unavailable"
+                                ),
+                                "since": None,
+                                "checked_at": checked_at,
+                            },
+                            "backup": {
+                                "status": "ok" if storage_backup_ready else "degraded",
+                                "reason_code": (
+                                    "ready"
+                                    if storage_backup_ready
+                                    else owner.storage_contract.backup_reason_code
+                                    or "backup_unavailable"
+                                ),
                                 "since": None,
                                 "checked_at": checked_at,
                             },
@@ -4005,6 +4030,7 @@ class NoyraHTTPServer:
                             "estimate": owner.retention.estimate(owner.kernel.subject_id),
                             "latest": owner.retention.latest(owner.kernel.subject_id),
                             "sqlite_space": owner.retention.sqlite_space(),
+                            "plan": owner.retention.retention_plan(owner.kernel.subject_id),
                             "evidence_capacity": owner.retention.evidence_capacity(
                                 owner.kernel.subject_id
                             ),
@@ -10283,7 +10309,7 @@ class NoyraService:
             )
         )
         self.at_rest.prepare()
-        self.storage_contract = detect_storage_layout(settings.data_dir)
+        self.storage_contract = detect_storage_layout(settings.data_dir, settings.backup_root)
         if (
             self.storage_contract.mode is StorageMode.UNAVAILABLE
             or not self.storage_contract.writable

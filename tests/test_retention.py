@@ -77,8 +77,11 @@ def test_retention_settings_http_auth_revision_and_validation(tmp_path: Any) -> 
     from noyra.service import NoyraHTTPServer, ServiceSettings
 
     token = "test-token-sufficient-entropy-for-retention"
+    backup_root = tmp_path / "backups"
+    backup_root.mkdir()
     settings = ServiceSettings(
         data_dir=tmp_path,
+        backup_root=backup_root,
         subject_id="retention-http",
         genesis_hash=content_hash("http"),
         port=0,
@@ -119,6 +122,8 @@ def test_retention_settings_http_auth_revision_and_validation(tmp_path: Any) -> 
         ) as response:
             status = json.loads(response.read())
         assert status["sqlite_space"]["page_size"] > 0
+        assert status["plan"]["backup"]["status"] == "planned"
+        assert status["plan"]["apply_allowed"] is False
         with pytest.raises(HTTPError) as conflict:
             submit()
         assert conflict.value.code == 409

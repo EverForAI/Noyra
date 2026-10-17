@@ -11,8 +11,10 @@ from collections.abc import Mapping
 from copy import copy, deepcopy
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
+from .backup_retention import BackupRetentionPolicy, backup_gc_plan
 from .database import Database
 from .errors import IntegrityError
 from .evidence_capacity import evidence_capacity_status
@@ -448,10 +450,14 @@ class RetentionManager:
         settings: RetentionSettings | None = None,
         *,
         minimum_free_bytes: int = 500_000_000,
+        backup_root: Path | None = None,
+        backup_policy: BackupRetentionPolicy | None = None,
     ):
         self.database = database
         self.settings = settings or RetentionSettings()
         self.minimum_free_bytes = minimum_free_bytes
+        self.backup_root = backup_root
+        self.backup_policy = backup_policy or BackupRetentionPolicy()
         with self.database.connection() as connection:
             exists = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='retention_runs'"
@@ -530,6 +536,79 @@ class RetentionManager:
         """Return current SQLite page and freelist metrics for operator diagnostics."""
 
         return self._sqlite_space_metrics()
+
+    def retention_plan(self, subject_id: str, *, now: datetime | None = None) -> dict[str, Any]:
+        """Return one read-only plan covering SQLite and backup artifacts.
+
+        The service account may not read a root-owned backup directory.  In
+        that case the plan reports the stable reason and never guesses that a
+        recovery point exists.  Backup deletion remains a privileged,
+        hash-rechecking maintenance operation.
+        """
+
+        policy = self.policy(subject_id)
+        latest = self.latest(subject_id)
+        backup: dict[str, Any]
+        if self.backup_root is None:
+            backup = {
+                "status": "unconfigured",
+                "reason_code": "backup_root_unconfigured",
+                "apply_allowed": False,
+                "policy": self.backup_policy.public(),
+            }
+        elif not self.backup_root.exists() or not self.backup_root.is_dir():
+            backup = {
+                "status": "unavailable",
+                "reason_code": "backup_path_missing",
+                "apply_allowed": False,
+                "policy": self.backup_policy.public(),
+            }
+        else:
+            try:
+                backup = backup_gc_plan(self.backup_root, self.backup_policy, now=now)
+                backup.update(
+                    {
+                        "status": "planned",
+                        "reason_code": None,
+                        "apply_allowed": False,
+                        "policy": self.backup_policy.public(),
+                        "apply_requires": "root_maintenance_lock_and_hash_recheck",
+                    }
+                )
+            except (OSError, PermissionError, ValueError) as error:
+                backup = {
+                    "status": "unavailable",
+                    "reason_code": "backup_inventory_unavailable",
+                    "error_type": type(error).__name__,
+                    "apply_allowed": False,
+                    "policy": self.backup_policy.public(),
+                }
+        sqlite = {
+            "estimate": self.estimate(subject_id, now=now),
+            "latest": latest,
+            "space": self.sqlite_space(),
+            "cursor": latest.get("next_cursor") if latest else None,
+        }
+        plan_id = content_hash(
+            {
+                "subject_id": subject_id,
+                "policy": policy,
+                "sqlite": sqlite,
+                "backup": {
+                    key: value
+                    for key, value in backup.items()
+                    if key not in {"backup_inventory", "backup_details"}
+                },
+            }
+        )
+        return {
+            "plan_id": plan_id,
+            "generated_at": (now or datetime.now(UTC)).isoformat(),
+            "policy": policy,
+            "sqlite": sqlite,
+            "backup": backup,
+            "apply_allowed": False,
+        }
 
     def estimate(self, subject_id: str, *, now: datetime | None = None) -> dict[str, int]:
         snapshot = copy(self)

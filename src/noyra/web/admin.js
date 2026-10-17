@@ -1232,6 +1232,9 @@ function renderRetention(payload) {
   const estimate = payload?.estimate || {};
   const latest = payload?.latest;
   const sqliteSpace = payload?.sqlite_space || {};
+  const plan = payload?.plan || {};
+  const backupPlan = plan.backup || {};
+  const backupSummary = backupPlan.backup_summary || {};
   const capacity = payload?.evidence_capacity;
   const latestDeleted = latest?.deleted_by_table ? Object.entries(latest.deleted_by_table).map(([key,value]) => `${key}: ${formatInteger(value)}`).join(" · ") : "暂无清理记录";
   const form = $("#retention-settings-form");
@@ -1250,6 +1253,10 @@ function renderRetention(payload) {
     ["SQLite 文件 / WAL", `${formatInteger(sqliteSpace.database_bytes)} / ${formatInteger(sqliteSpace.wal_bytes)} 字节`],
     ["SQLite 磁盘占用 / 空闲页", `${formatInteger(sqliteSpace.physical_bytes)} 字节 · ${formatInteger(sqliteSpace.freelist_pages)} 页`],
     ["SQLite 可回收空间", `${formatInteger(sqliteSpace.freelist_bytes)} 字节`],
+    ["备份计划", backupPlan.status === "planned" ? "已生成（仅预览）" : (backupPlan.reason_code || "未配置")],
+    ["已验证恢复点", `${formatInteger(backupSummary.verified_recovery_points_after_plan)} 个 · ${backupSummary.recovery_points_status || "未知"}`],
+    ["备份占用 / 水位", `${formatInteger(backupSummary.total_bytes_after_plan)} 字节 · ${backupSummary.space_status || "未知"}`],
+    ["未验证备份关注", formatInteger((backupPlan.backup_attention || []).length)],
     ["证据容量", capacity?.blocked ? "已达上限，暂停新增认知工作" : "可用"],
     ["必要证据每表上限", formatInteger(capacity?.limit_per_table)],
     ["模型调用 / 尝试", `${formatInteger(capacity?.counts?.model_calls)} / ${formatInteger(capacity?.counts?.model_attempts)}`],

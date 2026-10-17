@@ -43,6 +43,29 @@ class StorageLayout:
     writable: bool
     reason_code: str | None = None
 
+    @property
+    def runtime_ready(self) -> bool:
+        """Whether the data root is safe and writable for the running service."""
+
+        return self.mode is not StorageMode.UNAVAILABLE and self.writable
+
+    @property
+    def backup_ready(self) -> bool:
+        """Whether the configured backup root exists as a usable directory.
+
+        Backup writes are performed by the privileged maintenance boundary, so
+        this check intentionally validates path identity and presence without
+        requiring the unprivileged service account to write a root-owned path.
+        """
+
+        return self.backup_root.exists() and self.backup_root.is_dir()
+
+    @property
+    def backup_reason_code(self) -> str | None:
+        if self.backup_ready:
+            return None
+        return "backup_path_missing"
+
     def public(self) -> dict[str, Any]:
         return {
             "mode": self.mode.value,
@@ -50,6 +73,9 @@ class StorageLayout:
             "backup_device": self.backup_device,
             "writable": self.writable,
             "reason_code": self.reason_code,
+            "runtime_ready": self.runtime_ready,
+            "backup_ready": self.backup_ready,
+            "backup_reason_code": self.backup_reason_code,
         }
 
 

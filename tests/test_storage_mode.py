@@ -25,7 +25,23 @@ def test_plain_directory_is_system_disk_and_does_not_need_backup_directory(tmp_p
 
     assert layout.mode is StorageMode.SYSTEM_DISK
     assert layout.writable is True
+    assert layout.runtime_ready is True
+    assert layout.backup_ready is False
     assert layout.reason_code == "backup_path_missing"
+    assert layout.backup_reason_code == "backup_path_missing"
+
+
+def test_backup_directory_is_reported_separately_from_runtime_readiness(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    backups = tmp_path / "backups"
+    data.mkdir()
+    backups.mkdir()
+
+    layout = detect_storage_layout(data, backups)
+
+    assert layout.runtime_ready is True
+    assert layout.backup_ready is True
+    assert layout.backup_reason_code is None
 
 
 def test_dedicated_marker_without_mount_fails_closed(

@@ -70,7 +70,11 @@ def test_target_readiness_binds_subject_and_migration_target_identity(
 ) -> None:
     monkeypatch.setenv("NOYRA_MIGRATION_TARGET_ID", "shelter-1")
     token = "readiness-operator-token-with-enough-entropy"
-    settings = _settings(tmp_path, operator_token=SecretStr(token))
+    settings = _settings(
+        tmp_path,
+        operator_token=SecretStr(token),
+        backup_root=tmp_path / "missing-backups",
+    )
     service = NoyraService(settings)
     service.boot()
     service.http.start()
@@ -86,6 +90,9 @@ def test_target_readiness_binds_subject_and_migration_target_identity(
         assert payload["migration_target_id"] == "shelter-1"
         assert payload["storage"]["mode"] == "system_disk"
         assert payload["storage"]["writable"] is True
+        assert payload["storage"]["runtime_ready"] is True
+        assert payload["storage"]["backup_ready"] is False
+        assert payload["components"]["backup"]["reason_code"] == "backup_path_missing"
     finally:
         service.http.close()
         service.kernel.close()
