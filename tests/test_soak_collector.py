@@ -159,6 +159,48 @@ def test_model_activity_snapshot_is_bounded_and_uses_a_time_cursor(tmp_path: Pat
     assert "attempt-private-id" not in json.dumps(result)
 
 
+def test_model_activity_keyset_cursor_drains_rows_beyond_limit(tmp_path: Path) -> None:
+    helper = _helper()
+    database = tmp_path / "noyra.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "CREATE TABLE model_calls (call_id TEXT, created_at TEXT, completed_at TEXT, "
+        "status TEXT, error_code TEXT)"
+    )
+    connection.executemany(
+        "INSERT INTO model_calls VALUES (?, ?, ?, ?, ?)",
+        [
+            (f"call-{index:04d}", "2026-10-18T01:00:00+00:00", None, "ok", None)
+            for index in range(helper.MAX_ACTIVITY_ROWS + 5)
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    first_cursor: dict[str, dict[str, str]] = {}
+    first = helper._model_activity(
+        database,
+        since="2026-10-18T00:00:00+00:00",
+        until="2026-10-18T02:00:00+00:00",
+        cursor_sink=first_cursor,
+    )
+    assert first["calls"]["rows"] == helper.MAX_ACTIVITY_ROWS
+    assert first_cursor == {
+        "calls": {"timestamp": "2026-10-18T01:00:00+00:00", "id": "call-1999"}
+    }
+
+    second_cursor: dict[str, dict[str, str]] = {}
+    second = helper._model_activity(
+        database,
+        since="2026-10-18T00:00:00+00:00",
+        until="2026-10-18T02:00:00+00:00",
+        cursors=first_cursor,
+        cursor_sink=second_cursor,
+    )
+    assert second["calls"]["rows"] == 5
+    assert second_cursor["calls"]["id"] == "call-2004"
+
+
 def test_degraded_snapshot_contains_bounded_fault_window(tmp_path: Path) -> None:
     helper = _helper()
     output = tmp_path / "soak.jsonl"

@@ -251,6 +251,8 @@ def _model_activity(
     *,
     since: str | None = None,
     until: str | None = None,
+    cursors: dict[str, object] | None = None,
+    cursor_sink: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, object]:
     """Return bounded call/attempt aggregates without model payloads."""
 
@@ -266,20 +268,37 @@ def _model_activity(
             connection.set_progress_handler(lambda: 1, 50_000)
             calls: list[tuple[object, ...]] = []
             attempts: list[tuple[object, ...]] = []
+            call_cursor = cursors.get("calls") if isinstance(cursors, dict) else None
+            attempt_cursor = cursors.get("attempts") if isinstance(cursors, dict) else None
+
+            def cursor_values(value: object) -> tuple[str, str]:
+                if isinstance(value, dict):
+                    timestamp = value.get("timestamp")
+                    item_id = value.get("id")
+                    if isinstance(timestamp, str) and isinstance(item_id, str):
+                        return timestamp, item_id
+                if isinstance(since, str):
+                    return since, ""
+                return cutoff, ""
+
+            call_timestamp, call_id = cursor_values(call_cursor)
+            attempt_timestamp, attempt_id = cursor_values(attempt_cursor)
             if _table_exists(connection, "model_calls"):
                 calls = connection.execute(
                     "SELECT call_id, created_at, completed_at, status, error_code "
-                    "FROM model_calls WHERE created_at >= ? AND created_at <= ? "
+                    "FROM model_calls WHERE (created_at > ? OR "
+                    "(created_at = ? AND call_id > ?)) AND created_at <= ? "
                     "ORDER BY created_at, call_id LIMIT ?",
-                    (cutoff, end, MAX_ACTIVITY_ROWS),
+                    (call_timestamp, call_timestamp, call_id, end, MAX_ACTIVITY_ROWS),
                 ).fetchall()
             if _table_exists(connection, "model_attempts"):
                 attempts = connection.execute(
                     "SELECT attempt_id, started_at, completed_at, status, error_code "
-                    "FROM model_attempts WHERE COALESCE(started_at, completed_at) >= ? "
+                    "FROM model_attempts WHERE (COALESCE(started_at, completed_at) > ? OR "
+                    "(COALESCE(started_at, completed_at) = ? AND attempt_id > ?)) "
                     "AND COALESCE(started_at, completed_at) <= ? "
                     "ORDER BY COALESCE(started_at, completed_at), attempt_id LIMIT ?",
-                    (cutoff, end, MAX_ACTIVITY_ROWS),
+                    (attempt_timestamp, attempt_timestamp, attempt_id, end, MAX_ACTIVITY_ROWS),
                 ).fetchall()
     except (sqlite3.Error, OSError, ValueError) as error:
         return {"available": False, "error": type(error).__name__}
@@ -318,6 +337,18 @@ def _model_activity(
             "duration": _duration_summary(durations),
             "cursor": latest,
         }
+
+    if cursor_sink is not None:
+        if calls:
+            timestamp = calls[-1][1]
+            item_id = calls[-1][0]
+            if isinstance(timestamp, str) and isinstance(item_id, str):
+                cursor_sink["calls"] = {"timestamp": timestamp, "id": item_id}
+        if attempts:
+            timestamp = attempts[-1][1] or attempts[-1][2]
+            item_id = attempts[-1][0]
+            if isinstance(timestamp, str) and isinstance(item_id, str):
+                cursor_sink["attempts"] = {"timestamp": timestamp, "id": item_id}
 
     return {
         "available": True,
@@ -410,6 +441,8 @@ def collect_snapshot(
     health_base: str = "http://127.0.0.1:8765",
     now: str | None = None,
     since: str | None = None,
+    activity_cursors: dict[str, object] | None = None,
+    activity_cursor_sink: dict[str, dict[str, str]] | None = None,
     fault_state: dict[str, object] | None = None,
     output: Path | None = None,
 ) -> dict[str, object]:
@@ -417,7 +450,13 @@ def collect_snapshot(
     service = _systemd()
     live = _health(f"{health_base}/health/live")
     ready = _health(f"{health_base}/health/ready")
-    activity = _model_activity(data_dir / "noyra.sqlite3", since=since, until=collected_at)
+    activity = _model_activity(
+        data_dir / "noyra.sqlite3",
+        since=since,
+        until=collected_at,
+        cursors=activity_cursors,
+        cursor_sink=activity_cursor_sink,
+    )
     degraded = (
         live.get("status") != 200
         or ready.get("status") != 200
@@ -530,23 +569,32 @@ def main() -> int:
     parser.add_argument("--backup-dir", type=Path, default=Path("/var/backups/noyra"))
     parser.add_argument("--health-base", default="http://127.0.0.1:8765")
     parser.add_argument("--output", type=Path, default=Path("/var/log/noyra/soak.jsonl"))
-    parser.add_argument("--state", type=Path, default=Path("/var/lib/noyra/soak-state.json"))
+    parser.add_argument("--state", type=Path, default=Path("/var/log/noyra/soak-state.json"))
     parser.add_argument("--max-bytes", type=int, default=10_000_000)
     args = parser.parse_args()
     state = _read_state(args.state)
     cursor = state.get("cursor")
+    activity_cursors = state.get("activity_cursors")
+    if not isinstance(activity_cursors, dict):
+        activity_cursors = None
+    next_activity_cursors: dict[str, dict[str, str]] = {}
     snapshot = collect_snapshot(
         data_dir=args.data_dir,
         backup_dir=args.backup_dir,
         health_base=args.health_base.rstrip("/"),
         since=cursor if isinstance(cursor, str) else None,
+        activity_cursors=activity_cursors,
+        activity_cursor_sink=next_activity_cursors,
         fault_state=state,
         output=args.output,
     )
     append_snapshot(args.output, snapshot, max_bytes=args.max_bytes)
     collected_at = snapshot["collected_at"]
     if isinstance(collected_at, str):
-        next_state: dict[str, object] = {"cursor": collected_at}
+        next_state: dict[str, object] = {
+            "cursor": collected_at,
+            "activity_cursors": next_activity_cursors or activity_cursors or {},
+        }
         fault_window = snapshot.get("fault_window")
         if isinstance(fault_window, dict) and not fault_window.get("complete"):
             next_state["fault_since"] = fault_window.get("started_at")
