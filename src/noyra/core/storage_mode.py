@@ -8,6 +8,7 @@ silently replaced by a fresh empty database.
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import shutil
@@ -16,7 +17,7 @@ import subprocess
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 
 class StorageMode(StrEnum):
@@ -174,6 +175,41 @@ def _native_mount_config(data_root: Path) -> bool:
     return True
 
 
+def _fstab_expects_mount(data_root: Path) -> bool:
+    """Return whether fstab declares ``data_root`` as a mount target.
+
+    ``findmnt --fstab --target`` also reports the filesystem root for an
+    arbitrary path.  Compare the returned target explicitly so a normal
+    system-disk install is never classified as a missing dedicated volume.
+    """
+    if os.name != "posix":
+        return False
+    try:
+        result = subprocess.run(
+            ["findmnt", "--fstab", "-n", "-o", "TARGET", "--target", str(data_root)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    target = result.stdout.strip().splitlines()
+    return len(target) == 1 and Path(target[0]).resolve() == data_root.resolve()
+
+
+def _explicit_mount_expectation() -> bool:
+    """Read an optional root-owned service declaration for custom mounts."""
+    value = os.environ.get("NOYRA_EXPECTED_STORAGE_MODE", "").strip().casefold()
+    if value in {"", StorageMode.SYSTEM_DISK.value}:
+        return False
+    if value == StorageMode.DEDICATED_MOUNT.value:
+        return True
+    raise StorageUnavailableError("storage_mode_invalid")
+
+
 def detect_storage_layout(
     data_root: Path | str = "/var/lib/noyra",
     backup_root: Path | str = "/var/backups/noyra",
@@ -185,7 +221,13 @@ def detect_storage_layout(
         _reject_reparse_path(path)
         if path is data and (not path.exists() or not path.is_dir()):
             return StorageLayout(
-                data, backup, data / "upgrade", StorageMode.UNAVAILABLE, None, None, False,
+                data,
+                backup,
+                data / "upgrade",
+                StorageMode.UNAVAILABLE,
+                None,
+                None,
+                False,
                 "storage_path_missing",
             )
     if not backup.exists() or not backup.is_dir():
@@ -194,13 +236,22 @@ def detect_storage_layout(
         backup_device, _ = _findmnt(backup)
     marker = _read_marker(data)
     data_device, data_is_mount = _findmnt(data)
-    dedicated_expected = bool(
-        marker and marker.get("mode") == StorageMode.DEDICATED_MOUNT.value
-    ) or _native_mount_config(data)
+    dedicated_expected = (
+        bool(marker and marker.get("mode") == StorageMode.DEDICATED_MOUNT.value)
+        or _native_mount_config(data)
+        or _fstab_expects_mount(data)
+        or _explicit_mount_expectation()
+    )
     if dedicated_expected and not data_is_mount:
         return StorageLayout(
-            data, backup, data / "upgrade", StorageMode.UNAVAILABLE, data_device, backup_device,
-            False, "storage_mount_missing",
+            data,
+            backup,
+            data / "upgrade",
+            StorageMode.UNAVAILABLE,
+            data_device,
+            backup_device,
+            False,
+            "storage_mount_missing",
         )
     mode = StorageMode.DEDICATED_MOUNT if data_is_mount else StorageMode.SYSTEM_DISK
     try:
@@ -208,7 +259,13 @@ def detect_storage_layout(
     except OSError:
         writable = False
     return StorageLayout(
-        data, backup, data / "upgrade", mode, data_device, backup_device, writable,
+        data,
+        backup,
+        data / "upgrade",
+        mode,
+        data_device,
+        backup_device,
+        writable,
         ("backup_path_missing" if not backup.exists() else None)
         if writable
         else "storage_not_writable",
@@ -222,8 +279,10 @@ def _install_dir(path: Path, *, uid: int, gid: int, mode: int) -> None:
             raise StorageUnavailableError("storage_path_not_directory")
     else:
         path.mkdir(parents=True, mode=mode)
-    if os.name == "posix" and getattr(os, "geteuid", lambda: 1)() == 0:
-        os.chown(path, uid, gid)
+    geteuid = cast(Any, getattr(os, "geteuid", None))
+    chown = cast(Any, getattr(os, "chown", None))
+    if os.name == "posix" and callable(geteuid) and geteuid() == 0 and callable(chown):
+        chown(path, uid, gid)
     path.chmod(mode)
 
 
@@ -245,14 +304,16 @@ def ensure_system_disk_layout(
     backup = Path(backup_root).expanduser()
     if service_uid is None or service_gid is None:
         try:
-            import pwd
-
-            account = pwd.getpwnam("noyra")
+            pwd_module = importlib.import_module("pwd")
+            getpwnam = cast(Any, pwd_module.getpwnam)
+            account = getpwnam("noyra")
             service_uid = account.pw_uid
             service_gid = account.pw_gid
         except (ImportError, KeyError):
-            service_uid = os.getuid() if os.name == "posix" else 0
-            service_gid = os.getgid() if os.name == "posix" else 0
+            getuid = cast(Any, getattr(os, "getuid", None))
+            getgid = cast(Any, getattr(os, "getgid", None))
+            service_uid = getuid() if os.name == "posix" and callable(getuid) else 0
+            service_gid = getgid() if os.name == "posix" and callable(getgid) else 0
     _install_dir(data, uid=service_uid, gid=service_gid, mode=0o700)
     _install_dir(backup, uid=0, gid=0, mode=0o700)
     _install_dir(data / "upgrade", uid=0, gid=service_gid, mode=0o750)

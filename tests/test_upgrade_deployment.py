@@ -161,6 +161,15 @@ def test_privileged_runner_is_fixed_official_and_does_not_load_application_secre
     assert "flock -x 8" in runner
 
 
+def test_recover_only_skips_unavailable_storage_before_control_path_checks() -> None:
+    runner = (ROOT / "scripts" / "upgrade-ubuntu-runner.sh").read_text(encoding="utf-8")
+    recovery_branch = runner.index('if [[ "$recover_only" == true ]]; then')
+    storage_check = runner.index("if ! storage_is_available; then", recovery_branch)
+    skip = runner.index("skip_for_unavailable_storage", storage_check)
+    control_checks = runner.index('for path in /opt /var/lib/noyra "$INSTALL_ROOT"', storage_check)
+    assert storage_check < skip < control_checks
+
+
 def test_upgrade_management_documentation_describes_scope_and_recovery() -> None:
     documentation = (ROOT / "docs" / "deployment" / "ubuntu.md").read_text(encoding="utf-8")
     assert "### Upgrade from the management page" in documentation

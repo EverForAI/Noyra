@@ -48,6 +48,54 @@ def test_dedicated_marker_without_mount_fails_closed(
     assert layout.reason_code == "storage_mount_missing"
 
 
+def test_fstab_declared_mount_without_mount_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setattr(
+        "noyra.core.storage_mode._findmnt",
+        lambda path: (None, False),
+    )
+    monkeypatch.setattr(
+        "noyra.core.storage_mode._fstab_expects_mount",
+        lambda path: path == data,
+    )
+
+    layout = detect_storage_layout(data, tmp_path / "backups")
+
+    assert layout.mode is StorageMode.UNAVAILABLE
+    assert layout.reason_code == "storage_mount_missing"
+
+
+def test_explicit_dedicated_mount_without_mount_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("NOYRA_EXPECTED_STORAGE_MODE", "dedicated_mount")
+    monkeypatch.setattr(
+        "noyra.core.storage_mode._findmnt",
+        lambda path: (None, False),
+    )
+
+    layout = detect_storage_layout(data, tmp_path / "backups")
+
+    assert layout.mode is StorageMode.UNAVAILABLE
+    assert layout.reason_code == "storage_mount_missing"
+
+
+def test_invalid_explicit_storage_mode_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("NOYRA_EXPECTED_STORAGE_MODE", "unexpected")
+
+    with pytest.raises(StorageUnavailableError, match="storage_mode_invalid"):
+        detect_storage_layout(data, tmp_path / "backups")
+
+
 def test_marker_symlink_is_rejected(tmp_path: Path) -> None:
     data = tmp_path / "data"
     data.mkdir()
