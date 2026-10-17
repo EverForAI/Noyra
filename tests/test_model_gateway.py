@@ -1681,7 +1681,7 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
             captured["path"] = request.url.path
             captured["authorization"] = request.headers.get("authorization")
             captured["body"] = json.loads(request.content)
-            return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+            return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok":true}'}}]})
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         result = await OpenAICompatibleProvider.probe_unstored(
@@ -1697,6 +1697,11 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["path"], "/v1/chat/completions")
         self.assertEqual(captured["authorization"], "Bearer unstored-secret")
         self.assertEqual(captured["body"]["reasoning_effort"], "high")
+        self.assertEqual(captured["body"]["response_format"]["type"], "json_schema")
+        self.assertEqual(
+            captured["body"]["response_format"]["json_schema"]["name"],
+            "NoyraCapabilityProbe",
+        )
         self.assertNotIn("unstored-secret", repr(result))
 
     async def test_provider_lists_models_from_openai_compatible_endpoint(self: Self) -> None:

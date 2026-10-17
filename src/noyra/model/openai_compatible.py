@@ -201,9 +201,27 @@ class OpenAICompatibleProvider:
                     headers=provider._headers(),
                     json={
                         "model": settings.model,
-                        "messages": [{"role": "user", "content": "Reply with OK."}],
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": 'Return exactly {"ok":true} as the JSON response.',
+                            }
+                        ],
                         "max_tokens": 8,
                         "temperature": 0,
+                        "response_format": {
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": "NoyraCapabilityProbe",
+                                "strict": True,
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {"ok": {"type": "boolean"}},
+                                    "required": ["ok"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
                         **(
                             {"reasoning_effort": reasoning_effort}
                             if reasoning_effort is not None
@@ -216,6 +234,16 @@ class OpenAICompatibleProvider:
             if not parsed.content.strip():
                 raise ProviderCallError(
                     "provider_response_empty", retryable=False, outcome_unknown=True
+                )
+            try:
+                probe_payload = json.loads(parsed.content)
+            except (TypeError, ValueError) as error:
+                raise ProviderCallError(
+                    "provider_response_invalid", retryable=False, outcome_unknown=True
+                ) from error
+            if not isinstance(probe_payload, dict) or probe_payload.get("ok") is not True:
+                raise ProviderCallError(
+                    "provider_response_invalid", retryable=False, outcome_unknown=True
                 )
             return {
                 "ok": True,

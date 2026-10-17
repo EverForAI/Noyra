@@ -2852,10 +2852,12 @@ let reasoningCapabilityTimer = null;
 const applyReasoningProfile = (profile) => {
   const select = $("#admin-model-reasoning");
   const selected = select.value;
-  const efforts = Array.isArray(profile?.efforts) ? profile.efforts.filter((item) => typeof item === "string") : [];
+  const observedEfforts = Array.isArray(profile?.efforts) ? profile.efforts.filter((item) => typeof item === "string") : [];
+  const candidateEfforts = Array.isArray(profile?.candidate_efforts) ? profile.candidate_efforts.filter((item) => typeof item === "string") : [];
+  const efforts = observedEfforts.length ? observedEfforts : candidateEfforts;
   select.replaceChildren(new Option("不设置", ""), ...efforts.map((effort) => new Option({low:"低",medium:"中",high:"高",xhigh:"极高"}[effort] || effort, effort)));
   const observed = profile?.status === "known" && profile?.source === "probe";
-  reasoningField.hidden = profile?.supported !== true || efforts.length === 0;
+  reasoningField.hidden = efforts.length === 0;
   select.value = efforts.includes(selected) ? selected : "";
   if (profile?.revision !== undefined) reasoningField.dataset.profileRevision = String(profile.revision);
   else delete reasoningField.dataset.profileRevision;
@@ -2863,7 +2865,7 @@ const applyReasoningProfile = (profile) => {
   const selectionVerified = observed && (!select.value || tested.includes(select.value));
   reasoningField.dataset.capabilityObserved = observed ? "true" : "false";
   reasoningField.dataset.testedEfforts = JSON.stringify(tested);
-  if (!selectionVerified && profile?.supported === true) reasoningField.dataset.capabilityStatus = "unverified";
+  if (!selectionVerified && efforts.length) reasoningField.dataset.capabilityStatus = "unverified";
   else delete reasoningField.dataset.capabilityStatus;
   updateReasoningCapabilityStatus();
 };

@@ -30,6 +30,7 @@ def test_known_reasoning_models_expose_bounded_efforts() -> None:
 def test_unknown_models_fail_closed_without_reasoning() -> None:
     profile = reasoning_profile("deepseek-chat")
     assert profile.supported is False
+    assert profile.candidate_efforts == ("low", "medium", "high", "xhigh")
     assert normalize_reasoning_effort("deepseek-chat", "high") is None
 
 
@@ -46,6 +47,7 @@ def test_public_profile_is_server_owned_and_clears_unsupported_selection() -> No
     assert isinstance(supported["revision"], str)
     assert unsupported["supported"] is False
     assert unsupported["efforts"] == []
+    assert unsupported["candidate_efforts"] == ["low", "medium", "high", "xhigh"]
     assert unsupported["selected"] is None
 
 
@@ -108,25 +110,23 @@ def test_successful_probes_accumulate_only_current_observations(tmp_path: Any) -
     assert second.tested_efforts == ("low", "high")
 
 
-def test_unsupported_model_probe_cannot_persist_a_capability(tmp_path: Any) -> None:
+def test_unknown_model_probe_persists_endpoint_observation(tmp_path: Any) -> None:
     database = Database(tmp_path / "capability-unsupported.sqlite3")
     subject_id = "Noyra-capability-unsupported"
     IdentityStore(database).ensure(subject_id, content_hash("unsupported"))
     store = CapabilityProfileStore(database)
 
-    with pytest.raises(ValueError, match="not a candidate"):
-        store.record_probe_success(
-            subject_id,
-            "openai_compatible",
-            "https://models.example/v1",
-            "deepseek-chat",
-            "high",
-        )
-
-    assert (
-        store.get(subject_id, "openai_compatible", "https://models.example/v1", "deepseek-chat")
-        is None
+    observed = store.record_probe_success(
+        subject_id,
+        "openai_compatible",
+        "https://models.example/v1",
+        "deepseek-chat",
+        "high",
     )
+    assert observed is not None
+    assert observed.supported is True
+    assert observed.efforts == ("high",)
+    assert observed.tested_efforts == ("high",)
 
 
 def test_expired_capability_requires_each_effort_to_be_retested(tmp_path: Any) -> None:

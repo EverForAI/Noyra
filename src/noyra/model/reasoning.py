@@ -16,6 +16,7 @@ class ReasoningProfile:
     efforts: tuple[ReasoningEffort, ...]
     parameter: str | None
     version: int = 1
+    candidate_efforts: tuple[ReasoningEffort, ...] = ()
 
     def normalize(self, value: str | None) -> ReasoningEffort | None:
         if value is None or not self.supported:
@@ -47,6 +48,7 @@ def reasoning_profile_payload(
     return {
         "supported": profile.supported,
         "efforts": list(profile.efforts),
+        "candidate_efforts": list(profile.candidate_efforts),
         "parameter": profile.parameter,
         "version": profile.version,
         "revision": hashlib.sha256(revision_input.encode("utf-8")).hexdigest()[:16],
@@ -63,6 +65,7 @@ def reasoning_profile(model: str, provider_type: str = "openai_compatible") -> R
         supported,
         REASONING_EFFORTS if supported else (),
         "reasoning_effort" if supported else None,
+        candidate_efforts=(REASONING_EFFORTS if provider_type == "openai_compatible" else ()),
     )
 
 

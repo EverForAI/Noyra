@@ -169,7 +169,7 @@ class CapabilityProfileStore:
         if effort not in REASONING_EFFORTS:
             raise ValueError("invalid reasoning capability effort")
         candidate_profile = reasoning_profile(model, provider_type)
-        if effort not in candidate_profile.efforts:
+        if effort not in candidate_profile.candidate_efforts:
             raise ValueError("reasoning effort is not a candidate for this model")
         now = utc_now()
         expires = (datetime.now(UTC) + timedelta(days=CAPABILITY_PROBE_TTL_DAYS)).isoformat()
@@ -183,14 +183,16 @@ class CapabilityProfileStore:
                 (subject_id, provider_type, endpoint_hash, model.strip()),
             ).fetchone()
             if row is None:
-                efforts: tuple[ReasoningEffort, ...] = candidate_profile.efforts
+                efforts: tuple[ReasoningEffort, ...] = (
+                    candidate_profile.efforts or (effort,)
+                )
                 tested_efforts: tuple[ReasoningEffort, ...] = (effort,)
                 revision = 1
                 profile_id = new_id("mcap")
             else:
                 current = self._from_row(row)
                 efforts = current.efforts
-                if effort not in efforts:
+                if effort not in candidate_profile.candidate_efforts:
                     raise ValueError("reasoning effort is not a candidate for this model")
                 if current.status == "known" and not _is_expired(current.expires_at):
                     tested_efforts = tuple(
