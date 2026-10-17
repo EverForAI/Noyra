@@ -108,6 +108,84 @@ def test_provider_snapshot_contains_aggregates_without_provider_identifiers(tmp_
     assert "secret" not in json.dumps(result)
 
 
+def test_model_activity_snapshot_is_bounded_and_uses_a_time_cursor(tmp_path: Path) -> None:
+    helper = _helper()
+    database = tmp_path / "noyra.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "CREATE TABLE model_calls (call_id TEXT, created_at TEXT, completed_at TEXT, "
+        "status TEXT, error_code TEXT)"
+    )
+    connection.execute(
+        "CREATE TABLE model_attempts (attempt_id TEXT, started_at TEXT, completed_at TEXT, "
+        "status TEXT, error_code TEXT)"
+    )
+    connection.execute(
+        "INSERT INTO model_calls VALUES (?, ?, ?, ?, ?)",
+        (
+            "call-private-id",
+            "2026-10-18T01:00:00+00:00",
+            "2026-10-18T01:00:00.250+00:00",
+            "failed",
+            "provider_timeout",
+        ),
+    )
+    connection.execute(
+        "INSERT INTO model_attempts VALUES (?, ?, ?, ?, ?)",
+        (
+            "attempt-private-id",
+            "2026-10-18T01:00:00+00:00",
+            "2026-10-18T01:00:00.500+00:00",
+            "unknown",
+            "response_lost",
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    result = helper._model_activity(
+        database,
+        since="2026-10-18T00:59:00+00:00",
+        until="2026-10-18T01:01:00+00:00",
+    )
+
+    assert result["available"] is True
+    assert result["calls"]["statuses"] == {"failed": 1}
+    assert result["attempts"]["statuses"] == {"unknown": 1}
+    assert result["calls"]["duration"]["p50_ms"] == 250
+    assert result["attempts"]["duration"]["p95_ms"] == 500
+    assert result["calls"]["cursor"] == {"started_at": "2026-10-18T01:00:00+00:00"}
+    assert "call-private-id" not in json.dumps(result)
+    assert "attempt-private-id" not in json.dumps(result)
+
+
+def test_degraded_snapshot_contains_bounded_fault_window(tmp_path: Path) -> None:
+    helper = _helper()
+    output = tmp_path / "soak.jsonl"
+    with (
+        patch.object(
+            helper,
+            "_systemd",
+            return_value={"ActiveState": "active", "SubState": "running", "MainPID": 0},
+        ),
+        patch.object(helper, "_health", return_value={"status": 503, "body": {}}),
+        patch.object(helper, "_provider_health", return_value={"available": True, "states": {}}),
+        patch.object(helper, "_memory", return_value={"rss_bytes": None, "vm_size_bytes": None}),
+        patch.object(helper, "_free_bytes", return_value=123),
+    ):
+        snapshot = helper.collect_snapshot(
+            data_dir=tmp_path,
+            backup_dir=tmp_path,
+            now="2026-10-18T01:02:03+00:00",
+            fault_state={},
+            output=output,
+        )
+
+    assert snapshot["fault_window"]["phase"] == "degraded"
+    assert snapshot["fault_window"]["complete"] is False
+    assert snapshot["fault_window"]["samples"] == []
+
+
 def test_health_sanitizes_untrusted_json_fields() -> None:
     helper = _helper()
 

@@ -10,8 +10,9 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 from contextlib import closing
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -19,6 +20,8 @@ from urllib.request import Request, urlopen
 _SAFE_LABEL = re.compile(r"[A-Za-z0-9_.:-]{1,80}\Z")
 _SYSTEMD_FIELDS = {"ActiveState", "SubState", "MainPID", "NRestarts", "Result"}
 MAX_OUTPUT_BYTES = 100_000_000
+MAX_ACTIVITY_ROWS = 2_000
+FAULT_WINDOW_SECONDS = 900
 
 
 def _safe_label(value: object) -> str | None:
@@ -181,7 +184,7 @@ def _retention(database: Path) -> dict[str, object]:
     }
 
 
-def _provider_health(database: Path) -> dict[str, object]:
+def _provider_health(database: Path, *, since: str | None = None) -> dict[str, object]:
     if not database.is_file() or database.is_symlink():
         return {"available": False}
     try:
@@ -192,6 +195,16 @@ def _provider_health(database: Path) -> dict[str, object]:
                 "SELECT provider_kind, state, COUNT(*) "
                 "FROM provider_health_state GROUP BY provider_kind, state"
             ).fetchall()
+            recent_rows = (
+                connection.execute(
+                    "SELECT provider_kind, state, COUNT(*) "
+                    "FROM provider_health_state WHERE updated_at >= ? "
+                    "GROUP BY provider_kind, state",
+                    (since,),
+                ).fetchall()
+                if since is not None
+                else []
+            )
     except (sqlite3.Error, OSError, ValueError) as error:
         return {"available": False, "error": type(error).__name__}
     states: dict[str, dict[str, int]] = {}
@@ -200,7 +213,194 @@ def _provider_health(database: Path) -> dict[str, object]:
         safe_state = _safe_label(state)
         if safe_kind is not None and safe_state is not None:
             states.setdefault(safe_kind, {})[safe_state] = int(count)
-    return {"available": True, "states": states}
+    result: dict[str, object] = {"available": True, "states": states}
+    if since is not None:
+        recent: dict[str, dict[str, int]] = {}
+        for kind, state, count in recent_rows:
+            safe_kind = _safe_label(kind)
+            safe_state = _safe_label(state)
+            if safe_kind is not None and safe_state is not None:
+                recent.setdefault(safe_kind, {})[safe_state] = int(count)
+        result["recent_states"] = recent
+        result["since"] = _safe_timestamp(since)
+    return result
+
+
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        is not None
+    )
+
+
+def _duration_summary(values: list[float]) -> dict[str, int | None]:
+    if not values:
+        return {"count": 0, "p50_ms": None, "p95_ms": None}
+    values.sort()
+    return {
+        "count": len(values),
+        "p50_ms": int(values[(len(values) - 1) // 2]),
+        "p95_ms": int(values[min(len(values) - 1, max(0, int(len(values) * 0.95) - 1))]),
+    }
+
+
+def _model_activity(
+    database: Path,
+    *,
+    since: str | None = None,
+    until: str | None = None,
+) -> dict[str, object]:
+    """Return bounded call/attempt aggregates without model payloads."""
+
+    if not database.is_file() or database.is_symlink():
+        return {"available": False}
+    cutoff = since
+    if cutoff is None:
+        cutoff = (datetime.now(UTC) - timedelta(seconds=FAULT_WINDOW_SECONDS)).isoformat()
+    end = until or datetime.now(UTC).isoformat()
+    try:
+        connection = sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True, timeout=2)
+        with closing(connection):
+            connection.set_progress_handler(lambda: 1, 50_000)
+            calls: list[tuple[object, ...]] = []
+            attempts: list[tuple[object, ...]] = []
+            if _table_exists(connection, "model_calls"):
+                calls = connection.execute(
+                    "SELECT call_id, created_at, completed_at, status, error_code "
+                    "FROM model_calls WHERE created_at >= ? AND created_at <= ? "
+                    "ORDER BY created_at, call_id LIMIT ?",
+                    (cutoff, end, MAX_ACTIVITY_ROWS),
+                ).fetchall()
+            if _table_exists(connection, "model_attempts"):
+                attempts = connection.execute(
+                    "SELECT attempt_id, started_at, completed_at, status, error_code "
+                    "FROM model_attempts WHERE COALESCE(started_at, completed_at) >= ? "
+                    "AND COALESCE(started_at, completed_at) <= ? "
+                    "ORDER BY COALESCE(started_at, completed_at), attempt_id LIMIT ?",
+                    (cutoff, end, MAX_ACTIVITY_ROWS),
+                ).fetchall()
+    except (sqlite3.Error, OSError, ValueError) as error:
+        return {"available": False, "error": type(error).__name__}
+
+    def summarize(rows: list[tuple[object, ...]]) -> dict[str, object]:
+        status_counts: dict[str, int] = {}
+        error_counts: dict[str, int] = {}
+        durations: list[float] = []
+        latest: dict[str, str] | None = None
+        for row in rows:
+            started_raw = row[1] if isinstance(row[1], str) else None
+            completed_raw = row[2] if isinstance(row[2], str) else None
+            started = _safe_timestamp(started_raw)
+            status = _safe_label(row[3])
+            error = _safe_label(row[4])
+            if status is not None:
+                status_counts[status] = status_counts.get(status, 0) + 1
+            error_key = error or "none"
+            error_counts[error_key] = error_counts.get(error_key, 0) + 1
+            if started_raw is not None and completed_raw is not None:
+                try:
+                    elapsed = (
+                        datetime.fromisoformat(completed_raw.replace("Z", "+00:00"))
+                        - datetime.fromisoformat(started_raw.replace("Z", "+00:00"))
+                    ).total_seconds() * 1000
+                    if 0 <= elapsed <= 7 * 24 * 60 * 60 * 1000:
+                        durations.append(elapsed)
+                except ValueError:
+                    pass
+            if started is not None:
+                latest = {"started_at": started}
+        return {
+            "rows": len(rows),
+            "statuses": status_counts,
+            "errors": error_counts,
+            "duration": _duration_summary(durations),
+            "cursor": latest,
+        }
+
+    return {
+        "available": True,
+        "window": {"since": _safe_timestamp(cutoff), "until": _safe_timestamp(end)},
+        "limited": len(calls) >= MAX_ACTIVITY_ROWS or len(attempts) >= MAX_ACTIVITY_ROWS,
+        "calls": summarize(calls),
+        "attempts": summarize(attempts),
+    }
+
+
+def _read_state(path: Path) -> dict[str, object]:
+    try:
+        if path.is_symlink() or path.stat().st_size > 16_384:
+            return {}
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_state(path: Path, state: dict[str, object]) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".soak-state-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(state, stream, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _fault_window(
+    output: Path,
+    *,
+    collected_at: str,
+    degraded: bool,
+    state: dict[str, object],
+) -> dict[str, object] | None:
+    active_since = state.get("fault_since")
+    if degraded and not isinstance(active_since, str):
+        active_since = collected_at
+    if not isinstance(active_since, str):
+        return None
+    try:
+        current = datetime.fromisoformat(collected_at.replace("Z", "+00:00"))
+        started = datetime.fromisoformat(active_since.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if current - started > timedelta(seconds=FAULT_WINDOW_SECONDS) and not degraded:
+        return None
+    samples: list[dict[str, object]] = []
+    try:
+        with output.open("rb") as stream:
+            stream.seek(max(0, output.stat().st_size - 1_000_000))
+            tail = stream.read(1_000_000)
+        for line in tail.decode("utf-8", errors="replace").splitlines()[-200:]:
+            value = json.loads(line)
+            if not isinstance(value, dict):
+                continue
+            timestamp = value.get("collected_at")
+            if not isinstance(timestamp, str):
+                continue
+            parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            if started - timedelta(seconds=FAULT_WINDOW_SECONDS) <= parsed <= current:
+                samples.append(
+                    {
+                        "collected_at": _safe_timestamp(timestamp),
+                        "health": value.get("health"),
+                        "service": value.get("service"),
+                    }
+                )
+    except (OSError, ValueError, TypeError):
+        pass
+    return {
+        "started_at": _safe_timestamp(started.isoformat()),
+        "since": _safe_timestamp((started - timedelta(seconds=FAULT_WINDOW_SECONDS)).isoformat()),
+        "until": _safe_timestamp((started + timedelta(seconds=FAULT_WINDOW_SECONDS)).isoformat()),
+        "phase": "degraded" if degraded else "recovery",
+        "complete": not degraded and current >= started + timedelta(seconds=FAULT_WINDOW_SECONDS),
+        "samples": samples[-100:],
+    }
 
 
 def collect_snapshot(
@@ -209,16 +409,35 @@ def collect_snapshot(
     backup_dir: Path,
     health_base: str = "http://127.0.0.1:8765",
     now: str | None = None,
+    since: str | None = None,
+    fault_state: dict[str, object] | None = None,
+    output: Path | None = None,
 ) -> dict[str, object]:
+    collected_at = now or datetime.now(UTC).isoformat(timespec="milliseconds")
     service = _systemd()
+    live = _health(f"{health_base}/health/live")
+    ready = _health(f"{health_base}/health/ready")
+    activity = _model_activity(data_dir / "noyra.sqlite3", since=since, until=collected_at)
+    degraded = (
+        live.get("status") != 200
+        or ready.get("status") != 200
+        or service.get("ActiveState") != "active"
+        or service.get("SubState") != "running"
+    )
+    window = _fault_window(
+        output or Path("/var/log/noyra/soak.jsonl"),
+        collected_at=collected_at,
+        degraded=degraded,
+        state=fault_state or {},
+    )
     return {
         "format": "noyra-soak-snapshot/v1",
-        "collected_at": now or datetime.now(UTC).isoformat(timespec="milliseconds"),
+        "collected_at": collected_at,
         "service": service,
         "memory": _memory(service.get("MainPID")),
         "health": {
-            "live": _health(f"{health_base}/health/live"),
-            "ready": _health(f"{health_base}/health/ready"),
+            "live": live,
+            "ready": ready,
         },
         "storage": {
             "data": {**_tree_size(data_dir), "free_bytes": _free_bytes(data_dir)},
@@ -228,8 +447,10 @@ def collect_snapshot(
             },
             "database": _database_size(data_dir / "noyra.sqlite3"),
         },
-        "providers": _provider_health(data_dir / "noyra.sqlite3"),
+        "providers": _provider_health(data_dir / "noyra.sqlite3", since=since),
+        "model_activity": activity,
         "retention": _retention(data_dir / "noyra.sqlite3"),
+        "fault_window": window,
     }
 
 
@@ -309,14 +530,27 @@ def main() -> int:
     parser.add_argument("--backup-dir", type=Path, default=Path("/var/backups/noyra"))
     parser.add_argument("--health-base", default="http://127.0.0.1:8765")
     parser.add_argument("--output", type=Path, default=Path("/var/log/noyra/soak.jsonl"))
+    parser.add_argument("--state", type=Path, default=Path("/var/lib/noyra/soak-state.json"))
     parser.add_argument("--max-bytes", type=int, default=10_000_000)
     args = parser.parse_args()
+    state = _read_state(args.state)
+    cursor = state.get("cursor")
     snapshot = collect_snapshot(
         data_dir=args.data_dir,
         backup_dir=args.backup_dir,
         health_base=args.health_base.rstrip("/"),
+        since=cursor if isinstance(cursor, str) else None,
+        fault_state=state,
+        output=args.output,
     )
     append_snapshot(args.output, snapshot, max_bytes=args.max_bytes)
+    collected_at = snapshot["collected_at"]
+    if isinstance(collected_at, str):
+        next_state: dict[str, object] = {"cursor": collected_at}
+        fault_window = snapshot.get("fault_window")
+        if isinstance(fault_window, dict) and not fault_window.get("complete"):
+            next_state["fault_since"] = fault_window.get("started_at")
+        _write_state(args.state, next_state)
     print(json.dumps(snapshot, ensure_ascii=True, sort_keys=True))
     return 0
 
