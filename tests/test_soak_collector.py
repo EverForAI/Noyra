@@ -185,9 +185,7 @@ def test_model_activity_keyset_cursor_drains_rows_beyond_limit(tmp_path: Path) -
         cursor_sink=first_cursor,
     )
     assert first["calls"]["rows"] == helper.MAX_ACTIVITY_ROWS
-    assert first_cursor == {
-        "calls": {"timestamp": "2026-10-18T01:00:00+00:00", "id": "call-1999"}
-    }
+    assert first_cursor == {"calls": {"timestamp": "2026-10-18T01:00:00+00:00", "id": "call-1999"}}
 
     second_cursor: dict[str, dict[str, str]] = {}
     second = helper._model_activity(

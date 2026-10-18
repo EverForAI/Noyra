@@ -63,7 +63,9 @@ class StorageLayout:
         requiring the unprivileged service account to write a root-owned path.
         """
 
-        return self.backup_reason is None and self.backup_root.exists() and self.backup_root.is_dir()
+        return (
+            self.backup_reason is None and self.backup_root.exists() and self.backup_root.is_dir()
+        )
 
     @property
     def backup_reason_code(self) -> str | None:

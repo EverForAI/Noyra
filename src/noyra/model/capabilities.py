@@ -183,9 +183,7 @@ class CapabilityProfileStore:
                 (subject_id, provider_type, endpoint_hash, model.strip()),
             ).fetchone()
             if row is None:
-                efforts: tuple[ReasoningEffort, ...] = (
-                    candidate_profile.efforts or (effort,)
-                )
+                efforts: tuple[ReasoningEffort, ...] = candidate_profile.efforts or (effort,)
                 tested_efforts: tuple[ReasoningEffort, ...] = (effort,)
                 revision = 1
                 profile_id = new_id("mcap")

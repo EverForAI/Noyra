@@ -8395,9 +8395,7 @@ class NoyraHTTPServer:
                 if selected is not None and selected not in REASONING_EFFORTS:
                     raise ValueError("model draft reasoning effort is invalid")
                 profile = reasoning_profile(model)
-                reasoning_effort = (
-                    selected if selected in profile.candidate_efforts else None
-                )
+                reasoning_effort = selected if selected in profile.candidate_efforts else None
                 return base_url, model, SecretStr(keys[0]), reasoning_effort
 
             def _test_unstored_model_resource(self) -> None:

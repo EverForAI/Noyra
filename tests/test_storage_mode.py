@@ -73,7 +73,7 @@ def test_backup_mount_identity_accepts_expected_device(
     monkeypatch.setattr("noyra.core.storage_mode.BACKUP_STORAGE_IDENTITY_PATH", identity)
     monkeypatch.setattr(
         "noyra.core.storage_mode._findmnt",
-        lambda path: (("/dev/backup", True) if path == backups else (None, False)),
+        lambda path: ("/dev/backup", True) if path == backups else (None, False),
     )
     monkeypatch.setattr("noyra.core.storage_mode._fstab_expects_mount", lambda path: False)
 
@@ -106,7 +106,7 @@ def test_backup_mount_identity_fails_closed(
     monkeypatch.setattr("noyra.core.storage_mode.BACKUP_STORAGE_IDENTITY_PATH", identity)
     monkeypatch.setattr(
         "noyra.core.storage_mode._findmnt",
-        lambda path: ((source, mounted) if path == backups else (None, False)),
+        lambda path: (source, mounted) if path == backups else (None, False),
     )
     monkeypatch.setattr("noyra.core.storage_mode._fstab_expects_mount", lambda path: False)
 
