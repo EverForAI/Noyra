@@ -591,9 +591,11 @@ def main() -> int:
     append_snapshot(args.output, snapshot, max_bytes=args.max_bytes)
     collected_at = snapshot["collected_at"]
     if isinstance(collected_at, str):
+        persisted_activity_cursors = dict(activity_cursors or {})
+        persisted_activity_cursors.update(next_activity_cursors)
         next_state: dict[str, object] = {
             "cursor": collected_at,
-            "activity_cursors": next_activity_cursors or activity_cursors or {},
+            "activity_cursors": persisted_activity_cursors,
         }
         fault_window = snapshot.get("fault_window")
         if isinstance(fault_window, dict) and not fault_window.get("complete"):
