@@ -429,6 +429,55 @@ def _ascii_token_equal(supplied: object, expected: str) -> bool:
     )
 
 
+def _verify_trusted_proxy_principal(
+    principal: object,
+    timestamp: object,
+    signature: object,
+    peer_address: object,
+    *,
+    trusted_proxy_cidrs: tuple[str, ...],
+    hmac_key: SecretStr | None,
+    method: str,
+    path: str,
+    now: int | None = None,
+) -> str | None:
+    if (
+        hmac_key is None
+        or not isinstance(principal, str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}", principal)
+        or not isinstance(timestamp, str)
+        or re.fullmatch(r"[0-9]{1,12}", timestamp) is None
+        or not isinstance(signature, str)
+        or re.fullmatch(r"[0-9a-fA-F]{64}", signature) is None
+        or not isinstance(path, str)
+        or not path.startswith("/")
+        or len(path) > 4_096
+    ):
+        return None
+    try:
+        peer = ipaddress.ip_address(str(peer_address))
+        timestamp_value = int(timestamp)
+    except ValueError:
+        return None
+    if not any(peer in ipaddress.ip_network(cidr, strict=False) for cidr in trusted_proxy_cidrs):
+        return None
+    if abs((int(time.time()) if now is None else now) - timestamp_value) > 60:
+        return None
+    message = "\n".join(
+        (
+            "noyra-authenticated-principal/v1",
+            principal,
+            timestamp,
+            method.upper(),
+            path,
+        )
+    ).encode("utf-8")
+    expected = hmac.new(
+        hmac_key.get_secret_value().encode("utf-8"), message, hashlib.sha256
+    ).hexdigest()
+    return principal if hmac.compare_digest(signature.casefold(), expected) else None
+
+
 def _cognitive_resource_payload(
     record: CognitiveResourceGroupRecord, database: Database | None = None
 ) -> dict[str, Any]:
@@ -912,6 +961,7 @@ class ServiceSettings(BaseModel):
     ] = "external_signer_rebind"
     migration_local_wallet_transfer_enabled: bool = False
     migration_require_independent_review: bool = False
+    migration_proxy_principal_hmac_key: SecretStr | None = None
 
     @field_validator("trusted_proxy_cidrs", mode="before")
     @classmethod
@@ -1027,6 +1077,15 @@ class ServiceSettings(BaseModel):
                 raise ValueError("admin token must contain ASCII characters only") from error
         return value
 
+    @field_validator("migration_proxy_principal_hmac_key")
+    @classmethod
+    def validate_migration_proxy_principal_hmac_key(
+        cls, value: SecretStr | None
+    ) -> SecretStr | None:
+        if value is not None and len(value.get_secret_value().encode("utf-8")) < 32:
+            raise ValueError("migration proxy principal HMAC key must contain at least 32 bytes")
+        return value
+
     @model_validator(mode="after")
     def validate_listener_security(self) -> ServiceSettings:
         loopback = {"127.0.0.1", "::1", "localhost"}
@@ -1066,6 +1125,10 @@ class ServiceSettings(BaseModel):
             )
         if self.integrity_max_value_bytes > self.integrity_max_bytes_per_check:
             raise ValueError("integrity max value bytes cannot exceed the per-check byte budget")
+        if self.migration_require_independent_review and (
+            self.migration_proxy_principal_hmac_key is None
+        ):
+            raise ValueError("strict migration review requires a signed proxy principal HMAC key")
         if self.at_rest_mode == "required" and self.backup_keyring_path is None:
             raise ValueError("required at-rest mode needs NOYRA_BACKUP_KEYRING_PATH")
         if (
@@ -1162,6 +1225,16 @@ class ServiceSettings(BaseModel):
                 file_var="NOYRA_OPERATOR_TOKEN_FILE",
                 credential_var="NOYRA_OPERATOR_TOKEN_CREDENTIAL",
                 label="operator token",
+                allow_inline=profile != "production",
+            )
+        except CredentialError as error:
+            raise ValueError(str(error)) from error
+        try:
+            migration_proxy_principal_hmac_key = read_env_secret(
+                value_var="NOYRA_MIGRATION_PROXY_PRINCIPAL_HMAC_KEY",
+                file_var="NOYRA_MIGRATION_PROXY_PRINCIPAL_HMAC_KEY_FILE",
+                credential_var="NOYRA_MIGRATION_PROXY_PRINCIPAL_HMAC_KEY_CREDENTIAL",
+                label="migration proxy principal HMAC key",
                 allow_inline=profile != "production",
             )
         except CredentialError as error:
@@ -1349,6 +1422,11 @@ class ServiceSettings(BaseModel):
             ),
             migration_require_independent_review=cls._environment_flag(
                 "NOYRA_MIGRATION_REQUIRE_INDEPENDENT_REVIEW", "false"
+            ),
+            migration_proxy_principal_hmac_key=(
+                SecretStr(migration_proxy_principal_hmac_key)
+                if migration_proxy_principal_hmac_key
+                else None
             ),
         )
 
@@ -9144,20 +9222,16 @@ class NoyraHTTPServer:
 
             def _trusted_reviewer_principal(self) -> str | None:
                 principal = self.headers.get("X-Noyra-Authenticated-Principal", "").strip()
-                if not principal or len(principal) > 128:
-                    return None
-                try:
-                    peer = ipaddress.ip_address(str(self.client_address[0]))
-                except ValueError:
-                    return None
-                if not any(
-                    peer in ipaddress.ip_network(cidr, strict=False)
-                    for cidr in owner.settings.trusted_proxy_cidrs
-                ):
-                    return None
-                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}", principal):
-                    return None
-                return principal
+                return _verify_trusted_proxy_principal(
+                    principal,
+                    self.headers.get("X-Noyra-Principal-Timestamp", ""),
+                    self.headers.get("X-Noyra-Principal-Signature", ""),
+                    self.client_address[0],
+                    trusted_proxy_cidrs=owner.settings.trusted_proxy_cidrs,
+                    hmac_key=owner.settings.migration_proxy_principal_hmac_key,
+                    method=self.command,
+                    path=self.path,
+                )
 
             def _session_from_cookie(self) -> tuple[str, _AdminSession | None]:
                 cookie = SimpleCookie()

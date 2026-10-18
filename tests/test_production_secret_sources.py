@@ -34,6 +34,33 @@ def test_production_operator_token_rejects_inline_source() -> None:
         ServiceSettings.from_env()
 
 
+def test_production_strict_review_loads_proxy_hmac_key_from_private_file(
+    tmp_path: Path,
+) -> None:
+    key_path = tmp_path / "migration-proxy.key"
+    key_path.write_text("proxy-signing-key-that-is-at-least-32-bytes", encoding="utf-8")
+    if os.name == "posix":
+        key_path.chmod(0o600)
+    environment = {
+        "NOYRA_PROFILE": "production",
+        "NOYRA_DATA_DIR": str(tmp_path / "data"),
+        "NOYRA_SUBJECT_ID": "Noyra-signed-migration-review",
+        "NOYRA_GENESIS_HASH": content_hash({"test": "signed-migration-review"}),
+        "NOYRA_ADMIN_TOKEN": "admin-token-with-sufficient-entropy-123456",
+        "NOYRA_HOST": "127.0.0.1",
+        "NOYRA_AT_REST_MODE": "required",
+        "NOYRA_BACKUP_KEYRING_PATH": str(tmp_path / "backup.keys"),
+        "NOYRA_MIGRATION_REQUIRE_INDEPENDENT_REVIEW": "true",
+        "NOYRA_MIGRATION_PROXY_PRINCIPAL_HMAC_KEY_FILE": str(key_path),
+        "NOYRA_TRUSTED_PROXY_CIDRS": "127.0.0.1/32",
+    }
+    with patch.dict(os.environ, environment, clear=True):
+        settings = ServiceSettings.from_env()
+
+    assert settings.migration_proxy_principal_hmac_key is not None
+    assert settings.migration_proxy_principal_hmac_key.get_secret_value() == key_path.read_text()
+
+
 def test_production_model_group_rejects_inline_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NOYRA_PROFILE", "production")
     monkeypatch.setenv(

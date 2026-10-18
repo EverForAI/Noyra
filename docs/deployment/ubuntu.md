@@ -134,6 +134,33 @@ rate-limit bucket. Never enter a broad client or internet CIDR: that would let c
 source identity used by public-post and CAPTCHA abuse controls. Forwarded chains are bounded and
 parsed from the trusted proxy backwards.
 
+Strict migration review is separate from the default self-attested workflow. If
+`NOYRA_MIGRATION_REQUIRE_INDEPENDENT_REVIEW=true`, Noyra requires a proxy HMAC
+key of at least 32 bytes in the root-managed
+`NOYRA_MIGRATION_PROXY_PRINCIPAL_HMAC_KEY_FILE` (or a systemd credential). An
+authentication middleware must first verify the user's identity, discard any
+incoming `X-Noyra-Authenticated-Principal`, `X-Noyra-Principal-Timestamp`, and
+`X-Noyra-Principal-Signature` headers, then set the principal and current Unix
+timestamp and sign this UTF-8 text with HMAC-SHA256:
+
+```text
+noyra-authenticated-principal/v1
+<principal>
+<timestamp>
+<METHOD>
+<path-and-query>
+```
+
+The fields above are separated by single newline bytes.
+
+Send the lowercase hex digest as `X-Noyra-Principal-Signature`. Noyra accepts
+the assertion only from a configured trusted proxy and only within 60 seconds.
+The stock Nginx and Caddy examples strip these headers; they do not authenticate
+users or issue principal assertions. This proves that the configured identity
+middleware signed the assertion and that two approval subjects differ. It does
+not prove two natural persons if the identity provider lets one person create
+or control multiple accounts.
+
 Public submissions always enter moderation first. The default limit is 10 posts per client bucket
 per hour, with independent CAPTCHA issuance, global issuance, pending-queue, content-byte, row-count,
 and free-disk backstops. Configure the exposed limits in `/admin` under Runtime Guardrails; the
