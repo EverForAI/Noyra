@@ -189,7 +189,9 @@ class CapabilityProfileStore:
                 profile_id = new_id("mcap")
             else:
                 current = self._from_row(row)
-                efforts = current.efforts
+                efforts = tuple(
+                    item for item in REASONING_EFFORTS if item in (*current.efforts, effort)
+                )
                 if effort not in candidate_profile.candidate_efforts:
                     raise ValueError("reasoning effort is not a candidate for this model")
                 if current.status == "known" and not _is_expired(current.expires_at):

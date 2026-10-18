@@ -1026,6 +1026,43 @@ class ServiceTestCase(unittest.TestCase):
         secret_dir = self.data_dir / "secrets" / "models"
         self.assertEqual(list(secret_dir.glob("*")), [])
 
+    def test_probed_alias_can_be_saved_with_only_the_tested_effort(self: Self) -> None:
+        payload = {
+            "pool": "economy",
+            "label": "probed-alias",
+            "base_url": "https://models.example/v1",
+            "model": "provider-alias",
+            "api_keys": ["alias-resource-secret"],
+            "reasoning_effort": "high",
+        }
+        with patch.object(
+            OpenAICompatibleProvider,
+            "probe_unstored",
+            new=AsyncMock(return_value={"ok": True, "model": "provider-alias"}),
+        ):
+            status, observed = self.authorized_json(
+                "/api/config/model-resources/test",
+                payload={
+                    "base_url": payload["base_url"],
+                    "model": payload["model"],
+                    "api_keys": payload["api_keys"],
+                    "reasoning_effort": "high",
+                },
+            )
+        self.assertEqual(status, 200)
+        assert isinstance(observed, dict)
+        self.assertEqual(observed["reasoning_profile"]["tested_efforts"], ["high"])
+
+        status, created = self.authorized_json("/api/config/model-resources", payload=payload)
+        self.assertEqual(status, 201)
+        assert isinstance(created, dict)
+        status, resources = self.authorized_json("/api/config/model-resources?view=summary")
+        self.assertEqual(status, 200)
+        assert isinstance(resources, list)
+        item = next(item for item in resources if item["group_id"] == created["group_id"])
+        self.assertEqual(item["reasoning_profile"]["selected"], "high")
+        self.assertEqual(item["reasoning_profile"]["tested_efforts"], ["high"])
+
     def test_model_capability_endpoint_is_authenticated_and_server_owned(self: Self) -> None:
         unauthorized_request = Request(
             f"{self.base_url}/api/config/model-capabilities?model=gpt-5-mini",
@@ -1198,6 +1235,15 @@ class ServiceTestCase(unittest.TestCase):
         with self.assertRaises(HTTPError) as unverified:
             self.authorized_json("/api/config/model-resources", payload=unverified_reasoning)
         self.assertEqual(unverified.exception.code, 409)
+        unverified_alias = {
+            **payload,
+            "label": "unverified-alias-reasoning",
+            "model": "provider-alias",
+            "reasoning_effort": "high",
+        }
+        with self.assertRaises(HTTPError) as alias_unverified:
+            self.authorized_json("/api/config/model-resources", payload=unverified_alias)
+        self.assertEqual(alias_unverified.exception.code, 409)
 
         status, created = self.authorized_json("/api/config/model-resources", payload=payload)
         self.assertEqual(status, 201)

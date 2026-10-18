@@ -241,7 +241,11 @@ class OpenAICompatibleProvider:
                 raise ProviderCallError(
                     "provider_response_invalid", retryable=False, outcome_unknown=True
                 ) from error
-            if not isinstance(probe_payload, dict) or probe_payload.get("ok") is not True:
+            if (
+                not isinstance(probe_payload, dict)
+                or set(probe_payload) != {"ok"}
+                or probe_payload["ok"] is not True
+            ):
                 raise ProviderCallError(
                     "provider_response_invalid", retryable=False, outcome_unknown=True
                 )

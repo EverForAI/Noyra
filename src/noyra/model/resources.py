@@ -52,6 +52,7 @@ from noyra.core.types import (
     utc_now,
 )
 
+from .capabilities import CapabilityProfileStore
 from .config import OpenAICompatibleSettings
 from .errors import (
     BudgetExhaustedError,
@@ -64,7 +65,7 @@ from .errors import (
 from .gateway import ModelGateway
 from .ledger import ModelLedger
 from .openai_compatible import OpenAICompatibleProvider
-from .reasoning import ReasoningEffort, normalize_reasoning_effort, reasoning_profile
+from .reasoning import ReasoningEffort, reasoning_profile
 from .types import (
     BudgetLimits,
     CallRecord,
@@ -279,11 +280,6 @@ class CognitiveResourceGroupInput(BaseModel):
             raise ValueError("cognitive resource key cannot be blank")
         if len(fingerprints) != len(set(fingerprints)):
             raise ValueError("duplicate cognitive resource keys are not allowed")
-        if self.reasoning_effort is not None:
-            profile = reasoning_profile(self.model, self.provider_type)
-            if not profile.supported:
-                raise ValueError("reasoning effort is not supported by this model")
-            normalize_reasoning_effort(self.model, self.reasoning_effort, self.provider_type)
         return self
 
 
@@ -3530,6 +3526,26 @@ class RoutedModelGateway(ModelGateway):
         *,
         max_attempts: int | None = None,
     ) -> ModelGateway:
+        reasoning_verified = False
+        if group.reasoning_effort is not None:
+            capability = CapabilityProfileStore(self.database).get(
+                self.subject_id, group.provider_type, group.base_url, group.model
+            )
+            if capability is None:
+                if not reasoning_profile(group.model, group.provider_type).supported:
+                    raise ProviderCallError(
+                        "model_capability_probe_required", retryable=False, outcome_unknown=False
+                    )
+            elif (
+                capability.status != "known"
+                or capability.parameter != "reasoning_effort"
+                or group.reasoning_effort not in capability.tested_efforts
+            ):
+                raise ProviderCallError(
+                    "model_capability_probe_required", retryable=False, outcome_unknown=False
+                )
+            else:
+                reasoning_verified = True
         settings = OpenAICompatibleSettings(
             base_url=group.base_url,
             model=group.model,
@@ -3553,6 +3569,7 @@ class RoutedModelGateway(ModelGateway):
             resource_key_id=key.key_id,
             resource_key_fingerprint=key.key_fingerprint,
             reasoning_effort=group.reasoning_effort,
+            reasoning_capability_verified=reasoning_verified,
             capture_model_io=self.capture_model_io,
             capture_model_io_getter=self.capture_model_io_getter,
             enforce_training_policy=self.enforce_training_policy,
@@ -4080,7 +4097,13 @@ def resource_groups_from_env(pool: CognitivePool) -> tuple[CognitiveResourceGrou
                     )
                 )
             normalized["api_keys"] = tuple(SecretStr(value) for value in resolved_keys)
-            groups.append(CognitiveResourceGroupInput.model_validate(normalized))
+            proposal = CognitiveResourceGroupInput.model_validate(normalized)
+            if (
+                proposal.reasoning_effort is not None
+                and not reasoning_profile(proposal.model, proposal.provider_type).supported
+            ):
+                raise ValueError("reasoning effort for model aliases requires an endpoint probe")
+            groups.append(proposal)
     except (TypeError, ValueError) as error:
         raise ConfigurationError(f"invalid {pool} model group configuration: {error}") from error
     return tuple(groups)

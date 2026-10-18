@@ -429,15 +429,26 @@ def _ascii_token_equal(supplied: object, expected: str) -> bool:
     )
 
 
-def _cognitive_resource_payload(record: CognitiveResourceGroupRecord) -> dict[str, Any]:
+def _cognitive_resource_payload(
+    record: CognitiveResourceGroupRecord, database: Database | None = None
+) -> dict[str, Any]:
     payload = dict(record.__dict__)
     payload["exact_budget"] = {
         field: str(getattr(record, field)) for field in _MODEL_RESOURCE_EXACT_FIELDS
     }
-    payload["reasoning_profile"] = reasoning_profile_payload(
-        record.model,
-        record.provider_type,
-        selected=record.reasoning_effort,
+    capability = (
+        CapabilityProfileStore(database).get(
+            record.subject_id, record.provider_type, record.base_url, record.model
+        )
+        if database is not None
+        else None
+    )
+    payload["reasoning_profile"] = (
+        capability.public(selected=record.reasoning_effort)
+        if capability is not None
+        else reasoning_profile_payload(
+            record.model, record.provider_type, selected=record.reasoning_effort
+        )
     )
     return payload
 
@@ -4562,7 +4573,8 @@ class NoyraHTTPServer:
                         )
                         return
                     model_payloads = [
-                        _cognitive_resource_payload(group) for group in model_resource_records
+                        _cognitive_resource_payload(group, owner.kernel.database)
+                        for group in model_resource_records
                     ]
                     if query.get("view", [""])[0] == "management":
                         try:
@@ -8319,6 +8331,7 @@ class NoyraHTTPServer:
                         if (
                             capability is None
                             or capability.status != "known"
+                            or capability.parameter != "reasoning_effort"
                             or proposal.reasoning_effort not in capability.tested_efforts
                         ):
                             self._json(
@@ -8812,7 +8825,10 @@ class NoyraHTTPServer:
                         {"error": "invalid_model_resource_update"},
                     )
                     return
-                self._json(HTTPStatus.OK, _cognitive_resource_payload(record))
+                self._json(
+                    HTTPStatus.OK,
+                    _cognitive_resource_payload(record, owner.kernel.database),
+                )
 
             def _add_model_resource_keys(self) -> None:
                 if not self._authorized():
