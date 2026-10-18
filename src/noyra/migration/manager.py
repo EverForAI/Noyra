@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -89,9 +90,16 @@ class MigrationTask:
 
 
 class MigrationManager:
-    def __init__(self, database: Database, policy_store: MigrationStore):
+    def __init__(
+        self,
+        database: Database,
+        policy_store: MigrationStore,
+        *,
+        require_principal_identity: bool = False,
+    ):
         self.database = database
         self.policy_store = policy_store
+        self.require_principal_identity = require_principal_identity
 
     def create_proposal(
         self,
@@ -186,10 +194,19 @@ class MigrationManager:
         actor: str,
         idempotency_key: str,
         identity_binding: str | None = None,
+        reviewer_principal: str | None = None,
     ) -> MigrationTask:
         assert_current_lease()
         self._validate_actor(actor)
         identity_binding = self._normalize_identity_binding(identity_binding)
+        reviewer_principal = self._normalize_reviewer_principal(reviewer_principal)
+        if reviewer_principal is not None:
+            principal_binding = hashlib.sha256(
+                f"noyra-reviewer-principal:{reviewer_principal}".encode()
+            ).hexdigest()
+            if identity_binding is not None and identity_binding != principal_binding:
+                raise MigrationApprovalError("migration_identity_binding_mismatch")
+            identity_binding = principal_binding
         if (
             not isinstance(idempotency_key, str)
             or not idempotency_key.strip()
@@ -245,8 +262,15 @@ class MigrationManager:
                 for approval in approval_rows:
                     self._assert_approval_integrity(approval)
                 required = 2 if row["approval_mode"] == "dual_review" else 1
-                if required == 2 and identity_binding is None:
-                    raise MigrationApprovalError("migration_dual_review_identity_required")
+                if required == 2 and (
+                    identity_binding is None
+                    or (self.require_principal_identity and reviewer_principal is None)
+                ):
+                    raise MigrationApprovalError(
+                        "migration_reviewer_principal_required"
+                        if self.require_principal_identity
+                        else "migration_dual_review_identity_required"
+                    )
                 existing_approval = next(
                     (
                         approval
@@ -911,6 +935,16 @@ class MigrationManager:
         ):
             raise ValueError("migration identity binding is invalid")
         return identity_binding
+
+    @staticmethod
+    def _normalize_reviewer_principal(principal: str | None) -> str | None:
+        if principal is None:
+            return None
+        if not isinstance(principal, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}", principal.strip()
+        ):
+            raise ValueError("migration reviewer principal is invalid")
+        return principal.strip()
 
     @staticmethod
     def _parse_timestamp(value: str) -> datetime:

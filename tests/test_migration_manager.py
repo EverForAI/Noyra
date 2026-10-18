@@ -208,6 +208,51 @@ def test_dual_review_distinguishes_sessions_with_the_same_actor(tmp_path: Any) -
     assert approved.status == "approved"
 
 
+def test_strict_dual_review_requires_distinct_authenticated_principals(tmp_path: Any) -> None:
+    db, manager = _manager(tmp_path)
+    strict = MigrationManager(db, manager.policy_store, require_principal_identity=True)
+    policy = strict.policy_store.read_policy("Noyra-0001")
+    policy = strict.policy_store.update_policy(
+        "Noyra-0001", policy.revision, {"approval_mode": "dual_review"}, "operator"
+    )
+    proposal = strict.create_proposal(
+        subject_id="Noyra-0001",
+        target_id="target-1",
+        policy_revision=policy.revision,
+        reason_code="maintenance",
+        reason="planned",
+        expires_at="2099-01-01T00:00:00+00:00",
+    )
+    with pytest.raises(MigrationApprovalError, match="reviewer_principal_required"):
+        strict.approve(
+            proposal.proposal_id,
+            actor="operator",
+            idempotency_key="strict-one",
+            identity_binding="a" * 64,
+        )
+    pending = strict.approve(
+        proposal.proposal_id,
+        actor="operator",
+        idempotency_key="strict-one",
+        reviewer_principal="alice",
+    )
+    assert pending.status == "awaiting_approval"
+    replay = strict.approve(
+        proposal.proposal_id,
+        actor="operator",
+        idempotency_key="strict-one",
+        reviewer_principal="alice",
+    )
+    assert replay.status == "awaiting_approval"
+    approved = strict.approve(
+        proposal.proposal_id,
+        actor="operator",
+        idempotency_key="strict-one",
+        reviewer_principal="bob",
+    )
+    assert approved.status == "approved"
+
+
 def test_legacy_unbound_approval_cannot_satisfy_dual_review(tmp_path: Any) -> None:
     db, manager = _manager(tmp_path)
     policy = manager.policy_store.read_policy("Noyra-0001")

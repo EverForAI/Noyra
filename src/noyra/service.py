@@ -900,6 +900,7 @@ class ServiceSettings(BaseModel):
         "external_signer_rebind", "local_wallet_transfer", "disabled"
     ] = "external_signer_rebind"
     migration_local_wallet_transfer_enabled: bool = False
+    migration_require_independent_review: bool = False
 
     @field_validator("trusted_proxy_cidrs", mode="before")
     @classmethod
@@ -1312,7 +1313,14 @@ class ServiceSettings(BaseModel):
             ),
             migration_enabled=cls._environment_flag("NOYRA_MIGRATION_ENABLED", "false"),
             migration_approval_mode=cast(
-                Literal["disabled", "manual", "policy_auto", "emergency_recovery"],
+                Literal[
+                    "disabled",
+                    "manual",
+                    "self_attested",
+                    "dual_review",
+                    "policy_auto",
+                    "emergency_recovery",
+                ],
                 os.getenv("NOYRA_MIGRATION_APPROVAL_MODE", "disabled").strip().lower(),
             ),
             migration_rejection_cooldown_days=int(
@@ -1327,6 +1335,9 @@ class ServiceSettings(BaseModel):
             ),
             migration_local_wallet_transfer_enabled=cls._environment_flag(
                 "NOYRA_MIGRATION_LOCAL_WALLET_TRANSFER_ENABLED", "false"
+            ),
+            migration_require_independent_review=cls._environment_flag(
+                "NOYRA_MIGRATION_REQUIRE_INDEPENDENT_REVIEW", "false"
             ),
         )
 
@@ -1585,7 +1596,11 @@ class NoyraHTTPServer:
         )
         self.migration_targets = TargetRegistry(kernel.database, self.migration_store)
         self.migration_proposals = MigrationProposalStore(kernel.database)
-        self.migration_manager = MigrationManager(kernel.database, self.migration_store)
+        self.migration_manager = MigrationManager(
+            kernel.database,
+            self.migration_store,
+            require_principal_identity=settings.migration_require_independent_review,
+        )
         database_path = (settings.data_dir / "noyra.sqlite3").resolve()
         self.migration_http_executor = HTTPMigrationExecutor(
             target_resolver=self._migration_http_target,
@@ -5174,12 +5189,13 @@ class NoyraHTTPServer:
                     if payload is None:
                         return
                     try:
-                        actor, identity_binding = self._approval_identity()
+                        actor, identity_binding, reviewer_principal = self._approval_identity()
                         task = owner.migration_manager.approve(
                             proposal_id,
                             actor=actor,
                             idempotency_key=str(payload.get("idempotency_key", proposal_id)),
                             identity_binding=identity_binding,
+                            reviewer_principal=reviewer_principal,
                         )
                     except Exception as error:
                         code = getattr(error, "code", None)
@@ -9087,7 +9103,7 @@ class NoyraHTTPServer:
                 _session_id, session = self._session_from_cookie()
                 return session.actor if session is not None else "web-operator"
 
-            def _approval_identity(self) -> tuple[str, str | None]:
+            def _approval_identity(self) -> tuple[str, str | None, str | None]:
                 """Return an audit label and a non-secret review binding."""
                 supplied = self.headers.get("Authorization", "")
                 for role, secret in (
@@ -9101,11 +9117,33 @@ class NoyraHTTPServer:
                         binding = hashlib.sha256(
                             f"noyra-admin-principal:{owner.kernel.subject_id}:{role}".encode()
                         ).hexdigest()
-                        return f"web-{role}", binding
+                        actor = f"web-{role}"
+                        if owner.settings.migration_require_independent_review:
+                            return actor, None, self._trusted_reviewer_principal()
+                        return actor, binding, None
                 session_id, session = self._session_from_cookie()
                 if session is None:
-                    return self._actor(), None
-                return session.actor, owner._admin_session_hash(session_id)
+                    return self._actor(), None, self._trusted_reviewer_principal()
+                if owner.settings.migration_require_independent_review:
+                    return session.actor, None, self._trusted_reviewer_principal()
+                return session.actor, owner._admin_session_hash(session_id), None
+
+            def _trusted_reviewer_principal(self) -> str | None:
+                principal = self.headers.get("X-Noyra-Authenticated-Principal", "").strip()
+                if not principal or len(principal) > 128:
+                    return None
+                try:
+                    peer = ipaddress.ip_address(str(self.client_address[0]))
+                except ValueError:
+                    return None
+                if not any(
+                    peer in ipaddress.ip_network(cidr, strict=False)
+                    for cidr in owner.settings.trusted_proxy_cidrs
+                ):
+                    return None
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}", principal):
+                    return None
+                return principal
 
             def _session_from_cookie(self) -> tuple[str, _AdminSession | None]:
                 cookie = SimpleCookie()
