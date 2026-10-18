@@ -199,7 +199,11 @@
 | P2-06 backup GC audit durability | 已修复。apply 删除前必须成功写入 durable planned run；数据库缺失、表缺失、只读或锁错误都会 fail closed。 | `77b5f1a` |
 | P3-01 ancestor reparse check | 已修复。路径检查逐层走到根目录，不在第一个已存在目录处提前停止，并覆盖祖先 symlink 测试。 | `e552cde` |
 
-整改后的目标测试结果为 156 passed、1 skipped、172 subtests passed；前端 Node 测试 116 passed；shell 合同 6 个通过；`ruff check`、`ruff format --check` 和 `mypy --python-version 3.12 src tests` 通过。完整 pytest、真实 Ubuntu/systemd 安装重启、独立卷拔除、真实 provider 矩阵以及连续 soak 仍未在本机完成，因此这些仍是发布前的环境验收项，而不是代码整改已通过的证据。
+本轮收尾复核还修正了 8 项随 schema 95/99、新 capability registry 和 self-attested 默认模式变化而过期的测试夹具/断言，并将 schema 80 升级夹具改为显式复制旧列，避免 `SELECT *` 把当前 schema 误当成历史 schema。迁移测试修复分别提交为 `4238b2b` 和 `e3eb6b6`。
+
+最终针对审计项的 pytest 子集为 131 passed、2 subtests passed；受影响的完整测试文件集合为 131 passed、2 subtests passed；M41 smoke gate 为 289 passed、7 subtests passed。全仓静态复核通过：9 个 shell 合同、`ruff check .`、`ruff format --check .`、`mypy --python-version 3.12 src tests`、`pip check` 和 `compileall`。全量 pytest 运行完成，结果为 2666 passed、59 skipped、285 subtests passed、1 failed；唯一失败是 Windows 本地 HTTP 测试 `test_retired_erasure_http_routes_cannot_mutate_chat` 在 DELETE 请求期间遇到 `ConnectionAbortedError`。该用例随后单独连续运行 10 次全部通过，故目前表现为全量运行中的间歇性测试/本机 socket 异常，不能据此宣称全量 pytest 全绿，也没有证据将其归因为生产行为回归。
+
+审计中列出的 P1/P2/P3 代码问题均已按上表完成修复并提交。A-E 的代码整改与本地合同门禁已完成；真实 Ubuntu/systemd 安装重启、独立卷拔除、真实 provider 矩阵、跨机恢复和连续 soak 仍未在本机完成，因此 A-E 尚不能标记为生产环境验收闭环，也不能以本地测试替代这些证据。
 
 ### 整改后的剩余边界
 
