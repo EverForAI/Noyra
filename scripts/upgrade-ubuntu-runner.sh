@@ -65,6 +65,14 @@ storage_identity_mount_available() {
       return 1
     fi
     if [[ "$identity" == "$identity_root/storage-identity.conf" && -f "$identity" ]]; then
+      local identity_metadata identity_owner identity_nlink identity_mode identity_permissions
+      identity_metadata="$(stat -c '%u:%h:%a' -- "$identity" 2>/dev/null || true)"
+      IFS=: read -r identity_owner identity_nlink identity_mode <<< "$identity_metadata"
+      [[ "$identity_owner" == 0 && "$identity_nlink" == 1 ]] || return 1
+      [[ "$identity_mode" =~ ^[0-7]{3,4}$ ]] || return 1
+      identity_permissions="${identity_mode: -3}"
+      [[ "${identity_permissions:1:1}" =~ ^[0145]$ &&
+        "${identity_permissions:2:1}" =~ ^[0145]$ ]] || return 1
       read -r current_source current_target < <(findmnt -n -o SOURCE,TARGET --target "$data_root")
       [[ -n "$current_source" && "$current_target" == "$data_root" ]] || return 1
       [[ "$(grep -c '^NOYRA_STORAGE_IDENTITY_FORMAT=' "$identity")" == 1 ]] || return 1

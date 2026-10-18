@@ -250,7 +250,7 @@ def _external_mount_identity(data_root: Path) -> dict[str, str] | None:
     if not identity_data_root.is_absolute():
         raise StorageUnavailableError("storage_identity_invalid")
     if identity_data_root.resolve() != data_root.resolve():
-        return None
+        raise StorageUnavailableError("storage_identity_path_mismatch")
     return {
         "source": values["NOYRA_STORAGE_SOURCE"],
         "data_dir": values["NOYRA_STORAGE_DATA_DIR"],
@@ -298,7 +298,7 @@ def _external_backup_mount_identity(backup_root: Path) -> dict[str, str] | None:
     if not identity_root.is_absolute():
         raise StorageUnavailableError("backup_storage_identity_invalid")
     if identity_root.resolve() != backup_root.resolve():
-        return None
+        raise StorageUnavailableError("backup_storage_identity_path_mismatch")
     return {"source": values["NOYRA_BACKUP_STORAGE_SOURCE"]}
 
 

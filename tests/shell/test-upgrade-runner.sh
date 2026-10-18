@@ -160,20 +160,41 @@ cat > "$test_root/storage-bin/findmnt" <<'FINDMNT'
 #!/usr/bin/env bash
 printf '%s %s\n' "${NOYRA_TEST_MOUNT_SOURCE:-/dev/expected}" "$NOYRA_TEST_MOUNT_TARGET"
 FINDMNT
-chmod 0755 "$test_root/storage-bin/mountpoint" "$test_root/storage-bin/findmnt"
+cat > "$test_root/storage-bin/stat" <<'STAT'
+#!/usr/bin/env bash
+if [[ "${*: -1}" == "$NOYRA_TEST_IDENTITY_PATH" ]]; then
+  printf '%s\n' "${NOYRA_TEST_IDENTITY_METADATA:-0:1:640}"
+else
+  exec /usr/bin/stat "$@"
+fi
+STAT
+chmod 0755 "$test_root/storage-bin/mountpoint" "$test_root/storage-bin/findmnt" \
+  "$test_root/storage-bin/stat"
 storage_function="$(sed -n '/^storage_identity_mount_available()/,/^ensure_native_storage_layout()/ { /^ensure_native_storage_layout()/d; p; }' "$runner")"
 PATH="$test_root/storage-bin:$PATH" \
 NOYRA_TEST_MOUNT_TARGET="$test_root/data" \
 NOYRA_UPGRADE_TEST_IDENTITY_ROOT="$identity_root" \
+NOYRA_TEST_IDENTITY_PATH="$identity_root/storage-identity.conf" \
 bash -c "$storage_function; TEST_MODE=true; storage_identity_mount_available \"\$1\"" bash "$test_root/data" || \
   fail 'runner rejected the expected storage source'
 if PATH="$test_root/storage-bin:$PATH" \
   NOYRA_TEST_MOUNT_SOURCE=/dev/wrong \
   NOYRA_TEST_MOUNT_TARGET="$test_root/data" \
   NOYRA_UPGRADE_TEST_IDENTITY_ROOT="$identity_root" \
+  NOYRA_TEST_IDENTITY_PATH="$identity_root/storage-identity.conf" \
   bash -c "$storage_function; TEST_MODE=true; storage_identity_mount_available \"\$1\"" bash "$test_root/data"; then
   fail 'runner accepted a wrong storage source'
 fi
+for metadata in 1000:1:640 0:2:640 0:1:660 0:1:646; do
+  if PATH="$test_root/storage-bin:$PATH" \
+    NOYRA_TEST_IDENTITY_METADATA="$metadata" \
+    NOYRA_TEST_MOUNT_TARGET="$test_root/data" \
+    NOYRA_UPGRADE_TEST_IDENTITY_ROOT="$identity_root" \
+    NOYRA_TEST_IDENTITY_PATH="$identity_root/storage-identity.conf" \
+    bash -c "$storage_function; TEST_MODE=true; storage_identity_mount_available \"\$1\"" bash "$test_root/data"; then
+    fail "runner accepted unsafe identity metadata: $metadata"
+  fi
+done
 
 # A missing test storage root is an explicit skipped recovery, not a generic
 # runner failure, and the recovery path must not recreate the directory.

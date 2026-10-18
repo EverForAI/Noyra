@@ -131,10 +131,19 @@ def _storage_check_command(arguments: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="python -m noyra storage-check")
     parser.add_argument("--data-dir", type=Path, default=Path("/var/lib/noyra"))
     parser.add_argument("--backup-dir", type=Path, default=Path("/var/backups/noyra"))
+    parser.add_argument(
+        "--require-backup",
+        action="store_true",
+        help="return an unavailable exit status unless the configured backup path is ready",
+    )
     options = parser.parse_args(arguments)
     layout = detect_storage_layout(options.data_dir, options.backup_dir)
     print(json.dumps(layout.public(), sort_keys=True))
-    if layout.mode is StorageMode.UNAVAILABLE or not layout.writable:
+    if (
+        layout.mode is StorageMode.UNAVAILABLE
+        or not layout.writable
+        or (options.require_backup and not layout.backup_ready)
+    ):
         raise SystemExit(78)
 
 

@@ -11,6 +11,7 @@ from noyra.core.storage_mode import (
     STORAGE_IDENTITY_FORMAT,
     STORAGE_MARKER_FORMAT,
     STORAGE_MARKER_NAME,
+    StorageLayout,
     StorageMode,
     StorageUnavailableError,
     check_headroom,
@@ -256,6 +257,88 @@ def test_external_mount_identity_rejects_wrong_device(
 
     assert layout.mode is StorageMode.UNAVAILABLE
     assert layout.reason_code == "storage_mount_identity_mismatch"
+
+
+def test_external_mount_identity_rejects_a_different_data_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = tmp_path / "data"
+    other_data = tmp_path / "other-data"
+    data.mkdir()
+    other_data.mkdir()
+    identity = tmp_path / "storage-identity.conf"
+    identity.write_text(
+        "\n".join(
+            (
+                f"NOYRA_STORAGE_IDENTITY_FORMAT={STORAGE_IDENTITY_FORMAT}",
+                f"NOYRA_STORAGE_DATA_DIR={data}",
+                "NOYRA_STORAGE_MODE=dedicated_mount",
+                "NOYRA_STORAGE_SOURCE=/dev/expected",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("noyra.core.storage_mode.STORAGE_IDENTITY_PATH", identity)
+    monkeypatch.setattr("noyra.core.storage_mode._findmnt", lambda path: ("/dev/root", False))
+    monkeypatch.setattr("noyra.core.storage_mode._fstab_expects_mount", lambda path: False)
+
+    with pytest.raises(StorageUnavailableError, match="storage_identity_path_mismatch"):
+        detect_storage_layout(other_data, tmp_path / "backups")
+
+
+def test_backup_mount_identity_rejects_a_different_backup_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = tmp_path / "data"
+    backups = tmp_path / "backups"
+    other_backups = tmp_path / "other-backups"
+    data.mkdir()
+    backups.mkdir()
+    other_backups.mkdir()
+    identity = tmp_path / "backup-storage-identity.conf"
+    _write_backup_identity(identity, backups, "/dev/backup")
+    monkeypatch.setattr("noyra.core.storage_mode.BACKUP_STORAGE_IDENTITY_PATH", identity)
+    monkeypatch.setattr("noyra.core.storage_mode._findmnt", lambda path: ("/dev/root", False))
+    monkeypatch.setattr("noyra.core.storage_mode._fstab_expects_mount", lambda path: False)
+
+    with pytest.raises(StorageUnavailableError, match="backup_storage_identity_path_mismatch"):
+        detect_storage_layout(data, other_backups)
+
+
+def test_storage_check_can_require_backup_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from noyra.__main__ import _storage_check_command
+
+    layout = StorageLayout(
+        tmp_path / "data",
+        tmp_path / "backups",
+        tmp_path / "data" / "upgrade",
+        StorageMode.SYSTEM_DISK,
+        None,
+        None,
+        True,
+        "backup_path_missing",
+    )
+    monkeypatch.setattr("noyra.core.storage_mode.detect_storage_layout", lambda *_: layout)
+
+    _storage_check_command(
+        ["--data-dir", str(layout.data_root), "--backup-dir", str(layout.backup_root)]
+    )
+    assert '"backup_ready": false' in capsys.readouterr().out
+
+    with pytest.raises(SystemExit) as error:
+        _storage_check_command(
+            [
+                "--data-dir",
+                str(layout.data_root),
+                "--backup-dir",
+                str(layout.backup_root),
+                "--require-backup",
+            ]
+        )
+    assert error.value.code == 78
 
 
 def test_invalid_explicit_storage_mode_fails_closed(
