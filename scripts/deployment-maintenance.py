@@ -527,8 +527,11 @@ def _action_exists(releases: Path, backups: Path, action: dict[str, Any]) -> boo
             marker = read_marker(marker_path)
             if (
                 marker is None
+                or marker.get("format") != "noyra-verified-upgrade-backup/v1"
                 or marker.get("backup") != name
                 or marker.get("sha256") != action.get("sha256")
+                or marker.get("restore_verified") is not True
+                or marker.get("size", action.get("size")) != action.get("size")
             ):
                 raise ValueError("unsafe_backup_path")
             marker_path.unlink()
