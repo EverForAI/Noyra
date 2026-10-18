@@ -1129,6 +1129,8 @@ class ServiceSettings(BaseModel):
             self.migration_proxy_principal_hmac_key is None
         ):
             raise ValueError("strict migration review requires a signed proxy principal HMAC key")
+        if self.migration_require_independent_review and not self.trusted_proxy_cidrs:
+            raise ValueError("strict migration review requires trusted proxy CIDRs")
         if self.at_rest_mode == "required" and self.backup_keyring_path is None:
             raise ValueError("required at-rest mode needs NOYRA_BACKUP_KEYRING_PATH")
         if (

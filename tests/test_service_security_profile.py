@@ -48,6 +48,7 @@ def test_strict_migration_review_requires_a_proxy_hmac_key() -> None:
     configured = _settings(
         migration_require_independent_review=True,
         migration_proxy_principal_hmac_key=SecretStr("p" * 32),
+        trusted_proxy_cidrs=("127.0.0.1/32",),
     )
     assert configured.migration_require_independent_review is True
 
