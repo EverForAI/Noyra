@@ -275,7 +275,11 @@ def test_route_counter_backfill_isolation_rollback_and_tampering(
 
     with monkeypatch.context() as old:
         old.setattr(schema, "CURRENT_SCHEMA_VERSION", 91)
-        db, subject, gateway, _, _, _ = setup_route(tmp_path)
+        db = Database(tmp_path / "noyra.sqlite3")
+        subject = "Noyra-route-capacity"
+        IdentityStore(db).ensure(subject, "a" * 64)
+        resources = CognitiveResourceStore(db, tmp_path / "secrets")
+        gateway = RoutedModelGateway(db, subject, resources)
         decision(gateway)
         gateway._record_unavailable("economy", "world_cognition:old", "missing")
     db = Database(db.path)
