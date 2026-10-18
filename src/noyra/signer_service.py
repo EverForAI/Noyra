@@ -170,8 +170,12 @@ class SignerState:
             "CREATE TABLE IF NOT EXISTS signer_requests ("
             "request_id TEXT PRIMARY KEY, transfer_hash TEXT NOT NULL, status TEXT NOT NULL,"
             "tx_hash TEXT, chain_id INTEGER NOT NULL, nonce INTEGER NOT NULL,"
-            "gas_limit INTEGER NOT NULL, max_fee_per_gas TEXT NOT NULL, accepted_at TEXT)"
+            "gas_limit INTEGER NOT NULL, max_fee_per_gas TEXT NOT NULL, accepted_at TEXT,"
+            "transfer_json TEXT)"
         )
+        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(signer_requests)")}
+        if "transfer_json" not in columns:
+            connection.execute("ALTER TABLE signer_requests ADD COLUMN transfer_json TEXT")
         connection.commit()
         return cls(connection)
 
@@ -315,7 +319,9 @@ class SignerEngine:
             raw, tx_hash = self._sign(checked)
             self._admit(checked)
             self.state.connection.execute(
-                "INSERT INTO signer_requests VALUES (?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO signer_requests("
+                "request_id,transfer_hash,status,tx_hash,chain_id,nonce,gas_limit,"
+                "max_fee_per_gas,accepted_at,transfer_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
                     request_id,
                     transfer_hash,
@@ -326,6 +332,7 @@ class SignerEngine:
                     checked.gas_limit,
                     checked.max_fee_per_gas,
                     None,
+                    canonical_json(checked.model_dump(mode="json")),
                 ),
             )
             # Make the pending marker durable before any network side effect.
@@ -355,6 +362,27 @@ class SignerEngine:
         if chain_id != self.chain_id:
             raise SignerError("receipt request rejected")
         requested = _hash(tx_hash)
+        with self.state.lock:
+            request = self.state.connection.execute(
+                "SELECT transfer_hash,chain_id,nonce,status,transfer_json "
+                "FROM signer_requests WHERE tx_hash=? AND chain_id=?",
+                (requested, chain_id),
+            ).fetchone()
+        if request is None:
+            return None
+        if request["status"] not in {"pending", "unknown", "broadcast"}:
+            raise SignerError("receipt request rejected")
+        try:
+            saved_payload = json.loads(request["transfer_json"])
+            expected_transfer = parse_transfer(saved_payload)
+        except (TypeError, ValueError, KeyError) as error:
+            raise SignerError("receipt request envelope is unavailable") from error
+        if (
+            _transfer_hash(expected_transfer) != request["transfer_hash"]
+            or expected_transfer.chain_id != int(request["chain_id"])
+            or expected_transfer.nonce != int(request["nonce"])
+        ):
+            raise SignerError("receipt request envelope is invalid")
         raw = self.rpc.call("eth_getTransactionReceipt", [requested])
         if raw is None:
             return None
@@ -372,6 +400,13 @@ class SignerEngine:
             raise SignerError("receipt is invalid")
         if _quantity(tx.get("chainId"), maximum=SQLITE_INT64_MAX) != self.chain_id:
             raise SignerError("receipt is invalid")
+        if (
+            canonical_evm_address(tx.get("to", "")) != expected_transfer.to_address
+            or _quantity(tx.get("nonce"), maximum=SQLITE_INT64_MAX) != expected_transfer.nonce
+            or _quantity(tx.get("value")) != int(expected_transfer.value)
+            or tx.get("input", tx.get("data")) != expected_transfer.data
+        ):
+            raise SignerError("receipt transaction does not match the broadcast request")
         canonical_block = self.rpc.call("eth_getBlockByNumber", [hex(block), False])
         if (
             not isinstance(canonical_block, Mapping)
@@ -386,7 +421,7 @@ class SignerEngine:
             1 if status == 1 else 0,
             block,
             block_hash.lower(),
-            latest - block + 1,
+            max(0, latest - block + 1),
         )
 
 

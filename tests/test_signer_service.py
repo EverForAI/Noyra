@@ -47,6 +47,9 @@ class FakeRPC:
         self.sent_raw_transactions: list[str] = []
         self.raise_after_send: BaseException | None = None
         self.receipts: dict[str, dict[str, Any]] = {}
+        self.transactions: dict[str, dict[str, Any]] = {}
+        self.blocks: dict[str, dict[str, Any]] = {}
+        self.latest_block = 1
 
     def call(self, method: str, params: list[object]) -> object:
         if method == "eth_chainId":
@@ -71,11 +74,11 @@ class FakeRPC:
         if method == "eth_getTransactionReceipt":
             return self.receipts.get(str(params[0]).lower())
         if method == "eth_getTransactionByHash":
-            return None
+            return self.transactions.get(str(params[0]).lower())
         if method == "eth_getBlockByNumber":
-            return None
+            return self.blocks.get(str(params[0]).lower())
         if method == "eth_blockNumber":
-            return "0x1"
+            return hex(self.latest_block)
         raise AssertionError(f"unexpected RPC method: {method}")
 
 
@@ -142,7 +145,9 @@ def test_ambiguous_broadcast_is_persisted_and_never_retried(engine: SignerEngine
 def test_pending_request_is_fail_closed_after_restart(tmp_path: Path, account: Any) -> None:
     state = SignerState.open(tmp_path / "signer.sqlite3")
     state.connection.execute(
-        "INSERT INTO signer_requests VALUES (?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO signer_requests("
+        "request_id,transfer_hash,status,tx_hash,chain_id,nonce,gas_limit,max_fee_per_gas,"
+        "accepted_at) VALUES (?,?,?,?,?,?,?,?,?)",
         (
             "request-pending",
             _transfer_hash_for_test(),
@@ -266,6 +271,45 @@ def test_http_receipt_not_found_is_404(http_server: SignerHTTPServer) -> None:
         TOKEN,
     )
     assert response.status_code == 404
+
+
+def test_receipt_requires_matching_broadcast_envelope_and_clamps_stale_rpc_height(
+    engine: SignerEngine,
+) -> None:
+    transfer = native_transfer()
+    broadcast = engine.transfer("receipt-bound-request", transfer)
+    rpc = fake_rpc(engine)
+    block_hash = "0x" + "ab" * 32
+    rpc.receipts[broadcast.tx_hash] = {
+        "transactionHash": broadcast.tx_hash,
+        "status": "0x1",
+        "blockNumber": "0x5",
+        "blockHash": block_hash,
+    }
+    rpc.transactions[broadcast.tx_hash] = {
+        "hash": broadcast.tx_hash,
+        "from": engine.address,
+        "chainId": hex(CHAIN_ID),
+        "nonce": hex(transfer.nonce),
+        "to": transfer.to_address,
+        "value": hex(int(transfer.value)),
+        "input": transfer.data,
+    }
+    rpc.blocks["0x5"] = {"number": "0x5", "hash": block_hash}
+    rpc.latest_block = 4
+
+    receipt = engine.receipt(broadcast.tx_hash, CHAIN_ID)
+    assert receipt is not None
+    assert receipt.confirmations == 0
+
+    rpc.transactions[broadcast.tx_hash]["to"] = "0x3333333333333333333333333333333333333333"
+    with pytest.raises(SignerError, match="does not match the broadcast request"):
+        engine.receipt(broadcast.tx_hash, CHAIN_ID)
+
+
+def test_receipt_does_not_query_unregistered_transaction(engine: SignerEngine) -> None:
+    assert engine.receipt("0x" + "cc" * 32, CHAIN_ID) is None
+    assert fake_rpc(engine).transactions == {}
 
 
 def test_http_server_rejects_non_loopback_bind(account: Any, tmp_path: Path) -> None:
