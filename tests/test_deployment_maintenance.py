@@ -192,6 +192,28 @@ def test_backup_gc_required_audit_blocks_when_history_table_is_missing(tmp_path:
         )
 
 
+def test_backup_gc_required_audit_blocks_when_database_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = _helper()
+    database = tmp_path / "noyra.sqlite3"
+    database.touch()
+    plan = {"plan_id": "a" * 64, "cursor": {"version": 1}}
+
+    def fail_connection(*_args: Any, **_kwargs: Any) -> Any:
+        raise helper.sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(helper.sqlite3, "connect", fail_connection)
+    with pytest.raises(RuntimeError, match="backup_retention_audit_unavailable"):
+        helper._record_backup_gc_run(
+            database,
+            "Noyra-retention-audit",
+            plan,
+            status="applied",
+            required=True,
+        )
+
+
 def test_persisted_backup_policy_hash_failure_blocks_root_helper(tmp_path: Path) -> None:
     from noyra.core import Database, IdentityStore
     from noyra.core.retention import RetentionManager, RetentionSettings
@@ -334,6 +356,98 @@ def test_apply_gc_rechecks_backup_digest_after_preview(tmp_path: Path) -> None:
     helper.apply_gc(releases, backups, plan)
     assert not target.exists()
     assert not target.with_name(target.name + ".verified.json").exists()
+
+
+def test_backup_gc_resumes_from_durable_cursor_after_process_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from noyra.core import Database, IdentityStore
+    from noyra.core.types import content_hash
+
+    helper = _helper(root_markers=True)
+    releases, backups = tmp_path / "releases", tmp_path / "backups"
+    releases.mkdir()
+    backups.mkdir()
+    release = releases / "old-release"
+    release.mkdir()
+    (release / helper.MARKER).write_text(
+        json.dumps({"format": "noyra-verified-install/v1", "readiness": "passed"}),
+        encoding="utf-8",
+    )
+    backup = backups / "noyra-resume.noyra-backup"
+    backup.write_bytes(b"verified-backup")
+    backup.with_name(backup.name + ".verified.json").write_text(
+        json.dumps(
+            {
+                "format": "noyra-verified-upgrade-backup/v1",
+                "backup": backup.name,
+                "restore_verified": True,
+                "sha256": helper.file_hash(backup),
+            }
+        ),
+        encoding="utf-8",
+    )
+    database = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-resumable-backup-gc"
+    IdentityStore(database).ensure(subject, content_hash(subject))
+    plan = {
+        "plan_id": "a" * 64,
+        "releases": [release.name],
+        "backups": [backup.name],
+        "backup_details": [
+            {
+                "name": backup.name,
+                "size": backup.stat().st_size,
+                "sha256": helper.file_hash(backup),
+                "reason": "test",
+            }
+        ],
+    }
+    update = helper._update_backup_gc_run
+
+    def interrupt_after_first_delete(
+        database_path: Path,
+        run_id: str,
+        *,
+        status: str,
+        cursor: dict[str, Any],
+        deleted_count: int,
+        failure_code: str | None = None,
+        required: bool = True,
+    ) -> None:
+        if status == "planned" and deleted_count == 1:
+            raise KeyboardInterrupt
+        update(
+            database_path,
+            run_id,
+            status=status,
+            cursor=cursor,
+            deleted_count=deleted_count,
+            failure_code=failure_code,
+            required=required,
+        )
+
+    monkeypatch.setattr(helper, "_update_backup_gc_run", interrupt_after_first_delete)
+    first_release = release
+    with pytest.raises(KeyboardInterrupt):
+        helper.apply_resumable_gc(database.path, subject, releases, backups, plan)
+    assert not first_release.exists()
+
+    monkeypatch.setattr(helper, "_update_backup_gc_run", update)
+    result = helper.apply_resumable_gc(database.path, subject, releases, backups, plan)
+
+    assert result["resumed"] is True
+    assert result["deleted_count"] == 2
+    assert not release.exists()
+    assert not backup.exists()
+    assert not backup.with_name(backup.name + ".verified.json").exists()
+    with database.connection() as connection:
+        row = connection.execute(
+            "SELECT status, deleted_count, cursor_json FROM backup_retention_runs"
+        ).fetchone()
+    assert row["status"] == "applied"
+    assert row["deleted_count"] == result["deleted_count"]
+    assert json.loads(row["cursor_json"])["next_index"] == 2
 
 
 def test_gc_ignores_unmanaged_releases_and_requires_verified_replacement(tmp_path: Path) -> None:

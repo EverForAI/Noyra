@@ -31,6 +31,7 @@ from noyra.core.types import content_hash
 SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 MARKER = ".noyra-verified-install.json"
 PROCESS_REFERENCE_BYTES = 1_048_576
+MAX_RESUMABLE_GC_ACTIONS = 1_000
 
 read_marker = _read_marker
 file_hash = _file_hash
@@ -101,11 +102,12 @@ def _record_backup_gc_run(
     deleted_count: int = 0,
     failure_code: str | None = None,
     required: bool = False,
-) -> bool:
+    cursor_override: dict[str, Any] | None = None,
+) -> str | None:
     if subject_id is None or not database_path.is_file() or database_path.is_symlink():
         if required:
             raise RuntimeError("backup_retention_audit_unavailable")
-        return False
+        return None
     values = {
         "run_id": f"backupretention_{os.urandom(16).hex()}",
         "subject_id": subject_id,
@@ -115,7 +117,11 @@ def _record_backup_gc_run(
             None if status == "planned" else datetime.now(UTC).isoformat(timespec="milliseconds")
         ),
         "status": status,
-        "cursor_json": json.dumps(plan.get("cursor", {}), sort_keys=True, separators=(",", ":")),
+        "cursor_json": json.dumps(
+            cursor_override if cursor_override is not None else plan.get("cursor", {}),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
         "deleted_count": deleted_count,
         "failure_code": failure_code,
     }
@@ -128,7 +134,7 @@ def _record_backup_gc_run(
             if table is None:
                 if required:
                     raise RuntimeError("backup_retention_audit_unavailable")
-                return False
+                return None
             connection.execute(
                 "INSERT INTO backup_retention_runs VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (*values.values(), state_hash),
@@ -136,8 +142,107 @@ def _record_backup_gc_run(
     except sqlite3.DatabaseError as error:
         if required:
             raise RuntimeError("backup_retention_audit_unavailable") from error
-        return False
-    return True
+        return None
+    return str(values["run_id"])
+
+
+def _backup_gc_run_row_state(row: tuple[Any, ...], columns: list[str]) -> dict[str, Any]:
+    state = dict(zip(columns, row, strict=True))
+    state_hash = state.pop("state_hash", None)
+    if not isinstance(state_hash, str) or content_hash(state) != state_hash:
+        raise ValueError("backup_retention_run_integrity")
+    return state
+
+
+def _load_pending_backup_gc_run(
+    database_path: Path, subject_id: str
+) -> tuple[str, str, dict[str, Any], int] | None:
+    try:
+        with sqlite3.connect(database_path) as connection:
+            cursor = connection.execute(
+                "SELECT * FROM backup_retention_runs WHERE subject_id=? AND status='planned' "
+                "ORDER BY started_at DESC",
+                (subject_id,),
+            )
+            columns = [str(column[0]) for column in cursor.description or ()]
+            rows = cursor.fetchall()
+    except sqlite3.DatabaseError as error:
+        raise ValueError("backup_retention_audit_unavailable") from error
+    resumable: list[tuple[str, str, dict[str, Any], int]] = []
+    for row in rows:
+        state = _backup_gc_run_row_state(row, columns)
+        try:
+            payload = json.loads(str(state["cursor_json"]))
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("backup_retention_cursor_invalid") from error
+        if isinstance(payload, dict) and payload.get("version") == 2:
+            next_index = payload.get("next_index")
+            actions = payload.get("actions")
+            if (
+                type(next_index) is not int
+                or next_index < 0
+                or not isinstance(actions, list)
+                or next_index > len(actions)
+            ):
+                raise ValueError("backup_retention_cursor_invalid")
+            resumable.append(
+                (
+                    str(state["run_id"]),
+                    str(state["plan_id"]),
+                    payload,
+                    int(state["deleted_count"]),
+                )
+            )
+    if len(resumable) > 1:
+        raise ValueError("backup_retention_multiple_pending_runs")
+    return resumable[0] if resumable else None
+
+
+def _update_backup_gc_run(
+    database_path: Path,
+    run_id: str,
+    *,
+    status: str,
+    cursor: dict[str, Any],
+    deleted_count: int,
+    failure_code: str | None = None,
+    required: bool = True,
+) -> None:
+    if status not in {"planned", "applied", "failed"} or deleted_count < 0:
+        raise ValueError("backup_retention_run_state_invalid")
+    try:
+        with sqlite3.connect(database_path) as connection:
+            cursor_result = connection.execute(
+                "SELECT * FROM backup_retention_runs WHERE run_id=?", (run_id,)
+            )
+            columns = [str(column[0]) for column in cursor_result.description or ()]
+            row = cursor_result.fetchone()
+            if row is None:
+                raise ValueError("backup_retention_run_missing")
+            state = _backup_gc_run_row_state(row, columns)
+            now = datetime.now(UTC).isoformat(timespec="milliseconds")
+            state["completed_at"] = None if status == "planned" else now
+            state["status"] = status
+            state["cursor_json"] = json.dumps(cursor, sort_keys=True, separators=(",", ":"))
+            state["deleted_count"] = deleted_count
+            state["failure_code"] = failure_code
+            state["state_hash"] = content_hash(state)
+            connection.execute(
+                "UPDATE backup_retention_runs SET completed_at=?,status=?,cursor_json=?,"
+                "deleted_count=?,failure_code=?,state_hash=? WHERE run_id=?",
+                (
+                    state["completed_at"],
+                    status,
+                    state["cursor_json"],
+                    deleted_count,
+                    failure_code,
+                    state["state_hash"],
+                    run_id,
+                ),
+            )
+    except (OSError, sqlite3.DatabaseError) as error:
+        if required:
+            raise RuntimeError("backup_retention_audit_unavailable") from error
 
 
 def safe_directory(path: Path, *, owned: bool = True) -> Path:
@@ -380,10 +485,95 @@ def gc_plan(
     }
 
 
-def apply_gc(releases: Path, backups: Path, plan: dict[str, Any]) -> None:
+def _gc_actions(releases: Path, plan: dict[str, Any]) -> list[dict[str, Any]]:
+    actions = [
+        {
+            "kind": "release",
+            "name": name,
+            "marker_sha256": file_hash(releases / name / MARKER),
+        }
+        for name in plan["releases"]
+    ]
+    actions.extend(
+        {
+            "kind": "backup",
+            "name": item["name"],
+            "size": item["size"],
+            "sha256": item["sha256"],
+        }
+        for item in plan["backup_details"]
+    )
+    return actions
+
+
+def _action_exists(releases: Path, backups: Path, action: dict[str, Any]) -> bool:
+    name = action.get("name")
+    kind = action.get("kind")
+    if not isinstance(name, str) or Path(name).name != name:
+        raise ValueError("backup_retention_cursor_invalid")
+    if kind == "release":
+        path = releases / name
+        if path.is_symlink():
+            raise ValueError("unsafe_release_path")
+        return path.exists()
+    if kind == "backup":
+        path = backups / name
+        marker_path = path.with_name(path.name + ".verified.json")
+        if path.is_symlink() or marker_path.is_symlink():
+            raise ValueError("unsafe_backup_path")
+        if path.exists():
+            return True
+        if marker_path.exists():
+            marker = read_marker(marker_path)
+            if (
+                marker is None
+                or marker.get("backup") != name
+                or marker.get("sha256") != action.get("sha256")
+            ):
+                raise ValueError("unsafe_backup_path")
+            marker_path.unlink()
+        return False
+    raise ValueError("backup_retention_cursor_invalid")
+
+
+def _require_action_still_planned(
+    action: dict[str, Any], releases: Path, plan: dict[str, Any]
+) -> None:
+    name = action.get("name")
+    if action.get("kind") == "release":
+        if name not in plan["releases"]:
+            raise ValueError("backup_retention_resume_plan_changed")
+        marker_path = releases / str(name) / MARKER
+        if marker_path.is_symlink() or file_hash(marker_path) != action.get("marker_sha256"):
+            raise ValueError("backup_retention_resume_plan_changed")
+        return
+    if action.get("kind") == "backup":
+        current = {
+            item["name"]: item for item in plan["backup_details"] if isinstance(item, dict)
+        }.get(name)
+        if (
+            current is None
+            or current.get("sha256") != action.get("sha256")
+            or current.get("size") != action.get("size")
+        ):
+            raise ValueError("backup_retention_resume_plan_changed")
+        return
+    raise ValueError("backup_retention_cursor_invalid")
+
+
+def apply_gc(
+    releases: Path,
+    backups: Path,
+    plan: dict[str, Any],
+    *,
+    on_applied: Any = None,
+) -> None:
     # Caller holds the install lock; privileged parent directories exclude other writers.
     release_paths: list[Path] = []
     release_names = plan["releases"]
+    release_details = {
+        item.get("name"): item for item in plan.get("release_details", []) if isinstance(item, dict)
+    }
     if len(set(release_names)) != len(release_names):
         raise ValueError("duplicate_release_name")
     for name in release_names:
@@ -396,6 +586,10 @@ def apply_gc(releases: Path, backups: Path, plan: dict[str, Any]) -> None:
             or not verified_release(path)
         ):
             raise ValueError("unsafe_release_path")
+        if release_details:
+            detail = release_details.get(name)
+            if detail is None or file_hash(path / MARKER) != detail.get("marker_sha256"):
+                raise ValueError("unsafe_release_path")
         release_paths.append(path)
 
     backup_paths: list[tuple[Path, Path]] = []
@@ -429,9 +623,134 @@ def apply_gc(releases: Path, backups: Path, plan: dict[str, Any]) -> None:
 
     for path in release_paths:
         shutil.rmtree(path)
+        if on_applied is not None:
+            on_applied("release", path.name)
     for path, marker_path in backup_paths:
         path.unlink()
         marker_path.unlink()
+        if on_applied is not None:
+            on_applied("backup", path.name)
+
+
+def apply_resumable_gc(
+    database_path: Path,
+    subject_id: str,
+    releases: Path,
+    backups: Path,
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    pending = _load_pending_backup_gc_run(database_path, subject_id)
+    resumed = pending is not None
+    if pending is None:
+        actions = _gc_actions(releases, plan)
+        if len(actions) > MAX_RESUMABLE_GC_ACTIONS:
+            raise ValueError("backup_retention_plan_too_large")
+        cursor: dict[str, Any] = {"version": 2, "actions": actions, "next_index": 0}
+        run_id = _record_backup_gc_run(
+            database_path,
+            subject_id,
+            plan,
+            status="planned",
+            required=True,
+            cursor_override=cursor,
+        )
+        if run_id is None:
+            raise RuntimeError("backup_retention_audit_unavailable")
+        plan_id = str(plan["plan_id"])
+        deleted_count = 0
+    else:
+        run_id, plan_id, cursor, deleted_count = pending
+        actions = cursor["actions"]
+        if len(actions) > MAX_RESUMABLE_GC_ACTIONS:
+            raise ValueError("backup_retention_cursor_invalid")
+
+    next_index = int(cursor["next_index"])
+    try:
+        for index in range(next_index, len(actions)):
+            action = actions[index]
+            if not isinstance(action, dict):
+                raise ValueError("backup_retention_cursor_invalid")
+            if not _action_exists(releases, backups, action):
+                next_index = index + 1
+                deleted_count += 1
+                cursor["next_index"] = next_index
+                _update_backup_gc_run(
+                    database_path,
+                    run_id,
+                    status="planned",
+                    cursor=cursor,
+                    deleted_count=deleted_count,
+                )
+                continue
+
+            _require_action_still_planned(action, releases, plan)
+            name = str(action["name"])
+            if action["kind"] == "release":
+                action_plan: dict[str, Any] = {
+                    "releases": [name],
+                    "release_details": [{"name": name, "marker_sha256": action["marker_sha256"]}],
+                    "backups": [],
+                    "backup_details": [],
+                }
+            else:
+                detail = next(
+                    item
+                    for item in plan["backup_details"]
+                    if item["name"] == name and item["sha256"] == action["sha256"]
+                )
+                action_plan = {
+                    "releases": [],
+                    "backups": [name],
+                    "backup_details": [detail],
+                }
+
+            def record_progress(
+                kind: str,
+                applied_name: str,
+                expected_kind: str = action["kind"],
+                expected_name: str = name,
+                next_index_value: int = index + 1,
+            ) -> None:
+                nonlocal deleted_count, next_index
+                if kind != expected_kind or applied_name != expected_name:
+                    raise ValueError("backup_retention_progress_mismatch")
+                next_index = next_index_value
+                deleted_count += 1
+                cursor["next_index"] = next_index
+                _update_backup_gc_run(
+                    database_path,
+                    run_id,
+                    status="planned",
+                    cursor=cursor,
+                    deleted_count=deleted_count,
+                )
+
+            apply_gc(releases, backups, action_plan, on_applied=record_progress)
+
+        cursor["next_index"] = len(actions)
+        _update_backup_gc_run(
+            database_path,
+            run_id,
+            status="applied",
+            cursor=cursor,
+            deleted_count=deleted_count,
+            required=True,
+        )
+    except Exception as error:
+        try:
+            _update_backup_gc_run(
+                database_path,
+                run_id,
+                status="failed",
+                cursor=cursor,
+                deleted_count=deleted_count,
+                failure_code=type(error).__name__,
+                required=True,
+            )
+        except Exception as audit_error:
+            raise RuntimeError("backup_retention_terminal_audit_unavailable") from audit_error
+        raise
+    return {"plan_id": plan_id, "resumed": resumed, "deleted_count": deleted_count}
 
 
 def main() -> int:
@@ -516,36 +835,26 @@ def main() -> int:
                     keep=args.keep,
                     backup_policy=policy,
                 )
-                _record_backup_gc_run(
-                    database_path,
-                    subject_id,
-                    plan,
-                    status="planned",
-                    required=args.apply,
-                )
                 if args.apply:
-                    try:
-                        apply_gc(args.releases, args.backups, plan)
-                    except Exception as error:
-                        _record_backup_gc_run(
-                            database_path,
-                            subject_id,
-                            plan,
-                            status="failed",
-                            failure_code=type(error).__name__,
-                        )
-                        raise
-                    _record_backup_gc_run(
+                    if subject_id is None:
+                        raise RuntimeError("backup_retention_audit_unavailable")
+                    execution = apply_resumable_gc(
                         database_path,
                         subject_id,
+                        args.releases,
+                        args.backups,
                         plan,
-                        status="applied",
-                        deleted_count=len(plan["backups"]),
                     )
+                else:
+                    execution = None
             finally:
                 if opened:
                     os.close(descriptor)
-            result = {"status": "applied" if args.apply else "preview", **plan}
+            result = {
+                "status": "applied" if args.apply else "preview",
+                "execution": execution,
+                **plan,
+            }
         print(json.dumps(result, sort_keys=True))
         return 0
     except Exception as error:

@@ -10,6 +10,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
@@ -22,6 +23,7 @@ _SYSTEMD_FIELDS = {"ActiveState", "SubState", "MainPID", "NRestarts", "Result"}
 MAX_OUTPUT_BYTES = 100_000_000
 MAX_ACTIVITY_ROWS = 2_000
 FAULT_WINDOW_SECONDS = 900
+ACTIVITY_CURSOR_VERSION = 2
 
 
 def _safe_label(value: object) -> str | None:
@@ -268,6 +270,8 @@ def _model_activity(
             connection.set_progress_handler(lambda: 1, 50_000)
             calls: list[tuple[object, ...]] = []
             attempts: list[tuple[object, ...]] = []
+            in_progress_calls = 0
+            in_progress_attempts = 0
             call_cursor = cursors.get("calls") if isinstance(cursors, dict) else None
             attempt_cursor = cursors.get("attempts") if isinstance(cursors, dict) else None
 
@@ -286,20 +290,29 @@ def _model_activity(
             if _table_exists(connection, "model_calls"):
                 calls = connection.execute(
                     "SELECT call_id, created_at, completed_at, status, error_code "
-                    "FROM model_calls WHERE (created_at > ? OR "
-                    "(created_at = ? AND call_id > ?)) AND created_at <= ? "
-                    "ORDER BY created_at, call_id LIMIT ?",
+                    "FROM model_calls WHERE completed_at IS NOT NULL AND "
+                    "(completed_at > ? OR (completed_at = ? AND call_id > ?)) "
+                    "AND completed_at <= ? ORDER BY completed_at, call_id LIMIT ?",
                     (call_timestamp, call_timestamp, call_id, end, MAX_ACTIVITY_ROWS),
                 ).fetchall()
+                in_progress_calls = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM model_calls WHERE completed_at IS NULL"
+                    ).fetchone()[0]
+                )
             if _table_exists(connection, "model_attempts"):
                 attempts = connection.execute(
                     "SELECT attempt_id, started_at, completed_at, status, error_code "
-                    "FROM model_attempts WHERE (COALESCE(started_at, completed_at) > ? OR "
-                    "(COALESCE(started_at, completed_at) = ? AND attempt_id > ?)) "
-                    "AND COALESCE(started_at, completed_at) <= ? "
-                    "ORDER BY COALESCE(started_at, completed_at), attempt_id LIMIT ?",
+                    "FROM model_attempts WHERE completed_at IS NOT NULL AND "
+                    "(completed_at > ? OR (completed_at = ? AND attempt_id > ?)) "
+                    "AND completed_at <= ? ORDER BY completed_at, attempt_id LIMIT ?",
                     (attempt_timestamp, attempt_timestamp, attempt_id, end, MAX_ACTIVITY_ROWS),
                 ).fetchall()
+                in_progress_attempts = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM model_attempts WHERE completed_at IS NULL"
+                    ).fetchone()[0]
+                )
     except (sqlite3.Error, OSError, ValueError) as error:
         return {"available": False, "error": type(error).__name__}
 
@@ -340,12 +353,12 @@ def _model_activity(
 
     if cursor_sink is not None:
         if calls:
-            timestamp = calls[-1][1]
+            timestamp = calls[-1][2]
             item_id = calls[-1][0]
             if isinstance(timestamp, str) and isinstance(item_id, str):
                 cursor_sink["calls"] = {"timestamp": timestamp, "id": item_id}
         if attempts:
-            timestamp = attempts[-1][1] or attempts[-1][2]
+            timestamp = attempts[-1][2]
             item_id = attempts[-1][0]
             if isinstance(timestamp, str) and isinstance(item_id, str):
                 cursor_sink["attempts"] = {"timestamp": timestamp, "id": item_id}
@@ -356,17 +369,26 @@ def _model_activity(
         "limited": len(calls) >= MAX_ACTIVITY_ROWS or len(attempts) >= MAX_ACTIVITY_ROWS,
         "calls": summarize(calls),
         "attempts": summarize(attempts),
+        "in_progress": {"calls": in_progress_calls, "attempts": in_progress_attempts},
     }
 
 
-def _read_state(path: Path) -> dict[str, object]:
+def _read_state(path: Path) -> tuple[dict[str, object], str | None]:
     try:
-        if path.is_symlink() or path.stat().st_size > 16_384:
-            return {}
+        if path.is_symlink():
+            return {}, "symlink"
+        if path.stat().st_size > 16_384:
+            return {}, "oversized"
         value = json.loads(path.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
-        return {}
+        if not isinstance(value, dict):
+            return {}, "invalid_shape"
+        return value, None
+    except FileNotFoundError:
+        return {}, None
+    except OSError:
+        return {}, "unreadable"
+    except (UnicodeError, ValueError):
+        return {}, "invalid_json"
 
 
 def _write_state(path: Path, state: dict[str, object]) -> None:
@@ -571,12 +593,21 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=Path("/var/log/noyra/soak.jsonl"))
     parser.add_argument("--state", type=Path, default=Path("/var/log/noyra/soak-state.json"))
     parser.add_argument("--max-bytes", type=int, default=10_000_000)
-    args = parser.parse_args()
-    state = _read_state(args.state)
+    args = parser.parse_args(sys.argv[1:])
+    state, state_reset_reason = _read_state(args.state)
     cursor = state.get("cursor")
     activity_cursors = state.get("activity_cursors")
-    if not isinstance(activity_cursors, dict):
+    if activity_cursors is not None and not isinstance(activity_cursors, dict):
+        state_reset_reason = state_reset_reason or "invalid_activity_cursors"
         activity_cursors = None
+    if isinstance(activity_cursors, dict) and state.get("activity_cursor_version") != (
+        ACTIVITY_CURSOR_VERSION
+    ):
+        state_reset_reason = state_reset_reason or "activity_cursor_version_changed"
+        activity_cursors = None
+    if cursor is not None and not isinstance(cursor, str):
+        state_reset_reason = state_reset_reason or "invalid_snapshot_cursor"
+        cursor = None
     next_activity_cursors: dict[str, dict[str, str]] = {}
     snapshot = collect_snapshot(
         data_dir=args.data_dir,
@@ -588,6 +619,8 @@ def main() -> int:
         fault_state=state,
         output=args.output,
     )
+    if state_reset_reason is not None:
+        snapshot["state_reset_reason"] = state_reset_reason
     append_snapshot(args.output, snapshot, max_bytes=args.max_bytes)
     collected_at = snapshot["collected_at"]
     if isinstance(collected_at, str):
@@ -596,6 +629,7 @@ def main() -> int:
         next_state: dict[str, object] = {
             "cursor": collected_at,
             "activity_cursors": persisted_activity_cursors,
+            "activity_cursor_version": ACTIVITY_CURSOR_VERSION,
         }
         fault_window = snapshot.get("fault_window")
         if isinstance(fault_window, dict) and not fault_window.get("complete"):

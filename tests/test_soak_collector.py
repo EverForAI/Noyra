@@ -170,7 +170,13 @@ def test_model_activity_keyset_cursor_drains_rows_beyond_limit(tmp_path: Path) -
     connection.executemany(
         "INSERT INTO model_calls VALUES (?, ?, ?, ?, ?)",
         [
-            (f"call-{index:04d}", "2026-10-18T01:00:00+00:00", None, "ok", None)
+            (
+                f"call-{index:04d}",
+                "2026-10-18T01:00:00+00:00",
+                "2026-10-18T01:00:00+00:00",
+                "ok",
+                None,
+            )
             for index in range(helper.MAX_ACTIVITY_ROWS + 5)
         ],
     )
@@ -197,6 +203,107 @@ def test_model_activity_keyset_cursor_drains_rows_beyond_limit(tmp_path: Path) -
     )
     assert second["calls"]["rows"] == 5
     assert second_cursor["calls"]["id"] == "call-2004"
+
+
+def test_model_activity_revisits_rows_when_inflight_calls_complete(tmp_path: Path) -> None:
+    helper = _helper()
+    database = tmp_path / "noyra.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "CREATE TABLE model_calls (call_id TEXT, created_at TEXT, completed_at TEXT, "
+        "status TEXT, error_code TEXT)"
+    )
+    connection.execute(
+        "CREATE TABLE model_attempts (attempt_id TEXT, started_at TEXT, completed_at TEXT, "
+        "status TEXT, error_code TEXT)"
+    )
+    connection.execute(
+        "INSERT INTO model_calls VALUES (?, ?, ?, ?, ?)",
+        ("call-long", "2026-10-18T00:01:00+00:00", None, "running", None),
+    )
+    connection.execute(
+        "INSERT INTO model_attempts VALUES (?, ?, ?, ?, ?)",
+        ("attempt-long", "2026-10-18T00:01:00+00:00", None, "running", None),
+    )
+    connection.commit()
+    connection.close()
+
+    pending_cursors: dict[str, dict[str, str]] = {}
+    pending = helper._model_activity(
+        database,
+        since="2026-10-18T00:00:00+00:00",
+        until="2026-10-18T00:02:00+00:00",
+        cursor_sink=pending_cursors,
+    )
+    assert pending["calls"]["rows"] == 0
+    assert pending["attempts"]["rows"] == 0
+    assert pending["in_progress"] == {"calls": 1, "attempts": 1}
+    assert pending_cursors == {}
+
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "UPDATE model_calls SET completed_at=?, status=?, error_code=? WHERE call_id=?",
+        ("2026-10-18T00:03:00+00:00", "failed", "provider_timeout", "call-long"),
+    )
+    connection.execute(
+        "UPDATE model_attempts SET completed_at=?, status=?, error_code=? WHERE attempt_id=?",
+        ("2026-10-18T00:03:00+00:00", "failed", "provider_timeout", "attempt-long"),
+    )
+    connection.commit()
+    connection.close()
+
+    completed_cursors: dict[str, dict[str, str]] = {}
+    completed = helper._model_activity(
+        database,
+        since="2026-10-18T00:00:00+00:00",
+        until="2026-10-18T00:04:00+00:00",
+        cursor_sink=completed_cursors,
+    )
+    assert completed["calls"]["statuses"] == {"failed": 1}
+    assert completed["attempts"]["errors"] == {"provider_timeout": 1}
+    assert completed_cursors == {
+        "calls": {"timestamp": "2026-10-18T00:03:00+00:00", "id": "call-long"},
+        "attempts": {"timestamp": "2026-10-18T00:03:00+00:00", "id": "attempt-long"},
+    }
+
+
+def test_state_corruption_is_recorded_in_snapshot_and_cursor_version_migrates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = _helper()
+    state = tmp_path / "soak-state.json"
+    output = tmp_path / "soak.jsonl"
+    state.write_text("{truncated", encoding="utf-8")
+    assert helper._read_state(state) == ({}, "invalid_json")
+
+    snapshot = {"collected_at": "2026-10-18T01:02:03+00:00"}
+    monkeypatch.setattr(helper, "collect_snapshot", lambda **_kwargs: dict(snapshot))
+    monkeypatch.setattr(
+        helper,
+        "sys",
+        type("Args", (), {"argv": ["collector", "--state", str(state), "--output", str(output)]})(),
+    )
+
+    assert helper.main() == 0
+    record = json.loads(output.read_text(encoding="utf-8"))
+    assert record["state_reset_reason"] == "invalid_json"
+    saved_state = json.loads(state.read_text(encoding="utf-8"))
+    assert saved_state["activity_cursor_version"] == helper.ACTIVITY_CURSOR_VERSION
+
+    state.write_text(
+        json.dumps(
+            {
+                "cursor": "2026-10-18T01:00:00+00:00",
+                "activity_cursors": {
+                    "calls": {"timestamp": "2026-10-18T01:00:00+00:00", "id": "old-call"}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert helper.main() == 0
+    records = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    assert records[-1]["state_reset_reason"] == "activity_cursor_version_changed"
 
 
 def test_degraded_snapshot_contains_bounded_fault_window(tmp_path: Path) -> None:
