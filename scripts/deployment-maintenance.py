@@ -25,6 +25,7 @@ from noyra.core.backup_retention import backup_gc_plan_id as _backup_gc_plan_id
 from noyra.core.backup_retention import backup_inventory as _backup_inventory
 from noyra.core.backup_retention import file_hash as _file_hash
 from noyra.core.backup_retention import read_marker as _read_marker
+from noyra.core.storage_mode import detect_storage_layout
 from noyra.core.types import content_hash
 
 SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -457,6 +458,10 @@ def main() -> int:
         safe_directory(args.releases)
         if args.operation != "preflight":
             safe_directory(args.backups)
+        if args.operation in {"preflight", "verify-backup", "gc"}:
+            layout = detect_storage_layout(args.data, args.backups)
+            if not layout.backup_ready:
+                raise ValueError(layout.backup_reason_code or "backup_storage_unavailable")
         if args.operation == "preflight":
             result = preflight(args.releases, args.backups, args.data)
         elif args.operation == "verify-backup":
