@@ -283,10 +283,12 @@ Account.recover_message 恢复到临时签名器账户地址
 **隔离复现。** 将含内部实体的 RSS 编码为 UTF-16，共 388 字节，传入真实解析方法：
 
 ```python
-xml = ('<?xml version="1.0" encoding="utf-16"?>'
-       '<!DOCTYPE rss [<!ENTITY audit "AUDIT_ENTITY_EXPANDED">]>'
-       '<rss><channel><item><link>https://example.com/</link>'
-       '<title>&audit;</title></item></channel></rss>').encode('utf-16')
+xml = (
+    '<?xml version="1.0" encoding="utf-16"?>'
+    '<!DOCTYPE rss [<!ENTITY audit "AUDIT_ENTITY_EXPANDED">]>'
+    "<rss><channel><item><link>https://example.com/</link>"
+    "<title>&audit;</title></item></channel></rss>"
+).encode("utf-16")
 results = BrowserSearchExecutor._parse(httpx.Response(200, content=xml), 2)
 assert results[0].title == "AUDIT_ENTITY_EXPANDED"
 ```
