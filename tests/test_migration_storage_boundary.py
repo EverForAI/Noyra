@@ -76,6 +76,9 @@ from noyra.core.at_rest import (
 )
 from noyra.service import NoyraService, ServiceSettings
 root = Path(sys.argv[1])
+import noyra.core.storage_mode as storage_module
+storage_module.STORAGE_IDENTITY_PATH = root/'absent-storage-identity'
+storage_module.BACKUP_STORAGE_IDENTITY_PATH = root/'absent-backup-storage-identity'
 import noyra.service as service_module
 read_channel = service_module.upgrade_channel
 service_module.upgrade_channel = lambda: read_channel(root/'absent-upgrade-channel')
