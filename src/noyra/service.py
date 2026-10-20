@@ -83,6 +83,7 @@ from noyra.core.storage_mode import (
     StorageMode,
     StorageUnavailableError,
     detect_storage_layout,
+    resolve_storage_profile,
 )
 from noyra.core.training_export import TrainingDatasetExporter, TrainingExportLimits
 from noyra.core.types import content_hash, strict_json_loads, utc_now
@@ -885,6 +886,7 @@ class ServiceSettings(BaseModel):
     genesis_hash: str = Field(min_length=64, max_length=64)
     profile: Literal["development", "test", "production"] = "development"
     deployment_profile: Literal["host", "container_internal"] = "host"
+    storage_profile: Literal["runtime_only", "recovery_capable"] | None = None
     host: str = Field(default="127.0.0.1", min_length=1, max_length=255)
     port: int = Field(default=8765, ge=0, le=65_535)
     admin_token: SecretStr | None = None
@@ -1088,6 +1090,12 @@ class ServiceSettings(BaseModel):
 
     @model_validator(mode="after")
     def validate_listener_security(self) -> ServiceSettings:
+        if self.storage_profile is None:
+            object.__setattr__(
+                self,
+                "storage_profile",
+                resolve_storage_profile(self.profile, self.storage_profile),
+            )
         loopback = {"127.0.0.1", "::1", "localhost"}
         if self.profile == "production":
             # Production is always terminated by a trusted HTTPS proxy while
@@ -1251,6 +1259,10 @@ class ServiceSettings(BaseModel):
             deployment_profile=cast(
                 Literal["host", "container_internal"],
                 os.getenv("NOYRA_DEPLOYMENT_PROFILE", "host").strip().lower(),
+            ),
+            storage_profile=cast(
+                Literal["runtime_only", "recovery_capable"] | None,
+                (os.getenv("NOYRA_STORAGE_PROFILE", "").strip().lower() or None),
             ),
             host=os.getenv("NOYRA_HOST", "127.0.0.1"),
             port=int(os.getenv("NOYRA_PORT", "8765")),
@@ -1728,6 +1740,9 @@ class NoyraHTTPServer:
         handler = self._handler_type()
         self._rate_lock = threading.Lock()
         self._request_times: dict[str, deque[float]] = defaultdict(deque)
+        self._storage_observation_lock = threading.Lock()
+        self._storage_observation_at = 0.0
+        self._storage_observation: tuple[StorageContract, str] | None = None
         self._health_cache_lock = threading.Lock()
         self._health_cache_at = 0.0
         self._health_cache: tuple[HTTPStatus, dict[str, Any]] | None = None
@@ -1843,6 +1858,39 @@ class NoyraHTTPServer:
         # rolls the task back; keeping it active is the fail-closed recovery
         # state when a remote target fails after source fencing.
         del task, source_epoch
+
+    def _current_storage(self) -> tuple[StorageContract, str]:
+        """Observe current identity with bounded subprocesses and a short shared TTL."""
+        if not self._storage_observation_lock.acquire(timeout=0.25):
+            raise StorageUnavailableError("storage_probe_busy")
+        try:
+            ttl = min(self.settings.health_cache_ttl_seconds, 5.0)
+            if (
+                self._storage_observation is not None
+                and time.monotonic() - self._storage_observation_at < ttl
+            ):
+                return self._storage_observation
+            try:
+                layout = detect_storage_layout(self.settings.data_dir, self.settings.backup_root)
+            except (StorageUnavailableError, OSError):
+                layout = StorageContract(
+                    data_root=self.settings.data_dir,
+                    backup_root=self.settings.backup_root,
+                    upgrade_root=self.settings.data_dir / "upgrade",
+                    mode=StorageMode.UNAVAILABLE,
+                    data_device=None,
+                    backup_device=None,
+                    writable=False,
+                    reason_code="storage_probe_unavailable",
+                    backup_reason="storage_probe_unavailable",
+                )
+            observation = (layout, utc_now())
+            self.storage_contract = layout
+            self._storage_observation = observation
+            self._storage_observation_at = time.monotonic()
+            return observation
+        finally:
+            self._storage_observation_lock.release()
 
     def _cached_health(self) -> tuple[HTTPStatus, dict[str, Any]] | None:
         """Return the bounded readiness projection while its TTL is valid."""
@@ -2306,8 +2354,9 @@ class NoyraHTTPServer:
                 (self.kernel.subject_id, now, self.settings.admin_session_max_count - 1),
             ).fetchone()
             if oldest is not None:
+                # A wall-clock correction must not prevent an existing session's revocation.
                 connection.execute(
-                    "UPDATE admin_sessions SET revoked_at=? WHERE session_hash=?",
+                    "UPDATE admin_sessions SET revoked_at=MAX(?, created_at) WHERE session_hash=?",
                     (now, oldest["session_hash"]),
                 )
             connection.execute(
@@ -2361,11 +2410,12 @@ class NoyraHTTPServer:
         )
 
     def revoke_admin_session(self, session_id: str) -> None:
+        """Revoke durably even if the wall clock moved behind session creation."""
         if not session_id:
             return
         with self.kernel.database.transaction() as connection:
             connection.execute(
-                "UPDATE admin_sessions SET revoked_at=? WHERE session_hash=? "
+                "UPDATE admin_sessions SET revoked_at=MAX(?, created_at) WHERE session_hash=? "
                 "AND subject_id=? AND revoked_at IS NULL",
                 (time.time(), self._admin_session_hash(session_id), self.kernel.subject_id),
             )
@@ -2891,10 +2941,15 @@ class NoyraHTTPServer:
                             owner.cloud_archive_status["configured"]
                             and not owner.cloud_archive_status["ready"]
                         )
-                        storage_runtime_ready = owner.storage_contract.runtime_ready
-                        storage_backup_ready = owner.storage_contract.backup_ready
+                        storage, storage_checked_at = owner._current_storage()
+                        storage_runtime_ready = storage.runtime_ready
+                        storage_backup_ready = storage.backup_ready
                         ready = (
                             storage_runtime_ready
+                            and (
+                                owner.settings.storage_profile != "recovery_capable"
+                                or storage_backup_ready
+                            )
                             and at_rest_ready
                             and integrity_ready
                             and cloud_ready
@@ -2906,21 +2961,20 @@ class NoyraHTTPServer:
                                 "reason_code": (
                                     "ready"
                                     if storage_runtime_ready
-                                    else owner.storage_contract.reason_code or "storage_unavailable"
+                                    else storage.reason_code or "storage_unavailable"
                                 ),
                                 "since": None,
-                                "checked_at": checked_at,
+                                "checked_at": storage_checked_at,
                             },
                             "backup": {
                                 "status": "ok" if storage_backup_ready else "degraded",
                                 "reason_code": (
                                     "ready"
                                     if storage_backup_ready
-                                    else owner.storage_contract.backup_reason_code
-                                    or "backup_unavailable"
+                                    else storage.backup_reason_code or "backup_unavailable"
                                 ),
                                 "since": None,
-                                "checked_at": checked_at,
+                                "checked_at": storage_checked_at,
                             },
                             "integrity": {
                                 "status": "ok" if integrity_ready else "degraded",
@@ -2945,7 +2999,7 @@ class NoyraHTTPServer:
                             "subject_id": owner.kernel.subject_id,
                             "migration_target_id": owner.kernel.migration_target_id,
                             "lifecycle": lifecycle,
-                            "storage": owner.storage_contract.public(),
+                            "storage": storage.public(),
                             "at_rest": at_rest,
                             "cloud_archive": owner.cloud_archive_status,
                             "components": components,
@@ -10513,6 +10567,7 @@ class NoyraService:
             return
         self._unowned_preflight = False
         self._construction_complete = False
+        self._pending_capability_profiles: object | None = None
         self._wallet_automation_config: _WalletAutomationConfig | None = None
         self.at_rest = AtRestGuard(
             AtRestConfig(
@@ -10531,6 +10586,13 @@ class NoyraService:
         ):
             raise StorageUnavailableError(
                 self.storage_contract.reason_code or "storage_unavailable"
+            )
+        if (
+            settings.storage_profile == "recovery_capable"
+            and not self.storage_contract.backup_ready
+        ):
+            raise StorageUnavailableError(
+                self.storage_contract.backup_reason_code or "backup_storage_unavailable"
             )
         self.storage_layout = StorageLayout.create(settings.data_dir)
         self._pending_cognitive_resource_proposals: tuple[CognitiveResourceGroupInput, ...] = ()
@@ -10734,6 +10796,7 @@ class NoyraService:
                     service.http.cloud_archive_status["ready"] = True
             if not cognition_settings.enabled:
                 return service
+            service._pending_capability_profiles = service._read_environment_capabilities()
             configured_groups = resource_groups_from_env("economy") + resource_groups_from_env(
                 "deep"
             )
@@ -10806,18 +10869,103 @@ class NoyraService:
             return False
 
     def _sync_cognitive_resources(self, proposals: tuple[CognitiveResourceGroupInput, ...]) -> None:
-        existing = {
-            (record.pool, record.label)
-            for record in self.cognitive_resources.list(self.kernel.subject_id)
-        }
         for proposal in proposals:
-            if (proposal.pool, proposal.label) in existing:
+            current = self.cognitive_resources.find(
+                self.kernel.subject_id, proposal.pool, proposal.label
+            )
+            if current is not None and current.status != "active":
+                LOGGER.error(
+                    "environment_model_resource_%s: pool=%s label=%s",
+                    current.status,
+                    proposal.pool,
+                    proposal.label,
+                )
+                continue
+            if proposal.reasoning_effort is not None:
+                capability = CapabilityProfileStore(self.kernel.database).get(
+                    self.kernel.subject_id,
+                    proposal.provider_type,
+                    proposal.base_url,
+                    proposal.model,
+                )
+                if (
+                    capability is None
+                    or capability.status != "known"
+                    or proposal.reasoning_effort not in capability.tested_efforts
+                    or proposal.capability_revision is None
+                    or capability.revision < proposal.capability_revision
+                    or (
+                        capability.revision == proposal.capability_revision
+                        and capability.profile_digest != proposal.capability_digest
+                    )
+                    # Existing, unchanged durable groups may use newer online
+                    # probes. New provisioning must match the operator's pin.
+                    or (current is None and capability.revision != proposal.capability_revision)
+                ):
+                    raise RuntimeError("environment_model_capability_profile_required")
+            if current is not None:
+                expected_values = CognitiveResourceStore._values(
+                    self.kernel.subject_id, proposal, current.updated_at
+                )
+                proposed_keys = {
+                    content_hash({"api_key": key.get_secret_value()}) for key in proposal.api_keys
+                }
+                current_keys, revoked = self.cognitive_resources.environment_key_status(
+                    current.group_id, subject_id=self.kernel.subject_id, proposed=proposed_keys
+                )
+                if revoked:
+                    raise RuntimeError("environment_model_resource_key_revoked")
+                expected_pricing_status = (
+                    "priced"
+                    if expected_values[12] or expected_values[13]
+                    else proposal.pricing_status or "unknown"
+                )
+                matches = (
+                    (
+                        current.pool,
+                        current.label,
+                        current.provider_type,
+                        current.base_url,
+                        current.model,
+                        current.priority,
+                        current.weight,
+                        current.daily_attempts,
+                        current.daily_input_tokens,
+                        current.daily_output_tokens,
+                        current.daily_cost_microusd,
+                        current.input_microusd_per_million,
+                        current.output_microusd_per_million,
+                        current.max_attempts,
+                        current.reasoning_effort,
+                    )
+                    == expected_values[1:]
+                    and current_keys == proposed_keys
+                    and current.limit_enabled == proposal.limit_enabled
+                    and current.pricing_status == expected_pricing_status
+                )
+                if not matches:
+                    raise RuntimeError("environment_model_resource_conflict")
                 continue
             self.cognitive_resources.configure(
                 self.kernel.subject_id,
                 proposal,
                 actor="environment-operator",
             )
+
+    def _read_environment_capabilities(self) -> object | None:
+        path_value = os.getenv("NOYRA_MODEL_CAPABILITY_PROFILES_FILE", "").strip()
+        if not path_value:
+            return None
+        try:
+            raw = read_secret_file(
+                path_value,
+                label="model capability profile file",
+                single_line=False,
+                max_bytes=1_000_000,
+            )
+            return cast(object, json.loads(raw))
+        except (CredentialError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise RuntimeError("model_capability_profile_import_failed") from error
 
     def boot(self) -> None:
         if self._unowned_preflight:
@@ -10923,6 +11071,11 @@ class NoyraService:
             "embedding",
             self.http.embedding_resources.secret_dir,
         )
+        if self._pending_capability_profiles is not None:
+            CapabilityProfileStore(self.kernel.database).import_profiles(
+                self.kernel.subject_id, self._pending_capability_profiles, bootstrap=True
+            )
+            self._pending_capability_profiles = None
         if self._pending_cognitive_resource_proposals:
             self._sync_cognitive_resources(self._pending_cognitive_resource_proposals)
             self._pending_cognitive_resource_proposals = ()

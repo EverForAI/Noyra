@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -17,6 +18,11 @@ from noyra.core.storage_mode import (
     check_headroom,
     detect_storage_layout,
     ensure_system_disk_layout,
+)
+
+requires_storage_root = pytest.mark.skipif(
+    os.name == "posix" and getattr(os, "geteuid", lambda: -1)() != 0,
+    reason="valid root-owned storage identities and provisioning require root",
 )
 
 
@@ -62,6 +68,7 @@ def _write_backup_identity(path: Path, backup: Path, source: str) -> None:
     )
 
 
+@requires_storage_root
 def test_backup_mount_identity_accepts_expected_device(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -91,6 +98,7 @@ def test_backup_mount_identity_accepts_expected_device(
         (True, "/dev/other", "backup_mount_identity_mismatch"),
     ],
 )
+@requires_storage_root
 def test_backup_mount_identity_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -205,6 +213,7 @@ def test_explicit_dedicated_mount_without_mount_fails_closed(
     assert layout.reason_code == "storage_mount_missing"
 
 
+@requires_storage_root
 def test_external_mount_identity_fails_closed_when_mount_is_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -232,6 +241,7 @@ def test_external_mount_identity_fails_closed_when_mount_is_missing(
     assert layout.reason_code == "storage_mount_missing"
 
 
+@requires_storage_root
 def test_external_mount_identity_rejects_wrong_device(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -259,6 +269,7 @@ def test_external_mount_identity_rejects_wrong_device(
     assert layout.reason_code == "storage_mount_identity_mismatch"
 
 
+@requires_storage_root
 def test_external_mount_identity_rejects_a_different_data_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -287,6 +298,7 @@ def test_external_mount_identity_rejects_a_different_data_path(
         detect_storage_layout(other_data, tmp_path / "backups")
 
 
+@requires_storage_root
 def test_backup_mount_identity_rejects_a_different_backup_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -341,6 +353,31 @@ def test_storage_check_can_require_backup_readiness(
     assert error.value.code == 78
 
 
+def test_storage_check_uses_environment_backup_root_when_not_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from noyra.__main__ import _storage_check_command
+
+    data = tmp_path / "data"
+    backup = tmp_path / "custom-backups"
+    data.mkdir()
+    backup.mkdir()
+    observed: list[Path] = []
+    layout = StorageLayout(
+        data, backup, data / "upgrade", StorageMode.SYSTEM_DISK, None, None, True
+    )
+
+    def detect(data_root: Path, backup_root: Path) -> StorageLayout:
+        observed.append(backup_root)
+        return layout
+
+    monkeypatch.setenv("NOYRA_BACKUP_ROOT", str(backup))
+    monkeypatch.setattr("noyra.core.storage_mode.detect_storage_layout", detect)
+    _storage_check_command(["--data-dir", str(data)])
+    capsys.readouterr()
+    assert observed == [backup]
+
+
 def test_invalid_explicit_storage_mode_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -366,6 +403,7 @@ def test_marker_symlink_is_rejected(tmp_path: Path) -> None:
         detect_storage_layout(data)
 
 
+@requires_storage_root
 def test_ensure_system_disk_layout_preserves_existing_content(tmp_path: Path) -> None:
     data = tmp_path / "data"
     backups = tmp_path / "backups"
@@ -381,6 +419,7 @@ def test_ensure_system_disk_layout_preserves_existing_content(tmp_path: Path) ->
     assert (data / "upgrade" / "processing").is_dir()
 
 
+@requires_storage_root
 def test_ensure_system_disk_layout_rejects_symlink(tmp_path: Path) -> None:
     data = tmp_path / "data"
     target = tmp_path / "outside"
@@ -418,3 +457,89 @@ def test_headroom_separates_runtime_backup_and_upgrade_estimates(
 def test_headroom_rejects_negative_estimates(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="non-negative"):
         check_headroom(tmp_path, runtime_bytes=-1, backup_bytes=0, upgrade_bytes=0)
+
+
+@pytest.mark.parametrize("profile", ["production", "development", "public_preview"])
+@pytest.mark.parametrize("value", [None, "", "  ", "runtime_only", "recovery_capable"])
+def test_storage_profile_resolution_is_shared_across_entrypoints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    profile: str,
+    value: str | None,
+) -> None:
+    from noyra.__main__ import _storage_check_command
+    from noyra.core.storage_mode import resolve_storage_profile
+
+    expected = (
+        value.strip()
+        if value and value.strip()
+        else ("recovery_capable" if profile == "production" else "runtime_only")
+    )
+    assert resolve_storage_profile(profile, value) == expected
+    monkeypatch.setenv("NOYRA_PROFILE", profile)
+    if value is None:
+        monkeypatch.delenv("NOYRA_STORAGE_PROFILE", raising=False)
+    else:
+        monkeypatch.setenv("NOYRA_STORAGE_PROFILE", value)
+    data = tmp_path / "data"
+    data.mkdir()
+    layout = StorageLayout(
+        data,
+        tmp_path / "missing-backups",
+        data / "upgrade",
+        StorageMode.SYSTEM_DISK,
+        None,
+        None,
+        True,
+    )
+    monkeypatch.setattr("noyra.core.storage_mode.detect_storage_layout", lambda *_: layout)
+    if expected == "recovery_capable":
+        with pytest.raises(SystemExit) as error:
+            _storage_check_command(["--data-dir", str(data)])
+        assert error.value.code == 78
+    else:
+        _storage_check_command(["--data-dir", str(data)])
+    assert f'"storage_profile": "{expected}"' in capsys.readouterr().out
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or getattr(os, "geteuid", lambda: 0)() == 0,
+    reason="requires an actual unprivileged POSIX user",
+)
+@pytest.mark.parametrize("kind", ["data", "backup"])
+def test_nonroot_cannot_supply_a_trusted_mount_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    data, backup = tmp_path / "data", tmp_path / "backups"
+    data.mkdir()
+    backup.mkdir()
+    identity = tmp_path / "user-owned-identity.conf"
+    _write_backup_identity(identity, backup, "/dev/expected")
+    identity.chmod(0o600)
+    monkeypatch.setattr(
+        "noyra.core.storage_mode.STORAGE_IDENTITY_PATH",
+        identity if kind == "data" else tmp_path / "missing-data-identity",
+    )
+    monkeypatch.setattr(
+        "noyra.core.storage_mode.BACKUP_STORAGE_IDENTITY_PATH",
+        identity if kind == "backup" else tmp_path / "missing-backup-identity",
+    )
+    with pytest.raises(StorageUnavailableError, match="storage_identity_unsafe"):
+        detect_storage_layout(data, backup)
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or getattr(os, "geteuid", lambda: 0)() == 0,
+    reason="requires an actual unprivileged POSIX user",
+)
+def test_nonroot_provisioning_is_rejected_before_creating_paths(tmp_path: Path) -> None:
+    data, backup = tmp_path / "data", tmp_path / "backup"
+    with pytest.raises(PermissionError, match="requires root"):
+        ensure_system_disk_layout(
+            data,
+            backup,
+            service_uid=getattr(os, "geteuid", lambda: -1)(),
+            service_gid=getattr(os, "getegid", lambda: -1)(),
+        )
+    assert not data.exists() and not backup.exists()

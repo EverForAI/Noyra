@@ -242,10 +242,13 @@ class AutonomyLoop:
                     privacy_level="private",
                 )
                 failures = int(str(self.health()["consecutive_failures"]))
-                interval = min(
-                    self.config.max_error_backoff_seconds,
-                    self.config.error_backoff_seconds * math.pow(2, max(0, failures - 1)),
-                )
+                # Saturate before evaluating the exponent, including counters
+                # persisted across long outages and process restarts.
+                base = self.config.error_backoff_seconds
+                maximum = self.config.max_error_backoff_seconds
+                saturation = max(0, math.ceil(math.log2(maximum / base)))
+                exponent = min(max(0, failures - 1), saturation)
+                interval = min(maximum, base * 2**exponent)
             if self.next_wakeup_hook is not None:
                 next_wakeup = self.next_wakeup_hook()
                 if next_wakeup is not None:

@@ -41,6 +41,7 @@ from noyra.model import (
     ProviderResponse,
     RoutedModelGateway,
 )
+from noyra.model.capabilities import CapabilityProfileStore
 from noyra.model.errors import ProviderCallError
 from noyra.research import SearchExecutor
 from noyra.service import NoyraHTTPServer, NoyraService, ServiceSettings
@@ -680,6 +681,67 @@ class ServiceTestCase(unittest.TestCase):
                 asyncio.run(service.cognition.aclose())
             service.http.close()
             service.kernel.close()
+
+    def test_capability_profile_import_is_deferred_until_boot(self: Self) -> None:
+        profile_path = self.data_dir / "capabilities.json"
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        profile_path.write_text('{"profiles": []}', encoding="utf-8")
+        profile_path.chmod(0o600)
+        environment = {
+            "NOYRA_DATA_DIR": str(self.data_dir / "capability-boundary"),
+            "NOYRA_SUBJECT_ID": "Noyra-capability-boot-boundary",
+            "NOYRA_GENESIS_HASH": content_hash({"seed": "capability-boot-boundary"}),
+            "NOYRA_HOST": "127.0.0.1",
+            "NOYRA_PORT": "0",
+            "NOYRA_PROFILE": "test",
+            "NOYRA_STORAGE_PROFILE": "runtime_only",
+            "NOYRA_AT_REST_MODE": "development",
+            "NOYRA_COGNITION_ENABLED": "true",
+            "NOYRA_WORLD_SOURCES_JSON": json.dumps(
+                [
+                    {
+                        "name": "Configured source",
+                        "url": "https://example.com/world",
+                        "source_type": "news",
+                        "trust_score": 0.5,
+                    }
+                ]
+            ),
+            "NOYRA_MODEL_BASE_URL": "https://models.example/v1",
+            "NOYRA_MODEL_NAME": "provider-alias",
+            "NOYRA_MODEL_API_KEY": "test-api-key",
+            "NOYRA_DAILY_COST_LIMIT": "5",
+            "NOYRA_DAILY_INPUT_TOKENS": "100000",
+            "NOYRA_DAILY_MODEL_CALLS": "10",
+            "NOYRA_DAILY_OUTPUT_TOKENS": "20000",
+            "NOYRA_MODEL_INPUT_USD_PER_MILLION": "0",
+            "NOYRA_MODEL_OUTPUT_USD_PER_MILLION": "0",
+            "NOYRA_MODEL_CAPABILITY_PROFILES_FILE": str(profile_path),
+        }
+        calls: list[tuple[object, object, bool]] = []
+
+        def record_import(
+            store: CapabilityProfileStore,
+            subject_id: str,
+            payload: object,
+            *,
+            bootstrap: bool = False,
+        ) -> int:
+            calls.append((store, payload, bootstrap))
+            return 0
+
+        with (
+            patch.dict(os.environ, environment, clear=False),
+            patch.object(CapabilityProfileStore, "import_profiles", record_import),
+        ):
+            service = NoyraService.from_env()
+            try:
+                self.assertEqual(calls, [])
+                service.boot()
+                self.assertEqual(len(calls), 1)
+                self.assertTrue(calls[0][2])
+            finally:
+                service.close()
 
     def test_service_from_env_does_not_fallback_after_managed_embedding_integrity_failure(
         self: Self,

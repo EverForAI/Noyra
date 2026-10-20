@@ -19,3 +19,12 @@ deployments should load the JSON through `NOYRA_ECONOMY_MODEL_GROUPS_FILE` or
 `api_key_files` or `api_key_credentials` for provider keys. Inline `api_keys`
 remain only as a development compatibility path; imported keys are moved into
 the protected runtime secret directory and are excluded from SQLite and exports.
+
+If a group selects `reasoning_effort`, its JSON must also include the
+`capability_revision` and `capability_digest` returned by the authenticated model capability
+probe. Startup verifies that the endpoint, model, revision, digest, and selected effort still
+match a current tested profile; it never performs an unbounded provider probe during startup.
+Re-run the probe and update these fields when the profile expires. For a fresh host, export the
+non-secret profile returned by the probe as a protected JSON file and set
+`NOYRA_MODEL_CAPABILITY_PROFILES_FILE`; startup imports and verifies that file before it reads
+the environment-backed resource groups.

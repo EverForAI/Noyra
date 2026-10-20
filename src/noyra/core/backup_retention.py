@@ -7,6 +7,7 @@ the caller must perform a separate, locked apply after rechecking hashes.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -118,7 +119,11 @@ def backup_inventory(
 
     moment = now or datetime.now(UTC)
     inventory: list[dict[str, Any]] = []
-    for path in sorted(backups.glob("noyra-*.noyra-backup")):
+    # glob suppresses directory read errors on supported Python versions. Never
+    # represent an unreadable inventory as a successfully observed empty one.
+    for path in sorted(
+        item for item in backups.iterdir() if fnmatch.fnmatch(item.name, "noyra-*.noyra-backup")
+    ):
         if path.is_symlink() or not path.is_file():
             continue
         marker = marker_reader(path.with_name(path.name + ".verified.json"))
@@ -246,6 +251,7 @@ def backup_gc_plan(
     plan = {
         "backups": backup_names,
         "backup_details": deletions,
+        "retention_policy": policy.public(),
         "backup_attention": attention,
         "backup_inventory": inventory,
         "backup_protected": sorted(keep | protected),

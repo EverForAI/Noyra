@@ -26,7 +26,11 @@ def _setup_command(arguments: list[str]) -> None:
     parser.add_argument(
         "--caddyfile", dest="caddy_path", type=Path, default=Path("/etc/caddy/Caddyfile")
     )
-    parser.add_argument("--backup-root", type=Path, default=Path("/var/backups/noyra"))
+    parser.add_argument(
+        "--backup-root",
+        type=Path,
+        default=Path(os.getenv("NOYRA_BACKUP_ROOT", "/var/backups/noyra")),
+    )
     parser.add_argument("--tunnel-token-file", type=Path)
     parser.add_argument("--server", default=os.getenv("NOYRA_SERVER", "server"))
     options = parser.parse_args(arguments)
@@ -129,8 +133,16 @@ def _storage_check_command(arguments: list[str]) -> None:
     from noyra.core.storage_mode import StorageMode, detect_storage_layout
 
     parser = argparse.ArgumentParser(prog="python -m noyra storage-check")
-    parser.add_argument("--data-dir", type=Path, default=Path("/var/lib/noyra"))
-    parser.add_argument("--backup-dir", type=Path, default=Path("/var/backups/noyra"))
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path(os.getenv("NOYRA_DATA_DIR", "/var/lib/noyra")),
+    )
+    parser.add_argument(
+        "--backup-dir",
+        type=Path,
+        default=Path(os.getenv("NOYRA_BACKUP_ROOT", "/var/backups/noyra")),
+    )
     parser.add_argument(
         "--require-backup",
         action="store_true",
@@ -138,11 +150,27 @@ def _storage_check_command(arguments: list[str]) -> None:
     )
     options = parser.parse_args(arguments)
     layout = detect_storage_layout(options.data_dir, options.backup_dir)
-    print(json.dumps(layout.public(), sort_keys=True))
+    from noyra.core.storage_mode import resolve_storage_profile
+
+    try:
+        storage_profile = resolve_storage_profile(
+            os.getenv("NOYRA_PROFILE", "development"), os.getenv("NOYRA_STORAGE_PROFILE")
+        )
+    except ValueError as error:
+        raise SystemExit(78) from error
+    require_backup = options.require_backup or storage_profile == "recovery_capable"
+    payload = layout.public()
+    payload.update(
+        {
+            "storage_profile": storage_profile,
+            "backup_required": require_backup,
+        }
+    )
+    print(json.dumps(payload, sort_keys=True))
     if (
         layout.mode is StorageMode.UNAVAILABLE
         or not layout.writable
-        or (options.require_backup and not layout.backup_ready)
+        or (require_backup and not layout.backup_ready)
     ):
         raise SystemExit(78)
 

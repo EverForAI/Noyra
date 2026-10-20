@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
@@ -172,6 +174,50 @@ def test_pending_request_is_fail_closed_after_restart(tmp_path: Path, account: A
         engine.transfer("request-pending", native_transfer())
 
 
+def test_legacy_request_is_marked_unbound_during_state_migration(
+    tmp_path: Path, account: Any
+) -> None:
+    path = tmp_path / "legacy-signer.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE signer_requests ("
+        "request_id TEXT PRIMARY KEY, transfer_hash TEXT NOT NULL, status TEXT NOT NULL,"
+        "tx_hash TEXT, chain_id INTEGER NOT NULL, nonce INTEGER NOT NULL,"
+        "gas_limit INTEGER NOT NULL, max_fee_per_gas TEXT NOT NULL, accepted_at TEXT)"
+    )
+    connection.execute(
+        "INSERT INTO signer_requests VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "legacy-receipt",
+            "a" * 64,
+            "broadcast",
+            "0x" + "aa" * 32,
+            CHAIN_ID,
+            0,
+            21_000,
+            "2000000000",
+            "2026-10-18T00:00:00+00:00",
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    state = SignerState.open(path)
+    row = state.connection.execute(
+        "SELECT envelope_status FROM signer_requests WHERE request_id='legacy-receipt'"
+    ).fetchone()
+    assert row[0] == "legacy_unbound"
+    engine = SignerEngine(
+        account=account,
+        signer_id="staging-signer-01",
+        chain_id=CHAIN_ID,
+        rpc=FakeRPC(),
+        state=state,
+    )
+    with pytest.raises(SignerError, match="legacy_unbound"):
+        engine.receipt("0x" + "aa" * 32, CHAIN_ID)
+
+
 def test_identity_signature_uses_configured_account(engine: SignerEngine, account: Any) -> None:
     challenge = "noyra signer challenge"
     signature = engine.prove_identity("staging-signer-01", challenge)
@@ -273,6 +319,43 @@ def test_http_receipt_not_found_is_404(http_server: SignerHTTPServer) -> None:
     assert response.status_code == 404
 
 
+def test_http_nonce_conflict_uses_machine_readable_error_code(
+    http_server: SignerHTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def conflict(_: object, __: object) -> object:
+        raise SignerError("nonce conflict", code="nonce_conflict")
+
+    monkeypatch.setattr(http_server.engine, "nonce", conflict)
+    response = post_json(
+        http_server,
+        "/v1/nonce",
+        {"address": ADDRESS, "chain_id": CHAIN_ID},
+        TOKEN,
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "nonce_conflict"
+
+
+def test_http_internal_errors_return_diagnostic_500_without_exception_text(
+    http_server: SignerHTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(_: object, __: object) -> object:
+        raise RuntimeError("secret-provider-response")
+
+    monkeypatch.setattr(http_server.engine, "nonce", fail)
+    response = post_json(
+        http_server,
+        "/v1/nonce",
+        {"address": ADDRESS, "chain_id": CHAIN_ID},
+        TOKEN,
+    )
+    assert response.status_code == 500
+    body = response.json()
+    assert body["error"] == "signer_internal_error"
+    assert isinstance(body["request_id"], str) and len(body["request_id"]) == 16
+    assert "secret-provider-response" not in response.text
+
+
 def test_receipt_requires_matching_broadcast_envelope_and_clamps_stale_rpc_height(
     engine: SignerEngine,
 ) -> None:
@@ -358,3 +441,336 @@ def test_transfer_accepts_canonical_lowercase_recipient_address(engine: SignerEn
     result = engine.transfer("mixed-case-recipient-regression", transfer)
     assert result.chain_id == CHAIN_ID
     assert len(fake_rpc(engine).sent_raw_transactions) == 1
+
+
+@pytest.mark.parametrize("existing_column", [False, True])
+@pytest.mark.parametrize("damage", [None, "json", "hash", "nonce", "gas", "fee", "missing"])
+def test_migration_validates_historical_envelopes(
+    tmp_path: Path, account: Any, existing_column: bool, damage: str | None
+) -> None:
+    from noyra.signer_service import _transfer_hash
+
+    path = tmp_path / "old-envelope.sqlite3"
+    transfer = native_transfer()
+    payload: str | None = json.dumps(valid_transfer_payload())
+    if damage == "json":
+        payload = "{invalid"
+    elif damage == "missing":
+        payload = None
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE signer_requests (request_id TEXT PRIMARY KEY, transfer_hash TEXT, "
+            "status TEXT, tx_hash TEXT, chain_id INTEGER, nonce INTEGER, gas_limit INTEGER, "
+            "max_fee_per_gas TEXT, accepted_at TEXT, transfer_json TEXT"
+            + (", envelope_status TEXT" if existing_column else "")
+            + ")"
+        )
+        values = [
+            "history",
+            "0" * 64 if damage == "hash" else _transfer_hash(transfer),
+            "unknown",
+            "0x" + "aa" * 32,
+            CHAIN_ID,
+            9 if damage == "nonce" else 0,
+            999 if damage == "gas" else 21_000,
+            "1" if damage == "fee" else "2000000000",
+            None,
+            payload,
+        ]
+        if existing_column:
+            values.append("legacy_unbound")
+        connection.execute(
+            "INSERT INTO signer_requests VALUES (" + ",".join("?" for _ in values) + ")", values
+        )
+    for _ in range(2):
+        state = SignerState.open(path)
+        try:
+            row = state.connection.execute("SELECT * FROM signer_requests").fetchone()
+            assert row["envelope_status"] == ("bound" if damage is None else "legacy_unbound")
+            assert row["status"] == "unknown"
+            rpc = FakeRPC()
+            engine = SignerEngine(account=account, signer_id="test", rpc=rpc, state=state)
+            if damage is None:
+                assert engine.receipt("0x" + "aa" * 32, CHAIN_ID) is None
+            else:
+                with pytest.raises(SignerError, match="legacy_unbound"):
+                    engine.receipt("0x" + "aa" * 32, CHAIN_ID)
+            assert rpc.sent_raw_transactions == []
+        finally:
+            state.close()
+
+
+@pytest.mark.parametrize("kind", ["oversized", "compressed", "wrong-id", "valid"])
+def test_rpc_stream_limits_and_response_binding(kind: str) -> None:
+    import gzip
+
+    import httpx
+
+    from noyra.signer_service import HTTPRPC, MAX_RPC_RESPONSE_BYTES
+
+    payload = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": "wrong" if kind == "wrong-id" else "noyra-signer-v1",
+            "result": "0x1",
+            "padding": "x"
+            * (MAX_RPC_RESPONSE_BYTES + 1 if kind in {"oversized", "compressed"} else 1),
+        }
+    ).encode()
+
+    class Body(httpx.SyncByteStream):
+        closed = False
+        consumed = 0
+
+        def __iter__(self) -> Any:
+            for start in range(0, len(payload), 4096):
+                self.consumed += 4096
+                yield payload[start : start + 4096]
+
+        def close(self) -> None:
+            self.closed = True
+
+    stream = Body()
+
+    def response(request: httpx.Request) -> httpx.Response:
+        if kind == "compressed":
+            return httpx.Response(
+                200, content=gzip.compress(payload), headers={"Content-Encoding": "gzip"}
+            )
+        return httpx.Response(200, stream=stream)
+
+    rpc = HTTPRPC("https://rpc.example", CHAIN_ID)
+    rpc.client.close()
+    rpc.client = httpx.Client(transport=httpx.MockTransport(response))
+    try:
+        if kind == "valid":
+            assert rpc.call("eth_chainId", []) == "0x1"
+        else:
+            with pytest.raises(SignerError):
+                rpc.call("eth_chainId", [])
+        if kind != "compressed":
+            assert stream.closed
+            assert stream.consumed <= MAX_RPC_RESPONSE_BYTES + 4096
+    finally:
+        rpc.close()
+
+
+def test_rpc_absolute_deadline_closes_response_and_preserves_unknown(engine: SignerEngine) -> None:
+    import time
+
+    import httpx
+
+    from noyra.signer_service import HTTPRPC
+
+    release = threading.Event()
+    sends: list[str] = []
+
+    class StalledBody(httpx.SyncByteStream):
+        def __iter__(self) -> Any:
+            yield b"{"
+            release.wait(2)
+            yield b"}"
+
+        def close(self) -> None:
+            release.set()
+
+    def response(request: httpx.Request) -> httpx.Response:
+        sends.append(str(request.url))
+        return httpx.Response(200, stream=StalledBody())
+
+    rpc = HTTPRPC("https://rpc.example", CHAIN_ID, timeout=0.15)
+    rpc.client.close()
+    rpc.client = httpx.Client(transport=httpx.MockTransport(response))
+    original = engine.rpc
+
+    class SendRPC:
+        def call(self, method: str, params: list[object]) -> object:
+            return (
+                rpc.call(method, params)
+                if method == "eth_sendRawTransaction"
+                else original.call(method, params)
+            )
+
+    engine.rpc = SendRPC()
+    started = time.perf_counter()
+    try:
+        with pytest.raises(SignerError, match="broadcast unknown"):
+            engine.transfer("timeout", native_transfer())
+        assert time.perf_counter() - started < 1.0
+        assert release.is_set()
+        with pytest.raises(SignerError, match="broadcast unknown"):
+            engine.transfer("timeout", native_transfer())
+        assert len(sends) == 1
+        assert (
+            engine.state.connection.execute(
+                "SELECT status FROM signer_requests WHERE request_id='timeout'"
+            ).fetchone()[0]
+            == "unknown"
+        )
+    finally:
+        release.set()
+        rpc.close()
+
+
+def test_rpc_rejects_private_dns_before_connect(monkeypatch: pytest.MonkeyPatch) -> None:
+    import socket
+
+    from noyra.signer_service import HTTPRPC
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 443))
+        ],
+    )
+    rpc = HTTPRPC("https://rpc.example", CHAIN_ID, timeout=0.5)
+    try:
+        with pytest.raises(SignerError, match="rpc unavailable"):
+            rpc.call("eth_chainId", [])
+    finally:
+        rpc.close()
+
+
+@pytest.mark.parametrize("send_request", [False, True])
+def test_http_slow_clients_are_bounded_and_release_capacity(
+    http_server: SignerHTTPServer, monkeypatch: pytest.MonkeyPatch, send_request: bool
+) -> None:
+    import socket
+
+    from noyra.core.request_io import DeadlineRequestReader
+
+    monkeypatch.setattr("noyra.signer_service.SIGNER_REQUEST_SECONDS", 0.4)
+    entered = threading.Barrier(3)
+    release_read = threading.Event()
+    released_slots = threading.Event()
+    original_read = DeadlineRequestReader.readinto
+
+    def hold_first_read(reader: Any, buffer: Any) -> int:
+        if not getattr(reader, "_test_first_read_held", False):
+            reader._test_first_read_held = True
+            entered.wait(timeout=5)
+            assert release_read.wait(5)
+        return original_read(reader, buffer)
+
+    class CompletionSemaphore(threading.BoundedSemaphore):
+        def release(self, n: int = 1) -> None:
+            super().release(n)
+            if self._value == 2:
+                released_slots.set()
+
+    # Keep both real workers occupied during the overload probe; scheduler
+    # delays must not let their short deadlines race the capacity assertion.
+    monkeypatch.setattr(DeadlineRequestReader, "readinto", hold_first_read)
+    http_server._worker_slots = CompletionSemaphore(2)
+    clients = [
+        socket.create_connection(("127.0.0.1", http_server.server_port), timeout=3)
+        for _ in range(2)
+    ]
+    try:
+        for client in clients:
+            client.sendall(b"POST /v1/nonce HTTP/1.1\r\nHost: localhost\r\n")
+        entered.wait(timeout=5)
+        with socket.create_connection(
+            ("127.0.0.1", http_server.server_port), timeout=3
+        ) as overloaded:
+            try:
+                if send_request:
+                    overloaded.sendall(b"GET / HTTP/1.0\r\n\r\n")
+                response = overloaded.recv(512)
+            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                # Rejection precedes HTTP parsing. Closing with unread peer
+                # bytes may reset TCP instead of delivering the best-effort 503.
+                assert send_request
+            else:
+                assert b"503" in response
+        monkeypatch.setattr(DeadlineRequestReader, "readinto", original_read)
+        release_read.set()
+        for client in clients:
+            # Either EOF or reset closes the expired partial request.
+            with suppress(ConnectionResetError, ConnectionAbortedError):
+                assert client.recv(512) == b""
+        assert released_slots.wait(3)
+        assert (
+            post_json(
+                http_server, "/v1/nonce", {"address": ADDRESS, "chain_id": CHAIN_ID}, TOKEN
+            ).status_code
+            == 200
+        )
+    finally:
+        release_read.set()
+        entered.abort()
+        for client in clients:
+            client.close()
+
+
+def test_http_incomplete_authenticated_body_never_dispatches(
+    http_server: SignerHTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import socket
+
+    monkeypatch.setattr("noyra.signer_service.SIGNER_REQUEST_SECONDS", 0.15)
+    with socket.create_connection(("127.0.0.1", http_server.server_port), timeout=1) as client:
+        client.sendall(
+            (
+                "POST /v1/transfer HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer "
+                + TOKEN
+                + "\r\nContent-Type: application/json\r\nContent-Length: 20\r\n\r\n{"
+            ).encode()
+        )
+        assert client.recv(512) == b""
+    assert (
+        http_server.engine.state.connection.execute(
+            "SELECT COUNT(*) FROM signer_requests"
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def test_rpc_worker_cannot_send_after_its_caller_timed_out(engine: SignerEngine) -> None:
+    import httpx
+
+    from noyra.signer_service import HTTPRPC
+
+    release = threading.Event()
+    finished = threading.Event()
+    sent: list[httpx.Request] = []
+
+    def delayed_send(request: httpx.Request) -> httpx.Response:
+        try:
+            assert release.wait(2)
+            # Mirror the production HTTP transport's final pre-header hook.
+            request.extensions["trace"]("http11.send_request_headers.started", {})
+            sent.append(request)
+            return httpx.Response(
+                200, json={"jsonrpc": "2.0", "id": "noyra-signer-v1", "result": "0x0"}
+            )
+        finally:
+            finished.set()
+
+    rpc = HTTPRPC("https://rpc.example", CHAIN_ID, timeout=0.15)
+    rpc.client.close()
+    rpc.client = httpx.Client(transport=httpx.MockTransport(delayed_send))
+    original = engine.rpc
+
+    class SendRPC:
+        def call(self, method: str, params: list[object]) -> object:
+            return (
+                rpc.call(method, params)
+                if method == "eth_sendRawTransaction"
+                else original.call(method, params)
+            )
+
+    engine.rpc = SendRPC()
+    try:
+        with pytest.raises(SignerError, match="broadcast unknown"):
+            engine.transfer("late-send", native_transfer())
+        release.set()
+        assert finished.wait(1)
+        assert not sent
+        with pytest.raises(SignerError, match="broadcast unknown"):
+            engine.transfer("late-send", native_transfer())
+        assert not sent
+    finally:
+        release.set()
+        rpc.close()

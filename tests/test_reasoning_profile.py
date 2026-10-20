@@ -77,6 +77,42 @@ def test_capability_observations_are_subject_endpoint_and_model_scoped(tmp_path:
         store.get("another-subject", "openai_compatible", "https://models.example/v1", "gpt-5-mini")
         is None
     )
+
+
+def test_stale_capability_public_payload_clears_effective_selection(tmp_path: Any) -> None:
+    database = Database(tmp_path / "capability-public.sqlite3")
+    subject_id = "Noyra-capability-public"
+    IdentityStore(database).ensure(subject_id, content_hash("public"))
+    store = CapabilityProfileStore(database)
+    observed = store.record_probe_success(
+        subject_id,
+        "openai_compatible",
+        "https://models.example/v1",
+        "provider-alias",
+        "high",
+    )
+    assert observed is not None
+    with database.transaction() as connection:
+        row = connection.execute(
+            "SELECT * FROM model_capability_profiles WHERE subject_id=?", (subject_id,)
+        ).fetchone()
+        state = dict(row)
+        state.pop("state_hash")
+        expired = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+        state["expires_at"] = expired
+        connection.execute(
+            "UPDATE model_capability_profiles SET expires_at=?, state_hash=? WHERE subject_id=?",
+            (expired, content_hash(state), subject_id),
+        )
+    stale = store.get(
+        subject_id, "openai_compatible", "https://models.example/v1", "provider-alias"
+    )
+    assert stale is not None
+    payload = stale.public(selected="high")
+    assert payload["status"] == "stale"
+    assert payload["selected"] is None
+    assert payload["configured_selected"] == "high"
+    assert payload["effective_status"] == "probe_required"
     assert (
         store.get(
             "Noyra-capabilities", "openai_compatible", "https://other.example/v1", "gpt-5-mini"
@@ -145,6 +181,42 @@ def test_unknown_model_probe_persists_endpoint_observation(tmp_path: Any) -> Non
     assert additional is not None
     assert additional.efforts == ("low", "high")
     assert additional.tested_efforts == ("low", "high")
+
+
+def test_capability_profile_export_import_provisions_environment_startup(tmp_path: Any) -> None:
+    source_database = Database(tmp_path / "capability-export-source.sqlite3")
+    source_subject = "Noyra-capability-export-source"
+    IdentityStore(source_database).ensure(source_subject, content_hash("export-source"))
+    source_store = CapabilityProfileStore(source_database)
+    observed = source_store.record_probe_success(
+        source_subject,
+        "openai_compatible",
+        "https://models.example/v1",
+        "provider-alias",
+        "high",
+    )
+    assert observed is not None
+    exported = observed.export(
+        provider_type="openai_compatible",
+        base_url="https://models.example/v1",
+        model="provider-alias",
+    )
+
+    target_database = Database(tmp_path / "capability-export-target.sqlite3")
+    target_subject = "Noyra-capability-export-target"
+    IdentityStore(target_database).ensure(target_subject, content_hash("export-target"))
+    target_store = CapabilityProfileStore(target_database)
+    assert target_store.import_profiles(target_subject, {"profiles": [exported]}) == 1
+    imported = target_store.get(
+        target_subject,
+        "openai_compatible",
+        "https://models.example/v1",
+        "provider-alias",
+    )
+    assert imported is not None
+    assert imported.source == "operator"
+    assert imported.tested_efforts == ("high",)
+    assert imported.profile_digest == observed.profile_digest
 
 
 def test_unknown_alias_requires_endpoint_probe_before_resource_configuration(tmp_path: Any) -> None:

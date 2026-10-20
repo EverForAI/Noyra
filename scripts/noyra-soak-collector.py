@@ -9,10 +9,11 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -552,37 +553,102 @@ def append_snapshot(
     line = (json.dumps(snapshot, ensure_ascii=True, sort_keys=True) + "\n").encode("utf-8")
     if len(line) > max_bytes:
         raise ValueError("soak_snapshot_exceeds_max_bytes")
-    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags, 0o640)
-    with os.fdopen(descriptor, "ab") as stream:
-        if not os.path.isfile(path) or path.is_symlink():
-            raise ValueError("unsafe soak output")
-        stream.write(line)
-        stream.flush()
-        os.fsync(stream.fileno())
-    if path.stat().st_size <= max_bytes:
+    with _soak_output_lock(path):
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o640)
+        with os.fdopen(descriptor, "ab") as stream:
+            opened = os.fstat(stream.fileno())
+            current = path.lstat()
+            if (
+                not stat.S_ISREG(current.st_mode)
+                or path.is_symlink()
+                or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+            ):
+                raise ValueError("unsafe soak output")
+            stream.write(line)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _fsync_directory(path.parent)
+        if path.stat().st_size <= max_bytes:
+            return
+        rotated_from = path.lstat()
+        total_size = path.stat().st_size
+        start = max(0, total_size - max_bytes - 1)
+        with path.open("rb") as stream:
+            stream.seek(start)
+            tail = stream.read(max_bytes + 1)
+        lines = tail.splitlines()
+        if start:
+            lines = lines[1:]
+        kept: list[bytes] = []
+        size = 0
+        target_size = max_bytes * 4 // 5
+        for item in reversed(lines):
+            required = len(item) + 1
+            if kept and size + required > target_size:
+                break
+            kept.append(item)
+            size += required
+        current = path.lstat()
+        if (rotated_from.st_dev, rotated_from.st_ino) != (current.st_dev, current.st_ino):
+            raise ValueError("unsafe soak output replacement")
+        _atomic_replace_snapshot(path, b"\n".join(reversed(kept)) + b"\n")
+
+
+@contextmanager
+def _soak_output_lock(path: Path):
+    """Serialize append and rotation across overlapping timer processes."""
+
+    lock_path = path.with_name(path.name + ".lock")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags, 0o640)
+    try:
+        if os.name == "posix":
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        else:
+            import msvcrt
+
+            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+        yield
+    finally:
+        if os.name == "posix":
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        else:
+            import msvcrt
+
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        os.close(descriptor)
+
+
+def _atomic_replace_snapshot(path: Path, payload: bytes) -> None:
+    if path.is_symlink():
+        raise ValueError("unsafe soak output")
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        os.chmod(temporary, 0o640)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name != "posix":
         return
-    total_size = path.stat().st_size
-    start = max(0, total_size - max_bytes - 1)
-    with path.open("rb") as stream:
-        stream.seek(start)
-        tail = stream.read(max_bytes + 1)
-    lines = tail.splitlines()
-    if start:
-        lines = lines[1:]
-    kept: list[bytes] = []
-    size = 0
-    target_size = max_bytes * 4 // 5
-    for item in reversed(lines):
-        required = len(item) + 1
-        if kept and size + required > target_size:
-            break
-        kept.append(item)
-        size += required
-    with path.open("wb") as stream:
-        stream.write(b"\n".join(reversed(kept)) + b"\n")
-        stream.flush()
-        os.fsync(stream.fileno())
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def main() -> int:

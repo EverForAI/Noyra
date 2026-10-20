@@ -343,6 +343,12 @@ with root-only permissions, then set the corresponding `*_CREDENTIAL` variable (
 the credential name from the environment; systemd supplies its contents through
 `CREDENTIALS_DIRECTORY`. File and systemd credential sources cannot both be set for one value.
 
+Native production hosts use `NOYRA_STORAGE_PROFILE=recovery_capable` by default. This profile
+requires the configured backup root to be usable before the service starts, so runtime readiness
+cannot hide a missing restore and upgrade safeguard. A deliberate system-disk runtime-only
+deployment may set `NOYRA_STORAGE_PROFILE=runtime_only`; its readiness payload remains degraded
+for backup capability and maintenance commands still fail closed.
+
 Provider keys are never returned by normal configuration endpoints. Runtime and training exports
 contain only non-secret configuration metadata and redacted diagnostics; the server-side secret
 files are not included. Back up secret files separately using an encrypted, access-controlled

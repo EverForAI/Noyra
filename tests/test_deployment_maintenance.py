@@ -4,7 +4,7 @@ import os
 from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -42,6 +42,9 @@ def _helper(*, root_markers: bool = False) -> Any:
                 return original(path)
 
         module.read_marker = read_test_marker
+        # Unit fixtures emulate privileged evidence ownership independently of
+        # the production helper. Real root/service UID integration is separate.
+        module._expected_evidence_owner = cast(Any, os).geteuid
     return module
 
 
@@ -450,6 +453,222 @@ def test_backup_gc_resumes_from_durable_cursor_after_process_interruption(
     assert json.loads(row["cursor_json"])["next_index"] == 2
 
 
+def test_gc_manifest_cleanup_preserves_failed_and_pending_evidence(tmp_path: Path) -> None:
+    from noyra.core import Database, IdentityStore
+    from noyra.core.types import content_hash
+
+    helper = _helper(root_markers=True)
+    database = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-gc-manifest-retention"
+    IdentityStore(database).ensure(subject, content_hash(subject))
+    statuses = ("planned", "failed", "applied")
+    manifest_paths: dict[str, Path] = {}
+
+    for status in statuses:
+        run_id = f"backupretention_{status}"
+        manifest = helper._write_gc_manifest(database.path, run_id, [])
+        manifest_paths[status] = helper._gc_manifest_path(database.path, run_id)
+        cursor = {
+            "version": 4,
+            "next_index": 0,
+            "plan_id": "c" * 64,
+            **manifest,
+        }
+        helper._record_backup_gc_run(
+            database.path,
+            subject,
+            {"plan_id": "c" * 64},
+            status=status,
+            cursor_override=cursor,
+            failure_code="RuntimeError" if status == "failed" else None,
+            required=True,
+            run_id=run_id,
+        )
+
+    orphan_path = helper._gc_manifest_path(database.path, "backupretention_orphan")
+    helper._write_gc_manifest(database.path, "backupretention_orphan", [])
+
+    helper._cleanup_orphan_gc_manifests(database.path)
+
+    assert manifest_paths["planned"].exists()
+    assert manifest_paths["failed"].exists()
+    assert not manifest_paths["applied"].exists()
+    assert not orphan_path.exists()
+    with database.connection() as connection:
+        row = connection.execute(
+            "SELECT cursor_json, failure_code FROM backup_retention_runs WHERE run_id=?",
+            ("backupretention_failed",),
+        ).fetchone()
+    cursor = json.loads(row["cursor_json"])
+    failed_manifest = manifest_paths["failed"].read_bytes()
+    assert row["failure_code"] == "RuntimeError"
+    assert len(failed_manifest) == cursor["manifest_bytes"]
+    assert helper.hashlib.sha256(failed_manifest).hexdigest() == cursor["manifest_sha256"]
+
+
+def test_gc_runtime_failure_leaves_manifest_for_next_maintenance_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from noyra.core import Database, IdentityStore
+    from noyra.core.types import content_hash
+
+    helper = _helper(root_markers=True)
+    releases, backups = tmp_path / "releases", tmp_path / "backups"
+    releases.mkdir()
+    backups.mkdir()
+    release = releases / "old-release"
+    release.mkdir()
+    (release / helper.MARKER).write_text(
+        json.dumps({"format": "noyra-verified-install/v1", "readiness": "passed"}),
+        encoding="utf-8",
+    )
+    database = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-gc-failed-manifest"
+    IdentityStore(database).ensure(subject, content_hash(subject))
+    plan = {
+        "plan_id": "d" * 64,
+        "releases": [release.name],
+        "backup_details": [],
+        "backups": [],
+        "retention_policy": {},
+        "backup_protected": [],
+    }
+
+    def fail_gc(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("injected GC action failure")
+
+    monkeypatch.setattr(helper, "apply_gc", fail_gc)
+
+    with pytest.raises(OSError):
+        helper.apply_resumable_gc(database.path, subject, releases, backups, plan)
+
+    with database.connection() as connection:
+        row = connection.execute("SELECT run_id, status FROM backup_retention_runs").fetchone()
+    assert row["status"] == "failed"
+    manifest_path = helper._gc_index_path(database.path, row["run_id"])
+    assert manifest_path.is_file()
+
+    helper._cleanup_orphan_gc_manifests(database.path)
+
+    assert manifest_path.is_file()
+    assert release.is_dir()
+
+
+def test_gc_manifest_cleanup_error_does_not_change_applied_run_to_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from noyra.core import Database, IdentityStore
+    from noyra.core.types import content_hash
+
+    helper = _helper(root_markers=True)
+    releases, backups = tmp_path / "releases", tmp_path / "backups"
+    releases.mkdir()
+    backups.mkdir()
+    release = releases / "old-release"
+    release.mkdir()
+    (release / helper.MARKER).write_text(
+        json.dumps({"format": "noyra-verified-install/v1", "readiness": "passed"}),
+        encoding="utf-8",
+    )
+    database = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-gc-applied-manifest"
+    IdentityStore(database).ensure(subject, content_hash(subject))
+    plan = {
+        "plan_id": "e" * 64,
+        "releases": [release.name],
+        "backup_details": [],
+        "backups": [],
+        "retention_policy": {},
+        "backup_protected": [],
+    }
+    original_fsync = helper._fsync_directory
+    fsync_calls = 0
+
+    def fail_final_fsync(path: Path) -> None:
+        nonlocal fsync_calls
+        fsync_calls += 1
+        with database.connection() as connection:
+            applied = connection.execute(
+                "SELECT 1 FROM backup_retention_runs WHERE status='applied'"
+            ).fetchone()
+        if applied is not None:
+            raise OSError("injected sidecar directory sync failure")
+        original_fsync(path)
+
+    monkeypatch.setattr(helper, "_fsync_directory", fail_final_fsync)
+
+    result = helper.apply_resumable_gc(database.path, subject, releases, backups, plan)
+
+    with database.connection() as connection:
+        row = connection.execute("SELECT status FROM backup_retention_runs").fetchone()
+    assert result["status"] == "applied"
+    assert result["manifest_cleanup_warning"] is True
+    assert row["status"] == "applied"
+    assert not release.exists()
+
+
+def test_gc_resume_compatibility_does_not_delete_orphaned_marker(tmp_path: Path) -> None:
+    helper = _helper(root_markers=True)
+    releases, backups = tmp_path / "releases", tmp_path / "backups"
+    releases.mkdir()
+    backups.mkdir()
+    backup = backups / "noyra-orphan.noyra-backup"
+    marker = backup.with_name(backup.name + ".verified.json")
+    marker.write_text(
+        json.dumps(
+            {
+                "format": "noyra-verified-upgrade-backup/v1",
+                "backup": backup.name,
+                "restore_verified": True,
+                "sha256": "a" * 64,
+                "size": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    action = {"kind": "backup", "name": backup.name, "sha256": "a" * 64, "size": 1}
+    assert helper._resume_actions_compatible([action], [], releases, backups) is True
+    assert marker.exists()
+
+
+def test_gc_consumes_more_than_one_thousand_actions_in_batches(tmp_path: Path) -> None:
+    from noyra.core import Database, IdentityStore
+    from noyra.core.types import content_hash
+
+    helper = _helper(root_markers=True)
+    releases, backups = tmp_path / "releases", tmp_path / "backups"
+    releases.mkdir()
+    backups.mkdir()
+    names: list[str] = []
+    for index in range(1_001):
+        name = f"old-{index:04d}"
+        release = releases / name
+        release.mkdir()
+        (release / helper.MARKER).write_text(
+            json.dumps({"format": "noyra-verified-install/v1", "readiness": "passed"}),
+            encoding="utf-8",
+        )
+        names.append(name)
+    database = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-gc-batch"
+    IdentityStore(database).ensure(subject, content_hash(subject))
+    plan = {
+        "plan_id": "b" * 64,
+        "releases": names,
+        "backup_details": [],
+        "backups": [],
+        "retention_policy": {},
+        "backup_protected": [],
+    }
+    first = helper.apply_resumable_gc(database.path, subject, releases, backups, plan)
+    assert first["status"] == "partial"
+    assert first["remaining"] == 1
+    second = helper.apply_resumable_gc(database.path, subject, releases, backups, plan)
+    assert second["status"] == "applied"
+    assert second["remaining"] == 0
+    assert not any(releases.iterdir())
+
+
 def test_gc_ignores_unmanaged_releases_and_requires_verified_replacement(tmp_path: Path) -> None:
     helper = _helper(root_markers=True)
     releases, backups = tmp_path / "releases", tmp_path / "backups"
@@ -603,3 +822,320 @@ def test_installer_preflights_before_stopping_and_gc_follows_readiness() -> None
         '"$SOURCE_DIR/scripts/deployment-maintenance.py" verify-backup' in source
     )
     assert source.index("if start_and_check; then") < source.index('deployment-maintenance.py" gc')
+
+
+def _real_gc_layout(tmp_path: Path, helper: Any) -> tuple[Path, Path]:
+    releases, backups = tmp_path / "releases", tmp_path / "backups"
+    releases.mkdir()
+    backups.mkdir()
+    for index in range(8):
+        release = releases / f"release-{index}"
+        release.mkdir()
+        (release / helper.MARKER).write_text(
+            json.dumps({"format": "noyra-verified-install/v1", "readiness": "passed"})
+        )
+        os.utime(release, (1_800_000_000 + index, 1_800_000_000 + index))
+        backup = backups / f"noyra-{index}.noyra-backup"
+        backup.write_bytes(f"backup-{index}".encode())
+        backup.with_name(backup.name + ".verified.json").write_text(
+            json.dumps(
+                {
+                    "format": "noyra-verified-upgrade-backup/v1",
+                    "backup": backup.name,
+                    "restore_verified": True,
+                    "sha256": helper.file_hash(backup),
+                    "size": backup.stat().st_size,
+                }
+            )
+        )
+        os.utime(backup, (1_800_000_000 + index, 1_800_000_000 + index))
+    return releases, backups
+
+
+def test_gc_rebuilds_plan_between_every_mixed_batch(tmp_path: Path) -> None:
+    from noyra.core import Database, IdentityStore
+    from noyra.core.types import content_hash
+
+    helper = _helper(root_markers=True)
+    helper.MAX_RESUMABLE_GC_ACTIONS = 1
+    releases, backups = _real_gc_layout(tmp_path, helper)
+    database = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-mixed-resume"
+    IdentityStore(database).ensure(subject, content_hash(subject))
+    statuses = []
+    for _ in range(12):
+        plan = helper.gc_plan(releases, backups, keep=3, proc_root=tmp_path / "no-proc")
+        result = helper.apply_resumable_gc(database.path, subject, releases, backups, plan)
+        statuses.append(result["status"])
+        if result["status"] == "applied":
+            break
+    assert statuses == ["partial"] * 9 + ["applied"]
+    assert len(list(releases.iterdir())) == 3
+    assert len(list(backups.glob("*.noyra-backup"))) == 3
+    with database.connection() as connection:
+        rows = connection.execute(
+            "SELECT status,deleted_count FROM backup_retention_runs"
+        ).fetchall()
+    assert [(row["status"], row["deleted_count"]) for row in rows] == [("applied", 10)]
+
+
+def test_gc_policy_conflict_terminates_old_plan_and_preserves_evidence(tmp_path: Path) -> None:
+    from noyra.core import Database, IdentityStore
+    from noyra.core.types import content_hash
+
+    helper = _helper(root_markers=True)
+    helper.MAX_RESUMABLE_GC_ACTIONS = 1
+    releases, backups = _real_gc_layout(tmp_path, helper)
+    database = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-supersede"
+    IdentityStore(database).ensure(subject, content_hash(subject))
+    first = helper.apply_resumable_gc(
+        database.path,
+        subject,
+        releases,
+        backups,
+        helper.gc_plan(releases, backups, keep=3, proc_root=tmp_path / "no-proc"),
+    )
+    protected_releases = sorted(
+        releases.iterdir(), key=lambda p: p.stat().st_mtime_ns, reverse=True
+    )[:4]
+    second = helper.apply_resumable_gc(
+        database.path,
+        subject,
+        releases,
+        backups,
+        helper.gc_plan(releases, backups, keep=4, proc_root=tmp_path / "no-proc"),
+    )
+    assert second["run_id"] != first["run_id"]
+    assert second["superseded_run_id"] == first["run_id"]
+    assert helper._gc_index_path(database.path, first["run_id"]).exists()
+    with database.connection() as connection:
+        row = connection.execute(
+            "SELECT status,deleted_count,failure_code FROM backup_retention_runs WHERE run_id=?",
+            (first["run_id"],),
+        ).fetchone()
+    assert tuple(row) == ("failed", 1, "plan_superseded")
+    assert all(release.is_dir() for release in protected_releases)
+    for index in range(4, 8):
+        assert (backups / f"noyra-{index}.noyra-backup").is_file()
+
+
+def test_gc_index_tamper_fails_before_further_deletion(tmp_path: Path) -> None:
+    import sqlite3
+
+    from noyra.core import Database, IdentityStore
+    from noyra.core.types import content_hash
+
+    helper = _helper(root_markers=True)
+    helper.MAX_RESUMABLE_GC_ACTIONS = 1
+    releases, backups = _real_gc_layout(tmp_path, helper)
+    database = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-index-corruption"
+    IdentityStore(database).ensure(subject, content_hash(subject))
+    plan = helper.gc_plan(releases, backups, keep=3, proc_root=tmp_path / "no-proc")
+    result = helper.apply_resumable_gc(database.path, subject, releases, backups, plan)
+    with sqlite3.connect(helper._gc_index_path(database.path, result["run_id"])) as connection:
+        connection.execute("UPDATE actions SET payload='{}' WHERE ordinal=1")
+    before = sorted(path.name for path in releases.iterdir())
+    with pytest.raises(ValueError, match="manifest_integrity"):
+        helper.apply_resumable_gc(
+            database.path,
+            subject,
+            releases,
+            backups,
+            helper.gc_plan(releases, backups, keep=3, proc_root=tmp_path / "no-proc"),
+        )
+    assert sorted(path.name for path in releases.iterdir()) == before
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or getattr(os, "geteuid", lambda: -1)() != 0,
+    reason="requires actual root and separate service UID",
+)
+def test_root_gc_and_service_uid_health_restart_backup_restore() -> None:
+    import shutil
+    import subprocess
+    import sys
+    import tempfile
+
+    from noyra.core import Database, IdentityStore
+    from noyra.core.at_rest import BackupKeyring
+    from noyra.core.types import content_hash
+
+    outer = Path(tempfile.mkdtemp(prefix="noyra-gc-uid-"))
+    outer.chmod(0o755)
+    try:
+        data = outer / "data"
+        data.mkdir(mode=0o700)
+        database = Database(data / "noyra.sqlite3")
+        subject = "Noyra-real-UID"
+        IdentityStore(database).ensure(subject, content_hash(subject))
+        for member in data.iterdir():
+            cast(Any, os).chown(member, 65534, 65534)
+            member.chmod(0o600)
+        cast(Any, os).chown(data, 65534, 65534)
+        helper = _helper()
+        helper.MAX_RESUMABLE_GC_ACTIONS = 1
+        releases, backups = _real_gc_layout(outer, helper)
+        result = helper.apply_resumable_gc(
+            database.path,
+            subject,
+            releases,
+            backups,
+            helper.gc_plan(releases, backups, keep=3, proc_root=outer / "no-proc"),
+        )
+        assert result["status"] == "partial"
+        evidence = helper._gc_index_path(database.path, result["run_id"])
+        assert evidence.stat().st_uid == 0
+        output = outer / "service-output"
+        output.mkdir(mode=0o700)
+        cast(Any, os).chown(output, 65534, 65534)
+        keyring = outer / "keyring.json"
+        BackupKeyring.initialize(keyring)
+        cast(Any, os).chown(keyring, 65534, 65534)
+        code = """
+from pathlib import Path
+import os, sys
+from noyra.core.at_rest import (
+    _harden_private_paths, _private_permission_error, EncryptedBackupManager,
+)
+root, output, keyring = map(Path, sys.argv[1:])
+os.setgroups([]); os.setgid(65534); os.setuid(65534); os.umask(0o077)
+assert _private_permission_error(root) is None, _private_permission_error(root)
+_harden_private_paths(root)
+assert _private_permission_error(root) is None, _private_permission_error(root)
+manager = EncryptedBackupManager(root, keyring)
+artifact = manager.create(output / 'offline.noyra-backup')
+restored = manager.restore(artifact.path, output / 'restored')
+assert not (restored / '.noyra-maintenance').exists()
+assert _private_permission_error(root) is None, _private_permission_error(root)
+assert _private_permission_error(restored) is None, _private_permission_error(restored)
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", code, str(data), str(output), str(keyring)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        assert evidence.stat().st_uid == 0
+        # A restored database keeps the old audit row but cannot replay this
+        # machine's deletion queue. A fresh plan explicitly terminates it.
+        restored_db = output / "restored" / "noyra.sqlite3"
+        restored_result = helper.apply_resumable_gc(
+            restored_db,
+            subject,
+            releases,
+            backups,
+            helper.gc_plan(releases, backups, keep=4, proc_root=outer / "no-proc"),
+        )
+        assert restored_result["superseded_run_id"] == result["run_id"]
+    finally:
+        shutil.rmtree(outer)
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or getattr(os, "geteuid", lambda: -1)() != 0,
+    reason="real privileged evidence metadata",
+)
+def test_gc_legacy_and_reserved_namespace_keep_strict_metadata(tmp_path: Path) -> None:
+    from noyra.core.at_rest import AtRestError, _private_paths
+
+    helper = _helper()
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    database = data / "noyra.sqlite3"
+    database.touch(mode=0o600)
+    legacy = database.with_name(".noyra.sqlite3.backup-retention-backupretention_legacy.manifest")
+    legacy.write_text("legacy-evidence", encoding="utf-8")
+    legacy.chmod(0o600)
+    assert legacy not in list(_private_paths(data))
+    helper._ensure_gc_evidence(database)
+    moved = helper._gc_manifest_path(database, "backupretention_legacy")
+    assert moved.read_text(encoding="utf-8") == "legacy-evidence"
+    assert not legacy.exists()
+    assert moved not in list(_private_paths(data))
+    moved.chmod(0o644)
+    with pytest.raises(AtRestError, match="maintenance evidence"):
+        list(_private_paths(data))
+    moved.chmod(0o600)
+    alias = tmp_path / "alias"
+    alias.hardlink_to(moved)
+    with pytest.raises(AtRestError, match="maintenance evidence"):
+        list(_private_paths(data))
+
+
+@pytest.mark.parametrize("version", [2, 3, 4])
+def test_gc_upgrades_legacy_cursor_after_a_completed_mixed_action(
+    tmp_path: Path, version: int
+) -> None:
+    import shutil
+
+    from noyra.core import Database, IdentityStore
+    from noyra.core.types import content_hash
+
+    helper = _helper(root_markers=True)
+    helper.MAX_RESUMABLE_GC_ACTIONS = 2
+    releases, backups = _real_gc_layout(tmp_path, helper)
+    database = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-legacy-gc"
+    IdentityStore(database).ensure(subject, content_hash(subject))
+    plan = helper.gc_plan(releases, backups, keep=3, proc_root=tmp_path / "no-proc")
+    actions = list(helper._iter_gc_actions(releases, plan))
+    assert actions[0]["kind"] == "release" and any(a["kind"] == "backup" for a in actions)
+    run_id = f"backupretention_legacy_{version}"
+    cursor = {
+        "version": version,
+        "next_index": 1,
+        "plan_id": plan["plan_id"],
+        "policy_digest": helper._plan_policy_digest(plan),
+        "protected_digest": helper._plan_protected_digest(plan),
+    }
+    if version == 4:
+        cursor.update(helper._write_gc_manifest(database.path, run_id, actions))
+    else:
+        cursor["actions"] = actions
+    helper._record_backup_gc_run(
+        database.path,
+        subject,
+        plan,
+        status="planned",
+        deleted_count=1,
+        required=True,
+        cursor_override=cursor,
+        run_id=run_id,
+    )
+    shutil.rmtree(releases / actions[0]["name"])
+    for _ in range(6):
+        rebuilt = helper.gc_plan(releases, backups, keep=3, proc_root=tmp_path / "no-proc")
+        result = helper.apply_resumable_gc(database.path, subject, releases, backups, rebuilt)
+        assert result["run_id"] == run_id and result["resumed"] is True
+        if result["status"] == "applied":
+            break
+    assert result["status"] == "applied" and result["deleted_count"] == len(actions)
+    with database.connection() as connection:
+        row = connection.execute("SELECT * FROM backup_retention_runs").fetchone()
+    assert row["status"] == "applied" and json.loads(row["cursor_json"])["version"] == 5
+    assert len(list(releases.iterdir())) == 3
+    assert len(list(backups.glob("*.noyra-backup"))) == 3
+
+
+def test_gc_index_resume_supports_relative_database_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from noyra.core import Database, IdentityStore
+    from noyra.core.types import content_hash
+
+    helper, releases, backups = _releases(tmp_path)
+    helper.MAX_RESUMABLE_GC_ACTIONS = 1
+    database = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-relative-gc"
+    IdentityStore(database).ensure(subject, content_hash(subject))
+    plan = helper.gc_plan(releases, backups, keep=3, proc_root=tmp_path / "no-proc")
+    monkeypatch.chdir(tmp_path)
+    for _ in range(5):
+        result = helper.apply_resumable_gc(
+            Path(database.path.name), subject, releases, backups, plan
+        )
+    assert result["status"] == "applied" and result["deleted_count"] == 5
+    assert len(list(releases.iterdir())) == 3

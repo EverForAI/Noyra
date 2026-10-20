@@ -2577,7 +2577,11 @@ $("#admin-model-form").addEventListener("submit", async (event) => {
   if (button) button.disabled = true;
   try {
     const payload = { pool: $("#admin-model-pool").value, label: $("#admin-model-label").value.trim(), base_url: $("#admin-model-url").value.trim(), model: $("#admin-model-name").value.trim(), api_keys: $("#admin-model-keys").value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean), ...readModelLimits(form, "data-draft-limit") };
-    if ($("#admin-model-reasoning")?.value) payload.reasoning_effort = $("#admin-model-reasoning").value;
+    if ($("#admin-model-reasoning")?.value) {
+      payload.reasoning_effort = $("#admin-model-reasoning").value;
+      if (reasoningField.dataset.profileRevision) payload.capability_revision = Number(reasoningField.dataset.profileRevision);
+      if (reasoningField.dataset.profileDigest) payload.capability_digest = reasoningField.dataset.profileDigest;
+    }
     if (!confirmUnlimitedLimits(payload.limit_enabled)) return;
     payload.input_usd_per_million = normalizeBudgetCost(form.elements.input_usd_per_million.value);
     payload.output_usd_per_million = normalizeBudgetCost(form.elements.output_usd_per_million.value);
@@ -2851,7 +2855,7 @@ let reasoningCapabilityGeneration = 0;
 let reasoningCapabilityTimer = null;
 const applyReasoningProfile = (profile) => {
   const select = $("#admin-model-reasoning");
-  const selected = select.value;
+  const selected = profile?.configured_selected || profile?.selected || select.value;
   const observedEfforts = Array.isArray(profile?.efforts) ? profile.efforts.filter((item) => typeof item === "string") : [];
   const candidateEfforts = Array.isArray(profile?.candidate_efforts) ? profile.candidate_efforts.filter((item) => typeof item === "string") : [];
   const efforts = observedEfforts.length ? observedEfforts : candidateEfforts;
@@ -2861,6 +2865,8 @@ const applyReasoningProfile = (profile) => {
   select.value = efforts.includes(selected) ? selected : "";
   if (profile?.revision !== undefined) reasoningField.dataset.profileRevision = String(profile.revision);
   else delete reasoningField.dataset.profileRevision;
+  if (profile?.profile_digest) reasoningField.dataset.profileDigest = String(profile.profile_digest);
+  else delete reasoningField.dataset.profileDigest;
   const tested = Array.isArray(profile?.tested_efforts) ? profile.tested_efforts : [];
   const selectionVerified = observed && (!select.value || tested.includes(select.value));
   reasoningField.dataset.capabilityObserved = observed ? "true" : "false";

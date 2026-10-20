@@ -17,7 +17,20 @@ import subprocess
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
+
+StorageProfile = Literal["runtime_only", "recovery_capable"]
+
+
+def resolve_storage_profile(
+    profile: str = "development", value: str | None = None
+) -> StorageProfile:
+    selected = (value or "").strip().lower()
+    if not selected:
+        return "recovery_capable" if profile.strip().lower() == "production" else "runtime_only"
+    if selected not in {"runtime_only", "recovery_capable"}:
+        raise ValueError("storage profile is invalid")
+    return cast(StorageProfile, selected)
 
 
 class StorageMode(StrEnum):
@@ -130,7 +143,7 @@ def _reject_reparse_path(path: Path) -> None:
             continue
         except OSError as error:
             raise StorageUnavailableError("storage_metadata_unavailable") from error
-        if stat.S_ISLNK(metadata.st_mode):
+        if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & 0x400:
             raise StorageUnavailableError("storage_symlink_rejected")
         if not stat.S_ISDIR(metadata.st_mode):
             raise StorageUnavailableError("storage_path_not_directory")
@@ -335,6 +348,27 @@ def _explicit_mount_expectation() -> bool:
     if value == StorageMode.DEDICATED_MOUNT.value:
         return True
     raise StorageUnavailableError("storage_mode_invalid")
+
+
+def require_backup_storage(backup_root: Path | str) -> None:
+    """Check the backup boundary before any setup mkdir or write."""
+    backup = Path(backup_root).expanduser()
+    _reject_reparse_path(backup)
+    identity = _external_backup_mount_identity(backup)
+    device, mounted = _findmnt(backup)
+    if (identity is not None or _fstab_expects_mount(backup)) and not mounted:
+        raise StorageUnavailableError("backup_mount_missing")
+    if identity is not None and device != identity["source"]:
+        raise StorageUnavailableError("backup_mount_identity_mismatch")
+    if backup.exists():
+        metadata = backup.lstat()
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise StorageUnavailableError("backup_path_not_directory")
+        if os.name == "posix" and (
+            metadata.st_uid != getattr(os, "geteuid", lambda: -1)()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise StorageUnavailableError("backup_directory_permissions_invalid")
 
 
 def detect_storage_layout(

@@ -206,6 +206,17 @@ class BackupKeyring:
     @classmethod
     def rotate(cls, path: Path | str) -> BackupKeyring:
         target = Path(path).expanduser().resolve()
+        # This stable sibling is never replaced or removed. Locking the keyring
+        # inode itself would not serialize readers after its atomic replacement.
+        lock = ProcessLock(target.with_name(target.name + ".rotation.lock"))
+        lock.acquire()
+        try:
+            return cls._rotate_locked(target)
+        finally:
+            lock.release()
+
+    @classmethod
+    def _rotate_locked(cls, target: Path) -> BackupKeyring:
         current = cls.from_path(target)
         if len(current._keys) >= _MAX_KEYS:
             raise ValueError("backup keyring reached its retained-key limit")
@@ -835,6 +846,9 @@ class EncryptedBackupManager:
         }
         for source in _private_root_entries(self.data_root):
             if source == work_root or source.name in skipped_names:
+                continue
+            if _maintenance_evidence_entry(self.data_root, source):
+                # Machine-local deletion plans must never replay after restore.
                 continue
             if _installed_upgrade_control(self.data_root, source):
                 # Upgrade queues describe this machine, not durable subject state.
@@ -1482,6 +1496,15 @@ def _harden_tree(root: Path) -> None:
     os.chmod(root, 0o700)
 
 
+def _maintenance_evidence_entry(data_root: Path, path: Path) -> bool:
+    from .maintenance_evidence import privileged_maintenance_entry
+
+    try:
+        return privileged_maintenance_entry(data_root, path)
+    except (OSError, ValueError) as error:
+        raise AtRestError("maintenance evidence permissions are invalid") from error
+
+
 def _private_paths(data_root: Path) -> Iterator[Path]:
     yield data_root
     # Inspect every persistent entry, not only the historical ``secrets`` and
@@ -1489,6 +1512,8 @@ def _private_paths(data_root: Path) -> Iterator[Path]:
     # can all contain private material and must obey the same contract.
     for path in _private_root_entries(data_root):
         try:
+            if _maintenance_evidence_entry(data_root, path):
+                continue
             if _installed_upgrade_control(data_root, path):
                 yield from _upgrade_service_paths(data_root, path)
                 continue

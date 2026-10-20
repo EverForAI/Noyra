@@ -209,6 +209,11 @@ class CognitiveResourceGroupInput(BaseModel):
     base_url: str
     model: str = Field(min_length=1, max_length=256)
     reasoning_effort: ReasoningEffort | None = None
+    # Environment-backed resources cannot perform an unbounded provider probe
+    # during service construction.  They must pin the durable, endpoint-scoped
+    # profile created by the authenticated management probe instead.
+    capability_revision: int | None = Field(default=None, ge=1, strict=True)
+    capability_digest: str | None = Field(default=None, min_length=64, max_length=64)
     api_keys: tuple[SecretStr, ...] = Field(min_length=1, max_length=64)
     priority: int = Field(default=100, ge=0, le=1000)
     weight: int = Field(default=100, ge=1, le=1000)
@@ -262,6 +267,16 @@ class CognitiveResourceGroupInput(BaseModel):
         normalized = value.strip()
         if not normalized:
             raise ValueError("cognitive resource text cannot be blank")
+        return normalized
+
+    @field_validator("capability_digest")
+    @classmethod
+    def validate_capability_digest(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if any(character not in "0123456789abcdef" for character in normalized):
+            raise ValueError("capability digest must be hexadecimal")
         return normalized
 
     @field_validator("base_url")
@@ -820,7 +835,31 @@ class CognitiveResourceStore:
     def active(
         self, subject_id: str, pool: CognitivePool
     ) -> builtins.list[CognitiveResourceGroupRecord]:
-        return [record for record in self.list(subject_id, pool=pool) if record.status == "active"]
+        if pool not in {"economy", "deep"}:
+            raise ValueError("invalid resource pool")
+        records: list[CognitiveResourceGroupRecord] = []
+        # A stable transaction and SQL filtering keep management pagination from
+        # truncating the runtime candidate set, including across concurrent edits.
+        with self.database.read_transaction() as connection:
+            cursor = connection.execute(
+                "SELECT * FROM cognitive_resource_groups WHERE subject_id=? AND pool=? "
+                "AND status='active' ORDER BY priority, label, group_id",
+                (subject_id, pool),
+            )
+            while rows := cursor.fetchmany(MAX_RESOURCE_PAGE_SIZE):
+                records.extend(self._from_group_row(connection, row) for row in rows)
+        return records
+
+    def find(
+        self, subject_id: str, pool: CognitivePool, label: str
+    ) -> CognitiveResourceGroupRecord | None:
+        """Resolve an exact durable identity without management page limits."""
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM cognitive_resource_groups WHERE subject_id=? AND pool=? AND label=?",
+                (subject_id, pool, label),
+            ).fetchone()
+            return None if row is None else self._from_group_row(connection, row)
 
     def budget_summary(self, group: CognitiveResourceGroupRecord) -> dict[str, Any]:
         now = datetime.now(UTC)
@@ -895,6 +934,28 @@ class CognitiveResourceStore:
                 (group_id, subject_id, page_limit, page_offset),
             ).fetchall()
             return [self._from_key_row(row) for row in rows]
+
+    def environment_key_status(
+        self, group_id: str, *, subject_id: str, proposed: set[str]
+    ) -> tuple[set[str], bool]:
+        """Compare live keys and explicit revocations without a management page cap."""
+        current: set[str] = set()
+        revoked = False
+        with self.database.read_transaction() as connection:
+            self._get_group_row(connection, group_id, subject_id=subject_id)
+            cursor = connection.execute(
+                "SELECT * FROM cognitive_resource_keys WHERE group_id=? AND subject_id=?",
+                (group_id, subject_id),
+            )
+            while rows := cursor.fetchmany(MAX_RESOURCE_PAGE_SIZE):
+                for row in rows:
+                    key = self._from_key_row(row)
+                    if key.status == "revoked":
+                        revoked = revoked or key.key_fingerprint in proposed
+                    else:
+                        # Cooldown is temporary availability, not a revocation.
+                        current.add(key.key_fingerprint)
+        return current, revoked
 
     def select_key(self, group_id: str, *, subject_id: str) -> CognitiveResourceKeyRecord | None:
         now = utc_now()
@@ -4098,11 +4159,12 @@ def resource_groups_from_env(pool: CognitivePool) -> tuple[CognitiveResourceGrou
                 )
             normalized["api_keys"] = tuple(SecretStr(value) for value in resolved_keys)
             proposal = CognitiveResourceGroupInput.model_validate(normalized)
-            if (
-                proposal.reasoning_effort is not None
-                and not reasoning_profile(proposal.model, proposal.provider_type).supported
+            if proposal.reasoning_effort is not None and (
+                proposal.capability_revision is None or proposal.capability_digest is None
             ):
-                raise ValueError("reasoning effort for model aliases requires an endpoint probe")
+                raise ValueError(
+                    "reasoning effort requires capability_revision and capability_digest"
+                )
             groups.append(proposal)
     except (TypeError, ValueError) as error:
         raise ConfigurationError(f"invalid {pool} model group configuration: {error}") from error

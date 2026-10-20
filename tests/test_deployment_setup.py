@@ -168,7 +168,7 @@ def test_local_preflight_accepts_system_disk_storage(
     monkeypatch.setattr("os.geteuid", lambda: 0, raising=False)
     monkeypatch.setattr(
         "noyra.deployment_setup.detect_storage_layout",
-        lambda: SimpleNamespace(
+        lambda *_: SimpleNamespace(
             mode=StorageMode.SYSTEM_DISK,
             writable=True,
             reason_code=None,
@@ -179,6 +179,42 @@ def test_local_preflight_accepts_system_disk_storage(
     assert "system_disk" in result.stdout
 
 
+def test_local_preflight_uses_backup_root_from_environment_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_path = tmp_path / "noyra.env"
+    custom_backup = tmp_path / "custom-backups"
+    custom_backup.mkdir()
+    env_path.write_text(
+        "NOYRA_HOST=127.0.0.1\n"
+        "NOYRA_OPERATOR_TOKEN=test-token\n"
+        f"NOYRA_BACKUP_ROOT={custom_backup}\n",
+        encoding="utf-8",
+    )
+    observed: list[Path] = []
+
+    class Runner:
+        def run(self: Self, argv: Any, *, check: Any = True, input_text: Any = None) -> Any:
+            del check, input_text
+            return CompletedProcess(argv, 0, "active\n", "")
+
+    def detect(data_root: Path, backup_root: Path) -> Any:
+        observed.append(backup_root)
+        return SimpleNamespace(
+            mode=StorageMode.SYSTEM_DISK,
+            writable=True,
+            backup_ready=True,
+            reason_code=None,
+            backup_reason_code=None,
+        )
+
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr("os.geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr("noyra.deployment_setup.detect_storage_layout", detect)
+    SetupRunner(SetupOptions(env_path=env_path), Runner()).run_local()
+    assert observed == [custom_backup]
+
+
 def test_local_preflight_rejects_unavailable_storage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -187,7 +223,7 @@ def test_local_preflight_rejects_unavailable_storage(
     monkeypatch.setattr(platform, "system", lambda: "Linux")
     monkeypatch.setattr(
         "noyra.deployment_setup.detect_storage_layout",
-        lambda: SimpleNamespace(
+        lambda *_: SimpleNamespace(
             mode=StorageMode.UNAVAILABLE,
             writable=False,
             reason_code="storage_mount_missing",
@@ -343,7 +379,15 @@ def test_public_mode_reports_rollback_failure(
     original_run = runner.run
 
     def fail_external_health(argv: Any, *, check: Any = True, input_text: Any = None) -> Any:
-        if tuple(argv) == ("curl", "--fail", "https://admin.example.com/health/ready"):
+        if tuple(argv) == (
+            "curl",
+            "--fail",
+            "--connect-timeout",
+            "5",
+            "--max-time",
+            "10",
+            "https://admin.example.com/health/ready",
+        ):
             return CompletedProcess(argv, 1, "", "failed")
         return original_run(argv, check=check, input_text=input_text)
 
@@ -464,7 +508,15 @@ def test_cloudflare_redacts_token_from_health_error_and_restores_service_state(
                 return CompletedProcess(command, 0, "enabled\n", "")
             if command[:2] == ("systemctl", "is-active"):
                 return CompletedProcess(command, 0, "active\n", "")
-            if command == ("curl", "--fail", "https://admin.example.com/health/ready"):
+            if command == (
+                "curl",
+                "--fail",
+                "--connect-timeout",
+                "5",
+                "--max-time",
+                "10",
+                "https://admin.example.com/health/ready",
+            ):
                 return CompletedProcess(command, 1, "", secret)
             return CompletedProcess(command, 0, "", "")
 
@@ -501,7 +553,15 @@ def test_cloudflare_rollback_preserves_static_service_state(
                 return CompletedProcess(command, 0, "static\n", "")
             if command[:2] == ("systemctl", "is-active"):
                 return CompletedProcess(command, 0, "inactive\n", "")
-            if command == ("curl", "--fail", "https://admin.example.com/health/ready"):
+            if command == (
+                "curl",
+                "--fail",
+                "--connect-timeout",
+                "5",
+                "--max-time",
+                "10",
+                "https://admin.example.com/health/ready",
+            ):
                 return CompletedProcess(command, 1, "", "failed")
             return CompletedProcess(command, 0, "", "")
 
@@ -607,3 +667,104 @@ def test_cloudflare_rollback_restores_systemd_state_matrix(
         call for call in runner.calls if call[:1] == ("systemctl",) and call[1] != "daemon-reload"
     ]
     assert service_calls == expected
+
+
+@pytest.mark.parametrize("case", ["missing", "wrong-source"])
+def test_configuration_backup_rejects_missing_expected_volume_before_mkdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    source = tmp_path / "env"
+    source.write_text("private-key", encoding="utf-8")
+    backups = tmp_path / "missing-volume"
+    monkeypatch.setattr(
+        "noyra.core.storage_mode._external_backup_mount_identity",
+        lambda _: {"source": "/dev/expected"},
+    )
+    monkeypatch.setattr(
+        "noyra.core.storage_mode._findmnt", lambda _: ("/dev/wrong", case == "wrong-source")
+    )
+    monkeypatch.setattr("noyra.core.storage_mode._fstab_expects_mount", lambda _: False)
+    with pytest.raises(SetupError, match="BACKUP_STORAGE_UNAVAILABLE"):
+        create_backup(source, backups)
+    assert not backups.exists()
+    assert source.read_text(encoding="utf-8") == "private-key"
+
+
+@pytest.mark.parametrize("target_name", ["backup", "metadata"])
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
+def test_configuration_backup_never_follows_existing_artifact_links(
+    tmp_path: Path, target_name: str, kind: str
+) -> None:
+    source = tmp_path / "env"
+    source.write_text("private-key", encoding="utf-8")
+    record = create_backup(source, tmp_path / "backups")
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_text("untouched", encoding="utf-8")
+    target = record.backup_path if target_name == "backup" else record.metadata_path
+    target.unlink()
+    try:
+        if kind == "symlink":
+            target.symlink_to(sentinel)
+        else:
+            target.hardlink_to(sentinel)
+    except OSError:
+        pytest.skip("test filesystem does not support this link operation")
+    with pytest.raises(SetupError, match="BACKUP_PATH"):
+        create_backup(source, tmp_path / "backups")
+    assert sentinel.read_text(encoding="utf-8") == "untouched"
+    assert source.read_text(encoding="utf-8") == "private-key"
+
+
+def test_configuration_backup_is_idempotent_and_keeps_source_permissions(tmp_path: Path) -> None:
+    source = tmp_path / "env"
+    source.write_text("private-key", encoding="utf-8")
+    source.chmod(0o640)
+    before = source.stat().st_mode
+    first = create_backup(source, tmp_path / "backups")
+    assert create_backup(source, tmp_path / "backups") == first
+    assert source.stat().st_mode == before
+    if os.name == "posix":
+        assert first.backup_path.stat().st_mode & 0o777 == 0o600
+        assert first.metadata_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_configuration_backup_rejects_linked_backup_ancestor(tmp_path: Path) -> None:
+    source = tmp_path / "env"
+    source.write_text("private-key", encoding="utf-8")
+    real = tmp_path / "real"
+    real.mkdir(mode=0o700)
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks unavailable")
+    with pytest.raises(SetupError, match="BACKUP_STORAGE_UNAVAILABLE"):
+        create_backup(source, alias / "new-backups")
+    assert not list(real.iterdir())
+
+
+def test_configuration_backup_keeps_each_mode_metadata_for_same_bytes(tmp_path: Path) -> None:
+    source = tmp_path / "env"
+    source.write_text("unchanged-private-key", encoding="utf-8")
+    first = create_backup(source, tmp_path / "backups", "public-env")
+    original_metadata = first.metadata_path.read_bytes()
+    second = create_backup(source, tmp_path / "backups", "cloudflare-env")
+    assert second.backup_path == first.backup_path
+    assert second.metadata_path != first.metadata_path
+    assert first.metadata_path.read_bytes() == original_metadata
+    assert create_backup(source, tmp_path / "backups", "cloudflare-env") == second
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX backup artifact permissions")
+def test_setup_rejects_insecure_existing_backup_without_chmod(tmp_path: Path) -> None:
+    from noyra.deployment_setup import SetupError, create_backup
+
+    source = tmp_path / "noyra.env"
+    source.write_text("NOYRA_TEST_VALUE=private\n", encoding="utf-8")
+    source.chmod(0o600)
+    record = create_backup(source, tmp_path / "backups")
+    record.backup_path.chmod(0o644)
+    with pytest.raises(SetupError, match="private regular file"):
+        create_backup(source, tmp_path / "backups")
+    assert record.backup_path.stat().st_mode & 0o777 == 0o644
+    assert source.stat().st_mode & 0o777 == 0o600

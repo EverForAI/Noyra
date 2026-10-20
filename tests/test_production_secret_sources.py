@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from pydantic import SecretStr
 
 from noyra.core.credentials import CredentialError, read_env_secret
 from noyra.core.types import content_hash
@@ -32,6 +33,19 @@ def test_production_operator_token_rejects_inline_source() -> None:
         pytest.raises(ValueError, match="inline secret is disabled for operator token"),
     ):
         ServiceSettings.from_env()
+
+
+def test_direct_production_settings_default_to_recovery_capable(tmp_path: Path) -> None:
+    settings = ServiceSettings(
+        data_dir=tmp_path / "data",
+        subject_id="Noyra-production-storage-default",
+        genesis_hash=content_hash({"test": "production-storage-default"}),
+        profile="production",
+        at_rest_mode="required",
+        backup_keyring_path=tmp_path / "backup.keys",
+        operator_token=SecretStr("operator-token-with-sufficient-entropy-123456"),
+    )
+    assert settings.storage_profile == "recovery_capable"
 
 
 def test_production_strict_review_loads_proxy_hmac_key_from_private_file(

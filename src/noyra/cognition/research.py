@@ -953,4 +953,21 @@ class AutonomousResearch:
 
 class ModelSearchResults(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-    results: tuple[dict[str, Any], ...] = Field(default=(), max_length=10)
+    # Request only the documented search-result fields on strict providers.
+    # Local dictionaries stay permissive so durable legacy responses still load.
+    results: tuple[dict[str, Any], ...] = Field(
+        default=(),
+        max_length=10,
+        json_schema_extra={
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "url": {"type": "string"},
+                    "snippet": {"type": "string"},
+                },
+                "required": ["title", "url", "snippet"],
+                "additionalProperties": False,
+            }
+        },
+    )

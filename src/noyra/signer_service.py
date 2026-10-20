@@ -8,12 +8,16 @@ cloud KMS or an HSM.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import logging
+import math
 import secrets
 import sqlite3
 from collections.abc import Mapping
+from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import RLock
+from threading import BoundedSemaphore, RLock
 from typing import Any, Protocol
 
 import httpx
@@ -21,7 +25,16 @@ from eth_account.messages import encode_defunct
 from eth_account.signers.local import LocalAccount
 from eth_utils import to_checksum_address  # type: ignore[attr-defined]
 
-from noyra.core.types import canonical_json, utc_now
+from noyra.core.deadline import monotonic_time, operation_deadline, remaining_seconds
+from noyra.core.http import (
+    PublicDNSHTTPTransport,
+    SyncHTTPTimeoutHook,
+    call_sync_http_with_deadline,
+    read_bounded_sync_response,
+)
+from noyra.core.request_io import DeadlineRequestReader
+from noyra.core.types import canonical_json, strict_json_loads, utc_now
+from noyra.wallet.dispatch import WalletRequestFence
 from noyra.wallet.execution import (
     WalletBroadcastResult,
     WalletReceipt,
@@ -31,6 +44,10 @@ from noyra.wallet.types import SQLITE_INT64_MAX, canonical_evm_address
 
 CHAIN_ID = 11_155_111
 MAX_BODY_BYTES = 16_384
+MAX_RPC_RESPONSE_BYTES = 262_144
+MAX_SIGNER_WORKERS = 16
+SIGNER_REQUEST_SECONDS = 30.0
+_LOGGER = logging.getLogger(__name__)
 ALLOWED_RPC_METHODS = frozenset(
     {
         "eth_chainId",
@@ -50,6 +67,10 @@ ALLOWED_RPC_METHODS = frozenset(
 class SignerError(RuntimeError):
     """Safe error that is suitable for returning to the signer client."""
 
+    def __init__(self, message: str, *, code: str = "request_rejected") -> None:
+        super().__init__(message)
+        self.code = code
+
 
 class SignerRPC(Protocol):
     def call(self, method: str, params: list[object]) -> object: ...
@@ -61,27 +82,75 @@ class HTTPRPC:
     def __init__(self, url: str, chain_id: int, *, timeout: float = 15.0) -> None:
         from noyra.wallet.types import _rpc_url
 
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("rpc timeout is invalid")
         self.url = _rpc_url(url)
         self.chain_id = chain_id
-        self.client = httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False)
+        self.timeout = timeout
+        self.client = httpx.Client(
+            timeout=timeout,
+            follow_redirects=False,
+            trust_env=False,
+            transport=PublicDNSHTTPTransport(
+                max_connections=4, remaining=lambda: remaining_seconds(timeout)
+            ),
+        )
 
     def call(self, method: str, params: list[object]) -> object:
         if method not in ALLOWED_RPC_METHODS:
             raise SignerError("rpc operation is not allowed")
+        hook = SyncHTTPTimeoutHook()
         try:
-            response = self.client.post(
-                self.url,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": "noyra-signer-v1",
-                    "method": method,
-                    "params": params,
-                },
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
+            budget = remaining_seconds(self.timeout)
+            end = monotonic_time() + budget
+
+            def request() -> bytes:
+                # Authorization is enforced by the engine; this trace fence
+                # prevents a timed-out worker from starting a late RPC send.
+                fence = WalletRequestFence(end, hook, payment=False)
+                try:
+                    with operation_deadline(budget):
+                        fence.check_deadline()
+                        with self.client.stream(
+                            "POST",
+                            self.url,
+                            json={
+                                "jsonrpc": "2.0",
+                                "id": "noyra-signer-v1",
+                                "method": method,
+                                "params": params,
+                            },
+                            headers={
+                                "Accept": "application/json",
+                                "Accept-Encoding": "identity",
+                                "Content-Type": "application/json",
+                            },
+                            timeout=httpx.Timeout(remaining_seconds(budget)),
+                            extensions={"trace": fence.trace},
+                        ) as response:
+                            hook.register(response)
+                            try:
+                                if response.status_code != 200:
+                                    raise SignerError("rpc unavailable")
+                                if (
+                                    response.headers.get("Content-Encoding", "identity").lower()
+                                    != "identity"
+                                ):
+                                    raise SignerError("rpc response encoding is invalid")
+                                return read_bounded_sync_response(
+                                    response,
+                                    max_body_bytes=MAX_RPC_RESPONSE_BYTES,
+                                    total_timeout_seconds=budget,
+                                    deadline=end,
+                                )
+                            finally:
+                                hook.clear(response)
+                finally:
+                    fence.close()
+
+            body = strict_json_loads(
+                call_sync_http_with_deadline(request, timeout=budget, on_timeout=hook.cancel)
             )
-            if response.status_code != 200:
-                raise SignerError("rpc unavailable")
-            body = response.json()
             if (
                 not isinstance(body, dict)
                 or body.get("jsonrpc") != "2.0"
@@ -94,6 +163,8 @@ class HTTPRPC:
         except SignerError:
             raise
         except Exception as exc:
+            # The engine persists unknown for every sendRawTransaction failure.
+            # This client never retries, including on deadline failure.
             raise SignerError("rpc unavailable") from exc
 
     def close(self) -> None:
@@ -171,11 +242,42 @@ class SignerState:
             "request_id TEXT PRIMARY KEY, transfer_hash TEXT NOT NULL, status TEXT NOT NULL,"
             "tx_hash TEXT, chain_id INTEGER NOT NULL, nonce INTEGER NOT NULL,"
             "gas_limit INTEGER NOT NULL, max_fee_per_gas TEXT NOT NULL, accepted_at TEXT,"
-            "transfer_json TEXT)"
+            "transfer_json TEXT, envelope_status TEXT NOT NULL DEFAULT 'legacy_unbound')"
         )
         columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(signer_requests)")}
         if "transfer_json" not in columns:
             connection.execute("ALTER TABLE signer_requests ADD COLUMN transfer_json TEXT")
+        if "envelope_status" not in columns:
+            # Rows created before transfer envelopes were persisted cannot be
+            # reconstructed safely from a transaction hash.  Mark them
+            # explicitly so reconciliation can distinguish an unavailable
+            # historical contract from a missing receipt.
+            connection.execute(
+                "ALTER TABLE signer_requests ADD COLUMN envelope_status TEXT "
+                "NOT NULL DEFAULT 'legacy_unbound'"
+            )
+        candidates = connection.execute(
+            "SELECT * FROM signer_requests WHERE envelope_status IS NULL "
+            "OR envelope_status!='bound'"
+        )
+        while rows := candidates.fetchmany(256):
+            for row in rows:
+                bound = False
+                try:
+                    transfer = parse_transfer(strict_json_loads(row["transfer_json"]))
+                    bound = (
+                        _transfer_hash(transfer) == row["transfer_hash"]
+                        and transfer.chain_id == row["chain_id"]
+                        and transfer.nonce == row["nonce"]
+                        and transfer.gas_limit == row["gas_limit"]
+                        and transfer.max_fee_per_gas == row["max_fee_per_gas"]
+                    )
+                except (SignerError, TypeError, ValueError):
+                    pass
+                connection.execute(
+                    "UPDATE signer_requests SET envelope_status=? WHERE request_id=?",
+                    ("bound" if bound else "legacy_unbound", row["request_id"]),
+                )
         connection.commit()
         return cls(connection)
 
@@ -217,7 +319,7 @@ class SignerEngine:
             maximum=SQLITE_INT64_MAX,
         )
         if nonce != transfer.nonce:
-            raise SignerError("nonce conflict")
+            raise SignerError("nonce conflict", code="nonce_conflict")
         gas = _quantity(
             self.rpc.call("eth_estimateGas", [self._rpc_transfer(transfer)]), maximum=30_000_000
         )
@@ -303,16 +405,16 @@ class SignerEngine:
             ).fetchone()
             if row is not None:
                 if row["transfer_hash"] != transfer_hash:
-                    raise SignerError("request identity is already bound")
+                    raise SignerError("request identity is already bound", code="request_conflict")
                 if row["status"] == "unknown":
-                    raise SignerError("broadcast unknown")
+                    raise SignerError("broadcast unknown", code="broadcast_unknown")
                 if row["status"] == "pending":
                     self.state.connection.execute(
                         "UPDATE signer_requests SET status='unknown' WHERE request_id=?",
                         (request_id,),
                     )
                     self.state.connection.commit()
-                    raise SignerError("broadcast unknown")
+                    raise SignerError("broadcast unknown", code="broadcast_unknown")
                 return WalletBroadcastResult(
                     row["tx_hash"], row["chain_id"], row["nonce"], row["accepted_at"]
                 )
@@ -335,6 +437,10 @@ class SignerEngine:
                     canonical_json(checked.model_dump(mode="json")),
                 ),
             )
+            self.state.connection.execute(
+                "UPDATE signer_requests SET envelope_status='bound' WHERE request_id=?",
+                (request_id,),
+            )
             # Make the pending marker durable before any network side effect.
             # A process crash after broadcast must therefore recover as
             # unknown instead of issuing a second transaction.
@@ -349,8 +455,8 @@ class SignerEngine:
                 )
                 self.state.connection.commit()
                 if isinstance(exc, SignerError):
-                    raise SignerError("broadcast unknown") from exc
-                raise SignerError("broadcast unknown") from exc
+                    raise SignerError("broadcast unknown", code="broadcast_unknown") from exc
+                raise SignerError("broadcast unknown", code="broadcast_unknown") from exc
             accepted_at = utc_now()
             self.state.connection.execute(
                 "UPDATE signer_requests SET status='broadcast', accepted_at=? WHERE request_id=?",
@@ -364,7 +470,7 @@ class SignerEngine:
         requested = _hash(tx_hash)
         with self.state.lock:
             request = self.state.connection.execute(
-                "SELECT transfer_hash,chain_id,nonce,status,transfer_json "
+                "SELECT transfer_hash,chain_id,nonce,status,transfer_json,envelope_status "
                 "FROM signer_requests WHERE tx_hash=? AND chain_id=?",
                 (requested, chain_id),
             ).fetchone()
@@ -372,10 +478,12 @@ class SignerEngine:
             return None
         if request["status"] not in {"pending", "unknown", "broadcast"}:
             raise SignerError("receipt request rejected")
+        if request["envelope_status"] == "legacy_unbound":
+            raise SignerError("receipt request is legacy_unbound", code="legacy_unbound")
         try:
             saved_payload = json.loads(request["transfer_json"])
             expected_transfer = parse_transfer(saved_payload)
-        except (TypeError, ValueError, KeyError) as error:
+        except (SignerError, TypeError, ValueError, KeyError) as error:
             raise SignerError("receipt request envelope is unavailable") from error
         if (
             _transfer_hash(expected_transfer) != request["transfer_hash"]
@@ -435,14 +543,58 @@ class SignerHTTPServer(ThreadingHTTPServer):
             raise ValueError("signer token is invalid")
         self.engine = engine
         self.bearer_token = bearer_token
+        self._worker_slots = BoundedSemaphore(MAX_SIGNER_WORKERS)
         super().__init__((host, port), self._handler())
         self.url = f"http://{host}:{self.server_port}"
+
+    daemon_threads = True
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._worker_slots.acquire(blocking=False):
+            with suppress(OSError):
+                request.settimeout(0.1)
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n"
+                    b"Content-Length: 0\r\n\r\n"
+                )
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._worker_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._worker_slots.release()
 
     def _handler(self) -> type[BaseHTTPRequestHandler]:
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
             server_version = "NoyraSigner/1"
+
+            def setup(self) -> None:
+                super().setup()
+                self.connection.settimeout(SIGNER_REQUEST_SECONDS)
+                self.rfile = io.BufferedReader(
+                    DeadlineRequestReader(
+                        self.rfile,
+                        self.connection,
+                        SIGNER_REQUEST_SECONDS,
+                        max_bytes=MAX_BODY_BYTES + 16_384,
+                    )
+                )
+
+            def handle_one_request(self) -> None:
+                try:
+                    with operation_deadline(SIGNER_REQUEST_SECONDS):
+                        super().handle_one_request()
+                except OSError:
+                    self.close_connection = True
 
             def log_message(self, format: str, *args: object) -> None:
                 del format, args
@@ -454,7 +606,15 @@ class SignerHTTPServer(ThreadingHTTPServer):
                     self._send(401, {"error": "unauthorized"})
                     return
                 try:
-                    length = int(self.headers.get("Content-Length", "-1"))
+                    if (
+                        self.headers.get_all("Transfer-Encoding")
+                        or len(self.headers.get_all("Content-Length", [])) != 1
+                    ):
+                        raise SignerError("request framing is invalid")
+                    try:
+                        length = int(self.headers.get("Content-Length", "-1"))
+                    except ValueError as exc:
+                        raise SignerError("request body is invalid") from exc
                     if length < 0 or length > MAX_BODY_BYTES:
                         raise SignerError("request body is invalid")
                     if (
@@ -462,14 +622,41 @@ class SignerHTTPServer(ThreadingHTTPServer):
                         != "application/json"
                     ):
                         raise SignerError("request content type is invalid")
-                    payload = json.loads(self.rfile.read(length))
+                    try:
+                        body = self.rfile.read(length)
+                        if len(body) != length:
+                            raise SignerError("request body is incomplete")
+                        payload = strict_json_loads(body)
+                    except (UnicodeDecodeError, ValueError) as exc:
+                        raise SignerError("request body is invalid") from exc
                     status, result = self._dispatch(self.path, payload)
                     self._send(status, result)
                 except SignerError as exc:
-                    status = 409 if "unknown" in str(exc) or "conflict" in str(exc) else 400
-                    self._send(status, {"error": str(exc)})
-                except Exception:
-                    self._send(400, {"error": "request rejected"})
+                    status = (
+                        409
+                        if exc.code
+                        in {
+                            "nonce_conflict",
+                            "request_conflict",
+                            "broadcast_unknown",
+                            "legacy_unbound",
+                        }
+                        else 400
+                    )
+                    self._send(status, {"error": str(exc), "code": exc.code})
+                except Exception as exc:
+                    request_id = secrets.token_hex(8)
+                    route = self.path.split("?", 1)[0][:128]
+                    _LOGGER.exception(
+                        "signer request failed request_id=%s route=%s exception=%s",
+                        request_id,
+                        route,
+                        type(exc).__name__,
+                    )
+                    self._send(
+                        500,
+                        {"error": "signer_internal_error", "request_id": request_id},
+                    )
 
             def _dispatch(self, path: str, payload: object) -> tuple[int, dict[str, object]]:
                 if not isinstance(payload, Mapping):
@@ -527,6 +714,9 @@ class SignerHTTPServer(ThreadingHTTPServer):
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(raw)))
                 self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "close")
+                self.close_connection = True
+                self.connection.settimeout(remaining_seconds(SIGNER_REQUEST_SECONDS))
                 self.end_headers()
                 self.wfile.write(raw)
 
