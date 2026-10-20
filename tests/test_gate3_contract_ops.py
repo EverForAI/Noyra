@@ -170,7 +170,13 @@ def test_public_health_does_not_leak_cached_admin_diagnostics(
             "volume": {"volume_id": "private-volume"},
             "backup_key": {"active_key_fingerprint": "private-fingerprint"},
         }
-        monkeypatch.setattr(service.http, "at_rest", SimpleNamespace(health=lambda: private))
+        # Readiness now uses the bounded HTTP projection; /health retains the
+        # strict diagnostic contract. Model both, without weakening redaction.
+        monkeypatch.setattr(
+            service.http,
+            "at_rest",
+            SimpleNamespace(health=lambda: private, request_health=lambda: private),
+        )
         for path in ("/health/ready", "/health"):
             request = Request(
                 f"http://127.0.0.1:{port}{path}", headers={"Authorization": f"Bearer {token}"}
