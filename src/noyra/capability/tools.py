@@ -4,9 +4,10 @@ import os
 from pathlib import Path
 
 from noyra.core.actions import ActionLedger
+from noyra.core.admission import OperationInvalidated, accounting_scope, assert_current_lease
 from noyra.core.database import Database
 from noyra.core.types import ActionRecord
-from noyra.world import SafeWebReader, SourceRecord
+from noyra.world import SafeWebReader, SourceRecord, SourceRegistry
 
 from .filesystem import normalized_root, read_bounded, write_atomic
 from .store import CapabilityStore
@@ -162,7 +163,7 @@ class ToolRunner:
         if terminal is not None:
             return WebToolResult(terminal.action_id, terminal.status, None)
         try:
-            self.capabilities.use(
+            grant = self.capabilities.use(
                 subject_id,
                 "web_read",
                 source.url,
@@ -175,29 +176,45 @@ class ToolRunner:
                 self.actions.cancel(action.action_id, "capability authorization failed")
             raise
         action = self.actions.start(action.action_id)
-        try:
-            document = await reader.fetch(source)
-        except Exception as error:
-            finished = self.actions.finish(
-                action.action_id,
-                "failed",
-                {"error": type(error).__name__},
-                public_target=source.url,
-                public_goal_reference=public_goal_reference,
-                public_explanation="Authorized public source read failed.",
-                resource_summary="network read failed",
+
+        def authorize() -> None:
+            assert_current_lease()
+            current_source = SourceRegistry(self.database).get(
+                source.source_id, subject_id=subject_id
             )
+            if current_source.status != "active" or current_source.url != source.url:
+                raise PermissionError("world source changed before dispatch")
+            self.capabilities.revalidate_use(
+                grant.grant_id, subject_id, "web_read", source.url, side_effect=False
+            )
+            assert_current_lease()
+
+        try:
+            document = await reader.fetch(source, before_send=authorize)
+            authorize()
+        except Exception as error:
+            with accounting_scope():
+                finished = self.actions.finish(
+                    action.action_id,
+                    "failed",
+                    {"error": type(error).__name__},
+                    public_target=source.url,
+                    public_goal_reference=public_goal_reference,
+                    public_explanation="Authorized public source read failed.",
+                    resource_summary="network read failed",
+                )
             return WebToolResult(finished.action_id, finished.status, None)
         byte_count = len(document.content.encode("utf-8"))
-        finished = self.actions.finish(
-            action.action_id,
-            "succeeded",
-            {"source_id": source.source_id, "content_hash": document.content_hash},
-            public_goal_reference=public_goal_reference,
-            public_target=source.url,
-            public_explanation="Read an authorized public source.",
-            resource_summary=f"{byte_count} extracted bytes",
-        )
+        with accounting_scope():
+            finished = self.actions.finish(
+                action.action_id,
+                "succeeded",
+                {"source_id": source.source_id, "content_hash": document.content_hash},
+                public_goal_reference=public_goal_reference,
+                public_target=source.url,
+                public_explanation="Read an authorized public source.",
+                resource_summary=f"{byte_count} extracted bytes",
+            )
         return WebToolResult(finished.action_id, finished.status, document)
 
     def write_text(
@@ -263,23 +280,29 @@ class ToolRunner:
             )
             self._revalidate_file_target(subject_id, "filesystem_write", target, grant.grant_id)
         except Exception as error:
+            with accounting_scope():
+                finished = self.actions.finish(
+                    action.action_id,
+                    "failed" if isinstance(error, OperationInvalidated) else "unknown",
+                    {"error": type(error).__name__},
+                    side_effect_summary=(
+                        "write fenced before publication"
+                        if isinstance(error, OperationInvalidated)
+                        else "write completion is unknown"
+                    ),
+                    public_explanation="Authorized file write did not complete cleanly.",
+                    resource_summary=f"up to {len(encoded)} bytes",
+                )
+            return ToolResult(finished.action_id, finished.status, None, 0)
+        with accounting_scope():
             finished = self.actions.finish(
                 action.action_id,
-                "unknown",
-                {"error": type(error).__name__},
-                side_effect_summary="write completion is unknown",
-                public_explanation="Authorized file write did not complete cleanly.",
-                resource_summary=f"up to {len(encoded)} bytes",
+                "succeeded",
+                {"bytes": len(encoded)},
+                side_effect_summary="authorized file replaced atomically",
+                public_explanation="Wrote an authorized local text file.",
+                resource_summary=f"{len(encoded)} bytes",
             )
-            return ToolResult(finished.action_id, finished.status, None, 0)
-        finished = self.actions.finish(
-            action.action_id,
-            "succeeded",
-            {"bytes": len(encoded)},
-            side_effect_summary="authorized file replaced atomically",
-            public_explanation="Wrote an authorized local text file.",
-            resource_summary=f"{len(encoded)} bytes",
-        )
         return ToolResult(finished.action_id, finished.status, None, len(encoded))
 
     def _revalidate_file_target(

@@ -1946,7 +1946,13 @@ class NoyraHTTPServer:
         else:
             self.server.wait_handlers()
         self.wait_async_handlers()
+        close_transport = getattr(self.migration_http_executor.transport, "close", None)
+        if callable(close_transport):
+            close_transport()
         if self._migration_worker is not None:
+            # Do not abandon a worker retaining database ownership. Transport
+            # cancellation/deadlines bound network waits; local snapshot work
+            # must still drain before releasing the process lock.
             self._migration_worker.join()
         self.server.server_close()
         self.wallet_acquisition_runner.close()
@@ -1955,6 +1961,10 @@ class NoyraHTTPServer:
             close = getattr(self.wallet_signer, "close", None)
             if callable(close):
                 close()
+        if self.at_rest is not None:
+            close_guard = getattr(self.at_rest, "close", None)
+            if callable(close_guard):
+                close_guard()
         self._closed = True
 
     def begin_drain(self) -> None:
@@ -2929,7 +2939,7 @@ class NoyraHTTPServer:
                         return
                     try:
                         lifecycle = owner.kernel.lifecycle.current().state
-                        at_rest = None if owner.at_rest is None else owner.at_rest.health()
+                        at_rest = None if owner.at_rest is None else owner.at_rest.request_health()
                         at_rest_ready = not bool(
                             at_rest is not None
                             and at_rest.get("enforced")
@@ -9413,7 +9423,10 @@ class NoyraHTTPServer:
                 if owner.at_rest is None or not owner.at_rest.required:
                     return True
                 try:
-                    owner.at_rest.require_ready()
+                    check = getattr(
+                        owner.at_rest, "require_request_ready", owner.at_rest.require_ready
+                    )
+                    check()
                 except AtRestError:
                     return False
                 return True

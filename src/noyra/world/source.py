@@ -13,6 +13,7 @@ from urllib.parse import SplitResult, parse_qsl, urlsplit, urlunsplit
 
 import httpx
 
+from noyra.core.admission import assert_current_lease
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.http import (
@@ -346,7 +347,20 @@ class SafeWebReader:
         self.max_response_bytes = max_response_bytes
         self.max_text_chars = max_text_chars
 
-    async def fetch(self, source: SourceRecord) -> FetchedDocument:
+    async def fetch(
+        self, source: SourceRecord, *, before_send: Callable[[], None] | None = None
+    ) -> FetchedDocument:
+        def authorize() -> None:
+            assert_current_lease()
+            if before_send is not None:
+                before_send()
+            assert_current_lease()
+
+        async def trace(event: str, info: dict[str, Any]) -> None:
+            if event.endswith("send_request_headers.started"):
+                authorize()
+
+        authorize()
         if source.status != "active":
             raise UnsafeSourceError("only active world sources can be fetched")
         url = canonical_public_url(source.url)
@@ -384,6 +398,7 @@ class SafeWebReader:
                         "User-Agent": "Noyra-Research/0.1.0",
                     },
                     follow_redirects=False,
+                    extensions={"trace": trace},
                 ) as response:
                     try:
                         validate_response_headers(
@@ -420,6 +435,7 @@ class SafeWebReader:
                     except HTTPResponseLimitError as error:
                         raise FetchError("world_fetch_response_too_large") from error
                     text = body.decode(response.encoding or "utf-8", errors="replace")
+                authorize()
                 title, content = self._extract(media_type, text)
                 content = content[: self.max_text_chars]
                 signals = tuple(

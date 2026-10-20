@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from noyra.core import Database, IdentityStore
+from noyra.core.admission import RuntimeAdmissionGate, bind_lease
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.runtime_export import RuntimeLogExporter
 from noyra.core.types import canonical_json, content_hash
@@ -780,3 +781,56 @@ def test_status_summary_is_bounded_and_attempt_listing_is_subject_scoped(
     assert ledger.attempts(run.run_id, subject_id=subject_id) == []
     with pytest.raises(NotFoundError):
         ledger.attempts(run.run_id, subject_id="Noyra-wallet-other")
+
+
+@pytest.mark.parametrize("boundary", ["chain_id", "renew", "complete_success"])
+def test_runner_invalidation_settles_only_existing_attempt(
+    acquisition_fixture: AcquisitionFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    _database, subject_id, store, ledger, _clock = acquisition_fixture
+    _network, asset, address = _graph(store, subject_id)
+    run = ledger.enqueue(
+        subject_id,
+        asset_id=asset.asset_id,
+        address_id=address.address_id,
+        actor="operator",
+        idempotency_key="invalidated-attempt",
+    )
+    gate = RuntimeAdmissionGate(subject_id)
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        method = json.loads(request.content)["method"]
+        requests.append(method)
+        if boundary == "chain_id":
+            gate.invalidate()
+        return _rpc_response({"jsonrpc": "2.0", "id": "noyra-wallet-balance-v1", "result": "0x1"})
+
+    if boundary != "chain_id":
+        original = getattr(ledger, boundary)
+
+        def invalidate(*args: Any, **kwargs: Any) -> Any:
+            gate.invalidate()
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(ledger, boundary, invalidate)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        acquirer = WalletRPCBalanceAcquirer(store, client=client)
+        runner = WalletBalanceAcquisitionRunner(ledger, acquirer=acquirer)
+        with gate.operation("test") as lease, bind_lease(lease):
+            result = runner.run_once(subject_id, actor="operator")
+    assert result is not None and result.status == "unknown"
+    assert result.run_id == run.run_id
+    attempts = ledger.attempts(run.run_id, subject_id=subject_id)
+    assert len(attempts) == 1 and attempts[0].status == "unknown"
+    assert store.list_balance_snapshots(subject_id) == []
+    assert requests == (
+        ["eth_chainId"] if boundary == "chain_id" else ["eth_chainId", "eth_getBalance"]
+    )
+    assert ledger.verify_integrity(subject_id) == {
+        "wallet_balance_acquisition_runs": 1,
+        "wallet_balance_acquisition_attempts": 1,
+    }

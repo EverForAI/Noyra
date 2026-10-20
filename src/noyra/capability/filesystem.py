@@ -8,6 +8,7 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
+from noyra.core.admission import assert_current_lease, current_commit_scope
 from noyra.core.types import new_id
 
 _NOFOLLOW = int(getattr(os, "O_NOFOLLOW", 0))
@@ -185,13 +186,17 @@ def write_atomic(
                     raise OSError("file write made no progress")
                 view = view[count:]
             os.fsync(fd)
-            before_publish()
-            if api is not None:
-                msvcrt = importlib.import_module("msvcrt")
-                api.rename(msvcrt.get_osfhandle(fd), parent, path.name, replace=True)
-            else:
-                os.replace(name, path.name, src_dir_fd=parent, dst_dir_fd=parent)
-            published = True
+            # Only the short publication step holds the lifecycle gate. Preparing
+            # and flushing the temporary file must not block pause/drain.
+            with current_commit_scope():
+                before_publish()
+                assert_current_lease()
+                if api is not None:
+                    msvcrt = importlib.import_module("msvcrt")
+                    api.rename(msvcrt.get_osfhandle(fd), parent, path.name, replace=True)
+                else:
+                    os.replace(name, path.name, src_dir_fd=parent, dst_dir_fd=parent)
+                published = True
         finally:
             try:
                 if not published:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import json
 import os
 import stat
@@ -12,17 +13,22 @@ import sys
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import BoundedSemaphore
 from typing import Any, cast
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from noyra.core.at_rest import EncryptedBackupManager
+from noyra.core.deadline import operation_deadline
+from noyra.core.request_io import DeadlineRequestReader
 from noyra.core.types import canonical_json, content_hash
 from noyra.migration.activation import TargetActivationBridge
 from noyra.migration.agent import AgentAuthenticationError, MigrationAgent
 
 MAX_BODY = 8 * 1024 * 1024
+MAX_AGENT_WORKERS = 16
+AGENT_REQUEST_SECONDS = 30.0
 IDENTITY_KEYS = frozenset(
     {
         "target_id",
@@ -307,9 +313,54 @@ def dispatch(agent: MigrationAgent, operation: str, payload: dict[str, Any]) -> 
     raise ValueError("unsupported migration operation")
 
 
+class MigrationHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    block_on_close = False
+
+    def __init__(self, address: tuple[str, int], handler: type[BaseHTTPRequestHandler]):
+        self._worker_slots = BoundedSemaphore(MAX_AGENT_WORKERS)
+        super().__init__(address, handler)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._worker_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._worker_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._worker_slots.release()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "NoyraMigrationAgent/1"
-    protocol_version = "HTTP/1.1"
+    # One request per connection prevents persistent peers pinning worker slots.
+    protocol_version = "HTTP/1.0"
+
+    def setup(self) -> None:
+        super().setup()
+        self.connection.settimeout(AGENT_REQUEST_SECONDS)
+        self.rfile = io.BufferedReader(
+            DeadlineRequestReader(
+                self.rfile,
+                self.connection,
+                AGENT_REQUEST_SECONDS,
+                max_bytes=MAX_BODY + 16_384,
+            )
+        )
+
+    def handle_one_request(self) -> None:
+        try:
+            with operation_deadline(AGENT_REQUEST_SECONDS):
+                super().handle_one_request()
+        except OSError:
+            self.close_connection = True
 
     def do_POST(self) -> None:
         operations = {
@@ -331,7 +382,11 @@ class Handler(BaseHTTPRequestHandler):
             self._reply(404, {"error": "unknown migration endpoint"})
             return
         try:
-            self.connection.settimeout(10)
+            if (
+                self.headers.get("Transfer-Encoding") is not None
+                or len(self.headers.get_all("Content-Length", [])) != 1
+            ):
+                raise ValueError("request framing is invalid")
             if self.headers.get_content_type() != "application/json":
                 raise ValueError("content type must be application/json")
             length = int(self.headers.get("Content-Length", "-1"))
@@ -427,7 +482,7 @@ def main(argv: list[str] | None = None) -> int:
     if separator != ":" or host not in {"127.0.0.1", "::1"}:
         raise ValueError("agent must bind to loopback")
     port = int(raw_port)
-    server = ThreadingHTTPServer((host, port), Handler)
+    server = MigrationHTTPServer((host, port), Handler)
     server.daemon_threads = True
     server.timeout = 5
     server.agent = agent  # type: ignore[attr-defined]
