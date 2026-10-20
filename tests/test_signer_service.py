@@ -11,6 +11,7 @@ import pytest
 from eth_account import Account
 from eth_account.messages import encode_defunct
 
+from noyra.core.types import canonical_json
 from noyra.signer_service import (
     SignerEngine,
     SignerError,
@@ -23,6 +24,20 @@ from noyra.wallet.execution import WalletUnsignedTransfer
 TOKEN = "signer-test-token"
 ADDRESS = "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a"
 CHAIN_ID = 11155111
+
+
+def identity_challenge() -> str:
+    return canonical_json(
+        {
+            "domain": "noyra-migration-wallet/v1",
+            "task_id": "task-test",
+            "target_id": "target-test",
+            "target_identity": "identity-test",
+            "manifest_digest": "a" * 64,
+            "signer_id": "staging-signer-01",
+            "nonce": "b" * 64,
+        }
+    )
 
 
 def valid_transfer_payload(*, nonce: int = 0) -> dict[str, Any]:
@@ -219,7 +234,7 @@ def test_legacy_request_is_marked_unbound_during_state_migration(
 
 
 def test_identity_signature_uses_configured_account(engine: SignerEngine, account: Any) -> None:
-    challenge = "noyra signer challenge"
+    challenge = identity_challenge()
     signature = engine.prove_identity("staging-signer-01", challenge)
     recovered = Account.recover_message(encode_defunct(text=challenge), signature=signature)
     assert recovered.casefold() == account.address.casefold()
@@ -292,7 +307,7 @@ def test_http_identity_route_returns_signature(http_server: SignerHTTPServer) ->
     response = post_json(
         http_server,
         "/migration-identity",
-        {"signer_id": "staging-signer-01", "challenge": "challenge"},
+        {"signer_id": "staging-signer-01", "challenge": identity_challenge()},
         TOKEN,
     )
     assert response.status_code == 200
@@ -774,3 +789,40 @@ def test_rpc_worker_cannot_send_after_its_caller_timed_out(engine: SignerEngine)
     finally:
         release.set()
         rpc.close()
+
+
+@pytest.mark.parametrize(
+    "challenge",
+    [
+        "Unrelated login request",
+        "{}",
+        "[]",
+        "null",
+        identity_challenge().replace("noyra-migration-wallet/v1", "unrelated-auth/v1"),
+        identity_challenge().replace('"nonce":', '"unknown":'),
+        identity_challenge().replace('"staging-signer-01"', '"wrong-signer"'),
+        identity_challenge().replace('"manifest_digest":"' + "a" * 64, '"manifest_digest":"short'),
+        identity_challenge() + " ",
+    ],
+)
+def test_identity_rejects_other_domains_and_malformed_context(
+    engine: SignerEngine,
+    challenge: str,
+) -> None:
+    with pytest.raises(SignerError, match="identity rejected"):
+        engine.prove_identity("staging-signer-01", challenge)
+
+
+def test_http_identity_cannot_be_used_as_generic_personal_sign(
+    http_server: SignerHTTPServer,
+) -> None:
+    response = post_json(
+        http_server,
+        "/migration-identity",
+        {
+            "signer_id": "staging-signer-01",
+            "challenge": "Unrelated login request",
+        },
+        TOKEN,
+    )
+    assert response.status_code == 400

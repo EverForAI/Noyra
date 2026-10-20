@@ -21,6 +21,7 @@ from noyra.core.http import (
     validate_response_headers,
 )
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
+from noyra.core.xml import parse_untrusted_xml
 from noyra.world import canonical_public_url
 
 from .routing import get_search_routing_mode
@@ -28,7 +29,6 @@ from .types import SearchExecution, SearchResult
 
 BROWSER_SEARCH_ENDPOINT = "https://www.bing.com/search"
 BROWSER_SEARCH_TOOL = "browser_search:bing_rss"
-FORBIDDEN_XML_MARKERS = (b"<!DOCTYPE", b"<!ENTITY")
 
 
 class BrowserSearchOutcomeUnknownError(RuntimeError):
@@ -250,11 +250,8 @@ class BrowserSearchExecutor:
 
     @staticmethod
     def _parse(response: httpx.Response, limit: int) -> tuple[SearchResult, ...]:
-        upper_content = response.content.upper()
-        if any(marker in upper_content for marker in FORBIDDEN_XML_MARKERS):
-            raise ValueError("browser search XML declarations are not allowed")
         try:
-            root = ElementTree.fromstring(response.content)
+            root = parse_untrusted_xml(response.content)
         except ElementTree.ParseError as error:
             raise ValueError("browser search response is invalid XML") from error
         results: list[SearchResult] = []

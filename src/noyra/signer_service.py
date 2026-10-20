@@ -365,7 +365,44 @@ class SignerEngine:
         ):
             raise SignerError("identity rejected")
         try:
-            return "0x" + self.account.sign_message(encode_defunct(text=challenge)).signature.hex()
+            context = strict_json_loads(challenge)
+            fields = {
+                "domain",
+                "task_id",
+                "target_id",
+                "manifest_digest",
+                "target_identity",
+                "signer_id",
+                "nonce",
+            }
+            if not isinstance(context, dict) or set(context) != fields:
+                raise ValueError("identity context is invalid")
+            if (
+                context["domain"] != "noyra-migration-wallet/v1"
+                or context["signer_id"] != self.signer_id
+            ):
+                raise ValueError("identity domain is invalid")
+            for key in ("task_id", "target_id", "target_identity"):
+                value = context[key]
+                if (
+                    not isinstance(value, str)
+                    or not value
+                    or len(value) > 512
+                    or any(ord(c) < 32 for c in value)
+                ):
+                    raise ValueError("identity binding is invalid")
+            for key in ("manifest_digest", "nonce"):
+                value = context[key]
+                if (
+                    not isinstance(value, str)
+                    or len(value) != 64
+                    or any(c not in "0123456789abcdef" for c in value)
+                ):
+                    raise ValueError("identity digest is invalid")
+            canonical = canonical_json(context)
+            if challenge != canonical:
+                raise ValueError("identity encoding is invalid")
+            return "0x" + self.account.sign_message(encode_defunct(text=canonical)).signature.hex()
         except Exception as exc:
             raise SignerError("identity rejected") from exc
 
