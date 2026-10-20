@@ -1,0 +1,24 @@
+{
+  "source": "/var/tmp/noyra-postfix-baseline-cbdfaa0",
+  "web_cancellation": [
+    {
+      "action_type": "web_read",
+      "status": "executing"
+    }
+  ],
+  "integrity_aggregation": {
+    "status": "ok",
+    "checks": [
+      {
+        "status": "ok",
+        "reason_code": "ok",
+        "rows_examined": 40,
+        "bytes_examined": 8540,
+        "details": {
+          "model_calls": 40,
+          "model_attempts": 0
+        }
+      }
+    ]
+  }
+}

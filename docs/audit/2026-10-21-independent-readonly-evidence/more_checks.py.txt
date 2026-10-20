@@ -1,0 +1,17 @@
+
+import subprocess,pathlib,json,os
+root=pathlib.Path('/var/tmp/noyra-postfix-independent-dzhx1ejc')
+python='/var/tmp/noyra-independent-audit-20261020-env/bin/python'
+results={}
+env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1'}
+cmds={
+ 'mypy-linux':[python,'-m','mypy','--cache-dir','/var/tmp/noyra-postfix-mypy-cache','src','tests'],
+ 'shell-control':['bash','tests/shell/test-control-layout-rollback.sh'],
+ 'shell-upgrade':['bash','tests/shell/test-upgrade-components-rollback.sh'],
+ 'shell-migration':['bash','tests/shell/test-migration-components-rollback.sh'],
+}
+for key,cmd in cmds.items():
+ run=subprocess.run(cmd,cwd=root,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+ results[key]={'exit':run.returncode,'output':run.stdout}
+ pathlib.Path('/mnt/d/metagrowh/.user-temp/noyra-independent-postfix-_8xyyv14/'+key+'.log').write_text(run.stdout)
+print(json.dumps(results,ensure_ascii=False,indent=2))

@@ -1,0 +1,32 @@
+{
+  "source": "/var/tmp/noyra-postfix-independent-dzhx1ejc",
+  "large_tree": {
+    "entries": 100003,
+    "strict_ready": true,
+    "strict_seconds": 4.624430917999973,
+    "count_only_scan_error": "private permission audit exceeds its work budget",
+    "request_samples": [
+      {
+        "ready": false,
+        "reason": "private permission audit is pending or expired"
+      },
+      {
+        "ready": false,
+        "reason": "private permission audit exceeds its work budget"
+      },
+      {
+        "ready": false,
+        "reason": "private permission audit is pending or expired"
+      }
+    ]
+  },
+  "read_lease_invalidated": {
+    "error": "OperationInvalidated",
+    "actions": [
+      {
+        "action_type": "filesystem_read",
+        "status": "executing"
+      }
+    ]
+  }
+}

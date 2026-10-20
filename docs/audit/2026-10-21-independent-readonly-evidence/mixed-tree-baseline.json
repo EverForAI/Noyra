@@ -1,0 +1,20 @@
+{
+  "source": "/var/tmp/noyra-postfix-baseline-cbdfaa0",
+  "large_tree": {
+    "entries": 100003,
+    "regular_files": 98002,
+    "child_directories": 2000,
+    "strict_ready": true,
+    "strict_seconds": 5.4252256960000125,
+    "request_health": "not present; baseline service uses strict health()"
+  },
+  "read_lease_invalidated": {
+    "error": "OperationInvalidated",
+    "actions": [
+      {
+        "action_type": "filesystem_read",
+        "status": "executing"
+      }
+    ]
+  }
+}

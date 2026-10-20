@@ -1,0 +1,43 @@
+
+import sys,os,json,tempfile,shutil,asyncio
+from pathlib import Path
+sys.path.insert(0,str(Path(sys.argv[1])/'src'))
+from noyra.core import Database,IdentityStore
+from noyra.core.types import content_hash
+from noyra.capability import CapabilityStore,CapabilityGrant,ToolRunner
+from noyra.core.admission import RuntimeAdmissionGate,bind_lease
+from noyra.world import SourceRegistry
+from noyra.model.ledger import ModelLedger
+from noyra.core.integrity import IntegrityAuditLimits,IntegrityRegistry
+
+async def cancellation(db,root):
+ source=SourceRegistry(db).register('Noyra-audit-probe','test source','https://example.com/a','news',trust_score=0.5,status='active',reason='audit fixture')
+ CapabilityStore(db).grant('Noyra-audit-probe',CapabilityGrant(capability_type='web_read',scope={'hosts':['example.com']},issuer='owner',rate_limit_per_hour=10,side_effect=False),actor='operator')
+ started=asyncio.Event();never=asyncio.Event()
+ class Reader:
+  async def fetch(self,*a,**kw):
+   if 'before_send' in kw:kw['before_send']()
+   started.set();await never.wait()
+ gate=RuntimeAdmissionGate('Noyra-audit-probe')
+ with gate.operation('independent-web-cancel') as lease,bind_lease(lease):
+  task=asyncio.create_task(ToolRunner(db).fetch_document('Noyra-audit-probe',source,Reader(),idempotency_key='webcancel'))
+  await asyncio.wait_for(started.wait(),timeout=3)
+  task.cancel()
+  try:await task
+  except asyncio.CancelledError:pass
+ with db.connection() as c:return [dict(r) for r in c.execute("SELECT action_type,status FROM actions")]
+
+def main():
+ root=Path(tempfile.mkdtemp(prefix='noyra-extra-probe-',dir='/var/tmp'));out={'source':sys.argv[1]}
+ try:
+  db=Database(root/'noyra.sqlite3');IdentityStore(db).ensure('Noyra-audit-probe',content_hash('probe'))
+  out['web_cancellation']=asyncio.run(cancellation(db,root))
+  ledger=ModelLedger(db)
+  for i in range(40):
+   request={'short_prompt':str(i)}
+   ledger.prepare_call('Noyra-audit-probe','provider','model','probe',content_hash(request),f'probe{i}',request=request)
+  report=IntegrityRegistry().run(db,'Noyra-audit-probe',root,profile='periodic_deep',policy_mode='alert',deadline_seconds=10,limits=IntegrityAuditLimits(max_rows_per_check=2,max_bytes_per_check=4096,max_value_bytes=4096),check_ids=('model.ledger',))
+  out['integrity_aggregation']={'status':report.status,'checks':[{'status':c.status,'reason_code':c.reason_code,'rows_examined':c.rows_examined,'bytes_examined':c.bytes_examined,'details':dict(c.details)} for c in report.checks]}
+ finally:shutil.rmtree(root)
+ print(json.dumps(out,ensure_ascii=False,indent=2))
+if __name__=='__main__':main()

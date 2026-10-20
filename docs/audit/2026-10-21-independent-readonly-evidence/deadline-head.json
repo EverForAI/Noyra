@@ -1,0 +1,11 @@
+{
+  "source": "/var/tmp/noyra-postfix-independent-dzhx1ejc",
+  "parent_deadline_seconds": 0.05,
+  "helper_timeout_seconds": 1,
+  "release_after_seconds": 0.35,
+  "caller_elapsed_seconds": 0.3522962329999988,
+  "callback_started_seconds": [
+    0.351752995
+  ],
+  "error": null
+}
