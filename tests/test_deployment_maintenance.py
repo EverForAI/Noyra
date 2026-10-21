@@ -993,14 +993,29 @@ def test_root_gc_and_service_uid_health_restart_backup_restore() -> None:
         keyring = outer / "keyring.json"
         BackupKeyring.initialize(keyring)
         cast(Any, os).chown(keyring, 65534, 65534)
+        # The runner's checkout may be below a private HOME. Install only the
+        # package code in an independently traversable fixture; never loosen
+        # checkout/data permissions or pre-import modules before dropping UID.
+        service_source = outer / "service-python"
+        service_source.mkdir(mode=0o755)
+        service_source.chmod(0o755)
+        shutil.copytree(
+            Path(__file__).resolve().parents[1] / "src" / "noyra",
+            service_source / "noyra",
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+        for entry in service_source.rglob("*"):
+            entry.chmod(0o755 if entry.is_dir() else 0o644)
         code = """
 from pathlib import Path
 import os, sys
+root, output, keyring, source = map(Path, sys.argv[1:])
+os.setgroups([]); os.setgid(65534); os.setuid(65534); os.umask(0o077)
+import noyra
+assert Path(noyra.__file__).is_relative_to(source)
 from noyra.core.at_rest import (
     _harden_private_paths, _private_permission_error, EncryptedBackupManager,
 )
-root, output, keyring = map(Path, sys.argv[1:])
-os.setgroups([]); os.setgid(65534); os.setuid(65534); os.umask(0o077)
 assert _private_permission_error(root) is None, _private_permission_error(root)
 _harden_private_paths(root)
 assert _private_permission_error(root) is None, _private_permission_error(root)
@@ -1012,10 +1027,12 @@ assert _private_permission_error(root) is None, _private_permission_error(root)
 assert _private_permission_error(restored) is None, _private_permission_error(restored)
 """
         completed = subprocess.run(
-            [sys.executable, "-c", code, str(data), str(output), str(keyring)],
+            [sys.executable, "-c", code, str(data), str(output), str(keyring), str(service_source)],
             capture_output=True,
             text=True,
-            env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+            cwd=outer,
+            env={**os.environ, "PYTHONPATH": str(service_source), "PYTHONDONTWRITEBYTECODE": "1"},
+            timeout=120,
         )
         assert completed.returncode == 0, completed.stdout + completed.stderr
         assert evidence.stat().st_uid == 0
