@@ -526,22 +526,63 @@ def test_legacy_sleep_cutoff_catches_sleep_arrivals_without_schema_migration(
         reopened.close()
 
 
-def test_subprocess_timeout_terminates_descendants(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "taskkill_delay",
+    [
+        0.0,
+        pytest.param(
+            1.1,
+            marks=pytest.mark.skipif(sys.platform != "win32", reason="Windows taskkill timing"),
+        ),
+    ],
+)
+def test_subprocess_timeout_terminates_descendants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, taskkill_delay: float
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
     completed = tmp_path / "descendant-completed"
-    child = (
-        "import time;from pathlib import Path;time.sleep(1);Path("
-        + repr(str(completed))
-        + ").touch()"
-    )
-    parent = (
-        "import subprocess,sys,time;subprocess.Popen([sys.executable,'-c',"
-        + repr(child)
-        + "]);time.sleep(30)"
-    )
-    with pytest.raises(SetupError, match="COMMAND_TIMEOUT"):
-        SubprocessRunner().run([sys.executable, "-c", parent], timeout_seconds=0.25)
-    time.sleep(1.1)
-    assert not completed.exists()
+    real_run = subprocess.run
+
+    def delayed_taskkill(argv: Any, *args: Any, **kwargs: Any) -> Any:
+        if taskkill_delay and argv[0] == "taskkill":
+            time.sleep(taskkill_delay)
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr("noyra.deployment_setup.subprocess.run", delayed_taskkill)
+    with socket.socket() as listener, ThreadPoolExecutor(max_workers=1) as executor:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(15)
+        child = (
+            "import socket;from pathlib import Path;"
+            f"s=socket.create_connection({listener.getsockname()!r},timeout=20);"
+            "s.settimeout(None);s.sendall(b'R');"
+            f"Path({str(completed)!r}).touch() if s.recv(1)==b'G' else None;"
+            "s.close()"
+        )
+        parent = (
+            "import subprocess,sys,time;subprocess.Popen([sys.executable,'-c',"
+            + repr(child)
+            + "]);time.sleep(30)"
+        )
+        result = executor.submit(
+            SubprocessRunner().run, [sys.executable, "-c", parent], timeout_seconds=5
+        )
+        connection, _ = listener.accept()
+        with connection:
+            connection.settimeout(20)
+            assert connection.recv(1) == b"R"  # The real descendant is running.
+            with pytest.raises(SetupError, match="COMMAND_TIMEOUT"):
+                result.result(timeout=20)
+            # Timeout initiates cleanup; it does not promise an instantaneous
+            # kill. Only release the side effect AFTER cleanup has returned.
+            try:
+                connection.sendall(b"G")
+                assert connection.recv(1) == b""
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
+        assert not completed.exists()
 
 
 @pytest.mark.parametrize("operation", ["logout", "capacity"])
