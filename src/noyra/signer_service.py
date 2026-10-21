@@ -661,6 +661,13 @@ class SignerHTTPServer(ThreadingHTTPServer):
                         raise SignerError("request content type is invalid")
                     try:
                         body = self.rfile.read(length)
+                    except OSError:
+                        # A timed-out/reset request body must not reach dispatch or
+                        # the generic 500 handler. Close without starting a reply,
+                        # even if the socket timeout precedes the absolute budget.
+                        self.close_connection = True
+                        return
+                    try:
                         if len(body) != length:
                             raise SignerError("request body is incomplete")
                         payload = strict_json_loads(body)

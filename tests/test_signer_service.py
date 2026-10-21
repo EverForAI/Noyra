@@ -351,11 +351,12 @@ def test_http_nonce_conflict_uses_machine_readable_error_code(
     assert response.json()["code"] == "nonce_conflict"
 
 
+@pytest.mark.parametrize("error_type", [RuntimeError, TimeoutError, ConnectionResetError])
 def test_http_internal_errors_return_diagnostic_500_without_exception_text(
-    http_server: SignerHTTPServer, monkeypatch: pytest.MonkeyPatch
+    http_server: SignerHTTPServer, monkeypatch: pytest.MonkeyPatch, error_type: type[Exception]
 ) -> None:
     def fail(_: object, __: object) -> object:
-        raise RuntimeError("secret-provider-response")
+        raise error_type("secret-provider-response")
 
     monkeypatch.setattr(http_server.engine, "nonce", fail)
     response = post_json(
@@ -734,6 +735,46 @@ def test_http_incomplete_authenticated_body_never_dispatches(
             ).encode()
         )
         assert client.recv(512) == b""
+    assert (
+        http_server.engine.state.connection.execute(
+            "SELECT COUNT(*) FROM signer_requests"
+        ).fetchone()[0]
+        == 0
+    )
+
+
+@pytest.mark.parametrize(
+    "error", [TimeoutError("body deadline"), ConnectionResetError("peer reset")]
+)
+def test_http_body_read_failure_closes_without_reply_or_dispatch(
+    http_server: SignerHTTPServer, monkeypatch: pytest.MonkeyPatch, error: OSError
+) -> None:
+    from email.message import Message
+    from unittest.mock import Mock
+
+    # Inject the read error independently of the clock: on Windows a socket
+    # timeout can arrive just before the absolute deadline has expired.
+    handler = object.__new__(http_server._handler())
+    handler.headers = Message()
+    for key, value in (
+        ("Authorization", f"Bearer {TOKEN}"),
+        ("Content-Length", "20"),
+        ("Content-Type", "application/json"),
+    ):
+        handler.headers[key] = value
+    handler.path = "/v1/transfer"
+    handler.rfile = Mock(read=Mock(side_effect=error))
+    handler.close_connection = False
+    dispatch = Mock()
+    send = Mock()
+    monkeypatch.setattr(handler, "_dispatch", dispatch)
+    monkeypatch.setattr(handler, "_send", send)
+
+    cast(Any, handler).do_POST()
+
+    assert handler.close_connection
+    dispatch.assert_not_called()
+    send.assert_not_called()
     assert (
         http_server.engine.state.connection.execute(
             "SELECT COUNT(*) FROM signer_requests"
