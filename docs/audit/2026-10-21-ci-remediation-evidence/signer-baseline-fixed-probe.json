@@ -1,0 +1,34 @@
+[
+  {
+    "version": "baseline",
+    "error_type": "TimeoutError",
+    "closed": false,
+    "dispatch_count": 0,
+    "response_statuses": [
+      500
+    ]
+  },
+  {
+    "version": "baseline",
+    "error_type": "ConnectionResetError",
+    "closed": false,
+    "dispatch_count": 0,
+    "response_statuses": [
+      500
+    ]
+  },
+  {
+    "version": "fixed",
+    "error_type": "TimeoutError",
+    "closed": true,
+    "dispatch_count": 0,
+    "response_statuses": []
+  },
+  {
+    "version": "fixed",
+    "error_type": "ConnectionResetError",
+    "closed": true,
+    "dispatch_count": 0,
+    "response_statuses": []
+  }
+]

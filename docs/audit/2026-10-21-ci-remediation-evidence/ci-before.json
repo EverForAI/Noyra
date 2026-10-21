@@ -1,0 +1,159 @@
+{
+  "pr": {
+    "number": 18,
+    "html_url": "https://github.com/EverForAI/Noyra/pull/18",
+    "merged": false,
+    "state": "open",
+    "auto_merge": {
+      "merge_method": "merge"
+    },
+    "mergeable_state": "blocked"
+  },
+  "head_sha": "e49b8c12d15c37f26455a8645f4830442864e5c3",
+  "runs": [
+    {
+      "id": 39483505111,
+      "event": "pull_request",
+      "status": "completed",
+      "conclusion": "failure",
+      "html_url": "https://github.com/EverForAI/Noyra/actions/runs/39483505111",
+      "jobs": [
+        {
+          "id": 118837876662,
+          "name": "frontend",
+          "status": "completed",
+          "conclusion": "success",
+          "html_url": "https://github.com/EverForAI/Noyra/actions/runs/39483505111/job/118837876662",
+          "failed_steps": []
+        },
+        {
+          "id": 118837876943,
+          "name": "test (windows-2022, 3.12)",
+          "status": "completed",
+          "conclusion": "failure",
+          "html_url": "https://github.com/EverForAI/Noyra/actions/runs/39483505111/job/118837876943",
+          "failed_steps": [
+            "Run python -m pip_audit -r requirements.lock --no-deps --disable-pip"
+          ]
+        },
+        {
+          "id": 118837877011,
+          "name": "test (ubuntu-24.04, 3.12)",
+          "status": "completed",
+          "conclusion": "failure",
+          "html_url": "https://github.com/EverForAI/Noyra/actions/runs/39483505111/job/118837877011",
+          "failed_steps": [
+            "Verify Ubuntu installer backup boundary"
+          ]
+        },
+        {
+          "id": 118837877033,
+          "name": "test (ubuntu-24.04, 3.11)",
+          "status": "completed",
+          "conclusion": "failure",
+          "html_url": "https://github.com/EverForAI/Noyra/actions/runs/39483505111/job/118837877033",
+          "failed_steps": [
+            "Run python -m pip_audit -r requirements.lock --no-deps --disable-pip"
+          ]
+        },
+        {
+          "id": 118837877091,
+          "name": "test (windows-2022, 3.11)",
+          "status": "completed",
+          "conclusion": "failure",
+          "html_url": "https://github.com/EverForAI/Noyra/actions/runs/39483505111/job/118837877091",
+          "failed_steps": [
+            "Run python -m pytest --cov=noyra --cov-report=term-missing"
+          ]
+        },
+        {
+          "id": 118837877133,
+          "name": "cloud-profile",
+          "status": "completed",
+          "conclusion": "success",
+          "html_url": "https://github.com/EverForAI/Noyra/actions/runs/39483505111/job/118837877133",
+          "failed_steps": []
+        },
+        {
+          "id": 118837877144,
+          "name": "docker",
+          "status": "completed",
+          "conclusion": "success",
+          "html_url": "https://github.com/EverForAI/Noyra/actions/runs/39483505111/job/118837877144",
+          "failed_steps": []
+        }
+      ]
+    },
+    {
+      "id": 39483499731,
+      "event": "push",
+      "status": "completed",
+      "conclusion": "failure",
+      "html_url": "https://github.com/EverForAI/Noyra/actions/runs/39483499731",
+      "jobs": [
+        {
+          "id": 118837856849,
+          "name": "docker",
+          "status": "completed",
+          "conclusion": "success",
+          "html_url": "https://github.com/EverForAI/Noyra/actions/runs/39483499731/job/118837856849",
+          "failed_steps": []
+        },
+        {
+          "id": 118837857137,
+          "name": "test (ubuntu-24.04, 3.11)",
+          "status": "completed",
+          "conclusion": "failure",
+          "html_url": "https://github.com/EverForAI/Noyra/actions/runs/39483499731/job/118837857137",
+          "failed_steps": [
+            "Run python -m pip_audit -r requirements.lock --no-deps --disable-pip"
+          ]
+        },
+        {
+          "id": 118837857207,
+          "name": "frontend",
+          "status": "completed",
+          "conclusion": "success",
+          "html_url": "https://github.com/EverForAI/Noyra/actions/runs/39483499731/job/118837857207",
+          "failed_steps": []
+        },
+        {
+          "id": 118837857235,
+          "name": "cloud-profile",
+          "status": "completed",
+          "conclusion": "success",
+          "html_url": "https://github.com/EverForAI/Noyra/actions/runs/39483499731/job/118837857235",
+          "failed_steps": []
+        },
+        {
+          "id": 118837857287,
+          "name": "test (windows-2022, 3.11)",
+          "status": "completed",
+          "conclusion": "failure",
+          "html_url": "https://github.com/EverForAI/Noyra/actions/runs/39483499731/job/118837857287",
+          "failed_steps": [
+            "Run python -m pytest --cov=noyra --cov-report=term-missing"
+          ]
+        },
+        {
+          "id": 118837857452,
+          "name": "test (ubuntu-24.04, 3.12)",
+          "status": "completed",
+          "conclusion": "failure",
+          "html_url": "https://github.com/EverForAI/Noyra/actions/runs/39483499731/job/118837857452",
+          "failed_steps": [
+            "Verify Ubuntu installer backup boundary"
+          ]
+        },
+        {
+          "id": 118837857493,
+          "name": "test (windows-2022, 3.12)",
+          "status": "completed",
+          "conclusion": "cancelled",
+          "html_url": "https://github.com/EverForAI/Noyra/actions/runs/39483499731/job/118837857493",
+          "failed_steps": []
+        }
+      ]
+    }
+  ]
+}

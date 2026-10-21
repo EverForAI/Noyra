@@ -1,0 +1,6 @@
+from noyra.deployment_setup import SubprocessRunner
+def pytest_sessionstart(session):
+ def parent_only(process):
+  process.kill()
+  process.wait(timeout=5)
+ SubprocessRunner._terminate=staticmethod(parent_only)

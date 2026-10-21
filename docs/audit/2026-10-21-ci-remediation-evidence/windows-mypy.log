@@ -1,0 +1,2 @@
+tests\test_signer_service.py:772: error: "BaseHTTPRequestHandler" has no attribute "do_POST"  [attr-defined]
+Found 1 error in 1 file (checked 442 source files)
