@@ -361,8 +361,9 @@ class SubjectKernel:
     def _sync_migration_source_epoch(self, version: int) -> None:
         if self._migration_fence_root is None:
             return
+        self._migration_fence_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         source_root = self._migration_fence_root / "source"
-        source_root.mkdir(mode=0o750, parents=True, exist_ok=True)
+        source_root.mkdir(mode=0o700, exist_ok=True)
         if source_root.is_symlink() or not source_root.is_dir():
             raise RuntimeOwnershipError("migration source epoch directory is invalid")
         path = source_root / "epoch"

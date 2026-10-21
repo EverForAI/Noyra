@@ -15,9 +15,14 @@ from noyra.core.errors import NotFoundError
 from noyra.core.identity import validate_subject_id
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 
-ApprovalMode = Literal["disabled", "manual", "policy_auto", "emergency_recovery"]
+ApprovalMode = Literal[
+    "disabled", "manual", "self_attested", "dual_review", "policy_auto", "emergency_recovery"
+]
 WalletMode = Literal["external_signer_rebind", "local_wallet_transfer", "disabled"]
-_APPROVAL_MODES = frozenset({"disabled", "manual", "policy_auto", "emergency_recovery"})
+_APPROVAL_MODES = frozenset(
+    {"disabled", "manual", "self_attested", "dual_review", "policy_auto", "emergency_recovery"}
+)
+_REVIEW_APPROVAL_MODES = frozenset({"self_attested", "dual_review"})
 _WALLET_MODES = frozenset({"external_signer_rebind", "local_wallet_transfer", "disabled"})
 
 
@@ -65,10 +70,14 @@ class MigrationPolicy:
                 raise ValueError(f"migration policy {name} must be a list of strings")
             return tuple(dict.fromkeys(item.strip() for item in value))
 
+        try:
+            review_mode = row["approval_mode_override"]
+        except (IndexError, KeyError):
+            review_mode = None
         policy = cls(
             subject_id=validate_subject_id(str(row["subject_id"])),
             enabled=bool(row["enabled"]),
-            approval_mode=cast(ApprovalMode, str(row["approval_mode"])),
+            approval_mode=cast(ApprovalMode, str(review_mode or row["approval_mode"])),
             emergency_recovery_enabled=bool(row["emergency_recovery_enabled"]),
             local_wallet_transfer_enabled=bool(row["local_wallet_transfer_enabled"]),
             wallet_mode=cast(WalletMode, str(row["wallet_mode"])),
@@ -132,7 +141,12 @@ class MigrationPolicy:
             or type(self.local_wallet_transfer_enabled) is not bool
         ):
             raise TypeError("migration policy flags must be boolean")
-        if not self.enabled and self.approval_mode not in {"disabled", "manual"}:
+        if not self.enabled and self.approval_mode not in {
+            "disabled",
+            "manual",
+            "self_attested",
+            "dual_review",
+        }:
             raise ValueError("disabled migration cannot use automatic approval")
         if self.enabled and self.approval_mode == "disabled":
             raise ValueError("enabled migration requires an approval mode")
@@ -193,7 +207,7 @@ class MigrationPolicy:
             and "approval_mode" not in values
             and self.approval_mode == "disabled"
         ):
-            values["approval_mode"] = "manual"
+            values["approval_mode"] = "self_attested"
         if values.get("enabled") is False and "approval_mode" not in values:
             values["approval_mode"] = "disabled"
         updated = replace(self, **values, revision=self.revision + 1, updated_at=utc_now())
@@ -226,9 +240,7 @@ class MigrationStore:
         validate_subject_id(subject_id)
         with self.database.transaction() as connection:
             self._ensure_policy(connection, subject_id)
-            row = connection.execute(
-                "SELECT * FROM migration_policies WHERE subject_id = ?", (subject_id,)
-            ).fetchone()
+            row = self.policy_row(connection, subject_id)
             if row is None:
                 raise NotFoundError(f"migration policy not found: {subject_id}")
             return MigrationPolicy.from_record(row)
@@ -245,9 +257,7 @@ class MigrationStore:
             raise ValueError("migration policy actor is invalid")
         with self.database.transaction() as connection:
             self._ensure_policy(connection, subject_id)
-            row = connection.execute(
-                "SELECT * FROM migration_policies WHERE subject_id = ?", (subject_id,)
-            ).fetchone()
+            row = self.policy_row(connection, subject_id)
             current = MigrationPolicy.from_record(row)
             if current.revision != expected_revision:
                 raise MigrationPolicyConflictError(
@@ -261,6 +271,7 @@ class MigrationStore:
             )
             if result.rowcount != 1:
                 raise MigrationPolicyConflictError("migration policy changed during update")
+            self._write_review_mode(connection, updated)
             self._append_audit(
                 connection,
                 subject_id,
@@ -269,6 +280,30 @@ class MigrationStore:
                 {"revision": updated.revision, "changed_fields": sorted(patch)},
             )
             return updated
+
+    @staticmethod
+    def policy_row(connection: Any, subject_id: str) -> Any:
+        return connection.execute(
+            "SELECT p.*, r.mode AS approval_mode_override "
+            "FROM migration_policies p LEFT JOIN migration_policy_review_modes r "
+            "ON r.subject_id=p.subject_id WHERE p.subject_id=?",
+            (subject_id,),
+        ).fetchone()
+
+    @staticmethod
+    def _write_review_mode(connection: Any, policy: MigrationPolicy) -> None:
+        if policy.approval_mode in _REVIEW_APPROVAL_MODES:
+            connection.execute(
+                "INSERT INTO migration_policy_review_modes(subject_id,mode,updated_at) "
+                "VALUES (?,?,?) ON CONFLICT(subject_id) DO UPDATE SET "
+                "mode=excluded.mode,updated_at=excluded.updated_at",
+                (policy.subject_id, policy.approval_mode, policy.updated_at),
+            )
+        else:
+            connection.execute(
+                "DELETE FROM migration_policy_review_modes WHERE subject_id=?",
+                (policy.subject_id,),
+            )
 
     @staticmethod
     def _ensure_policy(connection: Any, subject_id: str) -> None:
@@ -289,7 +324,7 @@ class MigrationStore:
     def _row_values(policy: MigrationPolicy, include_subject: bool) -> tuple[Any, ...]:
         values = (
             int(policy.enabled),
-            policy.approval_mode,
+            ("manual" if policy.approval_mode in _REVIEW_APPROVAL_MODES else policy.approval_mode),
             int(policy.emergency_recovery_enabled),
             int(policy.local_wallet_transfer_enabled),
             policy.wallet_mode,

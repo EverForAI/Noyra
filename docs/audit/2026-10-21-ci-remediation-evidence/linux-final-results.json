@@ -1,0 +1,57 @@
+[
+  {
+    "name": "linux-private-checkout-root-test",
+    "exit": 0,
+    "elapsed": 4.21
+  },
+  {
+    "name": "linux-final-targeted",
+    "exit": 0,
+    "elapsed": 135.54
+  },
+  {
+    "name": "linux-shell-test-install-ubuntu-backup-boundary",
+    "exit": 0,
+    "elapsed": 1.15
+  },
+  {
+    "name": "linux-shell-test-single-disk-storage-contract",
+    "exit": 0,
+    "elapsed": 0.25
+  },
+  {
+    "name": "linux-shell-test-control-layout-rollback",
+    "exit": 0,
+    "elapsed": 0.07
+  },
+  {
+    "name": "linux-shell-test-upgrade-components-rollback",
+    "exit": 0,
+    "elapsed": 0.09
+  },
+  {
+    "name": "linux-shell-test-migration-components-rollback",
+    "exit": 0,
+    "elapsed": 0.03
+  },
+  {
+    "name": "linux-ci-root-upgrade-migration",
+    "exit": 0,
+    "elapsed": 190.83
+  },
+  {
+    "name": "linux-final-ruff-check",
+    "exit": 0,
+    "elapsed": 0.19
+  },
+  {
+    "name": "linux-final-ruff-format",
+    "exit": 0,
+    "elapsed": 0.16
+  },
+  {
+    "name": "linux-final-mypy",
+    "exit": 0,
+    "elapsed": 18.67
+  }
+]

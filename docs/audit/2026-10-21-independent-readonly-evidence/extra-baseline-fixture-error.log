@@ -1,0 +1,25 @@
+Traceback (most recent call last):
+  File "/mnt/d/metagrowh/.user-temp/noyra-independent-postfix-_8xyyv14/extra_probes.py", line 43, in <module>
+    if __name__=='__main__':main()
+                            ^^^^^^
+  File "/mnt/d/metagrowh/.user-temp/noyra-independent-postfix-_8xyyv14/extra_probes.py", line 34, in main
+    out['web_cancellation']=asyncio.run(cancellation(db,root))
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 687, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/mnt/d/metagrowh/.user-temp/noyra-independent-postfix-_8xyyv14/extra_probes.py", line 15, in cancellation
+    CapabilityStore(db).grant('Noyra-audit-probe',CapabilityGrant(capability_type='web_read',scope={'domains':['example.com']},issuer='owner',rate_limit_per_hour=10,side_effect=False),actor='operator')
+  File "/var/tmp/noyra-postfix-baseline-cbdfaa0/src/noyra/capability/store.py", line 43, in grant
+    self._validate_scope(proposal)
+  File "/var/tmp/noyra-postfix-baseline-cbdfaa0/src/noyra/capability/store.py", line 317, in _validate_scope
+    CapabilityStore._validate_scope_values(
+  File "/var/tmp/noyra-postfix-baseline-cbdfaa0/src/noyra/capability/store.py", line 368, in _validate_scope_values
+    raise ValueError("web capability scope requires public_https or one or more hosts")
+ValueError: web capability scope requires public_https or one or more hosts

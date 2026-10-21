@@ -19,6 +19,9 @@ services:
       # the container listener is trusted only by the local Compose network.
       NOYRA_PROFILE: production
       NOYRA_DEPLOYMENT_PROFILE: container_internal
+      # Compose keeps backups external to the read-only runtime container;
+      # retention/restore is performed by the host maintenance boundary.
+      NOYRA_STORAGE_PROFILE: runtime_only
       NOYRA_AT_REST_MODE: required
       NOYRA_VOLUME_ENCRYPTION_BACKEND: attestation
       NOYRA_VOLUME_ATTESTATION_PATH: /run/noyra/volume-attestation.json

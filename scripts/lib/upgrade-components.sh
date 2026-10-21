@@ -9,6 +9,8 @@ UPGRADE_COMPONENTS_CHANGED=false
 UPGRADE_PATH_WAS_ENABLED=false
 UPGRADE_PATH_WAS_ACTIVE=false
 UPGRADE_RECOVER_WAS_ENABLED=false
+SOAK_TIMER_WAS_ENABLED=false
+SOAK_TIMER_WAS_ACTIVE=false
 MIGRATION_COMPONENTS_BACKUP_DIR=""
 MIGRATION_COMPONENTS_CHANGED=false
 MIGRATION_AGENT_WAS_ENABLED=false
@@ -16,8 +18,8 @@ MIGRATION_AGENT_WAS_ACTIVE=false
 TARGET_ACTIVATION_PATH_WAS_ENABLED=false
 
 noyra_upgrade_components_snapshot() {
-  if [[ $# -ne 5 && $# -ne 6 ]]; then
-    echo 'Expected backup directory, runner, three units and optional main unit.' >&2
+  if [[ $# -lt 5 ]]; then
+    echo 'Expected backup directory and at least four component paths.' >&2
     return 2
   fi
   local backup_dir="$1"
@@ -28,6 +30,8 @@ noyra_upgrade_components_snapshot() {
   UPGRADE_PATH_WAS_ENABLED=false
   UPGRADE_PATH_WAS_ACTIVE=false
   UPGRADE_RECOVER_WAS_ENABLED=false
+  SOAK_TIMER_WAS_ENABLED=false
+  SOAK_TIMER_WAS_ACTIVE=false
 
   [[ ! -e "$backup_dir" && ! -L "$backup_dir" ]] || {
     echo 'Upgrade component snapshot path already exists.' >&2
@@ -59,6 +63,10 @@ noyra_upgrade_components_snapshot() {
   [[ "$state" == active ]] && UPGRADE_PATH_WAS_ACTIVE=true
   state="$(systemctl is-enabled noyra-upgrade-recover.service 2>/dev/null || true)"
   case "$state" in enabled|enabled-runtime|linked|linked-runtime|alias) UPGRADE_RECOVER_WAS_ENABLED=true ;; esac
+  state="$(systemctl is-enabled noyra-soak.timer 2>/dev/null || true)"
+  case "$state" in enabled|enabled-runtime|linked|linked-runtime|alias) SOAK_TIMER_WAS_ENABLED=true ;; esac
+  state="$(systemctl is-active noyra-soak.timer 2>/dev/null || true)"
+  [[ "$state" == active ]] && SOAK_TIMER_WAS_ACTIVE=true
 
   UPGRADE_COMPONENTS_BACKUP_DIR="$backup_dir"
   UPGRADE_COMPONENTS_CHANGED=false
@@ -74,12 +82,18 @@ noyra_upgrade_components_mark_changed() {
 
 noyra_upgrade_components_restore() {
   [[ "$UPGRADE_COMPONENTS_CHANGED" == true ]] || return 0
-  [[ $# -eq 4 || $# -eq 5 ]] || return 2
+  [[ $# -ge 4 ]] || return 2
   local runner_path="$1" path_unit_path="$2" service_unit_path="$3" recover_unit_path="$4"
   local -a paths=("$runner_path" "$path_unit_path" "$service_unit_path" "$recover_unit_path")
-  if [[ $# -eq 5 ]]; then paths+=("$5"); fi
+  if [[ $# -gt 4 ]]; then paths+=("${@:5}"); fi
   local index=0 path temporary state
 
+  state="$(systemctl is-active noyra-soak.timer 2>/dev/null || true)"
+  case "$state" in
+    active|activating|deactivating|reloading)
+      systemctl stop noyra-soak.timer >/dev/null 2>&1 || return 1
+      ;;
+  esac
   state="$(systemctl is-active noyra-upgrade.path 2>/dev/null || true)"
   case "$state" in
     active|activating|deactivating|reloading)
@@ -102,6 +116,16 @@ noyra_upgrade_components_restore() {
     systemctl enable noyra-upgrade-recover.service >/dev/null 2>&1 || return 1
   else
     systemctl disable noyra-upgrade-recover.service >/dev/null 2>&1 || true
+  fi
+  if [[ "$SOAK_TIMER_WAS_ENABLED" == true ]]; then
+    if [[ "$SOAK_TIMER_WAS_ACTIVE" == true ]]; then
+      systemctl enable --now noyra-soak.timer >/dev/null 2>&1 || return 1
+    else
+      systemctl enable noyra-soak.timer >/dev/null 2>&1 || return 1
+      systemctl stop noyra-soak.timer >/dev/null 2>&1 || return 1
+    fi
+  else
+    systemctl disable --now noyra-soak.timer >/dev/null 2>&1 || true
   fi
   if [[ "$UPGRADE_PATH_WAS_ENABLED" == true ]]; then
     if [[ "$UPGRADE_PATH_WAS_ACTIVE" == true ]]; then

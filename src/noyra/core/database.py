@@ -14,7 +14,7 @@ from typing import Any
 
 from .admission import current_commit_scope, is_accounting_scope
 from .conversation_schema import MIGRATION_V84, MIGRATION_V85
-from .errors import RuntimeOwnershipError
+from .errors import RuntimeOwnershipError, SchemaContractError
 from .evidence_schema import migration_v80, migration_v92
 from .locking import ProcessLock
 from .private_erasure_schema import (
@@ -310,7 +310,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 94
+CURRENT_SCHEMA_VERSION = 99
 
 # The schema DDL fingerprint is checked after every successful initialization.
 # Update this value only alongside a reviewed schema migration and its tests.
@@ -318,6 +318,11 @@ CURRENT_SCHEMA_VERSION = 94
 # installations persist this value in ``schema_meta`` and therefore require
 # the value to remain stable across compatible runtime fixes.
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
+    99: "289738612874ddce653fcc53979ab3285f0601920cde5aad27baafee978d1145",
+    98: "8a16f2c86d53e37f52f96154d49dda2630a22b411650f62f33fdaa05d230c415",
+    97: "39d19922cfd11f01d60b4d2085f50fdc8eb0fa6b1a213d0594aaa5e39d46ad36",
+    96: "f851774364cf13313d4a670104d5098ed362cb4c1e4422b76c7efd68c2e6e9dc",
+    95: "4d897bceb70f95ea1310b2a637d0606ff26dc70a8ff73e0f71094ce98e95fca5",
     94: "181b72baa819d54d6d18c80411b610abdd2c3c6cee18661aeadb3a190a339f9b",
     93: "8968045531bd80f2f1d487cb9a4b01e2b84767b10b8a85fc4ce85d0c956022bb",
     92: "28e3601ed49497ace746afc16374512e35491c6a3cd30299d4fd8122eab4c543",
@@ -343,6 +348,11 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 # auditable P0 finding.  Tables, indexes, and views still fail closed during
 # database construction because they define the storage contract itself.
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
+    99: "f6d0ed82b9a6fc8ead5f18dac96c904f04f5087376a2ec9ed1553d55d41dc2fd",
+    98: "1c71052010dca131f02eeb04c66f9c38422be66a3374d31d3a39c4e4ec1f20b0",
+    97: "2f1a1176f4b0882132078c303add11e9b525d9901b9f421023f9c78d1f45c7fc",
+    96: "96413e10b9c7d69bf591d15fc84be46a942aff186c6b40a923ee968243dcabf6",
+    95: "58c35537c7ed5fd43b871c53d925ba4f8cdc3dcefdb2d65a72172c89f4ba29c0",
     94: "762feef35a9e0593168f010ea4f980d3425bf55db788baf71bc587a9c9333e2e",
     93: "bd4f12a88b407fc6f3fe4ab713401afb9c1a4ba73d79146927898a2ca8211b36",
     92: "09ccb3fabc0eb74acae5bb8b3a6fa540d1fda3a436f1b62ab32755e9d46226a6",
@@ -381,11 +391,16 @@ _PERSISTENT_FEATURE_OBJECTS: dict[str, tuple[str, ...]] = {
         "search_provider_routing",
         "idx_search_provider_routing_order",
     ),
+    "model_capability_profiles": (
+        "model_capability_profiles",
+        "idx_model_capability_profiles_subject",
+    ),
 }
 
 _PERSISTENT_FEATURE_MIN_SCHEMA: dict[str, int] = {
     "provider_health_metrics": 68,
     "search_provider_routing": 77,
+    "model_capability_profiles": 99,
 }
 
 MIGRATIONS: dict[int, str] = {
@@ -6911,6 +6926,160 @@ SELECT 1;
     92: migration_v92(),
     93: MIGRATION_V93,
     94: MIGRATION_V94,
+    95: """
+ALTER TABLE cognitive_resource_groups
+    ADD COLUMN reasoning_effort TEXT CHECK (
+        reasoning_effort IS NULL OR reasoning_effort IN ('low', 'medium', 'high', 'xhigh')
+    );
+""",
+    96: """
+CREATE TABLE IF NOT EXISTS migration_policy_review_modes (
+    subject_id TEXT PRIMARY KEY REFERENCES migration_policies(subject_id),
+    mode TEXT NOT NULL CHECK (mode IN ('self_attested', 'dual_review')),
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS migration_proposal_approvals (
+    approval_id TEXT PRIMARY KEY,
+    proposal_id TEXT NOT NULL REFERENCES migration_proposals(proposal_id),
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    actor TEXT NOT NULL CHECK (length(actor) BETWEEN 1 AND 128),
+    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 1),
+    created_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL CHECK (
+        length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    UNIQUE (proposal_id, actor)
+);
+CREATE INDEX IF NOT EXISTS idx_migration_proposal_approvals_subject
+    ON migration_proposal_approvals(subject_id, proposal_id, created_at);
+CREATE TRIGGER IF NOT EXISTS prevent_migration_proposal_approval_update
+    BEFORE UPDATE ON migration_proposal_approvals
+    BEGIN SELECT RAISE(ABORT, 'migration proposal approvals are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS prevent_migration_proposal_approval_delete
+    BEFORE DELETE ON migration_proposal_approvals
+    BEGIN SELECT RAISE(ABORT, 'migration proposal approvals cannot be deleted'); END;
+CREATE TABLE IF NOT EXISTS migration_self_attestations (
+    task_id TEXT PRIMARY KEY REFERENCES migration_tasks(task_id),
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    actor TEXT NOT NULL CHECK (length(actor) BETWEEN 1 AND 128),
+    target_id TEXT NOT NULL REFERENCES migration_targets(target_id),
+    target_identity_digest TEXT NOT NULL CHECK (
+        length(target_identity_digest) = 64 AND target_identity_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    manifest_digest TEXT NOT NULL CHECK (
+        length(manifest_digest) = 64 AND manifest_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    gates_json TEXT NOT NULL,
+    gates_digest TEXT NOT NULL CHECK (
+        length(gates_digest) = 64 AND gates_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    completed_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL CHECK (
+        length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_migration_self_attestations_subject_time
+    ON migration_self_attestations(subject_id, completed_at DESC);
+CREATE TRIGGER IF NOT EXISTS prevent_migration_self_attestation_update
+    BEFORE UPDATE ON migration_self_attestations
+    BEGIN SELECT RAISE(ABORT, 'migration self-attestations are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS prevent_migration_self_attestation_delete
+    BEFORE DELETE ON migration_self_attestations
+    BEGIN SELECT RAISE(ABORT, 'migration self-attestations cannot be deleted'); END;
+""",
+    97: """
+DROP TRIGGER IF EXISTS prevent_migration_proposal_approval_update;
+DROP TRIGGER IF EXISTS prevent_migration_proposal_approval_delete;
+DROP INDEX IF EXISTS idx_migration_proposal_approvals_subject;
+DROP INDEX IF EXISTS idx_migration_proposal_approvals_proposal_binding;
+ALTER TABLE migration_proposal_approvals RENAME TO migration_proposal_approvals_v96;
+CREATE TABLE migration_proposal_approvals (
+    approval_id TEXT PRIMARY KEY,
+    proposal_id TEXT NOT NULL REFERENCES migration_proposals(proposal_id),
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    actor TEXT NOT NULL CHECK (length(actor) BETWEEN 1 AND 128),
+    identity_binding TEXT CHECK (
+        identity_binding IS NULL OR (
+            length(identity_binding) = 64 AND identity_binding NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 1),
+    created_at TEXT NOT NULL,
+    state_hash TEXT NOT NULL CHECK (
+        length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'
+    )
+);
+INSERT INTO migration_proposal_approvals(
+    approval_id, proposal_id, subject_id, actor, identity_binding,
+    policy_revision, created_at, state_hash
+)
+SELECT approval_id, proposal_id, subject_id, actor, NULL,
+       policy_revision, created_at, state_hash
+FROM migration_proposal_approvals_v96;
+DROP TABLE migration_proposal_approvals_v96;
+CREATE INDEX idx_migration_proposal_approvals_subject
+    ON migration_proposal_approvals(subject_id, proposal_id, created_at);
+CREATE UNIQUE INDEX idx_migration_proposal_approvals_proposal_binding
+    ON migration_proposal_approvals(proposal_id, identity_binding)
+    WHERE identity_binding IS NOT NULL;
+CREATE TRIGGER prevent_migration_proposal_approval_update
+    BEFORE UPDATE ON migration_proposal_approvals
+    BEGIN SELECT RAISE(ABORT, 'migration proposal approvals are append-only'); END;
+CREATE TRIGGER prevent_migration_proposal_approval_delete
+    BEFORE DELETE ON migration_proposal_approvals
+    BEGIN SELECT RAISE(ABORT, 'migration proposal approvals cannot be deleted'); END;
+""",
+    98: """
+CREATE TABLE IF NOT EXISTS backup_retention_policies (
+    subject_id TEXT PRIMARY KEY REFERENCES subject_identity(subject_id),
+    settings_json TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    updated_at TEXT NOT NULL,
+    updated_by TEXT NOT NULL,
+    state_hash TEXT NOT NULL CHECK (
+        length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'
+    )
+);
+CREATE TABLE IF NOT EXISTS backup_retention_runs (
+    run_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    plan_id TEXT NOT NULL CHECK (length(plan_id) = 64 AND plan_id NOT GLOB '*[^0-9a-f]*'),
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    status TEXT NOT NULL CHECK (status IN ('planned', 'applied', 'failed')),
+    cursor_json TEXT NOT NULL,
+    deleted_count INTEGER NOT NULL DEFAULT 0 CHECK (deleted_count >= 0),
+    failure_code TEXT,
+    state_hash TEXT NOT NULL CHECK (
+        length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_backup_retention_runs_subject_time
+    ON backup_retention_runs(subject_id, started_at DESC);
+""",
+    99: """
+CREATE TABLE IF NOT EXISTS model_capability_profiles (
+    profile_id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
+    provider_type TEXT NOT NULL,
+    endpoint_hash TEXT NOT NULL CHECK (
+        length(endpoint_hash) = 64 AND endpoint_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    model TEXT NOT NULL,
+    capabilities_json TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    source TEXT NOT NULL CHECK (source IN ('probe', 'operator', 'server_profile')),
+    status TEXT NOT NULL CHECK (status IN ('known', 'unknown', 'stale', 'failed')),
+    observed_at TEXT NOT NULL,
+    expires_at TEXT,
+    state_hash TEXT NOT NULL CHECK (
+        length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    UNIQUE(subject_id, provider_type, endpoint_hash, model)
+);
+CREATE INDEX IF NOT EXISTS idx_model_capability_profiles_subject
+    ON model_capability_profiles(subject_id, provider_type, model);
+""",
 }
 
 
@@ -7122,14 +7291,18 @@ class Database:
         *,
         initialize: bool = True,
         read_only: bool = False,
+        strict_schema_contract: bool = False,
     ):
         self.path = Path(path).resolve()
         self.read_only = read_only
+        self.strict_schema_contract = strict_schema_contract
         if initialize:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.initialize()
         elif not self.path.is_file():
             raise FileNotFoundError(self.path)
+        elif strict_schema_contract:
+            self.assert_schema_contract()
 
     def _connect(self) -> sqlite3.Connection:
         if self.read_only:
@@ -7205,7 +7378,9 @@ class Database:
             statement.clear()
 
         remainder = "".join(statement).strip()
-        if not remainder:
+        if not remainder or all(
+            not line.strip() or line.lstrip().startswith("--") for line in remainder.splitlines()
+        ):
             return
         if not sqlite3.complete_statement(remainder):
             raise sqlite3.OperationalError("incomplete SQL script")
@@ -7379,7 +7554,7 @@ class Database:
             with self.transaction() as connection:
                 self._upgrade_wallet_payment_policy_automation(connection)
             self._ensure_training_policies()
-            self._validate_schema_contract()
+            self._validate_schema_contract(strict=self.strict_schema_contract)
             with self.connection() as connection:
                 connection.execute("PRAGMA journal_mode = WAL")
                 connection.execute("PRAGMA synchronous = FULL")
@@ -7486,61 +7661,169 @@ class Database:
         ):
             raise RuntimeError(f"persistent schema feature {feature_id} contract mismatch")
 
-    def _validate_schema_contract(self) -> None:
+    def assert_schema_contract(self) -> None:
+        """Check the persisted contract without changing the database.
+
+        The installer uses this read-only form after a failed pointer switch so
+        an older release can prove that its database is still usable before it
+        is started again.
+        """
+        with self.connection() as connection:
+            self._validate_schema_contract_connection(connection, strict=True, persist_marker=False)
+
+    def _validate_schema_contract(self, *, strict: bool = False) -> None:
         """Verify the complete versioned DDL inventory before opening service."""
         with self.transaction() as connection:
-            version_row = connection.execute(
-                "SELECT value FROM schema_meta WHERE key='schema_version'"
-            ).fetchone()
-            if version_row is None:
-                raise RuntimeError("database schema contract has no schema version")
-            version = int(version_row[0])
-            expected = _SCHEMA_DDL_FINGERPRINTS.get(version)
-            latest_contract_version = max(_SCHEMA_DDL_FINGERPRINTS)
-            if expected is None and version < latest_contract_version:
-                # Historical-version test fixtures and migration handoff
-                # images are validated after they reach the current runtime
-                # schema.  The current schema itself must always have a
-                # reviewed fingerprint.
-                return
-            if expected is None or len(expected) != 64 or set(expected) - set("0123456789abcdef"):
-                raise RuntimeError(f"database schema contract is unavailable for schema {version}")
-            structure_expected = _SCHEMA_STRUCTURE_FINGERPRINTS.get(version)
-            if (
-                structure_expected is None
-                or len(structure_expected) != 64
-                or set(structure_expected) - set("0123456789abcdef")
-            ):
-                raise RuntimeError(
-                    f"database schema structural contract is unavailable for schema {version}"
-                )
-            structure_actual = self.schema_structure_fingerprint(connection)
-            if structure_actual != structure_expected:
-                raise RuntimeError(
-                    f"database schema contract structural mismatch for schema {version}: "
-                    f"expected {structure_expected}, found {structure_actual}"
-                )
-            previous = connection.execute(
-                "SELECT value FROM schema_meta WHERE key='schema_ddl_contract'"
-            ).fetchone()
-            if previous is not None:
-                try:
-                    previous_version_text, previous_fingerprint = str(previous[0]).split(":", 1)
-                    previous_version = int(previous_version_text)
-                except (ValueError, TypeError) as error:
-                    raise RuntimeError("database schema contract marker is invalid") from error
-                if previous_version > version:
-                    raise RuntimeError("database schema contract marker is newer than runtime")
-                if previous_version == version and previous_fingerprint != expected:
-                    raise RuntimeError(
-                        "database schema contract marker does not match installed DDL"
-                    )
+            self._validate_schema_contract_connection(
+                connection, strict=strict, persist_marker=True
+            )
 
+    def _validate_schema_contract_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        strict: bool,
+        persist_marker: bool,
+    ) -> None:
+        version_row = connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()
+        if version_row is None:
+            raise SchemaContractError("schema contract mismatch: schema version is missing")
+        try:
+            version = int(version_row[0])
+        except (TypeError, ValueError) as error:
+            raise SchemaContractError(
+                "schema contract mismatch: schema version is invalid"
+            ) from error
+        expected = _SCHEMA_DDL_FINGERPRINTS.get(version)
+        latest_contract_version = max(_SCHEMA_DDL_FINGERPRINTS)
+        if expected is None and version < latest_contract_version:
+            # Historical handoff images are checked after they reach a reviewed
+            # contract.  Their migration steps still validate any version that
+            # has a published fingerprint.
+            return
+        if expected is None or len(expected) != 64 or set(expected) - set("0123456789abcdef"):
+            raise SchemaContractError(
+                f"schema contract mismatch: contract unavailable for schema {version}"
+            )
+        structure_expected = _SCHEMA_STRUCTURE_FINGERPRINTS.get(version)
+        if (
+            structure_expected is None
+            or len(structure_expected) != 64
+            or set(structure_expected) - set("0123456789abcdef")
+        ):
+            raise SchemaContractError(
+                f"schema contract mismatch: structural contract unavailable for schema {version}"
+            )
+        structure_actual = self.schema_structure_fingerprint(connection)
+        if structure_actual != structure_expected:
+            raise SchemaContractError(
+                f"schema contract mismatch: structural mismatch for schema {version}: "
+                f"expected {structure_expected}, found {structure_actual}"
+            )
+        actual = self.schema_ddl_fingerprint(connection)
+        if strict and actual != expected:
+            raise SchemaContractError(
+                f"schema contract mismatch: DDL mismatch for schema {version}: "
+                f"expected {expected}, found {actual}"
+            )
+        previous = connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_ddl_contract'"
+        ).fetchone()
+        if previous is not None:
+            try:
+                previous_version_text, previous_fingerprint = str(previous[0]).split(":", 1)
+                previous_version = int(previous_version_text)
+            except (ValueError, TypeError) as error:
+                raise SchemaContractError("schema contract mismatch: marker is invalid") from error
+            if previous_version > version:
+                raise SchemaContractError("schema contract mismatch: marker is newer than runtime")
+            if previous_version == version and previous_fingerprint != expected:
+                raise SchemaContractError(
+                    "schema contract marker mismatch (schema_contract_mismatch): "
+                    "marker does not match installed DDL"
+                )
+
+        if strict:
+            self._validate_persistent_feature_markers(connection, version)
+        if persist_marker:
             connection.execute(
                 "INSERT INTO schema_meta(key, value) VALUES ('schema_ddl_contract', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (f"{version}:{expected}",),
             )
+
+    def _validate_persistent_feature_markers(
+        self, connection: sqlite3.Connection, schema_version: int
+    ) -> None:
+        """Check every installed feature marker against its actual objects."""
+        if (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='persistent_features'"
+            ).fetchone()
+            is None
+        ):
+            if schema_version < min(_PERSISTENT_FEATURE_MIN_SCHEMA.values(), default=0):
+                return
+            raise SchemaContractError(
+                "schema contract mismatch: persistent feature registry is missing"
+            )
+        rows = connection.execute(
+            "SELECT feature_id, feature_version, ddl_fingerprint FROM persistent_features "
+            "ORDER BY feature_id"
+        ).fetchall()
+        for row in rows:
+            feature_id = str(row["feature_id"])
+            object_names = _PERSISTENT_FEATURE_OBJECTS.get(feature_id)
+            if object_names is None:
+                raise SchemaContractError(
+                    f"schema contract mismatch: unknown persistent feature {feature_id}"
+                )
+            minimum = _PERSISTENT_FEATURE_MIN_SCHEMA.get(feature_id, 0)
+            if schema_version < minimum:
+                raise SchemaContractError(
+                    f"schema contract mismatch: feature {feature_id} is ahead of schema"
+                )
+            if int(row["feature_version"]) != 1:
+                raise SchemaContractError(
+                    f"schema contract mismatch: persistent feature {feature_id} version is invalid"
+                )
+            actual = self._persistent_feature_ddl_fingerprint(connection, object_names)
+            if str(row["ddl_fingerprint"]) != actual:
+                raise SchemaContractError(
+                    f"schema contract mismatch: persistent feature {feature_id} marker differs"
+                )
+
+    def _validate_schema_stage_contract(
+        self, connection: sqlite3.Connection, schema_version: int
+    ) -> None:
+        """Validate a reviewed migration stage before publishing its marker."""
+        # Historical fixtures intentionally rewind a current database marker to
+        # replay an older migration.  The v80 boundary is the first reviewed
+        # handoff that must be checked on a real legacy image; later stages are
+        # validated by the final current-schema contract below.
+        if (
+            not self.strict_schema_contract
+            or schema_version != 80
+            or getattr(self, "_migration_origin_version", None) != 71
+        ):
+            return
+        expected = _SCHEMA_DDL_FINGERPRINTS.get(schema_version)
+        structure_expected = _SCHEMA_STRUCTURE_FINGERPRINTS.get(schema_version)
+        if expected is None or structure_expected is None:
+            return
+        actual_structure = self.schema_structure_fingerprint(connection)
+        actual_ddl = self.schema_ddl_fingerprint(connection)
+        if actual_structure != structure_expected or actual_ddl != expected:
+            raise SchemaContractError(
+                f"schema contract mismatch: migration stage {schema_version} does not match "
+                f"its reviewed DDL and structure fingerprints; found {actual_ddl}"
+            )
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='persistent_features'"
+        ).fetchone():
+            self._validate_persistent_feature_markers(connection, schema_version)
 
     @staticmethod
     def _ensure_archive_transfer_claim_columns(connection: sqlite3.Connection) -> None:
@@ -7935,7 +8218,8 @@ END;
                     int(existing["feature_version"]) != 1
                     or str(existing["ddl_fingerprint"]) != fingerprint
                 ):
-                    raise RuntimeError(
+                    raise SchemaContractError(
+                        "schema contract mismatch: "
                         f"optional feature {feature_id} registry fingerprint does not match installed DDL"
                     )
                 connection.execute(
@@ -10189,6 +10473,26 @@ END;
             "ON migration_tasks(target_epoch_id) WHERE target_epoch_id IS NOT NULL"
         )
 
+    @staticmethod
+    def _ensure_migration_proposal_approval_mode(connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(migration_proposals)")
+        }
+        if "approval_mode" not in columns:
+            connection.execute(
+                "ALTER TABLE migration_proposals ADD COLUMN approval_mode TEXT NOT NULL "
+                "DEFAULT 'manual' CHECK (approval_mode IN ("
+                "'disabled','manual','self_attested','dual_review','policy_auto','emergency_recovery'))"
+            )
+
+    def _set_schema_version(self, connection: sqlite3.Connection, version: int) -> None:
+        """Advance the marker only after the complete migration stage is valid."""
+        connection.execute(
+            "UPDATE schema_meta SET value=? WHERE key='schema_version'",
+            (str(version),),
+        )
+        self._validate_schema_stage_contract(connection, version)
+
     def _migrate(self, *, wallet_legacy_approval: WalletLegacyApproval | None = None) -> None:
         with self.connection() as connection:
             row = connection.execute(
@@ -10197,6 +10501,7 @@ END;
             if row is None:
                 raise RuntimeError("database schema version is missing")
             version = int(row["value"])
+            self._migration_origin_version = version
             # A few early development databases only contained schema_meta and
             # a historical marker. Re-run additive migrations from the first
             # version when their anchor tables are absent instead of letting a
@@ -10234,9 +10539,8 @@ END;
                         "PRAGMA table_info(private_conversation_messages)"
                     )
                 ):
-                    connection.execute(
-                        "UPDATE schema_meta SET value='85' WHERE key='schema_version'"
-                    )
+                    connection.execute("BEGIN IMMEDIATE")
+                    self._set_schema_version(connection, 85)
                     connection.commit()
                     continue
                 if target_version == 84:
@@ -10246,9 +10550,7 @@ END;
                         connection.execute("BEGIN IMMEDIATE")
                         self._execute_sql_script(connection, migration)
                         migrate_web_history(connection)
-                        connection.execute(
-                            "UPDATE schema_meta SET value='84' WHERE key='schema_version'"
-                        )
+                        self._set_schema_version(connection, 84)
                         connection.commit()
                     except Exception:
                         connection.rollback()
@@ -10264,10 +10566,7 @@ END;
                     try:
                         connection.execute("BEGIN IMMEDIATE")
                         self._upgrade_wallet_submission_consent(connection)
-                        connection.execute(
-                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-                            (str(target_version),),
-                        )
+                        self._set_schema_version(connection, target_version)
                         connection.commit()
                     except Exception:
                         connection.rollback()
@@ -10317,10 +10616,7 @@ END;
                                     ),
                                 )
                         self._execute_sql_script(connection, migration)
-                        connection.execute(
-                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-                            (str(target_version),),
-                        )
+                        self._set_schema_version(connection, target_version)
                         connection.commit()
                     except Exception:
                         connection.rollback()
@@ -10333,10 +10629,7 @@ END;
                             connection, approved=wallet_legacy_approval is not None
                         )
                         self._execute_sql_script(connection, migration)
-                        connection.execute(
-                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-                            (str(target_version),),
-                        )
+                        self._set_schema_version(connection, target_version)
                         connection.commit()
                     except Exception:
                         connection.rollback()
@@ -10346,10 +10639,7 @@ END;
                     try:
                         connection.execute("BEGIN IMMEDIATE")
                         self._upgrade_wallet_receipt_evidence(connection)
-                        connection.execute(
-                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-                            (str(target_version),),
-                        )
+                        self._set_schema_version(connection, target_version)
                         connection.commit()
                     except Exception:
                         connection.rollback()
@@ -10372,10 +10662,7 @@ END;
                             raise RuntimeError(
                                 "wallet address migration introduced foreign-key violations"
                             )
-                        connection.execute(
-                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-                            (str(target_version),),
-                        )
+                        self._set_schema_version(connection, target_version)
                         connection.commit()
                     except Exception:
                         connection.rollback()
@@ -10390,10 +10677,7 @@ END;
                         connection.execute("BEGIN IMMEDIATE")
                         self._upgrade_wallet_payment_policy_recipient_allowlist(connection)
                         self._execute_sql_script(connection, migration)
-                        connection.execute(
-                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-                            (str(target_version),),
-                        )
+                        self._set_schema_version(connection, target_version)
                         connection.commit()
                     except Exception:
                         connection.rollback()
@@ -10403,10 +10687,7 @@ END;
                     try:
                         connection.execute("BEGIN IMMEDIATE")
                         self._upgrade_provider_health_metrics(connection)
-                        connection.execute(
-                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-                            (str(target_version),),
-                        )
+                        self._set_schema_version(connection, target_version)
                         connection.commit()
                     except Exception:
                         connection.rollback()
@@ -10417,10 +10698,7 @@ END;
                         connection.execute("BEGIN IMMEDIATE")
                         self._ensure_migration_target_attestation_columns(connection)
                         self._execute_sql_script(connection, migration)
-                        connection.execute(
-                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-                            (str(target_version),),
-                        )
+                        self._set_schema_version(connection, target_version)
                         connection.commit()
                     except Exception:
                         connection.rollback()
@@ -10431,10 +10709,7 @@ END;
                         connection.execute("BEGIN IMMEDIATE")
                         self._ensure_migration_task_epoch_column(connection)
                         self._execute_sql_script(connection, migration)
-                        connection.execute(
-                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-                            (str(target_version),),
-                        )
+                        self._set_schema_version(connection, target_version)
                         connection.commit()
                     except Exception:
                         connection.rollback()
@@ -10444,10 +10719,7 @@ END;
                     try:
                         connection.execute("BEGIN IMMEDIATE")
                         self._ensure_migration_target_recipient_columns(connection)
-                        connection.execute(
-                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-                            (str(target_version),),
-                        )
+                        self._set_schema_version(connection, target_version)
                         connection.commit()
                     except Exception:
                         connection.rollback()
@@ -10490,10 +10762,7 @@ END;
                                 reason="preserve existing limits",
                                 now=utc_now(),
                             )
-                        connection.execute(
-                            "UPDATE schema_meta SET value=? WHERE key='schema_version'",
-                            (str(target_version),),
-                        )
+                        self._set_schema_version(connection, target_version)
                         connection.commit()
                     except Exception:
                         connection.rollback()
@@ -10511,10 +10780,7 @@ END;
                         self._upgrade_provider_health_bucket_hashes(connection)
                         self._upgrade_wallet_payment_policy_layout(connection)
                         self._execute_sql_script(connection, migration)
-                        connection.execute(
-                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-                            (str(target_version),),
-                        )
+                        self._set_schema_version(connection, target_version)
                         connection.commit()
                     except Exception:
                         connection.rollback()
@@ -10522,7 +10788,8 @@ END;
                     continue
                 if target_version in {33, 48, 50, 51, 52}:
                     try:
-                        connection.executescript("BEGIN IMMEDIATE;\n" + migration)
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._execute_sql_script(connection, migration)
                         if target_version == 33:
                             self._backfill_behavior_log_revisions(connection)
                         elif target_version == 48:
@@ -10538,10 +10805,7 @@ END;
                         else:
                             self._ensure_public_post_evidence_columns(connection)
                             self._upgrade_public_post_evidence(connection)
-                        connection.execute(
-                            "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-                            (str(target_version),),
-                        )
+                        self._set_schema_version(connection, target_version)
                         connection.commit()
                     except Exception:
                         connection.rollback()
@@ -10576,24 +10840,60 @@ END;
                                     f"ALTER TABLE {table} ADD COLUMN {name} {declaration}"
                                 )
                         self._execute_sql_script(connection, migration)
-                        connection.execute(
-                            "UPDATE schema_meta SET value=? WHERE key='schema_version'",
-                            (str(target_version),),
-                        )
+                        self._set_schema_version(connection, target_version)
                         connection.commit()
                     except Exception:
                         connection.rollback()
                         raise
                     continue
-                script = (
-                    "BEGIN IMMEDIATE;\n"
-                    f"{migration}\n"
-                    "UPDATE schema_meta SET value = "
-                    f"'{target_version}' WHERE key = 'schema_version';\n"
-                    "COMMIT;"
-                )
+                if target_version == 96:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._ensure_migration_proposal_approval_mode(connection)
+                        self._execute_sql_script(connection, migration)
+                        self._set_schema_version(connection, target_version)
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
+                if target_version == 97:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        # A fresh database may not have reached the additive
+                        # model-call columns yet.  Install those columns
+                        # before any DDL that causes SQLite to reparse the
+                        # historical erasure triggers referring to them.
+                        model_columns = {
+                            str(row["name"])
+                            for row in connection.execute(
+                                "PRAGMA table_info(model_calls)"
+                            ).fetchall()
+                        }
+                        if "resource_group_id" not in model_columns:
+                            connection.execute(
+                                "ALTER TABLE model_calls ADD COLUMN resource_group_id TEXT"
+                            )
+                        if "request_json" not in model_columns:
+                            connection.execute(
+                                "ALTER TABLE model_calls ADD COLUMN request_json TEXT"
+                            )
+                        if "capture_policy_version" not in model_columns:
+                            connection.execute(
+                                "ALTER TABLE model_calls ADD COLUMN capture_policy_version INTEGER"
+                            )
+                        self._execute_sql_script(connection, migration)
+                        self._set_schema_version(connection, target_version)
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
                 try:
-                    connection.executescript(script)
+                    connection.execute("BEGIN IMMEDIATE")
+                    self._execute_sql_script(connection, migration)
+                    self._set_schema_version(connection, target_version)
+                    connection.commit()
                 except Exception:
                     connection.rollback()
                     raise

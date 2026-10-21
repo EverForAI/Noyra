@@ -131,11 +131,11 @@ def test_public_schema_has_fixed_reviewed_fingerprints(
     with kernel.database.connection() as connection:
         assert (
             kernel.database.schema_ddl_fingerprint(connection)
-            == "181b72baa819d54d6d18c80411b610abdd2c3c6cee18661aeadb3a190a339f9b"
+            == "289738612874ddce653fcc53979ab3285f0601920cde5aad27baafee978d1145"
         )
         assert (
             kernel.database.schema_structure_fingerprint(connection)
-            == "762feef35a9e0593168f010ea4f980d3425bf55db788baf71bc587a9c9333e2e"
+            == "f6d0ed82b9a6fc8ead5f18dac96c904f04f5087376a2ec9ed1553d55d41dc2fd"
         )
 
 

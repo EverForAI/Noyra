@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import subprocess
@@ -12,7 +14,11 @@ import pytest
 from pydantic import SecretStr
 
 from noyra.core.types import content_hash
-from noyra.service import ServiceSettings, _load_public_post_hash_key
+from noyra.service import (
+    ServiceSettings,
+    _load_public_post_hash_key,
+    _verify_trusted_proxy_principal,
+)
 
 
 def _settings(**changes: object) -> ServiceSettings:
@@ -33,6 +39,62 @@ def test_production_profile_defaults_admin_session_cookie_to_secure() -> None:
     settings = _settings(profile="production")
     assert settings.profile == "production"
     assert settings.admin_session_cookie_secure is True
+
+
+def test_strict_migration_review_requires_a_proxy_hmac_key() -> None:
+    with pytest.raises(ValueError, match="requires a signed proxy principal HMAC key"):
+        _settings(migration_require_independent_review=True)
+
+    configured = _settings(
+        migration_require_independent_review=True,
+        migration_proxy_principal_hmac_key=SecretStr("p" * 32),
+        trusted_proxy_cidrs=("127.0.0.1/32",),
+    )
+    assert configured.migration_require_independent_review is True
+
+
+def test_trusted_proxy_principal_requires_fresh_request_bound_signature() -> None:
+    principal = "alice@example.test"
+    timestamp = "1700000000"
+    method = "POST"
+    path = "/api/admin/migration/proposals/id/approve"
+    key = "proxy-signing-key-that-is-at-least-32-bytes"
+    message = "\n".join(
+        (
+            "noyra-authenticated-principal/v1",
+            principal,
+            timestamp,
+            method,
+            path,
+        )
+    ).encode()
+    signature = hmac.new(key.encode(), message, hashlib.sha256).hexdigest()
+
+    def verify(
+        candidate_principal: str = principal,
+        candidate_timestamp: str = timestamp,
+        candidate_peer: str = "127.0.0.1",
+        candidate_method: str = method,
+        candidate_path: str = path,
+    ) -> str | None:
+        return _verify_trusted_proxy_principal(
+            candidate_principal,
+            candidate_timestamp,
+            signature,
+            candidate_peer,
+            trusted_proxy_cidrs=("127.0.0.1/32",),
+            hmac_key=SecretStr(key),
+            method=candidate_method,
+            path=candidate_path,
+            now=int(timestamp),
+        )
+
+    assert verify() == principal
+    assert verify(candidate_principal="mallory@example.test") is None
+    assert verify(candidate_peer="192.0.2.10") is None
+    assert verify(candidate_timestamp="1699999939") is None
+    assert verify(candidate_method="GET") is None
+    assert verify(candidate_path=path + "?task=another") is None
 
 
 def test_production_profile_rejects_insecure_non_loopback_listener() -> None:

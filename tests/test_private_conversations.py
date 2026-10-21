@@ -98,6 +98,7 @@ def test_window_history_pages_and_migration_preserve_originals(tmp_path: Path) -
     with db.transaction() as connection:
         connection.execute("DELETE FROM private_conversation_messages")
         connection.execute("DELETE FROM private_conversations")
+        connection.execute("ALTER TABLE cognitive_resource_groups DROP COLUMN reasoning_effort")
         connection.execute("UPDATE schema_meta SET value='83' WHERE key='schema_version'")
     migrated = ConversationStore(Database(db.path))
     window = migrated.list("owner")["items"][0]
@@ -189,6 +190,7 @@ def test_legacy_author_is_not_claimed_as_current_operator(tmp_path: Path) -> Non
     with db.transaction() as connection:
         connection.execute("DELETE FROM private_conversation_messages")
         connection.execute("DELETE FROM private_conversations")
+        connection.execute("ALTER TABLE cognitive_resource_groups DROP COLUMN reasoning_effort")
         connection.execute("UPDATE schema_meta SET value='83' WHERE key='schema_version'")
     migrated = ConversationStore(Database(db.path))
     window = migrated.list("owner")["items"][0]

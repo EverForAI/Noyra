@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from noyra.core.database import Database
-from noyra.core.errors import IntegrityError
+from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.events import EventStore
 from noyra.core.payload_codec import decompress_text
 from noyra.core.private_sources import private_input_scope
@@ -110,11 +110,33 @@ class SleepReflectionCognition:
     def _context(self, run: SleepRunRecord) -> ReflectionContext:
         lower_bound = self._window_start(run)
         with self.database.connection() as connection:
+            current = self._boundary(connection, run.sleep_id)
+            previous = self._previous_run(connection, run)
+            prior = None if previous is None else self._boundary(connection, previous["sleep_id"])
+            event_filter = "occurred_at > ? AND occurred_at <= ?"
+            event_args: tuple[Any, ...] = (lower_bound, run.started_at)
+            interaction_filter = "created_at > ? AND created_at <= ?"
+            interaction_args: tuple[Any, ...] = (lower_bound, run.started_at)
+            if current is not None:
+                event_filter = (
+                    "event_id IN (SELECT event_id FROM event_chain_roots "
+                    "WHERE subject_id = ? AND sequence_number > ? AND sequence_number < ?)"
+                )
+                event_args = (self.subject_id, 0 if prior is None else prior[0], current[0])
+                interaction_filter = "interactions.rowid > ? AND interactions.rowid <= ?"
+                interaction_args = (0 if prior is None else prior[1], current[1])
+                if previous is not None and prior is None:
+                    # One-time compatibility boundary for pre-watermark sleep runs.
+                    event_filter += " AND occurred_at > ?"
+                    event_args += (lower_bound,)
+                    interaction_filter += " AND created_at > ?"
+                    interaction_args += (lower_bound,)
             event_rows = connection.execute(
                 "SELECT event_id, event_type, source, occurred_at, payload_json, payload_hash "
-                "FROM events WHERE subject_id = ? AND occurred_at > ? AND occurred_at <= ? "
-                "ORDER BY occurred_at DESC, event_id DESC LIMIT 64",
-                (self.subject_id, lower_bound, run.started_at),
+                "FROM events WHERE subject_id = ? AND "
+                + event_filter
+                + " AND event_type != 'sleep_reflection_boundary' ORDER BY rowid DESC LIMIT 64",
+                (self.subject_id, *event_args),
             ).fetchall()
             event_ids = tuple(str(row["event_id"]) for row in event_rows)
             appraisal_rows = self._appraisal_rows(connection, event_ids)
@@ -148,13 +170,13 @@ class SleepReflectionCognition:
                 "SELECT interaction_id, direction, kind, channel, counterparty, content, "
                 "rationale, "
                 "status, created_at, decided_at FROM interactions WHERE subject_id = ? "
-                "AND created_at > ? AND created_at <= ? "
+                "AND " + interaction_filter + " "
                 "AND NOT EXISTS(SELECT 1 FROM private_conversation_messages m "
                 "JOIN private_conversations c ON c.conversation_id=m.conversation_id "
                 "WHERE m.interaction_id=interactions.interaction_id "
                 "AND c.status IN ('deleting','deleted')) "
-                "ORDER BY created_at DESC, interaction_id DESC LIMIT 8",
-                (self.subject_id, lower_bound, run.started_at),
+                "ORDER BY interactions.rowid DESC LIMIT 8",
+                (self.subject_id, *interaction_args),
             ).fetchall()
             claim_rows = connection.execute(
                 "SELECT claim_id, proposition, confidence, status, updated_at FROM world_claims "
@@ -344,15 +366,55 @@ class SleepReflectionCognition:
             interaction_ids=tuple(str(item["interaction_id"]) for item in context["interactions"]),
         )
 
+    def _previous_run(self, connection: Any, run: SleepRunRecord) -> Any:
+        # Advance only after a committed integration. A failed run without a
+        # reflection must not consume a window; a failure after commit must not
+        # replay that integration. Row order avoids wall-clock ordering ties.
+        return connection.execute(
+            "SELECT sleep_id, started_at FROM sleep_runs WHERE subject_id = ? "
+            "AND reflection_event_id IS NOT NULL AND rowid < "
+            "(SELECT rowid FROM sleep_runs WHERE sleep_id = ?) "
+            "ORDER BY rowid DESC LIMIT 1",
+            (self.subject_id, run.sleep_id),
+        ).fetchone()
+
+    def _boundary(self, connection: Any, sleep_id: str) -> tuple[int, int] | None:
+        event_id = f"evt_reflection_boundary_{sleep_id}"
+        try:
+            event = self.events.get(event_id)
+        except NotFoundError:
+            return None
+        if (
+            event.subject_id != self.subject_id
+            or event.event_type != "sleep_reflection_boundary"
+            or event.payload.get("sleep_id") != sleep_id
+        ):
+            raise IntegrityError("reflection boundary is invalid")
+        chain = connection.execute(
+            "SELECT sequence_number FROM event_chain_roots WHERE event_id = ? AND subject_id = ?",
+            (event_id, self.subject_id),
+        ).fetchone()
+        if chain is None:
+            raise IntegrityError("reflection boundary sequence is missing")
+        interaction_id = event.payload.get("interaction_boundary_id")
+        interaction_row = 0
+        if interaction_id is not None:
+            if not isinstance(interaction_id, str):
+                raise IntegrityError("reflection interaction boundary is invalid")
+            row = connection.execute(
+                "SELECT rowid FROM interactions WHERE interaction_id = ? AND subject_id = ?",
+                (interaction_id, self.subject_id),
+            ).fetchone()
+            if row is None:
+                raise IntegrityError("reflection interaction boundary is missing")
+            interaction_row = int(row[0])
+        return int(chain[0]), interaction_row
+
     def _window_start(self, run: SleepRunRecord) -> str:
         with self.database.connection() as connection:
-            previous = connection.execute(
-                "SELECT completed_at FROM sleep_runs WHERE subject_id = ? AND sleep_id != ? "
-                "AND status = 'complete' ORDER BY completed_at DESC LIMIT 1",
-                (self.subject_id, run.sleep_id),
-            ).fetchone()
-            if previous is not None and previous[0] is not None:
-                return str(previous[0])
+            previous = self._previous_run(connection, run)
+            if previous is not None:
+                return str(previous["started_at"])
             identity = connection.execute(
                 "SELECT created_at FROM subject_identity WHERE subject_id = ?",
                 (self.subject_id,),

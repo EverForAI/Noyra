@@ -19,6 +19,9 @@ archive.example.com {
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}
         header_up X-Real-IP {remote_host}
+        header_up -X-Noyra-Authenticated-Principal
+        header_up -X-Noyra-Principal-Timestamp
+        header_up -X-Noyra-Principal-Signature
     }
 }
 
@@ -29,5 +32,8 @@ admin.example.com {
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}
         header_up X-Real-IP {remote_host}
+        header_up -X-Noyra-Authenticated-Principal
+        header_up -X-Noyra-Principal-Timestamp
+        header_up -X-Noyra-Principal-Signature
     }
 }

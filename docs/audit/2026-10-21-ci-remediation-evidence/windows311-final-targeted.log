@@ -1,0 +1,9 @@
+...................................................................s.... [ 41%]
+.................................s....ss................................ [ 83%]
+.............................                                            [100%]
+=========================== short test summary info ===========================
+SKIPPED [1] tests\test_audit_20261020_regressions.py:161: requires Linux root and a real unprivileged account
+SKIPPED [1] tests\test_deployment_maintenance.py:786: POSIX marker ownership contract
+SKIPPED [1] tests\test_deployment_maintenance.py:951: requires actual root and separate service UID
+SKIPPED [1] tests\test_deployment_maintenance.py:1054: real privileged evidence metadata
+169 passed, 4 skipped in 190.57s (0:03:10)

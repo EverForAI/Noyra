@@ -29,6 +29,7 @@ class CompletionRequest(BaseModel):
     temperature: float = Field(ge=0, le=2)
     schema_name: str = Field(min_length=1, max_length=128)
     output_schema: dict[str, Any]
+    reasoning_effort: Literal["low", "medium", "high", "xhigh"] | None = None
 
 
 @dataclass(frozen=True)

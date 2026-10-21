@@ -1,0 +1,84 @@
+{
+  "audit_context_date": "2026-10-21",
+  "head": "170d476486c909f0e79384c0a931db12672a8c18",
+  "baseline": "cbdfaa04764e98ab8a979da3e19a1e803a95efe2",
+  "tracked_files_inventory": 945,
+  "manifest_files": 631,
+  "source_bytes_changed": [],
+  "python_ast_files": 462,
+  "production_python_files": 219,
+  "production_python_lines": 143475,
+  "manual_focus_files": 48,
+  "linux_full": {
+    "collected": 2941,
+    "passed": 2924,
+    "skipped": 17,
+    "failed": 0,
+    "subtests_passed": 288,
+    "elapsed_seconds": 2533.298335074,
+    "execution": "4 isolated shards; Python 3.12.3"
+  },
+  "windows_targeted": {
+    "passed": 198,
+    "skipped": 28,
+    "failed": 0,
+    "elapsed_seconds": 276.59
+  },
+  "nobody_original": {
+    "passed": 103,
+    "skipped": 33,
+    "failed": 9,
+    "cause": "external /etc/noyra control paths unreadable to nobody; retained original log"
+  },
+  "nobody_isolation_first": {
+    "passed": 110,
+    "skipped": 33,
+    "failed": 2,
+    "cause": "remaining /etc/noyra/upgrade-channel lookup; retained original log"
+  },
+  "nobody_host_isolated_final": {
+    "passed": 112,
+    "skipped": 33,
+    "failed": 0,
+    "elapsed_seconds": 80.21,
+    "changes": "external pytest plugin redirects only 3 host configuration path lookups to absent /var/tmp paths; no production/test files or assertions edited"
+  },
+  "frontend": {
+    "passed": 116,
+    "failed": 0,
+    "skipped": 0,
+    "node": "v24.15.0"
+  },
+  "mypy_windows": "442 files passed, target 3.12",
+  "mypy_linux": "442 files passed, project default target 3.11",
+  "ruff": "src/tests/scripts: lint+format passed; pinned Linux whole-repo lint passed; pinned Linux whole-repo format FAILED on one unchanged baseline audit Markdown Python code block",
+  "site_check": "4 pages passed",
+  "findings": {
+    "P0": 0,
+    "P1": 0,
+    "P2": 3,
+    "P3": 2,
+    "secondary": 1,
+    "native": 4
+  },
+  "rollback_recommendation": "retain remediation commits; no full rollback; A01 must be fixed before accepting large/slow-tree required-mode deployment",
+  "remediation_quality": "medium",
+  "source_readonly": true,
+  "limitations": [
+    "not a human line-by-line proof for all 143475 source lines",
+    "no live cloud/S3 credentials or real money",
+    "no Python 3.11 runtime execution in this turn",
+    "no fresh network vulnerability database or penetration of a deployed production instance",
+    "supplementary OS-role tests are not counted as additional unique full-suite coverage"
+  ],
+  "evidence_script_storage": "Original script bytes saved as .py.txt; restore .py names only in an external reproduction directory",
+  "whole_repo_format": {
+    "exit": 1,
+    "tool": "ruff 0.16.2 from requirements-dev.lock",
+    "path": "docs/audit/2026-10-20-independent-code-audit-current-worktree.md",
+    "line": 285,
+    "baseline_and_head_bytes_identical": true,
+    "baseline_stdin_exit": 1,
+    "head_whole_repo_exit": 1
+  }
+}

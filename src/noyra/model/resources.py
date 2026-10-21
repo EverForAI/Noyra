@@ -52,6 +52,7 @@ from noyra.core.types import (
     utc_now,
 )
 
+from .capabilities import CapabilityProfileStore
 from .config import OpenAICompatibleSettings
 from .errors import (
     BudgetExhaustedError,
@@ -64,6 +65,7 @@ from .errors import (
 from .gateway import ModelGateway
 from .ledger import ModelLedger
 from .openai_compatible import OpenAICompatibleProvider
+from .reasoning import ReasoningEffort, reasoning_profile
 from .types import (
     BudgetLimits,
     CallRecord,
@@ -206,6 +208,12 @@ class CognitiveResourceGroupInput(BaseModel):
     provider_type: Literal["openai_compatible"] = "openai_compatible"
     base_url: str
     model: str = Field(min_length=1, max_length=256)
+    reasoning_effort: ReasoningEffort | None = None
+    # Environment-backed resources cannot perform an unbounded provider probe
+    # during service construction.  They must pin the durable, endpoint-scoped
+    # profile created by the authenticated management probe instead.
+    capability_revision: int | None = Field(default=None, ge=1, strict=True)
+    capability_digest: str | None = Field(default=None, min_length=64, max_length=64)
     api_keys: tuple[SecretStr, ...] = Field(min_length=1, max_length=64)
     priority: int = Field(default=100, ge=0, le=1000)
     weight: int = Field(default=100, ge=1, le=1000)
@@ -259,6 +267,16 @@ class CognitiveResourceGroupInput(BaseModel):
         normalized = value.strip()
         if not normalized:
             raise ValueError("cognitive resource text cannot be blank")
+        return normalized
+
+    @field_validator("capability_digest")
+    @classmethod
+    def validate_capability_digest(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if any(character not in "0123456789abcdef" for character in normalized):
+            raise ValueError("capability digest must be hexadecimal")
         return normalized
 
     @field_validator("base_url")
@@ -355,6 +373,7 @@ class CognitiveResourceGroupRecord:
     provider_type: str
     base_url: str
     model: str
+    reasoning_effort: ReasoningEffort | None
     priority: int
     weight: int
     daily_attempts: int
@@ -463,8 +482,8 @@ class CognitiveResourceStore:
                         priority, weight, daily_attempts, daily_input_tokens,
                         daily_output_tokens, daily_cost_microusd,
                         input_microusd_per_million, output_microusd_per_million,
-                        max_attempts, status, state_hash, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        max_attempts, reasoning_effort, status, state_hash, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                               'active', ?, ?, ?)""",
                     (
                         group_id,
@@ -816,7 +835,31 @@ class CognitiveResourceStore:
     def active(
         self, subject_id: str, pool: CognitivePool
     ) -> builtins.list[CognitiveResourceGroupRecord]:
-        return [record for record in self.list(subject_id, pool=pool) if record.status == "active"]
+        if pool not in {"economy", "deep"}:
+            raise ValueError("invalid resource pool")
+        records: list[CognitiveResourceGroupRecord] = []
+        # A stable transaction and SQL filtering keep management pagination from
+        # truncating the runtime candidate set, including across concurrent edits.
+        with self.database.read_transaction() as connection:
+            cursor = connection.execute(
+                "SELECT * FROM cognitive_resource_groups WHERE subject_id=? AND pool=? "
+                "AND status='active' ORDER BY priority, label, group_id",
+                (subject_id, pool),
+            )
+            while rows := cursor.fetchmany(MAX_RESOURCE_PAGE_SIZE):
+                records.extend(self._from_group_row(connection, row) for row in rows)
+        return records
+
+    def find(
+        self, subject_id: str, pool: CognitivePool, label: str
+    ) -> CognitiveResourceGroupRecord | None:
+        """Resolve an exact durable identity without management page limits."""
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM cognitive_resource_groups WHERE subject_id=? AND pool=? AND label=?",
+                (subject_id, pool, label),
+            ).fetchone()
+            return None if row is None else self._from_group_row(connection, row)
 
     def budget_summary(self, group: CognitiveResourceGroupRecord) -> dict[str, Any]:
         now = datetime.now(UTC)
@@ -891,6 +934,28 @@ class CognitiveResourceStore:
                 (group_id, subject_id, page_limit, page_offset),
             ).fetchall()
             return [self._from_key_row(row) for row in rows]
+
+    def environment_key_status(
+        self, group_id: str, *, subject_id: str, proposed: set[str]
+    ) -> tuple[set[str], bool]:
+        """Compare live keys and explicit revocations without a management page cap."""
+        current: set[str] = set()
+        revoked = False
+        with self.database.read_transaction() as connection:
+            self._get_group_row(connection, group_id, subject_id=subject_id)
+            cursor = connection.execute(
+                "SELECT * FROM cognitive_resource_keys WHERE group_id=? AND subject_id=?",
+                (group_id, subject_id),
+            )
+            while rows := cursor.fetchmany(MAX_RESOURCE_PAGE_SIZE):
+                for row in rows:
+                    key = self._from_key_row(row)
+                    if key.status == "revoked":
+                        revoked = revoked or key.key_fingerprint in proposed
+                    else:
+                        # Cooldown is temporary availability, not a revocation.
+                        current.add(key.key_fingerprint)
+        return current, revoked
 
     def select_key(self, group_id: str, *, subject_id: str) -> CognitiveResourceKeyRecord | None:
         now = utc_now()
@@ -2284,6 +2349,7 @@ class CognitiveResourceStore:
             row["provider_type"],
             row["base_url"],
             row["model"],
+            values[15],
             values[6],
             values[7],
             values[8],
@@ -2373,6 +2439,7 @@ class CognitiveResourceStore:
             CognitiveResourceStore._usd_to_microusd(proposal.input_usd_per_million),
             CognitiveResourceStore._usd_to_microusd(proposal.output_usd_per_million),
             proposal.max_attempts,
+            proposal.reasoning_effort,
         )
 
     @staticmethod
@@ -2394,13 +2461,14 @@ class CognitiveResourceStore:
                 row["input_microusd_per_million"],
                 row["output_microusd_per_million"],
                 row["max_attempts"],
+                row["reasoning_effort"],
             )
         except (KeyError, IndexError, TypeError, ValueError, ArithmeticError) as error:
             raise IntegrityError("cognitive resource group durable state is invalid") from error
 
     @staticmethod
     def _validate_group_values(values: tuple[Any, ...], status: Any) -> None:
-        if type(values) is not tuple or len(values) != 15:
+        if type(values) is not tuple or len(values) != 16:
             raise IntegrityError("cognitive resource group durable state is invalid")
         (
             subject_id,
@@ -2418,6 +2486,7 @@ class CognitiveResourceStore:
             input_microusd_per_million,
             output_microusd_per_million,
             max_attempts,
+            reasoning_effort,
         ) = values
         text_values = (subject_id, label, base_url, model)
         if any(type(value) is not str or not value.strip() for value in text_values):
@@ -2431,6 +2500,13 @@ class CognitiveResourceStore:
             or status not in {"active", "disabled", "revoked"}
         ):
             raise IntegrityError("cognitive resource group durable state is invalid")
+        if reasoning_effort is not None and reasoning_effort not in {
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+        }:
+            raise IntegrityError("cognitive resource reasoning effort is invalid")
         try:
             normalized_url = _normalize_public_model_url(base_url)
         except (TypeError, ValueError) as error:
@@ -2471,7 +2547,8 @@ class CognitiveResourceStore:
 
     @staticmethod
     def _group_hash(group_id: str, values: tuple[Any, ...], status: str) -> str:
-        return content_hash({"group_id": group_id, "values": list(values), "status": status})
+        hashed_values = values[:-1] if len(values) == 16 and values[-1] is None else values
+        return content_hash({"group_id": group_id, "values": list(hashed_values), "status": status})
 
     @staticmethod
     def _key_hash(
@@ -2689,6 +2766,7 @@ class RoutedModelGateway(ModelGateway):
         idempotency_key: str,
         max_output_tokens: int = 1024,
         temperature: float = 0.2,
+        reasoning_effort: str | None = None,
     ) -> GatewayResult[OutputT]:
         """Serialize one logical request and fail closed on a concurrent owner.
 
@@ -2741,6 +2819,7 @@ class RoutedModelGateway(ModelGateway):
                 idempotency_key=idempotency_key,
                 max_output_tokens=max_output_tokens,
                 temperature=temperature,
+                reasoning_effort=reasoning_effort,
             )
         finally:
             try:
@@ -2762,6 +2841,7 @@ class RoutedModelGateway(ModelGateway):
         idempotency_key: str,
         max_output_tokens: int = 1024,
         temperature: float = 0.2,
+        reasoning_effort: str | None = None,
     ) -> GatewayResult[OutputT]:
         if subject_id != self.subject_id:
             raise PermissionError("routed model gateway cannot serve another subject")
@@ -2847,6 +2927,7 @@ class RoutedModelGateway(ModelGateway):
                     idempotency_key=idempotency_key,
                     max_output_tokens=max_output_tokens,
                     temperature=temperature,
+                    reasoning_effort=reasoning_effort,
                 )
             except Exception:
                 self._record_unavailable(pool, purpose, "legacy_pool_failed")
@@ -2976,6 +3057,7 @@ class RoutedModelGateway(ModelGateway):
                         idempotency_key=routed_idempotency,
                         max_output_tokens=max_output_tokens,
                         temperature=temperature,
+                        reasoning_effort=reasoning_effort,
                     )
                 except (ProviderCallError, StructuredOutputError) as error:
                     latency = int((time.monotonic() - started) * 1000)
@@ -3000,7 +3082,7 @@ class RoutedModelGateway(ModelGateway):
                         )
                     self.resources.record_failure(
                         key.key_id,
-                        type(error).__name__,
+                        getattr(error, "category", getattr(error, "code", type(error).__name__)),
                         cooldown_seconds=self.cooldown_seconds,
                         subject_id=self.subject_id,
                     )
@@ -3419,7 +3501,7 @@ class RoutedModelGateway(ModelGateway):
         except ProviderCallError as error:
             self.resources.record_failure(
                 key.key_id,
-                getattr(error, "code", type(error).__name__),
+                getattr(error, "category", getattr(error, "code", type(error).__name__)),
                 cooldown_seconds=self.cooldown_seconds,
                 subject_id=subject_id,
             )
@@ -3505,6 +3587,26 @@ class RoutedModelGateway(ModelGateway):
         *,
         max_attempts: int | None = None,
     ) -> ModelGateway:
+        reasoning_verified = False
+        if group.reasoning_effort is not None:
+            capability = CapabilityProfileStore(self.database).get(
+                self.subject_id, group.provider_type, group.base_url, group.model
+            )
+            if capability is None:
+                if not reasoning_profile(group.model, group.provider_type).supported:
+                    raise ProviderCallError(
+                        "model_capability_probe_required", retryable=False, outcome_unknown=False
+                    )
+            elif (
+                capability.status != "known"
+                or capability.parameter != "reasoning_effort"
+                or group.reasoning_effort not in capability.tested_efforts
+            ):
+                raise ProviderCallError(
+                    "model_capability_probe_required", retryable=False, outcome_unknown=False
+                )
+            else:
+                reasoning_verified = True
         settings = OpenAICompatibleSettings(
             base_url=group.base_url,
             model=group.model,
@@ -3527,6 +3629,8 @@ class RoutedModelGateway(ModelGateway):
             resource_revision=group.limit_revision,
             resource_key_id=key.key_id,
             resource_key_fingerprint=key.key_fingerprint,
+            reasoning_effort=group.reasoning_effort,
+            reasoning_capability_verified=reasoning_verified,
             capture_model_io=self.capture_model_io,
             capture_model_io_getter=self.capture_model_io_getter,
             enforce_training_policy=self.enforce_training_policy,
@@ -4054,7 +4158,14 @@ def resource_groups_from_env(pool: CognitivePool) -> tuple[CognitiveResourceGrou
                     )
                 )
             normalized["api_keys"] = tuple(SecretStr(value) for value in resolved_keys)
-            groups.append(CognitiveResourceGroupInput.model_validate(normalized))
+            proposal = CognitiveResourceGroupInput.model_validate(normalized)
+            if proposal.reasoning_effort is not None and (
+                proposal.capability_revision is None or proposal.capability_digest is None
+            ):
+                raise ValueError(
+                    "reasoning effort requires capability_revision and capability_digest"
+                )
+            groups.append(proposal)
     except (TypeError, ValueError) as error:
         raise ConfigurationError(f"invalid {pool} model group configuration: {error}") from error
     return tuple(groups)

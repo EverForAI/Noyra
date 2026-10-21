@@ -196,7 +196,7 @@ async function loadMigration() {
   if (!current()) return;
   const draft = $("#migration-policy-form").dataset.dirty ? [...$("#migration-policy-form").elements].map(input => [input,input.value,input.checked]) : [];
   if (!$("#migration-policy-form").dataset.dirty) $("#migration-policy-form").dataset.revision = String(policy.revision);
-  $("#migration-enabled").checked = Boolean(policy.enabled); $("#migration-approval-mode").value = policy.approval_mode; $("#migration-cooldown").value = Math.round((policy.rejection_cooldown_seconds || 0) / 86400); $("#migration-wallet-mode").value = policy.wallet_mode; $("#migration-local-wallet").checked = Boolean(policy.local_wallet_transfer_enabled); $("#migration-policy-summary").innerHTML = summaryRows([["当前状态", policy.enabled ? "已开启" : "已关闭"], ["评估状态", ({ disabled: "已关闭", deferred: "评估延后", no_actionable_need: "无需迁移", cognition_unavailable: "等待认知资源", awaiting_approval: "等待审批", approved: "已批准", executing: "执行中", committed: "已迁移", reconciliation_required: "需核对或回滚", cognition_declined: "认知评估未建议迁移", hard_gate_rejected: "未通过策略检查" })[policy.assessment_status] || "等待评估"], ["策略版本", policy.revision], ["审批模式", policy.approval_mode], ["钱包模式", policy.wallet_mode], ["活动 epoch", policy.active_epoch ? `${policy.active_epoch.epoch_number} · ${policy.active_epoch.target_id}` : "无"]]);
+  $("#migration-enabled").checked = Boolean(policy.enabled); $("#migration-approval-mode").value = policy.approval_mode; $("#migration-cooldown").value = Math.round((policy.rejection_cooldown_seconds || 0) / 86400); $("#migration-wallet-mode").value = policy.wallet_mode; $("#migration-local-wallet").checked = Boolean(policy.local_wallet_transfer_enabled); $("#migration-policy-summary").innerHTML = summaryRows([["当前状态", policy.enabled ? "已开启" : "已关闭"], ["评估状态", ({ disabled: "已关闭", deferred: "评估延后", no_actionable_need: "无需迁移", cognition_unavailable: "等待认知资源", awaiting_approval: "等待审批", approved: "已批准", executing: "执行中", committed: "已迁移", reconciliation_required: "需核对或回滚", cognition_declined: "认知评估未建议迁移", hard_gate_rejected: "未通过策略检查" })[policy.assessment_status] || "等待评估"], ["策略版本", policy.revision], ["审批模式", ({ self_attested: "单人自核验", dual_review: "双身份复核", manual: "人工审批", policy_auto: "策略自动", emergency_recovery: "紧急恢复", disabled: "关闭" })[policy.approval_mode] || policy.approval_mode], ["钱包模式", policy.wallet_mode], ["活动 epoch", policy.active_epoch ? `${policy.active_epoch.epoch_number} · ${policy.active_epoch.target_id}` : "无"]]);
   $("#migration-allowed-targets").value = (policy.allowed_target_ids || []).join(",");
   $("#migration-allowed-regions").value = (policy.allowed_regions || []).join(",");
   $("#migration-max-cost").value = policy.max_cost_microusd;
@@ -205,8 +205,8 @@ async function loadMigration() {
   $("#migration-downtime").value = policy.max_downtime_seconds;
   for (const [input,value,checked] of draft) { input.value=value; input.checked=checked; }
   $("#migration-target-list").innerHTML = targets.length ? targets.map((item) => `<article class="resource-item"><div><h3>${esc(item.target_id)}</h3><p>${item.status === "active" ? "已验证" : "等待验证"} · ${esc(item.region || "未设置区域")}</p><small>${esc(item.endpoint)} · ${esc(item.key_fingerprint)}</small></div><div class="resource-actions"><button type="button" data-migration-challenge="${esc(item.target_id)}">${item.status === "active" ? "重新验证" : "发起验证"}</button>${item.status !== "revoked" ? `<button class="text-button" type="button" data-migration-revoke="${esc(item.target_id)}">撤销</button>` : ""}</div></article>`).join("") : '<div class="muted">尚未注册迁移目标</div>';
-  $("#migration-proposal-list").innerHTML = proposals.length ? proposals.map((item) => `<article class="resource-item"><div><h3>${esc(item.reason_code)}</h3><p>${esc(item.status)} · 目标 ${esc(item.target_id)} · 策略版本 ${esc(item.policy_revision)}</p><small>${esc(item.reason)}</small><small>收益 ${esc(item.benefit_score)} · 风险 ${esc(item.risk_score)} · 过期 ${esc(item.expires_at)}</small><small>证据：${esc(JSON.stringify(item.evidence || {}))}</small></div>${["awaiting_approval", "planned"].includes(item.status) ? `<div class="resource-actions"><button type="button" data-migration-approve="${esc(item.proposal_id)}">批准</button><button class="text-button" type="button" data-migration-reject="${esc(item.proposal_id)}">拒绝</button></div>` : ""}</article>`).join("") : '<div class="muted">暂无迁移提案</div>';
-  $("#migration-task-list").innerHTML = tasks.length ? tasks.map((item) => `<article class="resource-item"><div><h3>${esc(item.task_id)}</h3><p>${esc(item.status)} · 目标 ${esc(item.target_id)}</p><small>${esc(item.updated_at || item.created_at)}</small>${item.error_code ? `<small>执行受阻：${esc(item.error_code)}</small>` : ""}</div>${["approved"].includes(item.status) ? `<div class="resource-actions"><button type="button" data-migration-cutover="${esc(item.task_id)}">执行迁移</button></div>` : ""}${["approved", "preflight", "awaiting_approval"].includes(item.status) ? `<div class="resource-actions"><button class="text-button" type="button" data-migration-cancel="${esc(item.task_id)}">取消任务</button></div>` : ""}${!["committed", "rolled_back", "cancelled"].includes(item.status) ? `<div class="resource-actions"><button class="text-button" type="button" data-migration-rollback="${esc(item.task_id)}">回滚</button></div>` : ""}</article>`).join("") : '<div class="muted">暂无迁移任务</div>';
+  $("#migration-proposal-list").innerHTML = proposals.length ? proposals.map((item) => `<article class="resource-item"><div><h3>${esc(item.reason_code)}</h3><p>${esc(item.status)} · 目标 ${esc(item.target_id)} · 策略版本 ${esc(item.policy_revision)}</p><small>${esc(item.reason)}</small><small>复核：${esc(item.approval_count)}/${esc(item.required_approvals)}${item.approvals?.length ? ` · ${item.approvals.map(entry => esc(entry.actor)).join("、")}` : ""}</small><small>收益 ${esc(item.benefit_score)} · 风险 ${esc(item.risk_score)} · 过期 ${esc(item.expires_at)}</small><small>证据：${esc(JSON.stringify(item.evidence || {}))}</small></div>${["awaiting_approval", "planned"].includes(item.status) ? `<div class="resource-actions"><button type="button" data-migration-approve="${esc(item.proposal_id)}">${item.approval_mode === "dual_review" ? "记录复核" : "批准"}</button><button class="text-button" type="button" data-migration-reject="${esc(item.proposal_id)}">拒绝</button></div>` : ""}</article>`).join("") : '<div class="muted">暂无迁移提案</div>';
+  $("#migration-task-list").innerHTML = tasks.length ? tasks.map((item) => `<article class="resource-item"><div><h3>${esc(item.task_id)}</h3><p>${esc(item.status)} · 目标 ${esc(item.target_id)}</p><small>${esc(item.updated_at || item.created_at)}</small>${item.status === "awaiting_approval" ? "<small>等待另一种服务端登录身份完成复核</small>" : ""}${item.error_code ? `<small>执行受阻：${esc(item.error_code)}</small>` : ""}</div>${["approved"].includes(item.status) ? `<div class="resource-actions"><button type="button" data-migration-cutover="${esc(item.task_id)}">执行迁移</button></div>` : ""}${item.self_attestation_available ? `<div class="resource-actions"><button type="button" data-migration-attestation="${esc(item.task_id)}">导出自核验报告</button></div>` : ""}${["approved", "preflight", "awaiting_approval"].includes(item.status) ? `<div class="resource-actions"><button class="text-button" type="button" data-migration-cancel="${esc(item.task_id)}">取消任务</button></div>` : ""}${!["committed", "rolled_back", "cancelled"].includes(item.status) ? `<div class="resource-actions"><button class="text-button" type="button" data-migration-rollback="${esc(item.task_id)}">回滚</button></div>` : ""}</article>`).join("") : '<div class="muted">暂无迁移任务</div>';
 }
 function summaryRows(items) { return items.map(([label, value]) => `<div class="summary-row"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join(""); }
 const integerFormatter = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 });
@@ -1231,6 +1231,10 @@ function renderRetention(payload) {
   const settings = payload?.settings || {};
   const estimate = payload?.estimate || {};
   const latest = payload?.latest;
+  const sqliteSpace = payload?.sqlite_space || {};
+  const plan = payload?.plan || {};
+  const backupPlan = plan.backup || {};
+  const backupSummary = backupPlan.backup_summary || {};
   const capacity = payload?.evidence_capacity;
   const latestDeleted = latest?.deleted_by_table ? Object.entries(latest.deleted_by_table).map(([key,value]) => `${key}: ${formatInteger(value)}`).join(" · ") : "暂无清理记录";
   const form = $("#retention-settings-form");
@@ -1246,6 +1250,13 @@ function renderRetention(payload) {
     ["待清理运行记录", formatInteger(estimate.retention_runs)],
     ["最近清理", latest ? formatTimestamp(latest.completed_at || latest.started_at) : "暂无"],
     ["最近删除", latestDeleted],
+    ["SQLite 文件 / WAL", `${formatInteger(sqliteSpace.database_bytes)} / ${formatInteger(sqliteSpace.wal_bytes)} 字节`],
+    ["SQLite 磁盘占用 / 空闲页", `${formatInteger(sqliteSpace.physical_bytes)} 字节 · ${formatInteger(sqliteSpace.freelist_pages)} 页`],
+    ["SQLite 可回收空间", `${formatInteger(sqliteSpace.freelist_bytes)} 字节`],
+    ["备份计划", backupPlan.status === "planned" ? "已生成（仅预览）" : (backupPlan.reason_code || "未配置")],
+    ["已验证恢复点", `${formatInteger(backupSummary.verified_recovery_points_after_plan)} 个 · ${backupSummary.recovery_points_status || "未知"}`],
+    ["备份占用 / 水位", `${formatInteger(backupSummary.total_bytes_after_plan)} 字节 · ${backupSummary.space_status || "未知"}`],
+    ["未验证备份关注", formatInteger((backupPlan.backup_attention || []).length)],
     ["证据容量", capacity?.blocked ? "已达上限，暂停新增认知工作" : "可用"],
     ["必要证据每表上限", formatInteger(capacity?.limit_per_table)],
     ["模型调用 / 尝试", `${formatInteger(capacity?.counts?.model_calls)} / ${formatInteger(capacity?.counts?.model_attempts)}`],
@@ -1765,6 +1776,8 @@ function draftModelPayload(includeModel = true) {
   const keys = $("#admin-model-keys").value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
   const payload = { base_url: $("#admin-model-url").value.trim(), api_keys: keys };
   if (includeModel) payload.model = $("#admin-model-name").value.trim();
+  const reasoning = $("#admin-model-reasoning")?.value;
+  if (includeModel && reasoning) payload.reasoning_effort = reasoning;
   return payload;
 }
 async function loadSearchProviders() {
@@ -1920,8 +1933,8 @@ $("#migration-proposal-list").addEventListener("click", async (event) => {
   const reject = event.target.closest("[data-migration-reject]");
   try {
     if (approve) {
-      await request(`/api/v1/admin/migration/proposals/${encodeURIComponent(approve.dataset.migrationApprove)}/approve`, { method: "POST", body: JSON.stringify({ idempotency_key: `admin-approve-${approve.dataset.migrationApprove}` }) }); if (!currentAction()) return;
-      setStatus("#migration-status", "迁移提案已批准"); await loadMigration(); if (!currentAction()) return;
+      const result = await request(`/api/v1/admin/migration/proposals/${encodeURIComponent(approve.dataset.migrationApprove)}/approve`, { method: "POST", body: JSON.stringify({ idempotency_key: `admin-approve-${approve.dataset.migrationApprove}` }) }); if (!currentAction()) return;
+      setStatus("#migration-status", result.approval_status === "awaiting_second_approval" ? `已记录复核 ${result.approval_count}/${result.required_approvals}；需要另一种服务端登录身份继续` : "迁移提案已批准"); await loadMigration(); if (!currentAction()) return;
     } else if (reject) {
       const reason = window.prompt("请输入拒绝原因：");
       if (!reason?.trim()) return;
@@ -1933,10 +1946,18 @@ $("#migration-proposal-list").addEventListener("click", async (event) => {
 $("#migration-task-list").addEventListener("click", async (event) => {
   const currentAction = beginAdminAction();
   const cutover = event.target.closest("[data-migration-cutover]");
+  const attestation = event.target.closest("[data-migration-attestation]");
   const rollback = event.target.closest("[data-migration-rollback]");
   const cancel = event.target.closest("[data-migration-cancel]");
   try {
-    if (cutover) {
+    if (attestation) {
+      const report = await request(`/api/v1/admin/migration/tasks/${encodeURIComponent(attestation.dataset.migrationAttestation)}/self-attestation`); if (!currentAction()) return;
+      const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a"); link.href = url; link.download = `noyra-migration-self-attestation-${attestation.dataset.migrationAttestation}.json`; link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+      setStatus("#migration-status", "自核验报告已导出");
+    } else if (cutover) {
       const policy = await request("/api/v1/admin/migration/policy"); if (!currentAction()) return;
       if (policy.wallet_mode === "local_wallet_transfer") {
         if (!window.confirm("本次迁移将通过接收方加密包转移本地钱包及解锁文件。目标必须是您信任的设备。确认授权本次任务吗？")) return;
@@ -2556,6 +2577,11 @@ $("#admin-model-form").addEventListener("submit", async (event) => {
   if (button) button.disabled = true;
   try {
     const payload = { pool: $("#admin-model-pool").value, label: $("#admin-model-label").value.trim(), base_url: $("#admin-model-url").value.trim(), model: $("#admin-model-name").value.trim(), api_keys: $("#admin-model-keys").value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean), ...readModelLimits(form, "data-draft-limit") };
+    if ($("#admin-model-reasoning")?.value) {
+      payload.reasoning_effort = $("#admin-model-reasoning").value;
+      if (reasoningField.dataset.profileRevision) payload.capability_revision = Number(reasoningField.dataset.profileRevision);
+      if (reasoningField.dataset.profileDigest) payload.capability_digest = reasoningField.dataset.profileDigest;
+    }
     if (!confirmUnlimitedLimits(payload.limit_enabled)) return;
     payload.input_usd_per_million = normalizeBudgetCost(form.elements.input_usd_per_million.value);
     payload.output_usd_per_million = normalizeBudgetCost(form.elements.output_usd_per_million.value);
@@ -2582,6 +2608,7 @@ $("#admin-model-test").addEventListener("click", async (event) => {
   try {
     const result = await request("/api/config/model-resources/test", { method: "POST", body: JSON.stringify(draftModelPayload(true)) }); if (!currentAction()) return;
     setStatus("#model-status", `连接测试成功：${result.model}`);
+    if (result.reasoning_profile) applyReasoningProfile(result.reasoning_profile);
   } catch (error) { if (!currentAction()) return; setStatus("#model-status", errorText(error), true); }
   finally { if (!currentAction()) return; button.disabled = false; }
 });
@@ -2821,6 +2848,78 @@ draftLimits.addEventListener("change", (event) => { const toggle = event.target.
 const draftPricing = document.createElement("details"); draftPricing.className = "draft-limits";
 draftPricing.innerHTML = '<summary>价格与重试</summary><label>输入 USD／百万 Token<input name="input_usd_per_million" value="0" inputmode="decimal" required></label><label>输出 USD／百万 Token<input name="output_usd_per_million" value="0" inputmode="decimal" required></label><label>价格依据<select name="pricing_status"><option value="unknown">尚未确认价格</option><option value="priced">已填写单价（估算）</option><option value="free">确认免费</option></select></label><label>最大尝试<input name="max_attempts" value="3" inputmode="numeric" required></label>';
 $("#admin-model-form .resource-actions").before(draftPricing);
+const reasoningField = document.createElement("label"); reasoningField.id = "admin-model-reasoning-field"; reasoningField.hidden = true;
+reasoningField.innerHTML = '<span>思考强度</span><select id="admin-model-reasoning"><option value="">不设置</option></select><small id="admin-model-reasoning-status"></small>';
+$("#admin-model-form .resource-actions").before(reasoningField);
+let reasoningCapabilityGeneration = 0;
+let reasoningCapabilityTimer = null;
+const applyReasoningProfile = (profile) => {
+  const select = $("#admin-model-reasoning");
+  const selected = profile?.configured_selected || profile?.selected || select.value;
+  const observedEfforts = Array.isArray(profile?.efforts) ? profile.efforts.filter((item) => typeof item === "string") : [];
+  const candidateEfforts = Array.isArray(profile?.candidate_efforts) ? profile.candidate_efforts.filter((item) => typeof item === "string") : [];
+  const efforts = observedEfforts.length ? observedEfforts : candidateEfforts;
+  select.replaceChildren(new Option("不设置", ""), ...efforts.map((effort) => new Option({low:"低",medium:"中",high:"高",xhigh:"极高"}[effort] || effort, effort)));
+  const observed = profile?.status === "known" && profile?.source === "probe";
+  reasoningField.hidden = efforts.length === 0;
+  select.value = efforts.includes(selected) ? selected : "";
+  if (profile?.revision !== undefined) reasoningField.dataset.profileRevision = String(profile.revision);
+  else delete reasoningField.dataset.profileRevision;
+  if (profile?.profile_digest) reasoningField.dataset.profileDigest = String(profile.profile_digest);
+  else delete reasoningField.dataset.profileDigest;
+  const tested = Array.isArray(profile?.tested_efforts) ? profile.tested_efforts : [];
+  const selectionVerified = observed && (!select.value || tested.includes(select.value));
+  reasoningField.dataset.capabilityObserved = observed ? "true" : "false";
+  reasoningField.dataset.testedEfforts = JSON.stringify(tested);
+  if (!selectionVerified && efforts.length) reasoningField.dataset.capabilityStatus = "unverified";
+  else delete reasoningField.dataset.capabilityStatus;
+  updateReasoningCapabilityStatus();
+};
+const updateReasoningCapabilityStatus = () => {
+  const select = $("#admin-model-reasoning");
+  if (reasoningField.hidden || !select.value) {
+    $("#admin-model-reasoning-status").textContent = "";
+    return;
+  }
+  const observed = reasoningField.dataset.capabilityObserved === "true";
+  const tested = JSON.parse(reasoningField.dataset.testedEfforts || "[]");
+  $("#admin-model-reasoning-status").textContent = observed && tested.includes(select.value)
+    ? ""
+    : observed
+      ? "此端点尚未验证所选强度；保存前需要测试一次配置。"
+      : "此端点尚未验证思考强度。测试所选强度后才能保存。";
+};
+const updateReasoningField = async () => {
+  const generation = ++reasoningCapabilityGeneration;
+  const model = $("#admin-model-name").value.trim();
+  const baseUrl = $("#admin-model-url").value.trim();
+  reasoningField.hidden = true;
+  $("#admin-model-reasoning").value = "";
+  delete reasoningField.dataset.profileRevision;
+  delete reasoningField.dataset.capabilityStatus;
+  $("#admin-model-reasoning-status").textContent = "";
+  if (!csrfToken || !model) return;
+  const query = new URLSearchParams({model, provider_type: "openai_compatible"});
+  if (baseUrl) query.set("base_url", baseUrl);
+  try {
+    const profile = await request(`/api/config/model-capabilities?${query}`);
+    if (generation !== reasoningCapabilityGeneration || !csrfToken) return;
+    applyReasoningProfile(profile);
+  } catch {
+    if (generation !== reasoningCapabilityGeneration) return;
+    reasoningField.hidden = true;
+    $("#admin-model-reasoning").value = "";
+  }
+};
+const scheduleReasoningFieldUpdate = () => {
+  reasoningField.hidden = true;
+  $("#admin-model-reasoning").value = "";
+  clearTimeout(reasoningCapabilityTimer);
+  reasoningCapabilityTimer = setTimeout(() => void updateReasoningField(), 250);
+};
+$("#admin-model-name").addEventListener("input", scheduleReasoningFieldUpdate);
+$("#admin-model-url").addEventListener("input", scheduleReasoningFieldUpdate);
+$("#admin-model-reasoning").addEventListener("change", updateReasoningCapabilityStatus);
 $("#admin-model-form").addEventListener("input", () => { $("#admin-model-form").dataset.dirty = "true"; });
 window.addEventListener("beforeunload", (event) => { if (document.querySelector("form[data-dirty]")) { event.preventDefault(); event.returnValue = ""; } });
 addParameterHelp($("#admin-model-form"));

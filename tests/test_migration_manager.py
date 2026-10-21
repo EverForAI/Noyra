@@ -9,8 +9,9 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from noyra.core import Database, IdentityStore
+from noyra.core.types import new_id, utc_now
 from noyra.migration.fencing import EpochLease
-from noyra.migration.manager import MigrationManager
+from noyra.migration.manager import MigrationApprovalError, MigrationManager
 from noyra.migration.policy import MigrationStore
 from noyra.migration.targets import TargetRegistry
 
@@ -62,6 +63,241 @@ def test_manual_task_requires_approval_and_is_idempotent(tmp_path: Any) -> None:
         manager.approve(proposal.proposal_id, actor="operator", idempotency_key="k1").task_id
         == task.task_id
     )
+
+
+def test_dual_review_requires_two_distinct_server_identities(tmp_path: Any) -> None:
+    db, manager = _manager(tmp_path)
+    policy = manager.policy_store.read_policy("Noyra-0001")
+    policy = manager.policy_store.update_policy(
+        "Noyra-0001",
+        policy.revision,
+        {"approval_mode": "dual_review"},
+        "web-operator",
+    )
+    proposal = manager.create_proposal(
+        subject_id="Noyra-0001",
+        target_id="target-1",
+        policy_revision=policy.revision,
+        reason_code="storage_pressure",
+        reason="low space",
+        expires_at="2099-01-01T00:00:00+00:00",
+    )
+
+    pending = manager.approve(
+        proposal.proposal_id,
+        actor="web-operator",
+        idempotency_key="dual-review-task",
+        identity_binding="a" * 64,
+    )
+    assert pending.status == "awaiting_approval"
+    with pytest.raises(ValueError, match="transition"):
+        manager.transition_task(pending.task_id, "preparing", actor="web-operator")
+
+    replay = manager.approve(
+        proposal.proposal_id,
+        actor="web-operator",
+        idempotency_key="dual-review-task",
+        identity_binding="a" * 64,
+    )
+    assert replay.status == "awaiting_approval"
+    assert manager.get_proposal("Noyra-0001", proposal.proposal_id)["approval_count"] == 1
+
+    approved = manager.approve(
+        proposal.proposal_id,
+        actor="web-admin",
+        idempotency_key="dual-review-task",
+        identity_binding="b" * 64,
+    )
+    assert approved.task_id == pending.task_id
+    assert approved.status == "approved"
+    projection = manager.get_proposal("Noyra-0001", proposal.proposal_id)
+    assert projection["approval_count"] == projection["required_approvals"] == 2
+    assert {item["actor"] for item in projection["approvals"]} == {
+        "web-operator",
+        "web-admin",
+    }
+    with db.connection() as connection:
+        rows = connection.execute(
+            "SELECT actor,state_hash FROM migration_proposal_approvals WHERE proposal_id=?",
+            (proposal.proposal_id,),
+        ).fetchall()
+    assert len(rows) == 2
+    assert all(len(row["state_hash"]) == 64 for row in rows)
+
+
+def test_dual_review_rejects_stale_policy_after_first_approval(tmp_path: Any) -> None:
+    _, manager = _manager(tmp_path)
+    policy = manager.policy_store.read_policy("Noyra-0001")
+    policy = manager.policy_store.update_policy(
+        "Noyra-0001", policy.revision, {"approval_mode": "dual_review"}, "web-operator"
+    )
+    proposal = manager.create_proposal(
+        subject_id="Noyra-0001",
+        target_id="target-1",
+        policy_revision=policy.revision,
+        reason_code="storage_pressure",
+        reason="low space",
+        expires_at="2099-01-01T00:00:00+00:00",
+    )
+    task = manager.approve(
+        proposal.proposal_id,
+        actor="web-operator",
+        idempotency_key="dual-stale",
+        identity_binding="a" * 64,
+    )
+    current = manager.policy_store.read_policy("Noyra-0001")
+    manager.policy_store.update_policy(
+        "Noyra-0001", current.revision, {"trust_level": 4}, "web-admin"
+    )
+    with pytest.raises(MigrationApprovalError) as error:
+        manager.approve(
+            proposal.proposal_id,
+            actor="web-admin",
+            idempotency_key="dual-stale",
+            identity_binding="b" * 64,
+        )
+    assert error.value.code == "migration_policy_stale"
+    assert manager.get_task(task.task_id).status == "awaiting_approval"
+
+
+def test_dual_review_requires_identity_binding(tmp_path: Any) -> None:
+    _, manager = _manager(tmp_path)
+    policy = manager.policy_store.read_policy("Noyra-0001")
+    policy = manager.policy_store.update_policy(
+        "Noyra-0001", policy.revision, {"approval_mode": "dual_review"}, "operator"
+    )
+    proposal = manager.create_proposal(
+        subject_id="Noyra-0001",
+        target_id="target-1",
+        policy_revision=policy.revision,
+        reason_code="maintenance",
+        reason="planned",
+        expires_at="2099-01-01T00:00:00+00:00",
+    )
+    with pytest.raises(MigrationApprovalError, match="identity_required"):
+        manager.approve(proposal.proposal_id, actor="operator", idempotency_key="missing")
+
+
+def test_dual_review_distinguishes_sessions_with_the_same_actor(tmp_path: Any) -> None:
+    _, manager = _manager(tmp_path)
+    policy = manager.policy_store.read_policy("Noyra-0001")
+    policy = manager.policy_store.update_policy(
+        "Noyra-0001", policy.revision, {"approval_mode": "dual_review"}, "operator"
+    )
+    proposal = manager.create_proposal(
+        subject_id="Noyra-0001",
+        target_id="target-1",
+        policy_revision=policy.revision,
+        reason_code="maintenance",
+        reason="planned",
+        expires_at="2099-01-01T00:00:00+00:00",
+    )
+    pending = manager.approve(
+        proposal.proposal_id,
+        actor="web-operator",
+        idempotency_key="same-actor",
+        identity_binding="a" * 64,
+    )
+    approved = manager.approve(
+        proposal.proposal_id,
+        actor="web-operator",
+        idempotency_key="same-actor",
+        identity_binding="b" * 64,
+    )
+    assert pending.task_id == approved.task_id
+    assert approved.status == "approved"
+
+
+def test_strict_dual_review_requires_distinct_authenticated_principals(tmp_path: Any) -> None:
+    db, manager = _manager(tmp_path)
+    strict = MigrationManager(db, manager.policy_store, require_principal_identity=True)
+    policy = strict.policy_store.read_policy("Noyra-0001")
+    policy = strict.policy_store.update_policy(
+        "Noyra-0001", policy.revision, {"approval_mode": "dual_review"}, "operator"
+    )
+    proposal = strict.create_proposal(
+        subject_id="Noyra-0001",
+        target_id="target-1",
+        policy_revision=policy.revision,
+        reason_code="maintenance",
+        reason="planned",
+        expires_at="2099-01-01T00:00:00+00:00",
+    )
+    with pytest.raises(MigrationApprovalError, match="reviewer_principal_required"):
+        strict.approve(
+            proposal.proposal_id,
+            actor="operator",
+            idempotency_key="strict-one",
+            identity_binding="a" * 64,
+        )
+    pending = strict.approve(
+        proposal.proposal_id,
+        actor="operator",
+        idempotency_key="strict-one",
+        reviewer_principal="alice",
+    )
+    assert pending.status == "awaiting_approval"
+    replay = strict.approve(
+        proposal.proposal_id,
+        actor="operator",
+        idempotency_key="strict-one",
+        reviewer_principal="alice",
+    )
+    assert replay.status == "awaiting_approval"
+    approved = strict.approve(
+        proposal.proposal_id,
+        actor="operator",
+        idempotency_key="strict-one",
+        reviewer_principal="bob",
+    )
+    assert approved.status == "approved"
+
+
+def test_legacy_unbound_approval_cannot_satisfy_dual_review(tmp_path: Any) -> None:
+    db, manager = _manager(tmp_path)
+    policy = manager.policy_store.read_policy("Noyra-0001")
+    policy = manager.policy_store.update_policy(
+        "Noyra-0001", policy.revision, {"approval_mode": "dual_review"}, "operator"
+    )
+    proposal = manager.create_proposal(
+        subject_id="Noyra-0001",
+        target_id="target-1",
+        policy_revision=policy.revision,
+        reason_code="maintenance",
+        reason="planned",
+        expires_at="2099-01-01T00:00:00+00:00",
+    )
+    legacy = {
+        "approval_id": new_id("legacyapproval"),
+        "proposal_id": proposal.proposal_id,
+        "subject_id": "Noyra-0001",
+        "actor": "web-operator",
+        "policy_revision": policy.revision,
+        "created_at": utc_now(),
+    }
+    with db.transaction() as connection:
+        connection.execute(
+            "INSERT INTO migration_proposal_approvals(approval_id,proposal_id,subject_id,actor,identity_binding,policy_revision,created_at,state_hash) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (
+                legacy["approval_id"],
+                legacy["proposal_id"],
+                legacy["subject_id"],
+                legacy["actor"],
+                None,
+                legacy["policy_revision"],
+                legacy["created_at"],
+                manager._approval_hash(legacy),
+            ),
+        )
+    pending = manager.approve(
+        proposal.proposal_id,
+        actor="web-admin",
+        idempotency_key="legacy-boundary",
+        identity_binding="a" * 64,
+    )
+    assert pending.status == "awaiting_approval"
+    assert manager.get_proposal("Noyra-0001", proposal.proposal_id)["approval_count"] == 1
 
 
 def test_expired_proposal_cannot_be_approved(tmp_path: Any) -> None:

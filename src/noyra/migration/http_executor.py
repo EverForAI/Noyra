@@ -21,11 +21,13 @@ import secrets
 import socket
 import sqlite3
 import ssl
+import threading
 import time
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from urllib.parse import urlsplit
 
 from cryptography.exceptions import InvalidSignature
@@ -33,6 +35,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
 
 from noyra.core.database import CURRENT_SCHEMA_VERSION
+from noyra.core.deadline import operation_deadline, remaining_seconds
+from noyra.core.http import SyncHTTPTimeoutHook, call_sync_http_with_deadline
 from noyra.core.types import canonical_json, content_hash
 
 from .activation_contract import (
@@ -173,6 +177,9 @@ class UrllibHTTPTransport:
         if not 1 <= timeout_seconds <= 120:
             raise ValueError("migration HTTP timeout is invalid")
         self.timeout_seconds = timeout_seconds
+        self._request_lock = threading.Lock()
+        self._closed = False
+        self._requests: set[SyncHTTPTimeoutHook] = set()
         configured_networks = (
             allowed_private_networks
             if allowed_private_networks is not None
@@ -190,7 +197,48 @@ class UrllibHTTPTransport:
             raise ValueError("migration private network allowlist is invalid") from error
 
     def request(self, url: str, body: dict[str, Any], token: str) -> dict[str, Any]:
+        hook = SyncHTTPTimeoutHook()
+        with self._request_lock:
+            if self._closed:
+                raise MigrationExecutionError("target_transport_closed")
+            self._requests.add(hook)
+
+        def perform() -> dict[str, Any]:
+            with operation_deadline(self.timeout_seconds):
+                return self._request_bounded(url, body, token, hook)
+
+        try:
+            return cast(
+                dict[str, Any],
+                call_sync_http_with_deadline(
+                    perform,
+                    timeout=self.timeout_seconds,
+                    on_timeout=hook.cancel,
+                ),
+            )
+        except (TimeoutError, OSError, http.client.HTTPException) as error:
+            raise MigrationExecutionError("target_http_unavailable") from error
+        finally:
+            with self._request_lock:
+                self._requests.discard(hook)
+
+    def close(self) -> None:
+        with self._request_lock:
+            self._closed = True
+            requests = tuple(self._requests)
+        for hook in requests:
+            hook.cancel()
+
+    def _request_bounded(
+        self,
+        url: str,
+        body: dict[str, Any],
+        token: str,
+        hook: SyncHTTPTimeoutHook,
+    ) -> dict[str, Any]:
         endpoint, addresses = self._validate_connection_endpoint(url)
+        hook.assert_active()
+        remaining_seconds(self.timeout_seconds)
         parsed = urlsplit(endpoint)
         assert parsed.hostname is not None
         encoded = canonical_json(body).encode("utf-8")
@@ -215,9 +263,18 @@ class UrllibHTTPTransport:
             parsed.hostname,
             parsed.port or 443,
             addresses=addresses,
-            timeout=self.timeout_seconds,
+            timeout=remaining_seconds(self.timeout_seconds),
         )
+        hook.register(_AbortMigrationSocket(connection))
+        response: http.client.HTTPResponse | None = None
         try:
+            connection.connect()
+            # HTTP/1.0 / Connection: close detaches the socket from the
+            # connection in getresponse(). Retain it for non-blocking shutdown.
+            hook.register(_AbortMigrationSocket(connection))
+            connection.auto_open = 0
+            hook.assert_active()
+            remaining_seconds(self.timeout_seconds)
             connection.request("POST", path, body=encoded, headers=headers)
             response = connection.getresponse()
             if response.status < 200 or response.status >= 300:
@@ -226,7 +283,12 @@ class UrllibHTTPTransport:
         except (http.client.HTTPException, TimeoutError, OSError) as error:
             raise MigrationExecutionError("target_http_unavailable") from error
         finally:
+            if response is not None:
+                response.close()
             connection.close()
+            hook.clear()
+        hook.assert_active()
+        remaining_seconds(self.timeout_seconds)
         if len(raw) > MAX_RESPONSE_BYTES:
             raise MigrationExecutionError("target_response_too_large")
         try:
@@ -279,6 +341,27 @@ class UrllibHTTPTransport:
         return not any(address in network for network in self.allowed_private_networks)
 
 
+class _AbortMigrationSocket:
+    """Interrupt blocked body/header reads without taking a buffered-file lock."""
+
+    def __init__(self, connection: http.client.HTTPSConnection):
+        self.connection = connection
+        self._socket = connection.sock
+
+    def close(self) -> None:
+        sock = self._socket or self.connection.sock
+        if sock is not None:
+            with suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
+            # makefile() retains an I/O reference: socket.close() alone may
+            # leave Windows recv blocked. Detach first so later buffered-file
+            # cleanup cannot accidentally close a reused descriptor.
+            with suppress(OSError):
+                handle = sock.detach()
+                if handle != -1:
+                    socket.close(handle)
+
+
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     """Connect to the address validated for this request while retaining SNI."""
 
@@ -292,14 +375,20 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     ) -> None:
         super().__init__(host, port, timeout=timeout)
         self._validated_addresses = addresses
+        self._connection_timeout = timeout
         self._ssl_context = ssl.create_default_context()
 
     def connect(self) -> None:
         last_error: OSError | None = None
         for address in self._validated_addresses:
             try:
-                self.sock = socket.create_connection((address, self.port), self.timeout)
+                self.sock = socket.create_connection(
+                    (address, self.port), remaining_seconds(self._connection_timeout)
+                )
+                if hasattr(self.sock, "settimeout"):
+                    self.sock.settimeout(remaining_seconds(self._connection_timeout))
                 self.sock = self._ssl_context.wrap_socket(self.sock, server_hostname=self.host)
+                remaining_seconds(self._connection_timeout)
                 return
             except OSError as error:
                 last_error = error

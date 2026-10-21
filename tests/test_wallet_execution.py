@@ -302,6 +302,64 @@ def test_https_signer_classifies_transfer_http_status(status_code: int, expected
         signer.sign_and_broadcast(transfer, request_id="order:attempt:1")
 
 
+@pytest.mark.parametrize(
+    ("error_code", "expected"),
+    [("broadcast_unknown", "unknown"), ("nonce_conflict", "nonce_conflict")],
+)
+def test_https_signer_uses_stable_error_code_for_transfer_reconciliation(
+    error_code: str, expected: str
+) -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                409, json={"error": "rejected", "code": error_code}, request=request
+            )
+        )
+    )
+    signer = HTTPSWalletSigner("https://signer.example", signer_id="signer", client=client)
+    transfer = EVMTransferAdapter().build(
+        WalletTransferIntent(
+            order_id="order",
+            subject_id="subject",
+            network_id="network",
+            asset_id="asset",
+            asset_type="native",
+            source_address="0xA111111111111111111111111111111111111111",
+            recipient_address="0xB111111111111111111111111111111111111111",
+            amount="1",
+            chain_id=1,
+            nonce=0,
+            gas_limit=21_000,
+            max_fee_per_gas="1",
+        )
+    )
+    from noyra.wallet.execution import WalletBroadcastUnknownError, WalletSignerError
+
+    error_type = WalletBroadcastUnknownError if expected == "unknown" else WalletSignerError
+    with pytest.raises(error_type) as captured:
+        signer.sign_and_broadcast(transfer, request_id="order:attempt:1")
+    if expected == "nonce_conflict":
+        assert isinstance(captured.value, WalletSignerError)
+        assert captured.value.reason_code == "nonce_conflict"
+
+
+def test_https_signer_reports_legacy_unbound_receipt_as_explicit_reconciliation_error() -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                409,
+                json={"error": "receipt request is legacy_unbound", "code": "legacy_unbound"},
+                request=request,
+            )
+        )
+    )
+    signer = HTTPSWalletSigner("https://signer.example", signer_id="signer", client=client)
+    from noyra.wallet.execution import WalletExecutionError
+
+    with pytest.raises(WalletExecutionError, match="legacy receipt is unbound"):
+        signer.get_receipt("0x" + "a" * 64, chain_id=1)
+
+
 def test_https_signer_receipt_404_and_malformed_response_are_bounded() -> None:
     tx_hash = "0x" + "a" * 64
     responses = [

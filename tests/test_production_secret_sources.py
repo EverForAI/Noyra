@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from pydantic import SecretStr
 
 from noyra.core.credentials import CredentialError, read_env_secret
 from noyra.core.types import content_hash
@@ -32,6 +33,46 @@ def test_production_operator_token_rejects_inline_source() -> None:
         pytest.raises(ValueError, match="inline secret is disabled for operator token"),
     ):
         ServiceSettings.from_env()
+
+
+def test_direct_production_settings_default_to_recovery_capable(tmp_path: Path) -> None:
+    settings = ServiceSettings(
+        data_dir=tmp_path / "data",
+        subject_id="Noyra-production-storage-default",
+        genesis_hash=content_hash({"test": "production-storage-default"}),
+        profile="production",
+        at_rest_mode="required",
+        backup_keyring_path=tmp_path / "backup.keys",
+        operator_token=SecretStr("operator-token-with-sufficient-entropy-123456"),
+    )
+    assert settings.storage_profile == "recovery_capable"
+
+
+def test_production_strict_review_loads_proxy_hmac_key_from_private_file(
+    tmp_path: Path,
+) -> None:
+    key_path = tmp_path / "migration-proxy.key"
+    key_path.write_text("proxy-signing-key-that-is-at-least-32-bytes", encoding="utf-8")
+    if os.name == "posix":
+        key_path.chmod(0o600)
+    environment = {
+        "NOYRA_PROFILE": "production",
+        "NOYRA_DATA_DIR": str(tmp_path / "data"),
+        "NOYRA_SUBJECT_ID": "Noyra-signed-migration-review",
+        "NOYRA_GENESIS_HASH": content_hash({"test": "signed-migration-review"}),
+        "NOYRA_ADMIN_TOKEN": "admin-token-with-sufficient-entropy-123456",
+        "NOYRA_HOST": "127.0.0.1",
+        "NOYRA_AT_REST_MODE": "required",
+        "NOYRA_BACKUP_KEYRING_PATH": str(tmp_path / "backup.keys"),
+        "NOYRA_MIGRATION_REQUIRE_INDEPENDENT_REVIEW": "true",
+        "NOYRA_MIGRATION_PROXY_PRINCIPAL_HMAC_KEY_FILE": str(key_path),
+        "NOYRA_TRUSTED_PROXY_CIDRS": "127.0.0.1/32",
+    }
+    with patch.dict(os.environ, environment, clear=True):
+        settings = ServiceSettings.from_env()
+
+    assert settings.migration_proxy_principal_hmac_key is not None
+    assert settings.migration_proxy_principal_hmac_key.get_secret_value() == key_path.read_text()
 
 
 def test_production_model_group_rejects_inline_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:

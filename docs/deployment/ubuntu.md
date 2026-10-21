@@ -134,6 +134,33 @@ rate-limit bucket. Never enter a broad client or internet CIDR: that would let c
 source identity used by public-post and CAPTCHA abuse controls. Forwarded chains are bounded and
 parsed from the trusted proxy backwards.
 
+Strict migration review is separate from the default self-attested workflow. If
+`NOYRA_MIGRATION_REQUIRE_INDEPENDENT_REVIEW=true`, Noyra requires a proxy HMAC
+key of at least 32 bytes in the root-managed
+`NOYRA_MIGRATION_PROXY_PRINCIPAL_HMAC_KEY_FILE` (or a systemd credential). An
+authentication middleware must first verify the user's identity, discard any
+incoming `X-Noyra-Authenticated-Principal`, `X-Noyra-Principal-Timestamp`, and
+`X-Noyra-Principal-Signature` headers, then set the principal and current Unix
+timestamp and sign this UTF-8 text with HMAC-SHA256:
+
+```text
+noyra-authenticated-principal/v1
+<principal>
+<timestamp>
+<METHOD>
+<path-and-query>
+```
+
+The fields above are separated by single newline bytes.
+
+Send the lowercase hex digest as `X-Noyra-Principal-Signature`. Noyra accepts
+the assertion only from a configured trusted proxy and only within 60 seconds.
+The stock Nginx and Caddy examples strip these headers; they do not authenticate
+users or issue principal assertions. This proves that the configured identity
+middleware signed the assertion and that two approval subjects differ. It does
+not prove two natural persons if the identity provider lets one person create
+or control multiple accounts.
+
 Public submissions always enter moderation first. The default limit is 10 posts per client bucket
 per hour, with independent CAPTCHA issuance, global issuance, pending-queue, content-byte, row-count,
 and free-disk backstops. Configure the exposed limits in `/admin` under Runtime Guardrails; the
@@ -213,8 +240,9 @@ sudo ./scripts/install-ubuntu.sh --profile base
 
 The initializer is deliberately separate from the installer. It refuses to overwrite an existing
 image, non-empty mount point, active mapper, or existing helper/configuration path. It asks
-`cryptsetup` for the passphrase interactively, never writes that passphrase to disk, and installs a
-systemd drop-in that prevents Noyra from starting while `/var/lib/noyra` is not a mount point.
+`cryptsetup` for the passphrase interactively and never writes that passphrase to disk. The runtime
+checks the configured storage contract before opening SQLite, so a missing encrypted mount fails
+closed instead of falling back to an empty directory.
 `--dry-run` performs only read-only validation; `--yes` skips only the explicit `CREATE` confirmation,
 not the passphrase prompt.
 
@@ -259,10 +287,13 @@ private or tunnel-only installation; the sitemap stays unpublished in that mode.
 
 The installer creates `/var/lib/noyra` as `noyra:noyra` mode `0700`, installs a separate backup
 keyring at `/etc/noyra/backup-keyring.json` as `root:noyra` mode `0640`, and enables
-`NOYRA_AT_REST_MODE=required`. It does not format or encrypt a disk. Mount the intended LUKS volume
-at `/var/lib/noyra` first and verify the device-mapper chain with `findmnt`, `lsblk`, and
-`cryptsetup status`. The runtime independently walks the Linux sysfs block-device ancestry and
-fails before database creation when it cannot find a `CRYPT-LUKS` mapping.
+`NOYRA_AT_REST_MODE=required`. It does not format or encrypt a disk. With an ordinary system-disk
+directory, the installer can start Noyra directly; the at-rest guard still requires the configured
+encrypted-volume contract in production. When `/etc/noyra/storage.conf` exists, it identifies the
+single-disk encrypted container and the runtime refuses to use the unmounted path. For a dedicated
+LUKS volume, mount the intended device at `/var/lib/noyra` and verify the device-mapper chain with
+`findmnt`, `lsblk`, and `cryptsetup status`. The runtime independently walks the Linux sysfs block-device
+ancestry and fails before database creation when it cannot find a `CRYPT-LUKS` mapping.
 
 Generate secrets on the server instead of moving them through chat or source control:
 
@@ -312,11 +343,25 @@ with root-only permissions, then set the corresponding `*_CREDENTIAL` variable (
 the credential name from the environment; systemd supplies its contents through
 `CREDENTIALS_DIRECTORY`. File and systemd credential sources cannot both be set for one value.
 
+Native production hosts use `NOYRA_STORAGE_PROFILE=recovery_capable` by default. This profile
+requires the configured backup root to be usable before the service starts, so runtime readiness
+cannot hide a missing restore and upgrade safeguard. A deliberate system-disk runtime-only
+deployment may set `NOYRA_STORAGE_PROFILE=runtime_only`; its readiness payload remains degraded
+for backup capability and maintenance commands still fail closed.
+
 Provider keys are never returned by normal configuration endpoints. Runtime and training exports
 contain only non-secret configuration metadata and redacted diagnostics; the server-side secret
 files are not included. Back up secret files separately using an encrypted, access-controlled
 backup process. Legacy inline `NOYRA_MODEL_API_KEY` and `NOYRA_EMBEDDING_API_KEY` values remain a
 compatibility fallback, so clear them after moving existing deployments to protected files.
+
+After a successful native Ubuntu install, the installer writes a secret-free recovery manifest at
+`/etc/noyra/recovery-manifest.json` with mode `0600`. It records the active release and schema,
+storage mode, and the paths and metadata for the backup keyring, credential directory, server
+identity, database, and latest backup. It never contains credential contents, keys, tokens, or
+database rows. Preserve the manifest together with the protected files before an operating-system
+reinstall; it is a checklist of what must be restored, not a replacement for the encrypted backup
+or keyring.
 
 Autonomous cognition is disabled by default. Before enabling it, configure the remote model budget
 and a compact JSON array of HTTPS sources. Environment files require the JSON to stay on one line:

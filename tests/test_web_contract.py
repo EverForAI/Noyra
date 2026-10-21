@@ -197,12 +197,21 @@ def test_admin_model_and_search_configuration_controls_are_present() -> None:
     for marker in (
         "/api/config/model-resources/test",
         "/api/config/model-resources/models",
+        "/api/config/model-capabilities?${query}",
         "/api/config/search-providers",
         "model_first",
         "api_first",
         "auto",
     ):
         assert marker in ADMIN_JS or marker in ADMIN_HTML
+
+
+def test_admin_reasoning_control_consumes_server_capabilities() -> None:
+    assert "applyReasoningProfile(result.reasoning_profile)" in ADMIN_JS
+    assert "model-capabilities" in ADMIN_JS
+    assert "reasoningCapabilityGeneration" in ADMIN_JS
+    assert 'model.startsWith("o1")' not in ADMIN_JS
+    assert 'model.startsWith("gpt-5")' not in ADMIN_JS
 
 
 def test_admin_setup_guide_and_observability_are_present_and_localized() -> None:

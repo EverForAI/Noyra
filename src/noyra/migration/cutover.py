@@ -26,7 +26,7 @@ from .executor import (
 )
 from .fencing import EpochLease
 from .manager import MigrationManager, MigrationTask
-from .policy import MigrationStore
+from .policy import MigrationPolicy, MigrationStore
 
 
 @dataclass(frozen=True)
@@ -58,7 +58,6 @@ class CutoverCoordinator:
     ) -> dict[str, str]:
         """Execute an approved task using one fenced snapshot and real target proofs."""
         from .http_executor import HTTPMigrationExecutor
-        from .policy import MigrationPolicy
         from .runtime import payment_in_flight
 
         if not isinstance(self.executor, HTTPMigrationExecutor):
@@ -90,10 +89,7 @@ class CutoverCoordinator:
             try:
                 with self.database.transaction() as connection:
                     current_policy = MigrationPolicy.from_record(
-                        connection.execute(
-                            "SELECT * FROM migration_policies WHERE subject_id=?",
-                            (task.subject_id,),
-                        ).fetchone()
+                        MigrationStore.policy_row(connection, task.subject_id)
                     )
                     if current_policy != policy:
                         raise ValueError("migration policy changed before fencing")
@@ -154,7 +150,9 @@ class CutoverCoordinator:
                 target_verified=target_verified,
             )
             current = self.manager.get_task(task_id)
-            return self._commit_receipt(current, epoch, receipt, proof, actor)
+            return self._commit_receipt(
+                current, epoch, receipt, self._proof_for_task(task_id), actor
+            )
 
     def prepare(
         self,
@@ -350,8 +348,201 @@ class CutoverCoordinator:
                     "wallet_proof_digest": receipt.wallet_proof_digest,
                 },
             )
+            current_policy = MigrationPolicy.from_record(
+                MigrationStore.policy_row(connection, task.subject_id)
+            )
+            if current_policy.approval_mode == "self_attested":
+                self._record_self_attestation(connection, task, receipt, proof, actor)
             epoch.complete_in_transaction(connection, actor)
         return {"task_id": task_id, "status": task.status}
+
+    @staticmethod
+    def _record_self_attestation(
+        connection: Any,
+        task: MigrationTask,
+        receipt: MigrationExecutionReceipt,
+        proof: dict[str, object],
+        actor: str,
+    ) -> None:
+        credential = proof.get("credential_binding")
+        wallet = proof.get("wallet_binding")
+        volume = proof.get("target_volume_proof")
+        restore = proof.get("restore_report")
+        health = proof.get("health_report")
+        if not all(isinstance(item, Mapping) for item in (credential, wallet, volume)):
+            raise MigrationExecutionError("self_attestation_binding_missing")
+        assert isinstance(credential, Mapping)
+        assert isinstance(wallet, Mapping)
+        assert isinstance(volume, Mapping)
+        if not isinstance(restore, Mapping) or not isinstance(health, Mapping):
+            raise MigrationExecutionError("self_attestation_restore_or_health_missing")
+        identity = credential.get("target_identity")
+        wallet_identity = wallet.get("target_identity")
+        volume_identity = volume.get("target_identity")
+        checks = health.get("checks")
+        gates = {
+            "manifest_verified": (
+                proof.get("manifest_digest") == receipt.manifest_digest
+                and receipt.manifest_digest == task.manifest_digest
+            ),
+            "backup_restored": (
+                restore.get("status") == "restored"
+                and restore.get("target_id") == task.target_id
+                and restore.get("manifest_digest") == receipt.manifest_digest
+                and restore.get("artifact_id") == receipt.artifact_id
+                and content_hash(dict(restore)) == receipt.restore_report_digest
+            ),
+            "target_health": (
+                health.get("status") == "healthy"
+                and health.get("target_id") == task.target_id
+                and health.get("manifest_digest") == receipt.manifest_digest
+                and health.get("artifact_id") == receipt.artifact_id
+                and isinstance(checks, Mapping)
+                and bool(checks)
+                and all(value is True for value in checks.values())
+                and content_hash(dict(health)) == receipt.health_report_digest
+            ),
+            "target_identity": (
+                isinstance(identity, str)
+                and bool(identity.strip())
+                and wallet_identity == identity
+                and volume_identity == identity
+                and credential.get("target_id") == task.target_id
+                and wallet.get("target_id") == task.target_id
+                and volume.get("target_id") == task.target_id
+            ),
+            "credentials": (
+                credential.get("status") == "verified"
+                and receipt.credential_binding_digest is not None
+            ),
+            "wallet": (
+                wallet.get("status") in {"verified", "committed"}
+                and wallet.get("mode") == receipt.wallet_mode
+                and (receipt.wallet_mode == "disabled" or receipt.wallet_proof_digest is not None)
+            ),
+            "encrypted_volume": (
+                volume.get("status") == "verified"
+                and volume.get("encrypted") is True
+                and receipt.target_volume_proof_digest is not None
+            ),
+            "target_signature": isinstance(proof.get("target_signature"), str)
+            and bool(str(proof.get("target_signature", "")).strip()),
+            "source_fence": bool(receipt.source_fence_digest),
+            "target_activation": bool(receipt.target_activation_digest),
+        }
+        if not all(gates.values()):
+            raise MigrationExecutionError("self_attestation_gate_failed")
+        evidence = {
+            "gates": gates,
+            "proof_digests": {
+                "restore_report": receipt.restore_report_digest,
+                "health_report": receipt.health_report_digest,
+                "credential_binding": receipt.credential_binding_digest,
+                "wallet_binding": receipt.wallet_proof_digest,
+                "target_volume": receipt.target_volume_proof_digest,
+                "source_fence": receipt.source_fence_digest,
+                "target_activation": receipt.target_activation_digest,
+            },
+            "wallet_mode": receipt.wallet_mode,
+        }
+        evidence_json = canonical_json(evidence)
+        evidence_digest = content_hash(evidence)
+        identity_digest = content_hash(identity)
+        completed_at = utc_now()
+        values = {
+            "task_id": task.task_id,
+            "subject_id": task.subject_id,
+            "actor": actor.strip(),
+            "target_id": task.target_id,
+            "target_identity_digest": identity_digest,
+            "manifest_digest": receipt.manifest_digest,
+            "gates_json": evidence_json,
+            "gates_digest": evidence_digest,
+            "completed_at": completed_at,
+        }
+        state_hash = content_hash(values)
+        existing = connection.execute(
+            "SELECT state_hash FROM migration_self_attestations WHERE task_id=?",
+            (task.task_id,),
+        ).fetchone()
+        if existing is not None:
+            if existing["state_hash"] != state_hash:
+                raise MigrationExecutionError("self_attestation_conflict")
+            return
+        connection.execute(
+            "INSERT INTO migration_self_attestations("
+            "task_id,subject_id,actor,target_id,target_identity_digest,manifest_digest,"
+            "gates_json,gates_digest,completed_at,state_hash) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (*values.values(), state_hash),
+        )
+        MigrationStore._append_audit(
+            connection,
+            task.subject_id,
+            "migration_self_attestation_completed",
+            actor,
+            {
+                "task_id": task.task_id,
+                "target_id": task.target_id,
+                "target_identity_digest": identity_digest,
+                "manifest_digest": receipt.manifest_digest,
+                "gates_digest": evidence_digest,
+                "completed_at": completed_at,
+                "gates": gates,
+            },
+        )
+
+    def get_self_attestation(self, task_id: str, *, subject_id: str) -> dict[str, Any]:
+        import json
+
+        task = self.manager.get_task(task_id, subject_id=subject_id)
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM migration_self_attestations WHERE task_id=? AND subject_id=?",
+                (task.task_id, subject_id),
+            ).fetchone()
+        if row is None:
+            raise ValueError("migration self-attestation is unavailable")
+        values = dict(row)
+        expected = content_hash({key: values[key] for key in values if key != "state_hash"})
+        if values["state_hash"] != expected:
+            raise ValueError("migration self-attestation integrity check failed")
+        try:
+            evidence = json.loads(str(values["gates_json"]))
+        except (TypeError, ValueError) as error:
+            raise ValueError("migration self-attestation evidence is invalid") from error
+        if not isinstance(evidence, dict) or content_hash(evidence) != values["gates_digest"]:
+            raise ValueError("migration self-attestation evidence is invalid")
+        gates = evidence.get("gates")
+        if (
+            not isinstance(gates, dict)
+            or not gates
+            or not all(value is True for value in gates.values())
+        ):
+            raise ValueError("migration self-attestation gates are incomplete")
+        report = {
+            "format": "noyra-migration-self-attestation/v1",
+            "task_id": values["task_id"],
+            "subject_id": values["subject_id"],
+            "actor": values["actor"],
+            "target_id": values["target_id"],
+            "target_identity_digest": values["target_identity_digest"],
+            "manifest_digest": values["manifest_digest"],
+            "evidence": evidence,
+            "gates_digest": values["gates_digest"],
+            "completed_at": values["completed_at"],
+        }
+        report["report_digest"] = content_hash(report)
+        return report
+
+    def has_self_attestation(self, task_id: str) -> bool:
+        with self.database.connection() as connection:
+            return (
+                connection.execute(
+                    "SELECT 1 FROM migration_self_attestations WHERE task_id=?", (task_id,)
+                ).fetchone()
+                is not None
+            )
 
     def _proof_for_task(self, task_id: str) -> dict[str, object]:
         """Load the proof digests recorded when the task entered validation."""

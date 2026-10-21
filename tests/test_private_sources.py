@@ -21,6 +21,7 @@ def test_schema85_upgrade_preserves_messages_and_installs_source_contract(tmp_pa
     message = InteractionStore(db).receive("owner", "web", "web-user", "original")
     with db.transaction() as connection:
         connection.execute("DROP TABLE private_model_sources")
+        connection.execute("ALTER TABLE cognitive_resource_groups DROP COLUMN reasoning_effort")
         connection.execute("UPDATE schema_meta SET value='85' WHERE key='schema_version'")
     migrated = Database(db.path)
     assert InteractionStore(migrated).get(message.interaction_id).content == "original"

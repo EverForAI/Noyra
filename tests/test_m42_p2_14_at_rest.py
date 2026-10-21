@@ -343,6 +343,14 @@ def test_deployment_and_threat_model_require_the_complete_at_rest_boundary() -> 
     assert "at_rest:" in openapi
 
 
+def test_ubuntu_installer_creates_private_secrets_directory_before_hash_key() -> None:
+    installer = (ROOT / "scripts" / "install-ubuntu.sh").read_text(encoding="utf-8")
+    provision = 'install -d -o noyra -g noyra -m 0700 "$DATA_DIR/secrets"'
+    hash_key = 'public_hash_key_file="$(env_value NOYRA_PUBLIC_HASH_KEY_FILE'
+    assert provision in installer
+    assert installer.index(provision) < installer.index(hash_key)
+
+
 def test_windows_acl_audit_rejects_other_principals(tmp_path: Path) -> None:
     root = tmp_path / "acl"
     root.mkdir()

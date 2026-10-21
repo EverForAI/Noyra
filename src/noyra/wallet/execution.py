@@ -448,6 +448,13 @@ class HTTPSWalletSigner:
                 {"request_id": request_id, "transfer": transfer.model_dump(mode="json")},
             )
             if 400 <= status_code < 500:
+                error_code = self._response_error_code(response_body)
+                if status_code == 409 and error_code == "broadcast_unknown":
+                    raise WalletBroadcastUnknownError()
+                if status_code == 409 and error_code == "nonce_conflict":
+                    raise WalletSignerError(
+                        "wallet signer nonce conflict", reason_code="nonce_conflict"
+                    )
                 raise WalletSignerError("wallet signer rejected transfer")
             if status_code != 200:
                 raise WalletBroadcastUnknownError()
@@ -498,6 +505,11 @@ class HTTPSWalletSigner:
             if status_code == 404:
                 return None
             if 400 <= status_code < 500:
+                if (
+                    status_code == 409
+                    and self._response_error_code(response_body) == "legacy_unbound"
+                ):
+                    raise WalletExecutionError("wallet signer legacy receipt is unbound")
                 raise WalletSignerError("wallet signer receipt rejected")
             if status_code != 200:
                 raise WalletExecutionError("wallet signer receipt lookup failed")
@@ -558,6 +570,17 @@ class HTTPSWalletSigner:
             TypeError,
         ) as error:
             raise WalletExecutionError("wallet signer receipt lookup failed") from error
+
+    @staticmethod
+    def _response_error_code(body: bytes) -> str | None:
+        try:
+            payload = strict_json_loads(body)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        code = payload.get("code")
+        return code if isinstance(code, str) and len(code) <= 64 else None
 
     def get_pending_nonce(self, address: str, *, chain_id: int) -> int:
         """Read the chain pending nonce from the isolated signer service."""

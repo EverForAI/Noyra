@@ -41,6 +41,9 @@ jobs:
           sudo "$(command -v python)" -m pytest \
             tests/test_upgrade_storage_boundary.py tests/test_release_scripts.py \
             tests/test_migration_storage_boundary.py tests/test_migration_activation.py -q
+          sudo "$(command -v python)" -m pytest \
+            tests/test_deployment_maintenance.py tests/test_m42_p2_14_at_rest.py \
+              tests/test_storage_mode.py -q
       - run: python -m ruff check .
       - run: python -m ruff format --check .
       - run: python -m mypy src tests

@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
+import sqlite3
+import stat
 from collections.abc import Mapping
 from copy import copy, deepcopy
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
+from .backup_retention import BackupRetentionPolicy, backup_gc_plan
 from .database import Database
 from .errors import IntegrityError
 from .evidence_capacity import evidence_capacity_status
@@ -446,10 +451,14 @@ class RetentionManager:
         settings: RetentionSettings | None = None,
         *,
         minimum_free_bytes: int = 500_000_000,
+        backup_root: Path | None = None,
+        backup_policy: BackupRetentionPolicy | None = None,
     ):
         self.database = database
         self.settings = settings or RetentionSettings()
         self.minimum_free_bytes = minimum_free_bytes
+        self.backup_root = backup_root
+        self.backup_policy = backup_policy or BackupRetentionPolicy()
         with self.database.connection() as connection:
             exists = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='retention_runs'"
@@ -480,23 +489,75 @@ class RetentionManager:
                 "SELECT * FROM retention_policies WHERE subject_id=?", (subject_id,)
             ).fetchone()
         if row is None:
-            return {"settings": asdict(self.settings), "revision": 0, "source": "environment"}
+            result = {"settings": asdict(self.settings), "revision": 0, "source": "environment"}
+            result["backup"] = self.backup_policy_record(subject_id, connection=connection)
+            return result
         state = dict(row)
         state.pop("state_hash")
         if content_hash(state) != row["state_hash"]:
             raise IntegrityError("retention policy hash mismatch")
         settings = RetentionSettings.from_payload(strict_json_loads(row["settings_json"]))
-        return {
+        result = {
             "settings": asdict(settings),
             "revision": row["revision"],
             "source": "saved",
             "updated_at": row["updated_at"],
         }
+        result["backup"] = self.backup_policy_record(subject_id, connection=connection)
+        return result
+
+    def backup_policy_record(
+        self, subject_id: str, connection: Any | None = None
+    ) -> dict[str, Any]:
+        from contextlib import nullcontext
+
+        with (
+            self.database.connection() if connection is None else nullcontext(connection) as reader
+        ):
+            if not self._table_exists(reader, "backup_retention_policies"):
+                return {
+                    "settings": self.backup_policy.public(),
+                    "revision": 0,
+                    "source": "environment",
+                }
+            row = reader.execute(
+                "SELECT * FROM backup_retention_policies WHERE subject_id=?", (subject_id,)
+            ).fetchone()
+        if row is None:
+            return {
+                "settings": self.backup_policy.public(),
+                "revision": 0,
+                "source": "environment",
+            }
+        state = dict(row)
+        state.pop("state_hash")
+        if content_hash(state) != row["state_hash"]:
+            raise IntegrityError("backup retention policy hash mismatch")
+        settings = BackupRetentionPolicy.from_payload(strict_json_loads(row["settings_json"]))
+        return {
+            "settings": settings.public(),
+            "revision": int(row["revision"]),
+            "source": "saved",
+            "updated_at": row["updated_at"],
+            "updated_by": row["updated_by"],
+        }
 
     def configure(
-        self, subject_id: str, settings: Mapping[str, Any], *, expected_revision: int, actor: str
+        self,
+        subject_id: str,
+        settings: Mapping[str, Any],
+        *,
+        expected_revision: int,
+        actor: str,
+        backup_settings: Mapping[str, Any] | None = None,
+        backup_expected_revision: int | None = None,
     ) -> dict[str, Any]:
         validated = RetentionSettings.from_payload(settings)
+        validated_backup = (
+            None
+            if backup_settings is None
+            else BackupRetentionPolicy.from_payload(dict(backup_settings))
+        )
         if not actor.strip() or actor.casefold() == "subject":
             raise PermissionError("operator required")
         if type(expected_revision) is not int or expected_revision < 0:
@@ -519,10 +580,152 @@ class RetentionManager:
                 "state_hash=excluded.state_hash",
                 (*state.values(), content_hash(state)),
             )
+            if validated_backup is not None:
+                current_backup = self.backup_policy_record(subject_id, connection=connection)
+                expected_backup = (
+                    current_backup["revision"]
+                    if backup_expected_revision is None
+                    else backup_expected_revision
+                )
+                if (
+                    type(expected_backup) is not int
+                    or expected_backup != current_backup["revision"]
+                ):
+                    raise RetentionPolicyConflict("backup retention policy changed")
+                backup_state = {
+                    "subject_id": subject_id,
+                    "settings_json": canonical_json(validated_backup.public()),
+                    "revision": expected_backup + 1,
+                    "updated_at": utc_now(),
+                    "updated_by": actor,
+                }
+                connection.execute(
+                    "INSERT INTO backup_retention_policies VALUES(?,?,?,?,?,?) "
+                    "ON CONFLICT(subject_id) DO UPDATE SET settings_json=excluded.settings_json, "
+                    "revision=excluded.revision, updated_at=excluded.updated_at, "
+                    "updated_by=excluded.updated_by, state_hash=excluded.state_hash",
+                    (*backup_state.values(), content_hash(backup_state)),
+                )
         return self.policy(subject_id)
 
     def effective_settings(self, subject_id: str) -> RetentionSettings:
         return RetentionSettings(**self.policy(subject_id)["settings"])
+
+    def sqlite_space(self) -> dict[str, int | None]:
+        """Return current SQLite page and freelist metrics for operator diagnostics."""
+
+        return self._sqlite_space_metrics()
+
+    def retention_plan(self, subject_id: str, *, now: datetime | None = None) -> dict[str, Any]:
+        """Return one read-only plan covering SQLite and backup artifacts.
+
+        The service account may not read a root-owned backup directory.  In
+        that case the plan reports the stable reason and never guesses that a
+        recovery point exists.  Backup deletion remains a privileged,
+        hash-rechecking maintenance operation.
+        """
+
+        policy = self.policy(subject_id)
+        latest = self.latest(subject_id)
+        effective_backup_settings = policy["backup"]["settings"]
+        backup: dict[str, Any]
+        if self.backup_root is None:
+            backup = {
+                "status": "unconfigured",
+                "reason_code": "backup_root_unconfigured",
+                "apply_allowed": False,
+                "policy": effective_backup_settings,
+            }
+        elif not self.backup_root.exists() or not self.backup_root.is_dir():
+            backup = {
+                "status": "unavailable",
+                "reason_code": "backup_path_missing",
+                "apply_allowed": False,
+                "policy": effective_backup_settings,
+            }
+        else:
+            try:
+                effective_backup = BackupRetentionPolicy.from_payload(policy["backup"]["settings"])
+                backup = backup_gc_plan(self.backup_root, effective_backup, now=now)
+                backup.update(
+                    {
+                        "status": "planned",
+                        "reason_code": None,
+                        "apply_allowed": False,
+                        "policy": effective_backup.public(),
+                        "apply_requires": "root_maintenance_lock_and_hash_recheck",
+                    }
+                )
+            except (OSError, PermissionError, ValueError) as error:
+                backup = {
+                    "status": "unavailable",
+                    "reason_code": "backup_inventory_unavailable",
+                    "error_type": type(error).__name__,
+                    "apply_allowed": False,
+                    "policy": policy["backup"]["settings"],
+                }
+        sqlite = {
+            "estimate": self.estimate(subject_id, now=now),
+            "latest": latest,
+            "space": self.sqlite_space(),
+            "cursor": latest.get("next_cursor") if latest else None,
+        }
+        plan_id = content_hash(
+            {
+                "subject_id": subject_id,
+                "policy": policy,
+                "sqlite": sqlite,
+                "backup": {
+                    key: value
+                    for key, value in backup.items()
+                    if key not in {"backup_inventory", "backup_details"}
+                },
+            }
+        )
+        return {
+            "plan_id": plan_id,
+            "generated_at": (now or datetime.now(UTC)).isoformat(),
+            "policy": policy,
+            "sqlite": sqlite,
+            "backup": backup,
+            "apply_allowed": False,
+        }
+
+    def record_backup_gc_run(
+        self,
+        subject_id: str,
+        *,
+        plan_id: str,
+        status: str,
+        cursor: Mapping[str, Any],
+        deleted_count: int = 0,
+        failure_code: str | None = None,
+    ) -> str:
+        if status not in {"planned", "applied", "failed"}:
+            raise ValueError("backup retention run status is invalid")
+        if type(deleted_count) is not int or deleted_count < 0:
+            raise ValueError("backup retention deleted count is invalid")
+        if not isinstance(plan_id, str) or not re.fullmatch(r"[0-9a-f]{64}", plan_id):
+            raise ValueError("backup retention plan id is invalid")
+        run_id = new_id("backupretention")
+        started = utc_now()
+        values = {
+            "run_id": run_id,
+            "subject_id": subject_id,
+            "plan_id": plan_id,
+            "started_at": started,
+            "completed_at": started if status != "planned" else None,
+            "status": status,
+            "cursor_json": canonical_json(dict(cursor)),
+            "deleted_count": deleted_count,
+            "failure_code": failure_code,
+        }
+        with self.database.transaction() as connection:
+            connection.execute(
+                "INSERT INTO backup_retention_runs VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (*values.values(), content_hash(values)),
+            )
+        return run_id
 
     def estimate(self, subject_id: str, *, now: datetime | None = None) -> dict[str, int]:
         snapshot = copy(self)
@@ -806,6 +1009,7 @@ class RetentionManager:
                 LOGGER.warning(
                     "retention failure could not be persisted: %s", type(recording_error).__name__
                 )
+        sqlite_space = self._sqlite_space_metrics()
         return {
             "run_id": run_id,
             "deleted_by_table": deleted,
@@ -819,7 +1023,58 @@ class RetentionManager:
             "compaction_skipped": compaction_skipped,
             "next_cursor": cursor,
             "compacted_by_table": compacted,
+            "sqlite_space": sqlite_space,
         }
+
+    def _sqlite_space_metrics(self) -> dict[str, int | None]:
+        """Expose bounded SQLite growth signals without checkpoint/VACUUM side effects."""
+
+        try:
+            with self.database.connection() as connection:
+                page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+                page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+                freelist_count = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+            database_bytes = self.database.path.stat().st_size
+            wal_bytes = self._sidecar_size("-wal")
+            shm_bytes = self._sidecar_size("-shm")
+            physical_bytes = (
+                None
+                if wal_bytes is None or shm_bytes is None
+                else database_bytes + wal_bytes + shm_bytes
+            )
+            return {
+                "database_bytes": database_bytes,
+                "wal_bytes": wal_bytes,
+                "shm_bytes": shm_bytes,
+                "physical_bytes": physical_bytes,
+                "page_size": page_size,
+                "page_count": page_count,
+                "freelist_pages": freelist_count,
+                "freelist_bytes": page_size * freelist_count,
+            }
+        except (OSError, sqlite3.Error, TypeError, ValueError, IndexError):
+            return {
+                "database_bytes": None,
+                "wal_bytes": None,
+                "shm_bytes": None,
+                "physical_bytes": None,
+                "page_size": None,
+                "page_count": None,
+                "freelist_pages": None,
+                "freelist_bytes": None,
+            }
+
+    def _sidecar_size(self, suffix: str) -> int | None:
+        path = self.database.path.with_name(self.database.path.name + suffix)
+        try:
+            metadata = path.lstat()
+            if not stat.S_ISREG(metadata.st_mode):
+                return None
+            return metadata.st_size
+        except FileNotFoundError:
+            return 0
+        except OSError:
+            return None
 
     @staticmethod
     def _cursor_compatible(previous: Mapping[str, Any], current: Mapping[str, Any]) -> bool:

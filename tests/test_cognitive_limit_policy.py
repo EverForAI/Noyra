@@ -285,14 +285,84 @@ def test_schema80_upgrade_preserves_old_limits_hashes_and_history(
         old_database = Database(old_path)
     with old_database.transaction() as connection:
         connection.execute("ATTACH DATABASE ? AS seed", (str(database.path),))
-        for table in (
-            "subject_identity",
-            "cognitive_resource_groups",
-            "cognitive_resource_group_revisions",
-            "cognitive_resource_keys",
-            "cognitive_resource_key_events",
-        ):
-            connection.execute(f"INSERT INTO {table} SELECT * FROM seed.{table}")
+        legacy_columns = {
+            "subject_identity": (
+                "subject_id",
+                "project_name",
+                "genesis_hash",
+                "personal_name",
+                "identity_status",
+                "created_at",
+                "updated_at",
+                "state_version",
+                "model_name",
+                "last_checkpoint",
+                "origin_subject_id",
+                "branch_reason",
+            ),
+            # Schema 95 added reasoning_effort. Copy the schema-80 columns
+            # explicitly so this fixture represents a real pre-migration DB.
+            "cognitive_resource_groups": (
+                "group_id",
+                "subject_id",
+                "pool",
+                "label",
+                "provider_type",
+                "base_url",
+                "model",
+                "priority",
+                "weight",
+                "daily_attempts",
+                "daily_input_tokens",
+                "daily_output_tokens",
+                "daily_cost_microusd",
+                "input_microusd_per_million",
+                "output_microusd_per_million",
+                "max_attempts",
+                "status",
+                "state_hash",
+                "created_at",
+                "updated_at",
+            ),
+            "cognitive_resource_group_revisions": (
+                "revision_id",
+                "group_id",
+                "status",
+                "reason",
+                "state_hash",
+                "created_at",
+            ),
+            "cognitive_resource_keys": (
+                "key_id",
+                "group_id",
+                "subject_id",
+                "key_reference",
+                "key_fingerprint",
+                "status",
+                "selection_count",
+                "consecutive_failures",
+                "cooldown_until",
+                "last_selected_at",
+                "last_success_at",
+                "last_failure_at",
+                "state_hash",
+                "created_at",
+            ),
+            "cognitive_resource_key_events": (
+                "event_id",
+                "key_id",
+                "subject_id",
+                "event_type",
+                "reason_code",
+                "state_hash",
+                "created_at",
+            ),
+        }
+        for table, columns in legacy_columns.items():
+            column_sql = ", ".join(columns)
+            connection.execute(
+                f"INSERT INTO {table} ({column_sql}) SELECT {column_sql} FROM seed.{table}"
+            )
     upgraded = Database(old_path)
     current = CognitiveResourceStore(upgraded, tmp_path / "secrets").get(
         group.group_id, subject_id=subject

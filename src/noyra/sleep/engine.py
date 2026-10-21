@@ -137,6 +137,27 @@ class SleepEngine:
                 ),
             )
             self._insert_transition(connection, sleep_id, None, "winding_down", reason, now)
+            interaction = connection.execute(
+                "SELECT interaction_id FROM interactions WHERE subject_id = ? "
+                "ORDER BY rowid DESC LIMIT 1",
+                (self.subject_id,),
+            ).fetchone()
+            # The event's durable chain sequence is the reflection high-water
+            # mark. It is atomic with sleep creation and survives clock changes.
+            self.events._append_connection(
+                connection,
+                self.subject_id,
+                "sleep_reflection_boundary",
+                "sleep",
+                {
+                    "sleep_id": sleep_id,
+                    "interaction_boundary_id": None if interaction is None else interaction[0],
+                },
+                privacy_level="private",
+                causal_parent_ids=(),
+                occurred_at=now,
+                event_id=f"evt_reflection_boundary_{sleep_id}",
+            )
             return self._load_connection(connection, sleep_id)
 
     def begin_reflection(

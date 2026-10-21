@@ -1,0 +1,23 @@
+import json,os,shutil,subprocess,time
+from pathlib import Path
+out=Path('/mnt/d/metagrowh/.user-temp/noyra-ci-repair-20261021-l3prs_0l')
+repo=Path('/mnt/e/我的项目/Noyra/开发版')
+root=Path((out/'linux-snapshot-path.txt').read_text())
+assert root.parent==Path('/var/tmp') and root.name.startswith('noyra-ci-repair-')
+for name in subprocess.check_output(['git','-C',str(repo),'diff','--name-only','-z']).decode().split('\0')[:-1]:shutil.copyfile(repo/name,root/name)
+python='/var/tmp/noyra-release-fix-20261006-venv/bin/python'
+env={**os.environ,'PYTHONUTF8':'1','PYTHONDONTWRITEBYTECODE':'1'}
+env.pop('PYTHONPYCACHEPREFIX',None)
+commands=[('linux-private-checkout-root-test',[python,'-m','pytest','tests/test_deployment_maintenance.py::test_root_gc_and_service_uid_health_restart_backup_restore','-q','-p','no:cacheprovider']),('linux-final-targeted',[python,'-m','pytest','tests/test_signer_service.py','tests/test_audit_20261020_regressions.py','tests/test_m42_p3_08_supply_chain.py','tests/test_deployment_maintenance.py','tests/test_m42_p2_14_at_rest.py','tests/test_storage_mode.py','tests/test_boundary_remediation.py','tests/test_cloud_dependency_compatibility.py','tests/test_runtime_logging.py','-q','-p','no:cacheprovider','--junitxml='+str(out/'linux-final-targeted.xml')])]
+commands += [('linux-shell-'+Path(name).stem,['bash','tests/shell/'+name]) for name in ['test-install-ubuntu-backup-boundary.sh','test-single-disk-storage-contract.sh','test-control-layout-rollback.sh','test-upgrade-components-rollback.sh','test-migration-components-rollback.sh']]
+commands += [('linux-ci-root-upgrade-migration',[python,'-m','pytest','tests/test_upgrade_storage_boundary.py','tests/test_release_scripts.py','tests/test_migration_storage_boundary.py','tests/test_migration_activation.py','-q','-p','no:cacheprovider','--junitxml='+str(out/'linux-ci-root-upgrade-migration.xml')]),('linux-final-ruff-check',[python,'-m','ruff','check','.']),('linux-final-ruff-format',[python,'-m','ruff','format','--check','.']),('linux-final-mypy',[python,'-m','mypy','src','tests'])]
+results=[]
+for idx,(name,cmd) in enumerate(commands):
+ if idx==0:root.chmod(0o700)
+ if idx==1:root.chmod(0o755)
+ start=time.monotonic()
+ with (out/(name+'.log')).open('w') as f:r=subprocess.run(cmd,cwd=root,stdout=f,stderr=subprocess.STDOUT,env=env)
+ result={'name':name,'exit':r.returncode,'elapsed':round(time.monotonic()-start,2)};results.append(result)
+ print(json.dumps(result),flush=True);print((out/(name+'.log')).read_text(errors='replace')[-6500:],flush=True)
+ (out/'linux-final-results.json').write_text(json.dumps(results,indent=2))
+raise SystemExit(any(x['exit'] for x in results))

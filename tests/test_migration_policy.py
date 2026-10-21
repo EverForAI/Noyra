@@ -32,7 +32,7 @@ def test_fresh_policy_is_disabled_and_safe(tmp_path: Any) -> None:
     assert policy.allowed_target_ids == ()
 
 
-def test_enabling_without_mode_selects_manual(tmp_path: Any) -> None:
+def test_enabling_without_mode_selects_self_attested(tmp_path: Any) -> None:
     _, store = _store(tmp_path)
 
     policy = store.update_policy(
@@ -43,7 +43,7 @@ def test_enabling_without_mode_selects_manual(tmp_path: Any) -> None:
     )
 
     assert policy.enabled is True
-    assert policy.approval_mode == "manual"
+    assert policy.approval_mode == "self_attested"
     assert policy.revision == 2
 
 

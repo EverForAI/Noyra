@@ -1,0 +1,136 @@
+{
+  "date": "2026-10-20",
+  "baseline_commit": "cbdfaa0",
+  "production_remediation_commits": [
+    "f79ac1f",
+    "68c4eb5",
+    "c888e13"
+  ],
+  "final_test_contract_commit": "f5065b8",
+  "branch": "codex/audit-boundary-remediation",
+  "linux_full_sharded": {
+    "collected_main_nodes": 2941,
+    "test_files": 219,
+    "processes": 4,
+    "elapsed_seconds": 2627.38,
+    "passed": 2923,
+    "failed": 1,
+    "skipped": 17,
+    "subtests_passed": 288,
+    "shards": [
+      {
+        "shard": 1,
+        "passed": 669,
+        "skipped": 7,
+        "subtests_passed": 25,
+        "summary": "669 passed, 7 skipped, 25 subtests passed in 2624.48s (0:43:44)",
+        "log": "/var/tmp/noyra-boundary-final-0hw95swm-shard-1.log",
+        "xml": "/var/tmp/noyra-boundary-final-0hw95swm-shard-1.xml"
+      },
+      {
+        "shard": 2,
+        "passed": 694,
+        "skipped": 2,
+        "subtests_passed": 23,
+        "summary": "694 passed, 2 skipped, 23 subtests passed in 2626.27s (0:43:46)",
+        "log": "/var/tmp/noyra-boundary-final-0hw95swm-shard-2.log",
+        "xml": "/var/tmp/noyra-boundary-final-0hw95swm-shard-2.xml"
+      },
+      {
+        "shard": 3,
+        "failed": 1,
+        "passed": 752,
+        "skipped": 7,
+        "subtests_passed": 39,
+        "summary": "1 failed, 752 passed, 7 skipped, 39 subtests passed in 2556.65s (0:42:36)",
+        "log": "/var/tmp/noyra-boundary-final-0hw95swm-shard-3.log",
+        "xml": "/var/tmp/noyra-boundary-final-0hw95swm-shard-3.xml"
+      },
+      {
+        "shard": 4,
+        "passed": 808,
+        "skipped": 1,
+        "subtests_passed": 201,
+        "summary": "808 passed, 1 skipped, 201 subtests passed in 2612.86s (0:43:32)",
+        "log": "/var/tmp/noyra-boundary-final-0hw95swm-shard-4.log",
+        "xml": "/var/tmp/noyra-boundary-final-0hw95swm-shard-4.xml"
+      }
+    ],
+    "all_green_original_run": false
+  },
+  "original_failure": {
+    "node": "tests/test_gate3_contract_ops.py::test_public_health_does_not_leak_cached_admin_diagnostics",
+    "serial_original_fixture": "1 failed in 4.91s",
+    "cause": "old test double provides health but omits new request_health; real AtRestGuard provides both",
+    "repair": "add request_health to test double; no production change; no assertion removed or weakened"
+  },
+  "linux_followups": {
+    "final_boundary_and_acquisition": {
+      "passed": 61,
+      "summary": "61 passed in 119.89s (0:01:59)",
+      "log": "/var/tmp/noyra-boundary-final-verify-tb53p220.log"
+    },
+    "final_gate3_file": {
+      "passed": 10,
+      "summary": "10 passed in 18.43s",
+      "log": "/var/tmp/noyra-boundary-final-verify-tb53p220-gate3.log"
+    }
+  },
+  "windows": {
+    "python": "3.12.10",
+    "final_seven_modules": {
+      "passed": 180,
+      "skipped": 7,
+      "seconds": 325.31
+    },
+    "cross_module_compatibility": {
+      "passed": 131,
+      "skipped": 13,
+      "seconds": 310.29
+    },
+    "final_gate3_file": {
+      "passed": 10,
+      "seconds": 47.49
+    },
+    "counts_overlap_do_not_sum": true
+  },
+  "static": {
+    "ruff_lint": "passed",
+    "ruff_format_files": 462,
+    "mypy_source_files": 442,
+    "windows_mypy_python_target": "3.12",
+    "linux_mypy_python_target": "3.11",
+    "linux_actual_python": "3.12.3"
+  },
+  "frontend": {
+    "passed": 116,
+    "failed": 0
+  },
+  "provenance": {
+    "compared_roots": [
+      "src",
+      "tests",
+      "scripts",
+      "deploy",
+      ".github"
+    ],
+    "compared_files": 597,
+    "production_snapshot_mismatches": 0,
+    "test_only_snapshot_differences": [
+      "tests/test_boundary_remediation.py",
+      "tests/test_gate3_contract_ops.py"
+    ],
+    "final_manifest_sha256": "e9a242fbdb649b32bbfa0e1dd24d02f57e94c58b8f9c087d4958e093d53c70e4",
+    "manifest_algorithm": "sorted relative UTF-8 path + NUL + lowercase SHA256 hex + newline",
+    "full_snapshot": "/var/tmp/noyra-boundary-final-0hw95swm",
+    "original_manifest": "/var/tmp/noyra-boundary-final-0hw95swm-manifest.json",
+    "final_test_followups": "/var/tmp/noyra-boundary-final-verify-tb53p220"
+  },
+  "residual_limits": [
+    "A12: do not automatically chmod/chown ambiguous existing root-owned 0755 migration layouts",
+    "A08: permission snapshot maximum age 5 seconds; budget exceeded means fail-closed; Windows ACL changes rely on background detection",
+    "A02: network request is bounded; OS DNS worker cannot be forcibly killed; arbitrary local filesystem I/O has no new hard deadline",
+    "not a second clean complete-suite run: preserve original full-run failure and final targeted verification separately",
+    "Python 3.11 runtime, full Windows CI matrix, real encrypted-volume deployment, and live chain operations not performed"
+  ]
+}

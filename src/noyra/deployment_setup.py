@@ -8,16 +8,30 @@ import os
 import platform
 import re
 import shutil
+import signal
 import socket
 import stat as stat_module
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
+from importlib.resources import files
 from pathlib import Path
+from queue import Empty, Queue
 from subprocess import CompletedProcess
 from typing import Protocol
+
+from noyra.core.storage_mode import (
+    StorageMode,
+    StorageUnavailableError,
+    detect_storage_layout,
+    require_backup_storage,
+    resolve_storage_profile,
+)
 
 
 class SetupError(Exception):
@@ -182,9 +196,62 @@ class SubprocessRunner:
     enforce_host_privileges = True
 
     def run(
-        self, argv: Sequence[str], *, check: bool = True, input_text: str | None = None
+        self,
+        argv: Sequence[str],
+        *,
+        check: bool = True,
+        input_text: str | None = None,
+        timeout_seconds: float = 120,
     ) -> CompletedProcess[str]:
-        return subprocess.run(argv, check=check, input=input_text, text=True, capture_output=True)
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=os.name == "posix",
+        )
+        try:
+            stdout, stderr = process.communicate(input=input_text, timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            self._terminate(process)
+            raise SetupError(
+                "COMMAND_TIMEOUT", f"command timed out: {Path(argv[0]).name}"
+            ) from None
+        except BaseException:
+            self._terminate(process)
+            raise
+        assert process.returncode is not None
+        result = CompletedProcess(argv, process.returncode, stdout, stderr)
+        if check:
+            result.check_returncode()
+        return result
+
+    @staticmethod
+    def _terminate(process: subprocess.Popen[str]) -> None:
+        # Kill the session on Ubuntu so descendants cannot retain output
+        # pipes or continue a timed-out configuration operation.
+        if sys.platform != "win32":
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+        else:
+            with suppress(OSError, subprocess.TimeoutExpired):
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+            process.kill()
+        try:
+            process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
+            process.kill()
+            process.wait(timeout=5)
 
 
 @dataclass(frozen=True)
@@ -198,40 +265,116 @@ class BackupRecord:
     gid: int | None = None
 
 
+def _backup_regular_file(path: Path) -> os.stat_result:
+    metadata = path.lstat()
+    if (
+        not stat_module.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or getattr(metadata, "st_file_attributes", 0) & 0x400
+        or (
+            os.name == "posix"
+            and (
+                metadata.st_uid != getattr(os, "geteuid", lambda: -1)() or metadata.st_mode & 0o077
+            )
+        )
+    ):
+        raise SetupError("BACKUP_PATH", "backup artifact is not a private regular file")
+    return metadata
+
+
+def _publish_backup_file(target: Path, payload: bytes) -> None:
+    """Publish a complete private file without replacing an existing inode."""
+    if target.exists() or target.is_symlink():
+        _backup_regular_file(target)
+        if target.read_bytes() != payload:
+            raise SetupError("BACKUP_CONFLICT", "existing backup content does not match")
+        return
+    descriptor, temporary = tempfile.mkstemp(prefix=".noyra-setup-", dir=target.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        # link is an atomic, no-replace publication. A concurrent creator can
+        # never redirect this write to a symlink/hardlink target.
+        try:
+            os.link(temporary, target)
+        except FileExistsError as error:
+            raise SetupError(
+                "BACKUP_CONFLICT", "backup target changed during publication"
+            ) from error
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
 def create_backup(path: str | Path, backup_root: str | Path, mode: str = "default") -> BackupRecord:
     source = Path(path)
-    if source.is_symlink() or source.parent.is_symlink():
-        raise SetupError("SYMLINK_PATH", "refusing to back up a symlink")
+    for component in (source, *source.parents):
+        if component.is_symlink() or (
+            component.exists() and getattr(component.lstat(), "st_file_attributes", 0) & 0x400
+        ):
+            raise SetupError("SYMLINK_PATH", "refusing to back up a symlink or reparse point")
     if not source.exists() or not source.is_file():
         raise SetupError("BACKUP_SOURCE_MISSING", f"file does not exist: {source}")
     root = Path(backup_root)
-    root.mkdir(parents=True, exist_ok=True)
     try:
-        digest = hashlib.sha256(source.read_bytes()).hexdigest()
-    except OSError as exc:
-        raise SetupError("BACKUP_UNREADABLE", f"cannot read source: {source}") from exc
-    target = root / f"{source.name}.{digest[:12]}.bak"
-    shutil.copy2(source, target)
-    stat = source.stat()
-    metadata_path = target.with_name(target.name + ".metadata.json")
-    metadata = {
-        "original_path": str(source),
-        "backup_path": str(target),
-        "sha256": digest,
-        "mode": mode,
-        "file_mode": stat_module.S_IMODE(stat.st_mode),
-        "uid": getattr(stat, "st_uid", None),
-        "gid": getattr(stat, "st_gid", None),
-    }
-    metadata_path.write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
+        # A new system-disk directory is allowed. A missing declared mount is
+        # rejected before mkdir, including external identity and fstab checks.
+        require_backup_storage(root)
+        root.mkdir(parents=True, mode=0o700, exist_ok=True)
+        require_backup_storage(root)
+        with source.open("rb") as stream:
+            metadata_stat = os.fstat(stream.fileno())
+            if not stat_module.S_ISREG(metadata_stat.st_mode) or metadata_stat.st_nlink != 1:
+                raise SetupError("BACKUP_PATH", "backup source must be a single regular file")
+            payload = stream.read()
+        digest = hashlib.sha256(payload).hexdigest()
+        target = root / f"{source.name}.{digest[:12]}.bak"
+        metadata_path = target.with_name(target.name + ".metadata.json")
+        # Validate both existing names before publishing either artifact.
+        for candidate in (target, metadata_path):
+            if candidate.exists() or candidate.is_symlink():
+                _backup_regular_file(candidate)
+        metadata = {
+            "original_path": str(source),
+            "backup_path": str(target),
+            "sha256": digest,
+            "mode": mode,
+            "file_mode": stat_module.S_IMODE(metadata_stat.st_mode),
+            "uid": getattr(metadata_stat, "st_uid", None),
+            "gid": getattr(metadata_stat, "st_gid", None),
+        }
+        encoded_metadata = json.dumps(metadata, sort_keys=True).encode("utf-8")
+        if metadata_path.exists() and metadata_path.read_bytes() != encoded_metadata:
+            # The same bytes may be backed up under another setup mode or after
+            # source metadata changes. Preserve the earlier rollback record and
+            # give this authorization its own immutable metadata identity.
+            metadata_digest = hashlib.sha256(encoded_metadata).hexdigest()[:16]
+            metadata_path = target.with_name(target.name + f".{metadata_digest}.metadata.json")
+        _publish_backup_file(target, payload)
+        _publish_backup_file(metadata_path, encoded_metadata)
+        if os.name == "posix":
+            descriptor = os.open(
+                root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            )
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+    except StorageUnavailableError as error:
+        raise SetupError("BACKUP_STORAGE_UNAVAILABLE", str(error)) from error
+    except OSError as error:
+        raise SetupError(
+            "BACKUP_UNREADABLE", "cannot safely create configuration backup"
+        ) from error
     return BackupRecord(
         source,
         target,
         metadata_path,
         digest,
-        stat_module.S_IMODE(stat.st_mode),
-        getattr(stat, "st_uid", None),
-        getattr(stat, "st_gid", None),
+        stat_module.S_IMODE(metadata_stat.st_mode),
+        getattr(metadata_stat, "st_uid", None),
+        getattr(metadata_stat, "st_gid", None),
     )
 
 
@@ -314,6 +457,65 @@ class SetupRunner:
     def __init__(self, options: SetupOptions, runner: CommandRunner | None = None):
         self.options = options
         self.runner = runner or SubprocessRunner()
+        self._deadline: float | None = None
+
+    def _remaining(self) -> float:
+        if self._deadline is None:
+            self._deadline = time.monotonic() + 600
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise SetupError("SETUP_TIMEOUT", "deployment operation deadline exceeded")
+        return remaining
+
+    def _command(
+        self,
+        argv: Sequence[str],
+        *,
+        check: bool = True,
+        input_text: str | None = None,
+    ) -> CompletedProcess[str]:
+        remaining = self._remaining()
+        try:
+            if isinstance(self.runner, SubprocessRunner):
+                limit = 300 if argv[0] == "apt-get" else 120
+                return self.runner.run(
+                    argv,
+                    check=check,
+                    input_text=input_text,
+                    timeout_seconds=min(limit, remaining),
+                )
+            result = self.runner.run(argv, check=check, input_text=input_text)
+            self._remaining()
+            return result
+        except subprocess.TimeoutExpired:
+            # Custom command adapters must not disclose captured credentials.
+            raise SetupError(
+                "COMMAND_TIMEOUT", f"command timed out: {Path(argv[0]).name}"
+            ) from None
+
+    @staticmethod
+    def _health_command(url: str) -> tuple[str, ...]:
+        return ("curl", "--fail", "--connect-timeout", "5", "--max-time", "10", url)
+
+    def _configured_backup_root(self) -> Path:
+        """Resolve the backup root from the same env file used by the service."""
+
+        try:
+            text = self.options.env_path.read_text(encoding="utf-8")
+        except OSError:
+            return self.options.backup_root
+        assignments = {
+            key: value
+            for key, value in parse_env_file(text)
+            if value is not None and key and not key.startswith("#")
+        }
+        configured = assignments.get("NOYRA_BACKUP_ROOT", "").strip()
+        if not configured:
+            return self.options.backup_root
+        candidate = Path(configured).expanduser()
+        if not candidate.is_absolute():
+            raise SetupError("BACKUP_ROOT_INVALID", "NOYRA_BACKUP_ROOT must be absolute")
+        return candidate
 
     def run(self) -> SetupResult:
         if self.options.mode == "local":
@@ -325,6 +527,7 @@ class SetupRunner:
         raise SetupError("INVALID_MODE", f"unsupported deployment mode: {self.options.mode}")
 
     def run_local(self) -> SetupResult:
+        self._deadline = time.monotonic() + 600
         actions = [f"validate mode {self.options.mode}"]
         if self.options.env_path.is_symlink():
             raise SetupError("ENV_SYMLINK", "environment path must not be a symlink")
@@ -357,11 +560,39 @@ class SetupRunner:
             raise SetupError("OPERATOR_TOKEN_MISSING", "an operator token source is required")
         actions.append("validate operator token source")
 
+        storage_layout = None
+        configured_backup_root = self._configured_backup_root()
+        if platform.system().lower() == "linux":
+            try:
+                configured_data_root = Path(assignments.get("NOYRA_DATA_DIR", "/var/lib/noyra"))
+                storage_layout = detect_storage_layout(
+                    configured_data_root,
+                    configured_backup_root,
+                )
+            except StorageUnavailableError as error:
+                raise SetupError("STORAGE_UNAVAILABLE", str(error)) from error
+            if storage_layout.mode == StorageMode.UNAVAILABLE or not storage_layout.writable:
+                reason = storage_layout.reason_code or "storage_unavailable"
+                raise SetupError("STORAGE_UNAVAILABLE", reason)
+            actions.append(f"validate Noyra storage mode: {storage_layout.mode.value}")
+            try:
+                storage_profile = resolve_storage_profile(
+                    assignments.get("NOYRA_PROFILE", "development"),
+                    assignments.get("NOYRA_STORAGE_PROFILE"),
+                )
+            except ValueError as error:
+                raise SetupError("STORAGE_PROFILE_INVALID", str(error)) from error
+            if storage_profile == "recovery_capable" and not storage_layout.backup_ready:
+                raise SetupError(
+                    "BACKUP_STORAGE_UNAVAILABLE",
+                    storage_layout.backup_reason_code or "backup_storage_unavailable",
+                )
+            actions.append(f"validate Noyra storage profile: {storage_profile}")
+
         if self.options.dry_run:
             actions.extend(
                 [
                     "check root execution (deferred in dry-run)",
-                    "check /var/lib/noyra mount visibility (deferred in dry-run)",
                     "check systemctl is-active noyra (deferred in dry-run)",
                     "check live and ready health endpoints (deferred in dry-run)",
                     f"SSH: ssh -N -L 8765:127.0.0.1:8765 {self.options.server}",
@@ -372,20 +603,15 @@ class SetupRunner:
         if platform.system().lower() == "linux":
             if hasattr(os, "geteuid") and os.geteuid() != 0:
                 raise SetupError("ROOT_REQUIRED", "local checks require root")
-            mount = self.runner.run(
-                ("findmnt", "-n", "-o", "SOURCE", "--target", "/var/lib/noyra"),
-                check=False,
-            )
-            if mount.returncode != 0 or not mount.stdout.strip():
-                raise SetupError("DATA_MOUNT_MISSING", "/var/lib/noyra is not visible")
-            actions.append("validate /var/lib/noyra mount visibility")
-            active = self.runner.run(("systemctl", "is-active", "noyra"), check=False)
+            if storage_layout is None:
+                raise SetupError("STORAGE_UNAVAILABLE", "Noyra storage mode is unavailable")
+            active = self._command(("systemctl", "is-active", "noyra"), check=False)
             if active.returncode != 0 or active.stdout.strip() != "active":
                 raise SetupError("SERVICE_INACTIVE", "noyra service is not active")
             actions.append("validate systemctl is-active noyra")
             for endpoint in ("live", "ready"):
-                check = self.runner.run(
-                    ("curl", "--fail", f"http://127.0.0.1:8765/health/{endpoint}"), check=False
+                check = self._command(
+                    self._health_command(f"http://127.0.0.1:8765/health/{endpoint}"), check=False
                 )
                 if check.returncode != 0:
                     raise SetupError(
@@ -402,6 +628,7 @@ class SetupRunner:
         dry_run: bool | None = None,
     ) -> SetupResult:
         """Publish the public HTTPS proxy and roll back both files on failure."""
+        self._deadline = time.monotonic() + 600
         actions: list[str] = ["validate mode public"]
         selected_public = public_domain if public_domain is not None else self.options.public_domain
         selected_admin = admin_domain if admin_domain is not None else self.options.admin_domain
@@ -491,9 +718,10 @@ class SetupRunner:
             self._require_dns_ready(public, admin)
             actions.append("validate DNS readiness for both HTTPS origins")
 
-            env_backup = create_backup(env_path, self.options.backup_root, "public-env")
+            backup_root = self._configured_backup_root()
+            env_backup = create_backup(env_path, backup_root, "public-env")
             caddy_backup = (
-                create_backup(caddy_path, self.options.backup_root, "public-caddy")
+                create_backup(caddy_path, backup_root, "public-caddy")
                 if caddy_path.exists()
                 else None
             )
@@ -579,7 +807,7 @@ class SetupRunner:
         self, argv: Sequence[str], code: str, *, secret: str | None = None
     ) -> CompletedProcess[str]:
         try:
-            result = self.runner.run(argv, check=False)
+            result = self._command(argv, check=False)
         except OSError as exc:
             raise SetupError(code, f"command could not run: {argv[0]}") from exc
         if result.returncode != 0:
@@ -591,30 +819,48 @@ class SetupRunner:
 
     def _require_dns_ready(self, public: str, admin: str) -> None:
         for domain in (public, admin):
+            result: Queue[OSError | None] = Queue(maxsize=1)
+
+            def resolve(name: str = domain, output: Queue[OSError | None] = result) -> None:
+                try:
+                    socket.getaddrinfo(name, 443)
+                    output.put_nowait(None)
+                except OSError as lookup_error:
+                    output.put_nowait(lookup_error)
+
+            # getaddrinfo has no portable timeout. A daemon resolver cannot
+            # hold CLI shutdown or cause a mutation after the deadline.
+            threading.Thread(target=resolve, daemon=True).start()
             try:
-                socket.getaddrinfo(domain, 443)
-            except OSError as exc:
+                error = result.get(timeout=min(5, self._remaining()))
+            except Empty:
+                raise SetupError("DNS_TIMEOUT", f"DNS lookup timed out for {domain}") from None
+            if error is not None:
                 raise SetupError(
                     "DNS_PENDING",
                     f"DNS is not ready for {domain}; create A/AAAA records before setup",
-                ) from exc
+                ) from error
+
+    def _check_health(self, url: str, code: str, secret: str | None) -> None:
+        for attempt in range(3):
+            try:
+                self._run_checked(self._health_command(url), code, secret=secret)
+                return
+            except SetupError as error:
+                if attempt == 2 or error.code != code:
+                    raise
+                time.sleep(min(0.2, self._remaining()))
 
     def _run_health_checks(
         self, public: str, admin: str, actions: list[str], *, secret: str | None = None
     ) -> None:
         for endpoint in ("live", "ready"):
-            self._run_checked(
-                ("curl", "--fail", f"http://127.0.0.1:8765/health/{endpoint}"),
-                "HEALTHCHECK_FAILED",
-                secret=secret,
+            self._check_health(
+                f"http://127.0.0.1:8765/health/{endpoint}", "HEALTHCHECK_FAILED", secret
             )
             actions.append(f"validate local /health/{endpoint}")
         for domain in (public, admin):
-            self._run_checked(
-                ("curl", "--fail", f"https://{domain}/health/ready"),
-                "HTTPS_CHECK_FAILED",
-                secret=secret,
-            )
+            self._check_health(f"https://{domain}/health/ready", "HTTPS_CHECK_FAILED", secret)
             actions.append(f"validate HTTPS health for {domain}")
 
     def _rollback_public(
@@ -623,6 +869,7 @@ class SetupRunner:
         caddy_backup: BackupRecord | None,
         new_caddy_path: Path | None,
     ) -> None:
+        self._deadline = time.monotonic() + 120
         failures: list[str] = []
         try:
             restore_backup(env_backup)
@@ -643,7 +890,7 @@ class SetupRunner:
             (("systemctl", "reload", "caddy"), "Caddy service restoration failed"),
         ):
             try:
-                result = self.runner.run(command, check=False)
+                result = self._command(command, check=False)
                 if result.returncode != 0:
                     failures.append(label)
             except Exception:
@@ -663,6 +910,7 @@ class SetupRunner:
         enabled_state: str,
         was_active: bool,
     ) -> None:
+        self._deadline = time.monotonic() + 120
         failures: list[str] = []
         try:
             restore_backup(env_backup)
@@ -728,7 +976,7 @@ class SetupRunner:
                 )
             for command in restore_commands:
                 try:
-                    result = self.runner.run(command, check=False)
+                    result = self._command(command, check=False)
                     if result.returncode != 0:
                         failures.append("service restoration failed")
                 except Exception:
@@ -754,6 +1002,7 @@ class SetupRunner:
         exception text while still making setup usable from both the CLI and
         tests with an injected destination path.
         """
+        self._deadline = time.monotonic() + 600
         actions: list[str] = ["validate mode cloudflare"]
         selected_public = public_domain if public_domain is not None else self.options.public_domain
         selected_admin = admin_domain if admin_domain is not None else self.options.admin_domain
@@ -857,12 +1106,7 @@ class SetupRunner:
                     "NOYRA_ADMIN_SESSION_COOKIE_SECURE": "true",
                 },
             )
-            template_path = (
-                Path(__file__).resolve().parents[2]
-                / "deploy"
-                / "systemd"
-                / "cloudflared-noyra.service.example"
-            )
+            template_path = files("noyra").joinpath("resources/cloudflared-noyra.service")
             try:
                 unit_text = template_path.read_text(encoding="utf-8")
             except (OSError, UnicodeError) as exc:
@@ -872,12 +1116,12 @@ class SetupRunner:
 
             self._require_dns_ready(public, admin)
             actions.append("validate DNS readiness for both HTTPS origins")
-            version = self.runner.run(("cloudflared", "--version"), check=False)
+            version = self._command(("cloudflared", "--version"), check=False)
             if version.returncode != 0 and selected_dry_run:
                 raise SetupError("CLOUDFLARED_UNAVAILABLE", "cloudflared is not installed")
             if version.returncode != 0:
                 try:
-                    installed = self.runner.run(
+                    installed = self._command(
                         ("apt-get", "install", "-y", "cloudflared"), check=False
                     )
                 except OSError as exc:
@@ -886,7 +1130,7 @@ class SetupRunner:
                     ) from exc
                 if installed.returncode != 0:
                     raise SetupError("CLOUDFLARED_UNAVAILABLE", "cloudflared is not installed")
-                version = self.runner.run(("cloudflared", "--version"), check=False)
+                version = self._command(("cloudflared", "--version"), check=False)
                 if version.returncode != 0:
                     raise SetupError("CLOUDFLARED_UNAVAILABLE", "cloudflared is not installed")
             self._run_checked(
@@ -921,7 +1165,7 @@ class SetupRunner:
                 (("systemctl", "is-active", "cloudflared-noyra"), "active"),
             ):
                 try:
-                    state = self.runner.run(command, check=False)
+                    state = self._command(command, check=False)
                     value = state.stdout.strip()
                 except OSError:
                     value = ""
@@ -930,17 +1174,16 @@ class SetupRunner:
                 else:
                     service_was_active = value == "active"
 
-            env_backup = create_backup(env_path, self.options.backup_root, "cloudflare-env")
+            backup_root = self._configured_backup_root()
+            env_backup = create_backup(env_path, backup_root, "cloudflare-env")
             if credential_path.exists():
                 if not credential_path.is_file():
                     raise SetupError("TOKEN_PATH_INVALID", "Cloudflare token path is not a file")
-                token_backup = create_backup(
-                    credential_path, self.options.backup_root, "cloudflare-token"
-                )
+                token_backup = create_backup(credential_path, backup_root, "cloudflare-token")
             if unit_path.exists():
                 if not unit_path.is_file():
                     raise SetupError("UNIT_PATH_INVALID", "Cloudflare unit path is not a file")
-                unit_backup = create_backup(unit_path, self.options.backup_root, "cloudflare-unit")
+                unit_backup = create_backup(unit_path, backup_root, "cloudflare-unit")
 
             self._atomic_write(env_path, updated_env)
             self._atomic_write_protected(credential_path, selected_token + "\n")

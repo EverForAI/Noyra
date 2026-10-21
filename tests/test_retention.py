@@ -8,6 +8,7 @@ import pytest
 
 from noyra.core import Database, IdentityStore
 from noyra.core.actions import ActionLedger
+from noyra.core.backup_retention import BackupRetentionPolicy
 from noyra.core.provider_health import ProviderHealthStore
 from noyra.core.retention import (
     RETENTION_REGISTRY,
@@ -67,6 +68,39 @@ def test_saved_policy_survives_restart_and_rejects_conflicts_and_corruption(tmp_
         reopened.run_batch(subject)
 
 
+def test_backup_policy_and_gc_run_are_durable(tmp_path: Any) -> None:
+    db = Database(tmp_path / "backup-policy.sqlite3")
+    subject = "Noyra-backup-policy"
+    IdentityStore(db).ensure(subject, content_hash(subject))
+    manager = RetentionManager(db)
+    backup = BackupRetentionPolicy(keep_verified_count=3, max_age_days=14).public()
+    result = manager.configure(
+        subject,
+        asdict(RetentionSettings()),
+        expected_revision=0,
+        actor="operator",
+        backup_settings=backup,
+        backup_expected_revision=0,
+    )
+    assert result["backup"]["revision"] == 1
+    assert result["backup"]["settings"] == backup
+    plan = manager.retention_plan(subject)
+    assert plan["backup"]["policy"] == backup
+    run_id = manager.record_backup_gc_run(
+        subject,
+        plan_id=plan["backup"].get("plan_id", "0" * 64),
+        status="applied",
+        cursor=plan["backup"].get("cursor", {}),
+        deleted_count=0,
+    )
+    with db.connection() as connection:
+        row = connection.execute(
+            "SELECT status,plan_id FROM backup_retention_runs WHERE run_id=?", (run_id,)
+        ).fetchone()
+    assert row["status"] == "applied"
+    assert len(row["plan_id"]) == 64
+
+
 def test_retention_settings_http_auth_revision_and_validation(tmp_path: Any) -> None:
     from urllib.error import HTTPError
     from urllib.request import Request, urlopen
@@ -77,8 +111,11 @@ def test_retention_settings_http_auth_revision_and_validation(tmp_path: Any) -> 
     from noyra.service import NoyraHTTPServer, ServiceSettings
 
     token = "test-token-sufficient-entropy-for-retention"
+    backup_root = tmp_path / "backups"
+    backup_root.mkdir()
     settings = ServiceSettings(
         data_dir=tmp_path,
+        backup_root=backup_root,
         subject_id="retention-http",
         genesis_hash=content_hash("http"),
         port=0,
@@ -110,6 +147,17 @@ def test_retention_settings_http_auth_revision_and_validation(tmp_path: Any) -> 
         with submit() as response:
             result = json.loads(response.read())
         assert result["revision"] == 1
+        with urlopen(
+            Request(
+                f"http://127.0.0.1:{http.address[1]}/api/admin/retention",
+                headers=headers,
+            ),
+            timeout=10,
+        ) as response:
+            status = json.loads(response.read())
+        assert status["sqlite_space"]["page_size"] > 0
+        assert status["plan"]["backup"]["status"] == "planned"
+        assert status["plan"]["apply_allowed"] is False
         with pytest.raises(HTTPError) as conflict:
             submit()
         assert conflict.value.code == 409
@@ -136,6 +184,91 @@ def test_retention_run_history_is_bounded(tmp_path: Any) -> None:
             "SELECT COUNT(*) FROM retention_runs WHERE subject_id=?", (subject,)
         ).fetchone()[0]
     assert count == 2
+
+
+def test_retention_reports_sqlite_space_without_vacuum_side_effect(tmp_path: Any) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-retention-space"
+    IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
+    with db.connection() as connection:
+        connection.execute("CREATE TABLE space_probe(payload BLOB NOT NULL)")
+        connection.executemany(
+            "INSERT INTO space_probe(payload) VALUES (zeroblob(4096))", [() for _ in range(32)]
+        )
+        connection.commit()
+        connection.execute("DELETE FROM space_probe")
+        connection.commit()
+        before = tuple(
+            connection.execute(f"PRAGMA {pragma}").fetchone()[0]
+            for pragma in ("page_count", "freelist_count")
+        )
+    manager = RetentionManager(db)
+    metrics = manager.sqlite_space()
+    with db.connection() as connection:
+        after = tuple(
+            connection.execute(f"PRAGMA {pragma}").fetchone()[0]
+            for pragma in ("page_count", "freelist_count")
+        )
+
+    physical_bytes = metrics["physical_bytes"]
+    wal_bytes = metrics["wal_bytes"]
+    shm_bytes = metrics["shm_bytes"]
+    page_size = metrics["page_size"]
+    page_count = metrics["page_count"]
+    freelist_pages = metrics["freelist_pages"]
+    freelist_bytes = metrics["freelist_bytes"]
+    assert metrics["database_bytes"] == db.path.stat().st_size
+    assert physical_bytes is not None and physical_bytes >= metrics["database_bytes"]
+    assert wal_bytes is not None and wal_bytes >= 0
+    assert shm_bytes is not None and shm_bytes >= 0
+    assert page_size is not None and page_size > 0
+    assert page_count is not None and page_count > 0
+    assert freelist_pages is not None and freelist_pages >= 0
+    assert freelist_bytes == page_size * freelist_pages
+    assert before == after
+    assert freelist_pages is not None and freelist_pages > 0
+
+
+def test_retention_90_day_cutoff_deletes_only_rows_strictly_older_than_cutoff(
+    tmp_path: Any,
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    subject = "Noyra-retention-cutoff-90d"
+    IdentityStore(db).ensure(subject, content_hash({"subject": subject}))
+    health = ProviderHealthStore(db)
+    now = datetime(2026, 10, 18, 12, tzinfo=UTC)
+    cutoff = now - timedelta(days=90)
+    samples = {
+        "older": cutoff - timedelta(seconds=1),
+        "at-cutoff": cutoff,
+        "newer": cutoff + timedelta(seconds=1),
+    }
+    for provider in samples:
+        health.record_attempt(subject, "model", provider, f"attempt-{provider}", True, 1, None)
+    with db.transaction() as connection:
+        for provider, timestamp in samples.items():
+            connection.execute(
+                "UPDATE provider_health_buckets SET bucket_start=?, state_hash=? "
+                "WHERE subject_id=? AND provider_id=?",
+                (timestamp.isoformat(), content_hash({"provider": provider}), subject, provider),
+            )
+
+    result = RetentionManager(db, RetentionSettings(health_days=90)).run_batch(
+        subject, now=now, batch_size=50
+    )
+
+    assert result["failed_reason"] is None
+    assert result["deleted_by_table"]["provider_health_buckets"] == 1
+    with db.connection() as connection:
+        remaining = {
+            row["provider_id"]: row["bucket_start"]
+            for row in connection.execute(
+                "SELECT provider_id, bucket_start FROM provider_health_buckets WHERE subject_id=?",
+                (subject,),
+            )
+        }
+    assert set(remaining) == {"at-cutoff", "newer"}
+    assert remaining["at-cutoff"] == cutoff.isoformat()
 
 
 def test_retention_compacts_cold_model_payloads_without_deleting_ledger_rows(

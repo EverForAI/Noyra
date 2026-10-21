@@ -26,7 +26,11 @@ def _setup_command(arguments: list[str]) -> None:
     parser.add_argument(
         "--caddyfile", dest="caddy_path", type=Path, default=Path("/etc/caddy/Caddyfile")
     )
-    parser.add_argument("--backup-root", type=Path, default=Path("/var/backups/noyra"))
+    parser.add_argument(
+        "--backup-root",
+        type=Path,
+        default=Path(os.getenv("NOYRA_BACKUP_ROOT", "/var/backups/noyra")),
+    )
     parser.add_argument("--tunnel-token-file", type=Path)
     parser.add_argument("--server", default=os.getenv("NOYRA_SERVER", "server"))
     options = parser.parse_args(arguments)
@@ -124,6 +128,53 @@ def _backup_command(arguments: list[str], *, restore: bool) -> None:
         print(json.dumps(artifact.public(), sort_keys=True))
 
 
+def _storage_check_command(arguments: list[str]) -> None:
+    """Validate the native data path without creating or modifying state."""
+    from noyra.core.storage_mode import StorageMode, detect_storage_layout
+
+    parser = argparse.ArgumentParser(prog="python -m noyra storage-check")
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path(os.getenv("NOYRA_DATA_DIR", "/var/lib/noyra")),
+    )
+    parser.add_argument(
+        "--backup-dir",
+        type=Path,
+        default=Path(os.getenv("NOYRA_BACKUP_ROOT", "/var/backups/noyra")),
+    )
+    parser.add_argument(
+        "--require-backup",
+        action="store_true",
+        help="return an unavailable exit status unless the configured backup path is ready",
+    )
+    options = parser.parse_args(arguments)
+    layout = detect_storage_layout(options.data_dir, options.backup_dir)
+    from noyra.core.storage_mode import resolve_storage_profile
+
+    try:
+        storage_profile = resolve_storage_profile(
+            os.getenv("NOYRA_PROFILE", "development"), os.getenv("NOYRA_STORAGE_PROFILE")
+        )
+    except ValueError as error:
+        raise SystemExit(78) from error
+    require_backup = options.require_backup or storage_profile == "recovery_capable"
+    payload = layout.public()
+    payload.update(
+        {
+            "storage_profile": storage_profile,
+            "backup_required": require_backup,
+        }
+    )
+    print(json.dumps(payload, sort_keys=True))
+    if (
+        layout.mode is StorageMode.UNAVAILABLE
+        or not layout.writable
+        or (require_backup and not layout.backup_ready)
+    ):
+        raise SystemExit(78)
+
+
 class _WalletArgumentParser(argparse.ArgumentParser):
     """Argument parser that never echoes untrusted argument values."""
 
@@ -173,6 +224,41 @@ def _wallet_command(arguments: list[str]) -> None:
     _wallet_setup_command(forwarded)
 
 
+def _signer_command(arguments: list[str]) -> None:
+    from noyra.signer_service import CHAIN_ID, HTTPRPC, SignerEngine, SignerHTTPServer, SignerState
+    from noyra.wallet.keystore import load_account, read_password_file
+
+    parser = argparse.ArgumentParser(prog="python -m noyra signer")
+    parser.add_argument("--keystore", type=Path, required=True)
+    parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument("--wallet-password-credential", type=Path, required=True)
+    parser.add_argument("--rpc-url-credential", type=Path, required=True)
+    parser.add_argument("--bearer-token-credential", type=Path, required=True)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8780)
+    parser.add_argument("--chain-id", type=int, default=CHAIN_ID)
+    options = parser.parse_args(arguments)
+    if options.host != "127.0.0.1" or options.chain_id != CHAIN_ID:
+        raise SystemExit("signer configuration is invalid")
+    account = load_account(options.keystore, read_password_file(options.wallet_password_credential))
+    token = options.bearer_token_credential.read_text(encoding="utf-8").strip()
+    rpc_url = options.rpc_url_credential.read_text(encoding="utf-8").strip()
+    state = SignerState.open(options.state)
+    engine = SignerEngine(
+        account=account,
+        signer_id="staging-signer-01",
+        chain_id=options.chain_id,
+        rpc=HTTPRPC(rpc_url, options.chain_id),
+        state=state,
+    )
+    server = SignerHTTPServer(engine, bearer_token=token, host=options.host, port=options.port)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        state.close()
+
+
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "setup":
         _setup_command(sys.argv[2:])
@@ -192,11 +278,17 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "restore-backup":
         _backup_command(sys.argv[2:], restore=True)
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "storage-check":
+        _storage_check_command(sys.argv[2:])
+        return
     if len(sys.argv) > 1 and sys.argv[1] == "wallet-setup":
         _wallet_setup_command(sys.argv[2:])
         return
     if len(sys.argv) > 1 and sys.argv[1] == "wallet":
         _wallet_command(sys.argv[2:])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "signer":
+        _signer_command(sys.argv[2:])
         return
     print(f"Noyra {__version__} - artificial subject runtime")
 

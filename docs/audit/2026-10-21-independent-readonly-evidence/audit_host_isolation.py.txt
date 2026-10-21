@@ -1,0 +1,7 @@
+from pathlib import Path
+import noyra.core.storage_mode as storage
+def pytest_configure(config):
+ storage.STORAGE_IDENTITY_PATH=Path("/var/tmp/noyra-postfix-no-system-config/storage-identity.conf")
+ storage.BACKUP_STORAGE_IDENTITY_PATH=Path("/var/tmp/noyra-postfix-no-system-config/backup-storage-identity.conf")
+ import noyra.core.release_assurance as release
+ release.upgrade_channel.__defaults__=(Path("/var/tmp/noyra-postfix-no-system-config/upgrade-channel"),)

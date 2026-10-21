@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import re
 import threading
+from collections.abc import Callable
 from types import TracebackType
 from typing import Self
 
 import httpx
 
+from noyra.core.admission import assert_current_lease
 from noyra.core.deadline import monotonic_time
 from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
@@ -173,6 +175,17 @@ class WalletRPCBalanceAcquirer:
         method, params, abi_encoded = self._balance_request(
             asset.asset_type, asset.contract_address, address.address
         )
+
+        def authorize() -> None:
+            assert_current_lease()
+            if (
+                self.store.get_asset(asset_id, subject_id=subject_id) != asset
+                or self.store.get_address(address_id, subject_id=subject_id) != address
+                or self.store.get_network(network.network_id, subject_id=subject_id) != network
+            ):
+                raise WalletRPCError("wallet_rpc_configuration_changed")
+            assert_current_lease()
+
         started = monotonic_time()
         if not self._slots.acquire(timeout=self.timeout_seconds):
             raise WalletRPCError("wallet_rpc_capacity_exhausted")
@@ -191,12 +204,14 @@ class WalletRPCBalanceAcquirer:
                 raise WalletRPCError(error.code, request_count=request_count) from error
             request_count += 1
             try:
+                authorize()
                 return self._request(
                     rpc_url,
                     request_method,
                     request_params,
                     abi_encoded=request_abi_encoded,
                     timeout_seconds=remaining,
+                    before_send=authorize,
                 )
             except WalletRPCError as error:
                 raise WalletRPCError(error.code, request_count=request_count) from error
@@ -206,6 +221,7 @@ class WalletRPCBalanceAcquirer:
             if observed_chain_id != str(network.chain_id):
                 raise WalletRPCError("wallet_rpc_chain_id_mismatch", request_count=request_count)
             result = bounded_request(method, params, request_abi_encoded=abi_encoded)
+            authorize()
         finally:
             self._slots.release()
         return result, asset, address
@@ -224,7 +240,18 @@ class WalletRPCBalanceAcquirer:
         *,
         abi_encoded: bool,
         timeout_seconds: float,
+        before_send: Callable[[], None] | None = None,
     ) -> str:
+        def authorize() -> None:
+            assert_current_lease()
+            if before_send is not None:
+                before_send()
+            assert_current_lease()
+
+        def trace(event: str, info: object) -> None:
+            if event.endswith("send_request_headers.started"):
+                authorize()
+
         timeout_hook = SyncHTTPTimeoutHook()
         payload = {
             "jsonrpc": "2.0",
@@ -235,6 +262,7 @@ class WalletRPCBalanceAcquirer:
 
         def perform_request() -> bytes:
             deadline = monotonic_time() + timeout_seconds
+            authorize()
             with self._client.stream(
                 "POST",
                 endpoint,
@@ -247,6 +275,7 @@ class WalletRPCBalanceAcquirer:
                 },
                 follow_redirects=False,
                 timeout=httpx.Timeout(timeout_seconds),
+                extensions={"trace": trace},
             ) as response:
                 timeout_hook.register(response)
                 try:

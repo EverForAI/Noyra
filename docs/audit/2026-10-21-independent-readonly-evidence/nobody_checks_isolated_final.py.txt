@@ -1,0 +1,10 @@
+
+import os,subprocess,pathlib,json,pwd
+base=pathlib.Path('/var/tmp/noyra-postfix-nobody-tests');base.mkdir(mode=0o700,exist_ok=True)
+p=pwd.getpwnam('nobody');os.chown(base,p.pw_uid,p.pw_gid)
+root='/var/tmp/noyra-postfix-independent-dzhx1ejc'
+files=['tests/test_m42_p2_14_at_rest.py','tests/test_storage_mode.py','tests/test_capability_file_races.py','tests/test_gate2_storage_pressure.py','tests/test_upgrade_storage_boundary.py','tests/test_migration_storage_boundary.py']
+cmd=['runuser','-u','nobody','--','env','PYTHONDONTWRITEBYTECODE=1','PYTHONPATH=/mnt/d/metagrowh/.user-temp/noyra-independent-postfix-_8xyyv14','/var/tmp/noyra-independent-audit-20261020-env/bin/python','-m','pytest','-q','-p','no:cacheprovider',*files,'-p','audit_host_isolation','--basetemp',str(base/'pytest-isolated-final'),'--junitxml',str(base/'results-isolated-final.xml')]
+r=subprocess.run(cmd,cwd=root,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+pathlib.Path('/mnt/d/metagrowh/.user-temp/noyra-independent-postfix-_8xyyv14/nobody-host-isolated-final.log').write_text(r.stdout)
+print(r.stdout);print('EXIT',r.returncode)

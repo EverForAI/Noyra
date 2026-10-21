@@ -62,6 +62,8 @@ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
 fi
 command -v flock >/dev/null 2>&1 || { echo 'flock is required (install util-linux).' >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo 'curl is required for the readiness check.' >&2; exit 1; }
+command -v findmnt >/dev/null 2>&1 || { echo 'findmnt is required for storage identity checks.' >&2; exit 1; }
+command -v mountpoint >/dev/null 2>&1 || { echo 'mountpoint is required for storage identity checks.' >&2; exit 1; }
 
 SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SOURCE_DIR/scripts/lib/upgrade-components.sh"
@@ -78,8 +80,10 @@ DATA_DIR=/var/lib/noyra
 CONFIG_DIR=/etc/noyra
 CREDENTIALS_DIR="$CONFIG_DIR/credentials"
 UNIT_FILE=/etc/systemd/system/noyra.service
+SIGNER_UNIT=/etc/systemd/system/noyra-signer.service
 PROFILE_DROPIN_DIR=/etc/systemd/system/noyra.service.d
 PROFILE_DROPIN="$PROFILE_DROPIN_DIR/profile.conf"
+STORAGE_DROPIN="$PROFILE_DROPIN_DIR/storage.conf"
 UPGRADE_HANDOFF_LOCK="$DATA_DIR/upgrade/manager.lock"
 UPGRADE_RUNNER_UNIT=/etc/systemd/system/noyra-upgrade.service
 UPGRADE_PATH_UNIT=/etc/systemd/system/noyra-upgrade.path
@@ -91,7 +95,14 @@ TARGET_ACTIVATION_RUNNER=/usr/local/libexec/noyra-target-activation-runner.py
 TARGET_ACTIVATION_UNIT=/etc/systemd/system/noyra-target-activation.service
 TARGET_ACTIVATION_PATH_UNIT=/etc/systemd/system/noyra-target-activation.path
 TARGET_ACTIVATION_RECOVER_UNIT=/etc/systemd/system/noyra-target-activation-recover.service
+SOAK_COLLECTOR=/usr/local/libexec/noyra-soak-collector.py
+SOAK_SERVICE_UNIT=/etc/systemd/system/noyra-soak.service
+SOAK_TIMER_UNIT=/etc/systemd/system/noyra-soak.timer
 BACKUP_KEYRING="$CONFIG_DIR/backup-keyring.json"
+BACKUP_STORAGE_IDENTITY="$CONFIG_DIR/backup-storage-identity.conf"
+RECOVERY_MANIFEST="$CONFIG_DIR/recovery-manifest.json"
+STORAGE_IDENTITY="$CONFIG_DIR/storage-identity.conf"
+STORAGE_IDENTITY_TEMPORARY=""
 
 assert_absolute_backup_dir() {
   local parent base canonical_parent current component metadata perm remainder
@@ -287,7 +298,12 @@ if [[ -e "$upgrade_state_dir/status.json" ]]; then
   chmod 0640 "$upgrade_state_dir/status.json"
 fi
 }
+if [[ -e "$STORAGE_IDENTITY" || -L "$STORAGE_IDENTITY" ]] && ! mountpoint -q "$DATA_DIR"; then
+  echo "Configured dedicated storage is not mounted: $DATA_DIR" >&2
+  exit 1
+fi
 install -d -o noyra -g noyra -m 0700 "$DATA_DIR"
+install -d -o noyra -g noyra -m 0700 "$DATA_DIR/secrets"
 install -d -o root -g noyra -m 0750 "$CONFIG_DIR"
 install -d -o root -g noyra -m 0750 "$CREDENTIALS_DIR"
 
@@ -370,6 +386,38 @@ ensure_backup_keyring() {
   }
   chown root:noyra "$BACKUP_KEYRING"
   chmod 0640 "$BACKUP_KEYRING"
+}
+
+write_recovery_manifest() {
+  local python_path="$1"
+  if [[ -L "$RECOVERY_MANIFEST" || ( -e "$RECOVERY_MANIFEST" && ! -f "$RECOVERY_MANIFEST" ) ]]; then
+    echo "Recovery manifest must be a regular file: $RECOVERY_MANIFEST" >&2
+    return 1
+  fi
+  "$python_path" - "$RECOVERY_MANIFEST" "$release_id" "${source_sha:-}" \
+    "$DATA_DIR" "$backup_dir" "${backup_path:-}" "$BACKUP_KEYRING" \
+    "$CREDENTIALS_DIR" "$CONFIG_DIR/migration/identity.json" "$DATA_DIR/noyra.sqlite3" <<'PY'
+import sys
+from pathlib import Path
+
+from noyra.core.recovery_manifest import build_recovery_manifest, write_recovery_manifest
+
+manifest_path = Path(sys.argv[1])
+manifest = build_recovery_manifest(
+    release_id=sys.argv[2],
+    source_sha=sys.argv[3] or None,
+    data_dir=Path(sys.argv[4]),
+    backup_dir=Path(sys.argv[5]),
+    backup_path=Path(sys.argv[6]) if sys.argv[6] else None,
+    backup_keyring_path=Path(sys.argv[7]),
+    credentials_dir=Path(sys.argv[8]),
+    server_identity_path=Path(sys.argv[9]),
+    database_path=Path(sys.argv[10]),
+)
+write_recovery_manifest(manifest_path, manifest)
+PY
+  chown root:root "$RECOVERY_MANIFEST"
+  chmod 0600 "$RECOVERY_MANIFEST"
 }
 
 service_active=false
@@ -455,6 +503,10 @@ cleanup_stale_backup_staging() {
 
 cleanup_staging() {
   local failed=false
+  if [[ -n "${STORAGE_IDENTITY_TEMPORARY:-}" && ( -e "$STORAGE_IDENTITY_TEMPORARY" || -L "$STORAGE_IDENTITY_TEMPORARY" ) ]]; then
+    rm -f -- "$STORAGE_IDENTITY_TEMPORARY" || failed=true
+    STORAGE_IDENTITY_TEMPORARY=""
+  fi
   if [[ -n "${staging:-}" && ( -e "$staging" || -L "$staging" ) ]]; then
     if ! rm -rf --one-file-system -- "$staging"; then
       failed=true
@@ -502,6 +554,134 @@ validate_native_config_paths() {
   }
 }
 
+validate_storage_identity_path() {
+  local metadata owner group mode links
+  if [[ -L "$STORAGE_IDENTITY" || ( -e "$STORAGE_IDENTITY" && ! -f "$STORAGE_IDENTITY" ) ]]; then
+    echo "Storage identity must be a regular file: $STORAGE_IDENTITY" >&2
+    return 1
+  fi
+  [[ -e "$STORAGE_IDENTITY" ]] || return 0
+  metadata="$(stat -c '%u:%g:%a:%h' -- "$STORAGE_IDENTITY" 2>/dev/null || true)"
+  IFS=: read -r owner group mode links <<< "$metadata"
+  [[ "$owner" == 0 && "$links" == 1 && "$group" =~ ^[0-9]+$ && "$mode" =~ ^[0-9]+$ ]] || {
+    echo "Storage identity must be root-owned and single-linked: $STORAGE_IDENTITY" >&2
+    return 1
+  }
+  case "$mode" in
+    *[2367][0-7]|*[0-7][2367])
+      echo "Storage identity must not be group/other writable: $STORAGE_IDENTITY" >&2
+      return 1
+      ;;
+  esac
+  if grep -Evq '^(NOYRA_STORAGE_IDENTITY_FORMAT|NOYRA_STORAGE_DATA_DIR|NOYRA_STORAGE_MODE|NOYRA_STORAGE_SOURCE)=.+$' "$STORAGE_IDENTITY" ||
+    [[ "$(wc -l < "$STORAGE_IDENTITY")" != 4 ]]; then
+    echo "Storage identity has invalid fields: $STORAGE_IDENTITY" >&2
+    return 1
+  fi
+}
+
+ensure_storage_identity() {
+  local source target current_source
+  validate_storage_identity_path
+  if [[ -e "$STORAGE_IDENTITY" ]]; then
+    if ! mountpoint -q "$DATA_DIR"; then
+      echo "Configured dedicated storage is not mounted: $DATA_DIR" >&2
+      return 1
+    fi
+    read -r current_source target < <(findmnt -n -o SOURCE,TARGET --target "$DATA_DIR")
+    [[ "$target" == "$DATA_DIR" && -n "$current_source" ]] || {
+      echo "Could not verify the configured storage mount: $DATA_DIR" >&2
+      return 1
+    }
+    grep -Fqx "NOYRA_STORAGE_IDENTITY_FORMAT=noyra-storage-identity/v1" "$STORAGE_IDENTITY" || return 1
+    grep -Fqx "NOYRA_STORAGE_DATA_DIR=$DATA_DIR" "$STORAGE_IDENTITY" || return 1
+    grep -Fqx 'NOYRA_STORAGE_MODE=dedicated_mount' "$STORAGE_IDENTITY" || return 1
+    grep -Fqx "NOYRA_STORAGE_SOURCE=$current_source" "$STORAGE_IDENTITY" || {
+      echo "Configured storage mount identity changed: $DATA_DIR" >&2
+      return 1
+    }
+    return 0
+  fi
+  mountpoint -q "$DATA_DIR" || return 0
+  read -r source target < <(findmnt -n -o SOURCE,TARGET --target "$DATA_DIR")
+  [[ "$target" == "$DATA_DIR" && -n "$source" ]] || {
+    echo "Could not identify the dedicated storage mount: $DATA_DIR" >&2
+    return 1
+  }
+  STORAGE_IDENTITY_TEMPORARY="$(mktemp "$CONFIG_DIR/.storage-identity.conf.tmp.XXXXXX")"
+  printf 'NOYRA_STORAGE_IDENTITY_FORMAT=noyra-storage-identity/v1\nNOYRA_STORAGE_DATA_DIR=%s\nNOYRA_STORAGE_MODE=dedicated_mount\nNOYRA_STORAGE_SOURCE=%s\n' \
+    "$DATA_DIR" "$source" > "$STORAGE_IDENTITY_TEMPORARY"
+  chown root:root -- "$STORAGE_IDENTITY_TEMPORARY"
+  chmod 0644 -- "$STORAGE_IDENTITY_TEMPORARY"
+  mv -Tf -- "$STORAGE_IDENTITY_TEMPORARY" "$STORAGE_IDENTITY"
+  STORAGE_IDENTITY_TEMPORARY=""
+}
+
+validate_backup_storage_identity_path() {
+  local metadata owner group mode links
+  if [[ -L "$BACKUP_STORAGE_IDENTITY" || ( -e "$BACKUP_STORAGE_IDENTITY" && ! -f "$BACKUP_STORAGE_IDENTITY" ) ]]; then
+    echo "Backup storage identity must be a regular file: $BACKUP_STORAGE_IDENTITY" >&2
+    return 1
+  fi
+  [[ -e "$BACKUP_STORAGE_IDENTITY" ]] || return 0
+  metadata="$(stat -c '%u:%g:%a:%h' -- "$BACKUP_STORAGE_IDENTITY" 2>/dev/null || true)"
+  IFS=: read -r owner group mode links <<< "$metadata"
+  [[ "$owner" == 0 && "$links" == 1 && "$group" =~ ^[0-9]+$ && "$mode" =~ ^[0-9]+$ ]] || {
+    echo "Backup storage identity must be root-owned and single-linked: $BACKUP_STORAGE_IDENTITY" >&2
+    return 1
+  }
+  case "$mode" in
+    *[2367][0-7]|*[0-7][2367])
+      echo "Backup storage identity must not be group/other writable: $BACKUP_STORAGE_IDENTITY" >&2
+      return 1
+      ;;
+  esac
+  if grep -Evq '^(NOYRA_BACKUP_STORAGE_IDENTITY_FORMAT|NOYRA_BACKUP_STORAGE_DIR|NOYRA_BACKUP_STORAGE_MODE|NOYRA_BACKUP_STORAGE_SOURCE)=.+$' "$BACKUP_STORAGE_IDENTITY" ||
+    [[ "$(wc -l < "$BACKUP_STORAGE_IDENTITY")" != 4 ]]; then
+    echo "Backup storage identity has invalid fields: $BACKUP_STORAGE_IDENTITY" >&2
+    return 1
+  fi
+}
+
+ensure_backup_storage_identity() {
+  local source target
+  validate_backup_storage_identity_path
+  if [[ -e "$BACKUP_STORAGE_IDENTITY" ]]; then
+    mountpoint -q "$backup_dir" || {
+      echo "Configured dedicated backup storage is not mounted: $backup_dir" >&2
+      return 1
+    }
+    read -r source target < <(findmnt -n -o SOURCE,TARGET --target "$backup_dir")
+    [[ "$target" == "$backup_dir" && -n "$source" ]] || {
+      echo "Could not verify the configured backup storage mount: $backup_dir" >&2
+      return 1
+    }
+    grep -Fqx "NOYRA_BACKUP_STORAGE_IDENTITY_FORMAT=noyra-backup-storage-identity/v1" "$BACKUP_STORAGE_IDENTITY" || return 1
+    grep -Fqx "NOYRA_BACKUP_STORAGE_DIR=$backup_dir" "$BACKUP_STORAGE_IDENTITY" || return 1
+    grep -Fqx 'NOYRA_BACKUP_STORAGE_MODE=dedicated_mount' "$BACKUP_STORAGE_IDENTITY" || return 1
+    grep -Fqx "NOYRA_BACKUP_STORAGE_SOURCE=$source" "$BACKUP_STORAGE_IDENTITY" || {
+      echo "Configured backup storage mount identity changed: $backup_dir" >&2
+      return 1
+    }
+    return 0
+  fi
+  if ! mountpoint -q "$backup_dir"; then
+    return 0
+  fi
+  read -r source target < <(findmnt -n -o SOURCE,TARGET --target "$backup_dir")
+  [[ "$target" == "$backup_dir" && -n "$source" ]] || {
+    echo "Could not identify the dedicated backup storage mount: $backup_dir" >&2
+    return 1
+  }
+  local temporary
+  temporary="$(mktemp "$CONFIG_DIR/.backup-storage-identity.conf.tmp.XXXXXX")"
+  printf 'NOYRA_BACKUP_STORAGE_IDENTITY_FORMAT=noyra-backup-storage-identity/v1\nNOYRA_BACKUP_STORAGE_DIR=%s\nNOYRA_BACKUP_STORAGE_MODE=dedicated_mount\nNOYRA_BACKUP_STORAGE_SOURCE=%s\n' \
+    "$backup_dir" "$source" > "$temporary"
+  chown root:root -- "$temporary"
+  chmod 0644 -- "$temporary"
+  mv -Tf -- "$temporary" "$BACKUP_STORAGE_IDENTITY"
+}
+
 stop_old_service() {
   if systemctl is-active --quiet noyra; then
     service_active=true
@@ -517,6 +697,46 @@ stop_old_service() {
     echo 'Noyra did not stop within 45 seconds; refusing to switch releases.' >&2
     return 1
   fi
+}
+
+migrate_database_before_switch() {
+  [[ -f "$DATA_DIR/noyra.sqlite3" ]] || return 0
+  [[ -x "$release_root/.venv/bin/python" ]] || {
+    echo 'The staged release has no usable migration Python.' >&2
+    return 1
+  }
+  runuser --user=noyra --group=noyra -- /usr/bin/env \
+    NOYRA_DATA_DIR="$DATA_DIR" \
+    "$release_root/.venv/bin/python" - "$DATA_DIR/noyra.sqlite3" <<'PY'
+import sys
+from pathlib import Path
+
+from noyra.core.database import Database
+
+Database(Path(sys.argv[1]), strict_schema_contract=True)
+PY
+}
+
+verify_release_schema_contract() {
+  local release_path="$1"
+  [[ -x "$release_path/.venv/bin/python" && -f "$DATA_DIR/noyra.sqlite3" ]] || return 1
+  "$release_path/.venv/bin/python" - "$DATA_DIR/noyra.sqlite3" <<'PY'
+import inspect
+import sys
+from pathlib import Path
+
+from noyra.core.database import Database
+
+path = Path(sys.argv[1])
+parameters = inspect.signature(Database).parameters
+if "strict_schema_contract" in parameters:
+    Database(path, initialize=False, strict_schema_contract=True)
+else:
+    # Releases from before the strict contract API can still perform their
+    # read-only open check during rollback; readiness below remains the final
+    # compatibility gate for those releases.
+    Database(path, initialize=False)
+PY
 }
 
 start_and_check() {
@@ -578,7 +798,9 @@ on_error() {
   fi
   if [[ "$UPGRADE_COMPONENTS_CHANGED" == true ]]; then
     if ! noyra_upgrade_components_restore \
-      "$UPGRADE_RUNNER" "$UPGRADE_PATH_UNIT" "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT" "$UNIT_FILE"; then
+      "$UPGRADE_RUNNER" "$UPGRADE_PATH_UNIT" "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT" \
+      "$UNIT_FILE" "$SIGNER_UNIT" "$STORAGE_DROPIN" \
+      "$SOAK_COLLECTOR" "$SOAK_SERVICE_UNIT" "$SOAK_TIMER_UNIT"; then
       upgrade_components_restored=false
       echo 'Failed to restore root upgrade components; Noyra will remain stopped.' >&2
       status=1
@@ -609,6 +831,11 @@ on_error() {
     fi
     if [[ "$upgrade_components_restored" != true || "$migration_components_restored" != true ]]; then
       restored=false
+    fi
+    if [[ "$restored" == true && -n "$old_current" && -f "$DATA_DIR/noyra.sqlite3" ]] && \
+      ! verify_release_schema_contract "$RELEASES_DIR/$old_current"; then
+      restored=false
+      echo 'Previous release failed the schema contract check after rollback; leaving Noyra stopped.' >&2
     fi
     restore_profile_dropin_after_failure
     if [[ "$service_active" == true && "$restored" == true && "$cleanup_failed" == false ]]; then
@@ -649,6 +876,7 @@ trap on_error ERR
 
 install -d -o root -g root -m 0755 "$INSTALL_DIR" "$RELEASES_DIR"
 validate_native_config_paths
+ensure_storage_identity
 if [[ -L "$LOCK_FILE" || ( -e "$LOCK_FILE" && ! -f "$LOCK_FILE" ) ]]; then
   echo "Installer lock is not a regular file: $LOCK_FILE" >&2
   exit 1
@@ -738,6 +966,7 @@ if [[ -n "$old_current" || -n "$legacy_venv" ]]; then
   assert_absolute_backup_dir
 fi
 assert_absolute_backup_dir
+ensure_backup_storage_identity
 python3 "$SOURCE_DIR/scripts/deployment-maintenance.py" preflight \
   --releases "$RELEASES_DIR" --backups "$backup_dir" --data "$DATA_DIR"
 
@@ -910,6 +1139,11 @@ chmod 0755 "$release_root" "$release_root/.venv" "$release_root/.venv/bin"
 
 ensure_backup_keyring "$release_root/.venv/bin/python"
 
+# Migrate the durable database while the old pointer is still intact.  A
+# failed migration therefore removes only the unpublished release and leaves
+# the old service and pointer untouched.
+migrate_database_before_switch
+
 noyra_control_layout_snapshot "$DATA_DIR" \
   "$DATA_DIR/upgrade" "$DATA_DIR/upgrade/requests" "$DATA_DIR/upgrade/processing" \
   "$UPGRADE_HANDOFF_LOCK" "$DATA_DIR/upgrade/status.json" \
@@ -928,19 +1162,37 @@ UPGRADE_RUNNER="$LIBEXEC_DIR/noyra-upgrade-runner.sh"
 UPGRADE_COMPONENT_BACKUP_DIR="$INSTALL_DIR/.upgrade-components.$$.$RANDOM"
 noyra_upgrade_components_snapshot \
   "$UPGRADE_COMPONENT_BACKUP_DIR" "$UPGRADE_RUNNER" "$UPGRADE_PATH_UNIT" \
-  "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT" "$UNIT_FILE"
+  "$UPGRADE_RUNNER_UNIT" "$UPGRADE_RECOVER_UNIT" "$UNIT_FILE" "$SIGNER_UNIT" "$STORAGE_DROPIN" \
+  "$SOAK_COLLECTOR" "$SOAK_SERVICE_UNIT" "$SOAK_TIMER_UNIT"
 noyra_upgrade_components_mark_changed
+systemctl stop noyra-soak.timer >/dev/null 2>&1 || true
 install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra.service" "$UNIT_FILE"
 for upgrade_file in \
   "$UPGRADE_RUNNER" \
   "$UPGRADE_PATH_UNIT" \
   "$UPGRADE_RUNNER_UNIT" \
-  "$UPGRADE_RECOVER_UNIT"; do
+  "$UPGRADE_RECOVER_UNIT" \
+  "$SIGNER_UNIT" \
+  "$SOAK_COLLECTOR" \
+  "$SOAK_SERVICE_UNIT" \
+  "$SOAK_TIMER_UNIT"; do
   if [[ -L "$upgrade_file" || ( -e "$upgrade_file" && ! -f "$upgrade_file" ) ]]; then
     echo "Upgrade system file must be regular and not a symlink: $upgrade_file" >&2
     exit 1
   fi
 done
+install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-signer.service" "$SIGNER_UNIT"
+install -o root -g root -m 0644 "$SOURCE_DIR/scripts/noyra-soak-collector.py" "$SOAK_COLLECTOR"
+install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-soak.service" "$SOAK_SERVICE_UNIT"
+install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-soak.timer" "$SOAK_TIMER_UNIT"
+# Older single-disk helpers installed a mountpoint condition here. The native
+# service now validates storage explicitly and supports system-disk directories,
+# so remove only this known generated drop-in.
+if [[ -L "$STORAGE_DROPIN" || ( -e "$STORAGE_DROPIN" && ! -f "$STORAGE_DROPIN" ) ]]; then
+  echo "Storage drop-in must be a regular file: $STORAGE_DROPIN" >&2
+  on_error 1
+fi
+rm -f -- "$STORAGE_DROPIN"
 install -d -o root -g root -m 0755 "$LIBEXEC_DIR"
 install -o root -g root -m 0750 "$SOURCE_DIR/scripts/upgrade-ubuntu-runner.sh" "$UPGRADE_RUNNER"
 install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-upgrade.path" "$UPGRADE_PATH_UNIT"
@@ -1110,6 +1362,25 @@ if [[ "$service_active" == true ]]; then
   fi
 fi
 
+soak_log_dir=/var/log/noyra
+if [[ -L "$soak_log_dir" || ( -e "$soak_log_dir" && ! -d "$soak_log_dir" ) ]]; then
+  echo 'Soak log directory must be a real directory.' >&2
+  on_error 1
+fi
+if [[ -d "$soak_log_dir" ]]; then
+  [[ "$(stat -c '%u:%g' -- "$soak_log_dir")" == "0:$(id -g noyra)" ]] || {
+    echo 'Soak log directory has an unexpected owner.' >&2
+    on_error 1
+  }
+  chmod 0750 "$soak_log_dir"
+else
+  install -d -o root -g noyra -m 0750 "$soak_log_dir"
+fi
+systemctl daemon-reload
+systemctl enable --now noyra-soak.timer
+
+write_recovery_manifest "$release_root/.venv/bin/python"
+
 echo "Installed Noyra profile: $profile"
 echo "Release: $release_id"
 if [[ -n "$old_current" ]]; then
@@ -1118,6 +1389,7 @@ fi
 if [[ -n "$backup_path" ]]; then
   echo "Cold backup: $backup_path"
 fi
+echo "Recovery manifest: $RECOVERY_MANIFEST"
 echo 'Edit /etc/noyra/noyra.env, then run: systemctl enable --now noyra'
 rm -f -- "$profile_dropin_backup"
 noyra_upgrade_components_commit

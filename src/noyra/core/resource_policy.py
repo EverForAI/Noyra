@@ -142,7 +142,17 @@ CREATE TABLE cognitive_resource_groups_v81 (
  status TEXT NOT NULL CHECK(status IN ('active','disabled','revoked')),
  state_hash TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
-INSERT INTO cognitive_resource_groups_v81 SELECT * FROM cognitive_resource_groups;
+INSERT INTO cognitive_resource_groups_v81(
+ group_id, subject_id, pool, label, provider_type, base_url, model,
+ priority, weight, daily_attempts, daily_input_tokens, daily_output_tokens,
+ daily_cost_microusd, input_microusd_per_million, output_microusd_per_million,
+ max_attempts, status, state_hash, created_at, updated_at
+)
+SELECT group_id, subject_id, pool, label, provider_type, base_url, model,
+ priority, weight, daily_attempts, daily_input_tokens, daily_output_tokens,
+ daily_cost_microusd, input_microusd_per_million, output_microusd_per_million,
+ max_attempts, status, state_hash, created_at, updated_at
+FROM cognitive_resource_groups;
 DROP TABLE cognitive_resource_groups;
 ALTER TABLE cognitive_resource_groups_v81 RENAME TO cognitive_resource_groups;
 CREATE INDEX idx_cognitive_resource_group_pool

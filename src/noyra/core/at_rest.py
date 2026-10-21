@@ -21,6 +21,8 @@ import struct
 import subprocess
 import tarfile
 import tempfile
+import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass
@@ -206,6 +208,17 @@ class BackupKeyring:
     @classmethod
     def rotate(cls, path: Path | str) -> BackupKeyring:
         target = Path(path).expanduser().resolve()
+        # This stable sibling is never replaced or removed. Locking the keyring
+        # inode itself would not serialize readers after its atomic replacement.
+        lock = ProcessLock(target.with_name(target.name + ".rotation.lock"))
+        lock.acquire()
+        try:
+            return cls._rotate_locked(target)
+        finally:
+            lock.release()
+
+    @classmethod
+    def _rotate_locked(cls, target: Path) -> BackupKeyring:
         current = cls.from_path(target)
         if len(current._keys) >= _MAX_KEYS:
             raise ValueError("backup keyring reached its retained-key limit")
@@ -529,6 +542,10 @@ class AtRestGuard:
         self.probe = probe or VolumeEncryptionProbe()
         self._volume: VolumeEncryptionStatus | None = None
         self._prepared = False
+        self._permission_lock = threading.Lock()
+        self._permission_stop = threading.Event()
+        self._permission_thread: threading.Thread | None = None
+        self._permission_snapshot: tuple[tuple[int, ...], float, str | None] | None = None
 
     @property
     def required(self) -> bool:
@@ -553,9 +570,13 @@ class AtRestGuard:
         if not self.required:
             return
         _harden_private_paths(self.data_root)
+        checked_at = time.monotonic()
+        signature = self._permission_root_signature()
         permission_error = _private_permission_error(self.data_root)
         if permission_error is not None:
             raise AtRestError(permission_error)
+        with self._permission_lock:
+            self._permission_snapshot = (signature, checked_at, None)
 
     def require_ready(self) -> dict[str, Any]:
         if not self.required:
@@ -594,6 +615,84 @@ class AtRestGuard:
             return self._health_payload(True, None, keyring)
         except Exception as error:
             return self._health_payload(False, str(error), None)
+
+    def _permission_root_signature(self) -> tuple[int, ...]:
+        metadata = self.data_root.lstat()
+        if _is_reparse_entry(self.data_root):
+            raise AtRestError("private storage root is a link or reparse point")
+        # Directory mtime/ctime also change for ordinary SQLite WAL lifecycle;
+        # they are not a permission epoch and would permanently reject traffic.
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_mode,
+            metadata.st_uid,
+            metadata.st_gid,
+            int(getattr(metadata, "st_file_attributes", 0)),
+        )
+
+    def request_health(self) -> dict[str, Any]:
+        """HTTP readiness with a fail-closed, five-second permission snapshot.
+
+        Volume/key checks remain live. A single background reader refreshes
+        permissions; expired, changed-root and incomplete scans never authorize
+        requests. Direct health()/require_ready() remain strict full checks.
+        """
+        if not self.required:
+            return self.health()
+        try:
+            if not self._prepared or self._permission_stop.is_set():
+                raise AtRestError("at-rest permission monitor is unavailable")
+            self._require_volume()
+            keyring = self._require_keyring()
+            signature = self._permission_root_signature()
+            with self._permission_lock:
+                if self._permission_thread is None:
+                    self._permission_thread = threading.Thread(
+                        target=self._monitor_permissions,
+                        name="noyra-permission-audit",
+                        daemon=True,
+                    )
+                    self._permission_thread.start()
+                snapshot = self._permission_snapshot
+            if snapshot is None or snapshot[0] != signature or time.monotonic() - snapshot[1] > 5.0:
+                raise AtRestError("private permission audit is pending or expired")
+            if snapshot[2] is not None:
+                raise AtRestError(snapshot[2])
+            payload = self._health_payload(True, None, keyring)
+            payload["permissions"]["max_age_seconds"] = 5
+            return payload
+        except Exception as error:
+            return self._health_payload(False, str(error), None)
+
+    def require_request_ready(self) -> dict[str, Any]:
+        health = self.request_health()
+        if not health.get("ready"):
+            raise AtRestError(str(health.get("reason", "at-rest boundary unavailable")))
+        return health
+
+    def _monitor_permissions(self) -> None:
+        while not self._permission_stop.is_set():
+            checked_at = time.monotonic()
+            try:
+                signature = self._permission_root_signature()
+                error = _private_permission_error(self.data_root, deadline=checked_at + 4.0)
+                if signature != self._permission_root_signature():
+                    raise AtRestError("private storage root changed during audit")
+                with self._permission_lock:
+                    self._permission_snapshot = (signature, checked_at, error)
+            except Exception:
+                with self._permission_lock:
+                    self._permission_snapshot = None
+            self._permission_stop.wait(1.0)
+
+    def close(self) -> None:
+        self._permission_stop.set()
+        with self._permission_lock:
+            self._permission_snapshot = None
+            worker = self._permission_thread
+        if worker is not None:
+            worker.join(timeout=5.0)
 
     def _require_volume(self) -> VolumeEncryptionStatus:
         volume = self.probe.probe(
@@ -835,6 +934,9 @@ class EncryptedBackupManager:
         }
         for source in _private_root_entries(self.data_root):
             if source == work_root or source.name in skipped_names:
+                continue
+            if _maintenance_evidence_entry(self.data_root, source):
+                # Machine-local deletion plans must never replay after restore.
                 continue
             if _installed_upgrade_control(self.data_root, source):
                 # Upgrade queues describe this machine, not durable subject state.
@@ -1357,17 +1459,22 @@ def _keyring_permission_error(path: Path) -> str | None:
     return "backup keyring owner is not the service account or root"
 
 
-def _private_permission_error(data_root: Path) -> str | None:
+def _private_permission_error(data_root: Path, *, deadline: float | None = None) -> str | None:
     if os.name == "nt":
-        ready, detail = _windows_permission_audit(data_root)
+        ready, detail = (
+            _windows_permission_audit(data_root)
+            if deadline is None
+            else _windows_permission_audit(data_root, max_entries=100_000)
+        )
         return None if ready else f"Windows private-storage ACL check failed: {detail}"
     effective_uid = _effective_uid()
-    metadata: list[tuple[str, bool, int, int]] = []
     try:
         root_device = data_root.stat().st_dev
     except OSError as error:
         return f"private storage metadata is unavailable: {type(error).__name__}"
-    for path in _private_paths(data_root):
+    for count, path in enumerate(_private_paths(data_root), 1):
+        if deadline is not None and (time.monotonic() >= deadline or count > 100_000):
+            return "private permission audit exceeds its work budget"
         if _is_reparse_entry(path):
             return f"private storage contains a symlink: {path.name}"
         try:
@@ -1379,8 +1486,13 @@ def _private_permission_error(data_root: Path) -> str | None:
         # an unencrypted or operator-controlled device.
         if stat.st_dev != root_device:
             return f"private storage crosses a device boundary: {path.name}"
-        metadata.append((path.name, path.is_dir(), stat.st_uid, stat.st_mode & 0o777))
-    return _posix_metadata_error(metadata, effective_uid)
+        permission_error = _posix_metadata_error(
+            [(path.name, path.is_dir(), stat.st_uid, stat.st_mode & 0o777)],
+            effective_uid,
+        )
+        if permission_error is not None:
+            return permission_error
+    return None
 
 
 def _posix_metadata_error(
@@ -1482,6 +1594,15 @@ def _harden_tree(root: Path) -> None:
     os.chmod(root, 0o700)
 
 
+def _maintenance_evidence_entry(data_root: Path, path: Path) -> bool:
+    from .maintenance_evidence import privileged_maintenance_entry
+
+    try:
+        return privileged_maintenance_entry(data_root, path)
+    except (OSError, ValueError) as error:
+        raise AtRestError("maintenance evidence permissions are invalid") from error
+
+
 def _private_paths(data_root: Path) -> Iterator[Path]:
     yield data_root
     # Inspect every persistent entry, not only the historical ``secrets`` and
@@ -1489,6 +1610,8 @@ def _private_paths(data_root: Path) -> Iterator[Path]:
     # can all contain private material and must obey the same contract.
     for path in _private_root_entries(data_root):
         try:
+            if _maintenance_evidence_entry(data_root, path):
+                continue
             if _installed_upgrade_control(data_root, path):
                 yield from _upgrade_service_paths(data_root, path)
                 continue
@@ -1856,10 +1979,12 @@ def _windows_permission_audit(
     runner: CommandRunner | None = None,
     require_current_owner: bool = True,
     require_privileged_owner: bool = False,
+    max_entries: int | None = None,
 ) -> tuple[bool, str]:
     encoded_root = base64.b64encode(str(root).encode("utf-8")).decode("ascii")
     owner_check = "$true" if require_current_owner else "$false"
     privileged_owner_check = "$true" if require_privileged_owner else "$false"
+    limit = max_entries if max_entries is not None else 2_147_483_647
     script = f"""
 $ErrorActionPreference = 'Stop'
 $root = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded_root}'))
@@ -1870,7 +1995,10 @@ $targets = New-Object System.Collections.Generic.List[object]
 $targets.Add((Get-Item -Force -LiteralPath $root))
 if ((Get-Item -Force -LiteralPath $root).PSIsContainer) {{
   Get-ChildItem -Force -Recurse -LiteralPath $root |
-    ForEach-Object {{ $targets.Add($_) }}
+    ForEach-Object {{
+      if ($targets.Count -ge {limit}) {{ throw 'ACL audit exceeds entry budget' }}
+      $targets.Add($_)
+    }}
 }}
 foreach ($item in $targets) {{
   if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{

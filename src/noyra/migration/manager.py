@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -49,6 +50,14 @@ _TASK_TRANSITIONS: dict[str, frozenset[str]] = {
 _PROPOSAL_ACTIVE = frozenset({"planned", "awaiting_approval", "approved"})
 
 
+class MigrationApprovalError(ValueError):
+    """A bounded approval failure suitable for stable API error codes."""
+
+    def __init__(self, code: str, message: str | None = None):
+        self.code = code
+        super().__init__(message or code)
+
+
 @dataclass(frozen=True)
 class MigrationProposalRecord:
     proposal_id: str
@@ -81,9 +90,16 @@ class MigrationTask:
 
 
 class MigrationManager:
-    def __init__(self, database: Database, policy_store: MigrationStore):
+    def __init__(
+        self,
+        database: Database,
+        policy_store: MigrationStore,
+        *,
+        require_principal_identity: bool = False,
+    ):
         self.database = database
         self.policy_store = policy_store
+        self.require_principal_identity = require_principal_identity
 
     def create_proposal(
         self,
@@ -119,9 +135,7 @@ class MigrationManager:
             raise ValueError("migration proposal evidence is too large")
         with self.database.transaction() as connection:
             MigrationStore._ensure_policy(connection, subject_id)
-            policy_row = connection.execute(
-                "SELECT * FROM migration_policies WHERE subject_id=?", (subject_id,)
-            ).fetchone()
+            policy_row = MigrationStore.policy_row(connection, subject_id)
             policy = MigrationPolicy.from_record(policy_row)
             if not policy.enabled or policy.approval_mode == "disabled":
                 raise ValueError("migration is disabled")
@@ -137,6 +151,7 @@ class MigrationManager:
                 "subject_id": subject_id,
                 "target_id": target_id,
                 "policy_revision": policy_revision,
+                "approval_mode": policy.approval_mode,
                 "status": "awaiting_approval",
                 "reason_code": reason_code.strip(),
                 "reason": safe_reason,
@@ -147,7 +162,7 @@ class MigrationManager:
                 "created_at": created_at,
             }
             connection.execute(
-                "INSERT INTO migration_proposals(proposal_id,subject_id,target_id,policy_revision,status,reason_code,reason,evidence_json,benefit_score,risk_score,expires_at,created_at,state_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO migration_proposals(proposal_id,subject_id,target_id,policy_revision,approval_mode,status,reason_code,reason,evidence_json,benefit_score,risk_score,expires_at,created_at,state_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (*values.values(), self._proposal_hash(values)),
             )
             MigrationStore._append_audit(
@@ -172,11 +187,34 @@ class MigrationManager:
                 expires_at,
             )
 
-    def approve(self, proposal_id: str, *, actor: str, idempotency_key: str) -> MigrationTask:
+    def approve(
+        self,
+        proposal_id: str,
+        *,
+        actor: str,
+        idempotency_key: str,
+        identity_binding: str | None = None,
+        reviewer_principal: str | None = None,
+    ) -> MigrationTask:
         assert_current_lease()
         self._validate_actor(actor)
-        if not idempotency_key.strip() or len(idempotency_key) > 256:
+        identity_binding = self._normalize_identity_binding(identity_binding)
+        reviewer_principal = self._normalize_reviewer_principal(reviewer_principal)
+        if reviewer_principal is not None:
+            principal_binding = hashlib.sha256(
+                f"noyra-reviewer-principal:{reviewer_principal}".encode()
+            ).hexdigest()
+            if identity_binding is not None and identity_binding != principal_binding:
+                raise MigrationApprovalError("migration_identity_binding_mismatch")
+            identity_binding = principal_binding
+        if (
+            not isinstance(idempotency_key, str)
+            or not idempotency_key.strip()
+            or len(idempotency_key) > 256
+        ):
             raise ValueError("idempotency key is invalid")
+        expired = False
+        result_task: MigrationTask | None = None
         with self.database.transaction() as connection:
             row = connection.execute(
                 "SELECT * FROM migration_proposals WHERE proposal_id=?", (proposal_id,)
@@ -184,70 +222,193 @@ class MigrationManager:
             if row is None:
                 raise NotFoundError(f"migration proposal not found: {proposal_id}")
             self._assert_proposal_integrity(row)
-            existing = connection.execute(
+            existing_key = connection.execute(
                 "SELECT * FROM migration_tasks WHERE subject_id=? AND idempotency_key=?",
                 (row["subject_id"], idempotency_key),
             ).fetchone()
-            if existing is not None:
-                self._assert_task_integrity(existing)
-                if existing["proposal_id"] != proposal_id:
-                    raise ValueError("idempotency key belongs to another migration proposal")
-                return self._task(existing)
+            if existing_key is not None and existing_key["proposal_id"] != proposal_id:
+                raise MigrationApprovalError("migration_idempotency_conflict")
+            task_row = connection.execute(
+                "SELECT * FROM migration_tasks WHERE proposal_id=?", (proposal_id,)
+            ).fetchone()
+            if task_row is not None:
+                self._assert_task_integrity(task_row)
+                if task_row["status"] == "approved":
+                    return self._task(task_row)
             if row["status"] not in _PROPOSAL_ACTIVE:
-                raise ValueError("migration proposal is not awaiting approval")
+                raise MigrationApprovalError("migration_proposal_not_pending")
+            policy_row = MigrationStore.policy_row(connection, str(row["subject_id"]))
+            if policy_row is None:
+                raise MigrationApprovalError("migration_policy_unavailable")
+            policy = MigrationPolicy.from_record(policy_row)
+            if (
+                not policy.enabled
+                or policy.revision != int(row["policy_revision"])
+                or policy.approval_mode != str(row["approval_mode"])
+            ):
+                raise MigrationApprovalError("migration_policy_stale")
             if self._parse_timestamp(row["expires_at"]) <= datetime.now(UTC):
                 self._set_proposal_status(connection, row, "expired", actor, "proposal expired")
-                raise ValueError("migration proposal is expired")
-            self._ensure_target(connection, row["subject_id"], row["target_id"])
-            if self.cooldown_until(connection, row["subject_id"], row["target_id"]) is not None:
-                raise ValueError("migration rejection cooldown is active")
-            current_revision = self._policy_revision(connection, row["subject_id"])
-            if current_revision is not None and current_revision != int(row["policy_revision"]):
-                raise ValueError("migration policy revision is stale")
-            now = utc_now()
-            epoch_row = connection.execute(
-                "SELECT version FROM runtime_state WHERE subject_id=?", (row["subject_id"],)
-            ).fetchone()
-            source_epoch = (
-                f"runtime-{int(epoch_row['version'])}"
-                if epoch_row is not None
-                else "source-epoch-1"
-            )
-            task_id = new_id("migrationtask")
-            task_values = {
-                "task_id": task_id,
-                "proposal_id": proposal_id,
-                "subject_id": row["subject_id"],
-                "target_id": row["target_id"],
-                "idempotency_key": idempotency_key,
-                "source_epoch": source_epoch,
-                "policy_revision": int(row["policy_revision"]),
-                "status": "approved",
-                "manifest_digest": None,
-                "artifact_id": None,
-                "error_code": None,
-                "target_epoch_id": None,
-                "expires_at": row["expires_at"],
-                "created_at": now,
-                "updated_at": now,
-            }
-            connection.execute(
-                "INSERT INTO migration_tasks(task_id,proposal_id,subject_id,target_id,idempotency_key,source_epoch,policy_revision,status,manifest_digest,artifact_id,error_code,target_epoch_id,expires_at,created_at,updated_at,state_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (*task_values.values(), self._task_hash(task_values)),
-            )
-            self._set_proposal_status(connection, row, "approved", actor, actor.strip())
-            MigrationStore._append_audit(
-                connection,
-                row["subject_id"],
-                "migration_task_created",
-                actor.strip(),
-                {"task_id": task_id, "proposal_id": proposal_id, "source_epoch": source_epoch},
-            )
-            return self._task(
-                connection.execute(
-                    "SELECT * FROM migration_tasks WHERE task_id=?", (task_id,)
-                ).fetchone()
-            )
+                expired = True
+            else:
+                self._ensure_target(connection, row["subject_id"], row["target_id"])
+                if self.cooldown_until(connection, row["subject_id"], row["target_id"]) is not None:
+                    raise MigrationApprovalError("migration_cooldown_active")
+                approval_rows = connection.execute(
+                    "SELECT * FROM migration_proposal_approvals WHERE proposal_id=? "
+                    "ORDER BY created_at,approval_id",
+                    (proposal_id,),
+                ).fetchall()
+                for approval in approval_rows:
+                    self._assert_approval_integrity(approval)
+                required = 2 if row["approval_mode"] == "dual_review" else 1
+                if required == 2 and (
+                    identity_binding is None
+                    or (self.require_principal_identity and reviewer_principal is None)
+                ):
+                    raise MigrationApprovalError(
+                        "migration_reviewer_principal_required"
+                        if self.require_principal_identity
+                        else "migration_dual_review_identity_required"
+                    )
+                existing_approval = next(
+                    (
+                        approval
+                        for approval in approval_rows
+                        if (
+                            identity_binding is not None
+                            and approval["identity_binding"] == identity_binding
+                        )
+                        or (
+                            identity_binding is None
+                            and approval["identity_binding"] is None
+                            and approval["actor"] == actor.strip()
+                        )
+                    ),
+                    None,
+                )
+                if existing_approval is None:
+                    approval_values = {
+                        "approval_id": new_id("migrationapproval"),
+                        "proposal_id": proposal_id,
+                        "subject_id": row["subject_id"],
+                        "actor": actor.strip(),
+                        "identity_binding": identity_binding,
+                        "policy_revision": int(row["policy_revision"]),
+                        "created_at": utc_now(),
+                    }
+                    connection.execute(
+                        "INSERT INTO migration_proposal_approvals(approval_id,proposal_id,subject_id,actor,identity_binding,policy_revision,created_at,state_hash) "
+                        "VALUES(?,?,?,?,?,?,?,?)",
+                        (*approval_values.values(), self._approval_hash(approval_values)),
+                    )
+                    approval_rows = [*approval_rows, approval_values]
+                else:
+                    result_task = self._task(task_row) if task_row is not None else None
+                if required == 2:
+                    approvals = {
+                        str(item["identity_binding"])
+                        for item in approval_rows
+                        if item["identity_binding"] is not None
+                    }
+                else:
+                    approvals = {
+                        str(item["identity_binding"])
+                        if item["identity_binding"] is not None
+                        else f"actor:{item['actor']}"
+                        for item in approval_rows
+                    }
+                if task_row is None:
+                    now = utc_now()
+                    epoch_row = connection.execute(
+                        "SELECT version FROM runtime_state WHERE subject_id=?",
+                        (row["subject_id"],),
+                    ).fetchone()
+                    source_epoch = (
+                        f"runtime-{int(epoch_row['version'])}"
+                        if epoch_row is not None
+                        else "source-epoch-1"
+                    )
+                    task_id = new_id("migrationtask")
+                    task_values = {
+                        "task_id": task_id,
+                        "proposal_id": proposal_id,
+                        "subject_id": row["subject_id"],
+                        "target_id": row["target_id"],
+                        "idempotency_key": idempotency_key.strip(),
+                        "source_epoch": source_epoch,
+                        "policy_revision": int(row["policy_revision"]),
+                        "status": "approved" if len(approvals) >= required else "awaiting_approval",
+                        "manifest_digest": None,
+                        "artifact_id": None,
+                        "error_code": None,
+                        "target_epoch_id": None,
+                        "expires_at": row["expires_at"],
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                    connection.execute(
+                        "INSERT INTO migration_tasks(task_id,proposal_id,subject_id,target_id,idempotency_key,source_epoch,policy_revision,status,manifest_digest,artifact_id,error_code,target_epoch_id,expires_at,created_at,updated_at,state_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (*task_values.values(), self._task_hash(task_values)),
+                    )
+                    task_row = connection.execute(
+                        "SELECT * FROM migration_tasks WHERE task_id=?", (task_id,)
+                    ).fetchone()
+                    MigrationStore._append_audit(
+                        connection,
+                        row["subject_id"],
+                        "migration_task_created",
+                        actor.strip(),
+                        {
+                            "task_id": task_id,
+                            "proposal_id": proposal_id,
+                            "source_epoch": source_epoch,
+                            "approval_mode": row["approval_mode"],
+                        },
+                    )
+                elif task_row is not None and task_row["status"] == "awaiting_approval":
+                    if len(approvals) >= required:
+                        result_task = self.transition_task_in_transaction(
+                            connection,
+                            str(task_row["task_id"]),
+                            "approved",
+                            expected_status="awaiting_approval",
+                            actor=actor,
+                        )
+                        task_row = None
+                if existing_approval is None:
+                    MigrationStore._append_audit(
+                        connection,
+                        row["subject_id"],
+                        "migration_proposal_approval_recorded",
+                        actor.strip(),
+                        {
+                            "proposal_id": proposal_id,
+                            "task_id": None
+                            if task_row is None and result_task is None
+                            else (
+                                result_task.task_id
+                                if result_task is not None
+                                else task_row["task_id"]
+                            ),
+                            "approval_mode": row["approval_mode"],
+                            "approval_count": len(approvals),
+                            "required_approvals": required,
+                        },
+                    )
+                if len(approvals) >= required and row["status"] != "approved":
+                    self._set_proposal_status(connection, row, "approved", actor, actor.strip())
+                if result_task is None:
+                    if task_row is None:
+                        task_row = connection.execute(
+                            "SELECT * FROM migration_tasks WHERE proposal_id=?", (proposal_id,)
+                        ).fetchone()
+                    result_task = self._task(task_row)
+        if expired:
+            raise MigrationApprovalError("migration_proposal_expired")
+        if result_task is None:
+            raise MigrationApprovalError("migration_approval_state_unavailable")
+        return result_task
 
     def reject(self, proposal_id: str, *, actor: str, reason: str) -> MigrationProposalRecord:
         assert_current_lease()
@@ -588,10 +749,11 @@ class MigrationManager:
                 "SELECT * FROM migration_proposals WHERE proposal_id=? AND subject_id=?",
                 (proposal_id, subject_id),
             ).fetchone()
+            approvals = self._proposal_approvals(connection, row) if row is not None else []
         if row is None:
             raise NotFoundError(f"migration proposal not found: {proposal_id}")
         self._assert_proposal_integrity(row)
-        return self._proposal_projection(row)
+        return self._proposal_projection(row, approvals=approvals)
 
     def list_proposals(self, subject_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
         validate_subject_id(subject_id)
@@ -603,7 +765,36 @@ class MigrationManager:
                 "ORDER BY created_at DESC,proposal_id DESC LIMIT ?",
                 (subject_id, limit),
             ).fetchall()
-        return [self._proposal_projection(row) for row in rows]
+            approvals = {
+                str(row["proposal_id"]): self._proposal_approvals(connection, row) for row in rows
+            }
+        return [
+            self._proposal_projection(row, approvals=approvals[str(row["proposal_id"])])
+            for row in rows
+        ]
+
+    def _proposal_approvals(self, connection: Any, row: Any) -> list[dict[str, str]]:
+        self._assert_proposal_integrity(row)
+        rows = connection.execute(
+            "SELECT * FROM migration_proposal_approvals WHERE proposal_id=? "
+            "ORDER BY created_at,approval_id",
+            (row["proposal_id"],),
+        ).fetchall()
+        approvals = []
+        for approval in rows:
+            self._assert_approval_integrity(approval)
+            if approval["subject_id"] != row["subject_id"] or int(
+                approval["policy_revision"]
+            ) != int(row["policy_revision"]):
+                raise ValueError("migration approval binding mismatch")
+            if row["approval_mode"] == "dual_review" and approval["identity_binding"] is None:
+                # Historical approvals are retained for audit, but cannot
+                # satisfy the identity-bound dual-review gate.
+                continue
+            approvals.append(
+                {"actor": str(approval["actor"]), "created_at": str(approval["created_at"])}
+            )
+        return approvals
 
     def get_task(self, task_id: str, *, subject_id: str | None = None) -> MigrationTask:
         with self.database.connection() as connection:
@@ -736,6 +927,26 @@ class MigrationManager:
             raise ValueError("migration actor is invalid")
 
     @staticmethod
+    def _normalize_identity_binding(identity_binding: str | None) -> str | None:
+        if identity_binding is None:
+            return None
+        if not isinstance(identity_binding, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", identity_binding
+        ):
+            raise ValueError("migration identity binding is invalid")
+        return identity_binding
+
+    @staticmethod
+    def _normalize_reviewer_principal(principal: str | None) -> str | None:
+        if principal is None:
+            return None
+        if not isinstance(principal, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}", principal.strip()
+        ):
+            raise ValueError("migration reviewer principal is invalid")
+        return principal.strip()
+
+    @staticmethod
     def _parse_timestamp(value: str) -> datetime:
         try:
             parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -759,6 +970,7 @@ class MigrationManager:
                 "subject_id": values["subject_id"],
                 "target_id": values["target_id"],
                 "policy_revision": int(values["policy_revision"]),
+                "approval_mode": str(values.get("approval_mode", "manual")),
                 "status": values["status"],
                 "reason_code": values["reason_code"],
                 "reason": values["reason"],
@@ -771,6 +983,41 @@ class MigrationManager:
                 "decision_reason": values.get("decision_reason"),
             }
         )
+
+    @staticmethod
+    def _legacy_proposal_hash(values: Any) -> str:
+        return content_hash(
+            {
+                "proposal_id": values["proposal_id"],
+                "subject_id": values["subject_id"],
+                "target_id": values["target_id"],
+                "policy_revision": int(values["policy_revision"]),
+                "status": values["status"],
+                "reason_code": values["reason_code"],
+                "reason": values["reason"],
+                "evidence_json": values["evidence_json"],
+                "benefit_score": float(values["benefit_score"]),
+                "risk_score": float(values["risk_score"]),
+                "expires_at": values["expires_at"],
+                "created_at": values["created_at"],
+                "decided_at": values.get("decided_at"),
+                "decision_reason": values.get("decision_reason"),
+            }
+        )
+
+    @staticmethod
+    def _approval_hash(values: Any) -> str:
+        payload = {
+            "approval_id": values["approval_id"],
+            "proposal_id": values["proposal_id"],
+            "subject_id": values["subject_id"],
+            "actor": values["actor"],
+            "policy_revision": int(values["policy_revision"]),
+            "created_at": values["created_at"],
+        }
+        if values.get("identity_binding") is not None:
+            payload["identity_binding"] = values["identity_binding"]
+        return content_hash(payload)
 
     @staticmethod
     def _task_hash(values: Any) -> str:
@@ -808,7 +1055,9 @@ class MigrationManager:
         )
 
     @classmethod
-    def _proposal_projection(cls, row: Any) -> dict[str, Any]:
+    def _proposal_projection(
+        cls, row: Any, *, approvals: list[dict[str, str]] | None = None
+    ) -> dict[str, Any]:
         import json
 
         cls._assert_proposal_integrity(row)
@@ -826,6 +1075,7 @@ class MigrationManager:
                 "subject_id",
                 "target_id",
                 "policy_revision",
+                "approval_mode",
                 "status",
                 "reason_code",
                 "expires_at",
@@ -842,13 +1092,28 @@ class MigrationManager:
                 if values.get("decision_reason") is None
                 else redact_secret_text(str(values["decision_reason"]))
             ),
+            "approvals": list(approvals or []),
+            "approval_count": len(approvals or []),
+            "required_approvals": 2 if values.get("approval_mode") == "dual_review" else 1,
         }
 
     @classmethod
     def _assert_proposal_integrity(cls, row: Any) -> None:
         values = dict(row)
-        if values.get("state_hash") != cls._proposal_hash(values):
+        if values.get("state_hash") == cls._proposal_hash(values):
+            return
+        if values.get("approval_mode") == "manual" and values.get(
+            "state_hash"
+        ) == cls._legacy_proposal_hash(values):
+            return
+        else:
             raise ValueError("migration proposal integrity check failed")
+
+    @classmethod
+    def _assert_approval_integrity(cls, row: Any) -> None:
+        values = dict(row)
+        if values.get("state_hash") != cls._approval_hash(values):
+            raise ValueError("migration approval integrity check failed")
 
     @classmethod
     def _assert_task_integrity(cls, row: Any) -> None:

@@ -6,6 +6,7 @@ import hashlib
 import os
 import secrets
 import struct
+import tempfile
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -132,7 +133,16 @@ class TransferSession:
             raise ValueError("transfer source is unavailable")
         if source_path.stat().st_size != receipt.byte_size:
             raise ValueError("transfer resume prefix is invalid")
-        expected_prefix = receipt.next_chunk * receipt.chunk_bytes
+        if (
+            type(receipt.chunk_bytes) is not int
+            or not 4096 <= receipt.chunk_bytes <= 64 * 1024 * 1024
+            or type(receipt.byte_size) is not int
+            or not 0 <= receipt.byte_size <= MAX_ARTIFACT_BYTES
+            or receipt.next_chunk
+            > (receipt.byte_size + receipt.chunk_bytes - 1) // receipt.chunk_bytes
+        ):
+            raise ValueError("transfer resume receipt is invalid")
+        expected_prefix = min(receipt.next_chunk * receipt.chunk_bytes, receipt.byte_size)
         if not destination_path.is_file() or destination_path.stat().st_size != expected_prefix:
             raise ValueError("transfer resume prefix is invalid")
         with (
@@ -281,8 +291,12 @@ class EncryptedTransferSession:
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         artifact = hashlib.sha256()
         count = 0
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".noyra-receive-", dir=destination_path.parent
+        )
+        temporary = Path(temporary_name)
         try:
-            with encrypted_path.open("rb") as source, destination_path.open("wb") as target:
+            with os.fdopen(descriptor, "wb") as target, encrypted_path.open("rb") as source:
                 if source.read(len(_ENCRYPTED_MAGIC)) != _ENCRYPTED_MAGIC:
                     raise ValueError("encrypted transfer header is invalid")
                 chunk_bytes = struct.unpack(">I", source.read(4))[0]
@@ -311,16 +325,17 @@ class EncryptedTransferSession:
                     raise ValueError("encrypted transfer has trailing data")
                 target.flush()
                 os.fsync(target.fileno())
+            if count != receipt.chunk_count or temporary.stat().st_size != receipt.byte_size:
+                raise ValueError("encrypted transfer byte size mismatch")
+            if artifact.hexdigest() != receipt.artifact_hash:
+                raise ValueError("encrypted transfer artifact hash mismatch")
+            os.replace(temporary, destination_path)
         except Exception as error:
             with suppress(OSError):
-                destination_path.unlink()
+                temporary.unlink()
             if isinstance(error, ValueError) and "manifest" in str(error):
                 raise
             raise ValueError("encrypted transfer decrypt failed") from error
-        if count != receipt.chunk_count or destination_path.stat().st_size != receipt.byte_size:
-            raise ValueError("encrypted transfer byte size mismatch")
-        if artifact.hexdigest() != receipt.artifact_hash:
-            raise ValueError("encrypted transfer artifact hash mismatch")
 
     @staticmethod
     def _validate_digest(value: str) -> None:

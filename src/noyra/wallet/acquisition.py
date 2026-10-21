@@ -11,6 +11,7 @@ from itertools import pairwise
 from types import TracebackType
 from typing import Any, Self
 
+from noyra.core.admission import OperationInvalidated, accounting_scope
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.identity import validate_subject_id
@@ -2739,80 +2740,102 @@ class WalletBalanceAcquisitionRunner:
             if token is None:
                 raise IntegrityError(f"wallet acquisition claimed without token: {claim.run_id}")
             try:
-                balance, _asset, _address = self.acquirer.read_balance(
-                    subject_id,
-                    asset_id=claim.asset_id,
-                    address_id=claim.address_id,
-                    actor=actor,
-                )
-            except WalletRPCError as error:
                 try:
-                    return self.ledger.fail(
-                        claim.run_id,
-                        subject_id=subject_id,
-                        claim_token=token,
-                        worker_owner=self.worker_owner,
-                        error=error,
+                    balance, _asset, _address = self.acquirer.read_balance(
+                        subject_id,
+                        asset_id=claim.asset_id,
+                        address_id=claim.address_id,
                         actor=actor,
                     )
-                except WalletAcquisitionRunError as state_error:
-                    if state_error.code != "wallet_acquisition_lease_lost":
-                        raise
-                    return self._after_claim_loss(subject_id, claim.run_id)
-            except (NotFoundError, ValueError) as error:
-                try:
-                    return self.ledger.fail(
-                        claim.run_id,
-                        subject_id=subject_id,
-                        claim_token=token,
-                        worker_owner=self.worker_owner,
-                        error=error,
-                        error_code="wallet_rpc_configuration_invalid",
-                        request_count=0,
-                        retryable=False,
-                        actor=actor,
-                    )
-                except WalletAcquisitionRunError as state_error:
-                    if state_error.code != "wallet_acquisition_lease_lost":
-                        raise
-                    return self._after_claim_loss(subject_id, claim.run_id)
-            except Exception:
-                try:
-                    return self.ledger.mark_unknown(
-                        claim.run_id,
-                        subject_id=subject_id,
-                        claim_token=token,
-                        worker_owner=self.worker_owner,
-                        error_code="wallet_rpc_unexpected_failure",
-                        actor=actor,
-                    )
-                except WalletAcquisitionRunError as state_error:
-                    if state_error.code != "wallet_acquisition_lease_lost":
-                        raise
-                    return self._after_claim_loss(subject_id, claim.run_id)
+                except OperationInvalidated:
+                    raise
+                except WalletRPCError as error:
+                    try:
+                        return self.ledger.fail(
+                            claim.run_id,
+                            subject_id=subject_id,
+                            claim_token=token,
+                            worker_owner=self.worker_owner,
+                            error=error,
+                            actor=actor,
+                        )
+                    except WalletAcquisitionRunError as state_error:
+                        if state_error.code != "wallet_acquisition_lease_lost":
+                            raise
+                        return self._after_claim_loss(subject_id, claim.run_id)
+                except (NotFoundError, ValueError) as error:
+                    try:
+                        return self.ledger.fail(
+                            claim.run_id,
+                            subject_id=subject_id,
+                            claim_token=token,
+                            worker_owner=self.worker_owner,
+                            error=error,
+                            error_code="wallet_rpc_configuration_invalid",
+                            request_count=0,
+                            retryable=False,
+                            actor=actor,
+                        )
+                    except WalletAcquisitionRunError as state_error:
+                        if state_error.code != "wallet_acquisition_lease_lost":
+                            raise
+                        return self._after_claim_loss(subject_id, claim.run_id)
+                except Exception:
+                    try:
+                        return self.ledger.mark_unknown(
+                            claim.run_id,
+                            subject_id=subject_id,
+                            claim_token=token,
+                            worker_owner=self.worker_owner,
+                            error_code="wallet_rpc_unexpected_failure",
+                            actor=actor,
+                        )
+                    except WalletAcquisitionRunError as state_error:
+                        if state_error.code != "wallet_acquisition_lease_lost":
+                            raise
+                        return self._after_claim_loss(subject_id, claim.run_id)
 
-            renewed = self.ledger.renew(
-                claim.run_id,
-                subject_id=subject_id,
-                claim_token=token,
-                worker_owner=self.worker_owner,
-            )
-            if renewed is None:
-                return self._after_claim_loss(subject_id, claim.run_id)
-            try:
-                completed, _snapshot = self.ledger.complete_success(
+                renewed = self.ledger.renew(
                     claim.run_id,
                     subject_id=subject_id,
                     claim_token=token,
                     worker_owner=self.worker_owner,
-                    balance=balance,
-                    actor=actor,
                 )
-            except WalletAcquisitionRunError as state_error:
-                if state_error.code != "wallet_acquisition_lease_lost":
-                    raise
-                return self._after_claim_loss(subject_id, claim.run_id)
-            return completed
+                if renewed is None:
+                    return self._after_claim_loss(subject_id, claim.run_id)
+                try:
+                    completed, _snapshot = self.ledger.complete_success(
+                        claim.run_id,
+                        subject_id=subject_id,
+                        claim_token=token,
+                        worker_owner=self.worker_owner,
+                        balance=balance,
+                        actor=actor,
+                    )
+                except WalletAcquisitionRunError as state_error:
+                    if state_error.code != "wallet_acquisition_lease_lost":
+                        raise
+                    return self._after_claim_loss(subject_id, claim.run_id)
+                return completed
+            except OperationInvalidated:
+                # Only settle this already claimed attempt; no balance snapshot,
+                # renewed claim, retry, or provider call may bypass the fence.
+                with accounting_scope():
+                    try:
+                        return self.ledger.mark_unknown(
+                            claim.run_id,
+                            subject_id=subject_id,
+                            claim_token=token,
+                            worker_owner=self.worker_owner,
+                            error_code="wallet_rpc_operation_invalidated",
+                            actor=actor,
+                        )
+                    except WalletAcquisitionRunError as state_error:
+                        if state_error.code != "wallet_acquisition_lease_lost":
+                            raise
+                        # A lost claim belongs to recovery/the new owner. Do not
+                        # recover or schedule other attempts under accounting scope.
+                        return self.ledger.get(claim.run_id, subject_id=subject_id)
         finally:
             self.ledger._slots.release()
 

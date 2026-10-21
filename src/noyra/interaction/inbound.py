@@ -31,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
+from noyra.core.xml import parse_untrusted_xml
 
 from .store import InteractionStore
 
@@ -725,19 +726,12 @@ class WeChatInboundAdapter:
         """Parse bounded plaintext XML after rejecting entity declarations."""
         if raw.startswith(b"<"):
             try:
-                # ElementTree permits internal entity expansion.  WeChat's
-                # callback format never needs a DTD, so reject declarations
-                # before parsing and bound the resulting tree as defense in
-                # depth against entity/structural expansion attacks.
-                # CDATA sections are part of the official WeChat XML envelope;
-                # reject only declarations that can introduce external entities.
-                first_element = re.search(rb"<\s*[A-Za-z_][A-Za-z0-9_.:-]*", raw)
-                declaration_region = raw if first_element is None else raw[: first_element.start()]
-                if any(
-                    marker in declaration_region.upper() for marker in (b"<!DOCTYPE", b"<!ENTITY")
-                ):
-                    raise ValueError("wechat XML declarations are not allowed")
-                root = ET.fromstring(raw)
+                root = parse_untrusted_xml(
+                    raw,
+                    max_nodes=MAX_WECHAT_XML_NODES,
+                    max_depth=MAX_WECHAT_XML_DEPTH,
+                    max_text_chars=MAX_INBOUND_CONTENT_CHARS,
+                )
                 nodes = 0
                 text_size = 0
 

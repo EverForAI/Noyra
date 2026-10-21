@@ -22,7 +22,9 @@ from noyra.core.http import (
 
 from .config import OpenAICompatibleSettings
 from .errors import ProviderCallError
-from .types import CompletionRequest, ModelUsage, ProviderResponse
+from .reasoning import REASONING_EFFORTS
+from .types import CompletionRequest, ModelMessage, ModelUsage, ProviderResponse
+from .wire import strict_output_schema, uses_completion_token_limit
 
 
 class _UsagePayload(BaseModel):
@@ -110,6 +112,7 @@ class OpenAICompatibleProvider:
             headers["Authorization"] = f"Bearer {api_key}"
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.settings.timeout_seconds
+        started = loop.time()
         before_send = self.before_send
 
         async def trace(event: str, info: dict[str, Any]) -> None:
@@ -134,7 +137,9 @@ class OpenAICompatibleProvider:
                     extensions={"trace": trace},
                 ) as response:
                     return await self._parse_response(response, deadline=deadline)
-        except ProviderCallError:
+        except ProviderCallError as error:
+            if error.latency_ms is None:
+                error.latency_ms = max(0, min(int((loop.time() - started) * 1000), 86_400_000))
             raise
         except HTTPResponseLimitError:
             raise ProviderCallError(
@@ -176,9 +181,14 @@ class OpenAICompatibleProvider:
         base_url: str,
         model: str,
         api_key: Any,
+        reasoning_effort: str | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> dict[str, Any]:
         """Probe draft credentials without creating a durable resource."""
+        if reasoning_effort is not None and reasoning_effort not in REASONING_EFFORTS:
+            raise ProviderCallError(
+                "provider_reasoning_effort_invalid", retryable=False, outcome_unknown=False
+            )
         settings = OpenAICompatibleSettings(
             base_url=base_url,
             model=model,
@@ -195,18 +205,52 @@ class OpenAICompatibleProvider:
                     "POST",
                     f"{settings.base_url}/chat/completions",
                     headers=provider._headers(),
-                    json={
-                        "model": settings.model,
-                        "messages": [{"role": "user", "content": "Reply with OK."}],
-                        "max_tokens": 8,
-                        "temperature": 0,
-                    },
+                    json=provider._request_payload(
+                        CompletionRequest(
+                            model=settings.model,
+                            messages=(
+                                ModelMessage(
+                                    role="user",
+                                    content='Return exactly {"ok":true} as the JSON response.',
+                                ),
+                            ),
+                            max_output_tokens=(
+                                4096
+                                if uses_completion_token_limit(settings.model)
+                                or reasoning_effort is not None
+                                else 8
+                            ),
+                            temperature=0,
+                            schema_name="NoyraCapabilityProbe",
+                            output_schema={
+                                "type": "object",
+                                "properties": {"ok": {"type": "boolean"}},
+                                "required": ["ok"],
+                                "additionalProperties": False,
+                            },
+                            reasoning_effort=reasoning_effort,
+                        )
+                    ),
                     follow_redirects=False,
                 ) as response:
                     parsed = await provider._parse_response(response, deadline=deadline)
             if not parsed.content.strip():
                 raise ProviderCallError(
                     "provider_response_empty", retryable=False, outcome_unknown=True
+                )
+            try:
+                probe_payload = json.loads(parsed.content)
+            except (TypeError, ValueError) as error:
+                raise ProviderCallError(
+                    "provider_response_invalid", retryable=False, outcome_unknown=True
+                ) from error
+            if (
+                not isinstance(probe_payload, dict)
+                or set(probe_payload) != {"ok"}
+                or probe_payload["ok"] is not True
+            ):
+                raise ProviderCallError(
+                    "provider_response_invalid", retryable=False, outcome_unknown=True
                 )
             return {
                 "ok": True,
@@ -449,17 +493,24 @@ class OpenAICompatibleProvider:
 
     @staticmethod
     def _request_payload(request: CompletionRequest) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "model": request.model,
             "messages": [message.model_dump() for message in request.messages],
-            "max_tokens": request.max_output_tokens,
-            "temperature": request.temperature,
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
                     "name": request.schema_name,
                     "strict": True,
-                    "schema": request.output_schema,
+                    "schema": strict_output_schema(request.output_schema),
                 },
             },
         }
+        if uses_completion_token_limit(request.model):
+            payload["max_completion_tokens"] = request.max_output_tokens
+        else:
+            payload["max_tokens"] = request.max_output_tokens
+            payload["temperature"] = request.temperature
+        # Only capability-validated requests carry this optional field.
+        if request.reasoning_effort is not None:
+            payload["reasoning_effort"] = request.reasoning_effort
+        return payload

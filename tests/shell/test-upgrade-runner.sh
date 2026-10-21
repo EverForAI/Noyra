@@ -126,6 +126,8 @@ grep -Fq 'ExecStart=/usr/local/libexec/noyra-upgrade-runner.sh' "$service_unit" 
   fail 'privileged runner inherits Noyra secrets'
 grep -Fq 'ExecStart=/usr/local/libexec/noyra-upgrade-runner.sh --recover-only' "$recover_unit" || \
   fail 'boot recovery is not wired to the fixed runner'
+grep -Fq '/etc/noyra/storage-identity.conf' "$runner" || \
+  fail 'boot recovery does not honor the external storage identity'
 
 # On boot, a persisted active task becomes a stable interrupted status.
 printf '{"task_id":"task-reboot-0001","status":"running","target_sha":"%s","started_at":"2026-10-01T00:00:00Z"}\n' \
@@ -135,5 +137,69 @@ status="$(cat "$test_root/state/status.json")"
 [[ "$status" == *'"status":"interrupted"'* ]] || fail 'boot recovery did not mark the interrupted task'
 [[ "$status" == *'"error_code":"upgrade_interrupted"'* ]] || \
   fail 'boot recovery did not use the stable interrupted code'
+recovered_status="$status"
+bash "$runner" --recover-only
+[[ "$(cat "$test_root/state/status.json")" == "$recovered_status" ]] || \
+  fail 'repeated boot recovery changed an already interrupted task'
+
+# The persisted data mount identity is checked against the current source,
+# rather than merely checking that the mountpoint exists.
+identity_root="$test_root/identity"
+mkdir -p "$identity_root" "$test_root/storage-bin" "$test_root/data"
+cat > "$identity_root/storage-identity.conf" <<IDENTITY
+NOYRA_STORAGE_IDENTITY_FORMAT=noyra-storage-identity/v1
+NOYRA_STORAGE_DATA_DIR=$test_root/data
+NOYRA_STORAGE_MODE=dedicated_mount
+NOYRA_STORAGE_SOURCE=/dev/expected
+IDENTITY
+cat > "$test_root/storage-bin/mountpoint" <<'MOUNTPOINT'
+#!/usr/bin/env bash
+exit 0
+MOUNTPOINT
+cat > "$test_root/storage-bin/findmnt" <<'FINDMNT'
+#!/usr/bin/env bash
+printf '%s %s\n' "${NOYRA_TEST_MOUNT_SOURCE:-/dev/expected}" "$NOYRA_TEST_MOUNT_TARGET"
+FINDMNT
+cat > "$test_root/storage-bin/stat" <<'STAT'
+#!/usr/bin/env bash
+if [[ "${*: -1}" == "$NOYRA_TEST_IDENTITY_PATH" ]]; then
+  printf '%s\n' "${NOYRA_TEST_IDENTITY_METADATA:-0:1:640}"
+else
+  exec /usr/bin/stat "$@"
+fi
+STAT
+chmod 0755 "$test_root/storage-bin/mountpoint" "$test_root/storage-bin/findmnt" \
+  "$test_root/storage-bin/stat"
+storage_function="$(sed -n '/^storage_identity_mount_available()/,/^ensure_native_storage_layout()/ { /^ensure_native_storage_layout()/d; p; }' "$runner")"
+PATH="$test_root/storage-bin:$PATH" \
+NOYRA_TEST_MOUNT_TARGET="$test_root/data" \
+NOYRA_UPGRADE_TEST_IDENTITY_ROOT="$identity_root" \
+NOYRA_TEST_IDENTITY_PATH="$identity_root/storage-identity.conf" \
+bash -c "$storage_function; TEST_MODE=true; storage_identity_mount_available \"\$1\"" bash "$test_root/data" || \
+  fail 'runner rejected the expected storage source'
+if PATH="$test_root/storage-bin:$PATH" \
+  NOYRA_TEST_MOUNT_SOURCE=/dev/wrong \
+  NOYRA_TEST_MOUNT_TARGET="$test_root/data" \
+  NOYRA_UPGRADE_TEST_IDENTITY_ROOT="$identity_root" \
+  NOYRA_TEST_IDENTITY_PATH="$identity_root/storage-identity.conf" \
+  bash -c "$storage_function; TEST_MODE=true; storage_identity_mount_available \"\$1\"" bash "$test_root/data"; then
+  fail 'runner accepted a wrong storage source'
+fi
+for metadata in 1000:1:640 0:2:640 0:1:660 0:1:646; do
+  if PATH="$test_root/storage-bin:$PATH" \
+    NOYRA_TEST_IDENTITY_METADATA="$metadata" \
+    NOYRA_TEST_MOUNT_TARGET="$test_root/data" \
+    NOYRA_UPGRADE_TEST_IDENTITY_ROOT="$identity_root" \
+    NOYRA_TEST_IDENTITY_PATH="$identity_root/storage-identity.conf" \
+    bash -c "$storage_function; TEST_MODE=true; storage_identity_mount_available \"\$1\"" bash "$test_root/data"; then
+    fail "runner accepted unsafe identity metadata: $metadata"
+  fi
+done
+
+# A missing test storage root is an explicit skipped recovery, not a generic
+# runner failure, and the recovery path must not recreate the directory.
+rm -rf -- "$test_root/state"
+bash "$runner" --recover-only
+[[ ! -e "$test_root/state" ]] || fail 'recovery recreated unavailable storage'
 
 echo 'upgrade runner contract checks passed'

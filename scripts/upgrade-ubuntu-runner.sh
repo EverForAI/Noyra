@@ -45,8 +45,96 @@ status_written=false
 error_code=upgrade_start_failed
 phase=starting
 processing_file=""
+recover_only=false
+[[ "${1:-}" == --recover-only ]] && recover_only=true
 
 utc_now() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+
+storage_identity_mount_available() {
+  # Production identity: /etc/noyra/storage-identity.conf.
+  local data_root="$1" identity identity_root current_source current_target expected_dir expected_mode expected_format expected_source
+  identity_root=/etc/noyra
+  if [[ "$TEST_MODE" == true && -n "${NOYRA_UPGRADE_TEST_IDENTITY_ROOT:-}" ]]; then
+    identity_root="$NOYRA_UPGRADE_TEST_IDENTITY_ROOT"
+  fi
+  for identity in "$identity_root/storage.conf" "$identity_root/storage-identity.conf"; do
+    if [[ -L "$identity" || ( -e "$identity" && ! -f "$identity" ) ]]; then
+      return 1
+    fi
+    if [[ -f "$identity" ]] && ! mountpoint -q "$data_root"; then
+      return 1
+    fi
+    if [[ "$identity" == "$identity_root/storage-identity.conf" && -f "$identity" ]]; then
+      local identity_metadata identity_owner identity_nlink identity_mode identity_permissions
+      identity_metadata="$(stat -c '%u:%h:%a' -- "$identity" 2>/dev/null || true)"
+      IFS=: read -r identity_owner identity_nlink identity_mode <<< "$identity_metadata"
+      [[ "$identity_owner" == 0 && "$identity_nlink" == 1 ]] || return 1
+      [[ "$identity_mode" =~ ^[0-7]{3,4}$ ]] || return 1
+      identity_permissions="${identity_mode: -3}"
+      [[ "${identity_permissions:1:1}" =~ ^[0145]$ &&
+        "${identity_permissions:2:1}" =~ ^[0145]$ ]] || return 1
+      read -r current_source current_target < <(findmnt -n -o SOURCE,TARGET --target "$data_root")
+      [[ -n "$current_source" && "$current_target" == "$data_root" ]] || return 1
+      [[ "$(grep -c '^NOYRA_STORAGE_IDENTITY_FORMAT=' "$identity")" == 1 ]] || return 1
+      [[ "$(grep -c '^NOYRA_STORAGE_DATA_DIR=' "$identity")" == 1 ]] || return 1
+      [[ "$(grep -c '^NOYRA_STORAGE_MODE=' "$identity")" == 1 ]] || return 1
+      [[ "$(grep -c '^NOYRA_STORAGE_SOURCE=' "$identity")" == 1 ]] || return 1
+      [[ "$(wc -l < "$identity")" == 4 ]] || return 1
+      ! grep -Eqv '^(NOYRA_STORAGE_IDENTITY_FORMAT|NOYRA_STORAGE_DATA_DIR|NOYRA_STORAGE_MODE|NOYRA_STORAGE_SOURCE)=.+$' "$identity" || return 1
+      expected_format="$(sed -n 's/^NOYRA_STORAGE_IDENTITY_FORMAT=\(.*\)$/\1/p' "$identity")"
+      expected_dir="$(sed -n 's/^NOYRA_STORAGE_DATA_DIR=\(.*\)$/\1/p' "$identity")"
+      expected_mode="$(sed -n 's/^NOYRA_STORAGE_MODE=\(.*\)$/\1/p' "$identity")"
+      expected_source="$(sed -n 's/^NOYRA_STORAGE_SOURCE=\(.*\)$/\1/p' "$identity")"
+      [[ "$expected_format" == noyra-storage-identity/v1 &&
+        "$expected_dir" == "$data_root" &&
+        "$expected_mode" == dedicated_mount &&
+        -n "$expected_source" &&
+        "$expected_source" == "$current_source" ]] || return 1
+    fi
+  done
+}
+
+ensure_native_storage_layout() {
+  local data_root=/var/lib/noyra
+  local upgrade_root="$data_root/upgrade"
+  local request_root="$upgrade_root/requests"
+  local processing_root="$upgrade_root/processing"
+  local noyra_uid noyra_gid
+  [[ -d "$data_root" && ! -L "$data_root" ]] || return 78
+  # Root-owned storage identities live outside the data path and must fail
+  # closed when the dedicated volume is absent.
+  storage_identity_mount_available "$data_root" || return 78
+  noyra_uid="$(id -u noyra 2>/dev/null || true)"
+  noyra_gid="$(id -g noyra 2>/dev/null || true)"
+  [[ -n "$noyra_uid" && -n "$noyra_gid" ]] || return 78
+  [[ "$(stat -c '%u:%g:%a' -- "$data_root" 2>/dev/null || true)" == \
+    "$noyra_uid:$noyra_gid:700" ]] || return 78
+  ensure_dir_contract() {
+    local path="$1" owner="$2" mode="$3"
+    if [[ ! -e "$path" ]]; then
+      install -d -o "${owner%:*}" -g "${owner#*:}" -m "$mode" "$path"
+      return 0
+    fi
+    [[ -d "$path" && ! -L "$path" ]] || return 78
+    [[ "$(stat -c '%u:%g:%a' -- "$path" 2>/dev/null || true)" == "$owner:$mode" ]] || return 78
+  }
+  ensure_dir_contract "$upgrade_root" "0:$noyra_gid" 750 || return 78
+  ensure_dir_contract "$request_root" "$noyra_uid:$noyra_gid" 700 || return 78
+  ensure_dir_contract "$processing_root" "0:0" 700 || return 78
+  return 0
+}
+
+storage_is_available() {
+  local data_root=/var/lib/noyra
+  [[ -d "$data_root" && ! -L "$data_root" ]] || return 1
+  storage_identity_mount_available "$data_root" || return 1
+  return 0
+}
+
+skip_for_unavailable_storage() {
+  printf '%s\n' 'storage_unavailable: upgrade recovery was skipped until the data path is available.' >&2
+  return 0
+}
 
 write_status() {
   local status="$1" next_phase="$2" code="${3:-}" ended="${4:-}"
@@ -112,18 +200,41 @@ PY
 finish_failed() {
   local rc=$?
   if [[ "$status_written" == true && -n "$task_id" && "$phase" != completed && "$phase" != failed ]]; then
-    write_status failed failed "$error_code" "$(utc_now)" \
-      '升级未完成；旧版本由安装器保护。' || true
+    local failure_log='升级未完成；旧版本由安装器保护。'
+    if [[ "$error_code" == upgrade_install_failed ]]; then
+      failure_log='升级安装失败；安装器已记录回滚原因并重新检查旧版本 schema contract 和 readiness。'
+    fi
+    write_status failed failed "$error_code" "$(utc_now)" "$failure_log" || true
   fi
   if [[ -n "$processing_file" ]]; then rm -f -- "$processing_file"; fi
   return "$rc"
 }
 trap finish_failed EXIT
 
-if [[ "$TEST_MODE" == true ]]; then
+if [[ "$TEST_MODE" == true && "$recover_only" != true ]]; then
   mkdir -p -- "$INSTALL_ROOT" "$PROCESSING_DIR"
 fi
 if [[ "$TEST_MODE" != true ]]; then
+  if [[ "$recover_only" == true ]]; then
+    if ! storage_is_available; then
+      skip_for_unavailable_storage
+      exit 0
+    fi
+  else
+    if ! ensure_native_storage_layout; then
+      error_code=storage_unavailable
+      skip_for_unavailable_storage
+      exit 0
+    fi
+  fi
+  if [[ "$recover_only" == true ]]; then
+    for path in /opt /var/lib/noyra "$INSTALL_ROOT" "$UPGRADE_ROOT" "$REQUEST_DIR" "$PROCESSING_DIR"; do
+      if [[ -L "$path" || ! -d "$path" ]]; then
+        skip_for_unavailable_storage
+        exit 0
+      fi
+    done
+  fi
   for path in /opt /var/lib/noyra "$INSTALL_ROOT" "$UPGRADE_ROOT" "$REQUEST_DIR" "$PROCESSING_DIR"; do
     [[ ! -L "$path" && -d "$path" ]] || exit 1
   done
@@ -134,6 +245,14 @@ if [[ "$TEST_MODE" != true ]]; then
   [[ "$(stat -c '%u:%g:%a' -- "$PROCESSING_DIR")" == '0:0:700' ]] || exit 1
   [[ "$(stat -c '%u:%g:%a' -- "$HANDOFF_LOCK_PATH" 2>/dev/null || true)" == \
     "0:$(getent group noyra | cut -d: -f3):660" ]] || exit 1
+fi
+if [[ "$TEST_MODE" == true && "$recover_only" == true ]]; then
+  for path in "$INSTALL_ROOT" "$UPGRADE_ROOT" "$REQUEST_DIR" "$PROCESSING_DIR"; do
+    if [[ -L "$path" || ! -d "$path" ]]; then
+      skip_for_unavailable_storage
+      exit 0
+    fi
+  done
 fi
 [[ ! -L "$INSTALL_ROOT" && -d "$INSTALL_ROOT" ]] || exit 1
 [[ ! -L "$UPGRADE_ROOT" && -d "$UPGRADE_ROOT" ]] || exit 1

@@ -70,7 +70,11 @@ def test_target_readiness_binds_subject_and_migration_target_identity(
 ) -> None:
     monkeypatch.setenv("NOYRA_MIGRATION_TARGET_ID", "shelter-1")
     token = "readiness-operator-token-with-enough-entropy"
-    settings = _settings(tmp_path, operator_token=SecretStr(token))
+    settings = _settings(
+        tmp_path,
+        operator_token=SecretStr(token),
+        backup_root=tmp_path / "missing-backups",
+    )
     service = NoyraService(settings)
     service.boot()
     service.http.start()
@@ -84,6 +88,11 @@ def test_target_readiness_binds_subject_and_migration_target_identity(
             payload = json.loads(response.read())
         assert payload["subject_id"] == settings.subject_id
         assert payload["migration_target_id"] == "shelter-1"
+        assert payload["storage"]["mode"] == "system_disk"
+        assert payload["storage"]["writable"] is True
+        assert payload["storage"]["runtime_ready"] is True
+        assert payload["storage"]["backup_ready"] is False
+        assert payload["components"]["backup"]["reason_code"] == "backup_path_missing"
     finally:
         service.http.close()
         service.kernel.close()
@@ -161,7 +170,13 @@ def test_public_health_does_not_leak_cached_admin_diagnostics(
             "volume": {"volume_id": "private-volume"},
             "backup_key": {"active_key_fingerprint": "private-fingerprint"},
         }
-        monkeypatch.setattr(service.http, "at_rest", SimpleNamespace(health=lambda: private))
+        # Readiness now uses the bounded HTTP projection; /health retains the
+        # strict diagnostic contract. Model both, without weakening redaction.
+        monkeypatch.setattr(
+            service.http,
+            "at_rest",
+            SimpleNamespace(health=lambda: private, request_health=lambda: private),
+        )
         for path in ("/health/ready", "/health"):
             request = Request(
                 f"http://127.0.0.1:{port}{path}", headers={"Authorization": f"Bearer {token}"}

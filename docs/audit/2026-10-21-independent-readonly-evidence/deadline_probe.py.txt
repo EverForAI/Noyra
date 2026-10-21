@@ -1,0 +1,22 @@
+
+import sys,json,time,threading
+from pathlib import Path
+sys.path.insert(0,str(Path(sys.argv[1])/'src'))
+from noyra.core.http import call_sync_http_with_deadline
+from noyra.core.deadline import operation_deadline
+ready=[threading.Event() for _ in range(4)];release=threading.Event();workers=[]
+def block(i):
+ def work():ready[i].set();release.wait(2)
+ call_sync_http_with_deadline(work,timeout=2)
+for i in range(4):
+ t=threading.Thread(target=block,args=(i,));t.start();workers.append(t)
+for e in ready:assert e.wait(2)
+timer=threading.Timer(0.35,release.set);timer.start()
+started=time.perf_counter();called=[]
+try:
+ with operation_deadline(0.05):
+  result=call_sync_http_with_deadline(lambda:called.append(time.perf_counter()-started),timeout=1)
+ error=None
+except BaseException as e:error=type(e).__name__
+for t in workers:t.join()
+print(json.dumps({'source':sys.argv[1],'parent_deadline_seconds':0.05,'helper_timeout_seconds':1,'release_after_seconds':0.35,'caller_elapsed_seconds':time.perf_counter()-started,'callback_started_seconds':called,'error':error},indent=2))

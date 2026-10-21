@@ -14,7 +14,7 @@ from noyra.core.database import CURRENT_SCHEMA_VERSION
 from noyra.core.errors import RuntimeOwnershipError
 from noyra.core.types import canonical_json, content_hash
 from noyra.migration.cutover import CutoverCoordinator
-from noyra.migration.executor import MigrationExecutionReceipt
+from noyra.migration.executor import MigrationExecutionError, MigrationExecutionReceipt
 from noyra.migration.fencing import EpochLease
 from noyra.migration.manager import MigrationManager, MigrationTask
 from noyra.migration.policy import MigrationStore
@@ -369,6 +369,86 @@ def test_cutover_accepts_task_bound_signed_restore_and_health_proof(tmp_path: An
     prepared = cutover.prepare(task.task_id, proof=proof)
     assert prepared.status == "validating"
     assert cutover.commit(task.task_id) == {"task_id": task.task_id, "status": "committed"}
+    report = cutover.get_self_attestation(task.task_id, subject_id="Noyra-0001")
+    assert report["format"] == "noyra-migration-self-attestation/v1"
+    assert report["target_identity_digest"] == content_hash("host-1")
+    assert report["manifest_digest"] == "b" * 64
+    assert all(report["evidence"]["gates"].values())
+    assert report["report_digest"] == content_hash(
+        {key: value for key, value in report.items() if key != "report_digest"}
+    )
+
+
+def test_self_attested_cutover_rejects_mismatched_target_identity(tmp_path: Any) -> None:
+    database, store, registry, private = _target_context(tmp_path)
+    policy = store.read_policy("Noyra-0001")
+    manager = MigrationManager(database, store)
+    proposal = manager.create_proposal(
+        subject_id="Noyra-0001",
+        target_id="standby-1",
+        policy_revision=policy.revision,
+        reason_code="maintenance",
+        reason="planned maintenance",
+        expires_at="2099-01-01T00:00:00+00:00",
+    )
+    task = manager.approve(proposal.proposal_id, actor="operator", idempotency_key="identity-gate")
+    challenge = registry.issue_challenge("standby-1", source_epoch=task.source_epoch)
+    registry.attest(
+        "standby-1",
+        challenge,
+        base64.urlsafe_b64encode(private.sign(challenge.signing_bytes())).decode("ascii"),
+        actor="operator",
+    )
+    restore = {
+        "target_id": "standby-1",
+        "artifact_id": "artifact-identity",
+        "manifest_digest": "b" * 64,
+        "status": "restored",
+    }
+    health = {
+        **restore,
+        "status": "healthy",
+        "host_identity": "host-1",
+        "checks": {"database": True, "runtime": True},
+    }
+    signing_payload = {
+        "task_id": task.task_id,
+        "subject_id": task.subject_id,
+        "target_id": task.target_id,
+        "source_epoch": task.source_epoch,
+        "manifest_digest": restore["manifest_digest"],
+        "artifact_id": restore["artifact_id"],
+        "restore_report_digest": content_hash(restore),
+        "health_report_digest": content_hash(health),
+    }
+    proof: dict[str, object] = {
+        "manifest_digest": restore["manifest_digest"],
+        "artifact_id": restore["artifact_id"],
+        "restore_report": restore,
+        "health_report": health,
+        "target_signature": base64.urlsafe_b64encode(
+            private.sign(canonical_json(signing_payload).encode())
+        ).decode("ascii"),
+    }
+    _add_disabled_binding_proof(proof, task=task, target_identity="host-1")
+    wallet_binding = proof.get("wallet_binding")
+    assert isinstance(wallet_binding, dict)
+    proof["wallet_binding"] = {
+        **wallet_binding,
+        "target_identity": "different-host",
+    }
+    cutover = CutoverCoordinator(database, executor=_ProofExecutor())
+    cutover.prepare(task.task_id, proof=proof)
+    with pytest.raises(MigrationExecutionError, match="self_attestation_gate_failed"):
+        cutover.commit(task.task_id)
+    assert manager.get_task(task.task_id).status == "validating"
+    with database.connection() as connection:
+        assert (
+            connection.execute(
+                "SELECT 1 FROM migration_self_attestations WHERE task_id=?", (task.task_id,)
+            ).fetchone()
+            is None
+        )
 
 
 def test_cutover_commit_rolls_back_task_when_epoch_completion_fails(

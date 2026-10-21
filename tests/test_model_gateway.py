@@ -1681,13 +1681,14 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
             captured["path"] = request.url.path
             captured["authorization"] = request.headers.get("authorization")
             captured["body"] = json.loads(request.content)
-            return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+            return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok":true}'}}]})
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         result = await OpenAICompatibleProvider.probe_unstored(
             base_url="https://models.example/v1",
             model="remote-model",
             api_key=SecretStr("unstored-secret"),
+            reasoning_effort="high",
             client=client,
         )
         await client.aclose()
@@ -1695,7 +1696,63 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["model"], "remote-model")
         self.assertEqual(captured["path"], "/v1/chat/completions")
         self.assertEqual(captured["authorization"], "Bearer unstored-secret")
+        self.assertEqual(captured["body"]["reasoning_effort"], "high")
+        self.assertEqual(captured["body"]["response_format"]["type"], "json_schema")
+        self.assertEqual(
+            captured["body"]["response_format"]["json_schema"]["name"],
+            "NoyraCapabilityProbe",
+        )
         self.assertNotIn("unstored-secret", repr(result))
+
+    async def test_provider_probe_rejects_payload_outside_exact_schema(self: Self) -> None:
+        for content in ('{"ok":true,"extra":"ignored"}', '{"ok":"true"}', '{"ok":false}'):
+            with self.subTest(content=content):
+
+                async def handler(
+                    _: httpx.Request, response_content: str = content
+                ) -> httpx.Response:
+                    return httpx.Response(
+                        200,
+                        json={"choices": [{"message": {"content": response_content}}]},
+                    )
+
+                client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+                with self.assertRaises(ProviderCallError) as caught:
+                    await OpenAICompatibleProvider.probe_unstored(
+                        base_url="https://models.example/v1",
+                        model="provider-alias",
+                        api_key=SecretStr("probe-secret"),
+                        client=client,
+                    )
+                await client.aclose()
+                self.assertEqual(caught.exception.code, "provider_response_invalid")
+                self.assertNotIn("probe-secret", str(caught.exception))
+
+    async def test_verified_reasoning_capability_is_sent_for_model_alias(self: Self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "alias-reasoning.sqlite3")
+            subject_id = "Noyra-verified-alias"
+            IdentityStore(database).ensure(subject_id, content_hash("verified-alias"))
+            provider = FakeProvider([insight_response()])
+            gateway = ModelGateway(
+                provider,
+                ModelLedger(database),
+                model="provider-alias",
+                limits=BudgetLimits(10, 10_000, 10_000, 1_000_000),
+                reasoning_effort="high",
+                reasoning_capability_verified=True,
+            )
+
+            await gateway.complete_structured(
+                subject_id,
+                "world_cognition:alias-reasoning",
+                [ModelMessage(role="user", content="Observe the world.")],
+                Insight,
+                idempotency_key="verified-alias-reasoning",
+            )
+
+            self.assertEqual(provider.requests[0].model, "provider-alias")
+            self.assertEqual(provider.requests[0].reasoning_effort, "high")
 
     async def test_provider_lists_models_from_openai_compatible_endpoint(self: Self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:

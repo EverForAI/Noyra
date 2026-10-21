@@ -270,7 +270,9 @@ def test_container_automation_evidence_mount_is_optional_and_read_only() -> None
     assert "path.chmod(0o444)" in dockerfile
 
 
-def test_production_migration_gate_preserves_manual_and_local_wallet_choice(tmp_path: Path) -> None:
+def test_production_migration_gate_defaults_to_self_attested_and_preserves_local_wallet_choice(
+    tmp_path: Path,
+) -> None:
     database = Database(tmp_path / "noyra.sqlite3")
     IdentityStore(database).ensure("Noyra-release", "a" * 64)
     store = MigrationStore(database, production=True)
@@ -284,7 +286,7 @@ def test_production_migration_gate_preserves_manual_and_local_wallet_choice(tmp_
         },
         "operator",
     )
-    assert manual.approval_mode == "manual"
+    assert manual.approval_mode == "self_attested"
     with pytest.raises(ValueError, match="production_release_evidence_required"):
         store.update_policy(
             "Noyra-release",
