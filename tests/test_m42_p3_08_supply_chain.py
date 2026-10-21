@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +40,21 @@ def test_runtime_and_profile_locks_are_hash_pinned() -> None:
     _assert_hashed_lock(ROOT / "requirements.lock")
     _assert_hashed_lock(ROOT / "requirements-dev.lock")
     _assert_hashed_lock(ROOT / "requirements-cloud.lock")
+
+
+def test_certifi_security_floor_and_profile_locks_agree() -> None:
+    # The emSign trust-store incident must not return via a stale dev lock or
+    # an unconstrained wheel install, even if runtime HTTPS is only transitive.
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "certifi>=2026.10.19" in project["project"]["dependencies"]
+    versions = []
+    for name in ("requirements.lock", "requirements-dev.lock"):
+        match = re.search(r"^certifi==([0-9.]+) \\$", (ROOT / name).read_text(), re.MULTILINE)
+        assert match is not None, name
+        version = tuple(int(part) for part in match[1].split("."))
+        assert version >= (2026, 10, 19), name
+        versions.append(version)
+    assert versions[0] == versions[1]
 
 
 def test_ci_and_release_actions_are_immutable_and_install_hashes() -> None:
