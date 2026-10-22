@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -14,6 +15,33 @@ POWERSHELL = shutil.which("pwsh") or shutil.which("powershell")
 
 def _run(script: Path, *args: str) -> subprocess.CompletedProcess[str]:
     assert POWERSHELL is not None
+    if script.name == "build-windows-package.ps1":
+        launcher = Path(os.environ.get("WINDIR", r"C:\Windows")) / "System32" / "whoami.exe"
+        thumbprint_probe = subprocess.run(
+            [
+                POWERSHELL,
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                (
+                    f"(Get-AuthenticodeSignature -LiteralPath '{launcher}')."
+                    "SignerCertificate.Thumbprint"
+                ),
+            ],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        args = (
+            *args,
+            "-LauncherPath",
+            str(launcher),
+            "-TrustedPublisherThumbprints",
+            thumbprint_probe.stdout.strip(),
+        )
     return subprocess.run(
         [POWERSHELL, "-NoProfile", "-NonInteractive", "-File", str(script), *args],
         cwd=ROOT,

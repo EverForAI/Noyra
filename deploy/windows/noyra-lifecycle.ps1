@@ -12,7 +12,9 @@ param(
     [Parameter(Mandatory = $false)]
     [string]$Version,
     [Parameter(Mandatory = $false)]
-    [switch]$RequireSignature
+    [switch]$RequireSignature,
+    [Parameter(Mandatory = $false)]
+    [string[]]$TrustedPublisherThumbprints
 )
 
 $ErrorActionPreference = 'Stop'
@@ -40,6 +42,20 @@ function Assert-SafeSegment([string]$Value, [string]$Name) {
     if ([string]::IsNullOrWhiteSpace($Value) -or $Value -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
         throw "$Name is not a safe package/version segment."
     }
+}
+
+function Normalize-Thumbprints([object[]]$Values) {
+    if ($null -eq $Values -or $Values.Count -eq 0 -or
+        ($Values.Count -eq 1 -and [string]::IsNullOrWhiteSpace([string]$Values[0]))) {
+        return @()
+    }
+    return @($Values | ForEach-Object {
+        $normalized = ([string]$_).Trim().Replace(' ', '').ToUpperInvariant()
+        if ($normalized -notmatch '^[0-9A-F]{40}$') {
+            throw 'Trusted publisher thumbprints must be 40 hexadecimal characters.'
+        }
+        $normalized
+    } | Sort-Object -Unique)
 }
 
 function Read-Pointer([string]$Path) {
@@ -103,11 +119,28 @@ function Verify-Package([string]$Root) {
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     if ($manifest.format -ne 'noyra-windows-package/v1') { throw 'Unsupported package manifest.' }
     Assert-SafeSegment ([string]$manifest.version) 'manifest version'
+    $launcherProperty = $manifest.PSObject.Properties['launcher']
+    if ($null -eq $launcherProperty -or [string]$launcherProperty.Value -notin @('noyra.exe', 'noyra-desktop.exe')) {
+        throw 'Package manifest must declare noyra.exe or noyra-desktop.exe as launcher.'
+    }
+    $manifestLauncher = [string]$launcherProperty.Value
     $manifestRequiresSignature = $false
     $signatureProperty = $manifest.PSObject.Properties['signature_required']
     if ($null -ne $signatureProperty) {
         if ($signatureProperty.Value -isnot [bool]) { throw 'Invalid signature requirement.' }
         $manifestRequiresSignature = $signatureProperty.Value
+    }
+    $manifestThumbprintProperty = $manifest.PSObject.Properties['trusted_publisher_thumbprints']
+    $manifestThumbprintValues = if ($null -eq $manifestThumbprintProperty) { @() } else { @($manifestThumbprintProperty.Value) }
+    $manifestThumbprints = Normalize-Thumbprints $manifestThumbprintValues
+    $externalThumbprints = Normalize-Thumbprints $TrustedPublisherThumbprints
+    $signatureRequired = $RequireSignature -or $manifestRequiresSignature
+    if ($signatureRequired -and $externalThumbprints.Count -eq 0) {
+        throw 'Signature verification requires an external trusted publisher thumbprint.'
+    }
+    if ($signatureRequired -and $manifestThumbprints.Count -gt 0 -and
+        (@($manifestThumbprints) -join ',') -ne (@($externalThumbprints) -join ',')) {
+        throw 'Package trusted publisher metadata does not match installer trust policy.'
     }
     $seen = @{'noyra-package.json' = $true}
     foreach ($entry in @($manifest.files)) {
@@ -129,11 +162,15 @@ function Verify-Package([string]$Root) {
         $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($hash -ne ([string]$entry.sha256).ToLowerInvariant()) { throw "Package hash mismatch: $relative" }
         $extension = [IO.Path]::GetExtension($file).ToLowerInvariant()
-        if (($RequireSignature -or $manifestRequiresSignature) -and $extension -in @('.exe', '.msi', '.msix', '.appx')) {
+        if ($signatureRequired -and $extension -in @('.exe', '.msi', '.msix', '.appx')) {
             $signature = Get-AuthenticodeSignature -LiteralPath $file
-            if ($signature.Status -ne 'Valid') { throw "Authenticode signature is not valid: $relative" }
+            if ($signature.Status -ne 'Valid' -or
+                $externalThumbprints -notcontains $signature.SignerCertificate.Thumbprint.ToUpperInvariant()) {
+                throw "Authenticode signature or trusted publisher is not valid: $relative"
+            }
         }
     }
+    if (-not $seen.ContainsKey($manifestLauncher)) { throw "Declared launcher is not in package inventory: $manifestLauncher" }
     foreach ($relative in $inventory.Keys) {
         if (-not $seen.ContainsKey($relative)) { throw "Unlisted package file: $relative" }
     }
@@ -209,13 +246,9 @@ function Start-Noyra {
     if ($null -eq $current) { throw 'No installed Noyra version is selected.' }
     New-Item -ItemType Directory -Force -Path $DataRoot | Out-Null
     $versionRoot = Join-Path $versions $current
-    # Revalidate installed inventory before selecting any executable. Source-only
-    # developer packages may install, but cannot start without a listed launcher.
-    Verify-Package $versionRoot | Out-Null
-    $launcher = Join-Path $versionRoot 'noyra.exe'
-    if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
-        $launcher = Join-Path $versionRoot 'noyra-desktop.exe'
-    }
+    # Revalidate installed inventory and select only the manifest-declared launcher.
+    $installedManifest = Verify-Package $versionRoot
+    $launcher = Join-Path $versionRoot ([string]$installedManifest.launcher)
     if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
         throw "Installed package has no launcher: $current"
     }
@@ -298,7 +331,7 @@ switch ($Action) {
     }
     'upgrade' {
         if ([string]::IsNullOrWhiteSpace($PackageRoot)) { throw '-PackageRoot is required for upgrade.' }
-        & $PSCommandPath -Action install -InstallRoot $InstallRoot -DataRoot $DataRoot -PackageRoot $PackageRoot -RequireSignature:$RequireSignature
+        & $PSCommandPath -Action install -InstallRoot $InstallRoot -DataRoot $DataRoot -PackageRoot $PackageRoot -RequireSignature:$RequireSignature -TrustedPublisherThumbprints $TrustedPublisherThumbprints
     }
     'rollback' {
         $previous = Read-Pointer $previousPointer
