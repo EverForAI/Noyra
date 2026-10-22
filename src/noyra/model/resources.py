@@ -20,6 +20,12 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from noyra.core.at_rest import validate_private_file, validate_private_root
+from noyra.core.cognitive_waits import (
+    cancel_terminal_waits,
+    insert_wait_revision,
+    terminal_wait_reason,
+    wait_counts,
+)
 from noyra.core.credentials import read_secret_file
 from noyra.core.database import Database
 from noyra.core.errors import (
@@ -3546,13 +3552,7 @@ class RoutedModelGateway(ModelGateway):
                 resource_pool=pool,
             )
             with self.database.connection() as connection:
-                pending_waits = int(
-                    connection.execute(
-                        "SELECT COUNT(*) FROM waiting_cognitive_tasks "
-                        "WHERE subject_id = ? AND pool = ? AND status = 'waiting'",
-                        (self.subject_id, pool),
-                    ).fetchone()[0]
-                )
+                waits = wait_counts(connection, self.subject_id, pool)
             result[pool] = {
                 "status": "healthy"
                 if any(
@@ -3569,7 +3569,7 @@ class RoutedModelGateway(ModelGateway):
                 "today_output_tokens": usage.output_tokens,
                 "today_cost_microusd": usage.cost_microusd,
                 "pressure": usage.pressure,
-                "pending_wait_count": pending_waits,
+                **waits,
                 "budget_reset_at_utc": reset_at,
             }
         return result
@@ -3863,6 +3863,9 @@ class RoutedModelGateway(ModelGateway):
     ) -> None:
         now = utc_now()
         with self.database.transaction() as connection:
+            if terminal_wait_reason(connection, self.subject_id, purpose) is not None:
+                cancel_terminal_waits(connection, self.subject_id, purpose, now=now)
+                return
             counts = evidence_counts(connection, self.subject_id)
             if counts.get("waiting_cognitive_task_revisions", 0) >= evidence_row_limit():
                 return
@@ -4003,29 +4006,8 @@ class RoutedModelGateway(ModelGateway):
                 >= evidence_row_limit()
             ):
                 raise InvalidTransitionError("evidence_capacity_reached")
-        payload = {
-            "task_id": task_id,
-            "status": status,
-            "reason_code": reason_code,
-            "retry_count": retry_count,
-            "next_retry_at": next_retry_at,
-            "created_at": now,
-        }
-        connection.execute(
-            """INSERT INTO waiting_cognitive_task_revisions(
-                revision_id, task_id, status, reason_code, retry_count, next_retry_at,
-                state_hash, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                new_id("cwaitrev"),
-                task_id,
-                status,
-                reason_code,
-                retry_count,
-                next_retry_at,
-                content_hash(payload),
-                now,
-            ),
+        insert_wait_revision(
+            connection, task_id, status, reason_code, retry_count, next_retry_at, now
         )
 
     def _aggregate_limits(self, pool: str) -> BudgetLimits:
