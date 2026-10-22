@@ -269,6 +269,7 @@ def test_report_service_state_never_invents_a_stopped_service(
         r"""set -euo pipefail
 fake_state="$1"
 SOURCE_DIR=/synthetic/source
+INSTALLER_REPORTER=/synthetic/source/scripts/installer-report.py
 INSTALL_DIR=/synthetic/install
 install_report_id=test
 install_started_at=2026-10-22T00:00:00Z

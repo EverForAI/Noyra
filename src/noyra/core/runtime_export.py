@@ -671,6 +671,11 @@ _OWNERSHIP_GRAPHS[96] = _OWNERSHIP_GRAPHS[95]
 _OWNERSHIP_GRAPHS[97] = _OWNERSHIP_GRAPHS[96]
 _OWNERSHIP_GRAPHS[98] = _OWNERSHIP_GRAPHS[97]
 _OWNERSHIP_GRAPHS[99] = _OWNERSHIP_GRAPHS[98]
+_OWNERSHIP_GRAPHS[100] = {
+    **_OWNERSHIP_GRAPHS[99],
+    "memory_embedding_inputs": _parent_rule("memory_embeddings", "memory_id", "memory_id"),
+}
+_OWNERSHIP_GRAPHS[101] = _OWNERSHIP_GRAPHS[100]
 
 
 @dataclass(frozen=True)

@@ -38,6 +38,10 @@ class ModelCallStateError(ModelGatewayError):
     """A model call cannot advance from its current durable state."""
 
 
+class UnknownRetryResolutionEvidenceRequired(ModelCallStateError):
+    """Closing an ambiguous retry requires evidence and explicit risk acceptance."""
+
+
 class ModelResourceInactiveError(ModelCallStateError):
     """A saved resource is disabled or revoked; it is not an incomplete draft."""
 

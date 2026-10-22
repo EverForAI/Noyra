@@ -289,6 +289,10 @@ def test_large_embedding_table_scores_one_hard_bounded_candidate_query() -> None
                 "vector_json, vector_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 embedding_rows,
             )
+            connection.executemany(
+                "INSERT INTO memory_embedding_inputs(memory_id, content_hash) VALUES (?, ?)",
+                ((row[0], row[4]) for row in memory_rows),
+            )
         del memory_rows, embedding_rows
 
         decode_count = 0

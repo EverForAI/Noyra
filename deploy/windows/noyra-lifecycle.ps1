@@ -18,6 +18,19 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+$InstallRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
+$DataRoot = [IO.Path]::GetFullPath($DataRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
+if ($InstallRoot -eq [IO.Path]::GetPathRoot($InstallRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) -or
+    $DataRoot.Equals($InstallRoot, [StringComparison]::OrdinalIgnoreCase) -or
+    $DataRoot.StartsWith($InstallRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'InstallRoot must be a non-root directory separate from retained DataRoot.'
+}
+foreach ($path in @($InstallRoot, (Join-Path $InstallRoot 'versions'), $DataRoot)) {
+    if ((Test-Path -LiteralPath $path) -and
+        ((Get-Item -LiteralPath $path).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'Installation and data roots must not use reparse points.'
+    }
+}
 $versions = Join-Path $InstallRoot 'versions'
 $currentPointer = Join-Path $InstallRoot 'current.txt'
 $previousPointer = Join-Path $InstallRoot 'previous.txt'
@@ -51,31 +64,68 @@ function Write-PointerAtomic([string]$Path, [string]$Value) {
     }
 }
 
+function Assert-PackageTree([string]$Root) {
+    # Enumerate one directory at a time: never descend into an unverified link.
+    $ancestor = Get-Item -LiteralPath $Root -Force
+    while ($null -ne $ancestor) {
+        if ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw 'Package paths must not use reparse points.'
+        }
+        $ancestor = $ancestor.Parent
+    }
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $pending.Push($Root)
+    while ($pending.Count -gt 0) {
+        foreach ($item in @(Get-ChildItem -LiteralPath $pending.Pop() -Force)) {
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw 'Package paths must not use reparse points.'
+            }
+            if ($item.PSIsContainer) { $pending.Push($item.FullName) }
+            else { $item }
+        }
+    }
+}
+
 function Verify-Package([string]$Root) {
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) { throw "Package root is missing: $Root" }
+    $Root = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    if ($Root -eq [IO.Path]::GetPathRoot($Root).TrimEnd([IO.Path]::DirectorySeparatorChar)) {
+        throw 'A filesystem root cannot be used as a package root.'
+    }
+    $inventory = @{}
+    foreach ($file in @(Assert-PackageTree $Root)) {
+        $relative = $file.FullName.Substring($Root.Length + 1).Replace('\', '/')
+        if ($inventory.ContainsKey($relative)) { throw 'Package has case-colliding paths.' }
+        $inventory[$relative] = $file.FullName
+    }
     $manifestPath = Join-Path $Root 'noyra-package.json'
-    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'Package manifest is missing.' }
+    if (-not $inventory.ContainsKey('noyra-package.json')) { throw 'Package manifest is missing.' }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     if ($manifest.format -ne 'noyra-windows-package/v1') { throw 'Unsupported package manifest.' }
     Assert-SafeSegment ([string]$manifest.version) 'manifest version'
     $manifestRequiresSignature = $false
     $signatureProperty = $manifest.PSObject.Properties['signature_required']
-    if ($null -ne $signatureProperty) { $manifestRequiresSignature = [bool]$signatureProperty.Value }
-    $resolvedRoot = (Resolve-Path -LiteralPath $Root).Path
-    $seen = @{}
+    if ($null -ne $signatureProperty) {
+        if ($signatureProperty.Value -isnot [bool]) { throw 'Invalid signature requirement.' }
+        $manifestRequiresSignature = $signatureProperty.Value
+    }
+    $seen = @{'noyra-package.json' = $true}
     foreach ($entry in @($manifest.files)) {
         $relative = [string]$entry.path
-        if ([string]::IsNullOrWhiteSpace($relative) -or [IO.Path]::IsPathRooted($relative) -or
-            $relative.Contains('..') -or $relative.Contains('\') -or $seen.ContainsKey($relative)) {
+        if ([string]::IsNullOrWhiteSpace($relative) -or $relative.Length -gt 4096 -or
+            [IO.Path]::IsPathRooted($relative) -or $seen.ContainsKey($relative)) {
             throw 'Package manifest contains an unsafe path.'
         }
-        $seen[$relative] = $true
-        $file = Join-Path $Root $relative
-        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Package file is missing: $relative" }
-        $resolvedFile = (Resolve-Path -LiteralPath $file).Path
-        if (-not $resolvedFile.StartsWith($resolvedRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Package file escapes package root: $relative"
+        foreach ($segment in $relative.Split('/')) {
+            if ($segment -notmatch '^[^<>:"\\|?*\x00-\x1f/]+$' -or
+                $segment -match '[. ]$' -or $segment -match '^(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)') {
+                throw 'Package manifest contains an unsafe path.'
+            }
         }
+        $seen[$relative] = $true
+        if (-not $inventory.ContainsKey($relative)) { throw "Package file is missing: $relative" }
+        $file = $inventory[$relative]
+        if ([string]$entry.sha256 -notmatch '^[0-9a-fA-F]{64}$') { throw 'Invalid package hash.' }
         $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($hash -ne ([string]$entry.sha256).ToLowerInvariant()) { throw "Package hash mismatch: $relative" }
         $extension = [IO.Path]::GetExtension($file).ToLowerInvariant()
@@ -84,16 +134,84 @@ function Verify-Package([string]$Root) {
             if ($signature.Status -ne 'Valid') { throw "Authenticode signature is not valid: $relative" }
         }
     }
+    foreach ($relative in $inventory.Keys) {
+        if (-not $seen.ContainsKey($relative)) { throw "Unlisted package file: $relative" }
+    }
     return $manifest
 }
 
 function Get-CurrentVersion { return Read-Pointer $currentPointer }
 
+function Read-NoyraProcessIdentity {
+    if (-not (Test-Path -LiteralPath $pidFile -PathType Leaf)) { return $null }
+    if ((Get-Item -LiteralPath $pidFile).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw 'Process identity file must not be a reparse point.'
+    }
+    if ((Get-Item -LiteralPath $pidFile).Length -gt 8192) { throw 'Process identity file is too large.' }
+    try {
+        $record = Get-Content -LiteralPath $pidFile -Raw | ConvertFrom-Json
+        if ($record.format -ne 'noyra-process/v1' -or [long]$record.process_id -le 0 -or
+            [long]$record.process_id -gt [int]::MaxValue -or
+            [string]$record.start_time_utc_ticks -notmatch '^[0-9]{1,19}$') { throw 'Invalid process identity.' }
+        Assert-SafeSegment ([string]$record.version) 'process version'
+        $versionRoot = [IO.Path]::GetFullPath((Join-Path $versions ([string]$record.version)))
+        $path = [IO.Path]::GetFullPath([string]$record.executable)
+        $allowed = @((Join-Path $versionRoot 'noyra.exe'), (Join-Path $versionRoot 'noyra-desktop.exe'))
+        if ($path -notin $allowed) { throw 'Process executable is not an installed launcher.' }
+        return $record
+    }
+    catch { throw 'Unverifiable process identity (including legacy PID-only files); refusing to control any process. Verify the instance manually.' }
+}
+
+function Get-TrackedNoyraProcess {
+    $record = Read-NoyraProcessIdentity
+    if ($null -eq $record) { return $null }
+    try { $process = Get-Process -Id ([int]$record.process_id) -ErrorAction Stop }
+    catch [Microsoft.PowerShell.Commands.ProcessCommandException] { return $null }
+    try {
+        # Pin the process handle; never verify then stop via another PID lookup.
+        $null = $process.Handle
+        $actualPath = [IO.Path]::GetFullPath($process.MainModule.FileName)
+        $actualStart = $process.StartTime.ToUniversalTime().Ticks.ToString()
+        if ($actualStart -ne [string]$record.start_time_utc_ticks -or
+            -not $actualPath.Equals([string]$record.executable, [StringComparison]::OrdinalIgnoreCase)) {
+            $process.Dispose()
+            return $null
+        }
+        return $process
+    }
+    catch {
+        $process.Dispose()
+        throw 'Cannot verify the tracked process; refusing to stop or replace it.'
+    }
+}
+
+function Write-NoyraProcessIdentity($Process, [string]$Launcher, [string]$Current) {
+    $record = @{
+        format = 'noyra-process/v1'
+        process_id = $Process.Id
+        start_time_utc_ticks = $Process.StartTime.ToUniversalTime().Ticks.ToString()
+        executable = [IO.Path]::GetFullPath($Launcher)
+        version = $Current
+    }
+    $temporary = Join-Path $DataRoot ('.noyra-process-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        $record | ConvertTo-Json -Compress | Set-Content -LiteralPath $temporary -NoNewline -Encoding utf8
+        Move-Item -LiteralPath $temporary -Destination $pidFile -Force
+    }
+    finally { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
+}
+
 function Start-Noyra {
+    $existing = Get-TrackedNoyraProcess
+    if ($null -ne $existing) { $existing.Dispose(); return }
     $current = Get-CurrentVersion
     if ($null -eq $current) { throw 'No installed Noyra version is selected.' }
     New-Item -ItemType Directory -Force -Path $DataRoot | Out-Null
     $versionRoot = Join-Path $versions $current
+    # Revalidate installed inventory before selecting any executable. Source-only
+    # developer packages may install, but cannot start without a listed launcher.
+    Verify-Package $versionRoot | Out-Null
     $launcher = Join-Path $versionRoot 'noyra.exe'
     if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
         $launcher = Join-Path $versionRoot 'noyra-desktop.exe'
@@ -101,22 +219,57 @@ function Start-Noyra {
     if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
         throw "Installed package has no launcher: $current"
     }
-    $process = Start-Process -FilePath $launcher -WorkingDirectory $versionRoot -PassThru
-    Set-Content -LiteralPath $pidFile -Value $process.Id -NoNewline -Encoding ascii
+    foreach ($path in @($versionRoot, $launcher)) {
+        if ((Get-Item -LiteralPath $path).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw 'Installed launchers must not use reparse points.'
+        }
+    }
+    $process = Start-Process -FilePath $launcher -WorkingDirectory $versionRoot -WindowStyle Hidden -PassThru
+    try { Write-NoyraProcessIdentity $process $launcher $current }
+    catch {
+        if (-not $process.HasExited) { $process.Kill(); $null = $process.WaitForExit(5000) }
+        throw
+    }
+    finally { $process.Dispose() }
 }
 
 function Stop-Noyra {
-    if (-not (Test-Path -LiteralPath $pidFile -PathType Leaf)) { return }
-    $pidValue = [int](Get-Content -LiteralPath $pidFile -Raw)
-    $process = Get-Process -Id $pidValue -ErrorAction SilentlyContinue
-    if ($null -ne $process) { Stop-Process -Id $pidValue -Force }
+    $process = Get-TrackedNoyraProcess
+    if ($null -ne $process) {
+        try {
+            if (-not $process.HasExited) {
+                $null = $process.CloseMainWindow()
+                if (-not $process.WaitForExit(5000)) {
+                    $process.Kill()
+                    if (-not $process.WaitForExit(5000)) { throw 'Noyra did not stop.' }
+                }
+            }
+        }
+        finally { $process.Dispose() }
+    }
     Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
 }
+
+# Serialize start/stop/uninstall, including identity-file publication.
+$instanceLock = $null
+if ($Action -in @('start', 'stop', 'uninstall')) {
+    New-Item -ItemType Directory -Force -Path $DataRoot | Out-Null
+    $instanceLock = [IO.File]::Open((Join-Path $DataRoot '.noyra-lifecycle.lock'),
+        [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+}
+try {
 
 switch ($Action) {
     'install' {
         if ([string]::IsNullOrWhiteSpace($PackageRoot)) { throw '-PackageRoot is required for install.' }
-        $manifest = Verify-Package (Resolve-Path -LiteralPath $PackageRoot).Path
+        $manifest = Verify-Package $PackageRoot
+        if ($RequireSignature) {
+            if ($null -eq $manifest.PSObject.Properties['signature_required']) {
+                $manifest | Add-Member -NotePropertyName signature_required -NotePropertyValue $true
+            } else {
+                $manifest.signature_required = $true
+            }
+        }
         $version = [string]$manifest.version
         $target = Join-Path $versions $version
         if (Test-Path -LiteralPath $target) { throw "Version already installed: $version" }
@@ -124,12 +277,15 @@ switch ($Action) {
         $staging = Join-Path $versions ('.staging-' + [guid]::NewGuid().ToString('N'))
         try {
             $packagePath = (Resolve-Path -LiteralPath $PackageRoot).Path
-            Get-ChildItem -LiteralPath $packagePath -File -Recurse | ForEach-Object {
-                $relative = $_.FullName.Substring($packagePath.Length + 1)
+            New-Item -ItemType Directory -Path $staging | Out-Null
+            foreach ($entry in @($manifest.files)) {
+                $relative = [string]$entry.path
                 $destinationPath = Join-Path $staging $relative
                 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destinationPath) | Out-Null
-                Copy-Item -LiteralPath $_.FullName -Destination $destinationPath -Force
+                Copy-Item -LiteralPath (Join-Path $packagePath $relative) -Destination $destinationPath -Force
             }
+            # Pin the verified manifest rather than re-reading a mutable source.
+            $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $staging 'noyra-package.json') -Encoding utf8
             Verify-Package $staging | Out-Null
             Move-Item -LiteralPath $staging -Destination $target
             $old = Get-CurrentVersion
@@ -160,12 +316,18 @@ switch ($Action) {
         # DataRoot is intentionally retained; deleting subject data requires a separate explicit action.
     }
     'status' {
+        $tracked = Get-TrackedNoyraProcess
+        $running = $null -ne $tracked
+        if ($null -ne $tracked) { $tracked.Dispose() }
         [pscustomobject]@{
             install_root = $InstallRoot
             data_root = $DataRoot
             current_version = Get-CurrentVersion
             previous_version = Read-Pointer $previousPointer
-            running = (Test-Path -LiteralPath $pidFile -PathType Leaf)
+            running = $running
         } | ConvertTo-Json -Compress
     }
 }
+
+}
+finally { if ($null -ne $instanceLock) { $instanceLock.Dispose() } }

@@ -1667,6 +1667,10 @@ class NoyraHTTPServer:
             settings.data_dir / "secrets" / "embedding",
             repair_on_init=repair_secrets_on_init,
         )
+        self.embedding_runtime_status: Callable[[], dict[str, Any]] = lambda: {
+            "status": "unavailable",
+            "restart_required": True,
+        }
         self.cognition_is_enabled: Callable[[], bool] = lambda: False
         self.cognition_gateway: RoutedModelGateway | None = None
         self._pending_cognitive_resource_proposals: tuple[CognitiveResourceGroupInput, ...] = ()
@@ -2651,6 +2655,7 @@ class NoyraHTTPServer:
             wallet_acquisition = {"status": "degraded", "reason": "unavailable"}
         cognition_diagnostics: dict[str, Any] = {
             "enabled": self.cognition_is_enabled(),
+            "embedding_runtime": self.embedding_runtime_status(),
             "pending_interactions": pending_interaction_rows,
             "recent_interaction_model_calls": interaction_call_rows,
             "waiting_interaction_tasks": interaction_wait_rows,
@@ -4762,12 +4767,18 @@ class NoyraHTTPServer:
                     if not self._authorized():
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                         return
+                    runtime_status = owner.embedding_runtime_status()
+                    effective_id = runtime_status.get("effective_resource_id")
                     self._json(
                         HTTPStatus.OK,
                         [
                             {
                                 **record.__dict__,
                                 "key_fingerprint": record.key_fingerprint[:12],
+                                "runtime_effective": record.config_id == effective_id,
+                                "restart_required": (
+                                    record.status == "active" and record.config_id != effective_id
+                                ),
                             }
                             for record in owner.embedding_resources.list(owner.kernel.subject_id)
                         ],
@@ -6362,13 +6373,27 @@ class NoyraHTTPServer:
                 payload = self._request_json()
                 if payload is None:
                     return
-                allowed = {"reason", "outcome", "status", "response", "evidence"}
+                allowed = {
+                    "reason",
+                    "outcome",
+                    "status",
+                    "response",
+                    "evidence",
+                    "resolution_evidence",
+                    "accept_duplicate_risk",
+                }
                 outcome = payload.get("outcome", payload.get("status"))
                 response = payload.get("response", payload.get("evidence"))
+                resolution_evidence = payload.get("resolution_evidence")
+                accept_duplicate_risk = payload.get("accept_duplicate_risk", False)
                 if (
                     not set(payload) <= allowed
                     or not isinstance(payload.get("reason"), str)
                     or not isinstance(outcome, str)
+                    or (
+                        resolution_evidence is not None and not isinstance(resolution_evidence, str)
+                    )
+                    or not isinstance(accept_duplicate_risk, bool)
                     or (
                         "outcome" in payload
                         and "status" in payload
@@ -6396,6 +6421,8 @@ class NoyraHTTPServer:
                         reason=str(payload["reason"]),
                         outcome=outcome,
                         response=response,
+                        resolution_evidence=resolution_evidence,
+                        accept_duplicate_risk=accept_duplicate_risk,
                     )
                 except OperatorControlNotFound:
                     self._json(HTTPStatus.NOT_FOUND, {"error": "model_call_not_found"})
@@ -8723,6 +8750,7 @@ class NoyraHTTPServer:
                         "label": record.label,
                         "model": record.model,
                         "status": record.status,
+                        "runtime": owner.embedding_runtime_status(),
                     },
                 )
 
@@ -8861,7 +8889,10 @@ class NoyraHTTPServer:
                 except (ValueError, PermissionError):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_embedding_resource"})
                     return
-                self._json(HTTPStatus.OK, record.__dict__)
+                self._json(
+                    HTTPStatus.OK,
+                    {**record.__dict__, "runtime": owner.embedding_runtime_status()},
+                )
 
             def _change_model_resource_status(self) -> None:
                 if not self._authorized():
@@ -10697,6 +10728,7 @@ class NoyraService:
         self._initialize_common_key_after_integrity = initialize_common_key_after_integrity
         self.cognition: CognitionCycle | None = None
         self.http.cognition_is_enabled = lambda: self.cognition is not None
+        self.http.embedding_runtime_status = self._embedding_runtime_status
         self.http.migration_runtime.to_thread = self._tracked_to_thread
         self.cognitive_resources = self.http.cognitive_resources
         self.cognition_gateway: RoutedModelGateway | None = None
@@ -10920,6 +10952,48 @@ class NoyraService:
             return bool(policy.include_model_io)
         except Exception:
             return False
+
+    def _embedding_runtime_status(self) -> dict[str, Any]:
+        """Report stored selection separately from the immutable running cycle."""
+        with self.kernel.database.connection() as connection:
+            row = connection.execute(
+                "SELECT config_id, label, model FROM embedding_resources "
+                "WHERE subject_id=? AND status='active' "
+                "ORDER BY updated_at DESC, config_id DESC LIMIT 1",
+                (self.kernel.subject_id,),
+            ).fetchone()
+        desired_id = str(row["config_id"]) if row is not None else None
+        effective_id = None
+        effective_name = None
+        if self.cognition is not None and self.cognition.embedding_gateway is not None:
+            effective_id = self.cognition.embedding_gateway.resource_id
+            effective_name = self.cognition.embedding_gateway.name
+        matches_managed = desired_id is not None and desired_id == effective_id
+        matches_environment = desired_id is None and bool(
+            effective_id and effective_id.startswith("env:")
+        )
+        effective = matches_managed or matches_environment
+        unconfigured = desired_id is None and effective_id is None
+        restart_required = not (effective or unconfigured)
+        cognition_disabled = self.cognition is None
+        return {
+            "status": (
+                "cognition_disabled"
+                if cognition_disabled
+                else "applied"
+                if effective
+                else "not_configured"
+                if unconfigured
+                else "restart_required"
+            ),
+            "restart_required": restart_required and not cognition_disabled,
+            "desired_resource_id": desired_id,
+            "desired_label": None if row is None else str(row["label"]),
+            "desired_model": None if row is None else str(row["model"]),
+            "effective_resource_id": effective_id,
+            "effective_provider": effective_name,
+            "effective": effective,
+        }
 
     def _sync_cognitive_resources(self, proposals: tuple[CognitiveResourceGroupInput, ...]) -> None:
         for proposal in proposals:

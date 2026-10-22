@@ -1908,7 +1908,15 @@ async function loadRuntime() {
   if (unauthorized) throw unauthorized.reason;
   if (results[0].status === "fulfilled") {
     const diagnostics = results[0].value; const cognition = diagnostics.cognition || {};
-    $("#runtime-summary").innerHTML = summaryRows([["认知状态", cognition.enabled ? "已启用" : "未启用"], ["待处理消息", cognition.pending_interactions?.length || 0], ["认知等待任务", cognition.waiting_interaction_tasks?.length || 0], ["入站去重", JSON.stringify(diagnostics.inbound || {})], ["未知模型调用", diagnostics.unknown?.model_calls || 0], ["外部投递", JSON.stringify(diagnostics.deliveries || {})], ["完整性", diagnostics.integrity?.status || "未配置"]]).replaceAll("summary-row", "runtime-item");
+    const embedding = cognition.embedding_runtime || {};
+    const embeddingStatus = ({
+      applied: "已应用",
+      restart_required: "已配置，重启后生效",
+      not_configured: "未配置",
+      cognition_disabled: "认知运行未启用",
+      unavailable: "状态不可用",
+    })[embedding.status] || "状态不可用";
+    $("#runtime-summary").innerHTML = summaryRows([["认知状态", cognition.enabled ? "已启用" : "未启用"], ["向量资源", embeddingStatus], ["待处理消息", cognition.pending_interactions?.length || 0], ["认知等待任务", cognition.waiting_interaction_tasks?.length || 0], ["入站去重", JSON.stringify(diagnostics.inbound || {})], ["未知模型调用", diagnostics.unknown?.model_calls || 0], ["外部投递", JSON.stringify(diagnostics.deliveries || {})], ["完整性", diagnostics.integrity?.status || "未配置"]]).replaceAll("summary-row", "runtime-item");
   }
   if (results[1].status === "rejected") { setStatus("#public-post-controls-status", errorText(results[1].reason), true); return; }
   const controls = results[1].value; const form = $("#public-post-controls-form");

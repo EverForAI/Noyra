@@ -3161,7 +3161,26 @@ def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
             ):
                 raise IntegrityError(f"{context_label} historical authenticity is invalid")
         elif action in {"model_unknown_retry_authorized", "model_unknown_retry_cancelled"}:
-            _provenance_keys(payload, {"call_id", "reason"}, context_label)
+            keys = set(payload)
+            basic_keys = {"call_id", "reason"}
+            resolution_keys = basic_keys | {
+                "resolution_evidence_hash",
+                "duplicate_risk_accepted",
+            }
+            if action == "model_unknown_retry_authorized" or keys == basic_keys:
+                _provenance_keys(payload, basic_keys, context_label)
+            elif keys == resolution_keys:
+                _provenance_hash(
+                    payload["resolution_evidence_hash"],
+                    f"{context_label} resolution evidence hash",
+                )
+                if not _provenance_json_bool(
+                    payload["duplicate_risk_accepted"],
+                    f"{context_label} duplicate risk acceptance",
+                ):
+                    raise IntegrityError(f"{context_label} risk acceptance is invalid")
+            else:
+                raise IntegrityError(f"{context_label} payload is invalid")
             _provenance_text(payload["call_id"], f"{context_label} call id")
             _provenance_text(payload["reason"], f"{context_label} reason")
             if row["referenced_call_subject_id"] != subject_id:

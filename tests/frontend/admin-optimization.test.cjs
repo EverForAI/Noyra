@@ -537,6 +537,18 @@ const readModules = [
   ["loadSetupGuide", "async function loadSetupGuide(", "const chat =", [[],[],[],{}]],
   ["loadRetention", "async function loadRetention(", "async function runRetention(", [{}]],
 ];
+test("runtime diagnostics distinguish configured embedding from the provider currently in use", async () => {
+  const { sandbox, nodes } = context({
+    request: path => Promise.resolve(path === "/api/diagnostics"
+      ? { cognition: { enabled: true, embedding_runtime: { status: "restart_required" } } }
+      : { usage: {} }),
+  });
+  vm.runInContext(functionsBetween("async function loadRuntime(", "async function loadAll("), sandbox);
+  await sandbox.loadRuntime();
+  assert.match(nodes.get("#runtime-summary").innerHTML, /已配置，重启后生效/);
+  assert.match(nodes.get("#runtime-summary").innerHTML, /向量资源/);
+});
+
 for (const [name,start,end,payloads] of readModules) {
   test(`${name} discards old session responses even after a new login`,async()=>{
     const waiting=[];

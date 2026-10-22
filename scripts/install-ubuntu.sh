@@ -78,6 +78,8 @@ SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SOURCE_DIR/scripts/lib/upgrade-components.sh"
 source "$SOURCE_DIR/scripts/lib/control-layout.sh"
 source "$SOURCE_DIR/scripts/lib/release-scripts.sh"
+source "$SOURCE_DIR/scripts/lib/release-source.sh"
+INSTALLER_REPORTER="$SOURCE_DIR/scripts/installer-report.py"
 INSTALL_DIR=/opt/noyra
 RELEASES_DIR="$INSTALL_DIR/releases"
 UPGRADE_INSTALL_DIR="$INSTALL_DIR/upgrade"
@@ -446,7 +448,7 @@ write_install_report() {
     inactive|failed) final_service=stopped ;;
     *) final_service=unknown ;;
   esac
-  python3 -I "$SOURCE_DIR/scripts/installer-report.py" \
+  python3 -I "$INSTALLER_REPORTER" \
     --directory "$INSTALL_DIR/install-reports" --report-id "$install_report_id" \
     --started-at "$install_started_at" --exit-code "$status" --phase "$install_phase" \
     --release "${release_id:-}" --source-sha "${source_sha:-}" \
@@ -472,6 +474,7 @@ backup_inode=""
 noyra_uid=""
 noyra_gid=""
 staging=""
+source_snapshot=""
 cleanup_failed=false
 failure_handled=false
 upgrade_components_restored=true
@@ -541,6 +544,13 @@ cleanup_stale_backup_staging() {
 
 cleanup_staging() {
   local failed=false
+  if [[ -n "${source_snapshot:-}" && -d "$source_snapshot" && ! -L "$source_snapshot" ]]; then
+    if rm -rf --one-file-system -- "$source_snapshot"; then
+      source_snapshot=""
+    else
+      failed=true
+    fi
+  fi
   if [[ -n "${STORAGE_IDENTITY_TEMPORARY:-}" && ( -e "$STORAGE_IDENTITY_TEMPORARY" || -L "$STORAGE_IDENTITY_TEMPORARY" ) ]]; then
     rm -f -- "$STORAGE_IDENTITY_TEMPORARY" || failed=true
     STORAGE_IDENTITY_TEMPORARY=""
@@ -1055,9 +1065,19 @@ if shutil.disk_usage(sys.argv[1]).free < 2_500_000_000:
     raise SystemExit("deployment_release_headroom_insufficient")
 PY
 
-# Prepare and import-check the new code while the old service is still running.
-# Its installed backup reader, never the old release's reader, verifies restore.
-staging="$RELEASES_DIR/.staging-${release_id}-$$-$RANDOM"
+# Pin all package, lockfile and deployment inputs before building. An ignored
+# extra source file must never inherit HEAD's version or external-gate evidence.
+if [[ -n "$source_sha" ]]; then
+  install_phase=source_snapshot
+  source_snapshot="$(mktemp -d "$RELEASES_DIR/.source-${release_id}.XXXXXX")"
+  noyra_snapshot_release_source "$SOURCE_DIR" "$source_sha" "$source_snapshot"
+  SOURCE_DIR="$source_snapshot"
+fi
+
+# Build at the final immutable path, but do not select it with current/previous
+# until every check succeeds. Relocating a venv breaks generated entrypoints.
+# cleanup_staging owns this unpublished path until publication below.
+staging="$release_root"
 install_phase=build_release
 # Only public, root-owned program artifacts use 0022. Never widen data/key modes
 # or recursively chmod a release (it may contain private deployment artifacts).
@@ -1225,7 +1245,7 @@ if [[ -n "$legacy_venv" ]]; then
   legacy_venv=""
 fi
 
-mv -- "$staging" "$release_root"
+# The environment already lives at its final path; publishing never moves it.
 staging=""
 release_published=true
 if [[ -n "$source_sha" ]]; then

@@ -23,6 +23,7 @@ from .errors import (
     ModelAuthorizationError,
     ModelCallConflictError,
     ModelCallStateError,
+    UnknownRetryResolutionEvidenceRequired,
 )
 from .types import (
     AttemptRecord,
@@ -363,6 +364,27 @@ class ModelLedger:
 
         CognitiveResourceStore._from_key_row(key)
 
+    @staticmethod
+    def _check_lifecycle(connection: Any, subject_id: str, purpose: str) -> None:
+        from .errors import ModelLifecycleBlockedError
+
+        row = connection.execute(
+            "SELECT state FROM runtime_state WHERE subject_id=?", (subject_id,)
+        ).fetchone()
+        # Standalone ledgers may have no runtime owner. Runtime-managed subjects
+        # have a durable row and require a purpose-specific dispatch state.
+        if row is None:
+            return
+        allowed = {"active"}
+        if purpose.startswith("sleep_reflection:"):
+            allowed = {"reflective_sleep"}
+        if row["state"] not in allowed:
+            raise ModelLifecycleBlockedError(str(row["state"]))
+
+    def check_lifecycle(self, subject_id: str, purpose: str) -> None:
+        with self.database.connection() as connection:
+            self._check_lifecycle(connection, subject_id, purpose)
+
     def check_request_authorization(
         self,
         call_id: str,
@@ -371,7 +393,10 @@ class ModelLedger:
         resource_key_fingerprint: str | None = None,
         expected_resource_revision: int | None = None,
     ) -> None:
+        # A short serialized dispatch authorization is the linearization point
+        # against lifecycle transitions. Never hold this transaction over I/O.
         with self.database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             self._check_request(
                 connection,
                 call_id,
@@ -379,6 +404,7 @@ class ModelLedger:
                 resource_key_fingerprint,
                 expected_resource_revision,
             )
+            connection.commit()
 
     def _check_request(
         self,
@@ -389,6 +415,7 @@ class ModelLedger:
         revision: int | None,
     ) -> None:
         call = self._get_call_row(connection, call_id)
+        self._check_lifecycle(connection, str(call["subject_id"]), str(call["purpose"]))
         if connection.execute(
             "SELECT 1 FROM private_model_sources s JOIN private_conversations c "
             "ON c.conversation_id=s.conversation_id WHERE s.call_id=? "
@@ -846,6 +873,79 @@ class ModelLedger:
                     ),
                 )
             return self._load_call_connection(connection, call_id)
+
+    def close_failed_unknown_retry(
+        self,
+        call_id: str,
+        *,
+        actor: str,
+        reason: str,
+        resolution_evidence: str | None,
+        accept_duplicate_risk: bool,
+    ) -> bool:
+        """Consume an operator-authorized retry after its known failure.
+
+        Closing requires a cited provider record and explicit acceptance of
+        residual duplicate-execution risk. The evidence itself stays outside
+        the database; its hash and the risk decision are appended. This is an
+        auditable override, not proof that the provider outcome is knowable.
+        """
+        if not actor.strip() or actor.strip().casefold() == "subject" or not reason.strip():
+            raise ValueError("retry reconciliation requires actor and reason")
+        now = utc_now()
+        with self.database.transaction() as connection:
+            row = self._get_call_row(connection, call_id)
+            if row["status"] != "failed":
+                raise ModelCallStateError("only failed model calls can close a retry grant")
+            authorized = connection.execute(
+                "SELECT 1 FROM audit_records INDEXED BY idx_audit_subject_action_call "
+                "WHERE subject_id=? AND action='model_unknown_retry_authorized' "
+                "AND json_valid(payload_json) "
+                "AND json_extract(payload_json, '$.call_id')=? LIMIT 1",
+                (row["subject_id"], call_id),
+            ).fetchone()
+            if authorized is None:
+                return False
+            closed = connection.execute(
+                "SELECT 1 FROM audit_records INDEXED BY idx_audit_subject_action_call "
+                "WHERE subject_id=? AND action='model_unknown_retry_cancelled' "
+                "AND json_valid(payload_json) "
+                "AND json_extract(payload_json, '$.call_id')=? LIMIT 1",
+                (row["subject_id"], call_id),
+            ).fetchone()
+            if closed is not None:
+                return False
+            if (
+                not isinstance(resolution_evidence, str)
+                or not resolution_evidence.strip()
+                or len(resolution_evidence) > 1_024
+                or accept_duplicate_risk is not True
+            ):
+                raise UnknownRetryResolutionEvidenceRequired(
+                    "closing an ambiguous retry requires provider evidence and "
+                    "explicit risk acceptance"
+                )
+            connection.execute(
+                "INSERT INTO audit_records(audit_id, subject_id, action, actor, payload_json, "
+                "occurred_at) VALUES (?, ?, 'model_unknown_retry_cancelled', ?, ?, ?)",
+                (
+                    new_id("audit"),
+                    row["subject_id"],
+                    actor,
+                    canonical_json(
+                        {
+                            "call_id": call_id,
+                            "reason": reason,
+                            "resolution_evidence_hash": content_hash(
+                                {"evidence": resolution_evidence.strip()}
+                            ),
+                            "duplicate_risk_accepted": True,
+                        }
+                    ),
+                    now,
+                ),
+            )
+            return True
 
     @staticmethod
     def _budget_status_connection(

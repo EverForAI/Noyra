@@ -136,7 +136,32 @@ class EmbeddingSettings(BaseModel):
     def stable_resource_id(self) -> str:
         return (
             self.resource_id
-            or "env:" + content_hash({"base_url": self.base_url, "model": self.model})[:32]
+            or "env:"
+            + content_hash(
+                {"base_url": self.base_url, "model": self.model, "dimensions": self.dimensions}
+            )[:32]
+        )
+
+    @property
+    def space_fingerprint(self) -> str:
+        """Identity of a vector space, deliberately independent of credentials."""
+        parsed = urlsplit(self.base_url)
+        hostname = parsed.hostname
+        if hostname is None:
+            raise ValueError("embedding API hostname is missing")
+        host = hostname.encode("idna").decode("ascii").casefold()
+        port = parsed.port
+        authority = f"[{host}]" if ":" in host else host
+        if port is not None and port != 443:
+            authority = f"{authority}:{port}"
+        endpoint = f"https://{authority}{parsed.path.rstrip('/') or '/'}"
+        return content_hash(
+            {
+                "protocol": "openai-compatible-embeddings/v1",
+                "endpoint": endpoint,
+                "model": self.model,
+                "dimensions": self.dimensions,
+            }
         )
 
     def budget_limits(self) -> EmbeddingBudgetLimits:
@@ -220,7 +245,7 @@ class OpenAIEmbeddingProvider:
 
     @property
     def name(self) -> str:
-        return f"openai-compatible:{self.settings.model}"
+        return f"openai-compatible-space:{self.settings.space_fingerprint}"
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
         return [list(vector) for vector in self.embed_with_usage(texts).vectors]

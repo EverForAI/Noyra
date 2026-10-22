@@ -46,6 +46,7 @@ from noyra.model.errors import (
     ProviderCallError,
     StructuredOutputError,
 )
+from noyra.model.request_identity import business_request_key
 from noyra.model.types import CallRecord
 from noyra.sleep import FatigueInputs, FatigueTracker, SleepEngine
 from noyra.sleep.types import SleepReflectionPlan, SleepRunRecord
@@ -868,7 +869,9 @@ class CognitionCycle:
                 purpose,
                 self._messages(source, observation),
                 CognitionProposal,
-                idempotency_key=(f"world-cognition:{observation.observation_id}:{attempt_number}"),
+                idempotency_key=business_request_key(
+                    self.kernel.database, self.subject_id, purpose
+                ),
                 max_output_tokens=self.settings.max_output_tokens,
                 temperature=self.settings.temperature,
             )
