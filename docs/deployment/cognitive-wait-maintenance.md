@@ -18,8 +18,8 @@
 - 取消保留 task、retry_count、next_retry_at 和历史；更新当前状态哈希并追加 cancelled 修订。
   使用 parent_sleep_complete / parent_sleep_failed / sleep_reflection_committed /
   parent_observation_analyzed / parent_observation_rejected，不冒用 resource_recovered。
-- 终态更新与等待修订任一失败都回滚；不覆盖不一致证据。单条等待超过 1,000 条修订时拒绝自动收口，
-  需要专门核验，不静默截断历史后写入。
+- 终态更新与等待修订任一失败都回滚；不覆盖不一致证据。历史修订以游标常量内存流式校验，
+  不因人为设置的历史条数上限阻止合法终态；历史工具仍受每批 SQL 工作预算限制，不截断证据后写入。
 
 ## 观测口径
 

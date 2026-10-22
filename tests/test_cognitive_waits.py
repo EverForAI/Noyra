@@ -506,3 +506,34 @@ def test_preview_sees_committed_wal_not_an_immutable_main_file(env: Environment)
         assert env.preview()["eligible"] == 1
     finally:
         reader.close()
+
+
+def test_long_valid_history_does_not_block_business_completion(env: Environment) -> None:
+    from noyra.core.cognitive_waits import WAIT_FIELDS, insert_wait_revision
+
+    observation = env.observation()
+    purpose = f"world_cognition:{observation}"
+    env.wait(purpose)
+    with env.db.transaction() as connection:
+        row = connection.execute("SELECT * FROM waiting_cognitive_tasks").fetchone()
+        now = utc_now()
+        for count in range(2, 1003):
+            insert_wait_revision(
+                connection,
+                row["task_id"],
+                "waiting",
+                "fixture_retry",
+                count,
+                row["next_retry_at"],
+                now,
+            )
+        payload = {key: row[key] for key in WAIT_FIELDS}
+        payload.update(reason_code="fixture_retry", retry_count=1002, updated_at=now)
+        connection.execute(
+            "UPDATE waiting_cognitive_tasks SET reason_code='fixture_retry',retry_count=1002,"
+            "updated_at=?,state_hash=? WHERE task_id=?",
+            (now, content_hash(payload), row["task_id"]),
+        )
+    env.store.mark(observation, "rejected", subject_id=env.subject)
+    assert env.rows("waiting_cognitive_tasks")[0][4] == "cancelled"
+    env.check_wait_integrity()

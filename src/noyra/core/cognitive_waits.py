@@ -25,7 +25,6 @@ WAIT_FIELDS = (
     "first_waited_at",
     "updated_at",
 )
-MAX_WAIT_REVISIONS = 1000
 
 
 def terminal_wait_reason(
@@ -93,14 +92,18 @@ def validate_wait(connection: sqlite3.Connection, row: Any) -> None:
     payload = {key: row[key] for key in WAIT_FIELDS}
     if row["state_hash"] != content_hash(payload):
         raise IntegrityError("waiting cognitive task hash mismatch")
+    # Stream complete evidence in constant memory. An arbitrary history-length
+    # cap must not prevent a legitimate business task from reaching its terminal
+    # state. Maintenance callers separately enforce a SQL progress budget.
     revisions = connection.execute(
-        "SELECT * FROM waiting_cognitive_task_revisions WHERE task_id=? ORDER BY rowid LIMIT ?",
-        (row["task_id"], MAX_WAIT_REVISIONS + 1),
-    ).fetchall()
-    if not revisions or len(revisions) > MAX_WAIT_REVISIONS:
-        raise IntegrityError("waiting cognitive task history missing or exceeds repair limit")
+        "SELECT * FROM waiting_cognitive_task_revisions WHERE task_id=? ORDER BY rowid",
+        (row["task_id"],),
+    )
+    first_created_at = None
     previous = None
     for revision in revisions:
+        if first_created_at is None:
+            first_created_at = revision["created_at"]
         state = {
             key: revision[key]
             for key in (
@@ -130,13 +133,14 @@ def validate_wait(connection: sqlite3.Connection, row: Any) -> None:
         if not valid:
             raise IntegrityError("waiting cognitive task revision sequence invalid")
         previous = revision
-    assert previous is not None
+    if previous is None:
+        raise IntegrityError("waiting cognitive task history missing")
     if (
         any(
             row[key] != previous[key]
             for key in ("status", "reason_code", "retry_count", "next_retry_at")
         )
-        or row["first_waited_at"] != revisions[0]["created_at"]
+        or row["first_waited_at"] != first_created_at
         or row["updated_at"] != previous["created_at"]
     ):
         raise IntegrityError("waiting cognitive task current state mismatch")

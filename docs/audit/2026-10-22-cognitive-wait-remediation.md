@@ -36,7 +36,8 @@
 - 登记 unavailable 先重新读取同主体父状态，晚到失败不能复活终态用途的等待。
 - current hash / 修订 hash / 状态序列校验；取消追加 cancelled 修订，保留 first_waited_at、retry_count、next_retry_at。
 - 一次事务里父更新、等待更新、修订任一步失败全部回滚，不“修正”为模型成功。
-- 单条历史超过 1,000 修订时拒绝自动收口，需要专项核验；有界检查不静默截断证据。
+- 历史以游标流式校验，内存不随修订数增长；不设会阻断合法终态的任意历史条数上限。
+  维护工具另以每批 SQL 工作预算约束执行，超限回滚而非截断证据后写入。
 
 ### 历史工具
 
@@ -69,6 +70,9 @@ python -m noyra.cognitive_wait_maintenance 默认 mode=ro+query_only+BEGIN，读
 
 - 原有相关模块首轮回归：96 passed / 201 subtests，未发现旧睡眠/世界/网关契约回归。
 - 首轮新增等待/观测/HTTP 定向回归：43 passed / 11 subtests；此后补充父证据、回滚、WAL 和旧睡眠用例。
+- 流式历史最终等待模块（含超过 1,000 条合法修订）：Windows 26 passed。
+- 本地初稿全仓尝试完成 228 passed / 6 skipped / 14 subtests 后，为避免与定向回归重复占用资源而主动中断；
+  **不作为全仓通过证据**。缺失 boto3 的跳过不冒充云配置已验收；GitHub 云配置检查独立执行。
 - 前端：132 passed，覆盖错误分类、资源样本、未知计费解释、终态等待样本及实际 summaryRows 转义。
 - Ruff check、format check 通过；Mypy 448 source files 通过；admin.js 语法检查通过。
 - 六项 Linux shell 夹具通过（安装备份、单盘、控制布局、升级/迁移组件回滚及审计环境）。
@@ -88,6 +92,7 @@ python -m noyra.cognitive_wait_maintenance 默认 mode=ro+query_only+BEGIN，读
 3. 前端测试的 summaryRows 原为 JSON stub，不能验证 HTML 转义；改为执行真实 summaryRows 后通过。
 4. 第一次 Linux 启动脚本因 CRLF 被 shell 拒绝，改为实际 LF 字节后成功启动；未修改生产脚本来掩盖环境问题。
 5. Windows 扩展测试首次引用不存在的 test_runtime.py，pytest 拒绝且没有运行测试；改为真实模块后重跑。
+6. 自查移除初稿 1,000 条修订上限，避免合法长历史阻止业务终结；改为常量内存流式校验并增加超过 1,000 修订回归。
 
 ## 尚未完成及发布要求
 
