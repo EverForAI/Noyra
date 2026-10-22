@@ -42,7 +42,15 @@ from noyra.model import (
     RoutedModelGateway,
 )
 from noyra.model.capabilities import CapabilityProfileStore
-from noyra.model.errors import ProviderCallError
+from noyra.model.errors import (
+    BudgetExhaustedError,
+    ModelAuthorizationError,
+    ModelCallStateError,
+    ModelLifecycleBlockedError,
+    ModelResourceInactiveError,
+    ProviderCallError,
+    StructuredOutputError,
+)
 from noyra.research import SearchExecutor
 from noyra.service import NoyraHTTPServer, NoyraService, ServiceSettings
 from noyra.sleep import SleepEngine, SleepReflectionPlan
@@ -670,6 +678,7 @@ class ServiceTestCase(unittest.TestCase):
             service = NoyraService.from_env()
         try:
             self.assertIsNotNone(service.cognition)
+            self.assertTrue(service.http.cognition_is_enabled())
             assert service.cognition is not None
             self.assertEqual(service.cognition.gateway.model, "test-model")
             self.assertEqual(
@@ -2122,6 +2131,95 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(call["resource_group_id"], second_group_id)
         self.assertEqual(call["status"], "failed")
         self.assertEqual(call["error_code"], "provider_http_401")
+
+    def test_saved_probe_keeps_lifecycle_fence_and_reports_the_real_reason(self: Self) -> None:
+        CapabilityProfileStore(self.kernel.database).record_probe_success(
+            self.kernel.subject_id,
+            "openai_compatible",
+            "https://probe.example/v1",
+            "gpt-5-fixture",
+            "high",
+        )
+        _, resource = self.authorized_json(
+            "/api/config/model-resources",
+            payload={
+                "pool": "economy",
+                "label": "lifecycle probe",
+                "base_url": "https://probe.example/v1",
+                "model": "gpt-5-fixture",
+                "reasoning_effort": "high",
+                "api_keys": ["fixture-probe-secret"],
+                "max_attempts": 3,
+            },
+        )
+        assert isinstance(resource, dict)
+        group_id = str(resource["group_id"])
+        provider = FakeProvider([ProviderResponse('{"ok":true}', ModelUsage(2, 1))])
+        self.http.cognition_gateway = RoutedModelGateway(
+            self.kernel.database,
+            self.kernel.subject_id,
+            self.http.cognitive_resources,
+            provider_factory=lambda settings: provider,
+        )
+        sleep = SleepEngine(self.kernel.database, self.kernel.subject_id)
+        self.kernel.lifecycle.transition("paused", "fixture pause")
+        states = ["paused", "deep_sleep", "waking"]
+        for state in states:
+            if state == "deep_sleep":
+                self.kernel.lifecycle.transition("active", "fixture resume")
+                run = sleep.start("subject_choice", "fixture sleep")
+                sleep.begin_reflection(run.sleep_id)
+                sleep.commit_reflection(run.sleep_id, SleepReflectionPlan(summary="fixture"))
+                sleep.enter_deep_sleep(run.sleep_id)
+            elif state == "waking":
+                sleep.wake(run.sleep_id, "fixture wake")
+            with self.subTest(state=state):
+                with self.assertRaises(HTTPError) as error:
+                    self.authorized_json(
+                        f"/api/config/model-resources/{group_id}/test",
+                        payload={"reason": "fixture explicit test"},
+                    )
+                self.assertEqual(error.exception.code, 409)
+                body = json.loads(error.exception.read())
+                self.assertEqual(body["error"], "model_test_lifecycle_blocked")
+                self.assertEqual(body["lifecycle"], state)
+                self.assertEqual(len(provider.requests), 0)
+                self.assertEqual(self.kernel.lifecycle.current().state, state)
+        sleep.complete_wake(run.sleep_id)
+        status, result = self.authorized_json(
+            f"/api/config/model-resources/{group_id}/test",
+            payload={"reason": "fixture allowed test"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(provider.requests[0].max_output_tokens, 64)
+        self.assertEqual(provider.requests[0].reasoning_effort, "high")
+        assert isinstance(result, dict)
+        self.assertEqual(result["status"], "succeeded")
+
+    def test_saved_probe_error_categories_are_not_reported_as_missing_fields(self: Self) -> None:
+        cases = [
+            (ModelCallStateError("fixture"), 409, "model_test_state_conflict"),
+            (ModelAuthorizationError("fixture"), 403, "model_test_not_authorized"),
+            (PermissionError("fixture"), 403, "model_test_not_authorized"),
+            (StructuredOutputError("fixture"), 502, "model_test_output_invalid"),
+            (BudgetExhaustedError("fixture"), 429, "model_test_budget_exhausted"),
+            (ValueError("fixture"), 400, "invalid_model_resource_test"),
+            (ModelResourceInactiveError("fixture"), 409, "model_test_resource_inactive"),
+            (ModelLifecycleBlockedError("deep_sleep"), 409, "model_test_lifecycle_blocked"),
+        ]
+        gateway = Mock(spec=RoutedModelGateway)
+        self.http.cognition_gateway = gateway
+        for exception, expected_status, expected_code in cases:
+            with self.subTest(code=expected_code):
+                gateway.test_resource = AsyncMock(side_effect=exception)
+                with self.assertRaises(HTTPError) as error:
+                    self.authorized_json(
+                        "/api/config/model-resources/cgroup_fixture/test",
+                        payload={"reason": "fixture classification test"},
+                    )
+                self.assertEqual(error.exception.code, expected_status)
+                self.assertEqual(json.loads(error.exception.read())["error"], expected_code)
 
     def test_model_resource_test_endpoint_reports_missing_cognition_gateway(self: Self) -> None:
         status, created = self.authorized_json(

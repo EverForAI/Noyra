@@ -65,6 +65,7 @@ from .errors import (
     ConfigurationError,
     ModelAuthorizationError,
     ModelCallStateError,
+    ModelResourceInactiveError,
     ProviderCallError,
     StructuredOutputError,
 )
@@ -3471,7 +3472,7 @@ class RoutedModelGateway(ModelGateway):
         """
         group = self.resources.get(group_id, subject_id=subject_id)
         if group.status != "active":
-            raise ValueError("model resource must be active for testing")
+            raise ModelResourceInactiveError("model resource must be active for testing")
         key = self.resources.select_key(group.group_id, subject_id=subject_id)
         if key is None:
             raise ProviderCallError(

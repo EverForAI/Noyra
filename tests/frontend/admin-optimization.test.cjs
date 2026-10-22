@@ -459,7 +459,8 @@ test("overview reads only summary sources and preserves partial failure visibili
   const failures = await sandbox.loadOverview();
   assert.equal(failures.length, 1);
   assert.equal(paths.length, 4);
-  assert.ok(paths.every(path => !path.includes("upgrade") && !path.includes("wallet-") && !path.includes("model-resources")));
+  assert.ok(paths.every(path => !path.includes("upgrade") && !path.includes("wallet-") && !path.includes("model-resources") && path !== "/api/diagnostics"));
+  assert.ok(paths.includes("/api/admin/runtime-summary"));
   assert.ok(nodes.get("#overview-attention").innerHTML.includes('data-priority="risk"'));
   assert.ok(!nodes.get("#overview-attention").innerHTML.includes('data-priority="blocker"'));
 });
@@ -696,4 +697,134 @@ test("migration risk confirmation still blocks entering automatic mode",async()=
   const {sandbox,form,submit}=migrationSubmitContext(async(_path,options)=>{if(options)writes++;return {revision:1,approval_mode:"disabled"};},()=>{confirmations++;return false;});
   sandbox.$("#migration-approval-mode").value="policy_auto";
   await submit();assert.equal(writes,0);assert.equal(confirmations,1);assert.equal(form.dataset.dirty,"1");
+});
+
+
+function observationContext(extra = {}) {
+  const result = context(extra);
+  vm.runInContext(functionsBetween("function formatMicroUsd(", "function budgetError("), result.sandbox);
+  vm.runInContext(functionsBetween("async function loadOverview()", "function renderModelObservability("), result.sandbox);
+  return result;
+}
+
+for (const [reason, text] of [
+  ["recent_success", "近期循环成功"], ["paused", "主体已暂停"],
+  ["resting", "休息"], ["stopped", "已停止"],
+  ["cooling_down", "冷却"], ["recovering", "恢复"],
+  ["tick_not_recent", "不是故障定论"], ["insufficient_evidence", "不能据此显示正常"],
+]) {
+  test(`runtime explanation distinguishes ${reason} without inventing a per-message failure`, () => {
+    const { sandbox } = observationContext();
+    const explanation = sandbox.runtimeExplanation({database_observation:"ok",loop:{reason_code:reason}});
+    assert.ok(explanation.join(" ").includes(text));
+    assert.ok(!explanation.join(" ").includes("必须回复"));
+  });
+}
+
+test("runtime overview uses bounded sample money exactly and explains missing evidence", () => {
+  const { sandbox, nodes } = observationContext();
+  sandbox.renderRuntimeObservation({format:"noyra-runtime-observation/v1",database_observation:"ok",
+    cognition:{enabled:true},lifecycle:"active",loop:{reason_code:"recent_success",consecutive_failures:0},
+    resources:{rss_bytes:1048576,data_free_bytes:null,database_bytes:4096,wal_bytes:0},
+    model_sample:{call_limit:100,calls:100,attempts:500,calls_truncated:true,attempts_truncated:true,
+      succeeded_calls:98,failed_calls:1,unknown_calls:1,known_cost_microusd:"9007199254740993",
+      missing_cost_attempts:2,estimated_calls:1,call_elapsed_ms_p50:20,call_elapsed_ms_p95:300,
+      call_elapsed_samples:99}}, {lifecycle:{state:"active"}});
+  const summary=nodes.get("#cognition-summary").innerHTML;
+  assert.ok(summary.includes("9007199254.740993"));
+  assert.ok(summary.includes("不是今日总量") && summary.includes("非供应商账单"));
+  assert.ok(summary.includes("截断") && summary.includes("含排队与重试"));
+  assert.ok(nodes.get("#storage-summary").innerHTML.includes("未读取"));
+  assert.ok(nodes.get("#cognition-state").textContent.includes("连通性未由摘要验证"));
+});
+
+test("runtime overview unavailable is not zero cost, current health or a reason to reset data", () => {
+  const { sandbox, nodes } = observationContext();
+  sandbox.renderRuntimeObservation({database_observation:"unavailable",resources:{},cognition:{}},null);
+  assert.ok(nodes.get("#overview-observation").innerHTML.includes("不自动重置"));
+  assert.ok(nodes.get("#cognition-summary").innerHTML.includes("不按零处理"));
+  assert.ok(nodes.get("#overview-metrics").innerHTML.includes("未读取"));
+  sandbox.renderOverviewAttention({format:"noyra-runtime-observation/v1",database_observation:"unavailable",cognition:{enabled:true}});
+  assert.ok(nodes.get("#overview-attention").innerHTML.includes('data-priority="risk"'));
+});
+
+test("late lightweight observation cannot repopulate a logged-out overview", async () => {
+  const pending=deferred();
+  const { sandbox, nodes } = observationContext({request:()=>pending.promise});
+  const load=sandbox.loadOverview();
+  sandbox.overviewLoadVersion++;sandbox.csrfToken="";
+  pending.resolve({format:"noyra-runtime-observation/v1",database_observation:"ok"});
+  await load;
+  assert.ok(!nodes.has("#overview-observation"));
+});
+
+test("runtime explanation ignores injected reason labels and safe resource formatting rejects invalid values", () => {
+  const { sandbox, nodes } = observationContext();
+  sandbox.renderRuntimeObservation({database_observation:"ok",loop:{reason_code:'<img src=x onerror=alert(1)>'},resources:{},cognition:{}},null);
+  assert.ok(!nodes.get("#overview-observation").innerHTML.includes("<img"));
+  for(const value of [null,undefined,-1,Infinity,"1024",9007199254740992])assert.equal(sandbox.observationBytes(value),"未读取");
+});
+
+
+test("setup guide never mistakes a lightweight observation or absent diagnostics for payment readiness", () => {
+  const { sandbox, nodes }=context();
+  vm.runInContext(functionsBetween("function renderSetupGuide(", "async function loadSetupGuide("),sandbox);
+  const ready=value=>({status:"fulfilled",value});
+  const rows=[ready([{status:"active"}]),ready([]),ready([]),ready({mode:"automatic",per_order_limit:"10",daily_limit:"100"})];
+  sandbox.renderSetupGuide(rows);
+  assert.ok(nodes.get("#setup-guide-list").innerHTML.includes("无法确认钱包配置"));
+  sandbox.renderSetupGuide([...rows,ready({wallet_execution:{configured:true}})]);
+  const html=nodes.get("#setup-guide-list").innerHTML;
+  assert.ok(html.includes("配置齐备（未实测）") && html.includes("实际准入未由向导验证"));
+  assert.ok(!html.includes("签名器可用"));
+  sandbox.renderSetupGuide([...rows,ready({wallet_execution:{configured:false}})]);
+  assert.ok(!nodes.get("#setup-guide-list").innerHTML.includes("付款保持关闭"));
+});
+
+test("lightweight overview retains capped warnings about historical unknown payments", () => {
+  const { sandbox,nodes }=observationContext();
+  sandbox.renderOverviewAttention({format:"noyra-runtime-observation/v1",database_observation:"ok",
+    cognition:{enabled:true},loop:{reason_code:"recent_success"},
+    model_sample:{unknown_calls:0},attention:{unknown_payments:{count:50,more:true}}});
+  const html=nodes.get("#overview-attention").innerHTML;
+  assert.ok(html.includes("有付款结果未知") && html.includes("50+"));
+  assert.ok(html.includes('data-setup-go="wallet"'));
+});
+
+
+test("saved model test errors separate lifecycle, authorization, inactive resources and output failures", () => {
+  const {sandbox}=context();
+  vm.runInContext(functionsBetween("const describeRequestError =", "function showSection("),sandbox);
+  for(const [code,word] of [
+    ["model_test_lifecycle_blocked","不会为测试自动唤醒"],
+    ["model_test_state_conflict","调用状态限制"],
+    ["model_test_resource_inactive","已停用或撤销"],
+    ["model_test_not_authorized","授权"],
+    ["model_test_output_invalid","不等于 API Key 无效"],
+  ]) {
+    const text=vm.runInContext(`describeRequestError({code:${JSON.stringify(code)}})`,sandbox);
+    assert.ok(text.includes(word),code);
+    assert.ok(!text.includes("信息不完整"),code);
+  }
+  assert.ok(source.includes("输出上限为 64 Token"));
+  assert.ok(source.includes("最多向该资源发送一次请求"));
+});
+
+test("runtime samples explain resource groups, terminal waits and unknown billing evidence", () => {
+  const {sandbox,nodes}=observationContext();
+  vm.runInContext(functionsBetween("function summaryRows(", "const integerFormatter"),sandbox);
+  sandbox.renderRuntimeObservation({database_observation:"ok",resources:{},
+    cognition:{enabled:true},loop:{reason_code:"resting"},
+    model_sample:{call_limit:100,calls:3,attempts:3,succeeded_calls:3,failed_calls:0,unknown_calls:0,
+      pending_calls:0,operator_test_calls:1,unknown_call_reasons:{provider_http_502:6},
+      by_resource:[{resource_id:"<script>bad</script>",pool:"economy",model:"<img>",
+        succeeded:3,failed:0,unknown:0,pending:0,operator_tests:1}]},
+    waiting_sample:{record_limit:100,records:100,truncated:true,active:0,terminal_parent:95,
+      cancelled:5,missing_parent:0}},null);
+  const text=nodes.get("#cognition-summary").innerHTML;
+  assert.ok(text.includes("所属业务已终结 95"));
+  assert.ok(text.includes("历史取消 5") && text.includes("已截断，非全量"));
+  assert.ok(text.includes("管理员测试 1") && text.includes("不代表自主业务完成"));
+  assert.ok(text.includes("不证明供应商未执行或未计费"));
+  assert.ok(!text.includes("<script>") && !text.includes("<img>"));
 });

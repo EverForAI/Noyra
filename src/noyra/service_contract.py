@@ -269,6 +269,7 @@ API_ROUTE_CONTRACTS: tuple[APIRouteContract, ...] = (
     _get("/api/v1/admin/usage", "operator", 200, 400, 401, 503),
     _get("/api/v1/admin/activity-logs", "operator", 200, 400, 401),
     _get("/api/v1/admin/lifecycle-summary", "operator", 200, 401),
+    _get("/api/v1/admin/runtime-summary", "operator", 200, 401, 503),
     _get("/api/v1/admin/retention", "operator", 200, 401, 503),
     _post("/api/v1/admin/retention/run", "operator", 200, 400, 401, 415, 503),
     _post("/api/v1/admin/retention/settings", "operator", 200, 400, 401, 409, 415, 503),

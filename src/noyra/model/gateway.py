@@ -14,6 +14,7 @@ from .errors import (
     BudgetExhaustedError,
     ModelAuthorizationError,
     ModelCallStateError,
+    ModelLifecycleBlockedError,
     ProviderCallError,
     StructuredOutputError,
 )
@@ -102,9 +103,7 @@ class ModelGateway:
                 "SELECT state FROM runtime_state WHERE subject_id = ?", (subject_id,)
             ).fetchone()
         if lifecycle is not None and lifecycle["state"] in {"paused", "deep_sleep", "waking"}:
-            raise ModelCallStateError(
-                f"model calls are disabled while lifecycle is {lifecycle['state']}"
-            )
+            raise ModelLifecycleBlockedError(str(lifecycle["state"]))
         selected_reasoning = self.reasoning_effort if reasoning_effort is None else reasoning_effort
         if self.reasoning_capability_verified:
             if selected_reasoning != self.reasoning_effort:

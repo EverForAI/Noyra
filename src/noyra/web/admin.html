@@ -58,10 +58,11 @@
       <section class="admin-section" data-section-panel="overview">
         <div class="hero-strip"><div><p class="eyebrow">CURRENT SUBJECT</p><h2 id="subject-name">连接中</h2><p id="subject-meta">正在读取公开状态</p></div><div class="health-mark" id="health-mark">●</div></div>
         <p id="overview-updated" class="muted" role="status"></p>
+        <section class="overview-band" aria-label="运行状态解释"><div id="overview-observation" role="status">尚未读取运行观测；连接成功不等于全部功能可用。</div></section>
         <div class="metric-grid" id="overview-metrics"></div>
         <section class="overview-band"><h2>需要处理</h2><div id="overview-attention" aria-live="polite"></div></section>
         <div class="two-column"><section class="overview-band"><h2>运行与生命周期</h2><div id="overview-lifecycle" class="summary-list"></div><button type="button" data-setup-go="logs">查看活动日志</button></section><section class="overview-band"><h2>近期活动</h2><div id="overview-events"></div></section></div>
-        <div class="two-column"><article class="surface-card"><div class="card-heading"><h2>认知资源</h2><span class="card-state" id="cognition-state">-</span></div><div id="cognition-summary" class="summary-list"></div><button type="button" data-setup-go="models">管理资源</button></article><article class="surface-card"><div class="card-heading"><h2>存储与完整性</h2></div><div id="storage-summary" class="summary-list"></div><button type="button" data-setup-go="runtime">查看运行防护</button></article></div>
+        <div class="two-column"><article class="surface-card"><div class="card-heading"><h2>认知资源</h2><span class="card-state" id="cognition-state">-</span></div><div id="cognition-summary" class="summary-list"></div><button type="button" data-setup-go="models">管理资源</button></article><article class="surface-card"><div class="card-heading"><h2>资源与检查边界</h2></div><div id="storage-summary" class="summary-list"></div><button type="button" data-setup-go="runtime">查看运行防护</button></article></div>
         <details id="overview-setup"><summary>配置检查</summary>
         <article class="surface-card setup-guide-card" id="setup-guide" aria-labelledby="setup-guide-title">
           <div class="card-heading"><div><h2 id="setup-guide-title">首次配置向导</h2><p class="muted">先配置认知模型，搜索、通讯与付款都可以按需启用。</p></div><span class="card-state" id="setup-guide-state">正在检查</span></div>

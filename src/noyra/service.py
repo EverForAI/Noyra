@@ -74,6 +74,7 @@ from noyra.core.request_io import DeadlineRequestReader
 from noyra.core.retention import RetentionManager, RetentionPolicyConflict, RetentionSettings
 from noyra.core.runtime import SubjectKernel
 from noyra.core.runtime_export import RuntimeLogExporter
+from noyra.core.runtime_observation import ObservationBusy, RuntimeObserver
 from noyra.core.storage import StorageLayout, TrainingStore
 from noyra.core.storage_lifecycle import StorageLifecycleManager
 from noyra.core.storage_mode import (
@@ -176,7 +177,10 @@ from noyra.model import (
 from noyra.model.capabilities import CapabilityProfileStore
 from noyra.model.errors import (
     BudgetExhaustedError,
+    ModelAuthorizationError,
     ModelCallStateError,
+    ModelLifecycleBlockedError,
+    ModelResourceInactiveError,
     ProviderCallError,
     StructuredOutputError,
 )
@@ -1663,6 +1667,7 @@ class NoyraHTTPServer:
             settings.data_dir / "secrets" / "embedding",
             repair_on_init=repair_secrets_on_init,
         )
+        self.cognition_is_enabled: Callable[[], bool] = lambda: False
         self.cognition_gateway: RoutedModelGateway | None = None
         self._pending_cognitive_resource_proposals: tuple[CognitiveResourceGroupInput, ...] = ()
         self.runtime_exporter = RuntimeLogExporter(kernel.database)
@@ -1743,6 +1748,9 @@ class NoyraHTTPServer:
         self._storage_observation_lock = threading.Lock()
         self._storage_observation_at = 0.0
         self._storage_observation: tuple[StorageContract, str] | None = None
+        self.runtime_observer = RuntimeObserver(
+            self.kernel.database.path, self.settings.data_dir, self.kernel.subject_id
+        )
         self._health_cache_lock = threading.Lock()
         self._health_cache_at = 0.0
         self._health_cache: tuple[HTTPStatus, dict[str, Any]] | None = None
@@ -2642,7 +2650,7 @@ class NoyraHTTPServer:
         if not isinstance(wallet_acquisition, dict):
             wallet_acquisition = {"status": "degraded", "reason": "unavailable"}
         cognition_diagnostics: dict[str, Any] = {
-            "enabled": getattr(self, "cognition", None) is not None,
+            "enabled": self.cognition_is_enabled(),
             "pending_interactions": pending_interaction_rows,
             "recent_interaction_model_calls": interaction_call_rows,
             "waiting_interaction_tasks": interaction_wait_rows,
@@ -3567,6 +3575,22 @@ class NoyraHTTPServer:
                     self._json(
                         HTTPStatus.OK, owner.projection.lifecycle_summary(owner.kernel.subject_id)
                     )
+                elif parsed.path == "/api/admin/runtime-summary":
+                    if not self._authorized("operator"):
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                        return
+                    try:
+                        observation = owner.runtime_observer.snapshot(
+                            cognition_enabled=owner.cognition_is_enabled(),
+                            interval_seconds=owner.settings.active_interval_seconds,
+                        )
+                    except ObservationBusy:
+                        self._json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "runtime_observation_busy"},
+                        )
+                        return
+                    self._json(HTTPStatus.OK, observation)
                 elif parsed.path == "/api/diagnostics":
                     if not self._authorized("read"):
                         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -8764,13 +8788,28 @@ class NoyraHTTPServer:
                         },
                     )
                     return
-                except (ProviderCallError, StructuredOutputError) as error:
+                except ModelLifecycleBlockedError as error:
                     self._json(
-                        HTTPStatus.BAD_GATEWAY,
-                        {"error": getattr(error, "code", "model_test_failed")},
+                        HTTPStatus.CONFLICT,
+                        {"error": "model_test_lifecycle_blocked", "lifecycle": error.lifecycle},
                     )
                     return
-                except (ModelCallStateError, ValueError, PermissionError):
+                except ProviderCallError as error:
+                    self._json(HTTPStatus.BAD_GATEWAY, {"error": error.code})
+                    return
+                except StructuredOutputError:
+                    self._json(HTTPStatus.BAD_GATEWAY, {"error": "model_test_output_invalid"})
+                    return
+                except (ModelAuthorizationError, PermissionError):
+                    self._json(HTTPStatus.FORBIDDEN, {"error": "model_test_not_authorized"})
+                    return
+                except ModelResourceInactiveError:
+                    self._json(HTTPStatus.CONFLICT, {"error": "model_test_resource_inactive"})
+                    return
+                except ModelCallStateError:
+                    self._json(HTTPStatus.CONFLICT, {"error": "model_test_state_conflict"})
+                    return
+                except ValueError:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_model_resource_test"})
                     return
                 finally:
@@ -10657,6 +10696,7 @@ class NoyraService:
         self.http.storage_contract = self.storage_contract
         self._initialize_common_key_after_integrity = initialize_common_key_after_integrity
         self.cognition: CognitionCycle | None = None
+        self.http.cognition_is_enabled = lambda: self.cognition is not None
         self.http.migration_runtime.to_thread = self._tracked_to_thread
         self.cognitive_resources = self.http.cognitive_resources
         self.cognition_gateway: RoutedModelGateway | None = None
