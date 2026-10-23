@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from noyra.core.cognitive_waits import cancel_terminal_waits
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.events import EventStore
@@ -256,6 +257,9 @@ class SleepEngine:
                 """UPDATE sleep_runs SET reflection_event_id = ?, state_hash = ?,
                     version = ?, updated_at = ? WHERE sleep_id = ?""",
                 (event.event_id, state_hash, version, now, sleep_id),
+            )
+            cancel_terminal_waits(
+                connection, self.subject_id, f"sleep_reflection:{sleep_id}", now=now
             )
             return self._load_connection(connection, sleep_id)
 
@@ -867,6 +871,10 @@ class SleepEngine:
             ),
         )
         self._insert_transition(connection, row["sleep_id"], current, to_status, reason, now)
+        if to_status in {"complete", "failed"}:
+            cancel_terminal_waits(
+                connection, self.subject_id, f"sleep_reflection:{row['sleep_id']}", now=now
+            )
 
     @staticmethod
     def _insert_transition(

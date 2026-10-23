@@ -38,6 +38,22 @@ class ModelCallStateError(ModelGatewayError):
     """A model call cannot advance from its current durable state."""
 
 
+class UnknownRetryResolutionEvidenceRequired(ModelCallStateError):
+    """Closing an ambiguous retry requires evidence and explicit risk acceptance."""
+
+
+class ModelResourceInactiveError(ModelCallStateError):
+    """A saved resource is disabled or revoked; it is not an incomplete draft."""
+
+
+class ModelLifecycleBlockedError(ModelCallStateError):
+    """The durable lifecycle forbids sending a model request."""
+
+    def __init__(self, lifecycle: str):
+        super().__init__("model calls are disabled by the current lifecycle")
+        self.lifecycle = lifecycle
+
+
 class ModelAuthorizationError(ModelCallStateError):
     """Current resource authorization denies a request that has not been sent."""
 

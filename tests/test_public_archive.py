@@ -128,14 +128,23 @@ def test_public_schema_has_fixed_reviewed_fingerprints(
     archive: tuple[PublicArchive, SubjectKernel],
 ) -> None:
     _, kernel = archive
+    # These are the reviewed whole-database schema 103 fingerprints, not just
+    # the public archive tables. Versions 100-103 add embedding bindings and
+    # bounded lookup indexes without changing any public archive object.
     with kernel.database.connection() as connection:
         assert (
+            connection.execute(
+                "SELECT value FROM schema_meta WHERE key='schema_version'"
+            ).fetchone()[0]
+            == "103"
+        )
+        assert (
             kernel.database.schema_ddl_fingerprint(connection)
-            == "289738612874ddce653fcc53979ab3285f0601920cde5aad27baafee978d1145"
+            == "b13fec71f4c1a40287f7b7b272f7ba8e12bdd9625aa53ca08568023c25f84334"
         )
         assert (
             kernel.database.schema_structure_fingerprint(connection)
-            == "f6d0ed82b9a6fc8ead5f18dac96c904f04f5087376a2ec9ed1553d55d41dc2fd"
+            == "1147ca9c2c26d160b0b20186536e1bf4a4f34211aab668a25af36610bdaa284b"
         )
 
 

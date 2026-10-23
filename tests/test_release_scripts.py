@@ -83,6 +83,7 @@ def test_packaged_entrypoints_import_and_service_user_can_run_agent(
     assert result.returncode == 0, result.stderr
     expected = {
         "preflight-production.py": 0o644,
+        "deployment-maintenance.py": 0o644,
         "noyra-target-activation-runner.py": 0o750,
         "noyra-migration-agent.py": 0o755,
     }
@@ -93,7 +94,11 @@ def test_packaged_entrypoints_import_and_service_user_can_run_agent(
         assert metadata.st_uid == metadata.st_gid == 0
         assert path.read_bytes() == (source / "scripts" / name).read_bytes()
 
-    for name in ("noyra-migration-agent.py", "preflight-production.py"):
+    for name in (
+        "noyra-migration-agent.py",
+        "preflight-production.py",
+        "deployment-maintenance.py",
+    ):
         help_result = subprocess.run(
             [
                 "runuser",

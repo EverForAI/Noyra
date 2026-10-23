@@ -78,34 +78,68 @@ class MemoryEmbeddingIndex:
         self.clock = clock
 
     def index_memory(self, subject_id: str, memory_id: str, content: str) -> None:
+        digest = content_hash(content)
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT subject_id, content_hash, status FROM memories WHERE memory_id = ?",
+                (memory_id,),
+            ).fetchone()
+        if row is None or row["subject_id"] != subject_id:
+            raise ValueError("memory does not belong to subject")
+        if row["content_hash"] != digest or row["status"] != "active":
+            return
         vectors = self.provider.embed((content,))
         if len(vectors) != 1:
             raise ValueError("embedding provider returned an invalid batch")
         vector = self._validate_vector(vectors[0])
-        payload = canonical_json(vector)
         with self.database.transaction() as connection:
-            row = connection.execute(
-                "SELECT subject_id, content_hash FROM memories WHERE memory_id = ?", (memory_id,)
-            ).fetchone()
-            if row is None or row["subject_id"] != subject_id:
-                raise ValueError("memory does not belong to subject")
-            connection.execute(
-                """INSERT INTO memory_embeddings(
-                   memory_id, subject_id, provider, dimensions, vector_json, vector_hash, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(memory_id) DO UPDATE SET provider = excluded.provider,
-                   dimensions = excluded.dimensions, vector_json = excluded.vector_json,
-                   vector_hash = excluded.vector_hash, updated_at = excluded.updated_at""",
-                (
-                    memory_id,
-                    subject_id,
-                    self.provider.name,
-                    len(vector),
-                    payload,
-                    content_hash(vector),
-                    self.clock(),
-                ),
-            )
+            self._store_current(connection, subject_id, memory_id, digest, vector, self.clock())
+
+    def _store_current(
+        self,
+        connection: Any,
+        subject_id: str,
+        memory_id: str,
+        digest: str,
+        vector: list[float],
+        now: str,
+    ) -> bool:
+        # The provider runs outside the write transaction. Never publish a vector
+        # for content revised/withdrawn while that external work was in flight.
+        row = connection.execute(
+            "SELECT subject_id, content_hash, status FROM memories WHERE memory_id = ?",
+            (memory_id,),
+        ).fetchone()
+        if (
+            row is None
+            or row["subject_id"] != subject_id
+            or row["status"] != "active"
+            or row["content_hash"] != digest
+        ):
+            return False
+        connection.execute(
+            """INSERT INTO memory_embeddings(
+                memory_id, subject_id, provider, dimensions, vector_json, vector_hash, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(memory_id) DO UPDATE SET provider = excluded.provider,
+                dimensions = excluded.dimensions, vector_json = excluded.vector_json,
+                vector_hash = excluded.vector_hash, updated_at = excluded.updated_at""",
+            (
+                memory_id,
+                subject_id,
+                self.provider.name,
+                len(vector),
+                canonical_json(vector),
+                content_hash(vector),
+                now,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO memory_embedding_inputs(memory_id, content_hash) VALUES (?, ?) "
+            "ON CONFLICT(memory_id) DO UPDATE SET content_hash=excluded.content_hash",
+            (memory_id, digest),
+        )
+        return True
 
     def missing(self, subject_id: str, *, limit: int = 128) -> list[tuple[str, str]]:
         bounded = max(1, min(limit, 2_000))
@@ -113,8 +147,10 @@ class MemoryEmbeddingIndex:
             rows = connection.execute(
                 """SELECT m.memory_id, m.content FROM memories m
                    LEFT JOIN memory_embeddings e ON e.memory_id = m.memory_id
+                   LEFT JOIN memory_embedding_inputs i ON i.memory_id = m.memory_id
                    WHERE m.subject_id = ? AND m.status = 'active'
-                     AND (e.memory_id IS NULL OR e.provider != ?)
+                     AND (e.memory_id IS NULL OR e.provider != ?
+                          OR i.content_hash IS NULL OR i.content_hash != m.content_hash)
                    ORDER BY m.updated_at DESC LIMIT ?""",
                 (subject_id, self.provider.name, bounded),
             ).fetchall()
@@ -138,30 +174,16 @@ class MemoryEmbeddingIndex:
         if len(vectors) != len(records):
             raise ValueError("embedding provider returned an invalid batch")
         now = self.clock()
+        stored = 0
         with self.database.transaction() as connection:
-            for (memory_id, _), raw_vector in zip(records, vectors, strict=True):
+            for (memory_id, content), raw_vector in zip(records, vectors, strict=True):
                 if checkpoint is not None:
                     checkpoint()
                 vector = self._validate_vector(raw_vector)
-                connection.execute(
-                    """INSERT INTO memory_embeddings(
-                       memory_id, subject_id, provider, dimensions, vector_json,
-                       vector_hash, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(memory_id) DO UPDATE SET provider = excluded.provider,
-                       dimensions = excluded.dimensions, vector_json = excluded.vector_json,
-                       vector_hash = excluded.vector_hash, updated_at = excluded.updated_at""",
-                    (
-                        memory_id,
-                        subject_id,
-                        self.provider.name,
-                        len(vector),
-                        canonical_json(vector),
-                        content_hash(vector),
-                        now,
-                    ),
+                stored += self._store_current(
+                    connection, subject_id, memory_id, content_hash(content), vector, now
                 )
-        return len(records)
+        return stored
 
     def similarities(
         self,
@@ -181,10 +203,13 @@ class MemoryEmbeddingIndex:
         with self.database.connection() as connection:
             # SQLite otherwise favors the subject/provider index and scans the full corpus.
             rows = connection.execute(
-                "SELECT memory_id, dimensions, vector_json, vector_hash "
-                "FROM memory_embeddings INDEXED BY sqlite_autoindex_memory_embeddings_1 "
-                "WHERE subject_id = ? AND provider = ? "
-                f"AND memory_id IN ({placeholders}) "
+                "SELECT e.memory_id, e.dimensions, e.vector_json, e.vector_hash "
+                "FROM memory_embeddings AS e INDEXED BY sqlite_autoindex_memory_embeddings_1 "
+                "JOIN memory_embedding_inputs i ON i.memory_id=e.memory_id "
+                "JOIN memories m ON m.memory_id=e.memory_id AND m.subject_id=e.subject_id "
+                "WHERE e.subject_id = ? AND e.provider = ? "
+                "AND m.status='active' AND i.content_hash=m.content_hash "
+                f"AND e.memory_id IN ({placeholders}) "
                 "AND dimensions BETWEEN 1 AND ? "
                 "AND length(CAST(vector_json AS BLOB)) <= ? "
                 "AND length(vector_hash) = 64",

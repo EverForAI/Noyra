@@ -1,0 +1,422 @@
+..........F.FF.F......s................................................. [ 51%]
+....................................................................     [100%]
+================================== FAILURES ===================================
+____ test_backup_gc_resumes_from_durable_cursor_after_process_interruption ____
+
+database_path = WindowsPath('D:/metagrowh/.user-temp/pytest-of-�ǳ�/pytest-3903/test_backup_gc_resumes_from_du0/noyra.sqlite3')
+run_id = 'backupretention_01ae59d7ac25181bb467b2f4a980b5fd'
+actions = <generator object _iter_gc_actions at 0x000001672F9A4840>
+
+    def _write_gc_index(database_path: Path, run_id: str, actions: Any) -> dict[str, Any]:
+        """An immutable ordinal index with a hash chain anchored in the audit row.
+    
+        Creation is linear; each later invocation reads at most one action batch.
+        The next hash is committed together with the deletion cursor after each
+        action, so resumption does not rescan or trust an unchecked byte offset.
+        """
+        _ensure_gc_evidence(database_path)
+        destination = _gc_index_path(database_path, run_id)
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+        os.close(descriptor)
+        count = 0
+        following = content_hash({"gc_index_end": True})
+        try:
+            with sqlite3.connect(temporary) as connection:
+                connection.execute("PRAGMA journal_mode=OFF")
+                connection.execute(
+                    "CREATE TABLE actions (ordinal INTEGER PRIMARY KEY, payload TEXT NOT NULL, following TEXT NOT NULL)"
+                )
+                for count, action in enumerate(actions, 1):
+                    payload = json.dumps(action, sort_keys=True, separators=(",", ":"))
+                    if len(payload.encode("utf-8")) > 8192:
+                        raise ValueError("backup_retention_action_too_large")
+                    connection.execute("INSERT INTO actions VALUES(?,?,?)", (count - 1, payload, ""))
+                reader = connection.execute("SELECT ordinal,payload FROM actions ORDER BY ordinal DESC")
+                while rows := reader.fetchmany(MAX_RESUMABLE_GC_ACTIONS):
+                    for ordinal, payload in rows:
+                        connection.execute(
+                            "UPDATE actions SET following=? WHERE ordinal=?", (following, ordinal)
+                        )
+                        following = content_hash(
+                            {"ordinal": ordinal, "payload": payload, "following": following}
+                        )
+            with open(temporary, "rb") as stream:
+>               os.fsync(stream.fileno())
+E               OSError: [Errno 9] Bad file descriptor
+
+scripts\deployment-maintenance.py:727: OSError
+
+During handling of the above exception, another exception occurred:
+
+tmp_path = WindowsPath('D:/metagrowh/.user-temp/pytest-of-�ǳ�/pytest-3903/test_backup_gc_resumes_from_du0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000167312A2EA0>
+
+    def test_backup_gc_resumes_from_durable_cursor_after_process_interruption(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from noyra.core import Database, IdentityStore
+        from noyra.core.types import content_hash
+    
+        helper = _helper(root_markers=True)
+        releases, backups = tmp_path / "releases", tmp_path / "backups"
+        releases.mkdir()
+        backups.mkdir()
+        release = releases / "old-release"
+        release.mkdir()
+        (release / helper.MARKER).write_text(
+            json.dumps({"format": "noyra-verified-install/v1", "readiness": "passed"}),
+            encoding="utf-8",
+        )
+        backup = backups / "noyra-resume.noyra-backup"
+        backup.write_bytes(b"verified-backup")
+        backup.with_name(backup.name + ".verified.json").write_text(
+            json.dumps(
+                {
+                    "format": "noyra-verified-upgrade-backup/v1",
+                    "backup": backup.name,
+                    "restore_verified": True,
+                    "sha256": helper.file_hash(backup),
+                }
+            ),
+            encoding="utf-8",
+        )
+        database = Database(tmp_path / "noyra.sqlite3")
+        subject = "Noyra-resumable-backup-gc"
+        IdentityStore(database).ensure(subject, content_hash(subject))
+        plan = {
+            "plan_id": "a" * 64,
+            "releases": [release.name],
+            "backups": [backup.name],
+            "backup_details": [
+                {
+                    "name": backup.name,
+                    "size": backup.stat().st_size,
+                    "sha256": helper.file_hash(backup),
+                    "reason": "test",
+                }
+            ],
+        }
+        update = helper._update_backup_gc_run
+    
+        def interrupt_after_first_delete(
+            database_path: Path,
+            run_id: str,
+            *,
+            status: str,
+            cursor: dict[str, Any],
+            deleted_count: int,
+            failure_code: str | None = None,
+            required: bool = True,
+        ) -> None:
+            if status == "planned" and deleted_count == 1:
+                raise KeyboardInterrupt
+            update(
+                database_path,
+                run_id,
+                status=status,
+                cursor=cursor,
+                deleted_count=deleted_count,
+                failure_code=failure_code,
+                required=required,
+            )
+    
+        monkeypatch.setattr(helper, "_update_backup_gc_run", interrupt_after_first_delete)
+        first_release = release
+        with pytest.raises(KeyboardInterrupt):
+>           helper.apply_resumable_gc(database.path, subject, releases, backups, plan)
+
+tests\test_deployment_maintenance.py:436: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+scripts\deployment-maintenance.py:1225: in apply_resumable_gc
+    manifest = _write_gc_index(database_path, run_id, _iter_gc_actions(releases, plan))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+scripts\deployment-maintenance.py:731: in _write_gc_index
+    Path(temporary).unlink(missing_ok=True)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = WindowsPath('D:/metagrowh/.user-temp/pytest-of-�ǳ�/pytest-3903/test_backup_gc_resumes_from_du0/.noyra-maintenance/..noyra.sqlite3.backup-retention-backupretention_01ae59d7ac25181bb467b2f4a980b5fd.index.mkl14ege')
+missing_ok = True
+
+    def unlink(self, missing_ok=False):
+        """
+        Remove this file or link.
+        If the path is a directory, use rmdir() instead.
+        """
+        try:
+>           os.unlink(self)
+E           PermissionError: [WinError 32] ��һ����������ʹ�ô��ļ��������޷����ʡ�: 'D:\\metagrowh\\.user-temp\\pytest-of-�ǳ�\\pytest-3903\\test_backup_gc_resumes_from_du0\\.noyra-maintenance\\..noyra.sqlite3.backup-retention-backupretention_01ae59d7ac25181bb467b2f4a980b5fd.index.mkl14ege'
+
+..\.tools\Python312\Lib\pathlib.py:1342: PermissionError
+______ test_gc_runtime_failure_leaves_manifest_for_next_maintenance_run _______
+
+tmp_path = WindowsPath('D:/metagrowh/.user-temp/pytest-of-�ǳ�/pytest-3903/test_gc_runtime_failure_leaves0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000167312A2A20>
+
+    def test_gc_runtime_failure_leaves_manifest_for_next_maintenance_run(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from noyra.core import Database, IdentityStore
+        from noyra.core.types import content_hash
+    
+        helper = _helper(root_markers=True)
+        releases, backups = tmp_path / "releases", tmp_path / "backups"
+        releases.mkdir()
+        backups.mkdir()
+        release = releases / "old-release"
+        release.mkdir()
+        (release / helper.MARKER).write_text(
+            json.dumps({"format": "noyra-verified-install/v1", "readiness": "passed"}),
+            encoding="utf-8",
+        )
+        database = Database(tmp_path / "noyra.sqlite3")
+        subject = "Noyra-gc-failed-manifest"
+        IdentityStore(database).ensure(subject, content_hash(subject))
+        plan = {
+            "plan_id": "d" * 64,
+            "releases": [release.name],
+            "backup_details": [],
+            "backups": [],
+            "retention_policy": {},
+            "backup_protected": [],
+        }
+    
+        def fail_gc(*_args: Any, **_kwargs: Any) -> None:
+            raise OSError("injected GC action failure")
+    
+        monkeypatch.setattr(helper, "apply_gc", fail_gc)
+    
+        with pytest.raises(OSError):
+            helper.apply_resumable_gc(database.path, subject, releases, backups, plan)
+    
+        with database.connection() as connection:
+            row = connection.execute("SELECT run_id, status FROM backup_retention_runs").fetchone()
+>       assert row["status"] == "failed"
+               ^^^^^^^^^^^^^
+E       TypeError: 'NoneType' object is not subscriptable
+
+tests\test_deployment_maintenance.py:547: TypeError
+____ test_gc_manifest_cleanup_error_does_not_change_applied_run_to_failed _____
+
+database_path = WindowsPath('D:/metagrowh/.user-temp/pytest-of-�ǳ�/pytest-3903/test_gc_manifest_cleanup_error0/noyra.sqlite3')
+run_id = 'backupretention_002f46c2ebef638f4eb066d836da105d'
+actions = <generator object _iter_gc_actions at 0x00000167310F3140>
+
+    def _write_gc_index(database_path: Path, run_id: str, actions: Any) -> dict[str, Any]:
+        """An immutable ordinal index with a hash chain anchored in the audit row.
+    
+        Creation is linear; each later invocation reads at most one action batch.
+        The next hash is committed together with the deletion cursor after each
+        action, so resumption does not rescan or trust an unchecked byte offset.
+        """
+        _ensure_gc_evidence(database_path)
+        destination = _gc_index_path(database_path, run_id)
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+        os.close(descriptor)
+        count = 0
+        following = content_hash({"gc_index_end": True})
+        try:
+            with sqlite3.connect(temporary) as connection:
+                connection.execute("PRAGMA journal_mode=OFF")
+                connection.execute(
+                    "CREATE TABLE actions (ordinal INTEGER PRIMARY KEY, payload TEXT NOT NULL, following TEXT NOT NULL)"
+                )
+                for count, action in enumerate(actions, 1):
+                    payload = json.dumps(action, sort_keys=True, separators=(",", ":"))
+                    if len(payload.encode("utf-8")) > 8192:
+                        raise ValueError("backup_retention_action_too_large")
+                    connection.execute("INSERT INTO actions VALUES(?,?,?)", (count - 1, payload, ""))
+                reader = connection.execute("SELECT ordinal,payload FROM actions ORDER BY ordinal DESC")
+                while rows := reader.fetchmany(MAX_RESUMABLE_GC_ACTIONS):
+                    for ordinal, payload in rows:
+                        connection.execute(
+                            "UPDATE actions SET following=? WHERE ordinal=?", (following, ordinal)
+                        )
+                        following = content_hash(
+                            {"ordinal": ordinal, "payload": payload, "following": following}
+                        )
+            with open(temporary, "rb") as stream:
+>               os.fsync(stream.fileno())
+E               OSError: [Errno 9] Bad file descriptor
+
+scripts\deployment-maintenance.py:727: OSError
+
+During handling of the above exception, another exception occurred:
+
+tmp_path = WindowsPath('D:/metagrowh/.user-temp/pytest-of-�ǳ�/pytest-3903/test_gc_manifest_cleanup_error0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000167312A0DD0>
+
+    def test_gc_manifest_cleanup_error_does_not_change_applied_run_to_failed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from noyra.core import Database, IdentityStore
+        from noyra.core.types import content_hash
+    
+        helper = _helper(root_markers=True)
+        releases, backups = tmp_path / "releases", tmp_path / "backups"
+        releases.mkdir()
+        backups.mkdir()
+        release = releases / "old-release"
+        release.mkdir()
+        (release / helper.MARKER).write_text(
+            json.dumps({"format": "noyra-verified-install/v1", "readiness": "passed"}),
+            encoding="utf-8",
+        )
+        database = Database(tmp_path / "noyra.sqlite3")
+        subject = "Noyra-gc-applied-manifest"
+        IdentityStore(database).ensure(subject, content_hash(subject))
+        plan = {
+            "plan_id": "e" * 64,
+            "releases": [release.name],
+            "backup_details": [],
+            "backups": [],
+            "retention_policy": {},
+            "backup_protected": [],
+        }
+        original_fsync = helper._fsync_directory
+        fsync_calls = 0
+    
+        def fail_final_fsync(path: Path) -> None:
+            nonlocal fsync_calls
+            fsync_calls += 1
+            if fsync_calls == 1:
+                original_fsync(path)
+                return
+            raise OSError("injected sidecar directory sync failure")
+    
+        monkeypatch.setattr(helper, "_fsync_directory", fail_final_fsync)
+    
+>       result = helper.apply_resumable_gc(database.path, subject, releases, backups, plan)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_deployment_maintenance.py:597: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+scripts\deployment-maintenance.py:1225: in apply_resumable_gc
+    manifest = _write_gc_index(database_path, run_id, _iter_gc_actions(releases, plan))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+scripts\deployment-maintenance.py:731: in _write_gc_index
+    Path(temporary).unlink(missing_ok=True)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = WindowsPath('D:/metagrowh/.user-temp/pytest-of-�ǳ�/pytest-3903/test_gc_manifest_cleanup_error0/.noyra-maintenance/..noyra.sqlite3.backup-retention-backupretention_002f46c2ebef638f4eb066d836da105d.index.o8ng811m')
+missing_ok = True
+
+    def unlink(self, missing_ok=False):
+        """
+        Remove this file or link.
+        If the path is a directory, use rmdir() instead.
+        """
+        try:
+>           os.unlink(self)
+E           PermissionError: [WinError 32] ��һ����������ʹ�ô��ļ��������޷����ʡ�: 'D:\\metagrowh\\.user-temp\\pytest-of-�ǳ�\\pytest-3903\\test_gc_manifest_cleanup_error0\\.noyra-maintenance\\..noyra.sqlite3.backup-retention-backupretention_002f46c2ebef638f4eb066d836da105d.index.o8ng811m'
+
+..\.tools\Python312\Lib\pathlib.py:1342: PermissionError
+_________ test_gc_consumes_more_than_one_thousand_actions_in_batches __________
+
+database_path = WindowsPath('D:/metagrowh/.user-temp/pytest-of-�ǳ�/pytest-3903/test_gc_consumes_more_than_one0/noyra.sqlite3')
+run_id = 'backupretention_16c5575cea8be21b3f1ee9a874eb1517'
+actions = <generator object _iter_gc_actions at 0x000001672E363D40>
+
+    def _write_gc_index(database_path: Path, run_id: str, actions: Any) -> dict[str, Any]:
+        """An immutable ordinal index with a hash chain anchored in the audit row.
+    
+        Creation is linear; each later invocation reads at most one action batch.
+        The next hash is committed together with the deletion cursor after each
+        action, so resumption does not rescan or trust an unchecked byte offset.
+        """
+        _ensure_gc_evidence(database_path)
+        destination = _gc_index_path(database_path, run_id)
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+        os.close(descriptor)
+        count = 0
+        following = content_hash({"gc_index_end": True})
+        try:
+            with sqlite3.connect(temporary) as connection:
+                connection.execute("PRAGMA journal_mode=OFF")
+                connection.execute(
+                    "CREATE TABLE actions (ordinal INTEGER PRIMARY KEY, payload TEXT NOT NULL, following TEXT NOT NULL)"
+                )
+                for count, action in enumerate(actions, 1):
+                    payload = json.dumps(action, sort_keys=True, separators=(",", ":"))
+                    if len(payload.encode("utf-8")) > 8192:
+                        raise ValueError("backup_retention_action_too_large")
+                    connection.execute("INSERT INTO actions VALUES(?,?,?)", (count - 1, payload, ""))
+                reader = connection.execute("SELECT ordinal,payload FROM actions ORDER BY ordinal DESC")
+                while rows := reader.fetchmany(MAX_RESUMABLE_GC_ACTIONS):
+                    for ordinal, payload in rows:
+                        connection.execute(
+                            "UPDATE actions SET following=? WHERE ordinal=?", (following, ordinal)
+                        )
+                        following = content_hash(
+                            {"ordinal": ordinal, "payload": payload, "following": following}
+                        )
+            with open(temporary, "rb") as stream:
+>               os.fsync(stream.fileno())
+E               OSError: [Errno 9] Bad file descriptor
+
+scripts\deployment-maintenance.py:727: OSError
+
+During handling of the above exception, another exception occurred:
+
+tmp_path = WindowsPath('D:/metagrowh/.user-temp/pytest-of-�ǳ�/pytest-3903/test_gc_consumes_more_than_one0')
+
+    def test_gc_consumes_more_than_one_thousand_actions_in_batches(tmp_path: Path) -> None:
+        from noyra.core import Database, IdentityStore
+        from noyra.core.types import content_hash
+    
+        helper = _helper(root_markers=True)
+        releases, backups = tmp_path / "releases", tmp_path / "backups"
+        releases.mkdir()
+        backups.mkdir()
+        names: list[str] = []
+        for index in range(1_001):
+            name = f"old-{index:04d}"
+            release = releases / name
+            release.mkdir()
+            (release / helper.MARKER).write_text(
+                json.dumps({"format": "noyra-verified-install/v1", "readiness": "passed"}),
+                encoding="utf-8",
+            )
+            names.append(name)
+        database = Database(tmp_path / "noyra.sqlite3")
+        subject = "Noyra-gc-batch"
+        IdentityStore(database).ensure(subject, content_hash(subject))
+        plan = {
+            "plan_id": "b" * 64,
+            "releases": names,
+            "backup_details": [],
+            "backups": [],
+            "retention_policy": {},
+            "backup_protected": [],
+        }
+>       first = helper.apply_resumable_gc(database.path, subject, releases, backups, plan)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_deployment_maintenance.py:660: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+scripts\deployment-maintenance.py:1225: in apply_resumable_gc
+    manifest = _write_gc_index(database_path, run_id, _iter_gc_actions(releases, plan))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+scripts\deployment-maintenance.py:731: in _write_gc_index
+    Path(temporary).unlink(missing_ok=True)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = WindowsPath('D:/metagrowh/.user-temp/pytest-of-�ǳ�/pytest-3903/test_gc_consumes_more_than_one0/.noyra-maintenance/..noyra.sqlite3.backup-retention-backupretention_16c5575cea8be21b3f1ee9a874eb1517.index.3mz60eb1')
+missing_ok = True
+
+    def unlink(self, missing_ok=False):
+        """
+        Remove this file or link.
+        If the path is a directory, use rmdir() instead.
+        """
+        try:
+>           os.unlink(self)
+E           PermissionError: [WinError 32] ��һ����������ʹ�ô��ļ��������޷����ʡ�: 'D:\\metagrowh\\.user-temp\\pytest-of-�ǳ�\\pytest-3903\\test_gc_consumes_more_than_one0\\.noyra-maintenance\\..noyra.sqlite3.backup-retention-backupretention_16c5575cea8be21b3f1ee9a874eb1517.index.3mz60eb1'
+
+..\.tools\Python312\Lib\pathlib.py:1342: PermissionError
+=========================== short test summary info ===========================
+SKIPPED [1] tests\test_deployment_maintenance.py:783: POSIX marker ownership contract
+FAILED tests/test_deployment_maintenance.py::test_backup_gc_resumes_from_durable_cursor_after_process_interruption
+FAILED tests/test_deployment_maintenance.py::test_gc_runtime_failure_leaves_manifest_for_next_maintenance_run
+FAILED tests/test_deployment_maintenance.py::test_gc_manifest_cleanup_error_does_not_change_applied_run_to_failed
+FAILED tests/test_deployment_maintenance.py::test_gc_consumes_more_than_one_thousand_actions_in_batches
+4 failed, 135 passed, 1 skipped in 115.24s (0:01:55)

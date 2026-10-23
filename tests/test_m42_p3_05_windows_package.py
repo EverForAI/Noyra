@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -9,10 +11,38 @@ import pytest
 
 ROOT = Path(__file__).parents[1]
 POWERSHELL = shutil.which("pwsh") or shutil.which("powershell")
+NATIVE_WINDOWS = os.name == "nt"
 
 
 def _run(script: Path, *args: str) -> subprocess.CompletedProcess[str]:
     assert POWERSHELL is not None
+    if script.name == "build-windows-package.ps1":
+        launcher = Path(os.environ.get("WINDIR", r"C:\Windows")) / "System32" / "whoami.exe"
+        thumbprint_probe = subprocess.run(
+            [
+                POWERSHELL,
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                (
+                    f"(Get-AuthenticodeSignature -LiteralPath '{launcher}')."
+                    "SignerCertificate.Thumbprint"
+                ),
+            ],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        args = (
+            *args,
+            "-LauncherPath",
+            str(launcher),
+            "-TrustedPublisherThumbprints",
+            thumbprint_probe.stdout.strip(),
+        )
     return subprocess.run(
         [POWERSHELL, "-NoProfile", "-NonInteractive", "-File", str(script), *args],
         cwd=ROOT,
@@ -24,7 +54,10 @@ def _run(script: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is unavailable")
+@pytest.mark.skipif(
+    not NATIVE_WINDOWS or POWERSHELL is None,
+    reason="requires native Windows Authenticode and a signed Windows launcher",
+)
 def test_windows_package_install_upgrade_and_rollback_are_atomic(tmp_path: Path) -> None:
     output = tmp_path / "packages"
     install = tmp_path / "install"
@@ -86,7 +119,10 @@ def test_windows_package_install_upgrade_and_rollback_are_atomic(tmp_path: Path)
     assert (install / "current.txt").read_text(encoding="utf-8").strip() == "v1"
 
 
-@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is unavailable")
+@pytest.mark.skipif(
+    not NATIVE_WINDOWS or POWERSHELL is None,
+    reason="requires native Windows Authenticode and a signed Windows launcher",
+)
 def test_windows_package_hash_tampering_is_rejected(tmp_path: Path) -> None:
     assert POWERSHELL is not None
     powershell = POWERSHELL
@@ -133,6 +169,63 @@ def test_windows_package_hash_tampering_is_rejected(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert not (install / "current.txt").exists()
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is unavailable")
+@pytest.mark.parametrize("listed", [False, True])
+def test_windows_package_strict_signature_cannot_bypass_launcher_inventory(
+    tmp_path: Path, listed: bool
+) -> None:
+    assert POWERSHELL is not None
+    package = tmp_path / "package"
+    package.mkdir()
+    launcher = package / "noyra.exe"
+    launcher.write_bytes(b"synthetic non-executable launcher fixture")
+    readme = package / "README.txt"
+    readme.write_text("synthetic package", encoding="utf-8")
+    files = [{"path": readme.name, "sha256": hashlib.sha256(readme.read_bytes()).hexdigest()}]
+    if listed:
+        files.append(
+            {"path": launcher.name, "sha256": hashlib.sha256(launcher.read_bytes()).hexdigest()}
+        )
+    (package / "noyra-package.json").write_text(
+        json.dumps(
+            {
+                "format": "noyra-windows-package/v1",
+                "version": "strict-fixture",
+                "signature_required": True,
+                "files": files,
+            }
+        ),
+        encoding="utf-8",
+    )
+    install, data = tmp_path / "install", tmp_path / "data"
+    result = subprocess.run(
+        [
+            POWERSHELL,
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            str(ROOT / "deploy/windows/noyra-lifecycle.ps1"),
+            "-Action",
+            "install",
+            "-InstallRoot",
+            str(install),
+            "-DataRoot",
+            str(data),
+            "-PackageRoot",
+            str(package),
+            "-RequireSignature",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert result.returncode != 0
+    assert not (install / "current.txt").exists()
+    assert not (install / "versions/strict-fixture/noyra.exe").exists()
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is unavailable")

@@ -51,7 +51,18 @@ def test_ubuntu_installer_uses_atomic_release_lifecycle_and_rollback() -> None:
     assert 'PREVIOUS_LINK="$INSTALL_DIR/previous"' in installer
     assert "flock -n 9" in installer
     assert 'python3 -m venv "$staging/.venv"' in installer
-    assert 'mv -- "$staging" "$release_root"' in installer
+    # Venv entrypoints embed their creation path. Build at the immutable final
+    # location, then publish pointers only after validation and migration.
+    assert 'staging="$release_root"' in installer
+    assert 'mv -- "$staging" "$release_root"' not in installer
+    assert installer.index('staging="$release_root"') < installer.index(
+        'python3 -m venv "$staging/.venv"'
+    )
+    assert (
+        installer.index('"$staging/.venv/bin/python" -m pip check')
+        < installer.index("\nmigrate_database_before_switch\n")
+        < installer.index("install_phase=switch_release")
+    )
     assert '"$staging/.venv/bin/python" -m pip check' in installer
     assert "mv -Tf" in installer
     assert "health/ready" in installer
