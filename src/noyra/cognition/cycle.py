@@ -105,6 +105,7 @@ class CognitionCycle:
         reader: SafeWebReader | None = None,
         embedding_settings: EmbeddingSettings | None = None,
         embedding_call_authorizer: Callable[[], None] | None = None,
+        embedding_observed_dimension_recorder: Callable[[int], None] | None = None,
         common_knowledge: CommonKnowledgeStore | None = None,
         clock: Callable[[], str] = utc_now,
     ):
@@ -135,6 +136,7 @@ class CognitionCycle:
                 OpenAIEmbeddingProvider(
                     embedding_settings,
                     call_authorizer=embedding_call_authorizer,
+                    observed_dimension_recorder=embedding_observed_dimension_recorder,
                 ),
                 EmbeddingLedger(kernel.database, clock=clock),
                 subject_id=self.subject_id,

@@ -495,6 +495,28 @@ def test_embedding_default_dimension_change_invalidates_provider_identity(
     assert second.missing(kernel.subject_id) == [(memory.memory_id, memory.content)]
 
 
+def test_schema_102_migrates_observed_embedding_dimension_column(tmp_path: Path) -> None:
+    database = Database(tmp_path / "db")
+    with database.transaction() as connection:
+        connection.execute("ALTER TABLE embedding_resources DROP COLUMN observed_dimensions")
+        connection.execute("UPDATE schema_meta SET value='102' WHERE key='schema_version'")
+        connection.execute(
+            "UPDATE schema_meta SET value=? WHERE key='schema_ddl_contract'",
+            ("102:" + _SCHEMA_DDL_FINGERPRINTS[102],),
+        )
+
+    upgraded = Database(database.path, strict_schema_contract=True)
+    with upgraded.connection() as connection:
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(embedding_resources)")
+        }
+        version = connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0]
+    assert version == "103"
+    assert "observed_dimensions" in columns
+
+
 def test_embedding_configuration_drift_is_rejected_by_authorizer_and_integrity(
     tmp_path: Path,
 ) -> None:

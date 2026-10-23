@@ -104,6 +104,7 @@ class EmbeddingSettings(BaseModel):
     model: str = Field(min_length=1, max_length=256)
     api_key: SecretStr
     dimensions: int | None = Field(default=None, ge=1, le=16_384)
+    observed_dimensions: int | None = Field(default=None, ge=1, le=16_384)
     timeout_seconds: float = Field(default=30, gt=0, le=300)
     resource_id: str | None = Field(default=None, min_length=1, max_length=256)
     daily_call_limit: int = Field(default=1_000, ge=0)
@@ -159,9 +160,8 @@ class EmbeddingSettings(BaseModel):
             }
         )
 
-    @property
-    def space_fingerprint(self) -> str:
-        """Identity of a vector space, deliberately independent of credentials."""
+    def space_fingerprint_for(self, observed_dimensions: int | None = None) -> str:
+        """Return the vector-space identity without including credentials."""
         parsed = urlsplit(self.base_url)
         hostname = parsed.hostname
         if hostname is None:
@@ -172,14 +172,21 @@ class EmbeddingSettings(BaseModel):
         if port is not None and port != 443:
             authority = f"{authority}:{port}"
         endpoint = f"https://{authority}{parsed.path.rstrip('/') or '/'}"
+        dimensions = self.dimensions
+        if dimensions is None:
+            dimensions = observed_dimensions or self.observed_dimensions
         return content_hash(
             {
                 "protocol": "openai-compatible-embeddings/v1",
                 "endpoint": endpoint,
                 "model": self.model,
-                "dimensions": self.dimensions,
+                "dimensions": dimensions,
             }
         )
+
+    @property
+    def space_fingerprint(self) -> str:
+        return self.space_fingerprint_for()
 
     def budget_limits(self) -> EmbeddingBudgetLimits:
         return EmbeddingBudgetLimits(
@@ -255,34 +262,17 @@ class OpenAIEmbeddingProvider:
         *,
         transport: httpx.BaseTransport | None = None,
         call_authorizer: Callable[[], None] | None = None,
+        observed_dimension_recorder: Callable[[int], None] | None = None,
     ):
         self.settings = settings
         self.transport = transport
         self.call_authorizer = call_authorizer
-        self._observed_dimensions: int | None = None
+        self.observed_dimension_recorder = observed_dimension_recorder
+        self._observed_dimensions = settings.observed_dimensions
 
     @property
     def name(self) -> str:
-        dimensions = self.settings.dimensions or self._observed_dimensions
-        if dimensions == self.settings.dimensions:
-            fingerprint = self.settings.space_fingerprint
-        else:
-            parsed = urlsplit(self.settings.base_url)
-            hostname = parsed.hostname
-            if hostname is None:
-                raise ValueError("embedding API hostname is missing")
-            host = hostname.encode("idna").decode("ascii").casefold()
-            authority = f"[{host}]" if ":" in host else host
-            if parsed.port is not None and parsed.port != 443:
-                authority = f"{authority}:{parsed.port}"
-            fingerprint = content_hash(
-                {
-                    "protocol": "openai-compatible-embeddings/v1",
-                    "endpoint": f"https://{authority}{parsed.path.rstrip('/') or '/'}",
-                    "model": self.settings.model,
-                    "dimensions": dimensions,
-                }
-            )
+        fingerprint = self.settings.space_fingerprint_for(self._observed_dimensions)
         return f"openai-compatible-space:{fingerprint}"
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
@@ -407,6 +397,11 @@ class OpenAIEmbeddingProvider:
             ):
                 raise ValueError("embedding provider returned unexpected dimensions")
             self._observed_dimensions = observed_dimensions
+            if (
+                self.settings.dimensions is None
+                and self.observed_dimension_recorder is not None
+            ):
+                self.observed_dimension_recorder(observed_dimensions)
             usage = self._usage(body, estimate_embedding_input_tokens(texts))
         except _EmbeddingResponseTokenLimitError as error:
             raise EmbeddingProviderError(

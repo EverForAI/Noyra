@@ -10933,6 +10933,19 @@ class NoyraService:
                     service.kernel.subject_id,
                     managed_embedding_settings,
                 )
+            embedding_observed_dimension_recorder = None
+            if (
+                managed_embedding_settings is not None
+                and managed_embedding_settings.dimensions is None
+            ):
+                def record_embedding_dimensions(dimensions: int) -> None:
+                    service.http.embedding_resources.record_observed_dimensions(
+                        service.kernel.subject_id,
+                        managed_embedding_settings.resource_id or "",
+                        dimensions,
+                    )
+
+                embedding_observed_dimension_recorder = record_embedding_dimensions
             service.cognition = CognitionCycle(
                 service.kernel,
                 gateway,
@@ -10940,6 +10953,7 @@ class NoyraService:
                 reader=SafeWebReader(),
                 embedding_settings=embedding_settings,
                 embedding_call_authorizer=embedding_call_authorizer,
+                embedding_observed_dimension_recorder=embedding_observed_dimension_recorder,
                 common_knowledge=service.http.common_knowledge,
             )
             return service

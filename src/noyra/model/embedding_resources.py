@@ -78,6 +78,7 @@ class EmbeddingResourceRecord:
     input_cost_microusd_per_million: int
     circuit_failure_threshold: int
     circuit_cooldown_seconds: float
+    observed_dimensions: int | None
     key_fingerprint: str
     config_hash: str
     status: str
@@ -143,9 +144,9 @@ class EmbeddingResourceStore:
                     "dimensions, timeout_seconds, daily_call_limit, daily_token_limit, "
                     "daily_cost_limit_microusd, input_cost_microusd_per_million, "
                     "circuit_failure_threshold, circuit_cooldown_seconds, "
-                    "key_fingerprint, config_hash, "
+                    "observed_dimensions, key_fingerprint, config_hash, "
                     "status, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 'active', ?, ?)",
                     (
                         config_id,
                         subject_id,
@@ -230,6 +231,7 @@ class EmbeddingResourceStore:
             model=record.model,
             api_key=SecretStr(secret),
             dimensions=record.dimensions,
+            observed_dimensions=record.observed_dimensions,
             timeout_seconds=record.timeout_seconds,
             resource_id=record.config_id,
             daily_call_limit=record.daily_call_limit,
@@ -242,6 +244,40 @@ class EmbeddingResourceStore:
         if record.config_hash != settings.configuration_fingerprint:
             raise IntegrityError("embedding resource configuration fingerprint mismatch")
         return settings
+
+    def record_observed_dimensions(self, subject_id: str, config_id: str, dimensions: int) -> bool:
+        """Persist the provider's current default vector dimension.
+
+        This is runtime observation, not operator configuration.  It is kept
+        separate from ``config_hash`` so a provider alias changing dimension
+        invalidates old vectors without making the resource drift check fail.
+        """
+        if not 1 <= dimensions <= 16_384:
+            raise ValueError("embedding dimensions are invalid")
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                "SELECT status, dimensions, observed_dimensions FROM embedding_resources "
+                "WHERE config_id=? AND subject_id=?",
+                (config_id, subject_id),
+            ).fetchone()
+            if row is None or row["status"] != "active":
+                return False
+            configured = None if row["dimensions"] is None else int(row["dimensions"])
+            if configured is not None:
+                if configured != dimensions:
+                    raise IntegrityError("embedding provider returned unexpected dimensions")
+                return False
+            if (
+                row["observed_dimensions"] is not None
+                and int(row["observed_dimensions"]) == dimensions
+            ):
+                return False
+            connection.execute(
+                "UPDATE embedding_resources SET observed_dimensions=? "
+                "WHERE config_id=? AND subject_id=? AND status='active'",
+                (dimensions, config_id, subject_id),
+            )
+            return True
 
     def call_authorizer(
         self,
@@ -411,6 +447,11 @@ class EmbeddingResourceStore:
     def _from_row(row: Any) -> EmbeddingResourceRecord:
         try:
             dimensions = None if row["dimensions"] is None else strict_int(row["dimensions"])
+            observed_dimensions = (
+                None
+                if row["observed_dimensions"] is None
+                else strict_int(row["observed_dimensions"])
+            )
             timeout_seconds = strict_finite_float(row["timeout_seconds"])
             daily_call_limit = strict_int(row["daily_call_limit"])
             daily_token_limit = strict_int(row["daily_token_limit"])
@@ -422,6 +463,14 @@ class EmbeddingResourceStore:
             raise IntegrityError("embedding resource numeric state is invalid") from error
         if dimensions is not None and not 1 <= dimensions <= 16_384:
             raise IntegrityError("embedding resource dimensions are invalid")
+        if observed_dimensions is not None and not 1 <= observed_dimensions <= 16_384:
+            raise IntegrityError("embedding resource observed dimensions are invalid")
+        if (
+            dimensions is not None
+            and observed_dimensions is not None
+            and dimensions != observed_dimensions
+        ):
+            raise IntegrityError("embedding resource dimensions disagree with observation")
         if not 0 < timeout_seconds <= 300:
             raise IntegrityError("embedding resource timeout is invalid")
         if (
@@ -470,6 +519,7 @@ class EmbeddingResourceStore:
             input_cost_microusd_per_million,
             circuit_failure_threshold,
             circuit_cooldown_seconds,
+            observed_dimensions,
             row["key_fingerprint"],
             row["config_hash"],
             status,

@@ -3989,6 +3989,7 @@ def _check_embedding_resources(context: IntegrityContext) -> Mapping[str, Any]:
             model=record.model,
             api_key=SecretStr(value),
             dimensions=record.dimensions,
+            observed_dimensions=record.observed_dimensions,
             timeout_seconds=record.timeout_seconds,
             resource_id=record.config_id,
             daily_call_limit=record.daily_call_limit,
