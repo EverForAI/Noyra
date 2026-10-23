@@ -678,6 +678,35 @@ _OWNERSHIP_GRAPHS[100] = {
 _OWNERSHIP_GRAPHS[101] = _OWNERSHIP_GRAPHS[100]
 _OWNERSHIP_GRAPHS[102] = _OWNERSHIP_GRAPHS[101]
 _OWNERSHIP_GRAPHS[103] = _OWNERSHIP_GRAPHS[102]
+_OWNERSHIP_GRAPHS[104] = {
+    **_OWNERSHIP_GRAPHS[103],
+    **{
+        name: _subject_rule()
+        for name in (
+            "participant_entities",
+            "participant_sources",
+            "participant_message_links",
+            "participant_accounts",
+            "participant_post_links",
+            "participant_submissions",
+            "participant_applications",
+            "participant_notification_reads",
+        )
+    },
+    **{
+        name: _ExportOwnershipRule(
+            "skipped",
+            "ephemeral or authentication material",
+            reason="Authentication is retained in encrypted backups, not diagnostic exports",
+        )
+        for name in (
+            "participant_credentials",
+            "participant_sessions",
+            "participant_api_credentials",
+            "participant_auth_limits",
+        )
+    },
+}
 
 
 @dataclass(frozen=True)
