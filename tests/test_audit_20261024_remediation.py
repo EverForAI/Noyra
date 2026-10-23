@@ -495,3 +495,144 @@ async def test_withdrawal_at_model_send_guard_cancels_unsent_attempt(
         )
         assert c.execute("SELECT status FROM model_calls").fetchone()[0] == "failed"
     assert await engine.run_due() is None
+
+
+@pytest.mark.parametrize("kind", ["apply", "submit"])
+@pytest.mark.parametrize("transition", ["closed", "expired"])
+def test_receipt_replay_after_bounty_closes(
+    kernel: SubjectKernel, kind: str, transition: str
+) -> None:
+    from datetime import datetime, timedelta
+
+    collaboration, who, bounty = make_collaboration(kernel)
+    payload: dict[str, Any] = {
+        "bounty_id": bounty.bounty_id,
+        "content": "Evidence",
+        "idempotency_key": "receipt",
+    }
+    if kind == "submit":
+        payload.update(
+            evidence=["https://example.test/evidence"],
+            recipient_address="0x" + "1" * 40,
+            consent_version=1,
+        )
+    first = collaboration.write("/api/participants/" + kind, payload, who, "127.0.0.1")
+    economy = collaboration.owner.wallet_economy
+    if transition == "closed":
+        economy.close_bounty(bounty.bounty_id, kernel.subject_id, actor="operator")
+    else:
+        economy.clock = lambda: (
+            datetime.fromisoformat(bounty.expires_at) + timedelta(days=1)
+        ).isoformat(timespec="milliseconds")
+    with kernel.database.connection() as c:
+        before = c.execute("SELECT COUNT(*) FROM audit_records").fetchone()[0]
+    assert collaboration.write("/api/participants/" + kind, payload, who, "127.0.0.1") == first
+    if kind == "submit":
+        from noyra.wallet.economy_types import SubmissionInput
+
+        replay = economy.submit_to_bounty(
+            bounty.bounty_id,
+            kernel.subject_id,
+            SubmissionInput(
+                counterparty=who.entity_id,
+                content=payload["content"],
+                evidence=payload["evidence"],
+                recipient_address=payload["recipient_address"],
+                consent_version=1,
+                idempotency_key="participant:" + content_hash([who.entity_id, kind, "receipt"]),
+            ),
+        )
+        assert replay.submission_id == first["submission_id"]
+    with pytest.raises(ValueError):
+        collaboration.write(
+            "/api/participants/" + kind, {**payload, "content": "Changed"}, who, "127.0.0.1"
+        )
+    with kernel.database.connection() as c:
+        assert c.execute("SELECT COUNT(*) FROM audit_records").fetchone()[0] == before
+        assert c.execute("SELECT COUNT(*) FROM wallet_payment_orders").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "kind,capacity", [("messages", "_MESSAGE_CAP"), ("apply", "_APPLICATION_CAP")]
+)
+def test_receipt_replay_at_capacity_and_concurrent_duplicate(
+    kernel: SubjectKernel, kind: str, capacity: str
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    collaboration, who, bounty = make_collaboration(kernel)
+    payload: dict[str, Any] = {"content": "One invitation", "idempotency_key": "receipt"}
+    if kind == "apply":
+        payload["bounty_id"] = bounty.bounty_id
+    with patch("noyra.interaction.collaboration." + capacity, 1):
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            results = list(
+                workers.map(
+                    lambda _: collaboration.write(
+                        "/api/participants/" + kind, payload, who, "127.0.0.1"
+                    ),
+                    range(2),
+                )
+            )
+        assert results[0] == results[1]
+        assert (
+            collaboration.write("/api/participants/" + kind, payload, who, "127.0.0.1")
+            == results[0]
+        )
+        with pytest.raises(ValueError, match="capacity_reached"):
+            collaboration.write(
+                "/api/participants/" + kind, {**payload, "idempotency_key": "new"}, who, "127.0.0.1"
+            )
+
+
+def test_submission_key_cannot_be_reused_for_another_bounty(kernel: SubjectKernel) -> None:
+    from test_wallet_economy import _bounty
+
+    collaboration, who, bounty = make_collaboration(kernel)
+    economy = collaboration.owner.wallet_economy
+    assert bounty.goal_id is not None
+    another = _bounty(
+        economy,
+        kernel.subject_id,
+        bounty.network_id,
+        bounty.asset_id,
+        bounty.goal_id,
+        key="another",
+    )
+    economy.publish_bounty(another.bounty_id, kernel.subject_id, actor="operator")
+    payload: dict[str, Any] = {
+        "bounty_id": bounty.bounty_id,
+        "content": "Evidence",
+        "idempotency_key": "receipt",
+        "recipient_address": "0x" + "1" * 40,
+    }
+    collaboration.write("/api/participants/submit", payload, who, "127.0.0.1")
+    with pytest.raises(ValueError, match="idempotency_conflict"):
+        collaboration.write(
+            "/api/participants/submit",
+            {**payload, "bounty_id": another.bounty_id},
+            who,
+            "127.0.0.1",
+        )
+
+
+def test_message_receipt_across_browser_and_program_keeps_original_source(
+    kernel: SubjectKernel,
+) -> None:
+    collaboration, who, _ = make_collaboration(kernel)
+    payload = {"content": "Same invitation", "idempotency_key": "receipt"}
+    first = collaboration.write("/api/participants/messages", payload, who, "127.0.0.1")
+    accounts = AccountStore(kernel.database, kernel.subject_id)
+    key = accounts.api_key(who)
+    assert key
+    api_who = accounts.authenticate(key, api=True)
+    assert api_who and api_who.source_id != who.source_id
+    assert collaboration.write("/api/participants/messages", payload, api_who, "127.0.0.1") == first
+    with kernel.database.connection() as c:
+        assert (
+            c.execute(
+                "SELECT source_id FROM participant_message_links WHERE interaction_id=?",
+                (first["interaction_id"],),
+            ).fetchone()[0]
+            == who.source_id
+        )

@@ -10,9 +10,12 @@ from noyra.core.private_sources import WITHDRAWN_PARTICIPANT_INVITATION
 from noyra.core.types import content_hash, new_id, utc_now
 from noyra.wallet.economy_types import SubmissionInput
 
-from .participants import Participant
+from .participants import Participant, ParticipantStore
 from .store import InteractionStore
 from .types import PublicPostInput
+
+_MESSAGE_CAP = 10000
+_APPLICATION_CAP = 10000
 
 
 def _text(payload: dict[str, Any], key: str, maximum: int = 20000) -> str:
@@ -258,25 +261,55 @@ class ParticipantCollaboration:
             key = "participant:" + content_hash([who.entity_id, view, identity])
         if view == "messages":
             content = _text(payload, "content", 10000)
-            with self.db.connection() as c:
+            with self.db.transaction() as c:
+                existing = c.execute(
+                    "SELECT 1 FROM interactions WHERE subject_id=? AND idempotency_key=?",
+                    (self.subject, key),
+                ).fetchone()
                 if (
-                    c.execute(
+                    not existing
+                    and c.execute(
                         "SELECT COUNT(*) FROM participant_message_links WHERE subject_id=?",
                         (self.subject,),
                     ).fetchone()[0]
-                    >= 10000
+                    >= _MESSAGE_CAP
                 ):
                     raise ValueError("message_capacity_reached")
-            record = InteractionStore(self.db).receive(
-                self.subject,
-                "participant",
-                who.entity_id,
-                content,
-                idempotency_key=key,
-                participant=who,
-                participant_conversation="participant:" + who.entity_id,
-                participant_private=True,
-            )
+                record = InteractionStore(self.db)._create_connection(
+                    c,
+                    self.subject,
+                    "incoming",
+                    "human_message",
+                    "participant",
+                    who.entity_id,
+                    content,
+                    None,
+                    key,
+                    "offered",
+                    None,
+                )
+                if existing:
+                    source = c.execute(
+                        "SELECT entity_id,conversation_key,visibility "
+                        "FROM participant_message_links "
+                        "WHERE subject_id=? AND interaction_id=?",
+                        (self.subject, record.interaction_id),
+                    ).fetchone()
+                    if source is None or tuple(source) != (
+                        who.entity_id,
+                        "participant:" + who.entity_id,
+                        "private",
+                    ):
+                        raise PermissionError("message_owner_mismatch")
+                else:
+                    ParticipantStore.link(
+                        c,
+                        self.subject,
+                        record.interaction_id,
+                        who,
+                        "participant:" + who.entity_id,
+                        private=True,
+                    )
             return {"interaction_id": record.interaction_id, "status": record.status}
         if view == "posts":
             # PublicPostStore keeps its own CAPTCHA/rate/capacity and idempotent admission.
@@ -317,17 +350,8 @@ class ParticipantCollaboration:
             return {"post_id": post.post_id, "status": post.status}
         if view in {"apply", "submit"}:
             bounty_id = _text(payload, "bounty_id", 128)
-            bounty = self.owner.wallet_economy.get_bounty(bounty_id, self.subject)
-            if bounty.status != "published" or bounty.opens_at > utc_now():
-                raise ValueError("collaboration_not_open")
             content = _text(payload, "content")
             with self.db.transaction() as c:
-                count = c.execute(
-                    "SELECT COUNT(*) FROM participant_applications WHERE subject_id=?",
-                    (self.subject,),
-                ).fetchone()[0]
-                if count >= 10000:
-                    raise ValueError("collaboration_capacity_reached")
                 if view == "apply":
                     existing = c.execute(
                         "SELECT * FROM participant_applications WHERE subject_id=? AND "
@@ -341,6 +365,20 @@ class ParticipantCollaboration:
                             "application_id": existing["application_id"],
                             "status": existing["status"],
                         }
+                    bounty = self.owner.wallet_economy.get_bounty(bounty_id, self.subject)
+                    if (
+                        bounty.status != "published"
+                        or bounty.opens_at > self.owner.wallet_economy.clock()
+                    ):
+                        raise ValueError("collaboration_not_open")
+                    if (
+                        c.execute(
+                            "SELECT COUNT(*) FROM participant_applications WHERE subject_id=?",
+                            (self.subject,),
+                        ).fetchone()[0]
+                        >= _APPLICATION_CAP
+                    ):
+                        raise ValueError("collaboration_capacity_reached")
                     aid = new_id("application")
                     c.execute(
                         "INSERT INTO participant_applications VALUES(?,?,?,?,?,?,?,?)",
@@ -368,7 +406,6 @@ class ParticipantCollaboration:
                         "offered",
                         None,
                     )
-                    from .participants import ParticipantStore
 
                     ParticipantStore.link(
                         c,
@@ -379,26 +416,52 @@ class ParticipantCollaboration:
                         private=True,
                     )
                     return {"application_id": aid, "status": "submitted"}
+                proposal = SubmissionInput(
+                    counterparty=who.entity_id,
+                    content=content,
+                    evidence=payload.get("evidence", []),
+                    recipient_address=payload.get("recipient_address", ""),
+                    idempotency_key=key,
+                    consent_version=payload.get("consent_version", 1),
+                )
+                receipts = c.execute(
+                    "SELECT s.* FROM participant_submissions l JOIN wallet_bounty_submissions s "
+                    "ON s.submission_id=l.submission_id AND s.subject_id=l.subject_id "
+                    "WHERE l.subject_id=? AND l.entity_id=? AND s.idempotency_key=? LIMIT 2",
+                    (self.subject, who.entity_id, key),
+                ).fetchall()
+                if receipts:
+                    if (
+                        len(receipts) != 1
+                        or receipts[0]["bounty_id"] != bounty_id
+                        or not self.owner.wallet_economy._submission_input_matches(
+                            receipts[0], proposal
+                        )
+                    ):
+                        raise ValueError("idempotency_conflict")
+                    return {
+                        "submission_id": receipts[0]["submission_id"],
+                        "status": receipts[0]["status"],
+                    }
+                existing = c.execute(
+                    "SELECT 1 FROM wallet_bounty_submissions WHERE subject_id=? AND bounty_id=? "
+                    "AND idempotency_key=?",
+                    (self.subject, bounty_id, key),
+                ).fetchone()
                 submission = self.owner.wallet_economy.submit_to_bounty(
                     bounty_id,
                     self.subject,
-                    SubmissionInput(
-                        counterparty=who.entity_id,
-                        content=content,
-                        evidence=payload.get("evidence", []),
-                        recipient_address=payload.get("recipient_address", ""),
-                        idempotency_key=key,
-                        consent_version=payload.get("consent_version", 1),
-                    ),
+                    proposal,
                     client_ip=client,
                     _connection=c,
                 )
+                bounty = self.owner.wallet_economy.get_bounty(bounty_id, self.subject)
                 workflow = c.execute(
                     "SELECT * FROM wallet_reward_workflows WHERE subject_id=? AND "
                     "bounty_id=? AND status='open'",
                     (self.subject, bounty_id),
                 ).fetchone()
-                if workflow:
+                if workflow and not existing:
                     self.owner.wallet_rewards._link_submission(
                         c,
                         workflow,
