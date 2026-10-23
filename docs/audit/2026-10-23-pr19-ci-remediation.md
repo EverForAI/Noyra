@@ -27,3 +27,9 @@ GitHub PR 检查运行 `39901026191`，push 运行 `39901022254`。四组合均�
 - Ubuntu 测试改为检查最终 release 路径创建环境、禁止移动新 venv、pip 校验及数据库迁移早于指针发布；安装器产品实现不变。
 - 两项依赖系统受签名 launcher 的成功/篡改集成测试只在原生 Windows 运行；安装清单/签名拒绝和缺模块诊断仍在具备 PowerShell 的平台运行。没有把 Linux 的 PowerShell 当作 Windows 认证实现。
 - Windows 原生安装/升级/回滚、hash 篡改、严格签名拒绝、缺模块诊断及 Ubuntu 静态生命周期合同共 8 passed（26.57 秒）。复核 diff：只修改测试适用条件和断言，产品安装与信任校验均未放宽。Linux 专项在综合阶段补充。
+
+### B schema 99→103 逐对象复核
+
+使用 origin/main 的独立源码副本建立严格 schema99 库，再用当前分支迁移至103，另建严格103新库比较：迁移库与新库的 DDL/structure 指纹完全一致。全部旧对象仅 `embedding_resources` 改变（config_hash、observed_dimensions 两列），新增 `memory_embedding_inputs` 和三个有界查询索引；所有 `public_*` 表、索引和触发器逐项相同。未改变产品 schema、指纹注册表或迁移来迁就测试。
+
+公开档案测试显式断言版本103，更新为已复核的完整DDL/structure固定值；保留固定指纹而不是改为从同一运行时代码获取预期。公开档案、strict contract、schema迁移与runtime export筛选集共56 passed、26 deselected（156.40秒）。复核确认只更新测试的版本固定值，未取消schema防漂移门禁。
