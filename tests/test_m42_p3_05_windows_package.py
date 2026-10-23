@@ -11,6 +11,7 @@ import pytest
 
 ROOT = Path(__file__).parents[1]
 POWERSHELL = shutil.which("pwsh") or shutil.which("powershell")
+NATIVE_WINDOWS = os.name == "nt"
 
 
 def _run(script: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -53,7 +54,10 @@ def _run(script: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is unavailable")
+@pytest.mark.skipif(
+    not NATIVE_WINDOWS or POWERSHELL is None,
+    reason="requires native Windows Authenticode and a signed Windows launcher",
+)
 def test_windows_package_install_upgrade_and_rollback_are_atomic(tmp_path: Path) -> None:
     output = tmp_path / "packages"
     install = tmp_path / "install"
@@ -115,7 +119,10 @@ def test_windows_package_install_upgrade_and_rollback_are_atomic(tmp_path: Path)
     assert (install / "current.txt").read_text(encoding="utf-8").strip() == "v1"
 
 
-@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is unavailable")
+@pytest.mark.skipif(
+    not NATIVE_WINDOWS or POWERSHELL is None,
+    reason="requires native Windows Authenticode and a signed Windows launcher",
+)
 def test_windows_package_hash_tampering_is_rejected(tmp_path: Path) -> None:
     assert POWERSHELL is not None
     powershell = POWERSHELL
