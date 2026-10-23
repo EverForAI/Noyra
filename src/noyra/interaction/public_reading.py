@@ -98,7 +98,7 @@ def public_article_html(
     elif item["kind"] == "behavior":
         title = PUBLIC_ACTIONS.get(item["title"], [title, title])[int(english)]
     elif item["kind"] == "interaction":
-        title = "Public exchanges" if english else "公开交流"
+        title = public_label("interactions", english=english)
     description = (item["summary"] or title)[:220]
     path = public_item_path(item["kind"], item["id"])
     canonical = site_url + path if site_url else ""

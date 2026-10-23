@@ -128,14 +128,23 @@ def test_public_schema_has_fixed_reviewed_fingerprints(
     archive: tuple[PublicArchive, SubjectKernel],
 ) -> None:
     _, kernel = archive
+    # These are the reviewed whole-database schema 104 fingerprints, not just
+    # the public archive tables. Versions 100-104 add embedding bindings and
+    # bounded lookup indexes without changing any public archive object.
     with kernel.database.connection() as connection:
         assert (
+            connection.execute(
+                "SELECT value FROM schema_meta WHERE key='schema_version'"
+            ).fetchone()[0]
+            == "104"
+        )
+        assert (
             kernel.database.schema_ddl_fingerprint(connection)
-            == "289738612874ddce653fcc53979ab3285f0601920cde5aad27baafee978d1145"
+            == "72e5c15e4793cbe3b743b5eca667cea5bef3c34af05a4674bde7ce720234dc8e"
         )
         assert (
             kernel.database.schema_structure_fingerprint(connection)
-            == "f6d0ed82b9a6fc8ead5f18dac96c904f04f5087376a2ec9ed1553d55d41dc2fd"
+            == "1c17714c61ce55ec2a36af8dfdb439bbae32428bab58c7d842a34802426650e4"
         )
 
 
@@ -704,3 +713,42 @@ def test_partitioned_sitemap_exceeds_old_thousand_record_ceiling(
         store.sitemap_partition(kernel.subject_id, base64.urlsafe_b64encode(sealed).decode())
     assert PublicArchive(kernel.database).sitemap_partition(kernel.subject_id, tokens[0])
     assert store.sitemap_partitions(kernel.subject_id) == tokens
+
+
+def test_overview_keeps_public_writing_visible_after_stage_changes(
+    archive: tuple[PublicArchive, SubjectKernel],
+) -> None:
+    from noyra.interaction import PublicDiaryStore
+    from noyra.sleep import SleepEngine, SleepReflectionPlan
+
+    store, kernel = archive
+    sleep = SleepEngine(kernel.database, kernel.subject_id)
+    run = sleep.start("subject_choice", "PRIVATE-REST-REASON")
+    sleep.begin_reflection(run.sleep_id)
+    body = "公开日记的一段文字。" * 100
+    sleep.commit_reflection(
+        run.sleep_id,
+        SleepReflectionPlan(summary="PRIVATE-REFLECTION", public_diary_candidate=body),
+    )
+    sleep.enter_deep_sleep(run.sleep_id)
+    sleep.wake(run.sleep_id, "fixture", force=True)
+    sleep.complete_wake(run.sleep_id)
+    diary = PublicDiaryStore(kernel.database).publish(
+        kernel.subject_id, run.sleep_id, "从一段文字读起", body
+    )
+    for _ in range(5):
+        EventStore(kernel.database).append(
+            kernel.subject_id,
+            "lifecycle_transition",
+            "fixture",
+            {"from": "active", "to": "paused"},
+            privacy_level="public_status",
+        )
+    overview = store.overview(kernel.subject_id)
+    assert len(overview["recent"]) == 3
+    assert all(item["kind"] == "lifecycle" for item in overview["recent"])
+    assert [item["id"] for item in overview["writing"]] == [diary.entry_id]
+    assert overview["writing"][0]["body"] == ""
+    assert overview["writing"][0]["provenance"] == "subject"
+    assert len(overview["writing"][0]["summary"]) <= 300
+    assert "PRIVATE-" not in str(overview)

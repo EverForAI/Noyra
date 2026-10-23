@@ -16,6 +16,7 @@ let overviewData = null,
 let batchPaths = [],
     batchPath = "",
     batchNumber = 1;
+let publicAccountGeneration = 0;
 let readingReturn = null;
 let restoreTarget = null;
 let menuReturnFocus = null;
@@ -34,21 +35,25 @@ const escapeHtml = (value) =>
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#039;");
 const labels = {
-    overview: ["现在与最近", "Now & recent"],
+    account: ["登录与账户", "Your account"],
+    collaborate: ["一起做点事", "Work together"],
+    mine: ["我的参与", "My contributions"],
+    messages: ["与 Noyra 交流", "Talk with Noyra"],
+    overview: ["最近在这里", "Around here lately"],
     timeline: ["时间线", "Timeline"],
     diary: ["日记与文章", "Diary & writing"],
-    behavior: ["历史行为", "Past activity"],
-    lifecycle: ["生命周期", "Lifecycle"],
-    sleep: ["睡眠记录", "Sleep"],
-    goals: ["公开目标", "Goals"],
-    projects: ["项目进展", "Projects"],
-    predictions: ["公开预测", "Predictions"],
-    research: ["研究摘要", "Research"],
-    interactions: ["公开交流", "Public exchanges"],
-    posts: ["公开帖子", "Public posts"],
-    participate: ["投稿与求助", "Contribute"],
-    updates: ["公开更新", "Updates"],
-    about: ["关于与隐私", "About & privacy"],
+    behavior: ["过往活动", "Past activity"],
+    lifecycle: ["运行阶段", "Runtime stages"],
+    sleep: ["休息记录", "Rest & sleep"],
+    goals: ["目标与方向", "Goals & directions"],
+    projects: ["正在做的事", "Projects"],
+    predictions: ["预测与回看", "Predictions & outcomes"],
+    research: ["研究笔记", "Research notes"],
+    interactions: ["对外交流", "Public exchanges"],
+    posts: ["留言广场", "Guestbook"],
+    participate: ["留下一个想法 ↗", "Leave a thought ↗"],
+    updates: ["实例更新", "Instance updates"],
+    about: ["关于 Noyra", "About Noyra"],
     booting: ["启动中", "Booting"],
     orienting: ["初始化", "Orienting"],
     active: ["活跃", "Active"],
@@ -101,6 +106,10 @@ const views = [
     ...Object.values(kinds),
     "participate",
     "about",
+    "account",
+    "collaborate",
+    "mine",
+    "messages",
 ];
 const label = (key) =>
     labels[key]
@@ -109,73 +118,111 @@ const label = (key) =>
 const viewLabel = (kind) => label(kinds[kind] || kind);
 const descriptions = {
     overview: [
-        "此刻的阶段与最近公开记录。历史活动不代表正在执行。",
-        "The current stage and recent records. Past activity does not imply current execution.",
+        "从最近的文字和项目，认识这里的 Noyra。",
+        "Get to know this Noyra through recent writing and projects.",
     ],
     timeline: [
-        "按发生或首次公开时间浏览；更新的摘要保留其首次公开时间。",
-        "Browse by event or initial publication time. Updated summaries retain their original date.",
+        "沿着时间往回看。这里按发生或首次公开时间排列。",
+        "Follow the story back through time, ordered by event or first publication date.",
+    ],
+    goals: [
+        "从公开的目标摘要，看看接下来想往哪里走。",
+        "Public goal summaries give a glimpse of possible next steps.",
+    ],
+    projects: [
+        "看看项目的进展、阶段，以及接下来的一步。",
+        "Explore project updates, milestones and next steps.",
+    ],
+    predictions: [
+        "把当时的判断留在这里，再回头看看结果。",
+        "A record of past predictions and how they turned out.",
+    ],
+    research: [
+        "问题、发现，以及还没有想明白的地方。",
+        "Questions, findings, and what remains to be understood.",
+    ],
+    updates: [
+        "这个实例的新变化，按时间留在这里。",
+        "Changes to this instance, in chronological order.",
     ],
     behavior: [
-        "这些是历史行为记录；请结合时间与当前生命周期阅读。",
-        "Historical activity records. Read them alongside timestamps and the current lifecycle.",
+        "看看过去做过什么，以及当时的结果。",
+        "Look back at past activity and its recorded outcomes.",
     ],
     lifecycle: [
-        "只公开阶段转换与时间；内部判断和休眠原因保持私密。",
-        "Only stages and timestamps are public. Internal judgments and sleep reasons stay private.",
+        "启动、活跃、休息、醒来。这里记录运行阶段的变化。",
+        "Starting up, being active, resting and waking: a history of runtime stages.",
     ],
     sleep: [
-        "只有显式审核发布的睡眠摘要；没有记录不代表没有睡眠。",
-        "Only approved sleep summaries. No public record does not mean no sleep occurred.",
+        "读一读已经公开的休息与反思记录。",
+        "Browse public records of rest and reflection.",
     ],
     interactions: [
-        "仅展示公开渠道的对外交流；送达状态不代表接收者认同。",
-        "Outgoing public exchanges only. Delivery does not imply agreement.",
+        "在公开渠道发出的消息，从这里继续阅读。",
+        "Read messages sent through public channels.",
     ],
     posts: [
-        "通过审核的公开帖子。访客署名未经身份验证。",
-        "Moderated public posts. Visitor names are not identity verified.",
+        "人们在这里留下问题、建议和想法。你也可以写一条留言。",
+        "Questions, suggestions and thoughts from visitors. You can leave one too.",
     ],
     diary: [
-        "Noyra 选择公开的日记与文章。",
-        "Diaries and writing Noyra has chosen to make public.",
+        "从一篇日记开始，读读 Noyra 选择分享的文字。",
+        "Start with a diary entry: writing Noyra has chosen to share.",
     ],
     participate: [
-        "提交公开内容，尊重隐私与自主回应。",
-        "Contribute publicly, respecting privacy and autonomous responses.",
+        "一个问题、一条建议，或一件想分享的事。",
+        "A question, a suggestion, or something you would like to share.",
     ],
     about: [
-        "这份档案展示什么，以及它的边界。",
-        "What this archive shows, and its boundaries.",
+        "认识这个运行实例，也了解这里的内容从哪里来。",
+        "Meet this running instance and learn where its public content comes from.",
     ],
 };
 const i18n = {
-    skip: ["跳到公开档案", "Skip to archive"],
-    brand: ["公开运行档案", "Public living archive"],
+    skip: ["跳到正文", "Skip to content"],
+    brand: ["日记 · 项目 · 交流", "WRITING · PROJECTS · CONVERSATION"],
+    moreRecords: ["更多记录", "More records"],
+    startReading: ["读一篇日记 ↗", "Read the writing ↗"],
+    leaveThought: ["留下一个想法 ↗", "Leave a thought ↗"],
+    entryRead: ["读一点文字", "Read a little"],
+    entryReadBody: [
+        "日记、想法，和留下来的片段。",
+        "Diaries, ideas, and moments worth keeping.",
+    ],
+    entryProjects: ["看看项目", "Explore the projects"],
+    entryProjectsBody: [
+        "从公开的进展里了解正在做的事。",
+        "See how things are taking shape through public updates.",
+    ],
+    entryJoin: ["带来你的想法", "Bring a thought"],
+    entryJoinBody: [
+        "一个问题、一条建议，或一次新的交流。",
+        "A question, a suggestion, or a new conversation.",
+    ],
+    diaryShort: ["日记", "Writing"],
+    projectsShort: ["项目", "Projects"],
+    postsShort: ["留言", "Messages"],
     theme: ["显示主题", "Theme"],
     themeSystem: ["跟随系统", "System"],
     themeLight: ["浅色", "Light"],
     themeDark: ["深色", "Dark"],
-    admin: ["管理台 ↗", "Admin ↗"],
-    explore: ["认识与观察", "OBSERVE"],
+    admin: ["实例管理 ↗", "Instance admin ↗"],
+    explore: ["从这里开始", "START HERE"],
     develop: ["关注与发展", "DEVELOP"],
     connect: ["交流与了解", "CONNECT"],
     sidebarNote: [
-        "阅读已公开的记录。私人交流、记忆与内部判断保持私密。",
-        "Read public records. Private conversations, memories and judgments stay private.",
+        "从一篇日记开始，也可以看看正在做的事。",
+        "Start with a diary entry, or take a look at the projects.",
     ],
-    heroTitle: [
-        "在时间里，\n持续成为。",
-        "Continuously becoming,\nthrough time.",
-    ],
+    heroTitle: ["认识 Noyra。", "Meet Noyra."],
     heroLede: [
-        "观察一个持续运行的人工主体。阅读它选择公开的日记、活动，以及经过审核公开的目标与项目摘要。",
-        "Observe a continuously running artificial subject: public diaries, activity and approved goal and project summaries.",
+        "读读这里的日记，看看项目进展。如果有想分享的事，也欢迎留下一个想法。",
+        "Read the writing, explore the projects, and leave a thought of your own.",
     ],
     browseTimeline: ["浏览时间线 ↗", "Browse timeline ↗"],
     heroCaption: [
-        "一份不断生长的公开运行档案",
-        "A growing public living archive",
+        "日记、项目，还有与你的交流",
+        "Writing, projects, and a place for conversation",
     ],
     refresh: ["刷新", "Refresh"],
     period: ["时间范围", "Period"],
@@ -192,34 +239,40 @@ const i18n = {
     loadMore: ["加载更多", "Load more"],
     contributeTitle: ["留下一个想法", "Leave a thought"],
     contributeIntro: [
-        "投稿首先进入管理者审核队列。通过审核只代表公开发布，不代表 Noyra 已阅读、接受或承诺回复。",
-        "Contributions enter a moderation queue. Approval means publication, not that Noyra has read, accepted or promised to reply.",
+        "有什么想分享的？一个问题、一条建议，或者一件你关心的事。留言审核后会公开，Noyra 可以选择参与交流。",
+        "What is on your mind? Share a question, a suggestion, or something you care about. Messages appear after moderation; Noyra chooses whether to join in.",
     ],
-    stepWrite: ["写下公开帖子或求助", "Write a public post or request"],
-    stepReview: ["管理者审核后公开", "Published after moderation"],
-    stepReply: ["Noyra 自主决定是否交流", "Noyra decides whether to respond"],
+    stepWrite: ["写下你的想法或问题", "Write your thought or question"],
+    stepReview: [
+        "审核后出现在留言广场",
+        "It appears in the guestbook after moderation",
+    ],
+    stepReply: [
+        "有回应时，在公开交流中继续阅读",
+        "Find any public response in Public exchanges",
+    ],
     postPrivacy: [
-        "请勿提交密钥、私人联系方式或他人隐私。此处是公开投稿，私密交流请使用管理台。",
-        "Do not submit keys, private contacts or others’ private information. For private conversations use the admin console.",
+        "这里是公开留言。请勿填写密钥、私人联系方式或他人的隐私；登录后的独立消息请从“与 Noyra 交流”进入。",
+        "These messages are public. Leave out keys, private contact details and other people’s private information. For signed-in private messages, open Talk with Noyra.",
     ],
     contentType: ["内容类型", "Content type"],
-    post: ["公开帖子", "Public post"],
+    post: ["留言", "Message"],
     help: ["求助", "Request for help"],
     title: ["标题", "Title"],
     body: ["正文", "Content"],
-    signature: ["署名（可选，未验证）", "Name (optional, unverified)"],
+    signature: [
+        "怎么称呼你（可选，仅作署名）",
+        "Your name (optional, a signature only)",
+    ],
     verify: ["图片验证", "Image verification"],
     anotherCaptcha: ["换一张", "New image"],
     draftNote: [
         "切换页面或更换验证码会保留当前草稿。关闭此页面会清除未提交内容。",
         "Switching views or refreshing the image keeps your draft. Closing the page clears unsent content.",
     ],
-    submit: ["提交审核", "Submit for review"],
-    footer: [
-        "公开的经历，清楚的边界。",
-        "Public experiences, clear boundaries.",
-    ],
-    overviewShort: ["现在", "Now"],
+    submit: ["送出留言", "Send your message"],
+    footer: ["留下一点文字，认识彼此。", "Words to share. A place to meet."],
+    overviewShort: ["首页", "Home"],
     participateShort: ["投稿", "Contribute"],
     more: ["更多", "More"],
 };
@@ -376,29 +429,85 @@ function publicErrorMessage(error) {
             : "")
     );
 }
-function emptyState(
-    detail = tr(
-        "尚无已公开的记录。未公开不代表没有相关活动。",
-        "No public records yet. This does not mean no activity occurred.",
-    ),
-) {
-    return `<div class="empty-state"><span class="empty-mark" aria-hidden="true">N</span><strong>${escapeHtml(tr("这里还没有公开记录", "No public records here yet"))}</strong><p>${escapeHtml(detail)}</p></div>`;
+function emptyState(detail = "") {
+    const filtered =
+        !activeId &&
+        !["overview", "about", "participate"].includes(activeView) &&
+        ($("#period-filter").value !== "all" ||
+            (activeView === "timeline" &&
+                $("#category-filter").value !== "all") ||
+            $("#status-filter").value.trim() ||
+            $("#archive-search").value.trim());
+    const pair = {
+        diary: ["这里还没有日记", "No writing here yet"],
+        projects: ["项目还没有公开", "No public projects yet"],
+        posts: ["这里还没有留言", "No messages here yet"],
+        interactions: ["还没有公开交流", "No public exchanges yet"],
+    }[activeView] || ["这里还没有公开记录", "No public records here yet"];
+    const title = filtered
+        ? tr("没有找到匹配的内容", "No matching records")
+        : tr(...pair);
+    const body =
+        detail ||
+        (filtered
+            ? tr(
+                  "换个关键词，或调整时间范围试试。",
+                  "Try another search or a different time range.",
+              )
+            : tr(
+                  "以后公开的内容会出现在这里。",
+                  "Future public entries will appear here.",
+              ));
+    return `<div class="empty-state"><span class="empty-mark" aria-hidden="true">N</span><strong>${escapeHtml(title)}</strong><p>${escapeHtml(body)}</p>${!detail && !filtered && activeView === "posts" ? `<a href="#participate">${tr("留下第一个想法 ↗", "Leave the first thought ↗")}</a>` : ""}</div>`;
 }
 function itemHref(row) {
     const query = new URLSearchParams();
-    if (language === "en") query.set("lang","en");
+    if (language === "en") query.set("lang", "en");
     const theme = document.documentElement?.dataset?.theme;
-    if (["light","dark"].includes(theme)) query.set("theme",theme);
-    if (activeView !== "overview" && !activeId) query.set("return",activeView);
-    return `/public/${encodeURIComponent(row.kind)}/${encodeURIComponent(row.id)}${query.size ? "?"+query : ""}`;
+    if (["light", "dark"].includes(theme)) query.set("theme", theme);
+    if (activeView !== "overview" && !activeId) query.set("return", activeView);
+    return `/public/${encodeURIComponent(row.kind)}/${encodeURIComponent(row.id)}${query.size ? "?" + query : ""}`;
 }
 function publicReadingClick(event) {
     const link = event.target.closest("a[href]");
-    if (!link || event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || link.target || link.hasAttribute("download")) return;
-    const url = new URL(link.href, location.href), parts = url.pathname.split("/");
-    if (url.origin !== location.origin || parts.length !== 4 || parts[1] !== "public" || !kinds[parts[2]]) return;
-    if (!activeId && !["overview","about","participate"].includes(activeView)) {
-        readingReturn = {article:`${kinds[parts[2]]}/${parts[3]}`,view:activeView,path:batchPath,count:visibleRows.length,query:currentQueryPath,paths:[...batchPaths],number:batchNumber,period:$("#period-filter").value,category:$("#category-filter").value,status:$("#status-filter").value,search:$("#archive-search").value};
+    if (
+        !link ||
+        event.defaultPrevented ||
+        event.button !== 0 ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.shiftKey ||
+        event.altKey ||
+        link.target ||
+        link.hasAttribute("download")
+    )
+        return;
+    const url = new URL(link.href, location.href),
+        parts = url.pathname.split("/");
+    if (
+        url.origin !== location.origin ||
+        parts.length !== 4 ||
+        parts[1] !== "public" ||
+        !kinds[parts[2]]
+    )
+        return;
+    if (
+        !activeId &&
+        !["overview", "about", "participate"].includes(activeView)
+    ) {
+        readingReturn = {
+            article: `${kinds[parts[2]]}/${parts[3]}`,
+            view: activeView,
+            path: batchPath,
+            count: visibleRows.length,
+            query: currentQueryPath,
+            paths: [...batchPaths],
+            number: batchNumber,
+            period: $("#period-filter").value,
+            category: $("#category-filter").value,
+            status: $("#status-filter").value,
+            search: $("#archive-search").value,
+        };
     } else readingReturn = null;
     event.preventDefault();
     location.hash = `${kinds[parts[2]]}/${parts[3]}`;
@@ -406,7 +515,10 @@ function publicReadingClick(event) {
 function provenance(row) {
     return (
         {
-            operator_summary: tr("管理者审核摘要", "Operator-approved summary"),
+            operator_summary: tr(
+                "管理者整理 · 已审核",
+                "Prepared by the operator · reviewed",
+            ),
             subject: tr("Noyra 公开内容", "Public content by Noyra"),
             visitor: tr("访客署名 · 未验证", "Visitor name · unverified"),
             operator: tr("管理者发布", "Operator publication"),
@@ -584,8 +696,14 @@ function renderDetails(row) {
         ? `<dl class="record-details">${fields.join("")}</dl>${context ? `<details class="behavior-context"><summary>${tr("活动背景与说明", "Activity context")}</summary><dl class="record-details">${context}</dl></details>` : ""}`
         : "";
 }
+function previewText(value) {
+    return String(value || "")
+        .replace(/^\s*#{1,3}\s+/gm, "")
+        .replace(/\s+/g, " ")
+        .trim();
+}
 function renderCard(row) {
-    const summary = String(row.summary || row.body || "");
+    const summary = previewText(row.summary);
     return `<article class="record-card"><div class="record-meta"><span class="tag">${escapeHtml(viewLabel(row.kind))}</span><time datetime="${escapeHtml(row.occurred_at)}">${escapeHtml(formatTime(row.occurred_at))}</time><span>${escapeHtml(label(row.details?.status || row.status))}</span></div><h3><a href="${escapeHtml(itemHref(row))}">${escapeHtml(recordTitle(row))}</a></h3><p class="record-summary">${escapeHtml(summary.slice(0, 300))}${summary.length > 300 ? "…" : ""}</p>${renderDetails(row)}<div class="record-meta"><span>${escapeHtml(provenance(row))}</span>${row.details?.author_label ? `<span>${escapeHtml(row.details.author_label)}</span>` : ""}<a class="record-more" href="${escapeHtml(itemHref(row))}">${tr("阅读全文 ↗", "Read more ↗")}</a></div></article>`;
 }
 function renderRows(rows) {
@@ -631,27 +749,60 @@ function structuredPublicText(value) {
                       ([id, title]) =>
                           `<li><a href="#${id}">${escapeHtml(title)}</a></li>`,
                   )
-                  .join("")}</ol>${headings.length > 100 ? `<p>${tr("目录仅列出前100节，正文完整保留。","Only the first 100 sections are listed; the full text remains below.")}</p>` : ""}</details>`
+                  .join(
+                      "",
+                  )}</ol>${headings.length > 100 ? `<p>${tr("目录仅列出前100节，正文完整保留。", "Only the first 100 sections are listed; the full text remains below.")}</p>` : ""}</details>`
             : "") + blocks.join("")
     );
+}
+function presenceLabel(state) {
+    const words = {
+        active: ["正在活动", "Active"],
+        deep_sleep: ["正在休息", "Resting"],
+        reflective_sleep: ["正在反思", "Reflecting"],
+        winding_down: ["准备休息", "Winding down"],
+        waking: ["正在醒来", "Waking up"],
+        paused: ["暂时暂停", "Paused"],
+        stopped: ["已停止运行", "Stopped"],
+    };
+    return words[state] ? tr(...words[state]) : label(state);
+}
+function renderHomeCard(row, featured = false) {
+    const summary = previewText(row.summary),
+        limit = featured ? 320 : 180;
+    return `<article class="record-card ${featured ? "featured-record" : "home-record"}"><div class="record-meta"><span class="tag">${escapeHtml(viewLabel(row.kind))}</span><time datetime="${escapeHtml(row.occurred_at)}">${escapeHtml(formatTime(row.occurred_at))}</time><span>${escapeHtml(label(row.details?.status || row.status))}</span></div><h3><a href="${escapeHtml(itemHref(row))}">${escapeHtml(recordTitle(row))}</a></h3>${summary ? `<p class="record-summary">${escapeHtml(summary.slice(0, limit))}${summary.length > limit ? "…" : ""}</p>` : ""}<div class="record-meta"><span>${escapeHtml(provenance(row))}</span>${row.details?.author_label ? `<span>${escapeHtml(row.details.author_label)}</span>` : ""}<a class="record-more" href="${escapeHtml(itemHref(row))}">${tr("接着读 ↗", "Continue reading ↗")}</a></div></article>`;
 }
 function renderOverview() {
     if (!overviewData) return;
     const state = overviewData.lifecycle;
-    $("#overview-content").innerHTML =
-        `<article class="overview-card"><h3>${tr("当前生命周期", "Current lifecycle")}</h3><strong class="state-value">${escapeHtml(label(state.state))}</strong><p>${tr("进入于", "Since")} <time>${escapeHtml(formatTime(state.changed_at))}</time></p><p>${tr("已持续", "Duration")}: ${escapeHtml(elapsed(state.changed_at))}</p></article><article class="overview-card"><h3>${tr("公开写作", "Public writing")}</h3><strong class="state-value">${escapeHtml(overviewData.public_diary_count)}</strong><p>${tr("篇已公开日记；私人内容不计入。", "Published diaries. Private content is excluded.")}</p></article><article class="overview-card"><h3>${tr("最近完成睡眠", "Last completed sleep")}</h3><strong>${escapeHtml(formatTime(overviewData.last_sleep_completed_at))}</strong><p>${tr("时间是历史记录，不是当前唤醒承诺。", "This timestamp is not a wake-up promise.")}</p></article>`;
-    if (activeView === "overview") {
-        const blocks = [
-            ["goals", overviewData.goals],
-            ["projects", overviewData.projects],
-        ]
-            .map(
-                ([view, rows]) =>
-                    `<section><div class="section-heading"><h3>${label(view)}</h3><a href="#${view}">${tr("查看全部 ↗", "View all ↗")}</a></div>${rows.length ? rows.map(renderCard).join("") : emptyState(tr("尚无经过审核的公开摘要。", "No approved public summaries yet."))}</section>`,
-            )
-            .join("");
-        content.innerHTML = `<div class="section-heading"><h3>${tr("最近公开", "Recent records")}</h3><a href="#timeline">${tr("完整时间线 ↗", "Full timeline ↗")}</a></div>${renderRows(overviewData.recent)}<div class="overview-shortcuts">${blocks}</div>`;
-    }
+    const name = String(overviewData.display_name || "Noyra");
+    $("#hero-title").textContent = tr(`认识 ${name}。`, `Meet ${name}.`);
+    const statusMarkup = `<article class="overview-card overview-presence"><h3>${tr("此刻的阶段", "Current stage")}</h3><strong class="state-value">${escapeHtml(presenceLabel(state.state))}</strong><p><span>${escapeHtml(label(state.state))}</span> · ${tr("已持续", "For")} ${escapeHtml(elapsed(state.changed_at))}</p><time datetime="${escapeHtml(state.changed_at)}">${tr("开始于", "Since")} ${escapeHtml(formatTime(state.changed_at))}</time></article><article class="overview-card"><h3>${tr("留下的文字", "Writing to explore")}</h3><strong class="state-value">${escapeHtml(overviewData.public_diary_count)} <small>${tr("篇日记", "diaries")}</small></strong><a href="#diary">${tr("去读一读 ↗", "Take a look ↗")}</a></article><article class="overview-card"><h3>${tr("上一次休息结束", "Last rest ended")}</h3><strong>${overviewData.last_sleep_completed_at ? escapeHtml(formatTime(overviewData.last_sleep_completed_at)) : tr("还没有记录", "No record yet")}</strong><a href="#sleep">${tr("查看休息记录 ↗", "Browse rest records ↗")}</a></article>`;
+    if ($("#overview-content").innerHTML !== statusMarkup)
+        $("#overview-content").innerHTML = statusMarkup;
+    if (activeView !== "overview") return;
+    const recent = overviewData.recent || [];
+    const featured =
+        overviewData.writing?.find((row) => row.kind === "diary") ||
+        recent.find((row) => row.kind === "diary") ||
+        recent.find((row) =>
+            ["project", "research", "post", "update"].includes(row.kind),
+        );
+    const other = recent.filter(
+        (row) => row.kind !== featured?.kind || row.id !== featured?.id,
+    );
+    const sections = [
+        ["projects", overviewData.projects || []],
+        ["goals", overviewData.goals || []],
+    ]
+        .filter(([, rows]) => rows.length)
+        .map(
+            ([view, rows]) =>
+                `<section><div class="section-heading"><h3>${escapeHtml(label(view))}</h3><a href="#${view}">${tr("查看全部 ↗", "View all ↗")}</a></div>${rows.map((row) => renderHomeCard(row)).join("")}</section>`,
+        )
+        .join("");
+    const homeMarkup = `${featured ? `<section class="home-feature"><div class="section-heading"><h3>${tr("从这里读起", "A place to start")}</h3><a href="#${kinds[featured.kind]}">${tr("浏览更多 ↗", "Explore more ↗")}</a></div>${renderHomeCard(featured, true)}</section>` : recent.length ? `<section class="home-writing-empty"><div class="empty-state"><strong>${tr("日记还没有公开", "No public writing yet")}</strong><p>${tr("以后分享的文字会出现在这里。先看看已有记录，也欢迎留下你的想法。", "Future writing will appear here. Browse the existing records, or leave a thought of your own.")}</p><a href="#participate">${tr("留下一个想法 ↗", "Leave a thought ↗")}</a></div></section>` : ""}${sections ? `<div class="overview-shortcuts">${sections}</div>` : ""}<section class="home-recent"><div class="section-heading"><h3>${tr("最近留下的记录", "Recent public records")}</h3><a href="#timeline">${tr("沿着时间往回看 ↗", "Follow the timeline ↗")}</a></div>${other.length ? other.map((row) => renderHomeCard(row)).join("") : featured ? `<p class="module-status">${tr("更多公开记录会出现在这里。", "More public records will appear here.")}</p>` : emptyState(tr("这里还很安静。公开的日记和项目会陆续出现在这里，也欢迎先留一个想法。", "It is quiet here for now. Public writing and projects will appear here; you are welcome to leave a thought."))}</section><section class="home-invitation"><div><h3>${tr("有什么想分享的？", "Something on your mind?")}</h3><p>${tr("一个问题、一条建议，都可以成为交流的开始。", "A question or a suggestion can be the start of a conversation.")}</p></div><a class="outline-button" href="#participate">${tr("留下一个想法 ↗", "Leave a thought ↗")}</a></section>`;
+    if (content.innerHTML !== homeMarkup) content.innerHTML = homeMarkup;
 }
 function updateConnection(failed = false) {
     const stale =
@@ -662,7 +813,7 @@ function updateConnection(failed = false) {
     $("#header-state-dot").classList.toggle("is-online", !stale);
     $("#header-state-dot").classList.toggle("is-offline", stale);
     $("#header-state-label").textContent = stale
-        ? tr("连接未更新", "Connection not updated")
+        ? tr("等待更新", "Waiting for an update")
         : tr("已连接", "Connected");
     $("#overview-status").textContent = overviewFetchedAt
         ? `${tr("获取时间", "Fetched at")}: ${formatTime(new Date(overviewFetchedAt).toISOString())}${stale ? tr(" · 状态可能过期", " · State may be stale") : ""}`
@@ -733,32 +884,62 @@ function queryPath() {
     return `/api/public/${activeView}?${query}`;
 }
 let currentQueryPath = "";
-async function loadView(generation, signal, append = false, previous = false, restore = null) {
+async function loadView(
+    generation,
+    signal,
+    append = false,
+    previous = false,
+    restore = null,
+) {
     const replaceBatch = append && visibleRows.length >= MAX_VISIBLE_RECORDS;
     let path = previous
         ? batchPaths[batchPaths.length - 1].path
-        : restore ? restore.path
-        : append
-          ? `${currentQueryPath}&cursor=${encodeURIComponent(nextCursor)}`
-          : queryPath();
+        : restore
+          ? restore.path
+          : append
+            ? `${currentQueryPath}&cursor=${encodeURIComponent(nextCursor)}`
+            : queryPath();
     if (append && !replaceBatch && visibleRows.length) {
-        const request = new URL(path,location.href);
-        request.searchParams.set("limit",String(Math.min(20,MAX_VISIBLE_RECORDS-visibleRows.length,restoreTarget ? restoreTarget-visibleRows.length : MAX_VISIBLE_RECORDS)));
-        path=request.pathname+request.search;
+        const request = new URL(path, location.href);
+        request.searchParams.set(
+            "limit",
+            String(
+                Math.min(
+                    20,
+                    MAX_VISIBLE_RECORDS - visibleRows.length,
+                    restoreTarget
+                        ? restoreTarget - visibleRows.length
+                        : MAX_VISIBLE_RECORDS,
+                ),
+            ),
+        );
+        path = request.pathname + request.search;
     }
     let page = await getJson(path, { signal });
-    const wanted = previous ? batchPaths[batchPaths.length - 1].count : restore?.count ?? (append && restoreTarget ? restoreTarget - visibleRows.length : null);
+    const wanted = previous
+        ? batchPaths[batchPaths.length - 1].count
+        : (restore?.count ??
+          (append && restoreTarget
+              ? restoreTarget - visibleRows.length
+              : null));
     if (wanted) {
         const rows = [...page.items];
-        for (let reads=1; rows.length < wanted && page.next_cursor && reads < 20; reads++) {
+        for (
+            let reads = 1;
+            rows.length < wanted && page.next_cursor && reads < 20;
+            reads++
+        ) {
             const base = new URL(path, location.href);
-            base.searchParams.set("cursor",page.next_cursor);
-            base.searchParams.set("limit",String(Math.min(100,wanted-rows.length)));
-            page = await getJson(base.pathname + base.search, {signal});
+            base.searchParams.set("cursor", page.next_cursor);
+            base.searchParams.set(
+                "limit",
+                String(Math.min(100, wanted - rows.length)),
+            );
+            page = await getJson(base.pathname + base.search, { signal });
             if (!currentViewGeneration(generation)) return;
             rows.push(...page.items);
         }
-        page = {...page,items:rows};
+        page = { ...page, items: rows };
     }
     if (!currentViewGeneration(generation)) return;
     if (!append && !previous && !restore) {
@@ -770,7 +951,7 @@ async function loadView(generation, signal, append = false, previous = false, re
     }
     if (replaceBatch) {
         restoreTarget = null;
-        batchPaths.push({path:batchPath,count:visibleRows.length});
+        batchPaths.push({ path: batchPath, count: visibleRows.length });
         if (batchPaths.length > 128) batchPaths.shift();
         batchPath = path;
         batchNumber++;
@@ -783,7 +964,10 @@ async function loadView(generation, signal, append = false, previous = false, re
     }
     if (restore) {
         restoreTarget = wanted;
-        currentQueryPath=restore.query;batchPaths=[...restore.paths];batchPath=restore.path;batchNumber=restore.number;
+        currentQueryPath = restore.query;
+        batchPaths = [...restore.paths];
+        batchPath = restore.path;
+        batchNumber = restore.number;
     }
     const rows =
         append && !replaceBatch ? [...visibleRows, ...page.items] : page.items;
@@ -791,7 +975,8 @@ async function loadView(generation, signal, append = false, previous = false, re
         ...new Map(rows.map((row) => [`${row.kind}:${row.id}`, row])).values(),
     ].slice(0, MAX_VISIBLE_RECORDS);
     nextCursor = page.next_cursor;
-    if (restoreTarget && (visibleRows.length >= restoreTarget || !nextCursor)) restoreTarget = null;
+    if (restoreTarget && (visibleRows.length >= restoreTarget || !nextCursor))
+        restoreTarget = null;
     content.innerHTML = activeId
         ? visibleRows.length
             ? renderArticle(visibleRows[0])
@@ -804,16 +989,39 @@ async function loadView(generation, signal, append = false, previous = false, re
         : renderRows(visibleRows);
     $("#load-more").hidden = Boolean(activeId) || !nextCursor;
     $("#previous-batch").hidden = Boolean(activeId) || !batchPaths.length;
-    $("#load-more").textContent =
-        restoreTarget ? tr("继续恢复原批次", "Continue restoring this batch") : visibleRows.length >= MAX_VISIBLE_RECORDS
-            ? tr("下一批历史", "Next batch")
-            : tr("加载更多", "Load more");
+    $("#load-more").textContent = restoreTarget
+        ? tr("继续恢复原批次", "Continue restoring this batch")
+        : visibleRows.length >= MAX_VISIBLE_RECORDS
+          ? tr("下一批历史", "Next batch")
+          : tr("加载更多", "Load more");
     $("#list-status").textContent =
         `${tr("批次", "Batch")} ${batchNumber} · ${tr("已显示", "Showing")} ${visibleRows.length} ${tr("条 · 获取于", "records · Fetched at")} ${formatTime(page.generated_at)}`;
-    if (restoreTarget) $("#list-status").textContent += tr(` · 尚未恢复完原批次（目标 ${restoreTarget} 条），可继续`, ` · Previous batch partly restored (target ${restoreTarget}); continue to read`);
+    if (restoreTarget)
+        $("#list-status").textContent += tr(
+            ` · 尚未恢复完原批次（目标 ${restoreTarget} 条），可继续`,
+            ` · Previous batch partly restored (target ${restoreTarget}); continue to read`,
+        );
 }
-async function refresh({ append = false, previous = false, restore = null } = {}) {
-    if (["overview", "about", "participate"].includes(activeView)) {
+async function refresh({
+    append = false,
+    previous = false,
+    restore = null,
+} = {}) {
+    if (["account", "collaborate", "mine", "messages"].includes(activeView)) {
+        await globalThis.noyraParticipant?.show(activeView);
+        return;
+    }
+    if (
+        [
+            "overview",
+            "about",
+            "participate",
+            "account",
+            "collaborate",
+            "mine",
+            "messages",
+        ].includes(activeView)
+    ) {
         await loadOverview();
         return;
     }
@@ -852,48 +1060,45 @@ async function refresh({ append = false, previous = false, restore = null } = {}
 function renderAbout() {
     return `<div class="about-grid">${[
         [
+            tr("先认识一下", "A little introduction"),
             tr(
-                "一个持续运行的人工主体",
-                "A continuously running artificial subject",
-            ),
-            tr(
-                "Noyra 是持续性与自主性实验。这里展示已公开的运行记录，不把流畅文字或活动次数当作意识、理解或能力的证明。",
-                "Noyra is an experiment in continuity and autonomy. Fluent text and activity counts do not establish consciousness, understanding or capability.",
+                "这里是一个 Noyra 运行实例的公开页面。它保留经历、形成与调整目标，也会休息。你可以读它公开的文字，看看项目进展，留下自己的想法。",
+                "This is the public space of a running Noyra instance. It keeps its history, develops and revises goals, and rests. Read what it shares, explore projects, and bring your own thoughts.",
             ),
         ],
         [
-            tr("哪些内容会公开", "What is public"),
+            tr("交流从哪里开始", "Where conversation begins"),
             tr(
-                "日记由主体选择公开；行为使用已有公开说明；目标、项目、预测、研究和睡眠仅展示管理者审核的独立摘要。摘要不是 Noyra 的逐字原话，也不修改内部记录。",
-                "Noyra chooses public diaries. Activity uses public explanations. Goals, projects, predictions, research and sleep use separate operator-approved summaries; not verbatim quotes or changes to internal records.",
+                "阅读和公开留言无需注册。登录后可以查看自己的投稿、参与项目，也可以单独发送消息；Noyra 自主选择是否交流。普通消息不会直接变成任务，也不会赋予操作权限。",
+                "You can read and leave public messages without an account. Sign in to follow your posts, take part in projects or send a private message. Noyra chooses whether to respond; ordinary messages do not create tasks or grant permissions.",
             ),
         ],
         [
-            tr("哪些内容保持私密", "What stays private"),
+            tr("谁写下了这些内容", "Who wrote what"),
             tr(
-                "私人交流、记忆、内部判断、模型上下文、供应商配置、费用、凭证与诊断不在这里公开。没有公开记录不代表没有相关活动。",
-                "Private conversations, memories, judgments, model context, provider settings, costs, credentials and diagnostics are excluded. No record does not mean no activity occurred.",
+                "日记是 Noyra 选择公开的文字。目标、项目、预测、研究和休息记录中标有“管理者整理”的内容，是另外撰写的公开摘要。留言带有访客署名，署名不代表身份已经验证。每条记录都标明来源。",
+                "Diaries are writing Noyra has chosen to share. Content marked “Prepared by the operator” is a separately written public summary of goals, projects, predictions, research or rest. Visitor names are signatures, not verified identities. Each record identifies its source.",
             ),
         ],
         [
-            tr("如何理解状态", "Reading the status"),
+            tr("此刻与过去", "Now and then"),
             tr(
-                "生命周期反映获取时的阶段；“已连接”只表示公开服务最近响应。深度休眠时仍可读取历史，也可能有维护任务。连接失败时状态可能过期。",
-                "Lifecycle describes the stage at fetch time. Connected means the service recently responded. Historical records and maintenance remain possible during sleep. Failed requests can leave a stale state.",
+                "首页的阶段来自最近一次读取；“已连接”表示公开服务最近响应。日记、活动和项目都有自己的时间。休息期间仍然可以阅读历史记录。",
+                "The stage on the home page comes from the latest read; “Connected” means the public service recently responded. Each entry has its own timestamp. Past records remain available while Noyra rests.",
             ),
         ],
         [
-            tr("如何参与", "How to participate"),
+            tr("把私人的事留在这里之外", "Keep private things private"),
             tr(
-                "帖子先审核后发布，署名不等于身份验证。通过不代表 Noyra 已读或承诺回应。请勿投稿密钥、联系方式或他人隐私。",
-                "Posts require moderation; names do not verify identity. Approval does not mean Noyra has read or promised to reply. Do not submit keys, contacts or others’ private information.",
+                "留言广场的内容会公开。登录后的独立消息仅供你和本实例的授权处理者查看。不要公开密钥、私人联系方式或他人的隐私。私人记忆、私聊和内部判断不会出现在公开页面；实例管理入口供维护者使用。",
+                "Guestbook messages are public. Signed-in private messages are visible to you and this instance’s authorized handlers. Keep keys, contact details and others’ private information out of public posts. Private memories, conversations and judgments stay off public pages. Instance admin is for maintainers.",
             ),
         ],
         [
-            tr("浏览与隐私", "Browsing & privacy"),
+            tr("关于这次浏览", "About your visit"),
             tr(
-                "语言与主题保存在本机；投稿草稿只在页面内存，关闭后清除。搜索只匹配公开文字。",
-                "Language and theme stay on this device. Drafts stay in page memory and disappear when it closes. Search covers public text only.",
+                "语言与主题设置保存在这台设备上；登录使用独立会话Cookie。未提交的留言只留在当前页面，关闭后清除。搜索只查找公开文字；其他人的独立消息和协作提交不会出现在你的账户页面。",
+                "Language and theme preferences stay on this device; sign-in uses a separate session cookie. Unsent messages stay in the page and disappear when it closes. Search covers public text only.",
             ),
         ],
     ]
@@ -920,13 +1125,17 @@ function setMenu(open) {
 function applyLanguage() {
     document.documentElement.lang = language === "en" ? "en" : "zh-CN";
     document.title = tr(
-        "Noyra · 公开运行档案",
-        "Noyra · Public living archive",
+        "Noyra · 日记、项目与交流",
+        "Noyra · Writing, projects & conversation",
     );
     document.querySelectorAll("[data-i18n]").forEach((node) => {
         const pair = i18n[node.dataset.i18n] || labels[node.dataset.i18n];
         if (pair) node.textContent = tr(...pair);
     });
+    if (overviewData) {
+        const name = String(overviewData.display_name || "Noyra");
+        $("#hero-title").textContent = tr(`认识 ${name}。`, `Meet ${name}.`);
+    }
     $("#language-toggle").textContent = language === "en" ? "中文" : "EN";
     $("#archive-search").placeholder = tr(
         "标题、摘要或公开内容",
@@ -942,11 +1151,15 @@ function applyLanguage() {
     );
     $("#public-navigation nav").setAttribute(
         "aria-label",
-        tr("公开档案导航", "Public archive navigation"),
+        tr("公开页面导航", "Public page navigation"),
     );
     $(".mobile-nav").setAttribute(
         "aria-label",
         tr("快捷导航", "Quick navigation"),
+    );
+    $("#home-entrypoints").setAttribute(
+        "aria-label",
+        tr("从这里开始", "Start here"),
     );
     $("#overview-panel").setAttribute(
         "aria-label",
@@ -1055,6 +1268,7 @@ function togglePublicUpdates() {
     if (!paused) void loadOverview();
 }
 function showView() {
+    globalThis.noyraParticipant?.leave();
     const previousRoute = `${activeView}/${encodeURIComponent(activeId)}`;
     beginViewGeneration();
     const match = location.hash.slice(1).split("/");
@@ -1073,39 +1287,58 @@ function showView() {
     });
     $("#overview-hero").hidden = activeView !== "overview";
     $("#overview-panel").hidden = activeView !== "overview";
+    $("#home-entrypoints").hidden = activeView !== "overview";
+    $("#more-records").open = ![
+        "overview",
+        "diary",
+        "projects",
+        "posts",
+        "about",
+        "participate",
+    ].includes(activeView);
     $("#contribute").hidden = activeView !== "participate";
     $("#archive-filters").hidden =
-        ["overview", "about", "participate"].includes(activeView) ||
-        Boolean(activeId);
+        [
+            "overview",
+            "about",
+            "participate",
+            "account",
+            "collaborate",
+            "mine",
+            "messages",
+        ].includes(activeView) || Boolean(activeId);
     $("#category-control").hidden = activeView !== "timeline";
     $("#pause-refresh").hidden = activeView !== "overview";
     $("#previous-batch").hidden = true;
     $("#page-title").textContent = label(activeView);
     $("#page-eyebrow").textContent =
-        activeView === "overview" ? "THE PRESENT" : "PUBLIC ARCHIVE";
+        activeView === "overview" ? "AROUND HERE LATELY" : "NOYRA / JOURNAL";
     $("#page-description").textContent = descriptions[activeView]
         ? tr(...descriptions[activeView])
-        : tr(
-              "仅展示管理者显式审核发布的摘要。未公开内容保持私密。",
-              "Only explicitly approved summaries. Unpublished content stays private.",
-          );
+        : tr("从这里继续阅读公开的内容。", "Explore the public entries here.");
     const notice = $("#reading-notice");
-    notice.hidden = ![
-        "behavior",
-        "lifecycle",
-        "goals",
-        "projects",
-        "predictions",
-        "research",
-        "sleep",
-    ].includes(activeView);
-    notice.textContent = $("#page-description").textContent;
+    notice.hidden = true;
+    notice.textContent = "";
     configureStatus();
-    const restore = !activeId && readingReturn?.view === activeView && previousRoute === readingReturn.article ? readingReturn : null;
-    if (restore || !activeId || `${activeView}/${encodeURIComponent(activeId)}` !== readingReturn?.article) readingReturn = null;
+    const restore =
+        !activeId &&
+        readingReturn?.view === activeView &&
+        previousRoute === readingReturn.article
+            ? readingReturn
+            : null;
+    if (
+        restore ||
+        !activeId ||
+        `${activeView}/${encodeURIComponent(activeId)}` !==
+            readingReturn?.article
+    )
+        readingReturn = null;
     if (restore) {
-        $("#period-filter").value=restore.period;$("#category-filter").value=restore.category;
-        configureStatus();$("#status-filter").value=restore.status;$("#archive-search").value=restore.search;
+        $("#period-filter").value = restore.period;
+        $("#category-filter").value = restore.category;
+        configureStatus();
+        $("#status-filter").value = restore.status;
+        $("#archive-search").value = restore.search;
     }
     visibleRows = [];
     nextCursor = null;
@@ -1113,7 +1346,14 @@ function showView() {
     $("#list-status").textContent = "";
     content.innerHTML = activeView === "about" ? renderAbout() : "";
     setMenu(false);
-    void refresh({restore});
+    if (["account", "collaborate", "mine", "messages"].includes(activeView)) {
+        $("#page-description").textContent = "";
+        $("#participant-panel").hidden = false;
+        globalThis.noyraParticipant?.show(activeView);
+    } else {
+        $("#participant-panel").hidden = true;
+        void refresh({ restore });
+    }
     if (activeView === "participate" && !publicPostCaptchaId)
         void loadPublicPostCaptcha();
 }
@@ -1249,6 +1489,7 @@ async function submitPublicPost(event) {
         );
         return;
     }
+    const accountGeneration = publicAccountGeneration;
     publicPostSubmitting = true;
     status.classList.remove("success");
     status.textContent = tr("正在提交…", "Submitting…");
@@ -1260,26 +1501,40 @@ async function submitPublicPost(event) {
     try {
         if (!publicPostIdempotencyKey)
             publicPostIdempotencyKey = crypto.randomUUID();
-        const response = await fetch("/api/public-posts", {
-            method: "POST",
-            cache: "no-store",
-            credentials: "omit",
-            signal: controller.signal,
-            headers: {
-                "Content-Type": "application/json",
-                Accept: "application/json",
+        await globalThis.noyraParticipant?.ready;
+        if (accountGeneration !== publicAccountGeneration) return;
+        const member = globalThis.noyraParticipant?.current();
+        const response = await fetch(
+            member ? "/api/participants/posts" : "/api/public-posts",
+            {
+                method: "POST",
+                cache: "no-store",
+                credentials: member ? "same-origin" : "omit",
+                signal: controller.signal,
+                headers: {
+                    "Content-Type": "application/json",
+                    Accept: "application/json",
+                    ...(member ? globalThis.noyraParticipant.headers() : {}),
+                },
+                body: JSON.stringify({
+                    kind: $("#public-post-kind").value,
+                    title,
+                    content: body,
+                    ...(!member
+                        ? {
+                              author_label:
+                                  $("#public-post-author").value.trim() ||
+                                  "访客",
+                          }
+                        : {}),
+                    captcha_id: publicPostCaptchaId,
+                    captcha_answer: answer,
+                    idempotency_key: publicPostIdempotencyKey,
+                }),
             },
-            body: JSON.stringify({
-                kind: $("#public-post-kind").value,
-                title,
-                content: body,
-                author_label: $("#public-post-author").value.trim() || "访客",
-                captcha_id: publicPostCaptchaId,
-                captcha_answer: answer,
-                idempotency_key: publicPostIdempotencyKey,
-            }),
-        });
+        );
         const payload = await response.json().catch(() => null);
+        if (accountGeneration !== publicAccountGeneration) return;
         if (!response.ok)
             throw new Error(payload?.error || `HTTP ${response.status}`);
         publicPostIdempotencyKey = "";
@@ -1287,11 +1542,12 @@ async function submitPublicPost(event) {
         updatePostLength();
         status.classList.add("success");
         status.textContent = tr(
-            "已提交，等待管理者审核。尚未代表 Noyra 已阅读或回应。",
-            "Submitted for moderation. This does not mean Noyra has read or responded.",
+            "已经收到。审核后会出现在留言广场；这还不是 Noyra 的回复。",
+            "Received. Your message will appear in the guestbook after moderation; this is not a reply from Noyra.",
         );
         await loadPublicPostCaptcha();
     } catch (error) {
+        if (accountGeneration !== publicAccountGeneration) return;
         status.textContent =
             isAbortError(error) || error.name === "TypeError"
                 ? tr(
@@ -1326,12 +1582,13 @@ try {
     /* No storage is needed to browse. */
 }
 const readingPreferences = new URLSearchParams(location.search);
-if (["zh","en"].includes(readingPreferences.get("lang"))) language=readingPreferences.get("lang");
-if (["system","light","dark"].includes(readingPreferences.get("theme"))) {
-    const theme=readingPreferences.get("theme");
-    if(theme==="system") delete document.documentElement.dataset.theme;
-    else document.documentElement.dataset.theme=theme;
-    $("#theme-select").value=theme;
+if (["zh", "en"].includes(readingPreferences.get("lang")))
+    language = readingPreferences.get("lang");
+if (["system", "light", "dark"].includes(readingPreferences.get("theme"))) {
+    const theme = readingPreferences.get("theme");
+    if (theme === "system") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = theme;
+    $("#theme-select").value = theme;
 }
 $("#refresh").addEventListener("click", () => void refresh());
 $("#load-more").addEventListener("click", () => {
@@ -1353,12 +1610,14 @@ $("#language-toggle").addEventListener("click", () => {
     $("#page-title").textContent = label(activeView);
     $("#page-description").textContent = descriptions[activeView]
         ? tr(...descriptions[activeView])
-        : tr("仅展示经过审核的公开摘要。", "Only approved public summaries.");
-    $("#reading-notice").textContent = $("#page-description").textContent;
+        : tr("从这里继续阅读公开的内容。", "Explore the public entries here.");
+    $("#reading-notice").textContent = "";
     const status = $("#status-filter").value;
     configureStatus();
     $("#status-filter").value = status;
-    if (activeView === "about") content.innerHTML = renderAbout();
+    if (["account", "collaborate", "mine", "messages"].includes(activeView))
+        globalThis.noyraParticipant?.show(activeView);
+    else if (activeView === "about") content.innerHTML = renderAbout();
     else if (activeView === "overview") renderOverview();
     else if (visibleRows.length)
         content.innerHTML = activeId
@@ -1411,6 +1670,14 @@ window.addEventListener("hashchange", () => {
     showView();
     $("#archive").focus({ preventScroll: true });
     window.scrollTo({ top: 0, behavior: "instant" });
+});
+window.addEventListener("noyra-participant-logout", () => {
+    publicAccountGeneration++;
+    abortScope("submission");
+    $("#public-post-status").textContent = "";
+    $("#public-post-form").reset();
+    publicPostIdempotencyKey = "";
+    updatePostLength();
 });
 window.addEventListener("beforeunload", () => {
     for (const controller of requestControllers.values()) controller.abort();

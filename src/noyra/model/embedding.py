@@ -104,6 +104,7 @@ class EmbeddingSettings(BaseModel):
     model: str = Field(min_length=1, max_length=256)
     api_key: SecretStr
     dimensions: int | None = Field(default=None, ge=1, le=16_384)
+    observed_dimensions: int | None = Field(default=None, ge=1, le=16_384)
     timeout_seconds: float = Field(default=30, gt=0, le=300)
     resource_id: str | None = Field(default=None, min_length=1, max_length=256)
     daily_call_limit: int = Field(default=1_000, ge=0)
@@ -136,8 +137,56 @@ class EmbeddingSettings(BaseModel):
     def stable_resource_id(self) -> str:
         return (
             self.resource_id
-            or "env:" + content_hash({"base_url": self.base_url, "model": self.model})[:32]
+            or "env:"
+            + content_hash(
+                {"base_url": self.base_url, "model": self.model, "dimensions": self.dimensions}
+            )[:32]
         )
+
+    @property
+    def configuration_fingerprint(self) -> str:
+        return content_hash(
+            {
+                "base_url": self.base_url,
+                "model": self.model,
+                "dimensions": self.dimensions,
+                "timeout_seconds": self.timeout_seconds,
+                "daily_call_limit": self.daily_call_limit,
+                "daily_token_limit": self.daily_token_limit,
+                "daily_cost_limit_microusd": self.daily_cost_limit_microusd,
+                "input_cost_microusd_per_million": self.input_cost_microusd_per_million,
+                "circuit_failure_threshold": self.circuit_failure_threshold,
+                "circuit_cooldown_seconds": self.circuit_cooldown_seconds,
+            }
+        )
+
+    def space_fingerprint_for(self, observed_dimensions: int | None = None) -> str:
+        """Return the vector-space identity without including credentials."""
+        parsed = urlsplit(self.base_url)
+        hostname = parsed.hostname
+        if hostname is None:
+            raise ValueError("embedding API hostname is missing")
+        host = hostname.encode("idna").decode("ascii").casefold()
+        port = parsed.port
+        authority = f"[{host}]" if ":" in host else host
+        if port is not None and port != 443:
+            authority = f"{authority}:{port}"
+        endpoint = f"https://{authority}{parsed.path.rstrip('/') or '/'}"
+        dimensions = self.dimensions
+        if dimensions is None:
+            dimensions = observed_dimensions or self.observed_dimensions
+        return content_hash(
+            {
+                "protocol": "openai-compatible-embeddings/v1",
+                "endpoint": endpoint,
+                "model": self.model,
+                "dimensions": dimensions,
+            }
+        )
+
+    @property
+    def space_fingerprint(self) -> str:
+        return self.space_fingerprint_for()
 
     def budget_limits(self) -> EmbeddingBudgetLimits:
         return EmbeddingBudgetLimits(
@@ -213,14 +262,18 @@ class OpenAIEmbeddingProvider:
         *,
         transport: httpx.BaseTransport | None = None,
         call_authorizer: Callable[[], None] | None = None,
+        observed_dimension_recorder: Callable[[int], None] | None = None,
     ):
         self.settings = settings
         self.transport = transport
         self.call_authorizer = call_authorizer
+        self.observed_dimension_recorder = observed_dimension_recorder
+        self._observed_dimensions = settings.observed_dimensions
 
     @property
     def name(self) -> str:
-        return f"openai-compatible:{self.settings.model}"
+        fingerprint = self.settings.space_fingerprint_for(self._observed_dimensions)
+        return f"openai-compatible-space:{fingerprint}"
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
         return [list(vector) for vector in self.embed_with_usage(texts).vectors]
@@ -337,6 +390,15 @@ class OpenAIEmbeddingProvider:
         try:
             body = strict_json_loads(body_bytes)
             vectors = self._vectors(body, len(texts))
+            observed_dimensions = len(vectors[0])
+            if (
+                self.settings.dimensions is not None
+                and observed_dimensions != self.settings.dimensions
+            ):
+                raise ValueError("embedding provider returned unexpected dimensions")
+            self._observed_dimensions = observed_dimensions
+            if self.settings.dimensions is None and self.observed_dimension_recorder is not None:
+                self.observed_dimension_recorder(observed_dimensions)
             usage = self._usage(body, estimate_embedding_input_tokens(texts))
         except _EmbeddingResponseTokenLimitError as error:
             raise EmbeddingProviderError(

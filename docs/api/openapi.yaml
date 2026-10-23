@@ -1203,6 +1203,16 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/JsonObject' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/admin/runtime-summary:
+    get:
+      tags: [observation]
+      operationId: adminRuntimeSummary
+      description: Bounded local sample; not readiness, external provider verification, or billing. Includes resource-group call samples, operator-test counts, classified unknown reasons, and bounded terminal-parent/cancelled wait samples. Missing parents are not automatically cancelled. No external requests or recursive scans. Cached for up to two seconds.
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/v1/admin/provider-health:
     get:
       tags: [observation]
@@ -2085,6 +2095,7 @@ paths:
   /api/v1/config/model-resources/{groupId}/test:
     post:
       tags: [configuration]
+      description: One explicit budgeted attempt against the selected saved resource, with the existing 64-token output ceiling. Lifecycle or call-state restrictions return 409; inactive resources return 409; authorization errors return 403; invalid request fields return 400; invalid structured output returns 502. A blocked lifecycle never sends a provider request or wakes the subject. Draft probes have a different scope and may use a larger reasoning output ceiling.
       operationId: testModelResource
       security: [{ operatorBearer: [] }]
       parameters: [{ $ref: '#/components/parameters/GroupId' }]
@@ -2099,6 +2110,8 @@ paths:
         '502': { $ref: '#/components/responses/BadGateway' }
         '429': { $ref: '#/components/responses/RateLimited' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+        '403':
+          description: Model test authorization or durable state restriction
   /api/v1/config/model-resources/{groupId}/{operation}:
     post:
       tags: [configuration]
@@ -2537,8 +2550,409 @@ paths:
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
 
+  /api/v1/participants/applications:
+    get:
+      tags: [participants]
+      operationId: participantApplicationsGet
+      security: [{ ParticipantSession: [] }, { ParticipantBearer: [] }]
+      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      responses:
+        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '400': { description: Participant response 400; bodies never include another participant's private records. }
+        '401': { description: Participant response 401; bodies never include another participant's private records. }
+        '403': { description: Participant response 403; bodies never include another participant's private records. }
+        '404': { description: Participant response 404; bodies never include another participant's private records. }
+        '413': { description: Participant response 413; bodies never include another participant's private records. }
+        '429': { description: Participant response 429; bodies never include another participant's private records. }
+        '503': { description: Participant response 503; bodies never include another participant's private records. }
+  /api/v1/participants/apply:
+    post:
+      tags: [participants]
+      operationId: participantApplyPost
+      security: [{ ParticipantSession: [] }, { ParticipantBearer: [] }]
+      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '400': { description: Participant response 400; bodies never include another participant's private records. }
+        '401': { description: Participant response 401; bodies never include another participant's private records. }
+        '403': { description: Participant response 403; bodies never include another participant's private records. }
+        '404': { description: Participant response 404; bodies never include another participant's private records. }
+        '409': { description: Participant response 409; bodies never include another participant's private records. }
+        '411': { description: Participant response 411; bodies never include another participant's private records. }
+        '413': { description: Participant response 413; bodies never include another participant's private records. }
+        '415': { description: Participant response 415; bodies never include another participant's private records. }
+        '429': { description: Participant response 429; bodies never include another participant's private records. }
+        '503': { description: Participant response 503; bodies never include another participant's private records. }
+  /api/v1/participants/credential:
+    post:
+      tags: [participants]
+      operationId: participantCredentialPost
+      security: [{ ParticipantSession: [] }, { ParticipantBearer: [] }]
+      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '400': { description: Participant response 400; bodies never include another participant's private records. }
+        '401': { description: Participant response 401; bodies never include another participant's private records. }
+        '403': { description: Participant response 403; bodies never include another participant's private records. }
+        '404': { description: Participant response 404; bodies never include another participant's private records. }
+        '409': { description: Participant response 409; bodies never include another participant's private records. }
+        '411': { description: Participant response 411; bodies never include another participant's private records. }
+        '413': { description: Participant response 413; bodies never include another participant's private records. }
+        '415': { description: Participant response 415; bodies never include another participant's private records. }
+        '429': { description: Participant response 429; bodies never include another participant's private records. }
+        '503': { description: Participant response 503; bodies never include another participant's private records. }
+  /api/v1/participants/login:
+    post:
+      tags: [participants]
+      operationId: participantLoginPost
+      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '400': { description: Participant response 400; bodies never include another participant's private records. }
+        '401': { description: Participant response 401; bodies never include another participant's private records. }
+        '403': { description: Participant response 403; bodies never include another participant's private records. }
+        '404': { description: Participant response 404; bodies never include another participant's private records. }
+        '409': { description: Participant response 409; bodies never include another participant's private records. }
+        '411': { description: Participant response 411; bodies never include another participant's private records. }
+        '413': { description: Participant response 413; bodies never include another participant's private records. }
+        '415': { description: Participant response 415; bodies never include another participant's private records. }
+        '429': { description: Participant response 429; bodies never include another participant's private records. }
+        '503': { description: Participant response 503; bodies never include another participant's private records. }
+  /api/v1/participants/logout:
+    post:
+      tags: [participants]
+      operationId: participantLogoutPost
+      security: [{ ParticipantSession: [] }, { ParticipantBearer: [] }]
+      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '400': { description: Participant response 400; bodies never include another participant's private records. }
+        '401': { description: Participant response 401; bodies never include another participant's private records. }
+        '403': { description: Participant response 403; bodies never include another participant's private records. }
+        '404': { description: Participant response 404; bodies never include another participant's private records. }
+        '409': { description: Participant response 409; bodies never include another participant's private records. }
+        '411': { description: Participant response 411; bodies never include another participant's private records. }
+        '413': { description: Participant response 413; bodies never include another participant's private records. }
+        '415': { description: Participant response 415; bodies never include another participant's private records. }
+        '429': { description: Participant response 429; bodies never include another participant's private records. }
+        '503': { description: Participant response 503; bodies never include another participant's private records. }
+  /api/v1/participants/messages:
+    get:
+      tags: [participants]
+      operationId: participantMessagesGet
+      security: [{ ParticipantSession: [] }, { ParticipantBearer: [] }]
+      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      responses:
+        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '400': { description: Participant response 400; bodies never include another participant's private records. }
+        '401': { description: Participant response 401; bodies never include another participant's private records. }
+        '403': { description: Participant response 403; bodies never include another participant's private records. }
+        '404': { description: Participant response 404; bodies never include another participant's private records. }
+        '413': { description: Participant response 413; bodies never include another participant's private records. }
+        '429': { description: Participant response 429; bodies never include another participant's private records. }
+        '503': { description: Participant response 503; bodies never include another participant's private records. }
+    post:
+      tags: [participants]
+      operationId: participantMessagesPost
+      security: [{ ParticipantSession: [] }, { ParticipantBearer: [] }]
+      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '400': { description: Participant response 400; bodies never include another participant's private records. }
+        '401': { description: Participant response 401; bodies never include another participant's private records. }
+        '403': { description: Participant response 403; bodies never include another participant's private records. }
+        '404': { description: Participant response 404; bodies never include another participant's private records. }
+        '409': { description: Participant response 409; bodies never include another participant's private records. }
+        '411': { description: Participant response 411; bodies never include another participant's private records. }
+        '413': { description: Participant response 413; bodies never include another participant's private records. }
+        '415': { description: Participant response 415; bodies never include another participant's private records. }
+        '429': { description: Participant response 429; bodies never include another participant's private records. }
+        '503': { description: Participant response 503; bodies never include another participant's private records. }
+  /api/v1/participants/notification-read:
+    post:
+      tags: [participants]
+      operationId: participantNotificationReadPost
+      security: [{ ParticipantSession: [] }, { ParticipantBearer: [] }]
+      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '400': { description: Participant response 400; bodies never include another participant's private records. }
+        '401': { description: Participant response 401; bodies never include another participant's private records. }
+        '403': { description: Participant response 403; bodies never include another participant's private records. }
+        '404': { description: Participant response 404; bodies never include another participant's private records. }
+        '409': { description: Participant response 409; bodies never include another participant's private records. }
+        '411': { description: Participant response 411; bodies never include another participant's private records. }
+        '413': { description: Participant response 413; bodies never include another participant's private records. }
+        '415': { description: Participant response 415; bodies never include another participant's private records. }
+        '429': { description: Participant response 429; bodies never include another participant's private records. }
+        '503': { description: Participant response 503; bodies never include another participant's private records. }
+  /api/v1/participants/notifications:
+    get:
+      tags: [participants]
+      operationId: participantNotificationsGet
+      security: [{ ParticipantSession: [] }, { ParticipantBearer: [] }]
+      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      responses:
+        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '400': { description: Participant response 400; bodies never include another participant's private records. }
+        '401': { description: Participant response 401; bodies never include another participant's private records. }
+        '403': { description: Participant response 403; bodies never include another participant's private records. }
+        '404': { description: Participant response 404; bodies never include another participant's private records. }
+        '413': { description: Participant response 413; bodies never include another participant's private records. }
+        '429': { description: Participant response 429; bodies never include another participant's private records. }
+        '503': { description: Participant response 503; bodies never include another participant's private records. }
+  /api/v1/participants/opportunities:
+    get:
+      tags: [participants]
+      operationId: participantOpportunitiesGet
+      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      responses:
+        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '400': { description: Participant response 400; bodies never include another participant's private records. }
+        '401': { description: Participant response 401; bodies never include another participant's private records. }
+        '403': { description: Participant response 403; bodies never include another participant's private records. }
+        '404': { description: Participant response 404; bodies never include another participant's private records. }
+        '413': { description: Participant response 413; bodies never include another participant's private records. }
+        '429': { description: Participant response 429; bodies never include another participant's private records. }
+        '503': { description: Participant response 503; bodies never include another participant's private records. }
+  /api/v1/participants/posts:
+    get:
+      tags: [participants]
+      operationId: participantPostsGet
+      security: [{ ParticipantSession: [] }, { ParticipantBearer: [] }]
+      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      responses:
+        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '400': { description: Participant response 400; bodies never include another participant's private records. }
+        '401': { description: Participant response 401; bodies never include another participant's private records. }
+        '403': { description: Participant response 403; bodies never include another participant's private records. }
+        '404': { description: Participant response 404; bodies never include another participant's private records. }
+        '413': { description: Participant response 413; bodies never include another participant's private records. }
+        '429': { description: Participant response 429; bodies never include another participant's private records. }
+        '503': { description: Participant response 503; bodies never include another participant's private records. }
+    post:
+      tags: [participants]
+      operationId: participantPostsPost
+      security: [{ ParticipantSession: [] }, { ParticipantBearer: [] }]
+      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '400': { description: Participant response 400; bodies never include another participant's private records. }
+        '401': { description: Participant response 401; bodies never include another participant's private records. }
+        '403': { description: Participant response 403; bodies never include another participant's private records. }
+        '404': { description: Participant response 404; bodies never include another participant's private records. }
+        '409': { description: Participant response 409; bodies never include another participant's private records. }
+        '411': { description: Participant response 411; bodies never include another participant's private records. }
+        '413': { description: Participant response 413; bodies never include another participant's private records. }
+        '415': { description: Participant response 415; bodies never include another participant's private records. }
+        '429': { description: Participant response 429; bodies never include another participant's private records. }
+        '503': { description: Participant response 503; bodies never include another participant's private records. }
+  /api/v1/participants/recover:
+    post:
+      tags: [participants]
+      operationId: participantRecoverPost
+      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '400': { description: Participant response 400; bodies never include another participant's private records. }
+        '401': { description: Participant response 401; bodies never include another participant's private records. }
+        '403': { description: Participant response 403; bodies never include another participant's private records. }
+        '404': { description: Participant response 404; bodies never include another participant's private records. }
+        '409': { description: Participant response 409; bodies never include another participant's private records. }
+        '411': { description: Participant response 411; bodies never include another participant's private records. }
+        '413': { description: Participant response 413; bodies never include another participant's private records. }
+        '415': { description: Participant response 415; bodies never include another participant's private records. }
+        '429': { description: Participant response 429; bodies never include another participant's private records. }
+        '503': { description: Participant response 503; bodies never include another participant's private records. }
+  /api/v1/participants/register:
+    post:
+      tags: [participants]
+      operationId: participantRegisterPost
+      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '201': { description: Participant response 201; bodies never include another participant's private records. }
+        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '400': { description: Participant response 400; bodies never include another participant's private records. }
+        '401': { description: Participant response 401; bodies never include another participant's private records. }
+        '403': { description: Participant response 403; bodies never include another participant's private records. }
+        '404': { description: Participant response 404; bodies never include another participant's private records. }
+        '409': { description: Participant response 409; bodies never include another participant's private records. }
+        '411': { description: Participant response 411; bodies never include another participant's private records. }
+        '413': { description: Participant response 413; bodies never include another participant's private records. }
+        '415': { description: Participant response 415; bodies never include another participant's private records. }
+        '429': { description: Participant response 429; bodies never include another participant's private records. }
+        '503': { description: Participant response 503; bodies never include another participant's private records. }
+  /api/v1/participants/session:
+    get:
+      tags: [participants]
+      operationId: participantSessionGet
+      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      responses:
+        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '400': { description: Participant response 400; bodies never include another participant's private records. }
+        '401': { description: Participant response 401; bodies never include another participant's private records. }
+        '403': { description: Participant response 403; bodies never include another participant's private records. }
+        '404': { description: Participant response 404; bodies never include another participant's private records. }
+        '413': { description: Participant response 413; bodies never include another participant's private records. }
+        '429': { description: Participant response 429; bodies never include another participant's private records. }
+        '503': { description: Participant response 503; bodies never include another participant's private records. }
+  /api/v1/participants/submissions:
+    get:
+      tags: [participants]
+      operationId: participantSubmissionsGet
+      security: [{ ParticipantSession: [] }, { ParticipantBearer: [] }]
+      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      responses:
+        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '400': { description: Participant response 400; bodies never include another participant's private records. }
+        '401': { description: Participant response 401; bodies never include another participant's private records. }
+        '403': { description: Participant response 403; bodies never include another participant's private records. }
+        '404': { description: Participant response 404; bodies never include another participant's private records. }
+        '413': { description: Participant response 413; bodies never include another participant's private records. }
+        '429': { description: Participant response 429; bodies never include another participant's private records. }
+        '503': { description: Participant response 503; bodies never include another participant's private records. }
+  /api/v1/participants/submit:
+    post:
+      tags: [participants]
+      operationId: participantSubmitPost
+      security: [{ ParticipantSession: [] }, { ParticipantBearer: [] }]
+      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '400': { description: Participant response 400; bodies never include another participant's private records. }
+        '401': { description: Participant response 401; bodies never include another participant's private records. }
+        '403': { description: Participant response 403; bodies never include another participant's private records. }
+        '404': { description: Participant response 404; bodies never include another participant's private records. }
+        '409': { description: Participant response 409; bodies never include another participant's private records. }
+        '411': { description: Participant response 411; bodies never include another participant's private records. }
+        '413': { description: Participant response 413; bodies never include another participant's private records. }
+        '415': { description: Participant response 415; bodies never include another participant's private records. }
+        '429': { description: Participant response 429; bodies never include another participant's private records. }
+        '503': { description: Participant response 503; bodies never include another participant's private records. }
+  /api/v1/participants/withdraw:
+    post:
+      tags: [participants]
+      operationId: participantWithdrawPost
+      security: [{ ParticipantSession: [] }, { ParticipantBearer: [] }]
+      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '400': { description: Participant response 400; bodies never include another participant's private records. }
+        '401': { description: Participant response 401; bodies never include another participant's private records. }
+        '403': { description: Participant response 403; bodies never include another participant's private records. }
+        '404': { description: Participant response 404; bodies never include another participant's private records. }
+        '409': { description: Participant response 409; bodies never include another participant's private records. }
+        '411': { description: Participant response 411; bodies never include another participant's private records. }
+        '413': { description: Participant response 413; bodies never include another participant's private records. }
+        '415': { description: Participant response 415; bodies never include another participant's private records. }
+        '429': { description: Participant response 429; bodies never include another participant's private records. }
+        '503': { description: Participant response 503; bodies never include another participant's private records. }
+  /api/v1/admin/participant-sources:
+    post:
+      tags: [participants]
+      operationId: participantSourceBinding
+      security: [{ operatorBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [entity_id, binding_id], properties: { entity_id: { type: string }, binding_id: { type: string } } }
+      responses:
+        '200': { description: Explicit source binding recorded }
+        '401': { description: Operator authentication required }
+        '409': { description: Source conflict; existing contact history is not silently reassigned }
+        '411': { description: Content-Length required }
+        '413': { description: Request too large }
+        '429': { description: Rate limited }
+        '503': { description: Runtime unavailable }
+  /api/v1/participants/password:
+    post:
+      tags: [participants]
+      operationId: participantPassword
+      security: [{ ParticipantSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [current_password, password], properties: { current_password: { type: string }, password: { type: string } } }
+      responses:
+        '200': { description: Password and recovery rotation response }
+        '400': { description: Password and recovery rotation response }
+        '401': { description: Password and recovery rotation response }
+        '403': { description: Password and recovery rotation response }
+        '404': { description: Password and recovery rotation response }
+        '409': { description: Password and recovery rotation response }
+        '411': { description: Password and recovery rotation response }
+        '413': { description: Password and recovery rotation response }
+        '415': { description: Password and recovery rotation response }
+        '429': { description: Password and recovery rotation response }
+        '503': { description: Password and recovery rotation response }
 components:
   securitySchemes:
+    ParticipantSession:
+      type: apiKey
+      in: cookie
+      name: noyra_participant
+      description: Independent visitor session; cookie writes require X-Participant-CSRF.
+    ParticipantBearer:
+      type: http
+      scheme: bearer
+      description: Participant-only program credential; never an operator token.
     readBearer:
       type: http
       scheme: bearer
@@ -2761,6 +3175,11 @@ components:
         public_diary_count: { type: integer, minimum: 0 }
         last_sleep_completed_at: { type: string, format: date-time, nullable: true }
         recent: { type: array, maxItems: 3, items: { $ref: '#/components/schemas/PublicArchiveItem' } }
+        writing:
+          type: array
+          maxItems: 1
+          description: Optional latest public diary preview, using the same projection as the diary list with an empty body. Independent of recent timeline stage changes. Added October 23, 2026; clients may fall back to recent when absent.
+          items: { $ref: '#/components/schemas/PublicArchiveItem' }
         goals: { type: array, maxItems: 2, items: { $ref: '#/components/schemas/PublicArchiveItem' } }
         projects: { type: array, maxItems: 2, items: { $ref: '#/components/schemas/PublicArchiveItem' } }
     PublicPublicationInput:

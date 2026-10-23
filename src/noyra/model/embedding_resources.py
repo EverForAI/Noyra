@@ -78,7 +78,9 @@ class EmbeddingResourceRecord:
     input_cost_microusd_per_million: int
     circuit_failure_threshold: int
     circuit_cooldown_seconds: float
+    observed_dimensions: int | None
     key_fingerprint: str
+    config_hash: str
     status: str
     created_at: str
     updated_at: str
@@ -141,9 +143,10 @@ class EmbeddingResourceStore:
                     "config_id, subject_id, label, base_url, model, "
                     "dimensions, timeout_seconds, daily_call_limit, daily_token_limit, "
                     "daily_cost_limit_microusd, input_cost_microusd_per_million, "
-                    "circuit_failure_threshold, circuit_cooldown_seconds, key_fingerprint, "
+                    "circuit_failure_threshold, circuit_cooldown_seconds, "
+                    "observed_dimensions, key_fingerprint, config_hash, "
                     "status, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 'active', ?, ?)",
                     (
                         config_id,
                         subject_id,
@@ -159,6 +162,7 @@ class EmbeddingResourceStore:
                         settings.circuit_failure_threshold,
                         settings.circuit_cooldown_seconds,
                         fingerprint,
+                        settings.configuration_fingerprint,
                         now,
                         now,
                     ),
@@ -222,11 +226,12 @@ class EmbeddingResourceStore:
             raise IntegrityError("embedding resource secret is unavailable") from error
         if content_hash({"api_key": secret}) != record.key_fingerprint:
             raise IntegrityError("embedding resource secret fingerprint mismatch")
-        return EmbeddingSettings(
+        settings = EmbeddingSettings(
             base_url=record.base_url,
             model=record.model,
             api_key=SecretStr(secret),
             dimensions=record.dimensions,
+            observed_dimensions=record.observed_dimensions,
             timeout_seconds=record.timeout_seconds,
             resource_id=record.config_id,
             daily_call_limit=record.daily_call_limit,
@@ -236,6 +241,43 @@ class EmbeddingResourceStore:
             circuit_failure_threshold=record.circuit_failure_threshold,
             circuit_cooldown_seconds=record.circuit_cooldown_seconds,
         )
+        if record.config_hash != settings.configuration_fingerprint:
+            raise IntegrityError("embedding resource configuration fingerprint mismatch")
+        return settings
+
+    def record_observed_dimensions(self, subject_id: str, config_id: str, dimensions: int) -> bool:
+        """Persist the provider's current default vector dimension.
+
+        This is runtime observation, not operator configuration.  It is kept
+        separate from ``config_hash`` so a provider alias changing dimension
+        invalidates old vectors without making the resource drift check fail.
+        """
+        if not 1 <= dimensions <= 16_384:
+            raise ValueError("embedding dimensions are invalid")
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                "SELECT status, dimensions, observed_dimensions FROM embedding_resources "
+                "WHERE config_id=? AND subject_id=?",
+                (config_id, subject_id),
+            ).fetchone()
+            if row is None or row["status"] != "active":
+                return False
+            configured = None if row["dimensions"] is None else int(row["dimensions"])
+            if configured is not None:
+                if configured != dimensions:
+                    raise IntegrityError("embedding provider returned unexpected dimensions")
+                return False
+            if (
+                row["observed_dimensions"] is not None
+                and int(row["observed_dimensions"]) == dimensions
+            ):
+                return False
+            connection.execute(
+                "UPDATE embedding_resources SET observed_dimensions=? "
+                "WHERE config_id=? AND subject_id=? AND status='active'",
+                (dimensions, config_id, subject_id),
+            )
+            return True
 
     def call_authorizer(
         self,
@@ -250,7 +292,10 @@ class EmbeddingResourceStore:
         def authorize() -> None:
             with self.database.connection() as connection:
                 row = connection.execute(
-                    "SELECT subject_id, base_url, model, key_fingerprint, status "
+                    "SELECT subject_id, base_url, model, dimensions, timeout_seconds, "
+                    "daily_call_limit, daily_token_limit, daily_cost_limit_microusd, "
+                    "input_cost_microusd_per_million, circuit_failure_threshold, "
+                    "circuit_cooldown_seconds, config_hash, key_fingerprint, status "
                     "FROM embedding_resources WHERE config_id = ? AND subject_id = ?",
                     (config_id, subject_id),
                 ).fetchone()
@@ -260,6 +305,16 @@ class EmbeddingResourceStore:
             if (
                 row["base_url"] != settings.base_url
                 or row["model"] != settings.model
+                or row["dimensions"] != settings.dimensions
+                or float(row["timeout_seconds"]) != settings.timeout_seconds
+                or int(row["daily_call_limit"]) != settings.daily_call_limit
+                or int(row["daily_token_limit"]) != settings.daily_token_limit
+                or int(row["daily_cost_limit_microusd"]) != settings.daily_cost_limit_microusd
+                or int(row["input_cost_microusd_per_million"])
+                != settings.input_cost_microusd_per_million
+                or int(row["circuit_failure_threshold"]) != settings.circuit_failure_threshold
+                or float(row["circuit_cooldown_seconds"]) != settings.circuit_cooldown_seconds
+                or row["config_hash"] != settings.configuration_fingerprint
                 or row["key_fingerprint"] != expected_fingerprint
             ):
                 raise IntegrityError("embedding provider no longer matches its resource")
@@ -392,6 +447,11 @@ class EmbeddingResourceStore:
     def _from_row(row: Any) -> EmbeddingResourceRecord:
         try:
             dimensions = None if row["dimensions"] is None else strict_int(row["dimensions"])
+            observed_dimensions = (
+                None
+                if row["observed_dimensions"] is None
+                else strict_int(row["observed_dimensions"])
+            )
             timeout_seconds = strict_finite_float(row["timeout_seconds"])
             daily_call_limit = strict_int(row["daily_call_limit"])
             daily_token_limit = strict_int(row["daily_token_limit"])
@@ -403,6 +463,14 @@ class EmbeddingResourceStore:
             raise IntegrityError("embedding resource numeric state is invalid") from error
         if dimensions is not None and not 1 <= dimensions <= 16_384:
             raise IntegrityError("embedding resource dimensions are invalid")
+        if observed_dimensions is not None and not 1 <= observed_dimensions <= 16_384:
+            raise IntegrityError("embedding resource observed dimensions are invalid")
+        if (
+            dimensions is not None
+            and observed_dimensions is not None
+            and dimensions != observed_dimensions
+        ):
+            raise IntegrityError("embedding resource dimensions disagree with observation")
         if not 0 < timeout_seconds <= 300:
             raise IntegrityError("embedding resource timeout is invalid")
         if (
@@ -429,6 +497,7 @@ class EmbeddingResourceStore:
             "base_url",
             "model",
             "key_fingerprint",
+            "config_hash",
             "created_at",
             "updated_at",
         )
@@ -450,7 +519,9 @@ class EmbeddingResourceStore:
             input_cost_microusd_per_million,
             circuit_failure_threshold,
             circuit_cooldown_seconds,
+            observed_dimensions,
             row["key_fingerprint"],
+            row["config_hash"],
             status,
             row["created_at"],
             row["updated_at"],

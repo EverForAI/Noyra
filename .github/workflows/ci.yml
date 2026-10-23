@@ -39,6 +39,7 @@ jobs:
           sudo bash tests/shell/test-upgrade-components-rollback.sh
           sudo bash tests/shell/test-migration-components-rollback.sh
           sudo "$(command -v python)" -m pytest \
+            tests/test_installer_operability.py \
             tests/test_upgrade_storage_boundary.py tests/test_release_scripts.py \
             tests/test_migration_storage_boundary.py tests/test_migration_activation.py -q
           sudo "$(command -v python)" -m pytest \
@@ -77,6 +78,7 @@ jobs:
       - run: node --version
       - run: node --check src/noyra/web/admin.js
       - run: node --check src/noyra/web/app.js
+      - run: node --check src/noyra/web/participant.js
       - run: node --test tests/frontend/*.test.cjs
 
   cloud-profile:

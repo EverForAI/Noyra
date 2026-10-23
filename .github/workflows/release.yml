@@ -30,6 +30,7 @@ jobs:
       - run: node --version
       - run: node --check src/noyra/web/admin.js
       - run: node --check src/noyra/web/app.js
+      - run: node --check src/noyra/web/participant.js
       - run: node --test tests/frontend/*.test.cjs
       - name: Run cloud security regression without skips
         run: |

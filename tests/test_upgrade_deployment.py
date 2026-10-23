@@ -41,9 +41,10 @@ def test_installer_checks_packaged_entrypoints_before_stopping_old_service() -> 
     assert 'source "$SOURCE_DIR/scripts/lib/release-scripts.sh"' in installer
     prepare = installer.index('noyra_install_release_scripts "$SOURCE_DIR" "$staging"')
     stop = installer.index("\nstop_old_service\n", prepare)
-    publish = installer.index('mv -- "$staging" "$release_root"', stop)
+    publish = installer.index("release_published=true", stop)
     switch = installer.index('atomic_pointer "$CURRENT_LINK" "$release_id"', publish)
-    assert prepare < stop < publish < switch
+    assert installer.index('staging="$release_root"') < prepare < stop < publish < switch
+    assert 'mv -- "$staging" "$release_root"' not in installer
 
 
 def test_native_installer_provisions_root_runner_and_source_sha_marker() -> None:

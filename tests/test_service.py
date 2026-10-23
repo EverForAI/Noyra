@@ -34,6 +34,7 @@ from noyra.core.upgrade import UpgradeManager
 from noyra.interaction import InteractionStore, PublicProjection
 from noyra.mind import GoalCandidate, GoalStore
 from noyra.model import (
+    EmbeddingResourceInput,
     EmbeddingResourceStore,
     FakeProvider,
     ModelUsage,
@@ -42,7 +43,15 @@ from noyra.model import (
     RoutedModelGateway,
 )
 from noyra.model.capabilities import CapabilityProfileStore
-from noyra.model.errors import ProviderCallError
+from noyra.model.errors import (
+    BudgetExhaustedError,
+    ModelAuthorizationError,
+    ModelCallStateError,
+    ModelLifecycleBlockedError,
+    ModelResourceInactiveError,
+    ProviderCallError,
+    StructuredOutputError,
+)
 from noyra.research import SearchExecutor
 from noyra.service import NoyraHTTPServer, NoyraService, ServiceSettings
 from noyra.sleep import SleepEngine, SleepReflectionPlan
@@ -101,7 +110,9 @@ class ServiceTestCase(unittest.TestCase):
             return response.status, json.loads(response.read())
 
     def wait_for_export_job(self: Self, job_id: str) -> dict[str, Any]:
-        deadline = time.monotonic() + 10
+        # Windows file scanning can exceed ten seconds even on the unchanged
+        # schema99 baseline; keep completion bounded without cancelling valid I/O.
+        deadline = time.monotonic() + (30 if os.name == "nt" else 10)
         job: dict[str, Any] = {}
         while time.monotonic() < deadline:
             status, current = self.authorized_json(f"/api/admin/export-jobs/{job_id}")
@@ -110,7 +121,9 @@ class ServiceTestCase(unittest.TestCase):
             job = current
             if job["status"] in {"completed", "failed", "cancelled"}:
                 break
-            time.sleep(0.05)
+            # Stay below the production per-minute HTTP rate budget even
+            # when a Windows export consumes the full polling deadline.
+            time.sleep(0.5)
         self.assertEqual(job.get("status"), "completed", job)
         return job
 
@@ -670,6 +683,7 @@ class ServiceTestCase(unittest.TestCase):
             service = NoyraService.from_env()
         try:
             self.assertIsNotNone(service.cognition)
+            self.assertTrue(service.http.cognition_is_enabled())
             assert service.cognition is not None
             self.assertEqual(service.cognition.gateway.model, "test-model")
             self.assertEqual(
@@ -681,6 +695,75 @@ class ServiceTestCase(unittest.TestCase):
                 asyncio.run(service.cognition.aclose())
             service.http.close()
             service.kernel.close()
+
+    def test_managed_embedding_selection_reports_restart_then_effective_after_restart(
+        self: Self,
+    ) -> None:
+        environment = {
+            "NOYRA_PROFILE": "test",
+            "NOYRA_AT_REST_MODE": "development",
+            "NOYRA_DATA_DIR": str(self.data_dir / "embedding-runtime-state"),
+            "NOYRA_SUBJECT_ID": "Noyra-embedding-runtime-state",
+            "NOYRA_GENESIS_HASH": content_hash({"seed": "embedding-runtime-state"}),
+            "NOYRA_HOST": "127.0.0.1",
+            "NOYRA_PORT": "0",
+            "NOYRA_COGNITION_ENABLED": "true",
+            "NOYRA_WORLD_SOURCES_JSON": json.dumps(
+                [
+                    {
+                        "name": "Runtime fixture source",
+                        "url": "https://example.com/world",
+                        "source_type": "news",
+                        "trust_score": 0.5,
+                    }
+                ]
+            ),
+            "NOYRA_MODEL_BASE_URL": "https://models.example/v1",
+            "NOYRA_MODEL_NAME": "runtime-fixture-model",
+            "NOYRA_MODEL_API_KEY": "synthetic-model-key",
+            "NOYRA_DAILY_MODEL_CALLS": "10",
+            "NOYRA_DAILY_INPUT_TOKENS": "100000",
+            "NOYRA_DAILY_OUTPUT_TOKENS": "20000",
+            "NOYRA_DAILY_COST_LIMIT": "5",
+            "NOYRA_MODEL_INPUT_USD_PER_MILLION": "0",
+            "NOYRA_MODEL_OUTPUT_USD_PER_MILLION": "0",
+        }
+        with patch.dict(os.environ, environment, clear=False):
+            first = NoyraService.from_env()
+            try:
+                self.assertEqual(first.http.embedding_runtime_status()["status"], "not_configured")
+                record = first.http.embedding_resources.configure(
+                    first.kernel.subject_id,
+                    EmbeddingResourceInput(
+                        label="managed-fixture",
+                        base_url="https://embedding.example/v1",
+                        model="embedding-fixture-model",
+                        api_key=SecretStr("synthetic-embedding-key"),
+                        dimensions=2,
+                    ),
+                    actor="operator",
+                )
+                pending = first.http.embedding_runtime_status()
+                self.assertEqual(pending["status"], "restart_required")
+                self.assertTrue(pending["restart_required"])
+                self.assertEqual(pending["desired_resource_id"], record.config_id)
+                self.assertIsNone(pending["effective_resource_id"])
+                assert first.cognition is not None
+                asyncio.run(first.cognition.aclose())
+            finally:
+                first.close()
+
+            second = NoyraService.from_env()
+            try:
+                applied = second.http.embedding_runtime_status()
+                self.assertEqual(applied["status"], "applied")
+                self.assertFalse(applied["restart_required"])
+                self.assertEqual(applied["desired_resource_id"], record.config_id)
+                self.assertEqual(applied["effective_resource_id"], record.config_id)
+                assert second.cognition is not None
+                asyncio.run(second.cognition.aclose())
+            finally:
+                second.close()
 
     def test_capability_profile_import_is_deferred_until_boot(self: Self) -> None:
         profile_path = self.data_dir / "capabilities.json"
@@ -2123,6 +2206,95 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(call["status"], "failed")
         self.assertEqual(call["error_code"], "provider_http_401")
 
+    def test_saved_probe_keeps_lifecycle_fence_and_reports_the_real_reason(self: Self) -> None:
+        CapabilityProfileStore(self.kernel.database).record_probe_success(
+            self.kernel.subject_id,
+            "openai_compatible",
+            "https://probe.example/v1",
+            "gpt-5-fixture",
+            "high",
+        )
+        _, resource = self.authorized_json(
+            "/api/config/model-resources",
+            payload={
+                "pool": "economy",
+                "label": "lifecycle probe",
+                "base_url": "https://probe.example/v1",
+                "model": "gpt-5-fixture",
+                "reasoning_effort": "high",
+                "api_keys": ["fixture-probe-secret"],
+                "max_attempts": 3,
+            },
+        )
+        assert isinstance(resource, dict)
+        group_id = str(resource["group_id"])
+        provider = FakeProvider([ProviderResponse('{"ok":true}', ModelUsage(2, 1))])
+        self.http.cognition_gateway = RoutedModelGateway(
+            self.kernel.database,
+            self.kernel.subject_id,
+            self.http.cognitive_resources,
+            provider_factory=lambda settings: provider,
+        )
+        sleep = SleepEngine(self.kernel.database, self.kernel.subject_id)
+        self.kernel.lifecycle.transition("paused", "fixture pause")
+        states = ["paused", "deep_sleep", "waking"]
+        for state in states:
+            if state == "deep_sleep":
+                self.kernel.lifecycle.transition("active", "fixture resume")
+                run = sleep.start("subject_choice", "fixture sleep")
+                sleep.begin_reflection(run.sleep_id)
+                sleep.commit_reflection(run.sleep_id, SleepReflectionPlan(summary="fixture"))
+                sleep.enter_deep_sleep(run.sleep_id)
+            elif state == "waking":
+                sleep.wake(run.sleep_id, "fixture wake")
+            with self.subTest(state=state):
+                with self.assertRaises(HTTPError) as error:
+                    self.authorized_json(
+                        f"/api/config/model-resources/{group_id}/test",
+                        payload={"reason": "fixture explicit test"},
+                    )
+                self.assertEqual(error.exception.code, 409)
+                body = json.loads(error.exception.read())
+                self.assertEqual(body["error"], "model_test_lifecycle_blocked")
+                self.assertEqual(body["lifecycle"], state)
+                self.assertEqual(len(provider.requests), 0)
+                self.assertEqual(self.kernel.lifecycle.current().state, state)
+        sleep.complete_wake(run.sleep_id)
+        status, result = self.authorized_json(
+            f"/api/config/model-resources/{group_id}/test",
+            payload={"reason": "fixture allowed test"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(provider.requests[0].max_output_tokens, 4096)
+        self.assertEqual(provider.requests[0].reasoning_effort, "high")
+        assert isinstance(result, dict)
+        self.assertEqual(result["status"], "succeeded")
+
+    def test_saved_probe_error_categories_are_not_reported_as_missing_fields(self: Self) -> None:
+        cases = [
+            (ModelCallStateError("fixture"), 409, "model_test_state_conflict"),
+            (ModelAuthorizationError("fixture"), 403, "model_test_not_authorized"),
+            (PermissionError("fixture"), 403, "model_test_not_authorized"),
+            (StructuredOutputError("fixture"), 502, "model_test_output_invalid"),
+            (BudgetExhaustedError("fixture"), 429, "model_test_budget_exhausted"),
+            (ValueError("fixture"), 400, "invalid_model_resource_test"),
+            (ModelResourceInactiveError("fixture"), 409, "model_test_resource_inactive"),
+            (ModelLifecycleBlockedError("deep_sleep"), 409, "model_test_lifecycle_blocked"),
+        ]
+        gateway = Mock(spec=RoutedModelGateway)
+        self.http.cognition_gateway = gateway
+        for exception, expected_status, expected_code in cases:
+            with self.subTest(code=expected_code):
+                gateway.test_resource = AsyncMock(side_effect=exception)
+                with self.assertRaises(HTTPError) as error:
+                    self.authorized_json(
+                        "/api/config/model-resources/cgroup_fixture/test",
+                        payload={"reason": "fixture classification test"},
+                    )
+                self.assertEqual(error.exception.code, expected_status)
+                self.assertEqual(json.loads(error.exception.read())["error"], expected_code)
+
     def test_model_resource_test_endpoint_reports_missing_cognition_gateway(self: Self) -> None:
         status, created = self.authorized_json(
             "/api/config/model-resources",
@@ -2624,17 +2796,7 @@ class ServiceTestCase(unittest.TestCase):
         job_id = str(created["job_id"])
         self.assertIn(created["status"], {"queued", "running", "completed"})
 
-        deadline = time.monotonic() + 10
-        job: dict[str, Any] = created
-        while time.monotonic() < deadline:
-            status, current = self.authorized_json(f"/api/admin/export-jobs/{job_id}")
-            self.assertEqual(status, 200)
-            assert isinstance(current, dict)
-            job = current
-            if job["status"] in {"completed", "failed", "cancelled"}:
-                break
-            time.sleep(0.05)
-        self.assertEqual(job["status"], "completed")
+        job = self.wait_for_export_job(job_id)
         status, records = self.authorized_json("/api/admin/export-jobs")
         self.assertEqual(status, 200)
         assert isinstance(records, list)

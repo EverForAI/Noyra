@@ -27,8 +27,8 @@ class OpenAICompatibleSettings(BaseModel):
     base_url: str
     model: str = Field(min_length=1, max_length=256)
     api_key: SecretStr
-    timeout_seconds: float = Field(default=60, gt=0, le=600)
-    connect_timeout_seconds: float = Field(default=10, gt=0, le=120)
+    timeout_seconds: float = Field(default=100, gt=0, le=600)
+    connect_timeout_seconds: float = Field(default=20, gt=0, le=120)
     max_connections: int = Field(default=10, ge=1, le=100)
     max_response_bytes: int = Field(default=2_000_000, ge=1_024, le=20_000_000)
     trust_environment: bool = False

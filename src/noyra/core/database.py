@@ -17,6 +17,7 @@ from .conversation_schema import MIGRATION_V84, MIGRATION_V85
 from .errors import RuntimeOwnershipError, SchemaContractError
 from .evidence_schema import migration_v80, migration_v92
 from .locking import ProcessLock
+from .participant_schema import PARTICIPANT_SCHEMA
 from .private_erasure_schema import (
     MIGRATION_V87,
     MIGRATION_V88,
@@ -310,7 +311,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 99
+CURRENT_SCHEMA_VERSION = 104
 
 # The schema DDL fingerprint is checked after every successful initialization.
 # Update this value only alongside a reviewed schema migration and its tests.
@@ -318,6 +319,11 @@ CURRENT_SCHEMA_VERSION = 99
 # installations persist this value in ``schema_meta`` and therefore require
 # the value to remain stable across compatible runtime fixes.
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
+    104: "72e5c15e4793cbe3b743b5eca667cea5bef3c34af05a4674bde7ce720234dc8e",
+    103: "b13fec71f4c1a40287f7b7b272f7ba8e12bdd9625aa53ca08568023c25f84334",
+    102: "f731a5afa55d7e6c7adf170f93e985e0b1efee544f365dfd746f31afc997db09",
+    101: "f96066b2cb8abf958820d6340dfc1d00e60dcd491db84caef6f09f0e458c3301",
+    100: "e056dd1ba603c0d6f44444b24c668e4008ed3701c36155dbb5e742e328f7616a",
     99: "289738612874ddce653fcc53979ab3285f0601920cde5aad27baafee978d1145",
     98: "8a16f2c86d53e37f52f96154d49dda2630a22b411650f62f33fdaa05d230c415",
     97: "39d19922cfd11f01d60b4d2085f50fdc8eb0fa6b1a213d0594aaa5e39d46ad36",
@@ -348,6 +354,11 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 # auditable P0 finding.  Tables, indexes, and views still fail closed during
 # database construction because they define the storage contract itself.
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
+    104: "1c17714c61ce55ec2a36af8dfdb439bbae32428bab58c7d842a34802426650e4",
+    103: "1147ca9c2c26d160b0b20186536e1bf4a4f34211aab668a25af36610bdaa284b",
+    102: "cb7f1359673e8949c90b1706e14de28c857d8df4b54c07aa0e4f136bf3aa4900",
+    101: "8ef1b897245fdf0ae876e0f9a03ca6df381bfb0412ca804d202708cfdc22bd92",
+    100: "47b11a9ef31e674e8d9610620d7b6acaf9e33aa263f1383c095edc9411a965a8",
     99: "f6d0ed82b9a6fc8ead5f18dac96c904f04f5087376a2ec9ed1553d55d41dc2fd",
     98: "1c71052010dca131f02eeb04c66f9c38422be66a3374d31d3a39c4e4ec1f20b0",
     97: "2f1a1176f4b0882132078c303add11e9b525d9901b9f421023f9c78d1f45c7fc",
@@ -7080,6 +7091,30 @@ CREATE TABLE IF NOT EXISTS model_capability_profiles (
 CREATE INDEX IF NOT EXISTS idx_model_capability_profiles_subject
     ON model_capability_profiles(subject_id, provider_type, model);
 """,
+    100: """
+CREATE TABLE IF NOT EXISTS memory_embedding_inputs (
+    memory_id TEXT PRIMARY KEY REFERENCES memory_embeddings(memory_id) ON DELETE CASCADE,
+    content_hash TEXT NOT NULL CHECK (
+        length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_waiting_cognitive_task_revisions_task
+    ON waiting_cognitive_task_revisions(task_id);
+CREATE INDEX IF NOT EXISTS idx_model_calls_subject_purpose_pool
+    ON model_calls(subject_id, purpose, resource_pool);
+""",
+    101: """
+CREATE INDEX IF NOT EXISTS idx_audit_subject_action_call
+    ON audit_records(subject_id, action, json_extract(payload_json, '$.call_id'))
+    WHERE json_valid(payload_json);
+""",
+    102: """
+-- embedding resource configuration fingerprint is added idempotently below.
+""",
+    103: """
+-- observed embedding dimensions are added idempotently below.
+""",
+    104: PARTICIPANT_SCHEMA,
 }
 
 
@@ -10485,6 +10520,50 @@ END;
                 "'disabled','manual','self_attested','dual_review','policy_auto','emergency_recovery'))"
             )
 
+    @staticmethod
+    def _ensure_embedding_config_hash_column(connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(embedding_resources)")
+        }
+        if "config_hash" not in columns:
+            connection.execute("ALTER TABLE embedding_resources ADD COLUMN config_hash TEXT")
+
+    @staticmethod
+    def _ensure_embedding_observed_dimensions_column(connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(embedding_resources)")
+        }
+        if "observed_dimensions" not in columns:
+            connection.execute(
+                "ALTER TABLE embedding_resources ADD COLUMN observed_dimensions INTEGER"
+            )
+
+    @staticmethod
+    def _embedding_config_hash(row: sqlite3.Row) -> str:
+        return content_hash(
+            {
+                "base_url": str(row["base_url"]),
+                "model": str(row["model"]),
+                "dimensions": None if row["dimensions"] is None else int(row["dimensions"]),
+                "timeout_seconds": float(row["timeout_seconds"]),
+                "daily_call_limit": int(row["daily_call_limit"]),
+                "daily_token_limit": int(row["daily_token_limit"]),
+                "daily_cost_limit_microusd": int(row["daily_cost_limit_microusd"]),
+                "input_cost_microusd_per_million": int(row["input_cost_microusd_per_million"]),
+                "circuit_failure_threshold": int(row["circuit_failure_threshold"]),
+                "circuit_cooldown_seconds": float(row["circuit_cooldown_seconds"]),
+            }
+        )
+
+    @classmethod
+    def _backfill_embedding_config_hashes(cls, connection: sqlite3.Connection) -> None:
+        rows = connection.execute("SELECT * FROM embedding_resources").fetchall()
+        for row in rows:
+            connection.execute(
+                "UPDATE embedding_resources SET config_hash=? WHERE config_id=?",
+                (cls._embedding_config_hash(row), row["config_id"]),
+            )
+
     def _set_schema_version(self, connection: sqlite3.Connection, version: int) -> None:
         """Advance the marker only after the complete migration stage is valid."""
         connection.execute(
@@ -10883,6 +10962,28 @@ END;
                                 "ALTER TABLE model_calls ADD COLUMN capture_policy_version INTEGER"
                             )
                         self._execute_sql_script(connection, migration)
+                        self._set_schema_version(connection, target_version)
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
+                if target_version == 102:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._execute_sql_script(connection, migration)
+                        self._ensure_embedding_config_hash_column(connection)
+                        self._backfill_embedding_config_hashes(connection)
+                        self._set_schema_version(connection, target_version)
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
+                if target_version == 103:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._ensure_embedding_observed_dimensions_column(connection)
                         self._set_schema_version(connection, target_version)
                         connection.commit()
                     except Exception:

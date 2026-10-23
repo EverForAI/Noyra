@@ -191,6 +191,11 @@ def test_exclusive_memory_revisions_and_vector_are_erased(tmp_path: Path, archiv
                 utc_now(),
             ),
         )
+    with db.transaction() as connection:
+        connection.execute(
+            "INSERT INTO memory_embedding_inputs(memory_id, content_hash) VALUES (?, ?)",
+            (memory.memory_id, content_hash("private second memory")),
+        )
     erasure = ConversationErasure(db)
     erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
     job = erasure.run("owner", window["conversation_id"])
@@ -208,6 +213,7 @@ def test_exclusive_memory_revisions_and_vector_are_erased(tmp_path: Path, archiv
     assert MindEngine(db).verify_integrity("owner")["memories"] == 1
     with db.connection() as connection:
         assert not connection.execute("SELECT 1 FROM memory_embeddings").fetchone()
+        assert not connection.execute("SELECT 1 FROM memory_embedding_inputs").fetchone()
     with pytest.raises(sqlite3.IntegrityError), db.transaction() as connection:
         connection.execute(
             "UPDATE memories SET status='active' WHERE memory_id=?", (memory.memory_id,)
