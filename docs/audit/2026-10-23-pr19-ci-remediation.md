@@ -33,3 +33,9 @@ GitHub PR 检查运行 `39901026191`，push 运行 `39901022254`。四组合均�
 使用 origin/main 的独立源码副本建立严格 schema99 库，再用当前分支迁移至103，另建严格103新库比较：迁移库与新库的 DDL/structure 指纹完全一致。全部旧对象仅 `embedding_resources` 改变（config_hash、observed_dimensions 两列），新增 `memory_embedding_inputs` 和三个有界查询索引；所有 `public_*` 表、索引和触发器逐项相同。未改变产品 schema、指纹注册表或迁移来迁就测试。
 
 公开档案测试显式断言版本103，更新为已复核的完整DDL/structure固定值；保留固定指纹而不是改为从同一运行时代码获取预期。公开档案、strict contract、schema迁移与runtime export筛选集共56 passed、26 deselected（156.40秒）。复核确认只更新测试的版本固定值，未取消schema防漂移门禁。
+
+### C 语义记忆生命周期夹具
+
+成功场景按真实协议执行 boot→orient→activate，并用上下文在临时目录清理前关闭主体；验证两个原始记忆仍保留正文且均标记 superseded。新增 booting/paused/stopped 三种状态下不发送、不创建调用与attempt、不写整合、不修改记忆的拒绝回归。产品生命周期门禁和记忆整合逻辑均未修改。
+
+记忆整合与语义整合 5 passed、3 subtests passed（15.48秒），Ruff/format通过。复审检查Windows锁释放顺序：先退出主体上下文释放进程锁，再清理临时目录，避免成功测试退出时泄漏文件句柄。
