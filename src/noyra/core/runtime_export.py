@@ -676,6 +676,7 @@ _OWNERSHIP_GRAPHS[100] = {
     "memory_embedding_inputs": _parent_rule("memory_embeddings", "memory_id", "memory_id"),
 }
 _OWNERSHIP_GRAPHS[101] = _OWNERSHIP_GRAPHS[100]
+_OWNERSHIP_GRAPHS[102] = _OWNERSHIP_GRAPHS[101]
 
 
 @dataclass(frozen=True)
