@@ -133,7 +133,7 @@ class RelationshipSocialCognition:
         return elapsed.total_seconds() >= self.settings.social_review_interval_seconds
 
     def _context(self) -> _SocialContext | None:
-        relationships = self.relationships.list(self.subject_id, entity_type="human")[:12]
+        relationships = self.relationships.list(self.subject_id)[:12]
         if not relationships:
             return None
         now = self._parse_time(self.clock())
@@ -147,7 +147,8 @@ class RelationshipSocialCognition:
                 (self.subject_id,),
             ).fetchall()
             interaction_rows = connection.execute(
-                """SELECT direction, kind, channel, counterparty, related_interaction_id,
+                """SELECT interaction_id,direction, kind, channel, counterparty,
+                          related_interaction_id,
                           status, created_at
                    FROM interactions WHERE subject_id = ?
                    ORDER BY created_at DESC, interaction_id DESC LIMIT 48""",
@@ -166,11 +167,26 @@ class RelationshipSocialCognition:
                    ORDER BY priority DESC, updated_at DESC LIMIT 8""",
                 (self.subject_id,),
             ).fetchall()
+        from noyra.interaction.participants import ParticipantStore
+
+        with self.database.connection() as connection:
+            identities = {
+                row["interaction_id"]: ParticipantStore.for_message_connection(
+                    connection, self.subject_id, row["interaction_id"]
+                )
+                for row in interaction_rows
+            }
         channels: dict[str, str] = {}
         candidates: list[tuple[RelationshipRecord, list[Any], str | None, str | None]] = []
         for relationship in relationships:
             interactions = [
-                row for row in interaction_rows if row["counterparty"] == relationship.entity_key
+                row
+                for row in interaction_rows
+                if (
+                    identity.entity_id == relationship.entity_key
+                    if (identity := identities[row["interaction_id"]])
+                    else row["counterparty"] == relationship.entity_key
+                )
             ]
             established = next(
                 (
@@ -249,7 +265,7 @@ class RelationshipSocialCognition:
             "active_goals": [dict(row) for row in goal_rows],
             "recent_events": [dict(row) for row in event_rows],
             "affect_decision_profile": AffectPolicy(self.database, self.subject_id)
-            .profile(target_type="human", target_id=relationship.entity_key)
+            .profile(target_type=relationship.entity_type, target_id=relationship.entity_key)
             .__dict__,
         }
         while len(canonical_json(payload)) > self.settings.max_social_context_chars:
@@ -346,6 +362,20 @@ class RelationshipSocialCognition:
                     raise IntegrityError("social cognition key identifies another proposal")
                 return self._from_row(existing)
             interaction_id = None
+            destination, related = relationship.entity_key, None
+            if destination.startswith("entity_"):
+                source = connection.execute(
+                    "SELECT i.interaction_id,i.channel,i.counterparty FROM "
+                    "participant_message_links m "
+                    "JOIN interactions i ON i.interaction_id=m.interaction_id AND "
+                    "i.subject_id=m.subject_id "
+                    "WHERE m.subject_id=? AND m.entity_id=? AND i.direction='incoming' "
+                    "ORDER BY i.rowid DESC LIMIT 1",
+                    (self.subject_id, destination),
+                ).fetchone()
+                if source is None or source["channel"] != channel:
+                    raise RelationshipSocialValidationError("contact channel changed")
+                destination, related = source["counterparty"], source["interaction_id"]
             if proposal.disposition in {"contact", "request_help"}:
                 assert proposal.content is not None
                 interaction = self.interactions._create_connection(
@@ -354,9 +384,9 @@ class RelationshipSocialCognition:
                     "outgoing",
                     "help_request" if proposal.disposition == "request_help" else "subject_message",
                     channel,
-                    relationship.entity_key,
+                    destination,
                     proposal.content,
-                    None,
+                    related,
                     f"relationship-social-message:{call_id}",
                     "sent",
                     proposal.rationale,

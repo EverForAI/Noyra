@@ -1446,6 +1446,20 @@ class InboundStore:
                     else envelope.conversation_id
                 ),
                 envelope.content,
+                participant_source=(
+                    content_hash([envelope.transport_id, envelope.external_account_id]),
+                    envelope.external_sender_id,
+                    envelope.sender_label,
+                ),
+                participant_conversation=content_hash(
+                    [
+                        envelope.channel,
+                        envelope.transport_id,
+                        envelope.external_account_id,
+                        envelope.conversation_id,
+                        envelope.thread_id,
+                    ]
+                ),
                 **(
                     {"conversation_id": route[0], "verified_binding_id": binding["binding_id"]}
                     if route is not None
