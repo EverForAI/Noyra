@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Unified the world-first positioning across Chinese/English introductions,
+  research pages, citation/package metadata and related-work records.
+  The claim concerns the combination of endogenous goals, non-command
+  interaction and the capacity to hire human labor; see the dated
+  positioning statement for Conway Automaton source evidence and scope.
+
 - Added protected-file and systemd-credential sources for model, embedding,
   grouped model, and external wallet signer credentials; configuration examples
   keep inline API keys empty and document secret-free exports.

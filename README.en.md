@@ -13,8 +13,15 @@ GitHub: [EverForAI](https://github.com/EverForAI)<br>
 License: [Apache-2.0](LICENSE)<br>
 Current release: experimental research preview `preview-2026.09.07-r1`
 
-See the [related-work and research record](docs/research/2026-09-06-ncas-prior-art.md) for comparable
-projects, boundaries, and unresolved questions.
+The project's **world-first claim concerns the combination** of endogenous goals, non-command
+interaction, and the subject's capacity to organize paid human labor. Goals form and change through
+the subject's state, experience, and developing values, without an imposed business objective such
+as having to earn money to pay for its server. External permissions, budgets, and safety rules
+constrain actions without assigning the subject a business goal.
+
+See the [current positioning and Conway Automaton comparison](docs/research/2026-10-23-positioning.md)
+for the scope and evidence behind this claim, and the
+[related-work record](docs/research/2026-09-06-ncas-prior-art.md) for other comparable projects.
 
 ## What Is Noyra?
 

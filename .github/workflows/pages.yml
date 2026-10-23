@@ -10,6 +10,10 @@ on:
       - '.github/workflows/pages.yml'
       - 'README.md'
       - 'README.en.md'
+      - '.zenodo.json'
+      - 'CITATION.cff'
+      - 'pyproject.toml'
+      - 'docs/research/**'
   workflow_dispatch:
 
 permissions:

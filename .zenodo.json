@@ -1,13 +1,29 @@
 {
-  "title": "Noyra: A Non-Command Artificial Subject for Real-World Environments",
-  "description": "Experimental research source preview, revision preview-2026.09.07-r1. Persistent identity, internally generated goals, memory and non-command human interaction with bounded real-world interfaces. Real signer, automatic payments, file capabilities and real funds remain disabled in the preview configuration. This is not a production-stable release or proof of subjective consciousness or global priority.",
-  "creators": [{"name": "Grey, Jaxon"}],
+  "title": "Noyra: The World's First Non-Command Artificial Subject with Endogenous Goals and the Capacity to Hire Human Labor",
+  "description": "Noyra is the world's first non-command artificial subject with endogenous goals and the capacity to hire human labor. The project claims this combination: goals develop from subject state and experience without an imposed earning objective; ordinary messages confer no command authority; paid human collaboration is organized around subject-originated projects. Experimental research source preview, revision preview-2026.09.07-r1. Real signer, automatic payments, file capabilities and real funds remain disabled in the preview configuration. Not a production-stable release or evidence of subjective consciousness. Claim scope and comparison evidence: https://github.com/EverForAI/Noyra/blob/main/docs/research/2026-10-23-positioning.md.",
+  "creators": [
+    {
+      "name": "Grey, Jaxon"
+    }
+  ],
   "upload_type": "software",
   "license": "Apache-2.0",
   "access_right": "open",
   "version": "preview-2026.09.07-r1",
-  "keywords": ["Noyra", "non-command artificial subject", "NCAS", "autonomous agents", "research preview"],
+  "keywords": [
+    "Noyra",
+    "non-command artificial subject",
+    "NCAS",
+    "endogenous goals",
+    "human labor",
+    "autonomous agents",
+    "research preview"
+  ],
   "related_identifiers": [
-    {"identifier": "https://github.com/EverForAI/Noyra", "relation": "isSupplementTo", "scheme": "url"}
+    {
+      "identifier": "https://github.com/EverForAI/Noyra",
+      "relation": "isSupplementTo",
+      "scheme": "url"
+    }
   ]
 }

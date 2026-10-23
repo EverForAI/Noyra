@@ -12,7 +12,12 @@ GitHub：[EverForAI](https://github.com/EverForAI)<br>
 许可证：[Apache-2.0](LICENSE)<br>
 当前版本：实验性研究预览版 `preview-2026.09.07-r1`
 
-相关项目、边界和未决问题见[相关工作与检索记录](docs/research/2026-09-06-ncas-prior-art.md)。
+“世界首个”是本项目针对**目标内生、非命令式交互、主体自主组织有偿人类劳动**这一组合提出的首创主张。
+目标由主体的状态、经历和逐步形成的价值产生与修订，不预设“必须赚钱支付服务器费用”等不可放弃的业务目的。
+权限、预算和安全规则仍由外部基础设施维护；它们限定行动范围，不替主体指定业务目标。
+
+现行定位、与 Conway Automaton 的区别和证据范围见[首创主张说明](docs/research/2026-10-23-positioning.md)；
+其他相关项目见[相关工作与检索记录](docs/research/2026-09-06-ncas-prior-art.md)。
 
 ## Noyra 是什么？
 

@@ -130,6 +130,10 @@ export const content = {
         faqTitle: "几个重要问题。",
         faqs: [
             [
+                "“世界首个”指什么？",
+                "指目标内生、非命令式交互、自主组织有偿人类劳动这一组合。Noyra 不预设必须赚钱、服务创建者等不可放弃的业务目的；目标由自身状态、经历与价值发展形成。首创主张的范围与 Conway Automaton 固定提交源码对比见研究页。真实雇佣与支付的部署验收状态单独记录。",
+            ],
+            [
                 "Noyra 已经被证明有意识了吗？",
                 "没有。“人工主体”是操作性工程定义。第一人称表达、记忆或持续运行，都不构成主观意识或法律人格的证明。",
             ],
@@ -155,9 +159,9 @@ export const content = {
         footerDocs: "开发文档",
         footerNote: "实验性研究预览 · 不代表生产就绪",
         researchTitle: "研究与证据",
-        researchIntro: "研究一种面向真实世界持续运行的人工主体。",
+        researchIntro: "世界首个目标内生、可雇佣人类劳动的非命令式人工主体。",
         researchBody:
-            "Noyra 以非命令式人工主体（NCAS）为研究框架，具备非命令式交互、自主目标形成和自主雇佣人类劳动的实现基础，探索面向真实世界持续运行的人工主体。这里介绍 Noyra 的架构、实现进展与相关研究。",
+            "Noyra 的非命令式人工主体（NCAS）首创主张针对目标内生、非命令式交互与自主组织有偿人类劳动的结合。目标从自身状态、经历和价值发展中形成与修订，不预设必须赚钱支付服务器费用的业务目的。权限、预算与安全控制继续约束行动。这里给出架构、实现进展与比较证据。",
         criteriaTag: "01 / 架构与研究",
         criteriaTitle: "持续存在，自主形成方向。",
         researchTopicLink: "架构要点",
@@ -168,7 +172,7 @@ export const content = {
             ],
             [
                 "内生目标",
-                "目标有来自主体状态与经历的形成和修订路径，不只是分解用户提供的任务。",
+                "目标从主体状态、经历与价值发展中形成和修订，不预设必须赚钱等业务目的；预算约束不等于指定目标。",
             ],
             [
                 "无命令特权",
@@ -195,6 +199,7 @@ export const content = {
                 "身份、目标、观察、行动和恢复均有可追踪证据。失败与未知不伪装成成功。",
             ],
         ],
+        positioningLink: "查看首创主张与 Conway 对比证据",
         definitionLink: "查看完整定义与实现入口",
         evidenceTitle: "代码、测试、部署，分别陈述。",
         evidence: [
@@ -351,6 +356,10 @@ export const content = {
         faqTitle: "Important questions.",
         faqs: [
             [
+                "What does the world-first claim cover?",
+                "The combination of endogenous goals, non-command interaction and the capacity to organize paid human labor. Noyra has no imposed business objective such as earning its server costs or serving its creator. Goals form through its own state, experience and developing values. The research page links the claim scope and Conway Automaton source comparison. Live hiring and payment acceptance remain separately documented.",
+            ],
+            [
                 "Has Noyra been proven conscious?",
                 "No. Artificial subject is an operational engineering term. First-person language, memory and persistent operation do not establish subjective consciousness or legal personhood.",
             ],
@@ -377,9 +386,9 @@ export const content = {
         footerDocs: "Developer documentation",
         footerNote: "Experimental research preview · Not production-ready",
         researchTitle: "Research & evidence",
-        researchIntro: "Study an artificial subject designed for continuous operation in the real world.",
+        researchIntro: "The World's First Non-Command Artificial Subject with Endogenous Goals and the Capacity to Hire Human Labor.",
         researchBody:
-            "Noyra uses the Non-Command Artificial Subject (NCAS) framework to explore an artificial subject designed for continuous operation in the real world, with non-command interaction, endogenous goal formation and an implementation foundation for autonomously hiring human labor. Explore its architecture, implementation progress and related research.",
+            "Noyra claims the Non-Command Artificial Subject (NCAS) combination of endogenous goals, non-command interaction and the capacity to organize paid human labor. Goals form and change through its state, experience and developing values, without an imposed business objective such as earning its server costs. Permissions, budgets and safety controls continue to constrain actions. Explore the architecture, implementation progress and comparison evidence.",
         criteriaTag: "01 / ARCHITECTURE & RESEARCH",
         criteriaTitle: "Continuity with an internal direction.",
         researchTopicLink: "Architecture",
@@ -390,7 +399,7 @@ export const content = {
             ],
             [
                 "Endogenous goals",
-                "Goal formation and revision have paths grounded in subject state and experience, not merely decomposition of a user task.",
+                "Goals form and change through subject state, experience and developing values, without an imposed earning objective. Budget constraints do not assign a business goal.",
             ],
             [
                 "No command privilege",
@@ -417,6 +426,7 @@ export const content = {
                 "Identity, goals, observation, action and recovery have traceable evidence. Failures and unknown outcomes are not recorded as success.",
             ],
         ],
+        positioningLink: "World-first claim and Conway comparison evidence",
         definitionLink: "Full definition and implementation references",
         evidenceTitle: "Code, tests and deployment are distinct.",
         evidence: [
