@@ -65,6 +65,10 @@
         }
     }
     function errorMessage(error) {
+        if (error.message === "invalid_captcha")
+            return t("验证码不正确或已过期，请换一张后重试。", "The verification code is incorrect or expired. Request a new image and try again.");
+        if (error.message === "authentication_busy")
+            return t("登录服务正忙，请稍后重试。", "Sign-in is busy. Please try again shortly.");
         if (error.message === "account_name_unavailable")
             return t(
                 "这个用户名已有人使用，请换一个。",
@@ -133,10 +137,14 @@
                 "付款等待策略检查",
                 "Payment awaiting policy checks",
             ),
-            pending_confirmation: t(
+            awaiting_confirmation: t(
                 "付款等待确认",
                 "Payment awaiting approval",
             ),
+            pending_confirmation: t("付款等待确认", "Payment awaiting approval"),
+            signing: t("付款签名中，尚未广播", "Signing payment; not yet broadcast"),
+            expired: t("已过期", "Expired"),
+            refunded: t("已退款", "Refunded"),
             reserved: t("已预留，尚未到账", "Reserved; not yet paid"),
             broadcast: t(
                 "已广播，等待链上确认",
@@ -151,6 +159,15 @@
             cancelled: t("已取消", "Cancelled"),
             reply: t("有一条新回复", "A new reply"),
         })[value] || String(value || t("暂无付款订单", "No payment order yet"));
+    const paymentStatus = (value) => ({
+        rejected: t("付款被拒绝", "Payment rejected"),
+        cancelled: t("付款已取消", "Payment cancelled"),
+        expired: t("付款已过期", "Payment expired"),
+    })[value] || status(value);
+    const noticeStatus = (notice) => {
+        const [state, ...payments] = notice.status.split(":");
+        return [status(state), ...payments.filter(Boolean).map(paymentStatus)].join(" · ");
+    };
     const secretBox = (label, value) =>
         `<div class="account-secret"><strong>${escape(label)}</strong><p>${t("请保存到安全位置；此页面离开后不再展示。不要把它作为留言发送。", "Save this somewhere safe. It will disappear when you leave. Do not post it as a message.")}</p><input aria-label="${escape(label)}" readonly value="${escape(value)}" autocomplete="off"></div>`;
     function account() {
@@ -168,13 +185,13 @@
         return items
             .map(
                 (row) =>
-                    `<article class="record-card"><h3>${escape(row.title || t("一条消息", "A message"))}</h3><div class="record-meta"><span>${escape(status(row.status))}</span>${row.payment_status ? `<span>${escape(status(row.payment_status))}</span>` : ""}<time>${escape(new Date(row.created_at).toLocaleString())}</time></div><p class="record-summary">${escape(row.content)}</p>${row.reward_amount ? `<p>${t("约定报酬", "Agreed reward")}: ${escape(row.reward_display || row.reward_amount)} · ${escape(row.asset_symbol || row.asset_id)}<br>${t("收款地址", "Recipient")}: ${escape(row.recipient_address)}</p>` : ""}${["applications", "submissions"].includes(kind) && row.status === "submitted" ? `<button type="button" data-withdraw="${escape(row.application_id || row.submission_id)}" data-kind="${kind === "applications" ? "application" : "submission"}">${t("撤回", "Withdraw")}</button>` : ""}</article>`,
+                    `<article class="record-card"><h3>${escape(row.title || t("一条消息", "A message"))}</h3><div class="record-meta"><span>${escape(status(row.status))}</span>${row.payment_status ? `<span>${escape(paymentStatus(row.payment_status))}</span>` : ""}<time>${escape(new Date(row.created_at).toLocaleString())}</time></div><p class="record-summary">${escape(row.content)}</p>${row.reward_amount ? `<p>${t("约定报酬", "Agreed reward")}: ${escape(row.reward_display || row.reward_amount)} · ${escape(row.asset_symbol || row.asset_id)}<br>${t("收款地址", "Recipient")}: ${escape(row.recipient_address)}</p>` : ""}${["applications", "submissions"].includes(kind) && row.status === "submitted" ? `<button type="button" data-withdraw="${escape(row.application_id || row.submission_id)}" data-kind="${kind === "applications" ? "application" : "submission"}">${t("撤回", "Withdraw")}</button>` : ""}</article>`,
             )
             .join("");
     }
     function notices(items) {
         return items.length
-            ? items.map((n) => `<p>${escape(n.title)} · ${escape(n.status.split(":").map(status).join(" · "))} ${n.read ? "" : `<button data-read="${escape(n.notification_id)}" data-notice-kind="${escape(n.kind)}" data-related="${escape(n.related_id)}">${t("标为已读", "Mark as read")}</button>`}</p>`).join("")
+            ? items.map((n) => `<p>${escape(n.title)} · ${escape(noticeStatus(n))} ${n.read ? "" : `<button data-read="${escape(n.notification_id)}" data-notice-kind="${escape(n.kind)}" data-related="${escape(n.related_id)}">${t("标为已读", "Mark as read")}</button>`}</p>`).join("")
             : `<p>${t("暂时没有新进展。", "No updates yet.")}</p>`;
     }
     async function session(signal) {

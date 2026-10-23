@@ -17,7 +17,7 @@ const person = {
     display_name: "Alice",
     entity_type: "human",
 };
-function harness(fetch) {
+function harness(fetch, language = "zh-CN") {
     const nodes = new Map();
     const node = (key) => {
         if (!nodes.has(key))
@@ -35,7 +35,7 @@ function harness(fetch) {
     const events = {};
     const sandbox = {
         document: {
-            documentElement: { lang: "zh-CN" },
+            documentElement: { lang: language },
             querySelector: node,
             addEventListener: (name, fn) => (events[name] = fn),
         },
@@ -188,4 +188,38 @@ test("notification pages render owner references and mark old updates without sc
     const read = { dataset: { read: "n-1", noticeKind: "messages", related: "reply-1" }, disabled: false };
     await h.events.click({ target: { closest: () => read } });
     assert.deepEqual(sent[0], { notification_id: "n-1", kind: "messages", related_id: "reply-1" });
+});
+
+test("all backend payment states have readable Chinese and English explanations", async () => {
+    const contract = readFileSync(join(__dirname, "../../src/noyra/wallet/economy_types.py"), "utf8");
+    const literal = contract.match(/PaymentOrderStatus = Literal\[([\s\S]*?)\]/)[1];
+    const states = [...literal.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
+    assert.equal(states.length, 12);
+    for (const language of ["zh-CN", "en"]) {
+        const h = harness(async (path) => {
+            if (path.endsWith("session")) return response({ participant: person, csrf_token: "csrf" });
+            if (path.endsWith("submissions")) return response({ items: states.map((state, index) => ({
+                submission_id: "s-" + index, title: "Work", content: "Evidence", status: "accepted", payment_status: state, created_at: "2026-10-24T00:00:00+00:00",
+            })) });
+            if (path.endsWith("notifications")) return response({ items: states.map((state, index) => ({
+                notification_id: "n-" + index, title: "Work", status: "accepted:" + state, read: true,
+            })) });
+            return response({ items: [] });
+        }, language);
+        await h.api.ready;
+        await h.api.show("mine");
+        const html = h.node("#participant-panel").innerHTML;
+        for (const state of states) assert.doesNotMatch(html, new RegExp(">" + state + "<"));
+        if (language === "zh-CN") {
+            assert.match(html, /付款等待确认/);
+            assert.match(html, /付款签名中，尚未广播/);
+            assert.match(html, /付款被拒绝/);
+            assert.match(html, /已退款/);
+        } else {
+            assert.match(html, /Payment awaiting approval/);
+            assert.match(html, /Signing payment; not yet broadcast/);
+            assert.match(html, /Payment rejected/);
+            assert.match(html, /Refunded/);
+        }
+    }
 });

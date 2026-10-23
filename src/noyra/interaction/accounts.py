@@ -51,6 +51,8 @@ def password_matches(password: str, encoded: str) -> bool:
     try:
         salt, _ = encoded.split(":", 1)
         return hmac.compare_digest(password_hash(password, salt), encoded)
+    except AccountRateLimited:
+        raise
     except (ValueError, TypeError):
         return False
 

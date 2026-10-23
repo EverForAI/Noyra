@@ -298,7 +298,10 @@ def test_registration_uses_existing_captcha_and_failed_post_counts_commit(
         "captcha_id": challenge["challenge_id"],
         "captcha_answer": "WRONG",
     }
-    assert visitor.request("/api/participants/posts", payload)[0] == 400
+    assert visitor.request("/api/participants/posts", payload) == (
+        400,
+        {"error": "invalid_captcha"},
+    )
     with owner.kernel.database.connection() as c:
         assert (
             c.execute(
@@ -378,3 +381,38 @@ def test_participant_pages_keep_chronological_order_and_bound_multibyte_text() -
     assert 0 < len(page["items"]) < 50
     assert page["next_cursor"]
     assert len(json.dumps(page, ensure_ascii=False).encode()) < 2_000_000
+
+
+@pytest.mark.parametrize("operation", ["login", "password"])
+def test_kdf_backpressure_is_retryable_not_bad_credentials(
+    http: tuple[NoyraHTTPServer, str], monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    import threading
+
+    import noyra.interaction.accounts as accounts_module
+
+    owner, base = http
+    AccountStore(owner.kernel.database, owner.kernel.subject_id).register(
+        "alice", "correct horse battery", "Alice"
+    )
+    visitor = Client(base)
+    if operation == "password":
+        visitor.login("alice")
+    slots = threading.BoundedSemaphore(2)
+    monkeypatch.setattr(accounts_module, "_KDF_SLOTS", slots)
+    slots.acquire()
+    slots.acquire()
+    payload = (
+        {"username": "alice", "password": "correct horse battery"}
+        if operation == "login"
+        else {"current_password": "correct horse battery", "password": "new correct horse battery"}
+    )
+    try:
+        assert visitor.request("/api/participants/" + operation, payload) == (
+            429,
+            {"error": "authentication_busy"},
+        )
+    finally:
+        slots.release()
+        slots.release()
+    assert visitor.request("/api/participants/" + operation, payload)[0] == 200

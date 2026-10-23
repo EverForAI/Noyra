@@ -12,7 +12,12 @@ from urllib.parse import parse_qs, urlsplit
 from noyra.core.errors import IntegrityError, InvalidTransitionError, NotFoundError
 
 from .accounts import AccountError, AccountRateLimited, AccountStore, digest
-from .posts import PublicPostCapacityError, PublicPostQueueFullError, PublicPostRateLimitError
+from .posts import (
+    PublicPostCapacityError,
+    PublicPostCaptchaError,
+    PublicPostQueueFullError,
+    PublicPostRateLimitError,
+)
 
 COOKIE = "noyra_participant"
 
@@ -240,6 +245,8 @@ def dispatch(h: Any, owner: Any, method: str) -> bool:
             from .collaboration import ParticipantCollaboration
 
             _reply(h, 200, ParticipantCollaboration(owner).write(path, payload, who, client))
+    except PublicPostCaptchaError:
+        _reply(h, 400, {"error": "invalid_captcha"})
     except PublicPostRateLimitError:
         _reply(h, 429, {"error": "public_post_rate_limited"})
     except (PublicPostCapacityError, PublicPostQueueFullError):

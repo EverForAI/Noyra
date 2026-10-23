@@ -21,3 +21,5 @@ Private records are associated by receiver subject, participant entity, authenti
 ## Explicit external-channel binding
 
 Operator POST `/api/v1/admin/participant-sources` with entity_id,binding_id binds an already approved active channel sender to an existing entity before that source is independently recorded. This does not trust content self-identification. An existing source assigned to another contact is rejected: historical relationships are not guessed or silently merged. Binding is audited. Existing configured channels continue to require their native authentication and explicit inbound binding. Human/agent/Noyra correspondents all have separate stable entity IDs; group address remains a delivery target, not a person.
+
+Authentication backpressure returns HTTP429 with authentication_busy; it does not mean the password is wrong. CAPTCHA failures keep the invalid_captcha error used by the public posting flow, and failed attempts remain durable. Payment UI uses the actual PaymentOrderStatus values, including awaiting_confirmation, signing, expired and refunded; rejected payments are distinguished from rejected work.
