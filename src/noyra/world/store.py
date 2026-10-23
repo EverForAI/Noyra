@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from noyra.core.cognitive_waits import cancel_terminal_waits
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.events import EventStore
@@ -167,6 +168,9 @@ class ObservationStore:
                     self._transition_hash("new", status, reason),
                     now,
                 ),
+            )
+            cancel_terminal_waits(
+                connection, subject_id, f"world_cognition:{observation_id}", now=now
             )
             row = connection.execute(
                 "SELECT * FROM observations WHERE observation_id = ? AND subject_id = ?",

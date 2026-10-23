@@ -1203,6 +1203,16 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/JsonObject' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/admin/runtime-summary:
+    get:
+      tags: [observation]
+      operationId: adminRuntimeSummary
+      description: Bounded local sample; not readiness, external provider verification, or billing. Includes resource-group call samples, operator-test counts, classified unknown reasons, and bounded terminal-parent/cancelled wait samples. Missing parents are not automatically cancelled. No external requests or recursive scans. Cached for up to two seconds.
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/v1/admin/provider-health:
     get:
       tags: [observation]
@@ -2085,6 +2095,7 @@ paths:
   /api/v1/config/model-resources/{groupId}/test:
     post:
       tags: [configuration]
+      description: One explicit budgeted attempt against the selected saved resource, with the existing 64-token output ceiling. Lifecycle or call-state restrictions return 409; inactive resources return 409; authorization errors return 403; invalid request fields return 400; invalid structured output returns 502. A blocked lifecycle never sends a provider request or wakes the subject. Draft probes have a different scope and may use a larger reasoning output ceiling.
       operationId: testModelResource
       security: [{ operatorBearer: [] }]
       parameters: [{ $ref: '#/components/parameters/GroupId' }]
@@ -2099,6 +2110,8 @@ paths:
         '502': { $ref: '#/components/responses/BadGateway' }
         '429': { $ref: '#/components/responses/RateLimited' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+        '403':
+          description: Model test authorization or durable state restriction
   /api/v1/config/model-resources/{groupId}/{operation}:
     post:
       tags: [configuration]

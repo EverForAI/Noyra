@@ -55,6 +55,11 @@ class _CompletionPayload(BaseModel):
     usage: _UsagePayload | None = None
 
 
+def connectivity_probe_output_tokens(model: str, reasoning_effort: str | None) -> int:
+    """Use one bounded output contract for draft and stored connectivity probes."""
+    return 4096 if uses_completion_token_limit(model) or reasoning_effort is not None else 64
+
+
 class OpenAICompatibleProvider:
     name = "openai_compatible"
 
@@ -193,7 +198,6 @@ class OpenAICompatibleProvider:
             base_url=base_url,
             model=model,
             api_key=api_key,
-            timeout_seconds=30,
             max_response_bytes=256_000,
         )
         provider = cls(settings, client=client)
@@ -214,11 +218,8 @@ class OpenAICompatibleProvider:
                                     content='Return exactly {"ok":true} as the JSON response.',
                                 ),
                             ),
-                            max_output_tokens=(
-                                4096
-                                if uses_completion_token_limit(settings.model)
-                                or reasoning_effort is not None
-                                else 8
+                            max_output_tokens=connectivity_probe_output_tokens(
+                                settings.model, reasoning_effort
                             ),
                             temperature=0,
                             schema_name="NoyraCapabilityProbe",
@@ -292,7 +293,6 @@ class OpenAICompatibleProvider:
             base_url=base_url,
             model="model-discovery-placeholder",
             api_key=api_key,
-            timeout_seconds=30,
             max_response_bytes=512_000,
         )
         provider = cls(settings, client=client)

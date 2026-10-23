@@ -6,6 +6,7 @@ noyra_install_release_scripts() {
   local source_dir="$1" release_dir="$2" entry mode name
   local -a entries=(
     '0644:preflight-production.py'
+    '0644:deployment-maintenance.py'
     '0750:noyra-target-activation-runner.py'
     '0755:noyra-migration-agent.py'
   )

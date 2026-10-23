@@ -46,6 +46,7 @@ from noyra.model.errors import (
     ProviderCallError,
     StructuredOutputError,
 )
+from noyra.model.request_identity import business_request_key
 from noyra.model.types import CallRecord
 from noyra.sleep import FatigueInputs, FatigueTracker, SleepEngine
 from noyra.sleep.types import SleepReflectionPlan, SleepRunRecord
@@ -104,6 +105,7 @@ class CognitionCycle:
         reader: SafeWebReader | None = None,
         embedding_settings: EmbeddingSettings | None = None,
         embedding_call_authorizer: Callable[[], None] | None = None,
+        embedding_observed_dimension_recorder: Callable[[int], None] | None = None,
         common_knowledge: CommonKnowledgeStore | None = None,
         clock: Callable[[], str] = utc_now,
     ):
@@ -134,6 +136,7 @@ class CognitionCycle:
                 OpenAIEmbeddingProvider(
                     embedding_settings,
                     call_authorizer=embedding_call_authorizer,
+                    observed_dimension_recorder=embedding_observed_dimension_recorder,
                 ),
                 EmbeddingLedger(kernel.database, clock=clock),
                 subject_id=self.subject_id,
@@ -868,7 +871,9 @@ class CognitionCycle:
                 purpose,
                 self._messages(source, observation),
                 CognitionProposal,
-                idempotency_key=(f"world-cognition:{observation.observation_id}:{attempt_number}"),
+                idempotency_key=business_request_key(
+                    self.kernel.database, self.subject_id, purpose
+                ),
                 max_output_tokens=self.settings.max_output_tokens,
                 temperature=self.settings.temperature,
             )

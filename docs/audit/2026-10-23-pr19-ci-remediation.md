@@ -1,0 +1,53 @@
+# PR #19 CI 根因修复与验证
+
+日期：2026-10-23（北京时间）。分支：`codex/terminal-waits-operability`。基线：`0932154`。
+
+## 范围与执行顺序
+
+先闭合 PR #19 的 CI 根因并重新获取 GitHub 检查；运行时公开页面升级另开独立阶段，不混入本 PR。不连接生产、不调用真实模型、通信、支付或签名服务，不跳过必需检查，不修改主分支保护。
+
+| 模块 | 已确认根因 | 修复边界及风险 | 验证要求 |
+| --- | --- | --- | --- |
+| A 安装测试 | Ubuntu 仍要求移动 venv；Linux 上的 pwsh 被误当作可验证 Windows Authenticode | 修复测试平台/生命周期契约，不恢复会破坏 shebang 的移动操作；低风险 | 原子指针及失败回滚保持；Windows 成功/篡改测试实跑，Linux 保留可运行的拒绝测试 |
+| B schema 测试 | 新库升级至 103，公开档案测试仍固定 99 整库指纹 | 复核 99→103 结构差异与迁移后更新版本化测试；中风险 | 公开域结构不漂移、strict contract、迁移及导出所有权回归 |
+| C 生命周期夹具 | 语义记忆成功测试在 booting 状态发起调用，被新增生命周期门禁正确拒绝 | 正确启动并关闭测试主体，不放宽运行时门禁；低风险 | 成功整合、暂停/停止不发送且不修改记忆 |
+| D 路由与围栏 | business-round 身份变更后旧测试仍使用逐键锁；同时旧逐键跨进程锁兼容路径未覆盖 | 保留整业务轮次互斥与未知隔离，复核升级兼容，禁止用弱化锁或放行 unknown 解决红灯；高风险 | 新旧锁、碰撞、跨进程、换键、取消、异常清理、文件数量上限与证据容量 |
+| E 综合 | 原 PR 未完成整仓验证 | 全仓静态/前端、受影响集及双平台验证；推送后等待远端门禁 | 明确区分本地通过、远端 pending/失败、合并与部署 |
+
+## 原始失败证据
+
+GitHub PR 检查运行 `39901026191`，push 运行 `39901022254`。四组合均失败；PR 作业 Ubuntu 3.11/3.12 各 11 failed、2990 passed、67 skipped；Windows 3.11/3.12 各 9 failed、2962 passed、97 skipped。两封失败通知对应同一提交的两轮 CI，不代表主分支已被合入错误代码。
+
+本地在未修改前复现受影响集：9 failed、10 passed（84.48 秒）。语义记忆异常通过隔离诊断确认是 `ModelLifecycleBlockedError`（booting），不是供应商调用失败。
+
+## 模块结果
+
+### A 安装契约
+
+- Ubuntu 测试改为检查最终 release 路径创建环境、禁止移动新 venv、pip 校验及数据库迁移早于指针发布；安装器产品实现不变。
+- 两项依赖系统受签名 launcher 的成功/篡改集成测试只在原生 Windows 运行；安装清单/签名拒绝和缺模块诊断仍在具备 PowerShell 的平台运行。没有把 Linux 的 PowerShell 当作 Windows 认证实现。
+- Windows 原生安装/升级/回滚、hash 篡改、严格签名拒绝、缺模块诊断及 Ubuntu 静态生命周期合同共 8 passed（26.57 秒）。复核 diff：只修改测试适用条件和断言，产品安装与信任校验均未放宽。Linux 专项在综合阶段补充。
+
+### B schema 99→103 逐对象复核
+
+使用 origin/main 的独立源码副本建立严格 schema99 库，再用当前分支迁移至103，另建严格103新库比较：迁移库与新库的 DDL/structure 指纹完全一致。全部旧对象仅 `embedding_resources` 改变（config_hash、observed_dimensions 两列），新增 `memory_embedding_inputs` 和三个有界查询索引；所有 `public_*` 表、索引和触发器逐项相同。未改变产品 schema、指纹注册表或迁移来迁就测试。
+
+公开档案测试显式断言版本103，更新为已复核的完整DDL/structure固定值；保留固定指纹而不是改为从同一运行时代码获取预期。公开档案、strict contract、schema迁移与runtime export筛选集共56 passed、26 deselected（156.40秒）。复核确认只更新测试的版本固定值，未取消schema防漂移门禁。
+
+### C 语义记忆生命周期夹具
+
+成功场景按真实协议执行 boot→orient→activate，并用上下文在临时目录清理前关闭主体；验证两个原始记忆仍保留正文且均标记 superseded。新增 booting/paused/stopped 三种状态下不发送、不创建调用与attempt、不写整合、不修改记忆的拒绝回归。产品生命周期门禁和记忆整合逻辑均未修改。
+
+记忆整合与语义整合 5 passed、3 subtests passed（15.48秒），Ruff/format通过。复审检查Windows锁释放顺序：先退出主体上下文释放进程锁，再清理临时目录，避免成功测试退出时泄漏文件句柄。
+
+### D 路由身份与升级兼容锁
+
+旧断言确有过时部分，但未将全部锁失败归咎于测试。逐代码复核确认：业务轮次改成 `business-round` 后，当前版本不再检查升级前同一 caller key 的 v1 digest/v2 bucket；旧进程持有同一请求的锁时，新代码可能进入。此为上一轮引入的兼容缺口，风险P2，修复风险高；不同程序版本同时运行仍不是受支持部署方式，升级应先停止旧owner，新增锁只保留同一旧key的防线，不宣称允许任意旧版本混跑。
+
+修复同时持有业务轮次bucket和caller key原bucket，并仅检查已存在的相关v1文件；固定256 bucket命名空间、无unlink、无新增逐key文件。用ExitStack从内存锁登记后即建立清理，确保digest/path失败、第二把锁失败、取消及unlock异常后其余锁仍释放。未知结果仍先于等待时间/换路判断，未放宽资金、预算或人工重试规则。
+
+回归覆盖业务轮次及普通有意请求、旧逐key锁/新整轮锁/v1锁、hash bucket碰撞、换key子进程、1000身份的文件上限、重启继承、解锁异常、setup失败和取消。旧容量测试拆清同一业务round换key仍quarantined，普通请求不同key保持purpose-specific pool_waiting；两者重复调用都不新增证据。
+
+Windows模型/路由/锁/人工未知重试/生命周期集合137 passed、175 subtests passed（486.61秒）；前序路由+记忆30 passed、3 subtests passed及新增清理3 passed。全仓Ruff/format（727文件）、Mypy win32/linux（各452文件）与前端133项均通过。Linux受影响集及安装专项仍在执行，远端检查尚未重新触发。
+
+复审：未改业务身份或锁粒度，避免两个不同key绕过同一round；compat锁路径独立手工计算并由子进程验证，没有把测试预期绑定到被测辅助函数；只在真实Windows保留Authenticode成功链，未用假签名通过产品门禁。

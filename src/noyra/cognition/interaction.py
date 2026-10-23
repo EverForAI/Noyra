@@ -23,6 +23,7 @@ from noyra.model.errors import (
     ProviderCallError,
     StructuredOutputError,
 )
+from noyra.model.request_identity import business_request_key
 from noyra.sleep import FatigueInputs, FatigueTracker
 
 from .settings import CognitionSettings
@@ -101,9 +102,8 @@ class InteractionCognition:
                         purpose,
                         messages,
                         InteractionCognitionProposal,
-                        idempotency_key=(
-                            f"interaction-cognition:{interaction.interaction_id}:"
-                            f"{round_number}:{budget_day}:{calls_today + 1}"
+                        idempotency_key=business_request_key(
+                            self.database, self.subject_id, purpose
                         ),
                         max_output_tokens=min(1_500, self.settings.max_output_tokens),
                         temperature=self.settings.temperature,

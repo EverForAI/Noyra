@@ -9,7 +9,7 @@ import re
 import threading
 import time
 from collections.abc import Callable, Sequence
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -20,6 +20,12 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from noyra.core.at_rest import validate_private_file, validate_private_root
+from noyra.core.cognitive_waits import (
+    cancel_terminal_waits,
+    insert_wait_revision,
+    terminal_wait_reason,
+    wait_counts,
+)
 from noyra.core.credentials import read_secret_file
 from noyra.core.database import Database
 from noyra.core.errors import (
@@ -59,13 +65,16 @@ from .errors import (
     ConfigurationError,
     ModelAuthorizationError,
     ModelCallStateError,
+    ModelLifecycleBlockedError,
+    ModelResourceInactiveError,
     ProviderCallError,
     StructuredOutputError,
 )
 from .gateway import ModelGateway
 from .ledger import ModelLedger
-from .openai_compatible import OpenAICompatibleProvider
+from .openai_compatible import OpenAICompatibleProvider, connectivity_probe_output_tokens
 from .reasoning import ReasoningEffort, reasoning_profile
+from .request_identity import is_business_round, logical_key_from_route
 from .types import (
     BudgetLimits,
     CallRecord,
@@ -2775,7 +2784,11 @@ class RoutedModelGateway(ModelGateway):
         worker must not wait and then issue a duplicate side effect after the
         first worker's outcome becomes ambiguous.
         """
-        lock_key = (subject_id, purpose, idempotency_key)
+        # One unfinished business round is one identity, even for callers still
+        # using pre-upgrade counter/date keys. Explicit operator probes remain
+        # independent intentional requests.
+        lock_identity = "business-round" if is_business_round(purpose) else idempotency_key
+        lock_key = (subject_id, purpose, lock_identity)
         lock = self._try_claim_logical_route(lock_key)
         if lock is None:
             raise ProviderCallError(
@@ -2783,28 +2796,40 @@ class RoutedModelGateway(ModelGateway):
                 retryable=False,
                 outcome_unknown=True,
             )
-        route_digest = content_hash(
-            {
-                "subject_id": subject_id,
-                "purpose": purpose,
-                "idempotency_key": idempotency_key,
+        # Preserve the previous key-derived fence as well as the business-round
+        # fence. Otherwise an upgrade could ignore a still-held v1/v2 lock for
+        # exactly the same request. Both use the same fixed 256 bucket files;
+        # no per-request files are created in the legacy namespace.
+        with ExitStack() as cleanup:
+            cleanup.callback(self._release_logical_route, lock_key, lock, acquired=True)
+            digests = {
+                content_hash(
+                    {
+                        "subject_id": subject_id,
+                        "purpose": purpose,
+                        "idempotency_key": identity,
+                    }
+                )
+                for identity in (lock_identity, idempotency_key)
             }
-        )
-        legacy_path = (
-            self.database.path.with_name(f".{self.database.path.name}.model-route-locks")
-            / f"{route_digest}.lock"
-        )
-        # Fixed files avoid unlink races; hash collisions conservatively refuse work.
-        process_lock = ProcessLock(
-            self.database.path.with_name(f".{self.database.path.name}.model-route-locks-v2")
-            / f"{int(route_digest[:8], 16) % 256:02x}.lock"
-        )
-        legacy_lock = ProcessLock(legacy_path) if legacy_path.exists() else None
-        try:
+            process_paths = {
+                self.database.path.with_name(f".{self.database.path.name}.model-route-locks-v2")
+                / f"{int(digest[:8], 16) % 256:02x}.lock"
+                for digest in digests
+            }
+            legacy_paths = {
+                self.database.path.with_name(f".{self.database.path.name}.model-route-locks")
+                / f"{digest}.lock"
+                for digest in digests
+            }
+            process_paths.update(path for path in legacy_paths if path.exists())
             try:
-                process_lock.acquire()
-                if legacy_lock is not None:
-                    legacy_lock.acquire()
+                # Non-blocking and ordered: collisions conservatively refuse
+                # work; failed acquisition still releases every earlier lock.
+                for path in sorted(process_paths):
+                    process_lock = ProcessLock(path)
+                    cleanup.callback(process_lock.release)
+                    process_lock.acquire()
             except RuntimeOwnershipError as error:
                 raise ProviderCallError(
                     "routed_model_call_in_progress",
@@ -2821,15 +2846,6 @@ class RoutedModelGateway(ModelGateway):
                 temperature=temperature,
                 reasoning_effort=reasoning_effort,
             )
-        finally:
-            try:
-                if legacy_lock is not None:
-                    legacy_lock.release()
-            finally:
-                try:
-                    process_lock.release()
-                finally:
-                    self._release_logical_route(lock_key, lock, acquired=True)
 
     async def _complete_structured_locked(
         self,
@@ -2887,7 +2903,22 @@ class RoutedModelGateway(ModelGateway):
             reason_code="purpose_classified_locally",
         )
         groups = self.resources.active(subject_id, pool)
-        if forced_state is not None and not groups:
+        legacy_forced = forced_state is not None and forced_state.group_id == ""
+        if legacy_forced:
+            # A legacy authorization may only resume its original provider/model,
+            # even if stored resources have since been enabled.
+            if (
+                self.legacy_gateway is None
+                or self.legacy_gateway.resource_pool != pool
+                or forced_state is None
+                or self.legacy_gateway.model != forced_state.call.model
+                or self.legacy_gateway.provider.name != forced_state.call.provider
+            ):
+                raise ProviderCallError(
+                    "routed_unknown_retry_route_unavailable", retryable=False, outcome_unknown=True
+                )
+            groups = []
+        if forced_state is not None and not legacy_forced and not groups:
             self._finish_decision(
                 decision.decision_id,
                 "deferred",
@@ -2924,7 +2955,11 @@ class RoutedModelGateway(ModelGateway):
                     purpose,
                     messages,
                     output_type,
-                    idempotency_key=idempotency_key,
+                    idempotency_key=(
+                        forced_state.call.idempotency_key
+                        if legacy_forced and forced_state is not None
+                        else idempotency_key
+                    ),
                     max_output_tokens=max_output_tokens,
                     temperature=temperature,
                     reasoning_effort=reasoning_effort,
@@ -3111,6 +3146,22 @@ class RoutedModelGateway(ModelGateway):
                         isinstance(error, ProviderCallError) and error.outcome_unknown
                     ):
                         break
+                except ModelLifecycleBlockedError:
+                    # Local dispatch denial is neither an in-flight provider
+                    # request nor resource failure. Preserve the real reason.
+                    self._record_attempt(
+                        decision.decision_id,
+                        group.group_id,
+                        key.key_id,
+                        attempt_number,
+                        "failed",
+                        "model_lifecycle_blocked",
+                        int((time.monotonic() - started) * 1000),
+                    )
+                    self._finish_decision(
+                        decision.decision_id, "deferred", "model_lifecycle_blocked"
+                    )
+                    raise
                 except (BudgetExhaustedError, ModelCallStateError) as error:
                     latency = int((time.monotonic() - started) * 1000)
                     self._record_attempt(
@@ -3254,12 +3305,31 @@ class RoutedModelGateway(ModelGateway):
 
         prefix = self._route_prefix(idempotency_key, pool)
         legacy_prefix = self._legacy_route_prefix(idempotency_key, pool)
+        business_round = is_business_round(purpose)
         with self.database.connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM model_calls WHERE subject_id = ? AND purpose = ? "
                 "AND resource_pool = ? AND ("
                 "substr(idempotency_key, 1, ?) = ? OR "
-                "substr(idempotency_key, 1, ?) = ?) "
+                "substr(idempotency_key, 1, ?) = ? OR "
+                "(? AND ("
+                "status IN ('prepared','executing','unknown') OR "
+                "(status='failed' AND EXISTS (SELECT 1 FROM audit_records a "
+                "INDEXED BY idx_audit_subject_action_call "
+                "WHERE a.subject_id=model_calls.subject_id "
+                "AND a.action='model_unknown_retry_authorized' AND json_valid(a.payload_json) "
+                "AND json_extract(a.payload_json,'$.call_id')=model_calls.call_id) "
+                "AND NOT (EXISTS (SELECT 1 FROM audit_records a "
+                "INDEXED BY idx_audit_subject_action_call "
+                "WHERE a.subject_id=model_calls.subject_id "
+                "AND a.action='model_unknown_retry_closed' AND json_valid(a.payload_json) "
+                "AND json_extract(a.payload_json,'$.call_id')=model_calls.call_id) "
+                "OR (model_calls.error_code='operator_cancelled' AND EXISTS "
+                "(SELECT 1 FROM audit_records a "
+                "INDEXED BY idx_audit_subject_action_call "
+                "WHERE a.subject_id=model_calls.subject_id "
+                "AND a.action='model_unknown_retry_cancelled' AND json_valid(a.payload_json) "
+                "AND json_extract(a.payload_json,'$.call_id')=model_calls.call_id))))))) "
                 "ORDER BY created_at, call_id LIMIT 257",
                 (
                     self.subject_id,
@@ -3269,6 +3339,7 @@ class RoutedModelGateway(ModelGateway):
                     prefix,
                     len(legacy_prefix),
                     legacy_prefix,
+                    business_round,
                 ),
             ).fetchall()
             if len(rows) > 256:
@@ -3288,8 +3359,10 @@ class RoutedModelGateway(ModelGateway):
             placeholders = ",".join("?" for _ in call_ids)
             audit_rows = connection.execute(
                 "SELECT action, payload_json FROM audit_records "
+                "INDEXED BY idx_audit_subject_action_call "
                 "WHERE subject_id = ? AND action IN "
-                "('model_unknown_retry_authorized', 'model_unknown_retry_cancelled') "
+                "('model_unknown_retry_authorized', 'model_unknown_retry_cancelled', "
+                "'model_unknown_retry_closed') "
                 "AND json_valid(payload_json) "
                 f"AND json_extract(payload_json, '$.call_id') IN ({placeholders}) "
                 "ORDER BY occurred_at, audit_id",
@@ -3298,6 +3371,7 @@ class RoutedModelGateway(ModelGateway):
 
         authorized_call_ids: set[str] = set()
         cancelled_call_ids: set[str] = set()
+        closed_call_ids: set[str] = set()
         for audit_row in audit_rows:
             try:
                 payload = json.loads(str(audit_row["payload_json"]))
@@ -3309,18 +3383,40 @@ class RoutedModelGateway(ModelGateway):
                 call_id = payload["call_id"]
                 if audit_row["action"] == "model_unknown_retry_cancelled":
                     cancelled_call_ids.add(call_id)
+                elif audit_row["action"] == "model_unknown_retry_closed":
+                    closed_call_ids.add(call_id)
                 else:
                     authorized_call_ids.add(call_id)
 
         retry_state: _LogicalRouteState | None = None
         for row in rows:
             physical_key = str(row["idempotency_key"])
-            matched, metadata = self._route_metadata(physical_key, idempotency_key, pool)
+            try:
+                logical_key = (
+                    logical_key_from_route(physical_key, pool)
+                    if business_round
+                    else idempotency_key
+                )
+                matched, metadata = self._route_metadata(physical_key, logical_key, pool)
+            except ModelCallStateError:
+                matched, metadata = True, None
             if not matched:
-                continue
-            if metadata is None or str(row["resource_group_id"]) != metadata[0]:
-                # A malformed/mismatched physical route is not safe to reuse.
-                # Treat it as quarantined rather than selecting another key.
+                if (
+                    business_round
+                    and not physical_key.startswith("noyra-route-")
+                    and (row["resource_group_id"] is None)
+                ):
+                    # Direct legacy rows have no routed suffix, but still fence
+                    # the business round. Empty route metadata pins an explicit
+                    # retry to the original legacy gateway below.
+                    metadata = ("", "")
+                else:
+                    if business_round and row["status"] in {"prepared", "executing", "unknown"}:
+                        return _LogicalRouteState(
+                            self.ledger._call_from_row(row), "", "", "quarantine"
+                        )
+                    continue
+            if metadata is None or (metadata[0] and str(row["resource_group_id"]) != metadata[0]):
                 call = self.ledger._call_from_row(row)
                 return _LogicalRouteState(
                     call,
@@ -3346,13 +3442,15 @@ class RoutedModelGateway(ModelGateway):
             if (
                 status == "failed"
                 and call.call_id in authorized_call_ids
-                and call.call_id not in cancelled_call_ids
+                and call.call_id not in closed_call_ids
+                and not (
+                    str(row["error_code"]) == "operator_cancelled"
+                    and call.call_id in cancelled_call_ids
+                )
             ):
                 # One explicitly-authorized physical retry is terminal when
-                # it fails.  A later tick cannot treat the durable audit row
-                # as unlimited permission to rotate credentials and call
-                # again.  By contrast, operator reconciliation to a known
-                # failed outcome releases the ambiguity fence.
+                # it fails. A later tick cannot treat the durable audit row as
+                # unlimited permission to rotate credentials and call again.
                 return _LogicalRouteState(call, group_id, key_id, "quarantine")
         return retry_state
 
@@ -3465,7 +3563,7 @@ class RoutedModelGateway(ModelGateway):
         """
         group = self.resources.get(group_id, subject_id=subject_id)
         if group.status != "active":
-            raise ValueError("model resource must be active for testing")
+            raise ModelResourceInactiveError("model resource must be active for testing")
         key = self.resources.select_key(group.group_id, subject_id=subject_id)
         if key is None:
             raise ProviderCallError(
@@ -3495,7 +3593,9 @@ class RoutedModelGateway(ModelGateway):
                 messages,
                 _ModelProbeOutput,
                 idempotency_key=idempotency_key,
-                max_output_tokens=64,
+                max_output_tokens=connectivity_probe_output_tokens(
+                    group.model, group.reasoning_effort
+                ),
                 temperature=0,
             )
         except ProviderCallError as error:
@@ -3546,13 +3646,7 @@ class RoutedModelGateway(ModelGateway):
                 resource_pool=pool,
             )
             with self.database.connection() as connection:
-                pending_waits = int(
-                    connection.execute(
-                        "SELECT COUNT(*) FROM waiting_cognitive_tasks "
-                        "WHERE subject_id = ? AND pool = ? AND status = 'waiting'",
-                        (self.subject_id, pool),
-                    ).fetchone()[0]
-                )
+                waits = wait_counts(connection, self.subject_id, pool)
             result[pool] = {
                 "status": "healthy"
                 if any(
@@ -3569,7 +3663,7 @@ class RoutedModelGateway(ModelGateway):
                 "today_output_tokens": usage.output_tokens,
                 "today_cost_microusd": usage.cost_microusd,
                 "pressure": usage.pressure,
-                "pending_wait_count": pending_waits,
+                **waits,
                 "budget_reset_at_utc": reset_at,
             }
         return result
@@ -3863,6 +3957,9 @@ class RoutedModelGateway(ModelGateway):
     ) -> None:
         now = utc_now()
         with self.database.transaction() as connection:
+            if terminal_wait_reason(connection, self.subject_id, purpose) is not None:
+                cancel_terminal_waits(connection, self.subject_id, purpose, now=now)
+                return
             counts = evidence_counts(connection, self.subject_id)
             if counts.get("waiting_cognitive_task_revisions", 0) >= evidence_row_limit():
                 return
@@ -4003,29 +4100,8 @@ class RoutedModelGateway(ModelGateway):
                 >= evidence_row_limit()
             ):
                 raise InvalidTransitionError("evidence_capacity_reached")
-        payload = {
-            "task_id": task_id,
-            "status": status,
-            "reason_code": reason_code,
-            "retry_count": retry_count,
-            "next_retry_at": next_retry_at,
-            "created_at": now,
-        }
-        connection.execute(
-            """INSERT INTO waiting_cognitive_task_revisions(
-                revision_id, task_id, status, reason_code, retry_count, next_retry_at,
-                state_hash, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                new_id("cwaitrev"),
-                task_id,
-                status,
-                reason_code,
-                retry_count,
-                next_retry_at,
-                content_hash(payload),
-                now,
-            ),
+        insert_wait_revision(
+            connection, task_id, status, reason_code, retry_count, next_retry_at, now
         )
 
     def _aggregate_limits(self, pool: str) -> BudgetLimits:

@@ -1,0 +1,53 @@
+......................s..F.s............................................ [ 47%]
+........................................................................ [ 94%]
+........                                                                 [100%]
+================================== FAILURES ===================================
+_____ test_gc_policy_conflict_terminates_old_plan_and_preserves_evidence ______
+
+tmp_path = WindowsPath('D:/metagrowh/.user-temp/pytest-of-�ǳ�/pytest-3905/test_gc_policy_conflict_termin0')
+
+    def test_gc_policy_conflict_terminates_old_plan_and_preserves_evidence(tmp_path: Path) -> None:
+        from noyra.core import Database, IdentityStore
+        from noyra.core.types import content_hash
+    
+        helper = _helper(root_markers=True)
+        helper.MAX_RESUMABLE_GC_ACTIONS = 1
+        releases, backups = _real_gc_layout(tmp_path, helper)
+        database = Database(tmp_path / "noyra.sqlite3")
+        subject = "Noyra-supersede"
+        IdentityStore(database).ensure(subject, content_hash(subject))
+        first = helper.apply_resumable_gc(
+            database.path,
+            subject,
+            releases,
+            backups,
+            helper.gc_plan(releases, backups, keep=3, proc_root=tmp_path / "no-proc"),
+        )
+        second = helper.apply_resumable_gc(
+            database.path,
+            subject,
+            releases,
+            backups,
+            helper.gc_plan(releases, backups, keep=4, proc_root=tmp_path / "no-proc"),
+        )
+        assert second["run_id"] != first["run_id"]
+        assert second["superseded_run_id"] == first["run_id"]
+        assert helper._gc_index_path(database.path, first["run_id"]).exists()
+        with database.connection() as connection:
+            row = connection.execute(
+                "SELECT status,deleted_count,failure_code FROM backup_retention_runs WHERE run_id=?",
+                (first["run_id"],),
+            ).fetchone()
+        assert tuple(row) == ("failed", 1, "plan_superseded")
+        for index in range(4, 8):
+>           assert (releases / f"release-{index}").is_dir()
+E           AssertionError: assert False
+E            +  where False = is_dir()
+E            +    where is_dir = (WindowsPath('D:/metagrowh/.user-temp/pytest-of-�ǳ�/pytest-3905/test_gc_policy_conflict_termin0/releases') / 'release-4').is_dir
+
+tests\test_deployment_maintenance.py:916: AssertionError
+=========================== short test summary info ===========================
+SKIPPED [1] tests\test_deployment_maintenance.py:786: POSIX marker ownership contract
+SKIPPED [1] tests\test_deployment_maintenance.py:948: requires actual root and separate service UID
+FAILED tests/test_deployment_maintenance.py::test_gc_policy_conflict_terminates_old_plan_and_preserves_evidence
+1 failed, 149 passed, 2 skipped in 99.86s (0:01:39)

@@ -14,6 +14,7 @@ from .errors import (
     BudgetExhaustedError,
     ModelAuthorizationError,
     ModelCallStateError,
+    ModelLifecycleBlockedError,
     ProviderCallError,
     StructuredOutputError,
 )
@@ -97,14 +98,7 @@ class ModelGateway:
     ) -> GatewayResult[OutputT]:
         if not subject_id.strip() or not purpose.strip() or not idempotency_key.strip():
             raise ValueError("subject_id, purpose and idempotency_key are required")
-        with self.ledger.database.connection() as connection:
-            lifecycle = connection.execute(
-                "SELECT state FROM runtime_state WHERE subject_id = ?", (subject_id,)
-            ).fetchone()
-        if lifecycle is not None and lifecycle["state"] in {"paused", "deep_sleep", "waking"}:
-            raise ModelCallStateError(
-                f"model calls are disabled while lifecycle is {lifecycle['state']}"
-            )
+        self.ledger.check_lifecycle(subject_id, purpose)
         selected_reasoning = self.reasoning_effort if reasoning_effort is None else reasoning_effort
         if self.reasoning_capability_verified:
             if selected_reasoning != self.reasoning_effort:
@@ -180,7 +174,11 @@ class ModelGateway:
                     resource_key_fingerprint=self.resource_key_fingerprint,
                     pricing=self.pricing,
                 )
-            except (BudgetExhaustedError, ModelAuthorizationError) as error:
+            except (
+                BudgetExhaustedError,
+                ModelAuthorizationError,
+                ModelLifecycleBlockedError,
+            ) as error:
                 self.ledger.finish_call(
                     call.call_id,
                     "failed",
@@ -190,6 +188,8 @@ class ModelGateway:
                         else "budget_exhausted"
                     )
                     if isinstance(error, BudgetExhaustedError)
+                    else "model_lifecycle_blocked"
+                    if isinstance(error, ModelLifecycleBlockedError)
                     else "model_authorization_denied",
                 )
                 raise
@@ -231,10 +231,16 @@ class ModelGateway:
                     expected_resource_revision=self.resource_revision,
                 )
                 before_send()
-            except (ModelAuthorizationError, OperationInvalidated) as error:
+            except (
+                ModelAuthorizationError,
+                ModelLifecycleBlockedError,
+                OperationInvalidated,
+            ) as error:
                 code = (
                     "runtime_epoch_invalidated"
                     if isinstance(error, OperationInvalidated)
+                    else "model_lifecycle_blocked"
+                    if isinstance(error, ModelLifecycleBlockedError)
                     else "model_authorization_denied"
                 )
                 self.ledger.cancel_unsent_attempt(attempt.attempt_id, error_code=code)
@@ -254,13 +260,14 @@ class ModelGateway:
                     assert_current_lease()
                 except OperationInvalidated:
                     stale_operation = True
-            except ModelAuthorizationError:
-                self.ledger.cancel_unsent_attempt(
-                    attempt.attempt_id, error_code="model_authorization_denied"
+            except (ModelAuthorizationError, ModelLifecycleBlockedError) as error:
+                code = (
+                    "model_lifecycle_blocked"
+                    if isinstance(error, ModelLifecycleBlockedError)
+                    else "model_authorization_denied"
                 )
-                self.ledger.finish_call(
-                    call.call_id, "failed", error_code="model_authorization_denied"
-                )
+                self.ledger.cancel_unsent_attempt(attempt.attempt_id, error_code=code)
+                self.ledger.finish_call(call.call_id, "failed", error_code=code)
                 raise
             except OperationInvalidated:
                 if send_denied:

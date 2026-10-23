@@ -19,6 +19,7 @@ from noyra.model.errors import (
     ProviderCallError,
     StructuredOutputError,
 )
+from noyra.model.request_identity import business_request_key
 from noyra.sleep import SleepReflectionPlan, SleepRunRecord
 
 from .settings import CognitionSettings
@@ -82,7 +83,7 @@ class SleepReflectionCognition:
                     purpose,
                     self._messages(run, context),
                     SleepReflectionPlan,
-                    idempotency_key=f"sleep-reflection:{run.sleep_id}:{calls + 1}",
+                    idempotency_key=business_request_key(self.database, self.subject_id, purpose),
                     max_output_tokens=min(4_000, self.settings.max_output_tokens),
                     temperature=self.settings.temperature,
                 )

@@ -1158,6 +1158,7 @@ _CORE_AUDIT_ACTIONS = frozenset(
         "model_unknown_reconciled",
         "model_unknown_retry_authorized",
         "model_unknown_retry_cancelled",
+        "model_unknown_retry_closed",
         "runtime_exported",
         "training_export_aborted",
         "training_exported",
@@ -3082,6 +3083,7 @@ def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
         "FROM audit_records a "
         "LEFT JOIN model_calls referenced_call ON "
         "a.action IN ('model_unknown_retry_authorized', 'model_unknown_retry_cancelled', "
+        "'model_unknown_retry_closed', "
         "'model_unknown_reconciled') "
         "AND referenced_call.call_id = CASE "
         "WHEN typeof(a.payload_json) = 'text' AND json_valid(a.payload_json) "
@@ -3160,8 +3162,31 @@ def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
                 f"{context_label} historical authenticity",
             ):
                 raise IntegrityError(f"{context_label} historical authenticity is invalid")
-        elif action in {"model_unknown_retry_authorized", "model_unknown_retry_cancelled"}:
-            _provenance_keys(payload, {"call_id", "reason"}, context_label)
+        elif action in {
+            "model_unknown_retry_authorized",
+            "model_unknown_retry_cancelled",
+            "model_unknown_retry_closed",
+        }:
+            keys = set(payload)
+            basic_keys = {"call_id", "reason"}
+            resolution_keys = basic_keys | {
+                "resolution_evidence_hash",
+                "duplicate_risk_accepted",
+            }
+            if action in {"model_unknown_retry_authorized", "model_unknown_retry_cancelled"}:
+                _provenance_keys(payload, basic_keys, context_label)
+            elif keys == resolution_keys:
+                _provenance_hash(
+                    payload["resolution_evidence_hash"],
+                    f"{context_label} resolution evidence hash",
+                )
+                if not _provenance_json_bool(
+                    payload["duplicate_risk_accepted"],
+                    f"{context_label} duplicate risk acceptance",
+                ):
+                    raise IntegrityError(f"{context_label} risk acceptance is invalid")
+            else:
+                raise IntegrityError(f"{context_label} payload is invalid")
             _provenance_text(payload["call_id"], f"{context_label} call id")
             _provenance_text(payload["reason"], f"{context_label} reason")
             if row["referenced_call_subject_id"] != subject_id:
@@ -3929,6 +3954,9 @@ def _check_model_resources(context: IntegrityContext) -> object:
 
 
 def _check_embedding_resources(context: IntegrityContext) -> Mapping[str, Any]:
+    from pydantic import SecretStr
+
+    from noyra.model.embedding import EmbeddingSettings
     from noyra.model.embedding_ledger import EmbeddingLedger
     from noyra.model.embedding_resources import EmbeddingResourceStore
 
@@ -3956,6 +3984,23 @@ def _check_embedding_resources(context: IntegrityContext) -> Mapping[str, Any]:
             raise IntegrityError("embedding resource secret is invalid") from error
         if content_hash({"api_key": value}) != record.key_fingerprint:
             raise IntegrityError("embedding resource secret fingerprint mismatch")
+        settings = EmbeddingSettings(
+            base_url=record.base_url,
+            model=record.model,
+            api_key=SecretStr(value),
+            dimensions=record.dimensions,
+            observed_dimensions=record.observed_dimensions,
+            timeout_seconds=record.timeout_seconds,
+            resource_id=record.config_id,
+            daily_call_limit=record.daily_call_limit,
+            daily_token_limit=record.daily_token_limit,
+            daily_cost_limit_microusd=record.daily_cost_limit_microusd,
+            input_cost_microusd_per_million=record.input_cost_microusd_per_million,
+            circuit_failure_threshold=record.circuit_failure_threshold,
+            circuit_cooldown_seconds=record.circuit_cooldown_seconds,
+        )
+        if record.config_hash != settings.configuration_fingerprint:
+            raise IntegrityError("embedding resource configuration fingerprint mismatch")
         verified_secrets += 1
     ledger_details = EmbeddingLedger(context.database).verify_integrity(
         context.subject_id,

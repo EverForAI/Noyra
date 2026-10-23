@@ -813,7 +813,7 @@ def test_installer_preflights_before_stopping_and_gc_follows_readiness() -> None
     assert source.index('deployment-maintenance.py" preflight') < source.index(
         "\nstop_old_service\n", source.index('deployment-maintenance.py" preflight')
     )
-    prepare = source.index('staging="$RELEASES_DIR/.staging-')
+    prepare = source.index('staging="$release_root"')
     stop = source.index("\nstop_old_service\n", prepare)
     verify = source.index('deployment-maintenance.py" verify-backup')
     assert prepare < stop < verify < source.index("\nensure_upgrade_state_layout\n")
