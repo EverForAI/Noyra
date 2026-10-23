@@ -172,6 +172,11 @@
             )
             .join("");
     }
+    function notices(items) {
+        return items.length
+            ? items.map((n) => `<p>${escape(n.title)} · ${escape(n.status.split(":").map(status).join(" · "))} ${n.read ? "" : `<button data-read="${escape(n.notification_id)}" data-notice-kind="${escape(n.kind)}" data-related="${escape(n.related_id)}">${t("标为已读", "Mark as read")}</button>`}</p>`).join("")
+            : `<p>${t("暂时没有新进展。", "No updates yet.")}</p>`;
+    }
     async function session(signal) {
         const epoch = ++identityEpoch;
         const data = await api("session", undefined, signal);
@@ -222,7 +227,7 @@
                 body =
                     `<p>${t("需要帮助的项目会出现在这里。选择感兴趣的事，看看成果要求，再决定是否参与。", "Projects needing help appear here. Explore the criteria and decide whether you would like to take part.")}</p>` +
                     (data.items.length
-                        ? data.items.map(opportunity).join("")
+                        ? `<div id="participant-opportunities">${data.items.map(opportunity).join("")}</div>${data.next_cursor ? `<button data-more="opportunities" data-cursor="${escape(data.next_cursor)}">${t("更多协作", "More collaborations")}</button>` : ""}`
                         : `<div class="empty-state"><strong>${t("暂时没有开放的协作", "No open collaborations right now")}</strong><p>${t("可以先读读项目进展，或留下你的想法。", "Explore the projects or leave a thought in the meantime.")}</p><a href="#projects">${t("看看项目 ↗", "Explore projects ↗")}</a></div>`);
             } else if (!identity)
                 body = `<div class="empty-state"><h3>${t("先认识一下你", "Let us know who you are")}</h3><p>${t("登录后，这里会保存属于你的交流和协作记录。", "Sign in to see your own conversations and contributions.")}</p><a href="#account">${t("登录或注册 ↗", "Sign in or create an account ↗")}</a></div>`;
@@ -257,7 +262,7 @@
                     );
                 if (seq !== generation) return;
                 body =
-                    `<h3>${t("回复与进展", "Replies and updates")}</h3>${notifications.items.length ? notifications.items.map((n) => `<p>${escape(n.title)} · ${escape(n.status.split(":").map(status).join(" · "))} ${n.read ? "" : `<button data-read="${escape(n.notification_id)}">${t("标为已读", "Mark as read")}</button>`}</p>`).join("") : `<p>${t("暂时没有新进展。", "No updates yet.")}</p>`}` +
+                    `<h3>${t("回复与进展", "Replies and updates")}</h3><div id="participant-notifications">${notices(notifications.items)}</div>${notifications.next_cursor ? `<button data-more="notifications" data-cursor="${escape(notifications.next_cursor)}">${t("更多进展", "More updates")}</button>` : ""}` +
                     [
                         ["posts", posts, t("我的留言", "My public messages")],
                         [
@@ -432,7 +437,7 @@
             } else if (button.dataset.read) {
                 await api(
                     "notification-read",
-                    { notification_id: button.dataset.read },
+                    { notification_id: button.dataset.read, kind: button.dataset.noticeKind, related_id: button.dataset.related },
                     controller.signal,
                 );
                 if (seq === generation) await show("mine");
@@ -451,7 +456,10 @@
                         ? "#participant-records"
                         : "#participant-" + kind,
                 );
-                target.insertAdjacentHTML("beforeend", list(data.items, kind));
+                const html = kind === "opportunities"
+                    ? data.items.map(opportunity).join("")
+                    : kind === "notifications" ? notices(data.items) : list(data.items, kind);
+                target.insertAdjacentHTML("beforeend", html);
                 if (data.next_cursor) button.dataset.cursor = data.next_cursor;
                 else button.remove();
             }

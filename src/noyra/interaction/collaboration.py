@@ -18,6 +18,32 @@ _MESSAGE_CAP = 10000
 _APPLICATION_CAP = 10000
 
 
+_NOTIFICATION_SQL = {
+    "posts": """SELECT 'posts' AS kind,p.post_id AS related_id,p.title,
+        p.status||':' AS status,p.updated_at AS created_at,'posts:'||p.post_id AS notice_key
+        FROM participant_post_links l JOIN public_posts p ON p.post_id=l.post_id
+        AND p.subject_id=l.subject_id WHERE l.subject_id=:subject AND l.entity_id=:entity
+        AND p.status NOT IN ('submitted','pending_review')""",
+    "submissions": """SELECT 'submissions' AS kind,s.submission_id AS related_id,b.title,
+        s.status||':'||COALESCE(o.status,'') AS status,
+        max(s.created_at,COALESCE(s.decided_at,s.created_at),
+            COALESCE(o.updated_at,s.created_at)) AS created_at,
+        'submissions:'||s.submission_id AS notice_key
+        FROM participant_submissions l JOIN wallet_bounty_submissions s
+        ON s.submission_id=l.submission_id AND s.subject_id=l.subject_id
+        JOIN wallet_bounties b ON b.bounty_id=s.bounty_id AND b.subject_id=s.subject_id
+        LEFT JOIN wallet_payment_orders o ON o.submission_id=s.submission_id
+        AND o.subject_id=s.subject_id WHERE l.subject_id=:subject AND l.entity_id=:entity
+        AND s.status NOT IN ('submitted','pending_review')""",
+    "messages": """SELECT 'messages' AS kind,i.interaction_id AS related_id,'Noyra' AS title,
+        'reply' AS status,i.created_at,'messages:'||i.interaction_id AS notice_key
+        FROM participant_message_links m JOIN interactions i
+        ON i.interaction_id=m.interaction_id AND i.subject_id=m.subject_id
+        WHERE m.subject_id=:subject AND m.entity_id=:entity AND m.visibility='private'
+        AND m.conversation_key=:conversation AND i.direction='outgoing'""",
+}
+
+
 def _text(payload: dict[str, Any], key: str, maximum: int = 20000) -> str:
     value = payload.get(key, "")
     if not isinstance(value, str) or not 1 <= len(value.strip()) <= maximum:
@@ -32,7 +58,15 @@ class ParticipantCollaboration:
         self.subject = owner.kernel.subject_id
 
     def opportunities(self) -> list[dict[str, Any]]:
-        rows = self.owner.wallet_economy.list_bounties(self.subject, status="published", limit=50)
+        # Retain the Python helper; HTTP clients use the paginated projection.
+        items: list[dict[str, Any]] = self.opportunity_page({})["items"]
+        return items
+
+    def opportunity_page(self, query: dict[str, list[str]]) -> dict[str, Any]:
+        before = self._before(query)
+        rows = self.owner.wallet_economy.list_bounties(
+            self.subject, status="published", limit=51, before=before
+        )
         items = [
             {
                 k: getattr(row, k)
@@ -49,13 +83,16 @@ class ParticipantCollaboration:
                     "max_submissions",
                     "reward_slots",
                     "status",
+                    "created_at",
                 )
             }
             for row in rows
         ]
-        for item in items:
+        page = self._page(items, "bounty_id")
+        for item in page["items"]:
+            item.pop("created_at")
             self._reward_display(item)
-        return items
+        return page
 
     def _reward_display(self, item: dict[str, Any]) -> None:
         with self.db.connection() as c:
@@ -82,7 +119,8 @@ class ParticipantCollaboration:
             chain_id=details["chain_id"],
         )
 
-    def read(self, path: str, query: dict[str, list[str]], who: Participant) -> dict[str, Any]:
+    @staticmethod
+    def _before(query: dict[str, list[str]]) -> tuple[str, str]:
         if set(query) - {"before"}:
             raise ValueError("invalid_query")
         cursor = query.get("before", [""])[0]
@@ -103,9 +141,13 @@ class ParticipantCollaboration:
                     raise ValueError("invalid_cursor")
             except (ValueError, UnicodeError):
                 raise ValueError("invalid_cursor") from None
+        return before_time, before_id
+
+    def read(self, path: str, query: dict[str, list[str]], who: Participant) -> dict[str, Any]:
+        before_time, before_id = self._before(query)
         view = path.removeprefix("/api/participants/")
         if view == "opportunities":
-            return {"items": self.opportunities()}
+            return self.opportunity_page(query)
         with self.db.connection() as c:
             if view == "posts":
                 rows = c.execute(
@@ -164,8 +206,7 @@ class ParticipantCollaboration:
                 ).fetchall()
                 return self._page(rows, "interaction_id")
             if view == "notifications":
-                records = self._notifications(c, who)
-                return {"items": records}
+                return self._notifications(c, who, before=(before_time, before_id))
         raise LookupError("unknown_participant_route")
 
     @staticmethod
@@ -189,42 +230,69 @@ class ParticipantCollaboration:
         )
         return {"items": selected, "next_cursor": cursor}
 
-    def _notifications(self, c: Any, who: Participant) -> list[dict[str, Any]]:
-        results = []
-        for view, key in [("posts", "post_id"), ("submissions", "submission_id")]:
-            for row in self.read("/api/participants/" + view, {}, who)["items"]:
-                state = row["status"] + ":" + str(row.get("payment_status") or "")
-                if row["status"] in {"submitted", "pending_review"}:
-                    continue
-                results.append(
-                    {
-                        "notification_id": content_hash([view, row[key], state]),
-                        "kind": view,
-                        "title": row["title"],
-                        "status": state,
-                        "related_id": row[key],
-                    }
+    @staticmethod
+    def _notice(row: dict[str, Any]) -> dict[str, Any]:
+        kind, related, state = row["kind"], row["related_id"], row["status"]
+        identifier = content_hash(
+            ["message", related] if kind == "messages" else [kind, related, state]
+        )
+        return {k: v for k, v in row.items() if k != "notice_key"} | {"notification_id": identifier}
+
+    def _notice_params(self, who: Participant) -> dict[str, str]:
+        return {
+            "subject": self.subject,
+            "entity": who.entity_id,
+            "conversation": "participant:" + who.entity_id,
+        }
+
+    def _notification(
+        self, c: Any, who: Participant, kind: str, related: str
+    ) -> dict[str, Any] | None:
+        if kind not in _NOTIFICATION_SQL:
+            raise ValueError("invalid_notification_kind")
+        row = c.execute(
+            "SELECT * FROM (" + _NOTIFICATION_SQL[kind] + ") WHERE related_id=:related LIMIT 1",
+            self._notice_params(who) | {"related": related},
+        ).fetchone()
+        return self._notice(dict(row)) if row is not None else None
+
+    def _notifications(
+        self, c: Any, who: Participant, *, before: tuple[str, str] | None = None
+    ) -> dict[str, Any]:
+        before_time, before_id = before or self._before({})
+        params = self._notice_params(who) | {"before_time": before_time, "before_id": before_id}
+        candidates: list[dict[str, Any]] = []
+        # Filter and order each notification source before LIMIT. Pending posts
+        # and incoming messages cannot evict an older reply or a new payment.
+        for sql in _NOTIFICATION_SQL.values():
+            candidates.extend(
+                dict(row)
+                for row in c.execute(
+                    "SELECT * FROM ("
+                    + sql
+                    + ") WHERE (created_at,notice_key)<(:before_time,:before_id) "
+                    "ORDER BY created_at DESC,notice_key DESC LIMIT 51",
+                    params,
                 )
-        for row in self.read("/api/participants/messages", {}, who)["items"]:
-            if row["direction"] == "outgoing":
-                results.append(
-                    {
-                        "notification_id": content_hash(["message", row["interaction_id"]]),
-                        "kind": "messages",
-                        "title": "Noyra",
-                        "status": "reply",
-                        "related_id": row["interaction_id"],
-                    }
-                )
-        for row in results:
-            row["read"] = bool(
-                c.execute(
-                    "SELECT 1 FROM participant_notification_reads WHERE subject_id=? AND "
-                    "entity_id=? AND notification_id=?",
-                    (self.subject, who.entity_id, row["notification_id"]),
-                ).fetchone()
             )
-        return results[:100]
+        candidates.sort(key=lambda row: (row["created_at"], row["notice_key"]), reverse=True)
+        page = self._page(candidates[:51], "notice_key")
+        items = [self._notice(row) for row in page["items"]]
+        read: dict[str, str] = {}
+        if items:
+            placeholders = ",".join("?" for _ in items)
+            read = {
+                row[0]: row[1]
+                for row in c.execute(
+                    "SELECT notification_id,read_at FROM participant_notification_reads "
+                    "WHERE subject_id=? "
+                    "AND entity_id=? AND notification_id IN (" + placeholders + ")",
+                    (self.subject, who.entity_id, *(item["notification_id"] for item in items)),
+                )
+            }
+        for item in items:
+            item["read"] = read.get(item["notification_id"], "") >= item["created_at"]
+        return {"items": items, "next_cursor": page["next_cursor"]}
 
     def write(
         self, path: str, payload: dict[str, Any], who: Participant, client: str
@@ -250,7 +318,7 @@ class ParticipantCollaboration:
                 "idempotency_key",
             },
             "withdraw": {"kind", "id"},
-            "notification-read": {"notification_id"},
+            "notification-read": {"notification_id", "kind", "related_id"},
         }
         if view not in allowed:
             raise LookupError("unknown_participant_route")
@@ -532,10 +600,29 @@ class ParticipantCollaboration:
         if view == "notification-read":
             identifier = _text(payload, "notification_id", 64)
             with self.db.transaction() as c:
-                if not any(n["notification_id"] == identifier for n in self._notifications(c, who)):
+                if "kind" in payload or "related_id" in payload:
+                    notice = self._notification(
+                        c, who, _text(payload, "kind", 16), _text(payload, "related_id", 128)
+                    )
+                    available = notice is not None and notice["notification_id"] == identifier
+                else:
+                    # Existing clients only read the first page. New clients
+                    # include the source reference to mark any page in bounded work.
+                    notice = next(
+                        (
+                            n
+                            for n in self._notifications(c, who)["items"]
+                            if n["notification_id"] == identifier
+                        ),
+                        None,
+                    )
+                    available = notice is not None
+                if not available:
                     raise LookupError("notification_unavailable")
                 c.execute(
-                    "INSERT OR IGNORE INTO participant_notification_reads VALUES(?,?,?,?)",
+                    "INSERT INTO participant_notification_reads VALUES(?,?,?,?) "
+                    "ON CONFLICT(subject_id,entity_id,notification_id) "
+                    "DO UPDATE SET read_at=excluded.read_at",
                     (self.subject, who.entity_id, identifier, utc_now()),
                 )
             return {"ok": True}

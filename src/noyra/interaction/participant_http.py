@@ -143,7 +143,7 @@ def dispatch(h: Any, owner: Any, method: str) -> bool:
                 from .collaboration import ParticipantCollaboration
 
                 if path == "/api/participants/opportunities":
-                    data = {"items": ParticipantCollaboration(owner).opportunities()}
+                    data = ParticipantCollaboration(owner).opportunity_page(query)
                 else:
                     if who is None:
                         raise PermissionError("participant_login_required")

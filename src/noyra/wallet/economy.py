@@ -291,7 +291,12 @@ class WalletEconomyStore:
             return self._bounty_from_row(row, status=status)
 
     def list_bounties(
-        self, subject_id: str, *, status: str | None = None, limit: int = 100
+        self,
+        subject_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+        before: tuple[str, str] | None = None,
     ) -> list[BountyRecord]:
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError("invalid bounty limit")
@@ -313,6 +318,17 @@ class WalletEconomyStore:
             else:
                 query += " AND status=?"
                 args.append(status)
+        if before is not None:
+            if (
+                not isinstance(before, tuple)
+                or len(before) != 2
+                or not all(isinstance(value, str) for value in before)
+                or len(before[0]) > 40
+                or len(before[1]) > 128
+            ):
+                raise ValueError("invalid bounty cursor")
+            query += " AND (created_at,bounty_id)<(?,?)"
+            args.extend(before)
         query += " ORDER BY created_at DESC,bounty_id DESC LIMIT ?"
         args.append(limit)
         with self.database.connection() as c:

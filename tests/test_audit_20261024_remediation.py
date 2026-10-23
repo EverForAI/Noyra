@@ -636,3 +636,207 @@ def test_message_receipt_across_browser_and_program_keeps_original_source(
             ).fetchone()[0]
             == who.source_id
         )
+
+
+def test_notifications_survive_incoming_traffic_and_support_owned_deep_reads(
+    kernel: SubjectKernel,
+) -> None:
+    collaboration, who, _ = make_collaboration(kernel)
+    first = collaboration.write(
+        "/api/participants/messages",
+        {"content": "Hello", "idempotency_key": "first"},
+        who,
+        "127.0.0.1",
+    )
+    store = InteractionStore(kernel.database)
+    reply = store.send(
+        kernel.subject_id,
+        "participant",
+        who.entity_id,
+        "Reply",
+        related_interaction_id=first["interaction_id"],
+        idempotency_key="reply",
+    )
+    for index in range(50):
+        collaboration.write(
+            "/api/participants/messages",
+            {"content": "Incoming", "idempotency_key": "incoming-" + str(index)},
+            who,
+            "127.0.0.1",
+        )
+    assert (
+        collaboration.read("/api/participants/notifications", {}, who)["items"][0]["related_id"]
+        == reply.interaction_id
+    )
+    for index in range(55):
+        store.send(
+            kernel.subject_id,
+            "participant",
+            who.entity_id,
+            "Later reply",
+            related_interaction_id=first["interaction_id"],
+            idempotency_key="outgoing-" + str(index),
+        )
+    page = collaboration.read("/api/participants/notifications", {}, who)
+    assert len(page["items"]) == 50 and page["next_cursor"]
+    rest = collaboration.read(
+        "/api/participants/notifications", {"before": [page["next_cursor"]]}, who
+    )
+    assert len(rest["items"]) == 6 and rest["next_cursor"] is None
+    assert len({row["notification_id"] for row in page["items"] + rest["items"]}) == 56
+    notice = rest["items"][-1]
+    payload = {k: notice[k] for k in ("notification_id", "kind", "related_id")}
+    assert collaboration.write(
+        "/api/participants/notification-read", payload, who, "127.0.0.1"
+    ) == {"ok": True}
+    reread = collaboration.read(
+        "/api/participants/notifications", {"before": [page["next_cursor"]]}, who
+    )
+    assert reread["items"][-1]["read"] is True
+    # A previous occurrence of the same state must not mark a later occurrence read.
+    with kernel.database.transaction() as c:
+        c.execute(
+            "UPDATE participant_notification_reads SET read_at='2000-01-01T00:00:00+00:00' "
+            "WHERE notification_id=?",
+            (notice["notification_id"],),
+        )
+    assert (
+        collaboration.read(
+            "/api/participants/notifications", {"before": [page["next_cursor"]]}, who
+        )["items"][-1]["read"]
+        is False
+    )
+    collaboration.write("/api/participants/notification-read", payload, who, "127.0.0.1")
+    assert (
+        collaboration.read(
+            "/api/participants/notifications", {"before": [page["next_cursor"]]}, who
+        )["items"][-1]["read"]
+        is True
+    )
+    accounts = AccountStore(kernel.database, kernel.subject_id)
+    accounts.register("bob", "correct horse battery", "Bob")
+    bob = accounts.authenticate(accounts.login("bob", "correct horse battery")[0])
+    assert bob
+    assert collaboration.read("/api/participants/notifications", {}, bob)["items"] == []
+    with pytest.raises(LookupError):
+        collaboration.write("/api/participants/notification-read", payload, bob, "127.0.0.1")
+
+
+def test_old_submission_new_decision_is_not_hidden_by_new_pending_work(
+    kernel: SubjectKernel,
+) -> None:
+    from noyra.wallet import BountyInput
+
+    collaboration, who, original = make_collaboration(kernel)
+    economy = collaboration.owner.wallet_economy
+    bounty = economy.create_bounty(
+        kernel.subject_id,
+        BountyInput(
+            title="Many entries",
+            description="Synthetic",
+            acceptance_criteria=["evidence"],
+            network_id=original.network_id,
+            asset_id=original.asset_id,
+            reward_amount="10",
+            opens_at=original.opens_at,
+            expires_at=original.expires_at,
+            max_submissions=100,
+            reward_slots=1,
+            goal_id=original.goal_id,
+            idempotency_key="large-bounty",
+        ),
+        actor="operator",
+    )
+    economy.publish_bounty(bounty.bounty_id, kernel.subject_id, actor="operator")
+    entries = [
+        collaboration.write(
+            "/api/participants/submit",
+            {
+                "bounty_id": bounty.bounty_id,
+                "content": "Evidence",
+                "recipient_address": "0x" + "1" * 40,
+                "idempotency_key": "submission-" + str(index),
+            },
+            who,
+            "127.0.0.1",
+        )
+        for index in range(55)
+    ]
+    economy.decide_submission(
+        entries[0]["submission_id"],
+        kernel.subject_id,
+        accepted=True,
+        reason="Synthetic verification",
+        actor="operator",
+    )
+    notices = collaboration.read("/api/participants/notifications", {}, who)["items"]
+    assert len(notices) == 1 and notices[0]["related_id"] == entries[0]["submission_id"]
+    assert notices[0]["status"].startswith("accepted:")
+
+
+def test_large_opportunities_are_complete_and_bounded_over_real_http(kernel: SubjectKernel) -> None:
+    from pydantic import SecretStr
+
+    from noyra.service import NoyraHTTPServer, ServiceSettings
+    from noyra.wallet import BountyInput
+    from test_participant_http import Client
+
+    collaboration, _, original = make_collaboration(kernel)
+    economy = collaboration.owner.wallet_economy
+    expected = {original.bounty_id}
+    for index in range(52):
+        bounty = economy.create_bounty(
+            kernel.subject_id,
+            BountyInput(
+                title="Synthetic " + str(index),
+                description="详" * 20000,
+                acceptance_criteria=["Complete criterion"],
+                network_id=original.network_id,
+                asset_id=original.asset_id,
+                reward_amount="10",
+                opens_at=original.opens_at,
+                expires_at=original.expires_at,
+                max_submissions=3,
+                reward_slots=1,
+                goal_id=original.goal_id,
+                idempotency_key="page-" + str(index),
+            ),
+            actor="operator",
+        )
+        economy.publish_bounty(bounty.bounty_id, kernel.subject_id, actor="operator")
+        expected.add(bounty.bounty_id)
+    server = NoyraHTTPServer(
+        kernel,
+        ServiceSettings(
+            data_dir=kernel.database.path.parent,
+            subject_id=kernel.subject_id,
+            genesis_hash=content_hash("audit"),
+            host="127.0.0.1",
+            port=0,
+            admin_token=SecretStr("synthetic-admin-token-with-entropy"),
+        ),
+    )
+    server.start()
+    try:
+        client = Client("http://127.0.0.1:" + str(server.address[1]))
+        cursor = None
+        seen = []
+        for _ in range(5):
+            status, page = client.request(
+                "/api/participants/opportunities" + ("?before=" + cursor if cursor else "")
+            )
+            assert status == 200
+            assert len(json.dumps(page, ensure_ascii=False).encode()) < 2000000
+            for item in page["items"]:
+                seen.append(item["bounty_id"])
+                assert "goal_id" not in item and "created_at" not in item
+                if item["bounty_id"] != original.bounty_id:
+                    assert item["description"] == "详" * 20000
+                    assert item["acceptance_criteria"] == ["Complete criterion"]
+            cursor = page["next_cursor"]
+            if not cursor:
+                break
+        assert cursor is None and len(seen) == len(expected) and set(seen) == expected
+        assert client.request("/api/participants/opportunities?unknown=1")[0] == 400
+    finally:
+        server.close()

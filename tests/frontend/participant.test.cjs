@@ -25,6 +25,7 @@ function harness(fetch) {
                 innerHTML: "",
                 dataset: {},
                 textContent: "",
+                insertAdjacentHTML(position, html) { this.innerHTML += html; },
                 replaceChildren() {
                     this.innerHTML = "";
                 },
@@ -149,4 +150,42 @@ test("uncertain message submission keeps the same identity and draft on retry", 
     assert.equal(submitted[0].idempotency_key, submitted[1].idempotency_key);
     assert.equal(form.values.content, "a private draft");
     assert.equal(form.dataset.busy, "false");
+});
+
+test("anonymous opportunity pagination appends the next bounded page", async () => {
+    const paths = [];
+    const opportunity = (id) => ({ bounty_id: id, title: id, description: "Detail", acceptance_criteria: ["Criterion"], reward_amount: "10", asset_id: "asset", network_id: "network" });
+    const h = harness(async (path) => {
+        paths.push(path);
+        if (path.includes("opportunities")) return response({ items: [opportunity(path.includes("?") ? "older" : "newer")], next_cursor: path.includes("?") ? null : "next-page" });
+        return response({ participant: null });
+    });
+    await h.api.ready;
+    await h.api.show("collaborate");
+    assert.match(h.node("#participant-panel").innerHTML, /data-more="opportunities"/);
+    const button = { dataset: { more: "opportunities", cursor: "next-page" }, disabled: false, remove() { this.removed = true; } };
+    await h.events.click({ target: { closest: () => button } });
+    assert.ok(paths.includes("/api/participants/opportunities?before=next-page"));
+    assert.match(h.node("#participant-opportunities").innerHTML, /older/);
+    assert.equal(button.removed, true);
+});
+test("notification pages render owner references and mark old updates without scanning", async () => {
+    const sent = [];
+    const notice = { notification_id: "n-1", kind: "messages", related_id: "reply-1", title: "<unsafe>", status: "reply", read: false };
+    const h = harness(async (path, config) => {
+        if (config.method === "POST") { sent.push(JSON.parse(config.body)); return response({ ok: true }); }
+        if (path.endsWith("session")) return response({ participant: person, csrf_token: "csrf" });
+        if (path.includes("notifications")) return response({ items: [notice], next_cursor: path.includes("?") ? null : "older-page" });
+        return response({ items: [], next_cursor: null });
+    });
+    await h.api.ready;
+    await h.api.show("mine");
+    assert.match(h.node("#participant-panel").innerHTML, /data-more="notifications"/);
+    assert.doesNotMatch(h.node("#participant-panel").innerHTML, /<unsafe>/);
+    const more = { dataset: { more: "notifications", cursor: "older-page" }, disabled: false, remove() {} };
+    await h.events.click({ target: { closest: () => more } });
+    assert.match(h.node("#participant-notifications").innerHTML, /data-related="reply-1"/);
+    const read = { dataset: { read: "n-1", noticeKind: "messages", related: "reply-1" }, disabled: false };
+    await h.events.click({ target: { closest: () => read } });
+    assert.deepEqual(sent[0], { notification_id: "n-1", kind: "messages", related_id: "reply-1" });
 });

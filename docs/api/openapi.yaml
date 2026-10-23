@@ -2703,7 +2703,15 @@ paths:
         required: true
         content:
           application/json:
-            schema: { type: object }
+            schema:
+              type: object
+              additionalProperties: false
+              required: [notification_id]
+              description: Send kind and related_id together to mark an item on any page; identifier-only requests verify the first page.
+              properties:
+                notification_id: { type: string, minLength: 1, maxLength: 64 }
+                kind: { type: string, enum: [posts, submissions, messages] }
+                related_id: { type: string, minLength: 1, maxLength: 128 }
       responses:
         '200': { description: Participant response 200; bodies never include another participant's private records. }
         '400': { description: Participant response 400; bodies never include another participant's private records. }
@@ -2722,8 +2730,23 @@ paths:
       operationId: participantNotificationsGet
       security: [{ ParticipantSession: [] }, { ParticipantBearer: [] }]
       description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      parameters:
+        - in: query
+          name: before
+          required: false
+          description: Opaque next_cursor from the previous page.
+          schema: { type: string, maxLength: 512 }
       responses:
-        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '200':
+          description: Bounded page; follow next_cursor until null. Ownership and public field allowlists are preserved.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items: { type: array, maxItems: 50, items: { type: object } }
+                  next_cursor: { type: string, nullable: true, maxLength: 512 }
         '400': { description: Participant response 400; bodies never include another participant's private records. }
         '401': { description: Participant response 401; bodies never include another participant's private records. }
         '403': { description: Participant response 403; bodies never include another participant's private records. }
@@ -2736,8 +2759,23 @@ paths:
       tags: [participants]
       operationId: participantOpportunitiesGet
       description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      parameters:
+        - in: query
+          name: before
+          required: false
+          description: Opaque next_cursor from the previous page.
+          schema: { type: string, maxLength: 512 }
       responses:
-        '200': { description: Participant response 200; bodies never include another participant's private records. }
+        '200':
+          description: Bounded page; follow next_cursor until null. Ownership and public field allowlists are preserved.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items: { type: array, maxItems: 50, items: { type: object } }
+                  next_cursor: { type: string, nullable: true, maxLength: 512 }
         '400': { description: Participant response 400; bodies never include another participant's private records. }
         '401': { description: Participant response 401; bodies never include another participant's private records. }
         '403': { description: Participant response 403; bodies never include another participant's private records. }
