@@ -79,6 +79,7 @@ class EmbeddingResourceRecord:
     circuit_failure_threshold: int
     circuit_cooldown_seconds: float
     key_fingerprint: str
+    config_hash: str
     status: str
     created_at: str
     updated_at: str
@@ -141,9 +142,10 @@ class EmbeddingResourceStore:
                     "config_id, subject_id, label, base_url, model, "
                     "dimensions, timeout_seconds, daily_call_limit, daily_token_limit, "
                     "daily_cost_limit_microusd, input_cost_microusd_per_million, "
-                    "circuit_failure_threshold, circuit_cooldown_seconds, key_fingerprint, "
+                    "circuit_failure_threshold, circuit_cooldown_seconds, "
+                    "key_fingerprint, config_hash, "
                     "status, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
                     (
                         config_id,
                         subject_id,
@@ -159,6 +161,7 @@ class EmbeddingResourceStore:
                         settings.circuit_failure_threshold,
                         settings.circuit_cooldown_seconds,
                         fingerprint,
+                        settings.configuration_fingerprint,
                         now,
                         now,
                     ),
@@ -222,7 +225,7 @@ class EmbeddingResourceStore:
             raise IntegrityError("embedding resource secret is unavailable") from error
         if content_hash({"api_key": secret}) != record.key_fingerprint:
             raise IntegrityError("embedding resource secret fingerprint mismatch")
-        return EmbeddingSettings(
+        settings = EmbeddingSettings(
             base_url=record.base_url,
             model=record.model,
             api_key=SecretStr(secret),
@@ -236,6 +239,9 @@ class EmbeddingResourceStore:
             circuit_failure_threshold=record.circuit_failure_threshold,
             circuit_cooldown_seconds=record.circuit_cooldown_seconds,
         )
+        if record.config_hash != settings.configuration_fingerprint:
+            raise IntegrityError("embedding resource configuration fingerprint mismatch")
+        return settings
 
     def call_authorizer(
         self,
@@ -250,7 +256,10 @@ class EmbeddingResourceStore:
         def authorize() -> None:
             with self.database.connection() as connection:
                 row = connection.execute(
-                    "SELECT subject_id, base_url, model, key_fingerprint, status "
+                    "SELECT subject_id, base_url, model, dimensions, timeout_seconds, "
+                    "daily_call_limit, daily_token_limit, daily_cost_limit_microusd, "
+                    "input_cost_microusd_per_million, circuit_failure_threshold, "
+                    "circuit_cooldown_seconds, config_hash, key_fingerprint, status "
                     "FROM embedding_resources WHERE config_id = ? AND subject_id = ?",
                     (config_id, subject_id),
                 ).fetchone()
@@ -260,6 +269,16 @@ class EmbeddingResourceStore:
             if (
                 row["base_url"] != settings.base_url
                 or row["model"] != settings.model
+                or row["dimensions"] != settings.dimensions
+                or float(row["timeout_seconds"]) != settings.timeout_seconds
+                or int(row["daily_call_limit"]) != settings.daily_call_limit
+                or int(row["daily_token_limit"]) != settings.daily_token_limit
+                or int(row["daily_cost_limit_microusd"]) != settings.daily_cost_limit_microusd
+                or int(row["input_cost_microusd_per_million"])
+                != settings.input_cost_microusd_per_million
+                or int(row["circuit_failure_threshold"]) != settings.circuit_failure_threshold
+                or float(row["circuit_cooldown_seconds"]) != settings.circuit_cooldown_seconds
+                or row["config_hash"] != settings.configuration_fingerprint
                 or row["key_fingerprint"] != expected_fingerprint
             ):
                 raise IntegrityError("embedding provider no longer matches its resource")
@@ -429,6 +448,7 @@ class EmbeddingResourceStore:
             "base_url",
             "model",
             "key_fingerprint",
+            "config_hash",
             "created_at",
             "updated_at",
         )
@@ -451,6 +471,7 @@ class EmbeddingResourceStore:
             circuit_failure_threshold,
             circuit_cooldown_seconds,
             row["key_fingerprint"],
+            row["config_hash"],
             status,
             row["created_at"],
             row["updated_at"],

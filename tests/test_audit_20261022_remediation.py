@@ -460,6 +460,86 @@ def test_embedding_space_identity_tracks_endpoint_dimensions_but_not_key(
         )
 
 
+def test_embedding_default_dimension_change_invalidates_provider_identity(
+    kernel: SubjectKernel,
+) -> None:
+    def provider(vector: list[float]) -> OpenAIEmbeddingProvider:
+        settings = EmbeddingSettings(
+            base_url="https://mutable.example/v1",
+            model="mutable-alias",
+            api_key=SecretStr("synthetic"),
+            dimensions=None,
+        )
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content)
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {"index": index, "embedding": vector}
+                        for index, _ in enumerate(payload["input"])
+                    ]
+                },
+            )
+
+        return OpenAIEmbeddingProvider(settings, transport=httpx.MockTransport(handle))
+
+    _, memory, _ = memory_fixture(kernel.database, kernel.subject_id)
+    first = MemoryEmbeddingIndex(kernel.database, provider([1.0, 0.0]))
+    first.index_memory(kernel.subject_id, memory.memory_id, memory.content)
+    second_provider = provider([1.0, 0.0, 0.0])
+    second = MemoryEmbeddingIndex(kernel.database, second_provider)
+    assert first.provider.name != second_provider.name
+    assert second.similarities(kernel.subject_id, memory.content, [memory.memory_id]) == {}
+    assert second.missing(kernel.subject_id) == [(memory.memory_id, memory.content)]
+
+
+def test_embedding_configuration_drift_is_rejected_by_authorizer_and_integrity(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "db")
+    subject = "audit-embedding-drift"
+    IdentityStore(database).ensure(subject, content_hash(subject))
+    from noyra.core.integrity import IntegrityRegistry
+
+    store = __import__("noyra.model", fromlist=["EmbeddingResourceStore"]).EmbeddingResourceStore(
+        database, tmp_path / "secrets"
+    )
+    record = store.configure(
+        subject,
+        __import__("noyra.model", fromlist=["EmbeddingResourceInput"]).EmbeddingResourceInput(
+            label="managed",
+            base_url="https://embedding.example/v1",
+            model="embed-v1",
+            api_key=SecretStr("synthetic-key"),
+            dimensions=2,
+            daily_call_limit=9,
+        ),
+        actor="operator",
+    )
+    settings = store.active_settings(subject)
+    assert settings is not None
+    authorizer = store.call_authorizer(subject, settings)
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE embedding_resources SET dimensions=3, daily_call_limit=0 WHERE config_id=?",
+            (record.config_id,),
+        )
+    with pytest.raises(Exception, match="embedding provider no longer matches"):
+        authorizer()
+    report = IntegrityRegistry().run(
+        database,
+        subject,
+        tmp_path,
+        profile="manual",
+        policy_mode="alert",
+        deadline_seconds=15,
+        check_ids=("model.embedding_resources",),
+    )
+    assert report.status == "corrupt"
+
+
 @pytest.mark.parametrize("status", ["active", "superseded"])
 def test_embedding_cas_rejects_content_changed_during_provider_call(
     kernel: SubjectKernel, status: str

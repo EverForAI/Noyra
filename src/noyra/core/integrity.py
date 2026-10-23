@@ -3954,6 +3954,9 @@ def _check_model_resources(context: IntegrityContext) -> object:
 
 
 def _check_embedding_resources(context: IntegrityContext) -> Mapping[str, Any]:
+    from pydantic import SecretStr
+
+    from noyra.model.embedding import EmbeddingSettings
     from noyra.model.embedding_ledger import EmbeddingLedger
     from noyra.model.embedding_resources import EmbeddingResourceStore
 
@@ -3981,6 +3984,22 @@ def _check_embedding_resources(context: IntegrityContext) -> Mapping[str, Any]:
             raise IntegrityError("embedding resource secret is invalid") from error
         if content_hash({"api_key": value}) != record.key_fingerprint:
             raise IntegrityError("embedding resource secret fingerprint mismatch")
+        settings = EmbeddingSettings(
+            base_url=record.base_url,
+            model=record.model,
+            api_key=SecretStr(value),
+            dimensions=record.dimensions,
+            timeout_seconds=record.timeout_seconds,
+            resource_id=record.config_id,
+            daily_call_limit=record.daily_call_limit,
+            daily_token_limit=record.daily_token_limit,
+            daily_cost_limit_microusd=record.daily_cost_limit_microusd,
+            input_cost_microusd_per_million=record.input_cost_microusd_per_million,
+            circuit_failure_threshold=record.circuit_failure_threshold,
+            circuit_cooldown_seconds=record.circuit_cooldown_seconds,
+        )
+        if record.config_hash != settings.configuration_fingerprint:
+            raise IntegrityError("embedding resource configuration fingerprint mismatch")
         verified_secrets += 1
     ledger_details = EmbeddingLedger(context.database).verify_integrity(
         context.subject_id,

@@ -4775,7 +4775,11 @@ class NoyraHTTPServer:
                             {
                                 **record.__dict__,
                                 "key_fingerprint": record.key_fingerprint[:12],
-                                "runtime_effective": record.config_id == effective_id,
+                                "runtime_effective": (
+                                    record.status == "active"
+                                    and record.config_id == effective_id
+                                    and runtime_status.get("effective") is True
+                                ),
                                 "restart_required": (
                                     record.status == "active" and record.config_id != effective_id
                                 ),

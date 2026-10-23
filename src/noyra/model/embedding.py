@@ -143,6 +143,23 @@ class EmbeddingSettings(BaseModel):
         )
 
     @property
+    def configuration_fingerprint(self) -> str:
+        return content_hash(
+            {
+                "base_url": self.base_url,
+                "model": self.model,
+                "dimensions": self.dimensions,
+                "timeout_seconds": self.timeout_seconds,
+                "daily_call_limit": self.daily_call_limit,
+                "daily_token_limit": self.daily_token_limit,
+                "daily_cost_limit_microusd": self.daily_cost_limit_microusd,
+                "input_cost_microusd_per_million": self.input_cost_microusd_per_million,
+                "circuit_failure_threshold": self.circuit_failure_threshold,
+                "circuit_cooldown_seconds": self.circuit_cooldown_seconds,
+            }
+        )
+
+    @property
     def space_fingerprint(self) -> str:
         """Identity of a vector space, deliberately independent of credentials."""
         parsed = urlsplit(self.base_url)
@@ -242,10 +259,31 @@ class OpenAIEmbeddingProvider:
         self.settings = settings
         self.transport = transport
         self.call_authorizer = call_authorizer
+        self._observed_dimensions: int | None = None
 
     @property
     def name(self) -> str:
-        return f"openai-compatible-space:{self.settings.space_fingerprint}"
+        dimensions = self.settings.dimensions or self._observed_dimensions
+        if dimensions == self.settings.dimensions:
+            fingerprint = self.settings.space_fingerprint
+        else:
+            parsed = urlsplit(self.settings.base_url)
+            hostname = parsed.hostname
+            if hostname is None:
+                raise ValueError("embedding API hostname is missing")
+            host = hostname.encode("idna").decode("ascii").casefold()
+            authority = f"[{host}]" if ":" in host else host
+            if parsed.port is not None and parsed.port != 443:
+                authority = f"{authority}:{parsed.port}"
+            fingerprint = content_hash(
+                {
+                    "protocol": "openai-compatible-embeddings/v1",
+                    "endpoint": f"https://{authority}{parsed.path.rstrip('/') or '/'}",
+                    "model": self.settings.model,
+                    "dimensions": dimensions,
+                }
+            )
+        return f"openai-compatible-space:{fingerprint}"
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
         return [list(vector) for vector in self.embed_with_usage(texts).vectors]
@@ -362,6 +400,13 @@ class OpenAIEmbeddingProvider:
         try:
             body = strict_json_loads(body_bytes)
             vectors = self._vectors(body, len(texts))
+            observed_dimensions = len(vectors[0])
+            if (
+                self.settings.dimensions is not None
+                and observed_dimensions != self.settings.dimensions
+            ):
+                raise ValueError("embedding provider returned unexpected dimensions")
+            self._observed_dimensions = observed_dimensions
             usage = self._usage(body, estimate_embedding_input_tokens(texts))
         except _EmbeddingResponseTokenLimitError as error:
             raise EmbeddingProviderError(
