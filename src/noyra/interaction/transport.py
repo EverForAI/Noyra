@@ -1224,9 +1224,23 @@ class DeliveryDispatcher:
             interactions = connection.execute(
                 "SELECT i.* FROM interactions i WHERE i.subject_id = ? "
                 "AND i.direction = 'outgoing' "
+                "AND i.channel != 'participant' "
                 "AND (i.channel != 'web' OR i.kind = 'help_request') "
                 "AND NOT EXISTS (SELECT 1 FROM interaction_deliveries d "
-                "WHERE d.interaction_id = i.interaction_id) ORDER BY i.created_at LIMIT ?",
+                "WHERE d.interaction_id = i.interaction_id) "
+                # Limit eligible external deliveries, not internal replies or
+                # messages whose original authenticated transport is unavailable.
+                "AND EXISTS (SELECT 1 FROM interaction_transports t "
+                "WHERE t.subject_id=i.subject_id AND t.status='active' AND ("
+                "(i.channel='web' AND i.kind='help_request') OR "
+                "(t.channel=i.channel AND (i.related_interaction_id IS NULL OR "
+                "NOT EXISTS (SELECT 1 FROM interaction_inbound_events e "
+                "WHERE e.subject_id=i.subject_id AND "
+                "e.interaction_id=i.related_interaction_id) OR "
+                "EXISTS (SELECT 1 FROM interaction_inbound_events e "
+                "WHERE e.subject_id=i.subject_id AND "
+                "e.interaction_id=i.related_interaction_id AND t.transport_id=e.transport_id))))) "
+                "ORDER BY i.created_at,i.interaction_id LIMIT ?",
                 (subject_id, max(1, min(limit, 200))),
             ).fetchall()
             for interaction in interactions:

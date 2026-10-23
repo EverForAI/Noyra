@@ -172,3 +172,133 @@ def test_excluded_memories_do_not_record_access(kernel: SubjectKernel) -> None:
             ).fetchone()[0]
             == 0
         )
+
+
+@pytest.mark.parametrize("blocked_channel", ["participant", "unconfigured"])
+def test_ineligible_messages_cannot_fill_delivery_batch(
+    kernel: SubjectKernel, tmp_path: Path, blocked_channel: str
+) -> None:
+    from pydantic import SecretStr
+
+    from noyra.interaction import DeliveryDispatcher, TransportInput, TransportStore
+
+    store = InteractionStore(kernel.database)
+    for index in range(12):
+        store.send(
+            kernel.subject_id,
+            blocked_channel,
+            "local",
+            "Internal or unavailable",
+            idempotency_key="blocked-" + str(index),
+        )
+    transports = TransportStore(kernel.database, tmp_path / "secrets")
+    target = transports.configure(
+        kernel.subject_id,
+        TransportInput(
+            channel="webhook",
+            label="Synthetic",
+            endpoint="https://example.test/delivery",
+            credentials={"webhook_secret": SecretStr("synthetic")},
+        ),
+        actor="operator",
+    )
+    message = store.send(
+        kernel.subject_id, "webhook", "remote", "Deliver this", idempotency_key="external"
+    )
+    dispatcher = DeliveryDispatcher(kernel.database, transports)
+    assert dispatcher.enqueue_pending(kernel.subject_id, limit=10) == 1
+    assert dispatcher.enqueue_pending(kernel.subject_id, limit=10) == 0
+    with kernel.database.connection() as c:
+        rows = c.execute(
+            "SELECT interaction_id,transport_id FROM interaction_deliveries WHERE subject_id=?",
+            (kernel.subject_id,),
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [(message.interaction_id, target.transport_id)]
+
+
+def test_disabled_source_is_skipped_without_switching_bots(
+    kernel: SubjectKernel, tmp_path: Path
+) -> None:
+    from pydantic import SecretStr
+
+    from noyra.interaction import (
+        DeliveryDispatcher,
+        InboundEnvelope,
+        InboundStore,
+        TransportInput,
+        TransportStore,
+    )
+
+    transports = TransportStore(kernel.database, tmp_path / "secrets")
+    original = transports.configure(
+        kernel.subject_id,
+        TransportInput(
+            channel="webhook",
+            label="Original",
+            endpoint="https://example.test/original",
+            credentials={"webhook_secret": SecretStr("original")},
+        ),
+        actor="operator",
+    )
+    other = transports.configure(
+        kernel.subject_id,
+        TransportInput(
+            channel="webhook",
+            label="Other",
+            endpoint="https://example.test/other",
+            credentials={"webhook_secret": SecretStr("other")},
+        ),
+        actor="operator",
+    )
+    inbound = InboundStore(kernel.database)
+    inbound.bind(
+        kernel.subject_id,
+        original.transport_id,
+        external_account_id="account",
+        external_sender_id="sender",
+    )
+    store = InteractionStore(kernel.database)
+    blocked = []
+    for index in range(11):
+        incoming = inbound.ingest(
+            InboundEnvelope(
+                channel="webhook",
+                transport_id=original.transport_id,
+                provider_event_id="incoming-" + str(index),
+                external_account_id="account",
+                external_sender_id="sender",
+                conversation_id="remote",
+                content="Invitation",
+            )
+        )
+        blocked.append(
+            store.send(
+                kernel.subject_id,
+                "webhook",
+                "remote",
+                "Reply on original only",
+                related_interaction_id=incoming.interaction_id,
+                idempotency_key="reply-" + str(index),
+            ).interaction_id
+        )
+    transports.disable(
+        original.transport_id,
+        subject_id=kernel.subject_id,
+        actor="operator",
+        reason="synthetic test",
+    )
+    eligible = store.send(
+        kernel.subject_id,
+        "webhook",
+        "other-remote",
+        "Unrelated message",
+        idempotency_key="eligible",
+    )
+    dispatcher = DeliveryDispatcher(kernel.database, transports)
+    assert dispatcher.enqueue_pending(kernel.subject_id, limit=10) == 1
+    with kernel.database.connection() as c:
+        rows = c.execute(
+            "SELECT interaction_id,transport_id FROM interaction_deliveries"
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [(eligible.interaction_id, other.transport_id)]
+    assert all(store.get(identifier).status == "sent" for identifier in blocked)
