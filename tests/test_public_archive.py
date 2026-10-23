@@ -704,3 +704,42 @@ def test_partitioned_sitemap_exceeds_old_thousand_record_ceiling(
         store.sitemap_partition(kernel.subject_id, base64.urlsafe_b64encode(sealed).decode())
     assert PublicArchive(kernel.database).sitemap_partition(kernel.subject_id, tokens[0])
     assert store.sitemap_partitions(kernel.subject_id) == tokens
+
+
+def test_overview_keeps_public_writing_visible_after_stage_changes(
+    archive: tuple[PublicArchive, SubjectKernel],
+) -> None:
+    from noyra.interaction import PublicDiaryStore
+    from noyra.sleep import SleepEngine, SleepReflectionPlan
+
+    store, kernel = archive
+    sleep = SleepEngine(kernel.database, kernel.subject_id)
+    run = sleep.start("subject_choice", "PRIVATE-REST-REASON")
+    sleep.begin_reflection(run.sleep_id)
+    body = "公开日记的一段文字。" * 100
+    sleep.commit_reflection(
+        run.sleep_id,
+        SleepReflectionPlan(summary="PRIVATE-REFLECTION", public_diary_candidate=body),
+    )
+    sleep.enter_deep_sleep(run.sleep_id)
+    sleep.wake(run.sleep_id, "fixture", force=True)
+    sleep.complete_wake(run.sleep_id)
+    diary = PublicDiaryStore(kernel.database).publish(
+        kernel.subject_id, run.sleep_id, "从一段文字读起", body
+    )
+    for _ in range(5):
+        EventStore(kernel.database).append(
+            kernel.subject_id,
+            "lifecycle_transition",
+            "fixture",
+            {"from": "active", "to": "paused"},
+            privacy_level="public_status",
+        )
+    overview = store.overview(kernel.subject_id)
+    assert len(overview["recent"]) == 3
+    assert all(item["kind"] == "lifecycle" for item in overview["recent"])
+    assert [item["id"] for item in overview["writing"]] == [diary.entry_id]
+    assert overview["writing"][0]["body"] == ""
+    assert overview["writing"][0]["provenance"] == "subject"
+    assert len(overview["writing"][0]["summary"]) <= 300
+    assert "PRIVATE-" not in str(overview)

@@ -3,21 +3,21 @@
 from __future__ import annotations
 
 PUBLIC_LABELS = {
-    "overview": ["现在与最近", "Now & recent"],
+    "overview": ["最近在这里", "Around here lately"],
     "timeline": ["时间线", "Timeline"],
     "diary": ["日记与文章", "Diary & writing"],
-    "behavior": ["历史行为", "Past activity"],
-    "lifecycle": ["生命周期", "Lifecycle"],
-    "sleep": ["睡眠记录", "Sleep"],
-    "goals": ["公开目标", "Goals"],
-    "projects": ["项目进展", "Projects"],
-    "predictions": ["公开预测", "Predictions"],
-    "research": ["研究摘要", "Research"],
-    "interactions": ["公开交流", "Public exchanges"],
-    "posts": ["公开帖子", "Public posts"],
-    "participate": ["投稿与求助", "Contribute"],
-    "updates": ["公开更新", "Updates"],
-    "about": ["关于与隐私", "About & privacy"],
+    "behavior": ["过往活动", "Past activity"],
+    "lifecycle": ["运行阶段", "Runtime stages"],
+    "sleep": ["休息记录", "Rest & sleep"],
+    "goals": ["目标与方向", "Goals & directions"],
+    "projects": ["正在做的事", "Projects"],
+    "predictions": ["预测与回看", "Predictions & outcomes"],
+    "research": ["研究笔记", "Research notes"],
+    "interactions": ["对外交流", "Public exchanges"],
+    "posts": ["留言广场", "Guestbook"],
+    "participate": ["留下一个想法 ↗", "Leave a thought ↗"],
+    "updates": ["实例更新", "Instance updates"],
+    "about": ["关于 Noyra", "About Noyra"],
     "booting": ["启动中", "Booting"],
     "orienting": ["初始化", "Orienting"],
     "active": ["活跃", "Active"],
@@ -64,7 +64,7 @@ PUBLIC_ACTIONS = {
 }
 
 PUBLIC_PROVENANCE = {
-    "operator_summary": ["管理者审核摘要", "Operator-approved summary"],
+    "operator_summary": ["管理者整理 · 已审核", "Prepared by the operator · reviewed"],
     "subject": ["Noyra 公开内容", "Public content by Noyra"],
     "visitor": ["访客署名 · 未验证", "Visitor name · unverified"],
     "operator": ["管理者发布", "Operator publication"],

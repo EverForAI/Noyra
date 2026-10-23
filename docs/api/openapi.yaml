@@ -2761,6 +2761,11 @@ components:
         public_diary_count: { type: integer, minimum: 0 }
         last_sleep_completed_at: { type: string, format: date-time, nullable: true }
         recent: { type: array, maxItems: 3, items: { $ref: '#/components/schemas/PublicArchiveItem' } }
+        writing:
+          type: array
+          maxItems: 1
+          description: Optional latest public diary preview, using the same projection as the diary list with an empty body. Independent of recent timeline stage changes. Added October 23, 2026; clients may fall back to recent when absent.
+          items: { $ref: '#/components/schemas/PublicArchiveItem' }
         goals: { type: array, maxItems: 2, items: { $ref: '#/components/schemas/PublicArchiveItem' } }
         projects: { type: array, maxItems: 2, items: { $ref: '#/components/schemas/PublicArchiveItem' } }
     PublicPublicationInput:
