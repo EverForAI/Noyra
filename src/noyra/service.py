@@ -10938,6 +10938,7 @@ class NoyraService:
                 managed_embedding_settings is not None
                 and managed_embedding_settings.dimensions is None
             ):
+
                 def record_embedding_dimensions(dimensions: int) -> None:
                     service.http.embedding_resources.record_observed_dimensions(
                         service.kernel.subject_id,

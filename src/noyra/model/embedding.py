@@ -397,10 +397,7 @@ class OpenAIEmbeddingProvider:
             ):
                 raise ValueError("embedding provider returned unexpected dimensions")
             self._observed_dimensions = observed_dimensions
-            if (
-                self.settings.dimensions is None
-                and self.observed_dimension_recorder is not None
-            ):
+            if self.settings.dimensions is None and self.observed_dimension_recorder is not None:
                 self.observed_dimension_recorder(observed_dimensions)
             usage = self._usage(body, estimate_embedding_input_tokens(texts))
         except _EmbeddingResponseTokenLimitError as error:
