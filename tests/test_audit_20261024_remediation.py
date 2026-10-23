@@ -840,3 +840,100 @@ def test_large_opportunities_are_complete_and_bounded_over_real_http(kernel: Sub
         assert client.request("/api/participants/opportunities?unknown=1")[0] == 400
     finally:
         server.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phase",
+    [
+        "authorize_attempt",
+        "start_attempt",
+        "check_request_authorization",
+        "provider_complete",
+        "provider_failed",
+        "provider_unknown",
+    ],
+)
+async def test_routed_withdrawal_settles_route_without_fallback_or_state_commit(
+    kernel: SubjectKernel, tmp_path: Path, phase: str
+) -> None:
+    from noyra.model.resources import RoutedModelGateway
+    from test_audit_20261022_remediation import resources_for
+
+    collaboration, who, bounty = make_collaboration(kernel)
+    result = collaboration.write(
+        "/api/participants/apply",
+        {"bounty_id": bounty.bounty_id, "content": "I can help", "idempotency_key": "interest"},
+        who,
+        "127.0.0.1",
+    )
+    engine, provider = cognition(kernel)
+    resources, _ = resources_for(kernel.database, kernel.subject_id, tmp_path)
+    routed = RoutedModelGateway(
+        kernel.database, kernel.subject_id, resources, provider_factory=lambda _: provider
+    )
+    engine.gateway = routed
+
+    def withdraw() -> None:
+        collaboration.write(
+            "/api/participants/withdraw",
+            {"kind": "application", "id": result["application_id"]},
+            who,
+            "127.0.0.1",
+        )
+
+    target: Any
+    if phase.startswith("provider_"):
+        complete = provider.complete
+
+        async def after_send(request: CompletionRequest) -> ProviderResponse:
+            withdraw()
+            from noyra.core.private_sources import InvitationWithdrawnError
+
+            with pytest.raises(InvitationWithdrawnError), kernel.database.transaction():
+                pass
+            if phase != "provider_complete":
+                from noyra.model.errors import ProviderCallError
+
+                provider.requests.append(request)
+                raise ProviderCallError(
+                    "synthetic_provider_failure",
+                    retryable=False,
+                    outcome_unknown=phase == "provider_unknown",
+                )
+            return await complete(request)
+
+        target, name, hook = provider, "complete", after_send
+    else:
+        check = getattr(routed.ledger, phase)
+
+        def before_send(*args: Any, **kwargs: Any) -> Any:
+            withdraw()
+            return check(*args, **kwargs)
+
+        target, name, hook = routed.ledger, phase, before_send
+    with patch.object(target, name, side_effect=hook):
+        await engine.run_due()
+    with kernel.database.connection() as c:
+        assert c.execute("SELECT COUNT(*) FROM interaction_decisions").fetchone()[0] == 0
+        assert c.execute("SELECT COUNT(*) FROM cognitive_route_outcomes").fetchone()[0] == 1
+        assert c.execute("SELECT status FROM model_calls").fetchone()[0] == (
+            "succeeded"
+            if phase == "provider_complete"
+            else "unknown"
+            if phase == "provider_unknown"
+            else "failed"
+        )
+        assert (
+            c.execute(
+                "SELECT COUNT(*) FROM model_attempts WHERE status IN ('authorized','executing')"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            c.execute(
+                "SELECT COUNT(*) FROM waiting_cognitive_tasks WHERE status='waiting'"
+            ).fetchone()[0]
+            == 0
+        )
+    assert len(provider.requests) == (1 if phase.startswith("provider_") else 0)

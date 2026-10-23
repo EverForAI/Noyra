@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
+from noyra.core.admission import accounting_scope
 from noyra.core.at_rest import validate_private_file, validate_private_root
 from noyra.core.cognitive_waits import (
     cancel_terminal_waits,
@@ -41,6 +42,7 @@ from noyra.core.evidence_capacity import (
 )
 from noyra.core.evidence_schema import MAX_ROUTE_FAILOVERS
 from noyra.core.locking import ProcessLock
+from noyra.core.private_sources import InvitationWithdrawnError, participant_invitation_withdrawn
 from noyra.core.provider_health import ProviderHealthStore
 from noyra.core.resource_policy import (
     LIMIT_DIMENSIONS,
@@ -2836,16 +2838,42 @@ class RoutedModelGateway(ModelGateway):
                     retryable=False,
                     outcome_unknown=True,
                 ) from error
-            return await self._complete_structured_locked(
-                subject_id,
-                purpose,
-                messages,
-                output_type,
-                idempotency_key=idempotency_key,
-                max_output_tokens=max_output_tokens,
-                temperature=temperature,
-                reasoning_effort=reasoning_effort,
-            )
+            try:
+                return await self._complete_structured_locked(
+                    subject_id,
+                    purpose,
+                    messages,
+                    output_type,
+                    idempotency_key=idempotency_key,
+                    max_output_tokens=max_output_tokens,
+                    temperature=temperature,
+                    reasoning_effort=reasoning_effort,
+                )
+            except InvitationWithdrawnError:
+                # The logical-route lock still belongs to this task. Settle the
+                # local withdrawal without creating a wait or trying another key.
+                with self.database.connection() as connection:
+                    row = connection.execute(
+                        "SELECT d.decision_id FROM cognitive_route_decisions d "
+                        "WHERE d.subject_id=? AND d.purpose=? AND NOT EXISTS "
+                        "(SELECT 1 FROM cognitive_route_outcomes o "
+                        "WHERE o.decision_id=d.decision_id) "
+                        "ORDER BY d.rowid DESC LIMIT 1",
+                        (subject_id, purpose),
+                    ).fetchone()
+                if row is not None:
+                    with accounting_scope():
+                        self._finish_decision(
+                            row[0], "deferred", "participant_invitation_withdrawn"
+                        )
+                raise
+
+    def _invitation_withdrawn(self, purpose: str) -> bool:
+        if not purpose.startswith("interaction_cognition:"):
+            return False
+        interaction_id = purpose.removeprefix("interaction_cognition:").rpartition(":")[0]
+        with self.database.connection() as connection:
+            return participant_invitation_withdrawn(connection, self.subject_id, interaction_id)
 
     async def _complete_structured_locked(
         self,
@@ -3083,18 +3111,48 @@ class RoutedModelGateway(ModelGateway):
                     if forced_state is not None:
                         break
                     continue
+                settlement = ExitStack()
                 try:
-                    result = await gateway.complete_structured(
-                        subject_id,
-                        purpose,
-                        messages,
-                        output_type,
-                        idempotency_key=routed_idempotency,
-                        max_output_tokens=max_output_tokens,
-                        temperature=temperature,
-                        reasoning_effort=reasoning_effort,
+                    try:
+                        result = await gateway.complete_structured(
+                            subject_id,
+                            purpose,
+                            messages,
+                            output_type,
+                            idempotency_key=routed_idempotency,
+                            max_output_tokens=max_output_tokens,
+                            temperature=temperature,
+                            reasoning_effort=reasoning_effort,
+                        )
+                    finally:
+                        # Enter only AFTER gateway dispatch and settlement return.
+                        # No new model work or subject commits run in this scope.
+                        settlement.enter_context(accounting_scope())
+                except InvitationWithdrawnError:
+                    self._record_attempt(
+                        decision.decision_id,
+                        group.group_id,
+                        key.key_id,
+                        attempt_number,
+                        "failed",
+                        "participant_invitation_withdrawn",
+                        int((time.monotonic() - started) * 1000),
                     )
+                    raise
                 except (ProviderCallError, StructuredOutputError) as error:
+                    if self._invitation_withdrawn(purpose):
+                        self._record_attempt(
+                            decision.decision_id,
+                            group.group_id,
+                            key.key_id,
+                            attempt_number,
+                            "failed",
+                            "participant_invitation_withdrawn",
+                            int((time.monotonic() - started) * 1000),
+                        )
+                        raise InvitationWithdrawnError(
+                            "participant invitation has been withdrawn"
+                        ) from error
                     latency = int((time.monotonic() - started) * 1000)
                     with suppress(Exception):
                         self.provider_health.record_attempt(
@@ -3163,6 +3221,19 @@ class RoutedModelGateway(ModelGateway):
                     )
                     raise
                 except (BudgetExhaustedError, ModelCallStateError) as error:
+                    if self._invitation_withdrawn(purpose):
+                        self._record_attempt(
+                            decision.decision_id,
+                            group.group_id,
+                            key.key_id,
+                            attempt_number,
+                            "failed",
+                            "participant_invitation_withdrawn",
+                            int((time.monotonic() - started) * 1000),
+                        )
+                        raise InvitationWithdrawnError(
+                            "participant invitation has been withdrawn"
+                        ) from error
                     latency = int((time.monotonic() - started) * 1000)
                     self._record_attempt(
                         decision.decision_id,
@@ -3233,6 +3304,7 @@ class RoutedModelGateway(ModelGateway):
                     )
                     return result
                 finally:
+                    settlement.close()
                     await self._close_gateway(gateway)
             if isinstance(terminal_error, ProviderCallError) and terminal_error.outcome_unknown:
                 break
