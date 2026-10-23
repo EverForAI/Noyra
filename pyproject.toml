@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "noyra"
 version = "0.1.0"
-description = "A continuity-first experimental artificial subject runtime"
+description = "The World's First Non-Command Artificial Subject with Endogenous Goals and the Capacity to Hire Human Labor"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Jaxon Grey" }]

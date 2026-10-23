@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: "Please cite the exact research-preview tag and commit used."
-title: "Noyra: A Non-Command Artificial Subject for Real-World Environments"
+title: "Noyra: The World's First Non-Command Artificial Subject with Endogenous Goals and the Capacity to Hire Human Labor"
 type: software
 authors:
   - family-names: Grey
@@ -11,8 +11,12 @@ url: "https://github.com/EverForAI/Noyra"
 version: "preview-2026.09.07-r1"
 license: Apache-2.0
 abstract: >-
-  Experimental research runtime for persistent identity, internally generated
-  goals, memory and non-command human interaction with bounded real-world
-  interfaces. Source preview only; real signer, automatic payments, file
+  Noyra is the world's first non-command artificial subject with endogenous
+  goals and the capacity to hire human labor. This project claim concerns the
+  combination of internally formed goals without an imposed earning objective,
+  non-command interaction and subject-led paid human collaboration.
+  Claim scope and comparison evidence are documented in
+  docs/research/2026-10-23-positioning.md. Experimental research source preview;
+  real signer, automatic payments, file
   capabilities and real funds remain disabled in the preview configuration.
   Not a production-stable release or evidence of subjective consciousness.

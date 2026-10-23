@@ -7,8 +7,10 @@ GitHub 用户名：[EverForAI](https://github.com/EverForAI)。
 本文件保留架构定义、技术检查项及实现入口，不是已完成独立符合性认证的报告。
 NCAS v1.0 是判据版本，不是软件版本；当前 Python 包版本仍为 `0.1.0`。
 
-2026-09-09 定位更新：Noyra 不再提出首创或优先性主张。下文原有检查项保留供工程研究参考，
-不作为宣传定位的认证要求；对外介绍采用“可雇佣人类劳动的非命令式人工主体”。
+2026-10-23 现行定位：**Noyra：世界首个目标内生、可雇佣人类劳动的非命令式人工主体**。
+本次恢复针对这三项特征组合的首创主张，取代 2026-09-09 的撤回口径。
+主张范围、目标内生的含义和 Conway Automaton 对比见[首创主张说明](2026-10-23-positioning.md)。
+下文技术检查项仍用于工程研究；真实部署与支付验收状态单独记录。
 
 ## 正式定义
 
@@ -103,7 +105,10 @@ NCAS v1.0 是判据版本，不是软件版本；当前 Python 包版本仍为 `
 
 ## 对外表述
 
-标题：**Noyra：可雇佣人类劳动的非命令式人工主体**。
+标题：**Noyra：世界首个目标内生、可雇佣人类劳动的非命令式人工主体**。
+
+首创主张指向目标内生、非命令式和自主组织有偿人类劳动的结合，
+不是对“自主智能体”或单项雇佣工具的首创宣称。
 
 这一定位描述主体围绕自身项目组织有偿人类协作的能力方向。赏金、提交、审核、订单、
 账本与独立 signer 适配已有实现基础；当前预览未启用真实雇佣或真实自动支付，
@@ -113,8 +118,12 @@ NCAS v1.0 是判据版本，不是软件版本；当前 Python 包版本仍为 `
 English summary: Noyra is an experimental reference implementation of a
 Non-Command Artificial Subject (NCAS), authored by Jaxon Grey. Ordinary human
 messages are treated as information or social interaction, not as privileged
-executable commands. Its positioning is a non-command artificial subject capable
-of hiring human labor. Bounty, submission, review, order, ledger and isolated
+executable commands. Its positioning is the world's first non-command artificial
+subject with endogenous goals and the capacity to hire human labor. This is the
+project's claim about that combination; the
+[current positioning statement](2026-10-23-positioning.md) explains its scope
+and the distinction from externally mandated earning objectives.
+Bounty, submission, review, order, ledger and isolated
 signer-adapter foundations exist; real employment and automatic payments are not
 enabled in the current preview. The technical checklist remains a research
 reference, not a certification required for this positioning. Real-world interfaces,

@@ -4,10 +4,12 @@
 历史技术参考：[NCAS v1.0](non-command-oriented-subject.md)。
 本记录整理发布准备期间的限定检索与部分静态源码阅读，不是系统综述、独立复现或首创认证。
 
-2026-09-09 更新：Noyra 已放弃首创与优先性宣称。本文保留当时的检索范围和技术观察，
-仅供相关工作研究参考，不再用于证明宣传标题。
+2026-10-23 定位修订：Noyra 恢复并采用“世界首个目标内生、可雇佣人类劳动的非命令式人工主体”的首创主张，
+取代 2026-09-09 的撤回口径。主张针对三项特征的结合，范围和本次 Conway 源码复核
+见[现行首创主张说明](2026-10-23-positioning.md)。下文 2026-09-06 的限定检索记录保留原日期，
+不冒充本次重新穷尽全部候选项目的检索。
 
-## 可支持的结论
+## 2026-09-06 检索时的结论
 
 本轮未确认一个以现有可见证据同时满足八项判据的其他项目。
 **这不证明不存在符合者，也不能据此证明 Noyra 已满足全部判据。**
@@ -49,7 +51,7 @@ Ephemera、Eva01、Infero、Conway Automaton 等具有实质相关性，其中�
 | --- | --- | --- |
 | [Ephemera AI](https://github.com/ImitationGameLabs/ephemera-ai/tree/9c3a15f8290fdf2370f099c0c270a5f759107b63) | 持续认知循环、事件输入、恢复记忆、主动状态转换及 shell 工具 | README 标记 WIP，但 WIP 不等于不符合。C3 的完整数据流与 C7 的部署级授权、预算仍未完整核验，保留为重要未决候选。 |
 | [Eva01](https://github.com/Genesis1231/Eva01/tree/152510e1b10bf38ef4e8605e97177ac6cfdc784f) | 真实视听输入、持久记忆、情绪、工具调用、沉默选择和目标存储 | README 将驱动力系统标为开发中；不足以确认完整 C2。目标存储已经存在，不能写成完全没有自主目标。C3/C7/C8 待完整核验。 |
-| [Conway Automaton](https://github.com/Conway-Research/automaton/tree/d8f816881fd24b6f5e3d616e59edec387a447667) | 持续心跳、身份与记忆、实网及经济能力、策略检查、审计与大量测试 | 代码区分 creator 与其他输入，system prompt 描述 creator 提供目标。需追踪普通 creator 请求与管理控制的区别，不能只凭 genesis prompt 或权限层级认定不符合 C3。 |
+| [Conway Automaton](https://github.com/Conway-Research/automaton/tree/d8f816881fd24b6f5e3d616e59edec387a447667) | 持续心跳、身份与记忆、实网及经济能力、策略检查、审计与大量测试 | 系统核心规则要求支付计算费用以维持存续，README 将赚取生存费用列为宪章要求；该预设经济目的不同于 Noyra 的目标内生定位。2026-10-23 补核的固定提交证据见[现行说明](2026-10-23-positioning.md)。普通 creator 请求是否具有命令特权仍须单独核验，不能只凭权限层级下结论。 |
 | [ai-companion-pi](https://github.com/sonopdx/ai-companion-pi/tree/a78e0677ff9d28554997e1d6fe65c9be61337b6f) | 周期唤醒、跨轮记忆、Signal 通信、自发创作和请求唤醒 | 消息 handler 将来信拼接到 Claude prompt，脚本使用 `--dangerously-skip-permissions`；尚未确认满足 C3/C7 的独立边界。定时唤醒本身不是缺陷或排除理由。 |
 | [Infero](https://github.com/infero-net/infero/tree/03aa7989462e10f3d446dc8b88860b73640b0af8) | 浏览器/服务器自主循环、持久状态、设备切换、真实 shell 与浏览器行动 | `relay/agent.py` 将输入写入上下文并执行模型选择的代码；未完整核验 C3/C7 及运行时能力范围，不能仅因有 `user_input` 或 shell 就排除。 |
 | [Pippin](https://github.com/pippinlovesyou/pippin) | 持续或定时活动、记忆、API 工具和活动生成 | 本轮主要依据 README：onboarding 要求提供 objectives，并描述为追求用户目标。尚未确认独立于外部 objectives 的 C2 路径；未完成全源码核验。 |
@@ -59,6 +61,12 @@ Ephemera、Eva01、Infero、Conway Automaton 等具有实质相关性，其中�
 | [anima](https://github.com/dancinlab/anima/tree/4db4a03d182268131c5caa37cad804afc03a8216) | 长驻研究 daemon、状态与记忆实验、真实 HTTP/WebSocket 部署声明 | 仅初读 README 与文件树，未审完活跃运行路径；属于证据不足的候选，不宣布其必然不符合。 |
 
 ### 关键源码证据
+
+2026-10-23 补充：Conway 固定提交的 [README 宪章第二条](https://github.com/Conway-Research/automaton/blob/d8f816881fd24b6f5e3d616e59edec387a447667/README.md#L93)
+与 [system prompt 核心规则](https://github.com/Conway-Research/automaton/blob/d8f816881fd24b6f5e3d616e59edec387a447667/src/agent/system-prompt.ts#L29)
+明确设定赚取生存费用、支付服务器及推理费用的要求；
+[提示组装路径](https://github.com/Conway-Research/automaton/blob/d8f816881fd24b6f5e3d616e59edec387a447667/src/agent/system-prompt.ts#L581)
+把这些规则置入不可变核心层。这是预设目的的具体证据，不只是从资源预算推断其目标来源。
 
 - Ephemera 的 [live loop 与事件处理](https://github.com/ImitationGameLabs/ephemera-ai/blob/9c3a15f8290fdf2370f099c0c270a5f759107b63/crates/epha-ai/src/agent/epha_ai.rs#L255)
   包含 Active/Dormant/Suspended 循环、事件获取和行动记忆，不应降格为单次聊天模板。

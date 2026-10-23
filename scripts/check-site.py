@@ -1,5 +1,7 @@
 """Validate the static Pages artifact without starting Noyra or using third-party services."""
 
+import json
+import tomllib
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -96,10 +98,9 @@ def validate():
         for phrase in RETIRED_COPY:
             if phrase in text:
                 errors.append(f"{name}: retired positioning: {phrase}")
-        if name in {"index.html", "en/index.html"}:
-            expected = POSITIONING[lang]
-            if expected.replace(" ", "") not in text.replace(" ", ""):
-                errors.append(f"{name}: missing human-collaboration positioning")
+        expected = POSITIONING[lang]
+        if expected.replace(" ", "") not in text.replace(" ", ""):
+            errors.append(f"{name}: missing world-first combination positioning")
         if page.lang != lang or page.headings != 1:
             errors.append(f"{name}: language or H1 contract failed")
         if not {"zh-CN", "en", "x-default"} <= page.alternates.keys():
@@ -115,6 +116,29 @@ def validate():
         for phrase in RETIRED_COPY:
             if phrase in source.lower():
                 errors.append(f"{name}: retired positioning: {phrase}")
+    repo = ROOT.parent
+    metadata = json.loads((repo / ".zenodo.json").read_text(encoding="utf-8"))
+    package = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))
+    citation = (repo / "CITATION.cff").read_text(encoding="utf-8")
+    citation_title = next(line for line in citation.splitlines() if line.startswith("title: "))
+    titles = {
+        ".zenodo.json": metadata["title"],
+        "CITATION.cff": json.loads(citation_title.removeprefix("title: ")),
+        "pyproject.toml": package["project"]["description"],
+    }
+    for name, title in titles.items():
+        if POSITIONING["en"] not in title.lower():
+            errors.append(f"{name}: inconsistent world-first positioning")
+    for name in (
+        "non-command-oriented-subject.md",
+        "2026-09-06-ncas-prior-art.md",
+        "2026-10-23-positioning.md",
+    ):
+        source = (repo / "docs" / "research" / name).read_text(encoding="utf-8")
+        if POSITIONING["zh-CN"] not in source:
+            errors.append(f"{name}: missing current positioning")
+        if "Noyra 已放弃首创" in source or "Noyra 不再提出首创" in source:
+            errors.append(f"{name}: superseded withdrawal still presented as current")
     for path, page in parsed.items():
         for href in page.assets + page.links:
             url = urlsplit(href)
