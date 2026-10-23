@@ -793,6 +793,7 @@ API_ROUTE_CONTRACTS: tuple[APIRouteContract, ...] = (
 
 # Participant cookies/bearers are independent of every operator/read role.
 API_ROUTE_CONTRACTS += (
+    _post("/api/v1/participants/password", "participant", 200, 400, 401, 403, 404, 409, 415),
     _get("/api/v1/participants/session", "none", 200, 400, 401, 403, 404, 413),
     _get("/api/v1/participants/opportunities", "none", 200, 400, 401, 403, 404, 413),
     _get("/api/v1/participants/posts", "participant", 200, 400, 401, 403, 404, 413),

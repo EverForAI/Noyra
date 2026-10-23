@@ -996,3 +996,17 @@ test("private page refresh uses its authenticated view rather than the public ov
     }
     assert.equal(publicReads, 0);
 });
+
+test("late public-post response after account logout cannot clear a new draft", async () => {
+    const pending = deferred();
+    const { h, event } = submissionHarness(() => pending.promise);
+    const writing = h.sandbox.submitPublicPost(event);
+    await new Promise((resolve) => setImmediate(resolve));
+    h.set("publicAccountGeneration++");
+    h.node("#public-post-content").value = "A new account draft";
+    h.node("#public-post-status").textContent = "New session";
+    pending.resolve({ ok: true, json: async () => ({ status: "pending" }) });
+    await writing;
+    assert.equal(h.node("#public-post-content").value, "A new account draft");
+    assert.equal(h.node("#public-post-status").textContent, "New session");
+});

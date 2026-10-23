@@ -513,7 +513,7 @@ def test_schema_102_migrates_observed_embedding_dimension_column(tmp_path: Path)
         version = connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()[0]
-    assert version == "103"
+    assert version == str(CURRENT_SCHEMA_VERSION)
     assert "observed_dimensions" in columns
 
 

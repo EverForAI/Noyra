@@ -245,6 +245,12 @@ class InteractionCognition:
             if who
             else self.conversations.authorized_history(self.subject_id, interaction.interaction_id)
         )
+        if not history:
+            # Preserve explicitly verified legacy channel-to-web history consent.
+            # Ordinary group messages and participant accounts have no such link.
+            history = self.conversations.authorized_history(
+                self.subject_id, interaction.interaction_id
+            )
         self._private_sources = (
             interaction.interaction_id,
             *(row["interaction_id"] for row in history),

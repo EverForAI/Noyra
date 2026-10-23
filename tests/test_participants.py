@@ -101,3 +101,60 @@ def test_schema103_upgrade_preserves_sources_and_export_omits_credentials(tmp_pa
         assert b"PASSWORD-HASH-SECRET" not in b"".join(archive.read(n) for n in archive.namelist())
         manifest = json.loads(archive.read("manifest.json"))
         assert manifest["schema_version"] == 104
+
+
+def test_telegram_sender_identity_is_stable_across_chat_addresses() -> None:
+    from noyra.interaction.participants import source_namespace
+
+    assert source_namespace("telegram", "bot-a", "group-one") == source_namespace(
+        "telegram", "bot-a", "group-two"
+    )
+    assert source_namespace("telegram", "bot-a", "group-one") != source_namespace(
+        "telegram", "bot-b", "group-one"
+    )
+    assert source_namespace("webhook", "transport", "tenant-a") != source_namespace(
+        "webhook", "transport", "tenant-b"
+    )
+
+
+def test_attribution_cannot_be_reassigned_and_cross_subject_links_are_rejected(
+    tmp_path: Path,
+) -> None:
+    import sqlite3
+
+    from noyra.interaction.store import InteractionStore
+
+    db = Database(tmp_path / "db", strict_schema_contract=True)
+    for subject in ("subject-a", "subject-b"):
+        IdentityStore(db).ensure(subject, "a" * 64)
+    with db.transaction() as c:
+        alice = ParticipantStore.source(
+            c, "subject-a", "webhook", "tenant", "alice", entity_type="human"
+        )
+        bob = ParticipantStore.source(
+            c, "subject-a", "webhook", "tenant", "bob", entity_type="human"
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            c.execute(
+                "UPDATE participant_sources SET entity_id=? WHERE source_id=?",
+                (bob.entity_id, alice.source_id),
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            c.execute(
+                "UPDATE participant_entities SET entity_type='noyra' WHERE entity_id=?",
+                (alice.entity_id,),
+            )
+    message = InteractionStore(db).receive("subject-b", "test", "someone", "private subject-b")
+    with db.transaction() as c, pytest.raises(sqlite3.IntegrityError, match="ownership"):
+        c.execute(
+            "INSERT INTO participant_message_links VALUES(?,?,?,?,?,?,?)",
+            (
+                message.interaction_id,
+                "subject-a",
+                alice.entity_id,
+                alice.source_id,
+                "same-conversation",
+                "private",
+                "2026-10-24T00:00:00Z",
+            ),
+        )

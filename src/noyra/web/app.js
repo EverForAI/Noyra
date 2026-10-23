@@ -16,6 +16,7 @@ let overviewData = null,
 let batchPaths = [],
     batchPath = "",
     batchNumber = 1;
+let publicAccountGeneration = 0;
 let readingReturn = null;
 let restoreTarget = null;
 let menuReturnFocus = null;
@@ -1488,6 +1489,7 @@ async function submitPublicPost(event) {
         );
         return;
     }
+    const accountGeneration = publicAccountGeneration;
     publicPostSubmitting = true;
     status.classList.remove("success");
     status.textContent = tr("正在提交…", "Submitting…");
@@ -1500,6 +1502,7 @@ async function submitPublicPost(event) {
         if (!publicPostIdempotencyKey)
             publicPostIdempotencyKey = crypto.randomUUID();
         await globalThis.noyraParticipant?.ready;
+        if (accountGeneration !== publicAccountGeneration) return;
         const member = globalThis.noyraParticipant?.current();
         const response = await fetch(
             member ? "/api/participants/posts" : "/api/public-posts",
@@ -1531,6 +1534,7 @@ async function submitPublicPost(event) {
             },
         );
         const payload = await response.json().catch(() => null);
+        if (accountGeneration !== publicAccountGeneration) return;
         if (!response.ok)
             throw new Error(payload?.error || `HTTP ${response.status}`);
         publicPostIdempotencyKey = "";
@@ -1543,6 +1547,7 @@ async function submitPublicPost(event) {
         );
         await loadPublicPostCaptcha();
     } catch (error) {
+        if (accountGeneration !== publicAccountGeneration) return;
         status.textContent =
             isAbortError(error) || error.name === "TypeError"
                 ? tr(
@@ -1667,6 +1672,9 @@ window.addEventListener("hashchange", () => {
     window.scrollTo({ top: 0, behavior: "instant" });
 });
 window.addEventListener("noyra-participant-logout", () => {
+    publicAccountGeneration++;
+    abortScope("submission");
+    $("#public-post-status").textContent = "";
     $("#public-post-form").reset();
     publicPostIdempotencyKey = "";
     updatePostLength();

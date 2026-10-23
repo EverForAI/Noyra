@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import suppress
 from dataclasses import asdict
 from http.cookies import SimpleCookie
 from typing import Any
@@ -28,7 +29,8 @@ def _reply(h: Any, status: int, payload: Any, *, cookie: str | None = None) -> N
         h.send_header("Retry-After", "60")
     h._headers("application/json; charset=utf-8", len(body), cache_control="no-store")
     h.end_headers()
-    h.wfile.write(body)
+    with suppress(BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        h.wfile.write(body)
 
 
 def _token(h: Any) -> tuple[str, bool]:
@@ -74,9 +76,9 @@ def dispatch(h: Any, owner: Any, method: str) -> bool:
         try:
             if set(payload) != {"entity_id", "binding_id"}:
                 raise ValueError("invalid_binding")
-            from noyra.core.types import content_hash, new_id, utc_now
+            from noyra.core.types import new_id, utc_now
 
-            from .participants import ParticipantStore
+            from .participants import ParticipantStore, source_namespace
 
             with owner.kernel.database.transaction() as c:
                 binding = c.execute(
@@ -90,7 +92,9 @@ def dispatch(h: Any, owner: Any, method: str) -> bool:
                     c,
                     owner.kernel.subject_id,
                     binding["channel"],
-                    content_hash([binding["transport_id"], binding["external_account_id"]]),
+                    source_namespace(
+                        binding["channel"], binding["transport_id"], binding["external_account_id"]
+                    ),
                     binding["external_sender_id"],
                     entity_id=payload["entity_id"],
                 )
@@ -217,10 +221,19 @@ def dispatch(h: Any, owner: Any, method: str) -> bool:
                 raise PermissionError("browser_session_required")
             store.logout(token)
             _reply(h, 200, {"ok": True}, cookie=_cookie(owner, "", clear=True))
+        elif public == "password":
+            if api:
+                raise PermissionError("browser_session_required")
+            if set(payload) != {"current_password", "password"}:
+                raise AccountError("invalid_account_details")
+            code = store.change_password(who, payload["current_password"], payload["password"])
+            _reply(h, 200, {"recovery_code": code}, cookie=_cookie(owner, "", clear=True))
         elif public == "credential":
             if api:
                 raise PermissionError("browser_session_required")
-            if set(payload) - {"revoke"}:
+            if set(payload) - {"revoke"} or (
+                "revoke" in payload and type(payload["revoke"]) is not bool
+            ):
                 raise AccountError("invalid_account_details")
             _reply(h, 200, {"api_key": store.api_key(who, revoke=payload.get("revoke") is True)})
         else:
@@ -233,6 +246,8 @@ def dispatch(h: Any, owner: Any, method: str) -> bool:
         _reply(h, 503, {"error": "public_post_capacity_full"})
     except AccountRateLimited as error:
         _reply(h, 429, {"error": str(error)})
+    except AccountError as error:
+        _reply(h, 401 if str(error) == "invalid_credentials" else 400, {"error": str(error)})
     except PermissionError as error:
         _reply(h, 401 if who is None else 403, {"error": str(error)})
     except (LookupError, NotFoundError):

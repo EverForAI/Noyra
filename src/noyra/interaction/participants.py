@@ -206,3 +206,9 @@ class ParticipantStore:
     @staticmethod
     def legacy_key(channel: str, namespace: str, sender: str) -> str:
         return "source:" + content_hash([channel, namespace, sender])
+
+
+def source_namespace(channel: str, transport: str, account: str) -> str:
+    # Telegram's external account is the chat ID; user IDs are stable across
+    # chats for a configured bot. Other adapters retain their tenant/account.
+    return content_hash([transport, "" if channel == "telegram" else account])

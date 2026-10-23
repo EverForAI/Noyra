@@ -136,15 +136,15 @@ def test_public_schema_has_fixed_reviewed_fingerprints(
             connection.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()[0]
-            == "103"
+            == "104"
         )
         assert (
             kernel.database.schema_ddl_fingerprint(connection)
-            == "cc42d8184c9369c77f72357f4eb2858b0110273ec2f719b558429ca3f887afd2"
+            == "72e5c15e4793cbe3b743b5eca667cea5bef3c34af05a4674bde7ce720234dc8e"
         )
         assert (
             kernel.database.schema_structure_fingerprint(connection)
-            == "d4f245e1415bbd49376c10bca77247e7662f2cb3c6133d3824d7e376e6bcb521"
+            == "1c17714c61ce55ec2a36af8dfdb439bbae32428bab58c7d842a34802426650e4"
         )
 
 

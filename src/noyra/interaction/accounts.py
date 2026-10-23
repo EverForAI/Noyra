@@ -281,3 +281,40 @@ class AccountStore:
                 (digest(token), self.subject, row[0], "participant", utc_now()),
             )
             return token
+
+    def change_password(self, who: Participant, current_password: str, new_password: str) -> str:
+        with self.database.connection() as c:
+            row = c.execute(
+                "SELECT p.* FROM participant_credentials p JOIN participant_accounts a "
+                "ON a.account_id=p.account_id AND a.subject_id=p.subject_id "
+                "WHERE a.subject_id=? AND a.entity_id=?",
+                (self.subject, who.entity_id),
+            ).fetchone()
+        if row is None or not password_matches(current_password, row["password_digest"]):
+            raise AccountError("invalid_credentials")
+        encoded = password_hash(new_password)
+        recovery = secrets.token_urlsafe(32)
+        with self.database.transaction() as c:
+            changed = c.execute(
+                "UPDATE participant_credentials SET password_digest=?,recovery_digest=?,"
+                "changed_at=? WHERE subject_id=? AND account_id=? AND password_digest=?",
+                (
+                    encoded,
+                    digest(recovery),
+                    utc_now(),
+                    self.subject,
+                    row["account_id"],
+                    row["password_digest"],
+                ),
+            ).rowcount
+            if changed != 1:
+                raise AccountError("invalid_credentials")
+            c.execute(
+                "DELETE FROM participant_sessions WHERE subject_id=? AND account_id=?",
+                (self.subject, row["account_id"]),
+            )
+            c.execute(
+                "DELETE FROM participant_api_credentials WHERE subject_id=? AND account_id=?",
+                (self.subject, row["account_id"]),
+            )
+        return recovery

@@ -33,6 +33,7 @@ from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.core.xml import parse_untrusted_xml
 
+from .participants import source_namespace
 from .store import InteractionStore
 
 InboundChannel = Literal["telegram", "qq", "feishu", "wechat", "email", "webhook"]
@@ -1447,7 +1448,9 @@ class InboundStore:
                 ),
                 envelope.content,
                 participant_source=(
-                    content_hash([envelope.transport_id, envelope.external_account_id]),
+                    source_namespace(
+                        envelope.channel, envelope.transport_id, envelope.external_account_id
+                    ),
                     envelope.external_sender_id,
                     envelope.sender_label,
                 ),

@@ -2906,7 +2906,7 @@ paths:
     post:
       tags: [participants]
       operationId: participantSourceBinding
-      security: [{ OperatorToken: [] }]
+      security: [{ operatorBearer: [] }]
       requestBody:
         required: true
         content:
@@ -2920,6 +2920,28 @@ paths:
         '413': { description: Request too large }
         '429': { description: Rate limited }
         '503': { description: Runtime unavailable }
+  /api/v1/participants/password:
+    post:
+      tags: [participants]
+      operationId: participantPassword
+      security: [{ ParticipantSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [current_password, password], properties: { current_password: { type: string }, password: { type: string } } }
+      responses:
+        '200': { description: Password and recovery rotation response }
+        '400': { description: Password and recovery rotation response }
+        '401': { description: Password and recovery rotation response }
+        '403': { description: Password and recovery rotation response }
+        '404': { description: Password and recovery rotation response }
+        '409': { description: Password and recovery rotation response }
+        '411': { description: Password and recovery rotation response }
+        '413': { description: Password and recovery rotation response }
+        '415': { description: Password and recovery rotation response }
+        '429': { description: Password and recovery rotation response }
+        '503': { description: Password and recovery rotation response }
 components:
   securitySchemes:
     ParticipantSession:

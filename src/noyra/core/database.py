@@ -319,7 +319,7 @@ CURRENT_SCHEMA_VERSION = 104
 # installations persist this value in ``schema_meta`` and therefore require
 # the value to remain stable across compatible runtime fixes.
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
-    104: "cc42d8184c9369c77f72357f4eb2858b0110273ec2f719b558429ca3f887afd2",
+    104: "72e5c15e4793cbe3b743b5eca667cea5bef3c34af05a4674bde7ce720234dc8e",
     103: "b13fec71f4c1a40287f7b7b272f7ba8e12bdd9625aa53ca08568023c25f84334",
     102: "f731a5afa55d7e6c7adf170f93e985e0b1efee544f365dfd746f31afc997db09",
     101: "f96066b2cb8abf958820d6340dfc1d00e60dcd491db84caef6f09f0e458c3301",
@@ -354,7 +354,7 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 # auditable P0 finding.  Tables, indexes, and views still fail closed during
 # database construction because they define the storage contract itself.
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
-    104: "d4f245e1415bbd49376c10bca77247e7662f2cb3c6133d3824d7e376e6bcb521",
+    104: "1c17714c61ce55ec2a36af8dfdb439bbae32428bab58c7d842a34802426650e4",
     103: "1147ca9c2c26d160b0b20186536e1bf4a4f34211aab668a25af36610bdaa284b",
     102: "cb7f1359673e8949c90b1706e14de28c857d8df4b54c07aa0e4f136bf3aa4900",
     101: "8ef1b897245fdf0ae876e0f9a03ca6df381bfb0412ca804d202708cfdc22bd92",

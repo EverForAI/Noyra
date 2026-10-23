@@ -68,3 +68,23 @@ def test_durable_auth_rate_limit_and_bounded_sessions(tmp_path: Path) -> None:
     tokens = [store.login("alice", "correct horse battery")[0] for _ in range(9)]
     assert store.authenticate(tokens[0]) is None
     assert store.authenticate(tokens[-1])
+
+
+def test_password_change_requires_current_secret_and_revokes_all_credentials(
+    tmp_path: Path,
+) -> None:
+    store = accounts(tmp_path)
+    first = store.register("alice", "correct horse battery", "Alice")
+    token, _, _ = store.login("alice", "correct horse battery")
+    who = store.authenticate(token)
+    assert who
+    api = store.api_key(who)
+    assert api
+    with pytest.raises(AccountError):
+        store.change_password(who, "not the old password", "another correct password")
+    assert store.authenticate(token)
+    recovery = store.change_password(who, "correct horse battery", "another correct password")
+    assert recovery != first["recovery_code"]
+    assert store.authenticate(token) is None
+    assert store.authenticate(api, api=True) is None
+    assert store.login("alice", "another correct password")[0]

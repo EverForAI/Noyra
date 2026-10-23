@@ -144,6 +144,14 @@ def test_private_reply_isolation_and_bearer_rotation(http: tuple[NoyraHTTPServer
     )
     assert status == 200
     assert first["interaction_id"] != second["interaction_id"]
+    from noyra.interaction.participants import ParticipantStore
+
+    identities = ParticipantStore(owner.kernel.database)
+    alice_entity = identities.for_message(owner.kernel.subject_id, first["interaction_id"])
+    noyra_entity = identities.for_message(owner.kernel.subject_id, second["interaction_id"])
+    assert alice_entity and noyra_entity
+    assert alice_entity.entity_type == "human" and noyra_entity.entity_type == "noyra"
+    assert alice_entity.entity_id != noyra_entity.entity_id
     record = InteractionStore(owner.kernel.database).get(first["interaction_id"])
     InteractionStore(owner.kernel.database).send(
         owner.kernel.subject_id,
@@ -213,6 +221,15 @@ def test_authenticated_collaboration_derives_owner_not_client_label(tmp_path: Pa
     apply = {"bounty_id": bounty.bounty_id, "content": "I can help", "idempotency_key": "apply-one"}
     first = collaboration.write("/api/participants/apply", apply, a, "127.0.0.1")
     assert collaboration.write("/api/participants/apply", apply, a, "127.0.0.1") == first
+    with db.connection() as c:
+        invitation = c.execute(
+            "SELECT i.* FROM interactions i JOIN participant_message_links m "
+            "ON m.interaction_id=i.interaction_id WHERE m.entity_id=?",
+            (a.entity_id,),
+        ).fetchall()
+        assert len(invitation) == 1 and invitation[0]["status"] == "offered"
+        assert "Collaboration interest" in invitation[0]["content"]
+        assert c.execute("SELECT COUNT(*) FROM goals").fetchone()[0] == 1
     assert collaboration.read("/api/participants/applications", {}, b)["items"] == []
     with pytest.raises(LookupError):
         collaboration.write(
@@ -297,3 +314,67 @@ def test_registration_uses_existing_captcha_and_failed_post_counts_commit(
     mine = visitor.request("/api/participants/posts")[1]["items"]
     assert [row["post_id"] for row in mine] == [post["post_id"]]
     assert Client(base).request("/api/participants/posts")[0] == 401
+
+
+def test_explicit_bound_channel_reaches_same_account_entity(
+    http: tuple[NoyraHTTPServer, str],
+) -> None:
+    from noyra.interaction import InboundEnvelope, TransportInput
+    from noyra.interaction.participants import ParticipantStore
+
+    owner, base = http
+    accounts = AccountStore(owner.kernel.database, owner.kernel.subject_id)
+    registered = accounts.register("alice", "correct horse battery", "Alice")
+    transport = owner.transports.configure(
+        owner.kernel.subject_id,
+        TransportInput(
+            channel="webhook",
+            label="Synthetic incoming",
+            endpoint="https://example.test/incoming",
+            credentials={"webhook_secret": SecretStr("synthetic-secret")},
+        ),
+        actor="operator",
+    )
+    binding = owner.inbound.bind(
+        owner.kernel.subject_id,
+        transport.transport_id,
+        external_account_id="account",
+        external_sender_id="alice-native",
+    )
+    payload = {"entity_id": registered["entity_id"], "binding_id": binding}
+    visitor = Client(base)
+    assert visitor.request("/api/admin/participant-sources", payload)[0] == 401
+    status, data = visitor.request(
+        "/api/admin/participant-sources",
+        payload,
+        Authorization="Bearer admin-test-key-with-enough-entropy",
+    )
+    assert status == 200, data
+    incoming = owner.inbound.ingest(
+        InboundEnvelope(
+            channel="webhook",
+            transport_id=transport.transport_id,
+            provider_event_id="known-alice",
+            external_account_id="account",
+            external_sender_id="alice-native",
+            conversation_id="a-group",
+            content="same correspondent",
+        )
+    )
+    who = ParticipantStore(owner.kernel.database).for_message(
+        owner.kernel.subject_id, incoming.interaction_id
+    )
+    assert who and who.entity_id == registered["entity_id"] and who.entity_type == "human"
+
+
+def test_participant_pages_keep_chronological_order_and_bound_multibyte_text() -> None:
+    from noyra.interaction.collaboration import ParticipantCollaboration
+
+    rows = [
+        {"created_at": f"2026-10-24T00:{i:02}:00Z", "message_id": str(i), "content": "文字" * 10000}
+        for i in range(51)
+    ]
+    page = ParticipantCollaboration._page(rows, "message_id")
+    assert 0 < len(page["items"]) < 50
+    assert page["next_cursor"]
+    assert len(json.dumps(page, ensure_ascii=False).encode()) < 2_000_000

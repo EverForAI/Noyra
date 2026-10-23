@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from typing import Any
 
 from noyra.core.types import content_hash, new_id, utc_now
@@ -27,7 +29,7 @@ class ParticipantCollaboration:
 
     def opportunities(self) -> list[dict[str, Any]]:
         rows = self.owner.wallet_economy.list_bounties(self.subject, status="published", limit=50)
-        return [
+        items = [
             {
                 k: getattr(row, k)
                 for k in (
@@ -47,64 +49,112 @@ class ParticipantCollaboration:
             }
             for row in rows
         ]
+        for item in items:
+            self._reward_display(item)
+        return items
+
+    def _reward_display(self, item: dict[str, Any]) -> None:
+        with self.db.connection() as c:
+            details = c.execute(
+                "SELECT a.symbol,a.decimals,n.label,n.chain_id FROM wallet_assets a "
+                "JOIN wallet_networks n ON n.network_id=a.network_id AND n.subject_id=a.subject_id "
+                "WHERE a.subject_id=? AND a.asset_id=? AND a.network_id=?",
+                (self.subject, item["asset_id"], item["network_id"]),
+            ).fetchone()
+        if details is None:
+            raise ValueError("reward_asset_unavailable")
+        decimals = int(details["decimals"])
+        amount = str(item["reward_amount"])
+        padded = amount.zfill(decimals + 1)
+        formatted = (
+            (padded[:-decimals] + "." + padded[-decimals:]).rstrip("0").rstrip(".")
+            if decimals
+            else amount
+        )
+        item.update(
+            reward_display=formatted,
+            asset_symbol=details["symbol"],
+            network_label=details["label"],
+            chain_id=details["chain_id"],
+        )
 
     def read(self, path: str, query: dict[str, list[str]], who: Participant) -> dict[str, Any]:
         if set(query) - {"before"}:
             raise ValueError("invalid_query")
-        before = query.get("before", ["\uffff"])[0]
-        if len(before) > 100:
-            raise ValueError("invalid_query")
+        cursor = query.get("before", [""])[0]
+        before_time, before_id = "9999-12-31T23:59:59Z", "\uffff"
+        if cursor:
+            try:
+                if len(cursor) > 512:
+                    raise ValueError("invalid_cursor")
+                decoded = json.loads(base64.urlsafe_b64decode(cursor.encode()))
+                if (
+                    not isinstance(decoded, list)
+                    or len(decoded) != 2
+                    or not all(isinstance(v, str) for v in decoded)
+                ):
+                    raise ValueError("invalid_cursor")
+                before_time, before_id = decoded
+                if len(before_time) > 40 or len(before_id) > 128:
+                    raise ValueError("invalid_cursor")
+            except (ValueError, UnicodeError):
+                raise ValueError("invalid_cursor") from None
         view = path.removeprefix("/api/participants/")
         if view == "opportunities":
             return {"items": self.opportunities()}
         with self.db.connection() as c:
             if view == "posts":
                 rows = c.execute(
-                    "SELECT "
-                    "p.post_id,p.kind,p.title,p.content,p.status,p.created_at,p.updated_at "
-                    "FROM participant_post_links l JOIN public_posts p ON "
-                    "p.post_id=l.post_id AND p.subject_id=l.subject_id WHERE "
-                    "l.subject_id=? AND l.entity_id=? AND p.post_id<? ORDER BY p.post_id "
-                    "DESC LIMIT 51",
-                    (self.subject, who.entity_id, before),
+                    "SELECT p.post_id,p.kind,p.title,p.content,p.status,p.created_at,p.upda"
+                    "ted_at FROM participant_post_links l JOIN public_posts p ON p.post_id="
+                    "l.post_id AND p.subject_id=l.subject_id WHERE l.subject_id=? AND l.ent"
+                    "ity_id=? AND (p.created_at,p.post_id)<(?,?) ORDER BY p.created_at DESC"
+                    ",p.post_id DESC LIMIT 51",
+                    (self.subject, who.entity_id, before_time, before_id),
                 ).fetchall()
                 return self._page(rows, "post_id")
             if view == "applications":
                 rows = c.execute(
-                    "SELECT "
-                    "a.application_id,a.bounty_id,a.content,a.status,a.created_at,b.title "
-                    "FROM participant_applications a JOIN wallet_bounties b ON "
-                    "b.bounty_id=a.bounty_id AND b.subject_id=a.subject_id WHERE "
-                    "a.subject_id=? AND a.entity_id=? AND a.application_id<? ORDER BY "
-                    "a.application_id DESC LIMIT 51",
-                    (self.subject, who.entity_id, before),
+                    "SELECT a.application_id,a.bounty_id,a.content,a.status,a.created_at,b."
+                    "title FROM participant_applications a JOIN wallet_bounties b ON b.boun"
+                    "ty_id=a.bounty_id AND b.subject_id=a.subject_id WHERE a.subject_id=? A"
+                    "ND a.entity_id=? AND (a.created_at,a.application_id)<(?,?) ORDER BY a."
+                    "created_at DESC,a.application_id DESC LIMIT 51",
+                    (self.subject, who.entity_id, before_time, before_id),
                 ).fetchall()
                 return self._page(rows, "application_id")
             if view == "submissions":
                 rows = c.execute(
-                    "SELECT "
-                    "s.submission_id,s.bounty_id,s.content,s.status,s.created_at,s.recipien"
-                    "t_address,s.decided_at,b.title,b.reward_amount,b.network_id,b.asset_id"
-                    ",o.status AS payment_status,o.order_id FROM participant_submissions l "
-                    "JOIN wallet_bounty_submissions s ON s.submission_id=l.submission_id AN"
-                    "D s.subject_id=l.subject_id JOIN wallet_bounties b ON b.bounty_id=s.bo"
-                    "unty_id AND b.subject_id=s.subject_id LEFT JOIN wallet_payment_orders "
-                    "o ON o.submission_id=s.submission_id AND o.subject_id=s.subject_id WHE"
-                    "RE l.subject_id=? AND l.entity_id=? AND s.submission_id<? ORDER BY s.s"
-                    "ubmission_id DESC LIMIT 51",
-                    (self.subject, who.entity_id, before),
+                    "SELECT s.submission_id,s.bounty_id,s.content,s.status,s.created_at,s.r"
+                    "ecipient_address,s.decided_at,b.title,b.reward_amount,b.network_id,b.a"
+                    "sset_id,o.status AS payment_status,o.order_id FROM participant_submiss"
+                    "ions l JOIN wallet_bounty_submissions s ON s.submission_id=l.submissio"
+                    "n_id AND s.subject_id=l.subject_id JOIN wallet_bounties b ON b.bounty_"
+                    "id=s.bounty_id AND b.subject_id=s.subject_id LEFT JOIN wallet_payment_"
+                    "orders o ON o.submission_id=s.submission_id AND o.subject_id=s.subject"
+                    "_id WHERE l.subject_id=? AND l.entity_id=? AND (s.created_at,s.submiss"
+                    "ion_id)<(?,?) ORDER BY s.created_at DESC,s.submission_id DESC LIMIT 51",
+                    (self.subject, who.entity_id, before_time, before_id),
                 ).fetchall()
-                return self._page(rows, "submission_id")
+                result = self._page(rows, "submission_id")
+                for item in result["items"]:
+                    self._reward_display(item)
+                return result
             if view == "messages":
                 rows = c.execute(
-                    "SELECT "
-                    "i.interaction_id,i.direction,i.content,i.status,i.created_at,i.related"
-                    "_interaction_id FROM participant_message_links m JOIN interactions i O"
-                    "N i.interaction_id=m.interaction_id AND i.subject_id=m.subject_id WHER"
-                    "E m.subject_id=? AND m.entity_id=? AND m.visibility='private' AND m.co"
-                    "nversation_key=? AND i.interaction_id<? ORDER BY i.interaction_id DESC"
-                    " LIMIT 51",
-                    (self.subject, who.entity_id, "participant:" + who.entity_id, before),
+                    "SELECT i.interaction_id,i.direction,i.content,i.status,i.created_at,i."
+                    "related_interaction_id FROM participant_message_links m JOIN interacti"
+                    "ons i ON i.interaction_id=m.interaction_id AND i.subject_id=m.subject_"
+                    "id WHERE m.subject_id=? AND m.entity_id=? AND m.visibility='private' A"
+                    "ND m.conversation_key=? AND (i.created_at,i.interaction_id)<(?,?) ORDE"
+                    "R BY i.created_at DESC,i.interaction_id DESC LIMIT 51",
+                    (
+                        self.subject,
+                        who.entity_id,
+                        "participant:" + who.entity_id,
+                        before_time,
+                        before_id,
+                    ),
                 ).fetchall()
                 return self._page(rows, "interaction_id")
             if view == "notifications":
@@ -114,10 +164,24 @@ class ParticipantCollaboration:
 
     @staticmethod
     def _page(rows: Any, key: str) -> dict[str, Any]:
-        return {
-            "items": [dict(r) for r in rows[:50]],
-            "next_cursor": rows[49][key] if len(rows) > 50 else None,
-        }
+        selected: list[dict[str, Any]] = []
+        size = 0
+        for row in rows[:50]:
+            item = dict(row)
+            item_size = len(json.dumps(item, ensure_ascii=False).encode())
+            if selected and size + item_size > 1_500_000:
+                break
+            selected.append(item)
+            size += item_size
+        more = len(rows) > len(selected)
+        cursor = (
+            base64.urlsafe_b64encode(
+                json.dumps([selected[-1]["created_at"], selected[-1][key]]).encode()
+            ).decode()
+            if more and selected
+            else None
+        )
+        return {"items": selected, "next_cursor": cursor}
 
     def _notifications(self, c: Any, who: Participant) -> list[dict[str, Any]]:
         results = []
@@ -287,6 +351,29 @@ class ParticipantCollaboration:
                             key,
                             utc_now(),
                         ),
+                    )
+                    invitation = InteractionStore(self.db)._create_connection(
+                        c,
+                        self.subject,
+                        "incoming",
+                        "human_message",
+                        "participant",
+                        who.entity_id,
+                        "Collaboration interest [" + bounty_id + "]: " + content,
+                        None,
+                        key + ":interest",
+                        "offered",
+                        None,
+                    )
+                    from .participants import ParticipantStore
+
+                    ParticipantStore.link(
+                        c,
+                        self.subject,
+                        invitation.interaction_id,
+                        who,
+                        "participant:" + who.entity_id,
+                        private=True,
                     )
                     return {"application_id": aid, "status": "submitted"}
                 submission = self.owner.wallet_economy.submit_to_bounty(
