@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 PUBLIC_LABELS = {
+    "account": ["登录与账户", "Your account"],
+    "collaborate": ["一起做点事", "Work together"],
+    "mine": ["我的参与", "My contributions"],
+    "messages": ["与 Noyra 交流", "Talk with Noyra"],
     "overview": ["最近在这里", "Around here lately"],
     "timeline": ["时间线", "Timeline"],
     "diary": ["日记与文章", "Diary & writing"],

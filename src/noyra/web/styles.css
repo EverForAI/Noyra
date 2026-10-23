@@ -1336,3 +1336,63 @@ textarea:focus {
         letter-spacing: 0.5px;
     }
 }
+
+.participant-panel {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+}
+.participant-panel .message-form {
+    margin: 20px 0;
+}
+.participant-panel button {
+    padding: 9px 14px;
+    border-radius: 8px;
+    background: var(--soft);
+    color: var(--accent);
+}
+.participant-panel button.submit-action {
+    background: var(--accent);
+    color: var(--surface);
+}
+.account-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    align-items: start;
+}
+.account-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    align-items: center;
+}
+.account-secret {
+    padding: 18px;
+    border: 2px solid var(--accent);
+    border-radius: 10px;
+    background: var(--soft);
+    margin-top: 20px;
+}
+.account-secret input {
+    width: 100%;
+    font-family: monospace;
+}
+.account-secret p {
+    font-size: 14px;
+}
+.participant-panel details {
+    margin: 18px 0;
+}
+.participant-panel summary {
+    cursor: pointer;
+}
+#registration-captcha img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+}
+@media (max-width: 800px) {
+    .account-grid {
+        grid-template-columns: 1fr;
+    }
+}

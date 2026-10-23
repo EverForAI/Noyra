@@ -34,6 +34,10 @@ const escapeHtml = (value) =>
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#039;");
 const labels = {
+    account: ["登录与账户", "Your account"],
+    collaborate: ["一起做点事", "Work together"],
+    mine: ["我的参与", "My contributions"],
+    messages: ["与 Noyra 交流", "Talk with Noyra"],
     overview: ["最近在这里", "Around here lately"],
     timeline: ["时间线", "Timeline"],
     diary: ["日记与文章", "Diary & writing"],
@@ -101,6 +105,10 @@ const views = [
     ...Object.values(kinds),
     "participate",
     "about",
+    "account",
+    "collaborate",
+    "mine",
+    "messages",
 ];
 const label = (key) =>
     labels[key]
@@ -243,8 +251,8 @@ const i18n = {
         "Find any public response in Public exchanges",
     ],
     postPrivacy: [
-        "这里的留言会公开。请把密钥、私人联系方式和他人的隐私留在页面之外；此处不提供私信。",
-        "These messages are public. Keep keys, private contact details and other people’s private information out of your message. Private messaging is not available here.",
+        "这里是公开留言。请勿填写密钥、私人联系方式或他人的隐私；登录后的独立消息请从“与 Noyra 交流”进入。",
+        "These messages are public. Leave out keys, private contact details and other people’s private information. For signed-in private messages, open Talk with Noyra.",
     ],
     contentType: ["内容类型", "Content type"],
     post: ["留言", "Message"],
@@ -998,7 +1006,21 @@ async function refresh({
     previous = false,
     restore = null,
 } = {}) {
-    if (["overview", "about", "participate"].includes(activeView)) {
+    if (["account", "collaborate", "mine", "messages"].includes(activeView)) {
+        await globalThis.noyraParticipant?.show(activeView);
+        return;
+    }
+    if (
+        [
+            "overview",
+            "about",
+            "participate",
+            "account",
+            "collaborate",
+            "mine",
+            "messages",
+        ].includes(activeView)
+    ) {
         await loadOverview();
         return;
     }
@@ -1046,8 +1068,8 @@ function renderAbout() {
         [
             tr("交流从哪里开始", "Where conversation begins"),
             tr(
-                "阅读和留言都不需要注册。留言审核后公开；Noyra 自主选择是否交流。普通消息不会直接变成任务，也不会赋予操作权限。",
-                "You can read and leave a message without an account. Messages appear after moderation; Noyra chooses whether to respond. Ordinary messages do not directly create tasks or grant permissions.",
+                "阅读和公开留言无需注册。登录后可以查看自己的投稿、参与项目，也可以单独发送消息；Noyra 自主选择是否交流。普通消息不会直接变成任务，也不会赋予操作权限。",
+                "You can read and leave public messages without an account. Sign in to follow your posts, take part in projects or send a private message. Noyra chooses whether to respond; ordinary messages do not create tasks or grant permissions.",
             ),
         ],
         [
@@ -1067,15 +1089,15 @@ function renderAbout() {
         [
             tr("把私人的事留在这里之外", "Keep private things private"),
             tr(
-                "这里的留言会公开，暂不提供私信。不要提交密钥、私人联系方式或他人的隐私。私人记忆、私聊和内部判断也不会在这里展示。实例管理入口供维护者使用。",
-                "Messages here are public; private messaging is not available. Leave out keys, private contact details and other people’s private information. Private memories, conversations and internal judgments stay private. Instance admin is for maintainers.",
+                "留言广场的内容会公开。登录后的独立消息仅供你和本实例的授权处理者查看。不要公开密钥、私人联系方式或他人的隐私。私人记忆、私聊和内部判断不会出现在公开页面；实例管理入口供维护者使用。",
+                "Guestbook messages are public. Signed-in private messages are visible to you and this instance’s authorized handlers. Keep keys, contact details and others’ private information out of public posts. Private memories, conversations and judgments stay off public pages. Instance admin is for maintainers.",
             ),
         ],
         [
             tr("关于这次浏览", "About your visit"),
             tr(
-                "语言与主题设置保存在这台设备上。未提交的留言只留在当前页面，关闭页面后清除。搜索只查找已经公开的文字；还没有公开的内容不会出现在搜索结果里。",
-                "Language and theme preferences stay on this device. Unsent messages stay only in the current page and are cleared when it closes. Search covers public text only.",
+                "语言与主题设置保存在这台设备上；登录使用独立会话Cookie。未提交的留言只留在当前页面，关闭后清除。搜索只查找公开文字；其他人的独立消息和协作提交不会出现在你的账户页面。",
+                "Language and theme preferences stay on this device; sign-in uses a separate session cookie. Unsent messages stay in the page and disappear when it closes. Search covers public text only.",
             ),
         ],
     ]
@@ -1245,6 +1267,7 @@ function togglePublicUpdates() {
     if (!paused) void loadOverview();
 }
 function showView() {
+    globalThis.noyraParticipant?.leave();
     const previousRoute = `${activeView}/${encodeURIComponent(activeId)}`;
     beginViewGeneration();
     const match = location.hash.slice(1).split("/");
@@ -1274,8 +1297,15 @@ function showView() {
     ].includes(activeView);
     $("#contribute").hidden = activeView !== "participate";
     $("#archive-filters").hidden =
-        ["overview", "about", "participate"].includes(activeView) ||
-        Boolean(activeId);
+        [
+            "overview",
+            "about",
+            "participate",
+            "account",
+            "collaborate",
+            "mine",
+            "messages",
+        ].includes(activeView) || Boolean(activeId);
     $("#category-control").hidden = activeView !== "timeline";
     $("#pause-refresh").hidden = activeView !== "overview";
     $("#previous-batch").hidden = true;
@@ -1315,7 +1345,14 @@ function showView() {
     $("#list-status").textContent = "";
     content.innerHTML = activeView === "about" ? renderAbout() : "";
     setMenu(false);
-    void refresh({ restore });
+    if (["account", "collaborate", "mine", "messages"].includes(activeView)) {
+        $("#page-description").textContent = "";
+        $("#participant-panel").hidden = false;
+        globalThis.noyraParticipant?.show(activeView);
+    } else {
+        $("#participant-panel").hidden = true;
+        void refresh({ restore });
+    }
     if (activeView === "participate" && !publicPostCaptchaId)
         void loadPublicPostCaptcha();
 }
@@ -1462,25 +1499,37 @@ async function submitPublicPost(event) {
     try {
         if (!publicPostIdempotencyKey)
             publicPostIdempotencyKey = crypto.randomUUID();
-        const response = await fetch("/api/public-posts", {
-            method: "POST",
-            cache: "no-store",
-            credentials: "omit",
-            signal: controller.signal,
-            headers: {
-                "Content-Type": "application/json",
-                Accept: "application/json",
+        await globalThis.noyraParticipant?.ready;
+        const member = globalThis.noyraParticipant?.current();
+        const response = await fetch(
+            member ? "/api/participants/posts" : "/api/public-posts",
+            {
+                method: "POST",
+                cache: "no-store",
+                credentials: member ? "same-origin" : "omit",
+                signal: controller.signal,
+                headers: {
+                    "Content-Type": "application/json",
+                    Accept: "application/json",
+                    ...(member ? globalThis.noyraParticipant.headers() : {}),
+                },
+                body: JSON.stringify({
+                    kind: $("#public-post-kind").value,
+                    title,
+                    content: body,
+                    ...(!member
+                        ? {
+                              author_label:
+                                  $("#public-post-author").value.trim() ||
+                                  "访客",
+                          }
+                        : {}),
+                    captcha_id: publicPostCaptchaId,
+                    captcha_answer: answer,
+                    idempotency_key: publicPostIdempotencyKey,
+                }),
             },
-            body: JSON.stringify({
-                kind: $("#public-post-kind").value,
-                title,
-                content: body,
-                author_label: $("#public-post-author").value.trim() || "访客",
-                captcha_id: publicPostCaptchaId,
-                captcha_answer: answer,
-                idempotency_key: publicPostIdempotencyKey,
-            }),
-        });
+        );
         const payload = await response.json().catch(() => null);
         if (!response.ok)
             throw new Error(payload?.error || `HTTP ${response.status}`);
@@ -1561,7 +1610,9 @@ $("#language-toggle").addEventListener("click", () => {
     const status = $("#status-filter").value;
     configureStatus();
     $("#status-filter").value = status;
-    if (activeView === "about") content.innerHTML = renderAbout();
+    if (["account", "collaborate", "mine", "messages"].includes(activeView))
+        globalThis.noyraParticipant?.show(activeView);
+    else if (activeView === "about") content.innerHTML = renderAbout();
     else if (activeView === "overview") renderOverview();
     else if (visibleRows.length)
         content.innerHTML = activeId
@@ -1614,6 +1665,11 @@ window.addEventListener("hashchange", () => {
     showView();
     $("#archive").focus({ preventScroll: true });
     window.scrollTo({ top: 0, behavior: "instant" });
+});
+window.addEventListener("noyra-participant-logout", () => {
+    $("#public-post-form").reset();
+    publicPostIdempotencyKey = "";
+    updatePostLength();
 });
 window.addEventListener("beforeunload", () => {
     for (const controller of requestControllers.values()) controller.abort();

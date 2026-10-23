@@ -883,13 +883,13 @@ test("visitor guidance never sends people to operator login or invents private m
         );
         assert.match(
             about,
-            language === "en" ? /without an account/ : /不需要注册/,
+            language === "en" ? /without an account/ : /无需注册/,
         );
         assert.match(
             about,
             language === "en"
-                ? /private messaging is not available/
-                : /暂不提供私信/,
+                ? /Signed-in private messages/
+                : /登录后的独立消息/,
         );
         const note = h.get("tr(...i18n.postPrivacy)");
         assert.doesNotMatch(note, /admin console|管理台/);
@@ -981,4 +981,18 @@ test("a stage-only instance explains missing writing without claiming there is n
     assert.match(h.node("#content").innerHTML, /日记还没有公开/);
     assert.match(h.node("#content").innerHTML, /orienting|初始化/);
     assert.doesNotMatch(h.node("#content").innerHTML, /这里还没有公开记录/);
+});
+
+test("private page refresh uses its authenticated view rather than the public overview", async () => {
+    const h = harness();
+    let shown = "";
+    let publicReads = 0;
+    h.sandbox.noyraParticipant = { show: async (view) => (shown = view) };
+    h.sandbox.loadOverview = async () => publicReads++;
+    for (const view of ["account", "collaborate", "mine", "messages"]) {
+        h.set(`activeView="${view}"`);
+        await h.sandbox.refresh();
+        assert.equal(shown, view);
+    }
+    assert.equal(publicReads, 0);
 });

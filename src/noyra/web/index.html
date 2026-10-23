@@ -176,6 +176,34 @@
                         </div>
                     </details>
                     <a
+                        class="nav-link"
+                        href="#collaborate"
+                        data-view="collaborate"
+                        data-i18n="collaborate"
+                        >一起做点事</a
+                    >
+                    <a
+                        class="nav-link"
+                        href="#mine"
+                        data-view="mine"
+                        data-i18n="mine"
+                        >我的参与</a
+                    >
+                    <a
+                        class="nav-link"
+                        href="#messages"
+                        data-view="messages"
+                        data-i18n="messages"
+                        >与 Noyra 交流</a
+                    >
+                    <a
+                        class="nav-link"
+                        href="#account"
+                        data-view="account"
+                        data-i18n="account"
+                        >登录与账户</a
+                    >
+                    <a
                         class="nav-link write-link"
                         href="#participate"
                         data-view="participate"
@@ -308,6 +336,12 @@
                         ></a
                     >
                 </section>
+                <section
+                    id="participant-panel"
+                    class="participant-panel"
+                    hidden
+                    aria-label="账户与参与"
+                ></section>
                 <form id="archive-filters" class="filter-bar" hidden>
                     <label
                         ><span data-i18n="period">时间范围</span
@@ -443,7 +477,8 @@
                             </li>
                         </ol>
                         <p class="privacy-note" data-i18n="postPrivacy">
-                            这里的留言会公开。请把密钥、私人联系方式和他人的隐私留在页面之外；此处不提供私信。
+                            这里是公开留言。请勿填写密钥、私人联系方式或他人的隐私；登录后的独立消息请从“与
+                            Noyra 交流”进入。
                         </p>
                     </div>
                     <form id="public-post-form" class="message-form">
@@ -586,6 +621,7 @@
                 更多
             </button>
         </nav>
+        <script src="/participant.js" defer></script>
         <script src="/app.js" defer></script>
     </body>
 </html>
