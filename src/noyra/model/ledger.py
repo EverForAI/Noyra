@@ -908,7 +908,8 @@ class ModelLedger:
                 return False
             closed = connection.execute(
                 "SELECT 1 FROM audit_records INDEXED BY idx_audit_subject_action_call "
-                "WHERE subject_id=? AND action='model_unknown_retry_cancelled' "
+                "WHERE subject_id=? AND action IN ('model_unknown_retry_closed', "
+                "'model_unknown_retry_cancelled') "
                 "AND json_valid(payload_json) "
                 "AND json_extract(payload_json, '$.call_id')=? LIMIT 1",
                 (row["subject_id"], call_id),
@@ -927,7 +928,7 @@ class ModelLedger:
                 )
             connection.execute(
                 "INSERT INTO audit_records(audit_id, subject_id, action, actor, payload_json, "
-                "occurred_at) VALUES (?, ?, 'model_unknown_retry_cancelled', ?, ?, ?)",
+                "occurred_at) VALUES (?, ?, 'model_unknown_retry_closed', ?, ?, ?)",
                 (
                     new_id("audit"),
                     row["subject_id"],

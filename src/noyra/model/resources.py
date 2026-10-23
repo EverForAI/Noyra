@@ -3309,17 +3309,24 @@ class RoutedModelGateway(ModelGateway):
                 "AND resource_pool = ? AND ("
                 "substr(idempotency_key, 1, ?) = ? OR "
                 "substr(idempotency_key, 1, ?) = ? OR "
-                "(? AND (status IN ('prepared','executing','unknown') OR "
+                "(? AND ("
+                "status IN ('prepared','executing','unknown') OR "
                 "(status='failed' AND EXISTS (SELECT 1 FROM audit_records a "
                 "INDEXED BY idx_audit_subject_action_call "
                 "WHERE a.subject_id=model_calls.subject_id "
                 "AND a.action='model_unknown_retry_authorized' AND json_valid(a.payload_json) "
                 "AND json_extract(a.payload_json,'$.call_id')=model_calls.call_id) "
-                "AND NOT EXISTS (SELECT 1 FROM audit_records a "
+                "AND NOT (EXISTS (SELECT 1 FROM audit_records a "
+                "INDEXED BY idx_audit_subject_action_call "
+                "WHERE a.subject_id=model_calls.subject_id "
+                "AND a.action='model_unknown_retry_closed' AND json_valid(a.payload_json) "
+                "AND json_extract(a.payload_json,'$.call_id')=model_calls.call_id) "
+                "OR (model_calls.error_code='operator_cancelled' AND EXISTS "
+                "(SELECT 1 FROM audit_records a "
                 "INDEXED BY idx_audit_subject_action_call "
                 "WHERE a.subject_id=model_calls.subject_id "
                 "AND a.action='model_unknown_retry_cancelled' AND json_valid(a.payload_json) "
-                "AND json_extract(a.payload_json,'$.call_id')=model_calls.call_id))))) "
+                "AND json_extract(a.payload_json,'$.call_id')=model_calls.call_id))))))) "
                 "ORDER BY created_at, call_id LIMIT 257",
                 (
                     self.subject_id,
@@ -3351,7 +3358,8 @@ class RoutedModelGateway(ModelGateway):
                 "SELECT action, payload_json FROM audit_records "
                 "INDEXED BY idx_audit_subject_action_call "
                 "WHERE subject_id = ? AND action IN "
-                "('model_unknown_retry_authorized', 'model_unknown_retry_cancelled') "
+                "('model_unknown_retry_authorized', 'model_unknown_retry_cancelled', "
+                "'model_unknown_retry_closed') "
                 "AND json_valid(payload_json) "
                 f"AND json_extract(payload_json, '$.call_id') IN ({placeholders}) "
                 "ORDER BY occurred_at, audit_id",
@@ -3360,6 +3368,7 @@ class RoutedModelGateway(ModelGateway):
 
         authorized_call_ids: set[str] = set()
         cancelled_call_ids: set[str] = set()
+        closed_call_ids: set[str] = set()
         for audit_row in audit_rows:
             try:
                 payload = json.loads(str(audit_row["payload_json"]))
@@ -3371,6 +3380,8 @@ class RoutedModelGateway(ModelGateway):
                 call_id = payload["call_id"]
                 if audit_row["action"] == "model_unknown_retry_cancelled":
                     cancelled_call_ids.add(call_id)
+                elif audit_row["action"] == "model_unknown_retry_closed":
+                    closed_call_ids.add(call_id)
                 else:
                     authorized_call_ids.add(call_id)
 
@@ -3428,13 +3439,15 @@ class RoutedModelGateway(ModelGateway):
             if (
                 status == "failed"
                 and call.call_id in authorized_call_ids
-                and call.call_id not in cancelled_call_ids
+                and call.call_id not in closed_call_ids
+                and not (
+                    str(row["error_code"]) == "operator_cancelled"
+                    and call.call_id in cancelled_call_ids
+                )
             ):
                 # One explicitly-authorized physical retry is terminal when
-                # it fails.  A later tick cannot treat the durable audit row
-                # as unlimited permission to rotate credentials and call
-                # again.  By contrast, operator reconciliation to a known
-                # failed outcome releases the ambiguity fence.
+                # it fails. A later tick cannot treat the durable audit row as
+                # unlimited permission to rotate credentials and call again.
                 return _LogicalRouteState(call, group_id, key_id, "quarantine")
         return retry_state
 

@@ -1158,6 +1158,7 @@ _CORE_AUDIT_ACTIONS = frozenset(
         "model_unknown_reconciled",
         "model_unknown_retry_authorized",
         "model_unknown_retry_cancelled",
+        "model_unknown_retry_closed",
         "runtime_exported",
         "training_export_aborted",
         "training_exported",
@@ -3082,6 +3083,7 @@ def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
         "FROM audit_records a "
         "LEFT JOIN model_calls referenced_call ON "
         "a.action IN ('model_unknown_retry_authorized', 'model_unknown_retry_cancelled', "
+        "'model_unknown_retry_closed', "
         "'model_unknown_reconciled') "
         "AND referenced_call.call_id = CASE "
         "WHEN typeof(a.payload_json) = 'text' AND json_valid(a.payload_json) "
@@ -3160,14 +3162,18 @@ def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
                 f"{context_label} historical authenticity",
             ):
                 raise IntegrityError(f"{context_label} historical authenticity is invalid")
-        elif action in {"model_unknown_retry_authorized", "model_unknown_retry_cancelled"}:
+        elif action in {
+            "model_unknown_retry_authorized",
+            "model_unknown_retry_cancelled",
+            "model_unknown_retry_closed",
+        }:
             keys = set(payload)
             basic_keys = {"call_id", "reason"}
             resolution_keys = basic_keys | {
                 "resolution_evidence_hash",
                 "duplicate_risk_accepted",
             }
-            if action == "model_unknown_retry_authorized" or keys == basic_keys:
+            if action in {"model_unknown_retry_authorized", "model_unknown_retry_cancelled"}:
                 _provenance_keys(payload, basic_keys, context_label)
             elif keys == resolution_keys:
                 _provenance_hash(

@@ -323,7 +323,7 @@ async def test_operator_can_close_failed_one_shot_unknown_retry(
     with database.connection() as connection:
         closed_rows = connection.execute(
             "SELECT COUNT(*) FROM audit_records WHERE subject_id=? "
-            "AND action='model_unknown_retry_cancelled' "
+            "AND action='model_unknown_retry_closed' "
             "AND json_valid(payload_json) AND json_extract(payload_json,'$.call_id')=?",
             (subject, call.call_id),
         ).fetchone()[0]
@@ -332,7 +332,7 @@ async def test_operator_can_close_failed_one_shot_unknown_retry(
         audit_payload = json.loads(
             connection.execute(
                 "SELECT payload_json FROM audit_records WHERE subject_id=? "
-                "AND action='model_unknown_retry_cancelled' "
+                "AND action='model_unknown_retry_closed' "
                 "AND json_valid(payload_json) AND json_extract(payload_json,'$.call_id')=?",
                 (subject, call.call_id),
             ).fetchone()[0]
