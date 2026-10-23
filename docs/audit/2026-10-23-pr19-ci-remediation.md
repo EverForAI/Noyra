@@ -39,3 +39,15 @@ GitHub PR 检查运行 `39901026191`，push 运行 `39901022254`。四组合均�
 成功场景按真实协议执行 boot→orient→activate，并用上下文在临时目录清理前关闭主体；验证两个原始记忆仍保留正文且均标记 superseded。新增 booting/paused/stopped 三种状态下不发送、不创建调用与attempt、不写整合、不修改记忆的拒绝回归。产品生命周期门禁和记忆整合逻辑均未修改。
 
 记忆整合与语义整合 5 passed、3 subtests passed（15.48秒），Ruff/format通过。复审检查Windows锁释放顺序：先退出主体上下文释放进程锁，再清理临时目录，避免成功测试退出时泄漏文件句柄。
+
+### D 路由身份与升级兼容锁
+
+旧断言确有过时部分，但未将全部锁失败归咎于测试。逐代码复核确认：业务轮次改成 `business-round` 后，当前版本不再检查升级前同一 caller key 的 v1 digest/v2 bucket；旧进程持有同一请求的锁时，新代码可能进入。此为上一轮引入的兼容缺口，风险P2，修复风险高；不同程序版本同时运行仍不是受支持部署方式，升级应先停止旧owner，新增锁只保留同一旧key的防线，不宣称允许任意旧版本混跑。
+
+修复同时持有业务轮次bucket和caller key原bucket，并仅检查已存在的相关v1文件；固定256 bucket命名空间、无unlink、无新增逐key文件。用ExitStack从内存锁登记后即建立清理，确保digest/path失败、第二把锁失败、取消及unlock异常后其余锁仍释放。未知结果仍先于等待时间/换路判断，未放宽资金、预算或人工重试规则。
+
+回归覆盖业务轮次及普通有意请求、旧逐key锁/新整轮锁/v1锁、hash bucket碰撞、换key子进程、1000身份的文件上限、重启继承、解锁异常、setup失败和取消。旧容量测试拆清同一业务round换key仍quarantined，普通请求不同key保持purpose-specific pool_waiting；两者重复调用都不新增证据。
+
+Windows模型/路由/锁/人工未知重试/生命周期集合137 passed、175 subtests passed（486.61秒）；前序路由+记忆30 passed、3 subtests passed及新增清理3 passed。全仓Ruff/format（727文件）、Mypy win32/linux（各452文件）与前端133项均通过。Linux受影响集及安装专项仍在执行，远端检查尚未重新触发。
+
+复审：未改业务身份或锁粒度，避免两个不同key绕过同一round；compat锁路径独立手工计算并由子进程验证，没有把测试预期绑定到被测辅助函数；只在真实Windows保留Authenticode成功链，未用假签名通过产品门禁。

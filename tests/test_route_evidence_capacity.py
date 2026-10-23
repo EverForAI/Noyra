@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -61,10 +62,16 @@ def decision(gateway: RoutedModelGateway) -> str:
     ).decision_id
 
 
-async def complete(gateway: RoutedModelGateway, subject: str, key: str) -> Any:
+async def complete(
+    gateway: RoutedModelGateway,
+    subject: str,
+    key: str,
+    *,
+    purpose: str = "world_cognition:capacity",
+) -> Any:
     return await gateway.complete_structured(
         subject,
-        "world_cognition:capacity",
+        purpose,
         [ModelMessage(role="user", content="JSON")],
         Answer,
         idempotency_key=key,
@@ -199,22 +206,27 @@ async def test_first_attempt_capacity_denial_sends_nothing_and_is_terminal(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("purpose", ["world_cognition:capacity", "research_plan:capacity"])
 async def test_unknown_and_not_due_do_not_grow_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    purpose: str,
 ) -> None:
     monkeypatch.setenv("NOYRA_EVIDENCE_MAX_ROWS_PER_TABLE", "1")
     db, subject, gateway, _, _, _ = setup_route(tmp_path)
     provider = FakeProvider([ProviderCallError("unknown", retryable=False, outcome_unknown=True)])
     gateway.provider_factory = lambda _: provider
     with pytest.raises(ProviderCallError):
-        await complete(gateway, subject, "unknown")
+        await complete(gateway, subject, "unknown", purpose=purpose)
     before = RetentionManager(db).evidence_capacity(subject)["counts"]
     for _ in range(5):
         with pytest.raises(ProviderCallError, match="quarantined"):
-            await complete(gateway, subject, "unknown")
-        with pytest.raises(ProviderCallError, match="pool_waiting"):
-            await complete(gateway, subject, "not-due")
+            await complete(gateway, subject, "unknown", purpose=purpose)
+        # Business rounds keep the quarantine across key changes. Other
+        # intentional requests still obey their existing purpose-specific wait.
+        expected = "quarantined" if purpose.startswith("world_cognition:") else "pool_waiting"
+        with pytest.raises(ProviderCallError, match=expected):
+            await complete(gateway, subject, "not-due", purpose=purpose)
     assert len(provider.requests) == 1
     assert RetentionManager(db).evidence_capacity(subject)["counts"] == before
     assert RetentionManager(db).evidence_capacity(subject)["blocked"] is True
@@ -322,9 +334,11 @@ def test_route_counter_backfill_isolation_rollback_and_tampering(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("purpose", ["world_cognition:capacity", "research_plan:capacity"])
 async def test_route_lock_files_are_bounded_across_many_ids_and_restart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    purpose: str,
 ) -> None:
     db, subject, gateway, _, _, _ = setup_route(tmp_path)
 
@@ -333,27 +347,34 @@ async def test_route_lock_files_are_bounded_across_many_ids_and_restart(
 
     monkeypatch.setattr(gateway, "_complete_structured_locked", no_request)
     for number in range(1000):
-        await complete(gateway, subject, str(number))
+        await complete(gateway, subject, str(number), purpose=purpose)
     folder = db.path.with_name(f".{db.path.name}.model-route-locks-v2")
     assert 200 <= len(list(folder.glob("*.lock"))) <= 256
     assert not db.path.with_name(f".{db.path.name}.model-route-locks").exists()
     successor = RoutedModelGateway(Database(db.path), subject, gateway.resources)
     monkeypatch.setattr(successor, "_complete_structured_locked", no_request)
-    await complete(successor, subject, "0")
+    await complete(successor, subject, "0", purpose=purpose)
     assert RoutedModelGateway._logical_route_locks == {}
 
 
-@pytest.mark.parametrize("mode", ["same", "collision", "legacy"])
-def test_route_lock_fences_real_process_and_allows_successor(tmp_path: Path, mode: str) -> None:
+@pytest.mark.parametrize("purpose", ["world_cognition:capacity", "research_plan:capacity"])
+@pytest.mark.parametrize(
+    "mode", ["same", "collision", "legacy", "business", "business-collision", "business-legacy"]
+)
+def test_route_lock_fences_real_process_and_allows_successor(
+    tmp_path: Path, mode: str, purpose: str
+) -> None:
     path = tmp_path / "noyra.sqlite3"
+    business = purpose.startswith("world_cognition:")
+    identity = "business-round" if mode.startswith("business") and business else "once"
     digest = content_hash(
         {
             "subject_id": "subject",
-            "purpose": "world_cognition:capacity",
-            "idempotency_key": "once",
+            "purpose": purpose,
+            "idempotency_key": identity,
         }
     )
-    if mode == "collision":
+    if "collision" in mode:
         digest = next(
             candidate
             for number in range(10000)
@@ -362,7 +383,7 @@ def test_route_lock_fences_real_process_and_allows_successor(tmp_path: Path, mod
                     candidate := content_hash(
                         {
                             "subject_id": "subject",
-                            "purpose": "world_cognition:capacity",
+                            "purpose": purpose,
                             "idempotency_key": str(number),
                         }
                     )
@@ -374,7 +395,7 @@ def test_route_lock_fences_real_process_and_allows_successor(tmp_path: Path, mod
         )
     lock_path = (
         path.with_name(f".{path.name}.model-route-locks") / f"{digest}.lock"
-        if mode == "legacy"
+        if "legacy" in mode
         else path.with_name(f".{path.name}.model-route-locks-v2")
         / f"{int(digest[:8], 16) % 256:02x}.lock"
     )
@@ -394,9 +415,10 @@ gateway.database = SimpleNamespace(path=Path(sys.argv[1]))
 gateway._complete_structured_locked = no_request
 try:
     asyncio.run(gateway.complete_structured(
-        'subject', 'world_cognition:capacity', [], BaseModel, idempotency_key='once'))
+        'subject', sys.argv[3], [], BaseModel, idempotency_key=sys.argv[4]))
 except ProviderCallError as exc:
     assert exc.code == 'routed_model_call_in_progress' and exc.outcome_unknown
+    assert RoutedModelGateway._logical_route_locks == {}
     raise SystemExit(23)
 assert RoutedModelGateway._logical_route_locks == {}
 """
@@ -406,6 +428,8 @@ assert RoutedModelGateway._logical_route_locks == {}
         probe,
         str(path),
         str(Path(__file__).resolve().parents[1] / "src"),
+        purpose,
+        "different-key" if mode.startswith("business") and business else "once",
     ]
     owner = ProcessLock(lock_path)
     owner.acquire()
@@ -448,3 +472,85 @@ async def test_unlock_error_does_not_leak_other_locks(
     assert RoutedModelGateway._logical_route_locks == {}
     monkeypatch.setattr(ProcessLock, "release", original)
     assert (await complete(gateway, subject, "once")).cached
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["digest", "second_lock"])
+async def test_route_lock_setup_failure_releases_all_owners(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    db, subject, gateway, _, _, _ = setup_route(tmp_path)
+
+    async def no_request(*_: Any, **__: Any) -> None:
+        return None
+
+    monkeypatch.setattr(gateway, "_complete_structured_locked", no_request)
+    acquired = 0
+    original = ProcessLock.acquire
+
+    def fail_second(lock: ProcessLock) -> bool:
+        nonlocal acquired
+        acquired += 1
+        if acquired == 2:
+            raise OSError("synthetic second lock failure")
+        return original(lock)
+
+    def fail_digest(_: Any) -> str:
+        raise ValueError("synthetic digest failure")
+
+    with monkeypatch.context() as patch:
+        if failure == "digest":
+            patch.setattr("noyra.model.resources.content_hash", fail_digest)
+            with pytest.raises(ValueError, match="synthetic digest"):
+                await complete(gateway, subject, "once")
+        else:
+            patch.setattr(ProcessLock, "acquire", fail_second)
+            with pytest.raises(OSError, match="synthetic second lock"):
+                await complete(gateway, subject, "once")
+    assert RoutedModelGateway._logical_route_locks == {}
+    for path in db.path.with_name(f".{db.path.name}.model-route-locks-v2").glob("*.lock"):
+        probe = ProcessLock(path)
+        try:
+            assert probe.acquire()
+        finally:
+            probe.release()
+    # The same identity must be admissible after either setup failure.
+    await complete(gateway, subject, "once")
+    assert RoutedModelGateway._logical_route_locks == {}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_route_releases_business_and_compatibility_locks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db, subject, gateway, _, _, _ = setup_route(tmp_path)
+    entered = asyncio.Event()
+
+    async def blocked(*_: Any, **__: Any) -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(gateway, "_complete_structured_locked", blocked)
+    task = asyncio.create_task(complete(gateway, subject, "once"))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        with pytest.raises(ProviderCallError, match="in_progress"):
+            await complete(gateway, subject, "different-key")
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert RoutedModelGateway._logical_route_locks == {}
+    for path in db.path.with_name(f".{db.path.name}.model-route-locks-v2").glob("*.lock"):
+        probe = ProcessLock(path)
+        try:
+            assert probe.acquire()
+        finally:
+            probe.release()
+
+    async def no_request(*_: Any, **__: Any) -> None:
+        return None
+
+    monkeypatch.setattr(gateway, "_complete_structured_locked", no_request)
+    await complete(gateway, subject, "different-key")
+    assert RoutedModelGateway._logical_route_locks == {}

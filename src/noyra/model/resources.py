@@ -9,7 +9,7 @@ import re
 import threading
 import time
 from collections.abc import Callable, Sequence
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -2796,28 +2796,40 @@ class RoutedModelGateway(ModelGateway):
                 retryable=False,
                 outcome_unknown=True,
             )
-        route_digest = content_hash(
-            {
-                "subject_id": subject_id,
-                "purpose": purpose,
-                "idempotency_key": lock_identity,
+        # Preserve the previous key-derived fence as well as the business-round
+        # fence. Otherwise an upgrade could ignore a still-held v1/v2 lock for
+        # exactly the same request. Both use the same fixed 256 bucket files;
+        # no per-request files are created in the legacy namespace.
+        with ExitStack() as cleanup:
+            cleanup.callback(self._release_logical_route, lock_key, lock, acquired=True)
+            digests = {
+                content_hash(
+                    {
+                        "subject_id": subject_id,
+                        "purpose": purpose,
+                        "idempotency_key": identity,
+                    }
+                )
+                for identity in (lock_identity, idempotency_key)
             }
-        )
-        legacy_path = (
-            self.database.path.with_name(f".{self.database.path.name}.model-route-locks")
-            / f"{route_digest}.lock"
-        )
-        # Fixed files avoid unlink races; hash collisions conservatively refuse work.
-        process_lock = ProcessLock(
-            self.database.path.with_name(f".{self.database.path.name}.model-route-locks-v2")
-            / f"{int(route_digest[:8], 16) % 256:02x}.lock"
-        )
-        legacy_lock = ProcessLock(legacy_path) if legacy_path.exists() else None
-        try:
+            process_paths = {
+                self.database.path.with_name(f".{self.database.path.name}.model-route-locks-v2")
+                / f"{int(digest[:8], 16) % 256:02x}.lock"
+                for digest in digests
+            }
+            legacy_paths = {
+                self.database.path.with_name(f".{self.database.path.name}.model-route-locks")
+                / f"{digest}.lock"
+                for digest in digests
+            }
+            process_paths.update(path for path in legacy_paths if path.exists())
             try:
-                process_lock.acquire()
-                if legacy_lock is not None:
-                    legacy_lock.acquire()
+                # Non-blocking and ordered: collisions conservatively refuse
+                # work; failed acquisition still releases every earlier lock.
+                for path in sorted(process_paths):
+                    process_lock = ProcessLock(path)
+                    cleanup.callback(process_lock.release)
+                    process_lock.acquire()
             except RuntimeOwnershipError as error:
                 raise ProviderCallError(
                     "routed_model_call_in_progress",
@@ -2834,15 +2846,6 @@ class RoutedModelGateway(ModelGateway):
                 temperature=temperature,
                 reasoning_effort=reasoning_effort,
             )
-        finally:
-            try:
-                if legacy_lock is not None:
-                    legacy_lock.release()
-            finally:
-                try:
-                    process_lock.release()
-                finally:
-                    self._release_logical_route(lock_key, lock, acquired=True)
 
     async def _complete_structured_locked(
         self,
