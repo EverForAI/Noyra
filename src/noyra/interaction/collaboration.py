@@ -516,6 +516,10 @@ class ParticipantCollaboration:
                     "AND idempotency_key=?",
                     (self.subject, bounty_id, key),
                 ).fetchone()
+                if existing:
+                    # A claimed counterparty string is not authenticated ownership.
+                    # Never adopt an unlinked legacy/public submission as a receipt.
+                    raise PermissionError("submission_owner_mismatch")
                 submission = self.owner.wallet_economy.submit_to_bounty(
                     bounty_id,
                     self.subject,
@@ -529,7 +533,7 @@ class ParticipantCollaboration:
                     "bounty_id=? AND status='open'",
                     (self.subject, bounty_id),
                 ).fetchone()
-                if workflow and not existing:
+                if workflow:
                     self.owner.wallet_rewards._link_submission(
                         c,
                         workflow,

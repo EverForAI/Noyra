@@ -937,3 +937,34 @@ async def test_routed_withdrawal_settles_route_without_fallback_or_state_commit(
             == 0
         )
     assert len(provider.requests) == (1 if phase.startswith("provider_") else 0)
+
+
+def test_submission_receipt_requires_existing_authenticated_ownership(
+    kernel: SubjectKernel,
+) -> None:
+    from noyra.wallet.economy_types import SubmissionInput
+
+    collaboration, who, bounty = make_collaboration(kernel)
+    payload = {
+        "bounty_id": bounty.bounty_id,
+        "content": "Legacy contribution",
+        "recipient_address": "0x" + "1" * 40,
+        "idempotency_key": "receipt",
+    }
+    collaboration.owner.wallet_economy.submit_to_bounty(
+        bounty.bounty_id,
+        kernel.subject_id,
+        SubmissionInput(
+            counterparty=who.entity_id,
+            consent_version=1,
+            content=payload["content"],
+            recipient_address=payload["recipient_address"],
+            idempotency_key="participant:" + content_hash([who.entity_id, "submit", "receipt"]),
+        ),
+    )
+    with pytest.raises(PermissionError, match="submission_owner_mismatch"):
+        collaboration.write("/api/participants/submit", payload, who, "127.0.0.1")
+    assert collaboration.read("/api/participants/submissions", {}, who)["items"] == []
+    with kernel.database.connection() as c:
+        assert c.execute("SELECT COUNT(*) FROM participant_submissions").fetchone()[0] == 0
+        assert c.execute("SELECT COUNT(*) FROM wallet_payment_orders").fetchone()[0] == 0
