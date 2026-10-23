@@ -83,4 +83,4 @@
 
 ## 提交与工作区
 
-本轮相关提交：`6f2997a`（schema 102 export graph）、`b57ee85`（schema 103 observed embedding dimensions）、`4e53d36`（格式检查修整）；前序修复提交见 `docs/audit/2026-10-23-remediation.md`。最终审计文档本身需在本次任务结束前单独提交；推送、合并 main、生产升级均不属于本轮已执行动作。
+本轮相关提交：`6f2997a`（schema 102 export graph）、`b57ee85`（schema 103 observed embedding dimensions）、`4e53d36`（格式检查修整）、`2346107`（最终审计文档）；前序修复提交见 `docs/audit/2026-10-23-remediation.md`。推送、合并 main、生产升级均不属于本轮已执行动作。
