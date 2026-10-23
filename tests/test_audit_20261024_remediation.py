@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -13,9 +14,12 @@ from noyra.core import SubjectKernel
 from noyra.core.types import content_hash
 from noyra.interaction import InteractionStore
 from noyra.interaction.accounts import AccountStore
+from noyra.interaction.collaboration import ParticipantCollaboration
+from noyra.interaction.participants import Participant
 from noyra.mind.memory import MAX_RECALL_QUERY_CHARS, MemoryStore
 from noyra.model import (
     BudgetLimits,
+    CompletionRequest,
     FakeProvider,
     ModelGateway,
     ModelLedger,
@@ -23,6 +27,7 @@ from noyra.model import (
     ModelUsage,
     ProviderResponse,
 )
+from noyra.wallet import BountyRecord
 
 
 @pytest.fixture
@@ -302,3 +307,191 @@ def test_disabled_source_is_skipped_without_switching_bots(
         ).fetchall()
         assert [tuple(row) for row in rows] == [(eligible.interaction_id, other.transport_id)]
     assert all(store.get(identifier).status == "sent" for identifier in blocked)
+
+
+def make_collaboration(
+    kernel: SubjectKernel,
+) -> tuple[ParticipantCollaboration, Participant, BountyRecord]:
+    from types import SimpleNamespace
+
+    from noyra.wallet import WalletAssetInput, WalletEconomyStore, WalletNetworkInput, WalletStore
+    from noyra.wallet.workflow import WalletRewardWorkflow
+    from test_wallet_economy import _bounty
+
+    db, subject = kernel.database, kernel.subject_id
+    wallets = WalletStore(db)
+    network = wallets.register_network(
+        subject,
+        WalletNetworkInput(
+            label="Synthetic", chain_id=1, native_symbol="ETH", rpc_url="https://rpc.example"
+        ),
+        actor="operator",
+    )
+    asset = wallets.register_asset(
+        subject,
+        WalletAssetInput(
+            network_id=network.network_id,
+            asset_type="native",
+            name="Ether",
+            symbol="ETH",
+            decimals=18,
+        ),
+        actor="operator",
+    )
+    economy = WalletEconomyStore(db)
+    from noyra.core import EventStore
+    from noyra.mind import GoalCandidate, GoalStore
+
+    event = EventStore(db).append(subject, "experience", "test", {"kind": "synthetic fixture"})
+    goals = GoalStore(db)
+    goal = goals.create_candidate(
+        subject,
+        GoalCandidate(
+            title="Synthetic",
+            description="Synthetic",
+            origin="self",
+            priority=0.5,
+            commitment=0.5,
+            motive_emotion="interest",
+        ),
+        causal_source_ids=(event.event_id,),
+        reason="synthetic fixture",
+    )
+    goal = goals.activate(
+        goal.goal_id, rationale="synthetic fixture", causal_source_ids=(event.event_id,)
+    )
+    bounty = _bounty(economy, subject, network.network_id, asset.asset_id, goal.goal_id)
+    economy.publish_bounty(bounty.bounty_id, subject, actor="operator")
+    accounts = AccountStore(db, subject)
+    accounts.register("alice", "correct horse battery", "Alice")
+    who = accounts.authenticate(accounts.login("alice", "correct horse battery")[0])
+    assert who
+    owner = SimpleNamespace(
+        kernel=kernel, wallet_economy=economy, wallet_rewards=WalletRewardWorkflow(db)
+    )
+    return ParticipantCollaboration(owner), who, bounty
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_withdrawn_interest_is_not_scheduled_and_followup_still_works(
+    kernel: SubjectKernel,
+    legacy: bool,
+) -> None:
+    collaboration, who, bounty = make_collaboration(kernel)
+    result = collaboration.write(
+        "/api/participants/apply",
+        {"bounty_id": bounty.bounty_id, "content": "I can help", "idempotency_key": "interest"},
+        who,
+        "127.0.0.1",
+    )
+    if legacy:
+        with kernel.database.transaction() as c:
+            c.execute(
+                "UPDATE participant_applications SET status='withdrawn' WHERE application_id=?",
+                (result["application_id"],),
+            )
+    else:
+        collaboration.write(
+            "/api/participants/withdraw",
+            {"kind": "application", "id": result["application_id"]},
+            who,
+            "127.0.0.1",
+        )
+    assert (
+        collaboration.read("/api/participants/messages", {}, who)["items"][0]["status"]
+        == "withdrawn"
+    )
+    from noyra.interaction.integrity import InteractionIntegrity
+
+    InteractionIntegrity(kernel.database).verify(kernel.subject_id)
+    engine, provider = cognition(kernel)
+    assert await engine.run_due() is None
+    assert provider.requests == []
+    followup = collaboration.write(
+        "/api/participants/messages",
+        {"content": "A later invitation", "idempotency_key": "later"},
+        who,
+        "127.0.0.1",
+    )
+    assert await engine.run_due() == "interaction_silent"
+    assert InteractionStore(kernel.database).get(followup["interaction_id"]).status == "silent"
+    assert len(provider.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_during_call_preserves_accounting_without_committing_decision(
+    kernel: SubjectKernel,
+) -> None:
+    collaboration, who, bounty = make_collaboration(kernel)
+    result = collaboration.write(
+        "/api/participants/apply",
+        {"bounty_id": bounty.bounty_id, "content": "I can help", "idempotency_key": "interest"},
+        who,
+        "127.0.0.1",
+    )
+    engine, provider = cognition(kernel)
+    complete = provider.complete
+
+    async def withdraw_then_complete(request: CompletionRequest) -> ProviderResponse:
+        collaboration.write(
+            "/api/participants/withdraw",
+            {"kind": "application", "id": result["application_id"]},
+            who,
+            "127.0.0.1",
+        )
+        return await complete(request)
+
+    with patch.object(provider, "complete", side_effect=withdraw_then_complete):
+        assert await engine.run_due() == "interaction_private_input_withdrawn"
+    with kernel.database.connection() as c:
+        assert c.execute("SELECT COUNT(*) FROM interaction_decisions").fetchone()[0] == 0
+        assert c.execute("SELECT status FROM model_calls").fetchone()[0] == "succeeded"
+        assert (
+            c.execute("SELECT COUNT(*) FROM interactions WHERE direction='outgoing'").fetchone()[0]
+            == 0
+        )
+    assert await engine.run_due() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phase", ["authorize_attempt", "start_attempt", "check_request_authorization"]
+)
+async def test_withdrawal_at_model_send_guard_cancels_unsent_attempt(
+    kernel: SubjectKernel, phase: str
+) -> None:
+    collaboration, who, bounty = make_collaboration(kernel)
+    result = collaboration.write(
+        "/api/participants/apply",
+        {"bounty_id": bounty.bounty_id, "content": "I can help", "idempotency_key": "interest"},
+        who,
+        "127.0.0.1",
+    )
+    engine, provider = cognition(kernel)
+    check = getattr(engine.gateway.ledger, phase)
+
+    def withdraw_before_guard(*args: Any, **kwargs: Any) -> Any:
+        collaboration.write(
+            "/api/participants/withdraw",
+            {"kind": "application", "id": result["application_id"]},
+            who,
+            "127.0.0.1",
+        )
+        return check(*args, **kwargs)
+
+    with patch.object(engine.gateway.ledger, phase, side_effect=withdraw_before_guard):
+        outcome = await engine.run_due()
+        assert outcome == (
+            "interaction_model_failed"
+            if phase == "check_request_authorization"
+            else "interaction_private_input_withdrawn"
+        )
+    assert provider.requests == []
+    with kernel.database.connection() as c:
+        attempts = c.execute("SELECT status FROM model_attempts").fetchall()
+        assert [row[0] for row in attempts] == (
+            [] if phase == "authorize_attempt" else ["cancelled"]
+        )
+        assert c.execute("SELECT status FROM model_calls").fetchone()[0] == "failed"
+    assert await engine.run_due() is None

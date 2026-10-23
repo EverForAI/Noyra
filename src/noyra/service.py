@@ -67,6 +67,7 @@ from noyra.core.operator_controls import (
     OperatorControlNotFound,
     OperatorControlService,
 )
+from noyra.core.private_sources import WITHDRAWN_PARTICIPANT_INVITATION
 from noyra.core.provider_health import ProviderHealthStore
 from noyra.core.redaction import redact_secrets
 from noyra.core.release_assurance import activation_status, upgrade_channel
@@ -2546,9 +2547,10 @@ class NoyraHTTPServer:
                 dict(row)
                 for row in connection.execute(
                     "SELECT interaction_id, status, created_at, decided_at "
-                    "FROM interactions WHERE subject_id = ? AND direction = 'incoming' "
-                    "AND status IN ('offered', 'deferred') "
-                    "ORDER BY created_at, interaction_id LIMIT ?",
+                    "FROM interactions i WHERE subject_id = ? AND direction = 'incoming' "
+                    "AND status IN ('offered', 'deferred') AND NOT "
+                    + WITHDRAWN_PARTICIPANT_INVITATION
+                    + " ORDER BY created_at, interaction_id LIMIT ?",
                     (self.kernel.subject_id, DIAGNOSTICS_MAX_PENDING_INTERACTIONS),
                 )
             ]
@@ -11754,8 +11756,9 @@ class NoyraService:
             )
             pending_interactions = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM interactions WHERE subject_id = ? "
-                    "AND status IN ('offered', 'deferred')",
+                    "SELECT COUNT(*) FROM interactions i WHERE subject_id = ? "
+                    "AND status IN ('offered', 'deferred') AND NOT "
+                    + WITHDRAWN_PARTICIPANT_INVITATION,
                     (self.kernel.subject_id,),
                 ).fetchone()[0]
             )

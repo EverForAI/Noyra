@@ -10,7 +10,11 @@ from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, RuntimeOwnershipError
 from noyra.core.locking import ProcessLock
 from noyra.core.payload_codec import decompress_text
-from noyra.core.private_sources import private_input_scope
+from noyra.core.private_sources import (
+    WITHDRAWN_PARTICIPANT_INVITATION,
+    invitation_input_scope,
+    private_input_scope,
+)
 from noyra.core.types import canonical_json, utc_now
 from noyra.interaction import InteractionDecision, InteractionStore
 from noyra.interaction.conversations import ConversationStore
@@ -78,9 +82,10 @@ class InteractionCognition:
             interaction = self._due_interaction()
             if interaction is None:
                 return None
-            messages = self._messages(interaction)
-            with private_input_scope(self._private_sources):
-                return await self._run_due_locked(interaction, messages)
+            with invitation_input_scope(self.subject_id, interaction.interaction_id):
+                messages = self._messages(interaction)
+                with private_input_scope(self._private_sources):
+                    return await self._run_due_locked(interaction, messages)
         except PermissionError:
             return "interaction_private_input_withdrawn"
         finally:
@@ -227,6 +232,7 @@ class InteractionCognition:
                 "LEFT JOIN interaction_inbound_events e "
                 "ON e.interaction_id = i.interaction_id "
                 "WHERE i.subject_id = ? AND i.direction = 'incoming' AND "
+                "NOT " + WITHDRAWN_PARTICIPANT_INVITATION + " AND "
                 "NOT EXISTS(SELECT 1 FROM private_conversation_messages m "
                 "JOIN private_conversations c ON c.conversation_id=m.conversation_id "
                 "WHERE m.interaction_id=i.interaction_id "

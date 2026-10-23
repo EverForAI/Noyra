@@ -7,7 +7,7 @@ from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.evidence_capacity import require_evidence_capacity
 from noyra.core.payload_codec import compress_text, decompress_text
-from noyra.core.private_sources import record_private_sources
+from noyra.core.private_sources import participant_invitation_withdrawn, record_private_sources
 from noyra.core.types import (
     canonical_json,
     content_hash,
@@ -416,6 +416,13 @@ class ModelLedger:
     ) -> None:
         call = self._get_call_row(connection, call_id)
         self._check_lifecycle(connection, str(call["subject_id"]), str(call["purpose"]))
+        purpose = str(call["purpose"])
+        if purpose.startswith("interaction_cognition:"):
+            interaction_id = purpose.removeprefix("interaction_cognition:").rpartition(":")[0]
+            if participant_invitation_withdrawn(
+                connection, str(call["subject_id"]), interaction_id
+            ):
+                raise ModelAuthorizationError("participant invitation has been withdrawn")
         if connection.execute(
             "SELECT 1 FROM private_model_sources s JOIN private_conversations c "
             "ON c.conversation_id=s.conversation_id WHERE s.call_id=? "

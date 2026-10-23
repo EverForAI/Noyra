@@ -6,6 +6,7 @@ import base64
 import json
 from typing import Any
 
+from noyra.core.private_sources import WITHDRAWN_PARTICIPANT_INVITATION
 from noyra.core.types import content_hash, new_id, utc_now
 from noyra.wallet.economy_types import SubmissionInput
 
@@ -142,7 +143,9 @@ class ParticipantCollaboration:
                 return result
             if view == "messages":
                 rows = c.execute(
-                    "SELECT i.interaction_id,i.direction,i.content,i.status,i.created_at,i."
+                    "SELECT i.interaction_id,i.direction,i.content,CASE WHEN "
+                    + WITHDRAWN_PARTICIPANT_INVITATION
+                    + " THEN 'withdrawn' ELSE i.status END AS status,i.created_at,i."
                     "related_interaction_id FROM participant_message_links m JOIN interacti"
                     "ons i ON i.interaction_id=m.interaction_id AND i.subject_id=m.subject_"
                     "id WHERE m.subject_id=? AND m.entity_id=? AND m.visibility='private' A"
@@ -421,6 +424,34 @@ class ParticipantCollaboration:
                     ).rowcount
                     if not changed:
                         raise LookupError("application_unavailable")
+                    invitation = c.execute(
+                        "SELECT i.* FROM participant_applications a "
+                        "JOIN participant_message_links m ON m.subject_id=a.subject_id "
+                        "AND m.entity_id=a.entity_id JOIN interactions i ON "
+                        "i.interaction_id=m.interaction_id AND i.subject_id=m.subject_id "
+                        "WHERE a.application_id=? AND a.subject_id=? AND a.entity_id=? "
+                        "AND i.idempotency_key=a.idempotency_key||':interest' "
+                        "AND i.status IN ('offered','deferred')",
+                        (identifier, self.subject, who.entity_id),
+                    ).fetchone()
+                    c.execute(
+                        "INSERT INTO audit_records VALUES(?,?,?,?,?,?)",
+                        (
+                            new_id("audit"),
+                            self.subject,
+                            "participant_application_withdrawn",
+                            "participant:" + who.entity_id,
+                            json.dumps(
+                                {
+                                    "application_id": identifier,
+                                    "interaction_id": invitation["interaction_id"]
+                                    if invitation
+                                    else None,
+                                }
+                            ),
+                            utc_now(),
+                        ),
+                    )
             elif payload.get("kind") == "submission":
                 with self.db.connection() as c:
                     if not c.execute(

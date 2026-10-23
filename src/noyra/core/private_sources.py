@@ -11,6 +11,47 @@ from .types import content_hash
 
 _SOURCES: ContextVar[tuple[str, ...]] = ContextVar("noyra_private_interaction_sources", default=())
 
+_INVITATION: ContextVar[tuple[str, str] | None] = ContextVar(
+    "noyra_active_invitation", default=None
+)
+# The application key and message attribution are immutable. The invitation
+# key was derived in the same transaction in schema 104, covering old rows too.
+WITHDRAWN_PARTICIPANT_INVITATION = """EXISTS (
+ SELECT 1 FROM participant_message_links p JOIN participant_applications a
+ ON a.subject_id=p.subject_id AND a.entity_id=p.entity_id
+ WHERE p.interaction_id=i.interaction_id AND p.subject_id=i.subject_id
+ AND a.status='withdrawn' AND substr(i.idempotency_key,-9)=':interest'
+ AND a.idempotency_key=substr(i.idempotency_key,1,length(i.idempotency_key)-9)
+)"""
+
+
+class InvitationWithdrawnError(PermissionError):
+    """An active invitation was withdrawn; accounting must still settle."""
+
+
+def participant_invitation_withdrawn(connection: Any, subject_id: str, interaction_id: str) -> bool:
+    if not connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='participant_applications'"
+    ).fetchone():
+        return False
+    return (
+        connection.execute(
+            "SELECT 1 FROM interactions i WHERE i.subject_id=? AND i.interaction_id=? AND "
+            + WITHDRAWN_PARTICIPANT_INVITATION,
+            (subject_id, interaction_id),
+        ).fetchone()
+        is not None
+    )
+
+
+@contextmanager
+def invitation_input_scope(subject_id: str, interaction_id: str) -> Iterator[None]:
+    token = _INVITATION.set((subject_id, interaction_id))
+    try:
+        yield
+    finally:
+        _INVITATION.reset(token)
+
 
 def assert_event_sources_available(connection: Any, subject_id: str, event_id: str) -> None:
     if (
@@ -33,6 +74,9 @@ def assert_event_sources_available(connection: Any, subject_id: str, event_id: s
 
 
 def assert_private_inputs_available(connection: Any) -> None:
+    active = _INVITATION.get()
+    if active is not None and participant_invitation_withdrawn(connection, *active):
+        raise InvitationWithdrawnError("participant invitation has been withdrawn")
     for interaction_id in _SOURCES.get():
         state = connection.execute(
             "SELECT c.status FROM private_conversation_messages m JOIN private_conversations c "

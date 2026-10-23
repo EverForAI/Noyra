@@ -7,6 +7,7 @@ from typing import Any
 
 from noyra.core.admission import OperationInvalidated, assert_current_lease
 from noyra.core.errors import IntegrityError, InvalidTransitionError
+from noyra.core.private_sources import InvitationWithdrawnError
 from noyra.core.redaction import redact_payload
 from noyra.core.types import canonical_json, content_hash
 
@@ -176,6 +177,7 @@ class ModelGateway:
                 )
             except (
                 BudgetExhaustedError,
+                InvitationWithdrawnError,
                 ModelAuthorizationError,
                 ModelLifecycleBlockedError,
             ) as error:
@@ -232,6 +234,7 @@ class ModelGateway:
                 )
                 before_send()
             except (
+                InvitationWithdrawnError,
                 ModelAuthorizationError,
                 ModelLifecycleBlockedError,
                 OperationInvalidated,
