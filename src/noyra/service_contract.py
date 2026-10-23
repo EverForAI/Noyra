@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-RouteRole = Literal["none", "read", "operator", "export"]
+RouteRole = Literal["none", "read", "operator", "export", "participant"]
 
 
 @dataclass(frozen=True)
@@ -788,6 +788,32 @@ API_ROUTE_CONTRACTS: tuple[APIRouteContract, ...] = (
         409,
         415,
     ),
+)
+
+
+# Participant cookies/bearers are independent of every operator/read role.
+API_ROUTE_CONTRACTS += (
+    _get("/api/v1/participants/session", "none", 200, 400, 401, 403, 404, 413),
+    _get("/api/v1/participants/opportunities", "none", 200, 400, 401, 403, 404, 413),
+    _get("/api/v1/participants/posts", "participant", 200, 400, 401, 403, 404, 413),
+    _get("/api/v1/participants/applications", "participant", 200, 400, 401, 403, 404, 413),
+    _get("/api/v1/participants/submissions", "participant", 200, 400, 401, 403, 404, 413),
+    _get("/api/v1/participants/messages", "participant", 200, 400, 401, 403, 404, 413),
+    _get("/api/v1/participants/notifications", "participant", 200, 400, 401, 403, 404, 413),
+    _post("/api/v1/participants/register", "none", 201, 200, 400, 401, 403, 404, 409, 415),
+    _post("/api/v1/participants/login", "none", 200, 400, 401, 403, 404, 409, 415),
+    _post("/api/v1/participants/recover", "none", 200, 400, 401, 403, 404, 409, 415),
+    _post("/api/v1/participants/logout", "participant", 200, 400, 401, 403, 404, 409, 415),
+    _post("/api/v1/participants/credential", "participant", 200, 400, 401, 403, 404, 409, 415),
+    _post("/api/v1/participants/messages", "participant", 200, 400, 401, 403, 404, 409, 415),
+    _post("/api/v1/participants/posts", "participant", 200, 400, 401, 403, 404, 409, 415),
+    _post("/api/v1/participants/apply", "participant", 200, 400, 401, 403, 404, 409, 415),
+    _post("/api/v1/participants/submit", "participant", 200, 400, 401, 403, 404, 409, 415),
+    _post("/api/v1/participants/withdraw", "participant", 200, 400, 401, 403, 404, 409, 415),
+    _post(
+        "/api/v1/participants/notification-read", "participant", 200, 400, 401, 403, 404, 409, 415
+    ),
+    _post("/api/v1/admin/participant-sources", "operator", 200, 401, 409),
 )
 
 

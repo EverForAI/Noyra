@@ -2853,6 +2853,10 @@ class NoyraHTTPServer:
                     self._wechat_webhook_challenge()
                     return
                 parsed = urlsplit(self.path)
+                from .interaction.participant_http import dispatch as participant_dispatch
+
+                if participant_dispatch(self, owner, "GET"):
+                    return
                 if parsed.path.startswith("/public/"):
                     self._public_article(parsed)
                     return
@@ -2911,6 +2915,9 @@ class NoyraHTTPServer:
                     return
                 if parsed.path == "/":
                     self._asset("index.html", "text/html; charset=utf-8")
+                    return
+                if parsed.path == "/participant.js":
+                    self._asset("participant.js", "text/javascript; charset=utf-8")
                     return
                 if parsed.path == "/app.js":
                     self._asset("app.js", "text/javascript; charset=utf-8")
@@ -5107,6 +5114,10 @@ class NoyraHTTPServer:
                 self.do_POST()
 
             def _dispatch_post(self) -> None:
+                from .interaction.participant_http import dispatch as participant_dispatch
+
+                if participant_dispatch(self, owner, "POST"):
+                    return
                 if self.path == "/api/admin/migration/policy":
                     if not self._authorized("operator"):
                         self._discard_small_request_body()
@@ -10213,7 +10224,7 @@ class NoyraHTTPServer:
                         b"<!-- NOYRA_SEO_METADATA -->", "\n  ".join(metadata).encode("utf-8")
                     )
                     cache_control = "no-cache"
-                elif filename in {"app.js", "styles.css"}:
+                elif filename in {"app.js", "participant.js", "styles.css"}:
                     cache_control = "public, max-age=300, must-revalidate"
                 elif filename in {
                     "assets/public-hero.webp",

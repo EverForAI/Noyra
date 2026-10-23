@@ -186,14 +186,15 @@ class AccountStore:
                     return None
             if row is None:
                 return None
+            source_channel = "api" if api else "account"
             entity = c.execute(
                 "SELECT e.*,s.source_id,s.channel,s.authentication FROM participant_accounts "
                 "a JOIN participant_entities e ON e.entity_id=a.entity_id AND "
                 "e.subject_id=a.subject_id JOIN participant_sources s ON "
                 "s.entity_id=e.entity_id AND s.subject_id=e.subject_id AND "
-                "s.channel='account' AND s.sender_id=a.account_id WHERE a.subject_id=? AND "
+                "s.channel=? AND s.sender_id=a.account_id WHERE a.subject_id=? AND "
                 "a.account_id=? AND e.status='active'",
-                (self.subject, row["account_id"]),
+                (source_channel, self.subject, row["account_id"]),
             ).fetchone()
             if entity is None:
                 return None
@@ -265,6 +266,15 @@ class AccountStore:
             )
             if revoke:
                 return None
+            ParticipantStore.source(
+                c,
+                self.subject,
+                "api",
+                "local",
+                row[0],
+                entity_id=who.entity_id,
+                authentication="credential",
+            )
             token = "noyra_participant_" + secrets.token_urlsafe(32)
             c.execute(
                 "INSERT INTO participant_api_credentials VALUES(?,?,?,?,?)",
