@@ -23,6 +23,8 @@ from .retrieval import BoundedRetrievalConfig, HybridRetrievalWeights, MemoryEmb
 from .types import MemoryConsolidationRecord, MemoryRecall, MemoryRecord, MemoryType
 from .validation import validate_event_ids
 
+MAX_RECALL_QUERY_CHARS = 4_000
+
 MEMORY_STATUSES = frozenset({"active", "superseded", "archived"})
 CONSOLIDATION_STATUSES = frozenset({"committed", "no_change"})
 MEMORY_INTEGRATION_OPERATIONS = frozenset({"merge", "supersede", "contradict"})
@@ -270,7 +272,7 @@ class MemoryStore:
         record_access: bool = True,
     ) -> list[MemoryRecall]:
         normalized_query = query.strip()
-        if not normalized_query or len(normalized_query) > 4_000:
+        if not normalized_query or len(normalized_query) > MAX_RECALL_QUERY_CHARS:
             raise ValueError("memory recall query must be nonblank and bounded")
         if not context_type.strip() or not context_id.strip():
             raise ValueError("memory recall context is required")

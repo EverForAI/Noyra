@@ -17,6 +17,7 @@ from noyra.interaction.conversations import ConversationStore
 from noyra.interaction.participants import ParticipantStore
 from noyra.interaction.types import InteractionRecord
 from noyra.mind import AffectImpulse, MemoryStore, MindEngine, RelationshipStore
+from noyra.mind.memory import MAX_RECALL_QUERY_CHARS
 from noyra.model import ModelGateway, ModelMessage
 from noyra.model.errors import (
     BudgetExhaustedError,
@@ -274,27 +275,29 @@ class InteractionCognition:
             for item in self.mind.current_affect(self.subject_id)
             if (item.target_type, item.target_id) in allowed_affect_targets
         ][:8]
-        recalled_memories = [
-            {
-                "memory_id": item.memory.memory_id,
-                "memory_type": item.memory.memory_type,
-                "content": item.memory.content[:600],
-                "confidence": item.memory.confidence,
-                "relevance": item.relevance,
-            }
-            for item in self.memories.recall(
-                self.subject_id,
-                interaction.content,
-                context_type="interaction_cognition",
-                context_id=interaction.interaction_id,
-                memory_types=("relationship", "emotional", "autobiographical", "episodic"),
-                limit=5,
-            )
-        ]
-        # Memories predating entity attribution cannot be assigned to this
-        # correspondent. Do not inject another contact's private conversation.
-        if who is not None:
-            recalled_memories = []
+        # Attributed contacts cannot use unscoped memories. Decide this before
+        # recall: recall records access and may invoke an embedding provider.
+        recalled_memories = (
+            [
+                {
+                    "memory_id": item.memory.memory_id,
+                    "memory_type": item.memory.memory_type,
+                    "content": item.memory.content[:600],
+                    "confidence": item.memory.confidence,
+                    "relevance": item.relevance,
+                }
+                for item in self.memories.recall(
+                    self.subject_id,
+                    interaction.content.strip()[:MAX_RECALL_QUERY_CHARS],
+                    context_type="interaction_cognition",
+                    context_id=interaction.interaction_id,
+                    memory_types=("relationship", "emotional", "autobiographical", "episodic"),
+                    limit=5,
+                )
+            ]
+            if who is None
+            else []
+        )
         metadata = canonical_json(
             {
                 "interaction_id": interaction.interaction_id,
