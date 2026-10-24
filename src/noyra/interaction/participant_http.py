@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from noyra.core.errors import IntegrityError, InvalidTransitionError, NotFoundError
+from noyra.core.types import canonical_json
 
 from .accounts import AccountError, AccountRateLimited, AccountStore, digest
 from .posts import (
@@ -110,7 +111,7 @@ def dispatch(h: Any, owner: Any, method: str) -> bool:
                         owner.kernel.subject_id,
                         "participant_source_bound",
                         "operator",
-                        json.dumps(
+                        canonical_json(
                             {"entity_id": bound_who.entity_id, "binding_id": binding["binding_id"]}
                         ),
                         utc_now(),

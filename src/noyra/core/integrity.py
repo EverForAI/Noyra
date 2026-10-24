@@ -1162,6 +1162,8 @@ _CORE_AUDIT_ACTIONS = frozenset(
         "model_unknown_retry_closed",
         "participant_application_withdrawn",
         "participant_source_bound",
+        "private_route_changed",
+        "private_route_unlinked",
         "runtime_exported",
         "training_export_aborted",
         "training_exported",
@@ -1273,6 +1275,11 @@ _ADMIN_AUDIT_ACTIONS = frozenset(
         *_MODEL_RESOURCE_AUDIT_FIELDS,
         *_SEARCH_MANAGEMENT_AUDIT_FIELDS,
     }
+)
+# Only these two pre-canonical participant writers emitted json.dumps defaults.
+# Keep that exact historical encoding without accepting arbitrary JSON for other actions.
+_PARTICIPANT_LEGACY_JSON_ACTIONS = frozenset(
+    {"participant_application_withdrawn", "participant_source_bound"}
 )
 _TRAINING_POLICY_FIELDS = (
     "record_enabled",
@@ -1513,7 +1520,11 @@ def _provenance_time(value: object, context: str) -> str:
 
 
 def _provenance_object(
-    value: object, context: str, *, legacy_admin_json: bool = False
+    value: object,
+    context: str,
+    *,
+    legacy_admin_json: bool = False,
+    legacy_participant_json: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(value, str):
         raise IntegrityError(f"{context} JSON is invalid")
@@ -1527,6 +1538,7 @@ def _provenance_object(
     if not isinstance(parsed, dict) or (
         canonical_json(parsed) != value
         and not (legacy_admin_json and json.dumps(parsed, sort_keys=True) == value)
+        and not (legacy_participant_json and json.dumps(parsed) == value)
     ):
         raise IntegrityError(f"{context} JSON is invalid")
     return {str(key): item for key, item in parsed.items()}
@@ -3116,6 +3128,7 @@ def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
             row["payload_json"],
             f"{context_label} payload",
             legacy_admin_json=action in _ADMIN_AUDIT_ACTIONS,
+            legacy_participant_json=action in _PARTICIPANT_LEGACY_JSON_ACTIONS,
         )
         occurred_at = _provenance_time(row["occurred_at"], f"{context_label} occurred_at")
         if row_subject != subject_id:
@@ -3165,7 +3178,17 @@ def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
                 interaction = _audit_reference(
                     context, "interactions", "interaction_id", interaction_id, context_label
                 )
-                if interaction["idempotency_key"] != application["idempotency_key"] + ":interest":
+                link = context.connection.execute(
+                    "SELECT entity_id FROM participant_message_links WHERE subject_id=? "
+                    "AND interaction_id=?",
+                    (subject_id, interaction_id),
+                ).fetchone()
+                if (
+                    interaction["idempotency_key"] != application["idempotency_key"] + ":interest"
+                    or interaction["direction"] != "incoming"
+                    or link is None
+                    or link["entity_id"] != application["entity_id"]
+                ):
                     raise IntegrityError(f"{context_label} invitation reference is invalid")
         elif action == "participant_source_bound":
             _provenance_keys(payload, {"entity_id", "binding_id"}, context_label)
@@ -3194,6 +3217,27 @@ def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
             ).fetchone()
             if source is None or source["entity_id"] != entity_id:
                 raise IntegrityError(f"{context_label} participant source reference is invalid")
+        elif action in {"private_route_changed", "private_route_unlinked"}:
+            _provenance_keys(
+                payload,
+                {"binding_id", "push_web_replies"}
+                if action == "private_route_changed"
+                else {"binding_id"},
+                context_label,
+            )
+            if row["actor"] != "operator":
+                raise IntegrityError(f"{context_label} private route actor is invalid")
+            binding = _audit_reference(
+                context, "interaction_bindings", "binding_id", payload["binding_id"], context_label
+            )
+            if action == "private_route_changed":
+                _provenance_json_bool(
+                    payload["push_web_replies"], f"{context_label} reply push consent"
+                )
+                if binding["channel"] != "qq":
+                    raise IntegrityError(f"{context_label} private route channel is invalid")
+            # This is historical consent evidence. Later unlinking, disabling,
+            # revocation or consent changes must not invalidate the old audit.
         elif action == "wallet_legacy_state_authorized":
             _provenance_keys(
                 payload,

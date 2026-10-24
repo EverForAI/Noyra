@@ -7,7 +7,7 @@ import json
 from typing import Any
 
 from noyra.core.private_sources import WITHDRAWN_PARTICIPANT_INVITATION
-from noyra.core.types import content_hash, new_id, utc_now
+from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.wallet.economy_types import SubmissionInput
 
 from .participants import Participant, ParticipantStore
@@ -576,7 +576,7 @@ class ParticipantCollaboration:
                             self.subject,
                             "participant_application_withdrawn",
                             "participant:" + who.entity_id,
-                            json.dumps(
+                            canonical_json(
                                 {
                                     "application_id": identifier,
                                     "interaction_id": invitation["interaction_id"]
