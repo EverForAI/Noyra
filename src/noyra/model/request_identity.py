@@ -14,6 +14,10 @@ from .errors import ModelCallStateError
 # gateways. Never change a call/attempt or release an unknown reservation here.
 UNRUNNABLE_BUSINESS_CALL_SQL = """(
  c.status IN ('unknown','executing') OR
+ (c.status='prepared' AND EXISTS (
+  SELECT 1 FROM audit_records a INDEXED BY idx_audit_subject_action_call
+  WHERE a.subject_id=c.subject_id AND a.action='model_request_context_conflict'
+  AND json_valid(a.payload_json) AND json_extract(a.payload_json,'$.call_id')=c.call_id)) OR
  (c.status='prepared' AND :require_prepared_authorization AND NOT EXISTS (
   SELECT 1 FROM audit_records a INDEXED BY idx_audit_subject_action_call
   WHERE a.subject_id=c.subject_id AND a.action='model_unknown_retry_authorized'

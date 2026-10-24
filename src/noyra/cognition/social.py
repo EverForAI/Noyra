@@ -13,7 +13,7 @@ from noyra.core.payload_codec import decompress_text
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.interaction import InteractionStore
 from noyra.interaction.participants import ParticipantStore
-from noyra.mind import AffectPolicy, MindEngine, RelationshipStore
+from noyra.mind import AffectPolicy, MemoryStore, MindEngine, RelationshipStore
 from noyra.mind.types import RelationshipRecord
 from noyra.model import ModelGateway, ModelMessage
 from noyra.model.errors import (
@@ -88,6 +88,9 @@ class RelationshipSocialCognition:
         self.clock = clock
         self.relationships = RelationshipStore(database)
         self.interactions = InteractionStore(database)
+        # The runtime attaches retrieval configuration through this shared
+        # component interface; recipient contexts never invoke global recall.
+        self.memories = MemoryStore(database, clock=clock)
         self.mind = MindEngine(database, clock=clock)
         self.fatigue = FatigueTracker(database)
         self.events = EventStore(database)

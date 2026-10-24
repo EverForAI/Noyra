@@ -25,6 +25,7 @@ from noyra.mind.memory import MAX_RECALL_QUERY_CHARS
 from noyra.model import ModelGateway, ModelMessage
 from noyra.model.errors import (
     BudgetExhaustedError,
+    ModelCallConflictError,
     ModelCallStateError,
     ProviderCallError,
     StructuredOutputError,
@@ -128,6 +129,9 @@ class InteractionCognition:
                     reason="model budget exhausted while considering an interaction",
                 )
                 return "interaction_model_budget_exhausted"
+            except ModelCallConflictError:
+                self.gateway.ledger.quarantine_prepared_context(self.subject_id, purpose)
+                return "interaction_model_context_changed"
             except (ProviderCallError, StructuredOutputError, ModelCallStateError):
                 return "interaction_model_failed"
             proposal = result.output

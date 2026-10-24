@@ -862,3 +862,113 @@ def test_social_generation_never_recalls_unshared_or_mixed_memories(
         assert c.execute("SELECT COUNT(*) FROM memory_accesses").fetchone()[0] == 0
     for record in records:
         assert memories.get(record.memory_id).content == record.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routed", [False, True])
+async def test_authorized_retry_with_changed_context_yields_without_reidentifying_unknown(
+    kernel: SubjectKernel, tmp_path: Path, routed: bool
+) -> None:
+    from noyra.core import EventStore
+    from noyra.mind import AffectImpulse, AppraisalInput
+
+    engine, provider, _first, second, _, _, _ = unknown_fixture(kernel, tmp_path, routed)
+    assert await engine.run_due() == "interaction_model_failed"
+    with kernel.database.connection() as c:
+        call = dict(c.execute("SELECT * FROM model_calls").fetchone())
+        attempt = dict(c.execute("SELECT * FROM model_attempts").fetchone())
+    event = EventStore(kernel.database).append(
+        kernel.subject_id, "experience", "test", {"kind": "Independent experience"}
+    )
+    engine.mind.process_event(
+        kernel.subject_id,
+        event.event_id,
+        AppraisalInput(
+            novelty=0.5,
+            goal_congruence=0.2,
+            controllability=0.5,
+            certainty=0.7,
+            agency="environment",
+            narrative="A new experience",
+        ),
+        (
+            AffectImpulse(
+                emotion_type="curiosity",
+                target_type="subject",
+                target_id=None,
+                impulse=0.5,
+                valence=0.5,
+                arousal=0.5,
+                dominance=0.3,
+            ),
+        ),
+    )
+    engine.gateway.ledger.prepare_unknown_retry(
+        call["call_id"], actor="operator", reason="Synthetic authorized retry"
+    )
+    with resource_cooldown_elapsed():
+        assert await engine.run_due() == "interaction_model_context_changed"
+    assert due_id(engine) == second.interaction_id
+    assert len(provider.requests) == 1
+    with kernel.database.connection() as c:
+        saved = c.execute(
+            "SELECT status,idempotency_key FROM model_calls WHERE call_id=?", (call["call_id"],)
+        ).fetchone()
+        assert tuple(saved) == ("prepared", call["idempotency_key"])
+        assert (
+            dict(
+                c.execute(
+                    "SELECT * FROM model_attempts WHERE attempt_id=?", (attempt["attempt_id"],)
+                ).fetchone()
+            )
+            == attempt
+        )
+    assert await engine.run_due() == "interaction_silent"
+    assert len(provider.requests) == 2
+    with kernel.database.connection() as c:
+        assert (
+            c.execute(
+                "SELECT COUNT(*) FROM audit_records WHERE action='model_request_context_conflict'"
+            ).fetchone()[0]
+            == 1
+        )
+    engine.gateway.ledger.reconcile_prepared_failed(
+        call["call_id"], actor="operator", reason="Close incompatible prepared retry"
+    )
+    assert due_id(engine) == _first.interaction_id
+
+
+@pytest.mark.asyncio
+async def test_social_retains_runtime_embedding_interface_without_recalling_private_memory(
+    kernel: SubjectKernel,
+) -> None:
+    from pydantic import SecretStr
+
+    from noyra.cognition import CognitionCycle
+    from noyra.mind import MemoryStore
+    from noyra.model.embedding import EmbeddingSettings
+    from test_audit_20261024_remediation import cognition
+
+    social_fixture(kernel)
+    engine, _ = cognition(kernel)
+    cycle = CognitionCycle(
+        kernel,
+        engine.gateway,
+        engine.settings,
+        embedding_settings=EmbeddingSettings(
+            base_url="https://embedding.example/v1",
+            model="synthetic-embedding",
+            api_key=SecretStr("synthetic-key"),
+            dimensions=8,
+        ),
+    )
+    try:
+        assert cycle.embedding_index is not None
+        assert cycle.relationship_social.memories.embedding_index is cycle.embedding_index
+        with patch.object(
+            MemoryStore, "recall", side_effect=AssertionError("no recipient recall grant")
+        ):
+            context = cycle.relationship_social._context()
+            assert context is not None
+    finally:
+        await cycle.aclose()

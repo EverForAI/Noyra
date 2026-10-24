@@ -739,6 +739,40 @@ class ModelLedger:
                 )
         return changed
 
+    def quarantine_prepared_context(self, subject_id: str, purpose: str) -> None:
+        """Fence changed-input recovery without touching calls or reserved usage."""
+        with self.database.transaction() as connection:
+            rows = connection.execute(
+                "SELECT call_id FROM model_calls WHERE subject_id=? AND purpose=? "
+                "AND status='prepared'",
+                (subject_id, purpose),
+            )
+            for row in rows:
+                if connection.execute(
+                    "SELECT 1 FROM audit_records INDEXED BY idx_audit_subject_action_call "
+                    "WHERE subject_id=? AND action='model_request_context_conflict' "
+                    "AND json_valid(payload_json) AND json_extract(payload_json,'$.call_id')=?",
+                    (subject_id, row[0]),
+                ).fetchone():
+                    continue
+                connection.execute(
+                    "INSERT INTO audit_records VALUES(?,?,?,?,?,?)",
+                    (
+                        new_id("audit"),
+                        subject_id,
+                        "model_request_context_conflict",
+                        "runtime",
+                        canonical_json(
+                            {
+                                "call_id": row[0],
+                                "purpose": purpose,
+                                "reason": "prepared_request_context_changed",
+                            }
+                        ),
+                        utc_now(),
+                    ),
+                )
+
     def prepare_unknown_retry(self, call_id: str, *, actor: str, reason: str) -> CallRecord:
         """Explicitly authorize one retry of an outcome-unknown model call.
 

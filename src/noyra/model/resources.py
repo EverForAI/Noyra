@@ -66,6 +66,7 @@ from .errors import (
     BudgetExhaustedError,
     ConfigurationError,
     ModelAuthorizationError,
+    ModelCallConflictError,
     ModelCallStateError,
     ModelLifecycleBlockedError,
     ModelResourceInactiveError,
@@ -3130,6 +3131,20 @@ class RoutedModelGateway(ModelGateway):
                         # Enter only AFTER gateway dispatch and settlement return.
                         # No new model work or subject commits run in this scope.
                         settlement.enter_context(accounting_scope())
+                except ModelCallConflictError:
+                    self._record_attempt(
+                        decision.decision_id,
+                        group.group_id,
+                        key.key_id,
+                        attempt_number,
+                        "failed",
+                        "prepared_request_context_changed",
+                        int((time.monotonic() - started) * 1000),
+                    )
+                    self._finish_decision(
+                        decision.decision_id, "deferred", "prepared_request_context_changed"
+                    )
+                    raise
                 except InvitationWithdrawnError:
                     self._record_attempt(
                         decision.decision_id,
