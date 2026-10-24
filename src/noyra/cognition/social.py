@@ -189,7 +189,7 @@ class RelationshipSocialCognition:
         now = self._parse_time(self.clock())
         with self.database.connection() as connection:
             event_rows = connection.execute(
-                """SELECT event_id, event_type, source, occurred_at, payload_hash FROM events
+                """SELECT event_id, event_type, occurred_at FROM events
                    WHERE subject_id = ? AND event_type IN (
                        'interaction_received', 'interaction_sent', 'interaction_decision',
                        'sleep_reflection', 'goal_governance_committed', 'outcome_evaluated'
@@ -202,12 +202,6 @@ class RelationshipSocialCognition:
                           status, created_at
                    FROM interactions WHERE subject_id = ?
                    ORDER BY created_at DESC, interaction_id DESC LIMIT 48""",
-                (self.subject_id,),
-            ).fetchall()
-            goal_rows = connection.execute(
-                """SELECT goal_id, title, status, priority, commitment FROM goals
-                   WHERE subject_id = ? AND status = 'active' AND origin != 'human_proposal'
-                   ORDER BY priority DESC, updated_at DESC LIMIT 8""",
                 (self.subject_id,),
             ).fetchall()
         with self.database.connection() as connection:
@@ -311,7 +305,10 @@ class RelationshipSocialCognition:
         payload: dict[str, Any] = {
             "relationships": relationship_payload,
             "affect": [dict(row) for row in affect_rows],
-            "active_goals": [dict(row) for row in goal_rows],
+            # A self-generated goal may derive from another person's private
+            # message. Goal origin is not a per-recipient sharing grant. Keep
+            # goals in private cognition until explicit disclosure scope exists.
+            "active_goals": [],
             "recent_events": [dict(row) for row in event_rows],
             "affect_decision_profile": AffectPolicy(self.database, self.subject_id)
             .profile(target_type=relationship.entity_type, target_id=relationship.entity_key)
