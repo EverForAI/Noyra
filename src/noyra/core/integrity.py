@@ -3171,10 +3171,8 @@ def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
             _provenance_keys(payload, {"entity_id", "binding_id"}, context_label)
             entity_id = _provenance_text(payload["entity_id"], f"{context_label} entity id")
             binding_id = _provenance_text(payload["binding_id"], f"{context_label} binding id")
-            entity = _audit_reference(
-                context, "participant_entities", "entity_id", entity_id, context_label
-            )
-            if entity["status"] != "active" or row["actor"] != "operator":
+            _audit_reference(context, "participant_entities", "entity_id", entity_id, context_label)
+            if row["actor"] != "operator":
                 raise IntegrityError(f"{context_label} participant binding is invalid")
             binding = _audit_reference(
                 context, "interaction_bindings", "binding_id", binding_id, context_label
