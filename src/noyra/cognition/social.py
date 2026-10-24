@@ -204,13 +204,6 @@ class RelationshipSocialCognition:
                    ORDER BY created_at DESC, interaction_id DESC LIMIT 48""",
                 (self.subject_id,),
             ).fetchall()
-            affect_rows = connection.execute(
-                """SELECT emotion_type, target_type, target_id, intensity, valence, arousal
-                   FROM affect_components WHERE subject_id = ?
-                   AND target_type IN ('human','agent','entity','subject')
-                   ORDER BY intensity DESC, emotion_type LIMIT 12""",
-                (self.subject_id,),
-            ).fetchall()
             goal_rows = connection.execute(
                 """SELECT goal_id, title, status, priority, commitment FROM goals
                    WHERE subject_id = ? AND status = 'active' AND origin != 'human_proposal'
@@ -284,6 +277,15 @@ class RelationshipSocialCognition:
         if not candidates:
             return None
         relationship, interactions, last_incoming, last_outgoing = candidates[0]
+        with self.database.connection() as connection:
+            affect_rows = connection.execute(
+                """SELECT emotion_type, target_type, target_id, intensity, valence, arousal
+                   FROM affect_components WHERE subject_id = ? AND (
+                     (target_type = ? AND target_id = ?) OR
+                     (target_type IN ('subject', 'world') AND target_id IS NULL)
+                   ) ORDER BY intensity DESC, emotion_type LIMIT 12""",
+                (self.subject_id, relationship.entity_type, relationship.entity_key),
+            ).fetchall()
         # This context will generate content for a specific recipient. Global
         # memories have no durable per-recipient sharing grants, including old
         # or mixed-source memories. Keep them available to private cognition,

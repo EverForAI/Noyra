@@ -979,6 +979,93 @@ def test_social_generation_never_recalls_unshared_or_mixed_memories(
         assert memories.get(record.memory_id).content == record.content
 
 
+def test_social_generation_filters_affect_to_current_recipient(
+    kernel: SubjectKernel,
+) -> None:
+    import json
+
+    from noyra.core import EventStore
+    from noyra.interaction import InteractionStore
+    from noyra.mind import AffectImpulse, AppraisalInput, MindEngine, RelationshipStore
+
+    social, _, _, _, _, _, first, who, _ = social_fixture(kernel)
+    assert who is not None
+    with kernel.database.connection() as connection:
+        recipient_event = connection.execute(
+            "SELECT event_id FROM events WHERE json_extract(payload_json,'$.interaction_id')=?",
+            (first.interaction_id,),
+        ).fetchone()[0]
+    recipient = RelationshipStore(kernel.database).find(
+        kernel.subject_id, who.relationship_type, who.entity_id
+    )
+    accounts = AccountStore(kernel.database, kernel.subject_id)
+    accounts.register("bob", "correct horse battery", "Bob")
+    bob = accounts.authenticate(accounts.login("bob", "correct horse battery")[0])
+    assert bob
+    bob_interaction = InteractionStore(kernel.database).receive(
+        kernel.subject_id,
+        "participant",
+        bob.entity_id,
+        "Bob's private conversation",
+        participant=bob,
+        participant_private=True,
+        participant_conversation="participant:" + bob.entity_id,
+    )
+    with kernel.database.connection() as connection:
+        bob_event = connection.execute(
+            "SELECT event_id FROM events WHERE json_extract(payload_json,'$.interaction_id')=?",
+            (bob_interaction.interaction_id,),
+        ).fetchone()[0]
+    affect_event = EventStore(kernel.database).append(
+        kernel.subject_id,
+        "affect_fixture",
+        "test",
+        {"recipient_event": recipient_event, "bob_event": bob_event},
+    )
+    MindEngine(kernel.database).process_event(
+        kernel.subject_id,
+        affect_event.event_id,
+        AppraisalInput(
+            novelty=0.5,
+            goal_congruence=0.0,
+            controllability=0.5,
+            certainty=0.8,
+            agency="test",
+            narrative="A bounded affect fixture",
+        ),
+        (
+            AffectImpulse(
+                emotion_type="recipient_affect_marker",
+                target_type=recipient.entity_type,
+                target_id=recipient.entity_key,
+                impulse=0.7,
+                valence=0.5,
+                arousal=0.4,
+                dominance=0.2,
+            ),
+            AffectImpulse(
+                emotion_type="private_bob_affect_marker",
+                target_type=bob.entity_type,
+                target_id=bob.entity_id,
+                impulse=0.9,
+                valence=-0.8,
+                arousal=0.9,
+                dominance=-0.2,
+            ),
+        ),
+    )
+    context = social._context()
+    assert context is not None
+    affect = json.loads(context.serialized)["affect"]
+    assert {item["target_id"] for item in affect if item["target_type"] == bob.entity_type} == set()
+    assert any(
+        item["emotion_type"] == "recipient_affect_marker"
+        and item["target_id"] == recipient.entity_key
+        for item in affect
+    )
+    assert all(item["emotion_type"] != "private_bob_affect_marker" for item in affect)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("routed", [False, True])
 async def test_authorized_retry_with_changed_context_yields_without_reidentifying_unknown(

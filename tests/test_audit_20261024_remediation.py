@@ -16,7 +16,7 @@ from noyra.interaction import InteractionStore
 from noyra.interaction.accounts import AccountStore
 from noyra.interaction.collaboration import ParticipantCollaboration
 from noyra.interaction.participants import Participant
-from noyra.mind.memory import MAX_RECALL_QUERY_CHARS, MemoryStore
+from noyra.mind.memory import MemoryStore
 from noyra.model import (
     BudgetLimits,
     CompletionRequest,
@@ -127,12 +127,7 @@ async def test_long_invitation_and_followup_both_progress(
     with patch.object(engine.memories, "recall", wraps=engine.memories.recall) as recall:
         assert await engine.run_due() == "interaction_silent"
         assert await engine.run_due() == "interaction_silent"
-        if attributed:
-            recall.assert_not_called()
-        else:
-            assert all(
-                0 < len(call.args[1]) <= MAX_RECALL_QUERY_CHARS for call in recall.call_args_list
-            )
+        recall.assert_not_called()
     assert len(provider.requests) == 2
     assert body in provider.requests[0].messages[1].content
     assert interactions.get(first.interaction_id).content == body
