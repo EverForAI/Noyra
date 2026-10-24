@@ -18,6 +18,7 @@ from noyra.mind.types import RelationshipRecord
 from noyra.model import ModelGateway, ModelMessage
 from noyra.model.errors import (
     BudgetExhaustedError,
+    ModelCallConflictError,
     ModelCallStateError,
     ProviderCallError,
     StructuredOutputError,
@@ -123,8 +124,19 @@ class RelationshipSocialCognition:
                 "status IN ('prepared','executing','unknown')",
                 (self.subject_id, prefix, len(prefix + ":route:"), prefix + ":route:"),
             ).fetchall()
+            conflicted = connection.execute(
+                "SELECT 1 FROM model_calls c WHERE c.subject_id=? AND c.purpose=? "
+                "AND c.status='prepared' AND EXISTS ("
+                "SELECT 1 FROM audit_records a WHERE a.subject_id=c.subject_id "
+                "AND a.action='model_request_context_conflict' "
+                "AND json_valid(a.payload_json) "
+                "AND json_extract(a.payload_json,'$.call_id')=c.call_id) LIMIT 1",
+                (self.subject_id, purpose),
+            ).fetchone()
         if any(row["status"] != "prepared" or row["purpose"] != purpose for row in unfinished):
             return "relationship_social_model_failed"
+        if conflicted is not None:
+            return "relationship_social_context_changed"
         existing = self._successful_proposal(purpose, context)
         if existing is None:
             try:
@@ -139,6 +151,9 @@ class RelationshipSocialCognition:
                 )
             except BudgetExhaustedError:
                 return "relationship_social_budget_exhausted"
+            except ModelCallConflictError:
+                self.gateway.ledger.quarantine_prepared_context(self.subject_id, purpose)
+                return "relationship_social_context_changed"
             except (ProviderCallError, StructuredOutputError, ModelCallStateError):
                 return "relationship_social_model_failed"
             proposal, call_id = result.output, result.call_id
@@ -257,7 +272,13 @@ class RelationshipSocialCognition:
             if isinstance(cooldown_until, str):
                 cooling = self._parse_time(cooldown_until) > now
             high_conflict = relationship.conflict > 0.85 and relationship.trust < -0.5
-            if blocked or cooling or high_conflict or relationship.relationship_id not in channels:
+            if (
+                blocked
+                or cooling
+                or high_conflict
+                or relationship.relationship_id not in channels
+                or relationship.relationship_id not in routes
+            ):
                 continue
             candidates.append((relationship, interactions, last_incoming, last_outgoing))
         if not candidates:

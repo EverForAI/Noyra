@@ -472,6 +472,121 @@ async def test_social_unknown_cannot_be_bypassed_by_new_conversation(kernel: Sub
 
 
 @pytest.mark.asyncio
+async def test_social_changed_authorized_retry_is_quarantined(kernel: SubjectKernel) -> None:
+    from noyra.model.errors import ProviderCallError
+
+    social, provider, _receive, _transports, _inbound, _bot, _first, _who, _ = social_fixture(
+        kernel
+    )
+    provider._outcomes.clear()
+    provider._outcomes.append(
+        ProviderCallError("provider_outcome_unknown", retryable=False, outcome_unknown=True)
+    )
+    assert await social.run_due() == "relationship_social_model_failed"
+    with kernel.database.connection() as connection:
+        call = connection.execute(
+            "SELECT call_id FROM model_calls WHERE subject_id=? "
+            "AND purpose LIKE 'relationship_social:%'",
+            (kernel.subject_id,),
+        ).fetchone()
+    assert call is not None
+    social.gateway.ledger.prepare_unknown_retry(
+        call["call_id"], actor="operator", reason="Review changed context"
+    )
+    social.events.append(
+        kernel.subject_id,
+        "outcome_evaluated",
+        "test",
+        {"changed": True},
+    )
+    assert await social.run_due() == "relationship_social_context_changed"
+    assert await social.run_due() == "relationship_social_context_changed"
+    assert len(provider.requests) == 1
+    with kernel.database.connection() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM audit_records WHERE subject_id=? "
+                "AND action='model_request_context_conflict'",
+                (kernel.subject_id,),
+            ).fetchone()[0]
+            == 1
+        )
+
+
+@pytest.mark.asyncio
+async def test_social_skips_unroutable_high_priority_contact_for_valid_contact(
+    kernel: SubjectKernel,
+) -> None:
+    from noyra.interaction import InboundEnvelope
+    from noyra.interaction.participants import ParticipantStore
+    from noyra.mind import RelationshipStore
+
+    social, _provider, _receive, _transports, inbound, bot, first, who, _ = social_fixture(kernel)
+    relationship = social.relationships.find(
+        kernel.subject_id, who.relationship_type, who.entity_id
+    )
+    with kernel.database.connection() as connection:
+        event = connection.execute(
+            "SELECT event_id FROM events WHERE json_extract(payload_json,'$.interaction_id')=?",
+            (first.interaction_id,),
+        ).fetchone()[0]
+    social.relationships.revise(
+        relationship.relationship_id,
+        trust=relationship.trust,
+        affinity=relationship.affinity,
+        conflict=relationship.conflict,
+        familiarity=1.0,
+        boundaries=relationship.boundaries,
+        reason="Prioritize the original correspondent",
+        source_event_ids=(event,),
+    )
+    inbound.change_binding(
+        inbound.list_bindings(kernel.subject_id)[0]["binding_id"],
+        kernel.subject_id,
+        status="disabled",
+        actor="operator",
+        reason="Synthetic route failure",
+    )
+    inbound.bind(
+        kernel.subject_id,
+        bot.transport_id,
+        external_account_id="account",
+        external_sender_id="bob",
+    )
+    second = inbound.ingest(
+        InboundEnvelope(
+            channel="webhook",
+            transport_id=bot.transport_id,
+            provider_event_id="second-contact",
+            external_account_id="account",
+            external_sender_id="bob",
+            sender_label="Bob",
+            conversation_id="bob-room",
+            content="Invitation from Bob",
+        )
+    )
+    assert isinstance(second, InboundAccepted)
+    bob = ParticipantStore(kernel.database).for_message(kernel.subject_id, second.interaction_id)
+    assert bob is not None
+    with kernel.database.connection() as connection:
+        bob_event = connection.execute(
+            "SELECT event_id FROM events WHERE json_extract(payload_json,'$.interaction_id')=?",
+            (second.interaction_id,),
+        ).fetchone()[0]
+    bob_relationship = RelationshipStore(kernel.database).ensure(
+        kernel.subject_id,
+        bob.relationship_type,
+        bob.entity_id,
+        bob.display_name,
+        source_event_ids=(bob_event,),
+    )
+    context = social._context()
+    assert context is not None
+    assert set(context.relationships) == {bob_relationship.relationship_id}
+    assert context.routes[bob_relationship.relationship_id].counterparty == "bob-room"
+
+
+@pytest.mark.asyncio
 async def test_social_recovery_same_route_reuses_successful_response(kernel: SubjectKernel) -> None:
     social, provider, _, _, _, _, _, _, _ = social_fixture(kernel)
     with (
