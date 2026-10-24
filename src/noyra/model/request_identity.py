@@ -9,6 +9,29 @@ from noyra.core.database import Database
 
 from .errors import ModelCallStateError
 
+# Read-only scheduling view of the existing dispatch fence. Alias c is a
+# model_calls row; the caller binds require_prepared_authorization for routed
+# gateways. Never change a call/attempt or release an unknown reservation here.
+UNRUNNABLE_BUSINESS_CALL_SQL = """(
+ c.status IN ('unknown','executing') OR
+ (c.status='prepared' AND :require_prepared_authorization AND NOT EXISTS (
+  SELECT 1 FROM audit_records a INDEXED BY idx_audit_subject_action_call
+  WHERE a.subject_id=c.subject_id AND a.action='model_unknown_retry_authorized'
+  AND json_valid(a.payload_json) AND json_extract(a.payload_json,'$.call_id')=c.call_id)) OR
+ (c.status='failed' AND EXISTS (
+  SELECT 1 FROM audit_records a INDEXED BY idx_audit_subject_action_call
+  WHERE a.subject_id=c.subject_id AND a.action='model_unknown_retry_authorized'
+  AND json_valid(a.payload_json) AND json_extract(a.payload_json,'$.call_id')=c.call_id)
+  AND NOT EXISTS (
+   SELECT 1 FROM audit_records a INDEXED BY idx_audit_subject_action_call
+   WHERE a.subject_id=c.subject_id AND a.action='model_unknown_retry_closed'
+   AND json_valid(a.payload_json) AND json_extract(a.payload_json,'$.call_id')=c.call_id)
+  AND NOT (c.error_code='operator_cancelled' AND EXISTS (
+   SELECT 1 FROM audit_records a INDEXED BY idx_audit_subject_action_call
+   WHERE a.subject_id=c.subject_id AND a.action='model_unknown_retry_cancelled'
+   AND json_valid(a.payload_json) AND json_extract(a.payload_json,'$.call_id')=c.call_id)))
+)"""
+
 
 def is_business_round(purpose: str) -> bool:
     parts = purpose.split(":")

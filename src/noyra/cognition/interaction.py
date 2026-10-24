@@ -29,7 +29,7 @@ from noyra.model.errors import (
     ProviderCallError,
     StructuredOutputError,
 )
-from noyra.model.request_identity import business_request_key
+from noyra.model.request_identity import UNRUNNABLE_BUSINESS_CALL_SQL, business_request_key
 from noyra.sleep import FatigueInputs, FatigueTracker
 
 from .settings import CognitionSettings
@@ -231,16 +231,25 @@ class InteractionCognition:
                 "SELECT i.interaction_id FROM interactions i "
                 "LEFT JOIN interaction_inbound_events e "
                 "ON e.interaction_id = i.interaction_id "
-                "WHERE i.subject_id = ? AND i.direction = 'incoming' AND "
+                "WHERE i.subject_id = :subject AND i.direction = 'incoming' AND "
                 "NOT " + WITHDRAWN_PARTICIPANT_INVITATION + " AND "
                 "NOT EXISTS(SELECT 1 FROM private_conversation_messages m "
                 "JOIN private_conversations c ON c.conversation_id=m.conversation_id "
                 "WHERE m.interaction_id=i.interaction_id "
                 "AND c.status IN ('deleting','deleted')) AND "
-                "(i.status = 'offered' OR (i.status = 'deferred' AND i.decided_at <= ?)) "
+                "(i.status = 'offered' OR (i.status = 'deferred' AND i.decided_at <= :cutoff)) "
+                "AND NOT EXISTS (SELECT 1 FROM model_calls c WHERE c.subject_id=i.subject_id "
+                "AND c.purpose='interaction_cognition:'||i.interaction_id||':'||(SELECT COUNT(*) "
+                "FROM interaction_decisions d WHERE d.interaction_id=i.interaction_id) AND "
+                + UNRUNNABLE_BUSINESS_CALL_SQL
+                + ") "
                 "ORDER BY COALESCE(e.scheduling_priority, 0) DESC, "
                 "i.created_at, i.interaction_id LIMIT 1",
-                (self.subject_id, cutoff),
+                {
+                    "subject": self.subject_id,
+                    "cutoff": cutoff,
+                    "require_prepared_authorization": self.gateway.requires_explicit_prepared_retry,
+                },
             ).fetchone()
         return self.interactions.get(row[0]) if row is not None else None
 

@@ -2666,6 +2666,8 @@ class _LogicalRouteState:
 class RoutedModelGateway(ModelGateway):
     """Routes each cognition purpose to one isolated model pool with bounded failover."""
 
+    requires_explicit_prepared_retry = True
+
     _logical_route_locks: ClassVar[dict[tuple[str, str, str], tuple[threading.Lock, int]]] = {}
     _logical_route_locks_guard: ClassVar[threading.Lock] = threading.Lock()
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -10,6 +12,7 @@ from urllib.request import HTTPCookieProcessor
 
 import pytest
 
+from noyra.cognition import InteractionCognition
 from noyra.cognition.social import RelationshipSocialCognition
 from noyra.core import SubjectKernel
 from noyra.interaction import InboundStore, TransportStore
@@ -17,6 +20,7 @@ from noyra.interaction.accounts import AccountError, AccountStore
 from noyra.interaction.inbound import InboundAccepted
 from noyra.interaction.participants import Participant
 from noyra.interaction.transport import TransportRecord
+from noyra.interaction.types import InteractionRecord
 from noyra.model import CompletionRequest, FakeProvider, ProviderResponse
 from noyra.service import NoyraHTTPServer
 from test_audit_20261024_remediation import kernel as base_kernel
@@ -477,3 +481,277 @@ async def test_social_recovery_same_route_reuses_successful_response(kernel: Sub
         await social.run_due()
     assert await social.run_due() == "relationship_social_contact"
     assert len(provider.requests) == 1
+
+
+def unknown_fixture(
+    owner: SubjectKernel, tmp_path: Path, routed: bool
+) -> tuple[
+    InteractionCognition,
+    FakeProvider,
+    InteractionRecord,
+    InteractionRecord,
+    Callable[[Participant, str], InteractionRecord],
+    Participant,
+    Participant,
+]:
+    from noyra.cognition import CognitionSettings, InteractionCognition
+    from noyra.interaction import InteractionStore
+    from noyra.model import BudgetLimits, FakeProvider, ModelGateway, ModelLedger, ModelPricing
+    from noyra.model.errors import ProviderCallError
+    from noyra.model.resources import RoutedModelGateway
+    from test_audit_20261022_remediation import resources_for
+    from test_audit_20261024_remediation import cognition
+
+    _prototype, queued = cognition(owner, 5)
+    # Reuse only a valid synthetic response, not a precomputed result.
+    provider = FakeProvider(
+        [
+            ProviderCallError("provider_outcome_unknown", retryable=False, outcome_unknown=True),
+            *list(queued._outcomes),
+        ]
+    )
+    gateway: ModelGateway
+    if routed:
+        resources, _ = resources_for(owner.database, owner.subject_id, tmp_path)
+        resources_for(owner.database, owner.subject_id, tmp_path, label="Independent route")
+        gateway = RoutedModelGateway(
+            owner.database, owner.subject_id, resources, provider_factory=lambda _: provider
+        )
+    else:
+        gateway = ModelGateway(
+            provider,
+            ModelLedger(owner.database),
+            model="test-model",
+            limits=BudgetLimits(20, 500000, 100000, 5000000),
+            pricing=ModelPricing(),
+        )
+    accounts = AccountStore(owner.database, owner.subject_id)
+    accounts.register("alice", "correct horse battery", "Alice")
+    accounts.register("bob", "correct horse battery", "Bob")
+    alice = accounts.authenticate(accounts.login("alice", "correct horse battery")[0])
+    bob = accounts.authenticate(accounts.login("bob", "correct horse battery")[0])
+    assert alice and bob
+    interactions = InteractionStore(owner.database)
+
+    def receive(who: Participant, key: str) -> InteractionRecord:
+        return interactions.receive(
+            owner.subject_id,
+            "participant",
+            who.entity_id,
+            "Independent invitation " + key,
+            idempotency_key=key,
+            participant=who,
+            participant_private=True,
+            participant_conversation="participant:" + who.entity_id,
+        )
+
+    first = receive(alice, "first")
+    second = receive(bob, "second")
+    engine = InteractionCognition(
+        owner.database,
+        owner.subject_id,
+        gateway,
+        CognitionSettings(interaction_cooldown_seconds=0, max_interaction_model_calls_per_day=20),
+    )
+    return engine, provider, first, second, receive, alice, bob
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routed", [False, True])
+async def test_unknown_round_yields_to_independent_messages_without_releasing_evidence(
+    kernel: SubjectKernel, tmp_path: Path, routed: bool
+) -> None:
+    from noyra.cognition import InteractionCognition
+    from noyra.interaction import InteractionStore
+
+    engine, provider, first, second, receive, alice, _ = unknown_fixture(kernel, tmp_path, routed)
+    assert await engine.run_due() == "interaction_model_failed"
+    with kernel.database.connection() as c:
+        call = dict(c.execute("SELECT * FROM model_calls").fetchone())
+        attempt = dict(c.execute("SELECT * FROM model_attempts").fetchone())
+    # Recreate the worker and cross the scheduling day without changing evidence.
+    restarted = InteractionCognition(
+        kernel.database,
+        kernel.subject_id,
+        engine.gateway,
+        engine.settings,
+        clock=lambda: "2099-01-01T00:00:00.000+00:00",
+    )
+    assert due_id(restarted) == second.interaction_id
+    assert await restarted.run_due() == "interaction_silent"
+    same_contact = receive(alice, "later-same-contact")
+    assert await restarted.run_due() == "interaction_silent"
+    assert InteractionStore(kernel.database).get(same_contact.interaction_id).status == "silent"
+    assert await restarted.run_due() is None
+    assert len(provider.requests) == 3
+    with kernel.database.connection() as c:
+        assert (
+            dict(
+                c.execute(
+                    "SELECT * FROM model_calls WHERE call_id=?", (call["call_id"],)
+                ).fetchone()
+            )
+            == call
+        )
+        assert (
+            dict(
+                c.execute(
+                    "SELECT * FROM model_attempts WHERE attempt_id=?", (attempt["attempt_id"],)
+                ).fetchone()
+            )
+            == attempt
+        )
+    assert InteractionStore(kernel.database).get(first.interaction_id).status == "offered"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routed", [False, True])
+@pytest.mark.parametrize("resolution", ["retry", "succeeded", "failed"])
+async def test_explicit_unknown_resolution_resumes_only_original_business_round(
+    kernel: SubjectKernel, tmp_path: Path, routed: bool, resolution: str
+) -> None:
+
+    engine, provider, first, second, _, _, _ = unknown_fixture(kernel, tmp_path, routed)
+    assert await engine.run_due() == "interaction_model_failed"
+    with kernel.database.connection() as c:
+        call_id = c.execute("SELECT call_id FROM model_calls").fetchone()[0]
+    if resolution == "retry":
+        engine.gateway.ledger.prepare_unknown_retry(
+            call_id, actor="operator", reason="Synthetic explicit retry"
+        )
+    else:
+        evidence = None
+        if resolution == "succeeded":
+            outcome = provider._outcomes[0]
+            assert isinstance(outcome, ProviderResponse)
+            evidence = {"content": outcome.content}
+        engine.gateway.ledger.reconcile_unknown(
+            call_id,
+            outcome=resolution,
+            actor="operator",
+            reason="Synthetic provider evidence",
+            response=evidence,
+        )
+    assert due_id(engine) == first.interaction_id
+    with resource_cooldown_elapsed():
+        assert await engine.run_due() == "interaction_silent"
+    assert len(provider.requests) == (1 if resolution == "succeeded" else 2)
+    with kernel.database.connection() as c:
+        rows = c.execute(
+            "SELECT call_id,idempotency_key FROM model_calls WHERE purpose=?",
+            ("interaction_cognition:" + first.interaction_id + ":0",),
+        ).fetchall()
+        if resolution == "retry":
+            assert len(rows) == 1 and rows[0]["call_id"] == call_id
+    assert due_id(engine) == second.interaction_id
+
+
+@pytest.mark.asyncio
+async def test_consumed_failed_unknown_retry_stays_isolated_until_closed(
+    kernel: SubjectKernel, tmp_path: Path
+) -> None:
+    from noyra.model.errors import ProviderCallError
+
+    engine, provider, first, second, _, _, _ = unknown_fixture(kernel, tmp_path, True)
+    assert await engine.run_due() == "interaction_model_failed"
+    with kernel.database.connection() as c:
+        call_id = c.execute("SELECT call_id FROM model_calls").fetchone()[0]
+    engine.gateway.ledger.prepare_unknown_retry(
+        call_id, actor="operator", reason="One explicit retry"
+    )
+    provider._outcomes.appendleft(
+        ProviderCallError("synthetic_known_failure", retryable=False, outcome_unknown=False)
+    )
+    with resource_cooldown_elapsed():
+        assert await engine.run_due() == "interaction_model_failed"
+    assert due_id(engine) == second.interaction_id
+    engine.gateway.ledger.close_failed_unknown_retry(
+        call_id,
+        actor="operator",
+        reason="Synthetic manual reconciliation",
+        resolution_evidence="synthetic-provider-record",
+        accept_duplicate_risk=True,
+    )
+    assert due_id(engine) == first.interaction_id
+
+
+def due_id(engine: InteractionCognition) -> str | None:
+    record = engine._due_interaction()
+    return record.interaction_id if record is not None else None
+
+
+@contextmanager
+def resource_cooldown_elapsed() -> Iterator[None]:
+    future = datetime.now(UTC) + timedelta(days=1)
+
+    class Future(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Future:
+            return cls.fromtimestamp(future.timestamp(), tz)
+
+    # Advance natural route cooldowns without changing any ledger/unknown row.
+    with (
+        patch("noyra.core.provider_health.datetime", Future),
+        patch("noyra.model.resources.utc_now", lambda: future.isoformat(timespec="milliseconds")),
+    ):
+        yield
+
+
+@pytest.mark.asyncio
+async def test_unapproved_prepared_and_executing_rounds_do_not_block_queue(
+    kernel: SubjectKernel, tmp_path: Path
+) -> None:
+    from noyra.core.types import content_hash
+
+    engine, provider, first, second, _, _, _ = unknown_fixture(kernel, tmp_path, True)
+    purpose = "interaction_cognition:" + first.interaction_id + ":0"
+    call, _ = engine.gateway.ledger.prepare_call(
+        kernel.subject_id,
+        "fake",
+        "test-model",
+        purpose,
+        content_hash("synthetic prepared request"),
+        "synthetic-prepared",
+        resource_pool="economy",
+    )
+    assert due_id(engine) == second.interaction_id
+    assert len(provider.requests) == 0
+    # A separate executing call must also stay fenced while preserving reservation.
+    from noyra.model import BudgetLimits
+
+    attempt = engine.gateway.ledger.authorize_attempt(
+        call.call_id,
+        BudgetLimits(20, 500000, 100000, 5000000),
+        reserved_input_tokens=100,
+        reserved_output_tokens=100,
+        reserved_cost_microusd=0,
+    )
+    engine.gateway.ledger.start_attempt(attempt.attempt_id)
+    assert due_id(engine) == second.interaction_id
+    with kernel.database.connection() as c:
+        assert (
+            c.execute(
+                "SELECT status FROM model_attempts WHERE attempt_id=?", (attempt.attempt_id,)
+            ).fetchone()[0]
+            == "executing"
+        )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_unknown_retry_is_not_a_permanent_scheduler_block(
+    kernel: SubjectKernel, tmp_path: Path
+) -> None:
+    engine, provider, first, _, _, _, _ = unknown_fixture(kernel, tmp_path, True)
+    assert await engine.run_due() == "interaction_model_failed"
+    with kernel.database.connection() as c:
+        call_id = c.execute("SELECT call_id FROM model_calls").fetchone()[0]
+    engine.gateway.ledger.prepare_unknown_retry(
+        call_id, actor="operator", reason="One intentional retry"
+    )
+    engine.gateway.ledger.reconcile_prepared_failed(
+        call_id, actor="operator", reason="Cancel unused retry"
+    )
+    assert due_id(engine) == first.interaction_id
+    with resource_cooldown_elapsed():
+        assert await engine.run_due() == "interaction_silent"
+    assert len(provider.requests) == 2

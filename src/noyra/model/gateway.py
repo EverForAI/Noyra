@@ -38,6 +38,8 @@ from .types import (
 class ModelGateway:
     """Validated, budgeted, idempotent boundary around an untrusted model provider."""
 
+    requires_explicit_prepared_retry = False
+
     def __init__(
         self,
         provider: ModelProvider,
