@@ -311,7 +311,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 105
+CURRENT_SCHEMA_VERSION = 106
 
 # The schema DDL fingerprint is checked after every successful initialization.
 # Update this value only alongside a reviewed schema migration and its tests.
@@ -320,6 +320,7 @@ CURRENT_SCHEMA_VERSION = 105
 # the value to remain stable across compatible runtime fixes.
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
     105: "f117dc793fddf96e769abef73c30127b5494ce8fb8b7f6598e6b1e093f554950",
+    106: "236bf850b21704b51478101c6a979682307f69f4530f937287eaec46c14870c5",
     104: "72e5c15e4793cbe3b743b5eca667cea5bef3c34af05a4674bde7ce720234dc8e",
     103: "b13fec71f4c1a40287f7b7b272f7ba8e12bdd9625aa53ca08568023c25f84334",
     102: "f731a5afa55d7e6c7adf170f93e985e0b1efee544f365dfd746f31afc997db09",
@@ -356,6 +357,7 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 # database construction because they define the storage contract itself.
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
     105: "8feff8b35da5fad5d7c530dd492dcf78347c038456f48857c4afad63fd220a2e",
+    106: "60c959c1499b63793106847aae7da21ad44733ecc143373b44e5ea2313450241",
     104: "1c17714c61ce55ec2a36af8dfdb439bbae32428bab58c7d842a34802426650e4",
     103: "1147ca9c2c26d160b0b20186536e1bf4a4f34211aab668a25af36610bdaa284b",
     102: "cb7f1359673e8949c90b1706e14de28c857d8df4b54c07aa0e4f136bf3aa4900",
@@ -7130,7 +7132,35 @@ WHEN EXISTS(SELECT 1 FROM interactions i WHERE i.interaction_id=NEW.interaction_
  AND i.subject_id=NEW.subject_id AND i.created_at<>NEW.interaction_created_at)
 BEGIN SELECT RAISE(ABORT,'participant message time mismatch'); END;
 """,
+    106: """
+CREATE TRIGGER IF NOT EXISTS prevent_goal_origin_update
+BEFORE UPDATE OF goal_id,subject_id,origin,created_at,origin_evidence,origin_evidence_hash ON goals
+WHEN NEW.goal_id IS NOT OLD.goal_id OR NEW.subject_id IS NOT OLD.subject_id
+ OR NEW.origin IS NOT OLD.origin OR NEW.created_at IS NOT OLD.created_at
+ OR NEW.origin_evidence IS NOT OLD.origin_evidence
+ OR NEW.origin_evidence_hash IS NOT OLD.origin_evidence_hash
+BEGIN SELECT RAISE(ABORT,'goal origin evidence is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS validate_goal_origin_evidence_insert
+BEFORE INSERT ON goals WHEN NEW.origin_evidence<>'created'
+BEGIN SELECT RAISE(ABORT,'legacy goal origin evidence is migration-only'); END;
+""",
 }
+
+
+def goal_origin_evidence_hash(
+    goal_id: str, subject_id: str, origin: str, created_at: str, evidence: str
+) -> str:
+    """Bind observed goal provenance without upgrading legacy ancestry claims."""
+    return content_hash(
+        {
+            "format": "noyra-goal-origin/v1",
+            "goal_id": goal_id,
+            "subject_id": subject_id,
+            "origin": origin,
+            "created_at": created_at,
+            "evidence": evidence,
+        }
+    )
 
 
 def action_state_hash(row: sqlite3.Row) -> str:
@@ -10995,6 +11025,17 @@ END;
                         connection.rollback()
                         raise
                     continue
+                if target_version == 106:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._ensure_goal_origin_evidence(connection)
+                        self._execute_sql_script(connection, migration)
+                        self._set_schema_version(connection, target_version)
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
                 if target_version == 105:
                     try:
                         connection.execute("BEGIN IMMEDIATE")
@@ -11024,6 +11065,47 @@ END;
                 except Exception:
                     connection.rollback()
                     raise
+
+    @staticmethod
+    def _ensure_goal_origin_evidence(connection: sqlite3.Connection) -> None:
+        names = {row[1] for row in connection.execute("PRAGMA table_info(goals)")}
+        evidence_columns = {"origin_evidence", "origin_evidence_hash"}
+        if evidence_columns <= names:
+            return
+        if evidence_columns & names:
+            raise SchemaContractError("goal origin evidence columns are incomplete")
+        connection.execute(
+            "ALTER TABLE goals ADD COLUMN origin_evidence TEXT NOT NULL DEFAULT 'created' "
+            "CHECK (origin_evidence IN ('created','legacy_baseline'))"
+        )
+        connection.execute(
+            "ALTER TABLE goals ADD COLUMN origin_evidence_hash TEXT NOT NULL DEFAULT ''"
+        )
+        # Old state/revision hashes did not cover origin. These witnesses pin
+        # only the value observed at migration, never its original ancestry.
+        for row in connection.execute("SELECT goal_id,subject_id,origin,created_at FROM goals"):
+            if row["origin"] not in {
+                "self",
+                "environment",
+                "human_proposal",
+                "maintenance",
+                "mixed",
+            }:
+                raise SchemaContractError("legacy goal origin is invalid")
+            connection.execute(
+                "UPDATE goals SET origin_evidence='legacy_baseline',origin_evidence_hash=? "
+                "WHERE goal_id=?",
+                (
+                    goal_origin_evidence_hash(
+                        row["goal_id"],
+                        row["subject_id"],
+                        row["origin"],
+                        row["created_at"],
+                        "legacy_baseline",
+                    ),
+                    row["goal_id"],
+                ),
+            )
 
     @staticmethod
     def _ensure_participant_message_time(connection: sqlite3.Connection) -> None:

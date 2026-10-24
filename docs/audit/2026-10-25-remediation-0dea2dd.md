@@ -51,3 +51,11 @@
 - 原生 Windows 回归：实际文件锁模拟 trust/current 写入失败、目录模拟 receipt 故障，解除故障后同版本重试成功；已有 current 的失败/恢复、重复升级保留 previous、内容损坏与不同同版本包拒绝。使用内存 CMS 证书与系统签名 fixture，不导入证书、不启动打包程序。
 - 验证：签名/构建/升级包组合 7 passed（21.91 秒），进程身份隔离 8 passed（5.46 秒）；补充 trust/pointer 实际故障后原生综合 fixture 再次 1 passed（3.98 秒）；Ruff/格式/Mypy 通过。
 - 复审：重试不依靠“同名即可信”或未经验证的状态标记；严格验签及实际 signer 撤销仍有效，失败回执不变更原信任策略。未发现模块阻断项。
+
+### 模块 5：A04（完成）
+
+- schema 106 为 origin、主体/目标标识、创建时间及证据类别计算独立 provenance hash，SQLite 拒绝这些字段的变更；GoalStore 读取与实际 mind.state 检查核验同一证据。不改既有状态/修订散列格式。
+- 新目标随创建事务记录 created；迁移旧目标记录 legacy_baseline，只固定升级时观察到的值，不宣称证明最初来源，不自动改变来源、接受状态或其他行为。后续接受/修订不提升旧证据类别，新插入不能冒充 legacy。GoalRecord/诊断导出保留类别，纯内存合成对象默认 unverified。
+- 回归覆盖五种来源正常形成、接受/激活/修订、六种不可变字段、合法枚举损坏后实际 mind.state 检出并 pause、真实 schema 105 升级且原状态哈希/全部修订不变、升级前无法证明的来源改写仍明确标为 baseline、导出、迁移原子失败重试和 guard 移除后的 strict reopen 拒绝。
+- 验证：mind/完整性/schema 42 passed、34 subtests（72.64 秒）；来源保护、治理、参与者、跨 104/105/106 迁移与公开归档组合 73 passed（160.57 秒）；学习/诊断导出 18 passed（32.93 秒）。新夹具曾试图跳过 proposed→candidate，已改为确认迁移不推断旧目标接受，不放松状态机。
+- 全仓库 Ruff check、760 文件格式检查、Mypy 470 文件均通过。复审全部 origin 写入者、历史迁移契约、消费者和导出所有权图后未发现模块阻断项。详细证据语义见 docs/goal-origin-evidence.md。

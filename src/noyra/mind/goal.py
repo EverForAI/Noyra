@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from noyra.core.database import Database
+from noyra.core.database import Database, goal_origin_evidence_hash
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.types import (
     canonical_json,
@@ -88,8 +88,8 @@ class GoalStore:
             """INSERT INTO goals(
                 goal_id, subject_id, title, description, origin, status,
                 priority, commitment, progress, emotional_pressure, state_hash,
-                current_revision, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 1, ?, ?)""",
+                current_revision, created_at, updated_at, origin_evidence, origin_evidence_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 1, ?, ?, 'created', ?)""",
             (
                 goal_id,
                 subject_id,
@@ -102,6 +102,7 @@ class GoalStore:
                 state_hash,
                 now,
                 now,
+                goal_origin_evidence_hash(goal_id, subject_id, candidate.origin, now, "created"),
             ),
         )
         self._insert_revision(
@@ -423,6 +424,17 @@ class GoalStore:
         status = row["status"]
         if not isinstance(status, str) or status not in GOAL_STATUSES:
             raise IntegrityError(f"goal durable state is invalid: {goal_id}")
+        origin = row["origin"]
+        evidence = row["origin_evidence"]
+        if (
+            origin not in {"self", "environment", "human_proposal", "maintenance", "mixed"}
+            or evidence not in {"created", "legacy_baseline"}
+            or row["origin_evidence_hash"]
+            != goal_origin_evidence_hash(
+                goal_id, row["subject_id"], origin, row["created_at"], evidence
+            )
+        ):
+            raise IntegrityError(f"goal origin evidence mismatch: {goal_id}")
         expected_hash = GoalStore._state_hash(
             row["title"],
             row["description"],
@@ -448,6 +460,7 @@ class GoalStore:
             current_revision=current_revision,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            origin_evidence=evidence,
         )
 
     @staticmethod
