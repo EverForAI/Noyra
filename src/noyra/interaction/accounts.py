@@ -254,14 +254,25 @@ class AccountStore:
             )
         return replacement
 
-    def api_key(self, who: Participant, *, revoke: bool = False) -> str | None:
+    def api_key(
+        self, who: Participant, *, session_token: str, csrf: str, revoke: bool = False
+    ) -> str | None:
+        if not isinstance(session_token, str) or not 20 <= len(session_token) <= 256:
+            raise AccountError("invalid_credentials")
+        # Serialize the authorization and mutation with reset/logout/password
+        # changes. A previously authenticated Participant is not a session grant.
         with self.database.transaction() as c:
             row = c.execute(
-                "SELECT account_id FROM participant_accounts WHERE subject_id=? AND entity_id=?",
-                (self.subject, who.entity_id),
+                "SELECT a.account_id,s.csrf_digest FROM participant_accounts a "
+                "JOIN participant_sessions s ON s.account_id=a.account_id "
+                "AND s.subject_id=a.subject_id JOIN participant_entities e "
+                "ON e.entity_id=a.entity_id AND e.subject_id=a.subject_id "
+                "WHERE a.subject_id=? AND a.entity_id=? AND e.status='active' "
+                "AND s.session_digest=? AND s.expires_at>?",
+                (self.subject, who.entity_id, digest(session_token), time.time()),
             ).fetchone()
-            if row is None:
-                raise AccountError("account_required")
+            if row is None or not hmac.compare_digest(row["csrf_digest"], digest(csrf)):
+                raise AccountError("invalid_credentials")
             c.execute(
                 "DELETE FROM participant_api_credentials WHERE subject_id=? AND account_id=?",
                 (self.subject, row[0]),

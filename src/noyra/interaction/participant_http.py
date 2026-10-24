@@ -240,7 +240,18 @@ def dispatch(h: Any, owner: Any, method: str) -> bool:
                 "revoke" in payload and type(payload["revoke"]) is not bool
             ):
                 raise AccountError("invalid_account_details")
-            _reply(h, 200, {"api_key": store.api_key(who, revoke=payload.get("revoke") is True)})
+            _reply(
+                h,
+                200,
+                {
+                    "api_key": store.api_key(
+                        who,
+                        session_token=token,
+                        csrf=h.headers.get("X-Participant-CSRF", ""),
+                        revoke=payload.get("revoke") is True,
+                    )
+                },
+            )
         else:
             from .collaboration import ParticipantCollaboration
 

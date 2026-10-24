@@ -623,7 +623,8 @@ def test_message_receipt_across_browser_and_program_keeps_original_source(
     payload = {"content": "Same invitation", "idempotency_key": "receipt"}
     first = collaboration.write("/api/participants/messages", payload, who, "127.0.0.1")
     accounts = AccountStore(kernel.database, kernel.subject_id)
-    key = accounts.api_key(who)
+    token, csrf, _ = accounts.login("alice", "correct horse battery")
+    key = accounts.api_key(who, session_token=token, csrf=csrf)
     assert key
     api_who = accounts.authenticate(key, api=True)
     assert api_who and api_who.source_id != who.source_id

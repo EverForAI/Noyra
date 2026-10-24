@@ -23,7 +23,7 @@ def test_human_default_sessions_scope_reset_and_credential_revocation(tmp_path: 
     assert principal and principal.entity_id == registration["entity_id"]
     assert store.authenticate(token, csrf="wrong") is None
     assert accounts(tmp_path, "subject-b").authenticate(token) is None
-    api = store.api_key(principal)
+    api = store.api_key(principal, session_token=token, csrf=csrf)
     assert api and store.authenticate(api, api=True)
     assert store.authenticate(api) is None
     assert store.authenticate(token, api=True) is None
@@ -75,10 +75,10 @@ def test_password_change_requires_current_secret_and_revokes_all_credentials(
 ) -> None:
     store = accounts(tmp_path)
     first = store.register("alice", "correct horse battery", "Alice")
-    token, _, _ = store.login("alice", "correct horse battery")
+    token, csrf, _ = store.login("alice", "correct horse battery")
     who = store.authenticate(token)
     assert who
-    api = store.api_key(who)
+    api = store.api_key(who, session_token=token, csrf=csrf)
     assert api
     with pytest.raises(AccountError):
         store.change_password(who, "not the old password", "another correct password")
