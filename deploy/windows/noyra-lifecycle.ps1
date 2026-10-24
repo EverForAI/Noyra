@@ -468,12 +468,12 @@ switch ($Action) {
                 throw 'Staged package version changed after initial verification.'
             }
             Move-Item -LiteralPath $staging -Destination $target
+            # Record the verified requirement before changing external trust
+            # or pointers. A failed receipt must leave existing trust intact.
+            Write-InstalledVerificationPolicy $version ([bool]$manifest.signature_required)
             if ($manifest.signature_required) {
                 Write-PublisherTrustPolicy $TrustedPublisherThumbprints
             }
-            # Record the verified requirement outside the mutable package tree.
-            # Recovery never needs to verify a damaged current package first.
-            Write-InstalledVerificationPolicy $version ([bool]$manifest.signature_required)
             $old = Get-CurrentVersion
             if ($null -ne $old) { Write-PointerAtomic $previousPointer $old }
             Write-PointerAtomic $currentPointer $version

@@ -132,8 +132,14 @@ try {
     Expect 'saved_single_pin_reaches_executable_verification' (Invoke-Life install 'saved-single' $single) $false 'Authenticode'
     Expect 'package_metadata_cannot_self_authorize' (Invoke-Life install 'untrusted' $a1 @{TrustedPublisherThumbprints = $pinsB}) $false 'not a trusted publisher'
     Expect 'invalid_pin_rejected' (Invoke-Life install 'bad-pin' $a1 @{TrustedPublisherThumbprints = @('not-a-pin')}) $false '40 hexadecimal'
-    New-Item -ItemType Directory -Path (Join-Path $WorkRoot 'receipt-dir/verification-policy.signed-a1.json') -Force | Out-Null
-    Expect 'directory_receipt_cannot_publish_pointer' (Invoke-Life install 'receipt-dir' $a1 @{TrustedPublisherThumbprints = $pinsA}) $false 'verification policy is unsafe'
+    New-Item -ItemType Directory -Path (Join-Path $WorkRoot 'receipt-dir/verification-policy.signed-b3.json') -Force | Out-Null
+    Set-Trust 'receipt-dir' $pinsA
+    $retainedTrust = [IO.File]::ReadAllBytes((Join-Path $WorkRoot 'receipt-dir/trusted-publishers.json'))
+    Expect 'directory_receipt_cannot_publish_pointer' (Invoke-Life install 'receipt-dir' $b3 @{TrustedPublisherThumbprints = $pinsB}) $false 'verification policy is unsafe'
+    if ([Convert]::ToBase64String($retainedTrust) -ne [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $WorkRoot 'receipt-dir/trusted-publishers.json')))) {
+        throw 'Failed receipt changed existing external trust.'
+    }
+    $results.failed_receipt_preserves_existing_trust = $true
     Expect 'unsigned_initial_install' (Invoke-Life install 'guard' $u1) $true
     Expect 'strict_upgrade_for_recovery_guard' (Invoke-Life upgrade 'guard' $a1 @{TrustedPublisherThumbprints = $pinsA}) $true
     [IO.File]::WriteAllText((Join-Path $WorkRoot 'guard/versions/signed-a1/noyra-package.json'), '{broken', $utf8)
