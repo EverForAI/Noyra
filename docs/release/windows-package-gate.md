@@ -33,15 +33,24 @@ converted into a passing release result.
 A package build is not complete without an explicit `-LauncherPath` pointing to
 the signed Noyra launcher executable. The builder writes the launcher as the
 manifest-declared `noyra.exe` entry; it no longer silently creates a source-only
-package that the lifecycle can install but never start. For strict signing, pass
-one or more approved publisher certificate thumbprints with
-`-TrustedPublisherThumbprints` and `-RequireSignature`. The lifecycle receives
-the same approved thumbprints and checks the manifest-declared launcher and every
-packaged executable against that publisher allowlist. Authenticode `Valid` alone
-is not an Noyra release identity.
+package that the lifecycle can install but never start. For strict signing, pass one or more approved publisher certificate thumbprints
+with `-TrustedPublisherThumbprints` and `-RequireSignature`, plus
+`-ManifestSignerThumbprint` when building. The builder emits a detached CMS
+signature at `noyra-package.json.p7s`; the lifecycle verifies that signature,
+the exact manifest bytes, the manifest inventory, the launcher, and every
+packaged executable against the external publisher allowlist. It never trusts a
+thumbprint or public key that is introduced only by the package itself.
+
+After the first strict install, the lifecycle retains the explicitly supplied
+allowlist in `trusted-publishers.json` under the install root. Later `start`,
+`rollback`, and strict `upgrade` operations may reuse that policy when the
+operator does not pass the parameter again. A missing or malformed policy is a
+hard failure; it is not regenerated from package metadata.
 
 The thumbprint allowlist is an operator/release policy input and must be
-reviewed and rotated with the publisher certificate. The package manifest is
-not itself a publisher signature; the release pipeline must still sign and
-verify the release checksum/manifest bundle and retain the clean-VM evidence
-required by the external release gate.
+reviewed and rotated with the publisher certificate. The manifest signer must
+be one of the allowlisted certificates and must be available with its private
+key to the build process. Certificate rotation therefore requires an explicit
+trust-policy update and a clean-VM install/upgrade/rollback check. The Windows
+CMS signature complements, rather than replaces, the release pipeline's
+checksum signature and clean-VM evidence gate.

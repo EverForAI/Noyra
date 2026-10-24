@@ -229,6 +229,71 @@ def test_windows_package_strict_signature_cannot_bypass_launcher_inventory(
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is unavailable")
+def test_windows_package_single_publisher_reaches_manifest_signature_gate(
+    tmp_path: Path,
+) -> None:
+    assert POWERSHELL is not None
+    package = tmp_path / "package"
+    package.mkdir()
+    launcher = package / "noyra.exe"
+    launcher.write_bytes(b"synthetic non-executable launcher fixture")
+    readme = package / "README.txt"
+    readme.write_text("synthetic package", encoding="utf-8")
+    thumbprint = "A" * 40
+    (package / "noyra-package.json").write_text(
+        json.dumps(
+            {
+                "format": "noyra-windows-package/v1",
+                "version": "single-publisher-fixture",
+                "signature_required": True,
+                "trusted_publisher_thumbprints": [thumbprint],
+                "launcher": "noyra.exe",
+                "files": [
+                    {
+                        "path": "README.txt",
+                        "sha256": hashlib.sha256(readme.read_bytes()).hexdigest(),
+                    },
+                    {
+                        "path": "noyra.exe",
+                        "sha256": hashlib.sha256(launcher.read_bytes()).hexdigest(),
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            POWERSHELL,
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            str(ROOT / "deploy/windows/noyra-lifecycle.ps1"),
+            "-Action",
+            "install",
+            "-InstallRoot",
+            str(tmp_path / "install"),
+            "-DataRoot",
+            str(tmp_path / "data"),
+            "-PackageRoot",
+            str(package),
+            "-RequireSignature",
+            "-TrustedPublisherThumbprints",
+            thumbprint,
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "Count" not in output
+    assert "noyra-package.json.p7s" in output
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is unavailable")
 def test_windows_package_missing_management_module_has_actionable_diagnostic(
     tmp_path: Path,
 ) -> None:

@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory = $false)] [string]$SourceRoot = (Join-Path $PSScriptRoot '..'),
     [Parameter(Mandatory = $false)] [string]$LauncherPath,
     [Parameter(Mandatory = $false)] [string[]]$TrustedPublisherThumbprints,
+    [Parameter(Mandatory = $false)] [string]$ManifestSignerThumbprint,
     [Parameter(Mandatory = $false)] [switch]$RequireSignature
 )
 
@@ -58,6 +59,9 @@ $trustedThumbprints = @($TrustedPublisherThumbprints | ForEach-Object {
 } | Sort-Object -Unique)
 if ($RequireSignature -and $trustedThumbprints.Count -eq 0) {
     throw 'RequireSignature requires at least one trusted publisher thumbprint.'
+}
+if ($RequireSignature -and [string]::IsNullOrWhiteSpace($ManifestSignerThumbprint)) {
+    throw 'RequireSignature requires ManifestSignerThumbprint for the detached package manifest signature.'
 }
 $source = (Resolve-Path -LiteralPath $SourceRoot).Path
 if (-not (Test-Path -LiteralPath $OutputRoot)) {
@@ -125,7 +129,32 @@ try {
         signature_required = [bool]$RequireSignature
     }
     $manifestJson = $manifest | ConvertTo-Json -Depth 6 -Compress
-    Set-Content -LiteralPath (Join-Path $staging 'noyra-package.json') -Value $manifestJson -NoNewline -Encoding utf8
+    $manifestPath = Join-Path $staging 'noyra-package.json'
+    [IO.File]::WriteAllText($manifestPath, $manifestJson, [Text.UTF8Encoding]::new($false))
+    if ($RequireSignature) {
+        try {
+            Add-Type -AssemblyName System.Security.Cryptography.Pkcs -ErrorAction Stop
+            $normalizedSigner = ([string]$ManifestSignerThumbprint).Trim().Replace(' ', '').ToUpperInvariant()
+            if ($normalizedSigner -notmatch '^[0-9A-F]{40}$' -or $trustedThumbprints -notcontains $normalizedSigner) {
+                throw 'ManifestSignerThumbprint must be one of the trusted publisher thumbprints.'
+            }
+            $certificate = Get-ChildItem Cert:\CurrentUser\My |
+                Where-Object { $_.Thumbprint -eq $normalizedSigner } |
+                Select-Object -First 1
+            if ($null -eq $certificate -or -not $certificate.HasPrivateKey) {
+                throw 'The manifest signer certificate with a private key is unavailable.'
+            }
+            $content = [System.Security.Cryptography.Pkcs.ContentInfo]::new([IO.File]::ReadAllBytes($manifestPath))
+            $cms = [System.Security.Cryptography.Pkcs.SignedCms]::new($content, $true)
+            $signer = [System.Security.Cryptography.Pkcs.CmsSigner]::new($certificate)
+            $signer.IncludeOption = [System.Security.Cryptography.X509Certificates.X509IncludeOption]::EndCertOnly
+            $cms.ComputeSignature($signer)
+            [IO.File]::WriteAllBytes((Join-Path $staging 'noyra-package.json.p7s'), $cms.Encode())
+        }
+        catch {
+            throw ('Unable to create detached package manifest signature: ' + $_.Exception.Message)
+        }
+    }
     Move-Item -LiteralPath $staging -Destination $destination
     Write-Output $destination
 }

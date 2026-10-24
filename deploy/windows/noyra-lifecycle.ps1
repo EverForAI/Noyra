@@ -36,6 +36,7 @@ foreach ($path in @($InstallRoot, (Join-Path $InstallRoot 'versions'), $DataRoot
 $versions = Join-Path $InstallRoot 'versions'
 $currentPointer = Join-Path $InstallRoot 'current.txt'
 $previousPointer = Join-Path $InstallRoot 'previous.txt'
+$publisherTrustPath = Join-Path $InstallRoot 'trusted-publishers.json'
 $pidFile = Join-Path $DataRoot 'noyra.pid'
 
 function Assert-SafeSegment([string]$Value, [string]$Name) {
@@ -80,6 +81,41 @@ function Write-PointerAtomic([string]$Path, [string]$Value) {
     }
 }
 
+function Read-PublisherTrustPolicy {
+    if (-not (Test-Path -LiteralPath $publisherTrustPath -PathType Leaf)) { return @() }
+    $item = Get-Item -LiteralPath $publisherTrustPath -Force
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint -or $item.Length -gt 16KB) {
+        throw 'Publisher trust policy is unsafe.'
+    }
+    $document = Get-Content -LiteralPath $publisherTrustPath -Raw | ConvertFrom-Json
+    if ($document.format -ne 'noyra-publisher-trust/v1') {
+        throw 'Publisher trust policy has an unsupported format.'
+    }
+    $values = if ($null -eq $document.thumbprints) { @() } else { @($document.thumbprints) }
+    $normalized = @(Normalize-Thumbprints $values)
+    if ($normalized.Count -eq 0) { throw 'Publisher trust policy is empty.' }
+    return $normalized
+}
+
+function Write-PublisherTrustPolicy([string[]]$Thumbprints) {
+    $normalized = @(Normalize-Thumbprints $Thumbprints)
+    if ($normalized.Count -eq 0) { throw 'Cannot persist an empty publisher trust policy.' }
+    New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
+    $temporary = Join-Path $InstallRoot ('.trusted-publishers.' + [guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        $document = [ordered]@{
+            format = 'noyra-publisher-trust/v1'
+            thumbprints = @($normalized)
+        }
+        $document | ConvertTo-Json -Depth 4 -Compress |
+            Set-Content -LiteralPath $temporary -NoNewline -Encoding utf8
+        Move-Item -LiteralPath $temporary -Destination $publisherTrustPath -Force
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+    }
+}
+
 function Assert-PackageTree([string]$Root) {
     # Enumerate one directory at a time: never descend into an unverified link.
     $ancestor = Get-Item -LiteralPath $Root -Force
@@ -102,7 +138,38 @@ function Assert-PackageTree([string]$Root) {
     }
 }
 
-function Verify-Package([string]$Root) {
+function Verify-ManifestSignature(
+    [string]$Root,
+    [byte[]]$ManifestBytes,
+    [string[]]$TrustedThumbprints
+) {
+    $signaturePath = Join-Path $Root 'noyra-package.json.p7s'
+    if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
+        throw 'Strict package verification requires noyra-package.json.p7s.'
+    }
+    if ((Get-Item -LiteralPath $signaturePath).Length -gt 1MB) {
+        throw 'Package manifest signature exceeds its size limit.'
+    }
+    try {
+        Add-Type -AssemblyName System.Security.Cryptography.Pkcs -ErrorAction Stop
+        $content = [System.Security.Cryptography.Pkcs.ContentInfo]::new($ManifestBytes)
+        $cms = [System.Security.Cryptography.Pkcs.SignedCms]::new($content, $true)
+        $cms.Decode([IO.File]::ReadAllBytes($signaturePath))
+        $cms.CheckSignature($true)
+    }
+    catch {
+        throw 'Package manifest signature is invalid.'
+    }
+    if ($cms.SignerInfos.Count -ne 1 -or $null -eq $cms.SignerInfos[0].Certificate) {
+        throw 'Package manifest signature must have exactly one signer certificate.'
+    }
+    $signerThumbprint = $cms.SignerInfos[0].Certificate.Thumbprint.ToUpperInvariant()
+    if ($TrustedThumbprints -notcontains $signerThumbprint) {
+        throw 'Package manifest signer is not a trusted publisher.'
+    }
+}
+
+function Verify-Package([string]$Root, [switch]$ForceSignature) {
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) { throw "Package root is missing: $Root" }
     $Root = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar)
     if ($Root -eq [IO.Path]::GetPathRoot($Root).TrimEnd([IO.Path]::DirectorySeparatorChar)) {
@@ -116,7 +183,11 @@ function Verify-Package([string]$Root) {
     }
     $manifestPath = Join-Path $Root 'noyra-package.json'
     if (-not $inventory.ContainsKey('noyra-package.json')) { throw 'Package manifest is missing.' }
-    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ((Get-Item -LiteralPath $manifestPath).Length -gt 16MB) {
+        throw 'Package manifest exceeds its size limit.'
+    }
+    $manifestBytes = [IO.File]::ReadAllBytes($manifestPath)
+    $manifest = [IO.File]::ReadAllText($manifestPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
     if ($manifest.format -ne 'noyra-windows-package/v1') { throw 'Unsupported package manifest.' }
     Assert-SafeSegment ([string]$manifest.version) 'manifest version'
     $launcherProperty = $manifest.PSObject.Properties['launcher']
@@ -132,17 +203,31 @@ function Verify-Package([string]$Root) {
     }
     $manifestThumbprintProperty = $manifest.PSObject.Properties['trusted_publisher_thumbprints']
     $manifestThumbprintValues = if ($null -eq $manifestThumbprintProperty) { @() } else { @($manifestThumbprintProperty.Value) }
-    $manifestThumbprints = Normalize-Thumbprints $manifestThumbprintValues
-    $externalThumbprints = Normalize-Thumbprints $TrustedPublisherThumbprints
-    $signatureRequired = $RequireSignature -or $manifestRequiresSignature
-    if ($signatureRequired -and $externalThumbprints.Count -eq 0) {
-        throw 'Signature verification requires an external trusted publisher thumbprint.'
-    }
-    if ($signatureRequired -and $manifestThumbprints.Count -gt 0 -and
-        (@($manifestThumbprints) -join ',') -ne (@($externalThumbprints) -join ',')) {
-        throw 'Package trusted publisher metadata does not match installer trust policy.'
+    # PowerShell unwraps a one-item pipeline result to a scalar. Keep the
+    # trust-policy contract array-shaped for zero, one, and many publishers.
+    $manifestThumbprints = @(Normalize-Thumbprints $manifestThumbprintValues)
+    $externalThumbprints = @(Normalize-Thumbprints $TrustedPublisherThumbprints)
+    $signatureRequired = $RequireSignature -or $ForceSignature -or $manifestRequiresSignature
+    if ($signatureRequired) {
+        if ($externalThumbprints.Count -eq 0) {
+            throw 'Signature verification requires an external trusted publisher thumbprint.'
+        }
+        if (-not $manifestRequiresSignature) {
+            throw 'The signed manifest must require strict package verification.'
+        }
+        if ($manifestThumbprints.Count -eq 0) {
+            throw 'Strict package verification requires trusted publisher metadata in the manifest.'
+        }
+        if ($externalThumbprints.Count -gt 0 -and
+            (@($manifestThumbprints) -join ',') -ne (@($externalThumbprints) -join ',')) {
+            throw 'Package trusted publisher metadata does not match installer trust policy.'
+        }
+        $effectiveThumbprints = $externalThumbprints
+        Verify-ManifestSignature -Root $Root -ManifestBytes $manifestBytes `
+            -TrustedThumbprints $effectiveThumbprints
     }
     $seen = @{'noyra-package.json' = $true}
+    if ($signatureRequired) { $seen['noyra-package.json.p7s'] = $true }
     foreach ($entry in @($manifest.files)) {
         $relative = [string]$entry.path
         if ([string]::IsNullOrWhiteSpace($relative) -or $relative.Length -gt 4096 -or
@@ -165,7 +250,7 @@ function Verify-Package([string]$Root) {
         if ($signatureRequired -and $extension -in @('.exe', '.msi', '.msix', '.appx')) {
             $signature = Get-AuthenticodeSignature -LiteralPath $file
             if ($signature.Status -ne 'Valid' -or
-                $externalThumbprints -notcontains $signature.SignerCertificate.Thumbprint.ToUpperInvariant()) {
+                $effectiveThumbprints -notcontains $signature.SignerCertificate.Thumbprint.ToUpperInvariant()) {
                 throw "Authenticode signature or trusted publisher is not valid: $relative"
             }
         }
@@ -175,6 +260,10 @@ function Verify-Package([string]$Root) {
         if (-not $seen.ContainsKey($relative)) { throw "Unlisted package file: $relative" }
     }
     return $manifest
+}
+
+if (@($TrustedPublisherThumbprints).Count -eq 0) {
+    $TrustedPublisherThumbprints = @(Read-PublisherTrustPolicy)
 }
 
 function Get-CurrentVersion { return Read-Pointer $currentPointer }
@@ -295,14 +384,7 @@ try {
 switch ($Action) {
     'install' {
         if ([string]::IsNullOrWhiteSpace($PackageRoot)) { throw '-PackageRoot is required for install.' }
-        $manifest = Verify-Package $PackageRoot
-        if ($RequireSignature) {
-            if ($null -eq $manifest.PSObject.Properties['signature_required']) {
-                $manifest | Add-Member -NotePropertyName signature_required -NotePropertyValue $true
-            } else {
-                $manifest.signature_required = $true
-            }
-        }
+        $manifest = Verify-Package -Root $PackageRoot
         $version = [string]$manifest.version
         $target = Join-Path $versions $version
         if (Test-Path -LiteralPath $target) { throw "Version already installed: $version" }
@@ -317,10 +399,21 @@ switch ($Action) {
                 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destinationPath) | Out-Null
                 Copy-Item -LiteralPath (Join-Path $packagePath $relative) -Destination $destinationPath -Force
             }
-            # Pin the verified manifest rather than re-reading a mutable source.
-            $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $staging 'noyra-package.json') -Encoding utf8
+            if ($manifest.signature_required) {
+                Copy-Item -LiteralPath (Join-Path $packagePath 'noyra-package.json.p7s') `
+                    -Destination (Join-Path $staging 'noyra-package.json.p7s') -Force
+            }
+            # Preserve the exact signed bytes. Re-serializing JSON changes the
+            # detached-signature input even when the parsed object is equal.
+            [IO.File]::WriteAllBytes(
+                (Join-Path $staging 'noyra-package.json'),
+                [IO.File]::ReadAllBytes((Join-Path $packagePath 'noyra-package.json'))
+            )
             Verify-Package $staging | Out-Null
             Move-Item -LiteralPath $staging -Destination $target
+            if ($manifest.signature_required) {
+                Write-PublisherTrustPolicy $TrustedPublisherThumbprints
+            }
             $old = Get-CurrentVersion
             if ($null -ne $old) { Write-PointerAtomic $previousPointer $old }
             Write-PointerAtomic $currentPointer $version
@@ -336,8 +429,13 @@ switch ($Action) {
     'rollback' {
         $previous = Read-Pointer $previousPointer
         if ($null -eq $previous -or -not (Test-Path -LiteralPath (Join-Path $versions $previous))) { throw 'No usable previous version is available.' }
-        Verify-Package (Join-Path $versions $previous) | Out-Null
         $current = Get-CurrentVersion
+        $forceSignature = [bool]$RequireSignature
+        if ($null -ne $current) {
+            $currentManifest = Verify-Package (Join-Path $versions $current)
+            $forceSignature = $forceSignature -or [bool]$currentManifest.signature_required
+        }
+        Verify-Package -Root (Join-Path $versions $previous) -ForceSignature:$forceSignature | Out-Null
         if ($null -ne $current) { Write-PointerAtomic $previousPointer $current }
         Write-PointerAtomic $currentPointer $previous
     }
