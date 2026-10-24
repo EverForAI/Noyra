@@ -63,3 +63,12 @@
 - 保留社交组件的 MemoryStore 配置接口供完整 CognitionCycle 安装向量索引；社交上下文仍不执行全局 recall。全量 Mypy 发现这一兼容要求后已修正，并通过真实启用 embedding 的运行时构造/关闭回归。
 - 验证：新增两条裸/路由上下文变化竞争回归及运行时 embedding 接口回归 **3 passed**；本轮与此前回归、模型授权、私有来源组合 **86 passed**；全量 Ruff/格式/Mypy 及前端 152 passed。
 - 复审：审计没有含正文或凭据，没有修改/释放未知账本；授权与实际调用仍在原围栏内；保留向量运行时接口不等于恢复面向收件人的全局检索。未发现剩余阻断项。
+
+### 最终交叉审查与补强（完成）
+
+- 在实际路由新发现“授权重试的 prepared 请求在输入上下文变化后产生 ModelCallConflict”的收尾路径；修正为只追加 model_request_context_conflict、保留 prepared call/attempt 与预算保留、让交互从可运行队列隔离，并允许其他消息继续。管理员可按原模型授权/核对流程显式关闭不兼容的准备项；不会自行换身份或重发。
+- 检查未知轮次 SQL 使用现有 `idx_model_calls_subject_purpose_pool`、`idx_interaction_decisions_interaction` 和 `idx_audit_subject_action_call`；未增加 Schema 版本或索引迁移。
+- 全量静态检查：Ruff 通过，484 files 格式检查通过，463 源文件 Mypy 通过，前端 **152 passed**。
+- `noyra-followup-integration-a.log`：扩展的账户、社交路由、未知调用与记忆隔离组合 **86 passed**。
+- `noyra-followup-new-final.log`：新增回归最终重跑 **35 passed in 188.89s**。
+- 最终生产数据无触碰；没有网络供应商调用或真实交付。
