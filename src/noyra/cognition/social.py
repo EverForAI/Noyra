@@ -10,6 +10,12 @@ from noyra.core.database import Database
 from noyra.core.errors import IntegrityError
 from noyra.core.events import EventStore
 from noyra.core.payload_codec import decompress_text
+from noyra.core.private_sources import (
+    WITHDRAWN_PARTICIPANT_INVITATION,
+    InvitationWithdrawnError,
+    invitation_input_scope,
+    participant_invitation_withdrawn,
+)
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.interaction import InteractionStore
 from noyra.interaction.participants import ParticipantStore
@@ -18,6 +24,7 @@ from noyra.mind.types import RelationshipRecord
 from noyra.model import ModelGateway, ModelMessage
 from noyra.model.errors import (
     BudgetExhaustedError,
+    ModelAuthorizationError,
     ModelCallConflictError,
     ModelCallStateError,
     ProviderCallError,
@@ -140,15 +147,19 @@ class RelationshipSocialCognition:
         existing = self._successful_proposal(purpose, context)
         if existing is None:
             try:
-                result = await self.gateway.complete_structured(
-                    self.subject_id,
-                    purpose,
-                    self._messages(context),
-                    RelationshipSocialProposal,
-                    idempotency_key=f"relationship-social:{period}:{route_key}",
-                    max_output_tokens=min(2_000, self.settings.max_output_tokens),
-                    temperature=self.settings.temperature,
-                )
+                route = next(iter(context.routes.values()))
+                with invitation_input_scope(self.subject_id, route.interaction_id):
+                    result = await self.gateway.complete_structured(
+                        self.subject_id,
+                        purpose,
+                        self._messages(context),
+                        RelationshipSocialProposal,
+                        idempotency_key=f"relationship-social:{period}:{route_key}",
+                        max_output_tokens=min(2_000, self.settings.max_output_tokens),
+                        temperature=self.settings.temperature,
+                    )
+            except (InvitationWithdrawnError, ModelAuthorizationError):
+                return "relationship_social_rejected"
             except BudgetExhaustedError:
                 return "relationship_social_budget_exhausted"
             except ModelCallConflictError:
@@ -267,6 +278,7 @@ class RelationshipSocialCognition:
                         "LEFT JOIN participant_message_links m ON m.subject_id=i.subject_id "
                         "AND m.interaction_id=i.interaction_id WHERE i.subject_id=? "
                         "AND (m.entity_id=? OR (m.interaction_id IS NULL AND i.counterparty=?)) "
+                        "AND NOT " + WITHDRAWN_PARTICIPANT_INVITATION + " "
                         "ORDER BY i.created_at DESC,i.interaction_id DESC LIMIT 48",
                         (self.subject_id, relationship.entity_key, relationship.entity_key),
                     ).fetchall()
@@ -474,6 +486,8 @@ class RelationshipSocialCognition:
         if row is None or row["direction"] != "incoming":
             raise RelationshipSocialValidationError("contact source unavailable")
         InteractionStore._from_row(row)
+        if participant_invitation_withdrawn(connection, self.subject_id, row["interaction_id"]):
+            raise RelationshipSocialValidationError("contact invitation has been withdrawn")
         identity = ParticipantStore.for_message_connection(
             connection, self.subject_id, row["interaction_id"]
         )

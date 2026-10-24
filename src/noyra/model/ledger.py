@@ -7,7 +7,12 @@ from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.evidence_capacity import require_evidence_capacity
 from noyra.core.payload_codec import compress_text, decompress_text
-from noyra.core.private_sources import participant_invitation_withdrawn, record_private_sources
+from noyra.core.private_sources import (
+    InvitationWithdrawnError,
+    assert_private_inputs_available,
+    participant_invitation_withdrawn,
+    record_private_sources,
+)
 from noyra.core.types import (
     canonical_json,
     content_hash,
@@ -414,6 +419,12 @@ class ModelLedger:
         fingerprint: str | None,
         revision: int | None,
     ) -> None:
+        # Context-scoped invitations also cover social requests whose durable
+        # purpose is route-bound rather than interaction_cognition:<id>.
+        try:
+            assert_private_inputs_available(connection)
+        except InvitationWithdrawnError as error:
+            raise ModelAuthorizationError("participant invitation has been withdrawn") from error
         call = self._get_call_row(connection, call_id)
         self._check_lifecycle(connection, str(call["subject_id"]), str(call["purpose"]))
         purpose = str(call["purpose"])
