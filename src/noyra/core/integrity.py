@@ -3142,10 +3142,10 @@ def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
             call_id = _provenance_text(payload["call_id"], f"{context_label} call id")
             purpose = _provenance_text(payload["purpose"], f"{context_label} purpose")
             reason = _provenance_text(payload["reason"], f"{context_label} reason")
-            if reason != "prepared_request_context_changed":
+            if row["actor"] != "runtime" or reason != "prepared_request_context_changed":
                 raise IntegrityError(f"{context_label} context conflict reason is invalid")
             call = _audit_reference(context, "model_calls", "call_id", call_id, context_label)
-            if call["purpose"] != purpose:
+            if call["purpose"] != purpose or call["status"] not in {"prepared", "failed"}:
                 raise IntegrityError(f"{context_label} model call purpose is invalid")
         elif action == "participant_application_withdrawn":
             _provenance_keys(payload, {"application_id", "interaction_id"}, context_label)
