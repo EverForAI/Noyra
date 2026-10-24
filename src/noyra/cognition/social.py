@@ -182,48 +182,95 @@ class RelationshipSocialCognition:
         elapsed = self._parse_time(self.clock()) - self._parse_time(latest.created_at)
         return elapsed.total_seconds() >= self.settings.social_review_interval_seconds
 
+    def _candidate_relationships(
+        self,
+    ) -> tuple[list[RelationshipRecord], tuple[float, float, str, str] | None]:
+        # Always inspect the priority head, then one bounded continuation page.
+        # Persist continuation only after a scan with no eligible recipient so
+        # disabled contacts cannot hide the rest of the directory after restart.
+        page_size = 32
+        key = f"relationship_social_cursor:{self.subject_id}"
+        with self.database.connection() as connection:
+            saved = connection.execute(
+                "SELECT value FROM schema_meta WHERE key=?", (key,)
+            ).fetchone()
+            after: tuple[float, float, str, str] | None = None
+            if saved is not None:
+                try:
+                    value = json.loads(saved[0])
+                    if (
+                        not isinstance(value, list)
+                        or len(value) != 4
+                        or any(type(item) not in (int, float) for item in value[:2])
+                        or not 0 <= value[0] <= 1
+                        or not -1 <= value[1] <= 1
+                        or any(not isinstance(item, str) or not item for item in value[2:])
+                    ):
+                        raise ValueError("invalid social cursor")
+                    after = (float(value[0]), float(value[1]), value[2], value[3])
+                except (ValueError, TypeError) as error:
+                    raise IntegrityError("social candidate cursor is invalid") from error
+            order = (
+                " ORDER BY familiarity DESC, affinity DESC, updated_at DESC, relationship_id DESC"
+            )
+            head = connection.execute(
+                "SELECT * FROM relationships WHERE subject_id=?" + order + " LIMIT ?",
+                (self.subject_id, page_size),
+            ).fetchall()
+            rows = list(head)
+            next_cursor = None
+            if len(head) == page_size:
+                last = head[-1]
+                head_end = (
+                    float(last["familiarity"]),
+                    float(last["affinity"]),
+                    str(last["updated_at"]),
+                    str(last["relationship_id"]),
+                )
+                if after is None or after > head_end:
+                    after = head_end
+                tail = connection.execute(
+                    "SELECT * FROM relationships WHERE subject_id=? AND "
+                    "(familiarity,affinity,updated_at,relationship_id) < (?,?,?,?)"
+                    + order
+                    + " LIMIT ?",
+                    (self.subject_id, *after, page_size),
+                ).fetchall()
+                rows.extend(tail)
+                if len(tail) == page_size:
+                    last = tail[-1]
+                    next_cursor = (
+                        float(last["familiarity"]),
+                        float(last["affinity"]),
+                        str(last["updated_at"]),
+                        str(last["relationship_id"]),
+                    )
+        return [RelationshipStore._from_row(row) for row in rows], next_cursor
+
     def _context(self) -> _SocialContext | None:
-        relationships = self.relationships.list(self.subject_id)[:12]
+        relationships, next_cursor = self._candidate_relationships()
         if not relationships:
             return None
         now = self._parse_time(self.clock())
-        with self.database.connection() as connection:
-            event_rows = connection.execute(
-                """SELECT event_id, event_type, occurred_at FROM events
-                   WHERE subject_id = ? AND event_type IN (
-                       'interaction_received', 'interaction_sent', 'interaction_decision',
-                       'sleep_reflection', 'goal_governance_committed', 'outcome_evaluated'
-                   ) ORDER BY occurred_at DESC, event_id DESC LIMIT 64""",
-                (self.subject_id,),
-            ).fetchall()
-            interaction_rows = connection.execute(
-                """SELECT interaction_id,direction, kind, channel, counterparty,
-                          related_interaction_id,
-                          status, created_at
-                   FROM interactions WHERE subject_id = ?
-                   ORDER BY created_at DESC, interaction_id DESC LIMIT 48""",
-                (self.subject_id,),
-            ).fetchall()
-        with self.database.connection() as connection:
-            identities = {
-                row["interaction_id"]: ParticipantStore.for_message_connection(
-                    connection, self.subject_id, row["interaction_id"]
-                )
-                for row in interaction_rows
-            }
         channels: dict[str, str] = {}
         routes: dict[str, _SocialRoute] = {}
         candidates: list[tuple[RelationshipRecord, list[Any], str | None, str | None]] = []
         for relationship in relationships:
-            interactions = [
-                row
-                for row in interaction_rows
-                if (
-                    identity.entity_id == relationship.entity_key
-                    if (identity := identities[row["interaction_id"]])
-                    else row["counterparty"] == relationship.entity_key
+            # Limit within this recipient's established identity, rather than
+            # slicing the global feed before attribution. Legacy messages are
+            # eligible only when they have no participant identity link.
+            with self.database.connection() as connection:
+                interactions = list(
+                    connection.execute(
+                        "SELECT i.interaction_id,i.direction,i.kind,i.channel,i.counterparty,"
+                        "i.related_interaction_id,i.status,i.created_at FROM interactions i "
+                        "LEFT JOIN participant_message_links m ON m.subject_id=i.subject_id "
+                        "AND m.interaction_id=i.interaction_id WHERE i.subject_id=? "
+                        "AND (m.entity_id=? OR (m.interaction_id IS NULL AND i.counterparty=?)) "
+                        "ORDER BY i.created_at DESC,i.interaction_id DESC LIMIT 48",
+                        (self.subject_id, relationship.entity_key, relationship.entity_key),
+                    ).fetchall()
                 )
-            ]
             established = next(
                 (
                     row
@@ -268,10 +315,29 @@ class RelationshipSocialCognition:
             ):
                 continue
             candidates.append((relationship, interactions, last_incoming, last_outgoing))
+            break
         if not candidates:
+            key = f"relationship_social_cursor:{self.subject_id}"
+            with self.database.transaction() as connection:
+                if next_cursor is None:
+                    connection.execute("DELETE FROM schema_meta WHERE key=?", (key,))
+                else:
+                    connection.execute(
+                        "INSERT INTO schema_meta(key,value) VALUES(?,?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (key, canonical_json(next_cursor)),
+                    )
             return None
         relationship, interactions, last_incoming, last_outgoing = candidates[0]
         with self.database.connection() as connection:
+            event_rows = connection.execute(
+                """SELECT event_id, event_type, occurred_at FROM events
+                   WHERE subject_id = ? AND event_type IN (
+                       'interaction_received', 'interaction_sent', 'interaction_decision',
+                       'sleep_reflection', 'goal_governance_committed', 'outcome_evaluated'
+                   ) ORDER BY occurred_at DESC, event_id DESC LIMIT 64""",
+                (self.subject_id,),
+            ).fetchall()
             affect_rows = connection.execute(
                 """SELECT emotion_type, target_type, target_id, intensity, valence, arousal
                    FROM affect_components WHERE subject_id = ? AND (
