@@ -5,6 +5,7 @@ import heapq
 import json
 import multiprocessing
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -1164,6 +1165,7 @@ _CORE_AUDIT_ACTIONS = frozenset(
         "participant_source_bound",
         "private_route_changed",
         "private_route_unlinked",
+        "private_erasure_requested",
         "runtime_exported",
         "training_export_aborted",
         "training_exported",
@@ -1263,6 +1265,14 @@ _SEARCH_MANAGEMENT_AUDIT_FIELDS = {
     "search_provider_test_succeeded": {"provider_type", "result_count"},
     "search_provider_test_failed": {"provider_type", "error"},
 }
+_OPERATION_MANAGEMENT_AUDIT_FIELDS = {
+    "admin_login_rate_limited": {"path"},
+    "retention_batch_run": {"reason", "deleted_by_table", "protected_rows"},
+    "retention_policy_updated": {"settings", "revision", "source", "updated_at", "backup"},
+    "search_provider_routing_updated": {"config_id", "priority", "weight", "reason"},
+    "admin_upgrade_rejected": {"error_code"},
+    "admin_upgrade_started": {"task_id", "target_short_sha", "reason"},
+}
 _ADMIN_AUDIT_ACTIONS = frozenset(
     {
         "admin_login_succeeded",
@@ -1274,6 +1284,7 @@ _ADMIN_AUDIT_ACTIONS = frozenset(
         "inbound_message_received",
         *_MODEL_RESOURCE_AUDIT_FIELDS,
         *_SEARCH_MANAGEMENT_AUDIT_FIELDS,
+        *_OPERATION_MANAGEMENT_AUDIT_FIELDS,
     }
 )
 # Only these two pre-canonical participant writers emitted json.dumps defaults.
@@ -2770,6 +2781,113 @@ def _audit_reference(
     return row
 
 
+def _verify_operation_management_audit(
+    context: IntegrityContext, row: Any, payload: Mapping[str, Any]
+) -> None:
+    action, actor = row["action"], row["actor"]
+    label = f"audit record {row['audit_id']}"
+    fields = _OPERATION_MANAGEMENT_AUDIT_FIELDS[action]
+    # Early configurable-retention summaries predate backup policy support.
+    if action == "retention_policy_updated" and "backup" not in payload:
+        fields = fields - {"backup"}
+    _provenance_keys(payload, fields, label)
+    if action == "admin_login_rate_limited":
+        if actor != "web-anonymous" or payload["path"] != "/admin/session":
+            raise IntegrityError(f"{label} login evidence is invalid")
+        return
+    if actor not in {"web-admin", "web-operator", "web-break_glass"}:
+        raise IntegrityError(f"{label} management actor is invalid")
+    if action == "retention_batch_run":
+        from .retention import RETENTION_REGISTRY
+
+        # Runs can legitimately be pruned. Validate the historical summary,
+        # not the current maintenance result or a transient run row.
+        reason = payload["reason"]
+        if not isinstance(reason, str):
+            raise IntegrityError(f"{label} retention reason is invalid")
+        counts = payload["deleted_by_table"]
+        # Historical runs also summarized now-preserved evidence domains.
+        tables = {spec.table for spec in RETENTION_REGISTRY}
+        if not isinstance(counts, dict) or not counts or set(counts) - tables:
+            raise IntegrityError(f"{label} retention tables are invalid")
+        for name, count in counts.items():
+            _provenance_int(count, f"{label} {name} count")
+        _provenance_int(payload["protected_rows"], f"{label} protected count")
+    elif action == "retention_policy_updated":
+        from .backup_retention import BackupRetentionPolicy
+        from .retention import RetentionSettings
+
+        if not isinstance(payload["settings"], dict) or (
+            "backup" in payload and not isinstance(payload["backup"], dict)
+        ):
+            raise IntegrityError(f"{label} retention settings are invalid")
+        try:
+            settings = payload["settings"]
+            if "runtime_days" not in settings:
+                settings = {**settings, "runtime_days": 90}
+            RetentionSettings.from_payload(settings)
+            backup = payload.get(
+                "backup",
+                {
+                    "settings": BackupRetentionPolicy().public(),
+                    "revision": 0,
+                    "source": "environment",
+                },
+            )
+            saved = backup.get("source") == "saved"
+            _provenance_keys(
+                backup,
+                {"settings", "revision", "source"}
+                | ({"updated_at", "updated_by"} if saved else set()),
+                label,
+            )
+            BackupRetentionPolicy.from_payload(backup["settings"])
+        except (ValueError, TypeError, KeyError) as error:
+            raise IntegrityError(f"{label} retention policy is invalid") from error
+        for part, table, minimum in (
+            (payload, "retention_policies", 1),
+            (backup, "backup_retention_policies", 0),
+        ):
+            revision = _provenance_int(part["revision"], f"{label} revision", minimum=minimum)
+            source = "saved" if revision else "environment"
+            if part["source"] != source:
+                raise IntegrityError(f"{label} retention source is invalid")
+            if revision:
+                _provenance_time(part["updated_at"], f"{label} updated time")
+                current = context.connection.execute(
+                    f"SELECT revision FROM {table} WHERE subject_id=?", (context.subject_id,)
+                ).fetchone()
+                if current is None or revision > current[0]:
+                    raise IntegrityError(f"{label} retention revision is unavailable")
+        if backup["revision"]:
+            _provenance_text(backup["updated_by"], f"{label} backup actor")
+    elif action == "search_provider_routing_updated":
+        _audit_reference(
+            context, "search_provider_configs", "config_id", payload["config_id"], label
+        )
+        priority = _provenance_int(payload["priority"], f"{label} priority")
+        weight = _provenance_int(payload["weight"], f"{label} weight", minimum=1)
+        if (
+            priority > 1000
+            or weight > 1000
+            or len(_provenance_text(payload["reason"], label)) > 500
+        ):
+            raise IntegrityError(f"{label} provider routing is invalid")
+    elif action == "admin_upgrade_rejected":
+        code = _provenance_text(payload["error_code"], f"{label} error code")
+        if len(code) > 128 or not re.fullmatch(r"(?:upgrade_[a-z0-9_]+|storage_unavailable)", code):
+            raise IntegrityError(f"{label} upgrade error is invalid")
+    elif action == "admin_upgrade_started":
+        if (
+            not isinstance(payload["task_id"], str)
+            or not re.fullmatch(r"[0-9a-f]{32}", payload["task_id"])
+            or not isinstance(payload["target_short_sha"], str)
+            or not re.fullmatch(r"[0-9a-f]{12}", payload["target_short_sha"])
+            or len(_provenance_text(payload["reason"], label)) > 256
+        ):
+            raise IntegrityError(f"{label} upgrade evidence is invalid")
+
+
 def _verify_management_audit_provenance(
     context: IntegrityContext, row: Any, payload: Mapping[str, Any]
 ) -> bool:
@@ -2809,7 +2927,9 @@ def _verify_management_audit_provenance(
         return True
     if action not in _ADMIN_AUDIT_ACTIONS:
         return False
-    if action in _MODEL_RESOURCE_AUDIT_FIELDS:
+    if action in _OPERATION_MANAGEMENT_AUDIT_FIELDS:
+        _verify_operation_management_audit(context, row, payload)
+    elif action in _MODEL_RESOURCE_AUDIT_FIELDS:
         # These drafts intentionally have no persisted resource to reference.
         # Validate the exact redacted writer summary, never infer provider
         # success from it or relax validation of unrelated audit actions.
@@ -3217,6 +3337,20 @@ def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
             ).fetchone()
             if source is None or source["entity_id"] != entity_id:
                 raise IntegrityError(f"{context_label} participant source reference is invalid")
+        elif action == "private_erasure_requested":
+            _provenance_keys(payload, {"job_id"}, context_label)
+            if row["actor"] != "operator":
+                raise IntegrityError(f"{context_label} erasure actor is invalid")
+            job = _audit_reference(
+                context, "private_erasure_jobs", "job_id", payload["job_id"], context_label
+            )
+            _audit_reference(
+                context,
+                "private_conversations",
+                "conversation_id",
+                job["conversation_id"],
+                context_label,
+            )
         elif action in {"private_route_changed", "private_route_unlinked"}:
             _provenance_keys(
                 payload,
