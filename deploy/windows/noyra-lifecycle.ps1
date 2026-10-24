@@ -426,9 +426,9 @@ function Stop-Noyra {
     Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
 }
 
-# Serialize start/stop/uninstall, including identity-file publication.
+# Serialize installation, pointer changes, and process identity publication.
 $instanceLock = $null
-if ($Action -in @('start', 'stop', 'uninstall')) {
+if ($Action -in @('install', 'rollback', 'start', 'stop', 'uninstall')) {
     New-Item -ItemType Directory -Force -Path $DataRoot | Out-Null
     $instanceLock = [IO.File]::Open((Join-Path $DataRoot '.noyra-lifecycle.lock'),
         [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
@@ -441,33 +441,47 @@ switch ($Action) {
         $manifest = Verify-Package -Root $PackageRoot
         $version = [string]$manifest.version
         $target = Join-Path $versions $version
-        if (Test-Path -LiteralPath $target) { throw "Version already installed: $version" }
         New-Item -ItemType Directory -Force -Path $versions, $DataRoot | Out-Null
-        $staging = Join-Path $versions ('.staging-' + [guid]::NewGuid().ToString('N'))
+        $staging = $null
         try {
-            $packagePath = (Resolve-Path -LiteralPath $PackageRoot).Path
-            New-Item -ItemType Directory -Path $staging | Out-Null
-            foreach ($entry in @($manifest.files)) {
-                $relative = [string]$entry.path
-                $destinationPath = Join-Path $staging $relative
-                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destinationPath) | Out-Null
-                Copy-Item -LiteralPath (Join-Path $packagePath $relative) -Destination $destinationPath -Force
+            if (Test-Path -LiteralPath $target) {
+                # An interrupted install may have promoted this directory before
+                # publishing its receipt. Reuse it only after full verification
+                # and exact manifest identity with the explicitly supplied source.
+                $installedManifest = Verify-Package -Root $target -ForceSignature:([bool]$manifest.signature_required)
+                $sourceManifestHash = (Get-FileHash -LiteralPath (Join-Path $PackageRoot 'noyra-package.json') -Algorithm SHA256).Hash
+                $targetManifestHash = (Get-FileHash -LiteralPath (Join-Path $target 'noyra-package.json') -Algorithm SHA256).Hash
+                if ([string]$installedManifest.version -cne $version -or
+                    $sourceManifestHash -cne $targetManifestHash) {
+                    throw 'Existing version differs from the supplied package; refusing to replace it.'
+                }
             }
-            if ($manifest.signature_required) {
-                Copy-Item -LiteralPath (Join-Path $packagePath 'noyra-package.json.p7s') `
-                    -Destination (Join-Path $staging 'noyra-package.json.p7s') -Force
+            else {
+                $staging = Join-Path $versions ('.staging-' + [guid]::NewGuid().ToString('N'))
+                $packagePath = (Resolve-Path -LiteralPath $PackageRoot).Path
+                New-Item -ItemType Directory -Path $staging | Out-Null
+                foreach ($entry in @($manifest.files)) {
+                    $relative = [string]$entry.path
+                    $destinationPath = Join-Path $staging $relative
+                    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destinationPath) | Out-Null
+                    Copy-Item -LiteralPath (Join-Path $packagePath $relative) -Destination $destinationPath -Force
+                }
+                if ($manifest.signature_required) {
+                    Copy-Item -LiteralPath (Join-Path $packagePath 'noyra-package.json.p7s') `
+                        -Destination (Join-Path $staging 'noyra-package.json.p7s') -Force
+                }
+                # Preserve the exact signed bytes. Re-serializing JSON changes the
+                # detached-signature input even when the parsed object is equal.
+                [IO.File]::WriteAllBytes(
+                    (Join-Path $staging 'noyra-package.json'),
+                    [IO.File]::ReadAllBytes((Join-Path $packagePath 'noyra-package.json'))
+                )
+                $stagedManifest = Verify-Package -Root $staging -ForceSignature:([bool]$manifest.signature_required)
+                if ([string]$stagedManifest.version -cne $version) {
+                    throw 'Staged package version changed after initial verification.'
+                }
+                Move-Item -LiteralPath $staging -Destination $target
             }
-            # Preserve the exact signed bytes. Re-serializing JSON changes the
-            # detached-signature input even when the parsed object is equal.
-            [IO.File]::WriteAllBytes(
-                (Join-Path $staging 'noyra-package.json'),
-                [IO.File]::ReadAllBytes((Join-Path $packagePath 'noyra-package.json'))
-            )
-            $stagedManifest = Verify-Package -Root $staging -ForceSignature:([bool]$manifest.signature_required)
-            if ([string]$stagedManifest.version -cne $version) {
-                throw 'Staged package version changed after initial verification.'
-            }
-            Move-Item -LiteralPath $staging -Destination $target
             # Record the verified requirement before changing external trust
             # or pointers. A failed receipt must leave existing trust intact.
             Write-InstalledVerificationPolicy $version ([bool]$manifest.signature_required)
@@ -475,11 +489,19 @@ switch ($Action) {
                 Write-PublisherTrustPolicy $TrustedPublisherThumbprints
             }
             $old = Get-CurrentVersion
-            if ($null -ne $old) { Write-PointerAtomic $previousPointer $old }
-            Write-PointerAtomic $currentPointer $version
+            if ($old -cne $version) {
+                if ($null -ne $old) { Write-PointerAtomic $previousPointer $old }
+                Write-PointerAtomic $currentPointer $version
+            }
         }
         finally {
-            if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+            if ($null -ne $staging -and (Test-Path -LiteralPath $staging)) {
+                $stagingFull = [IO.Path]::GetFullPath($staging)
+                if (-not $stagingFull.StartsWith($versions + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw 'Staging cleanup escaped the versions directory.'
+                }
+                Remove-Item -LiteralPath $stagingFull -Recurse -Force
+            }
         }
     }
     'upgrade' {

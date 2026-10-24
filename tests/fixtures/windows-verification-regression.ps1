@@ -140,6 +140,54 @@ try {
         throw 'Failed receipt changed existing external trust.'
     }
     $results.failed_receipt_preserves_existing_trust = $true
+    # Repair the external fault and retry the same fully verified version.
+    Remove-Item -LiteralPath (Join-Path $WorkRoot 'receipt-dir/verification-policy.signed-b3.json')
+    Expect 'receipt_failure_same_version_retry' (Invoke-Life install 'receipt-dir' $b3 @{TrustedPublisherThumbprints = $pinsB}) $true
+    Assert-Current 'receipt-dir' 'signed-b3'
+    Expect 'selected_version_retry_is_idempotent' (Invoke-Life install 'receipt-dir' $b3) $true
+    if (Test-Path -LiteralPath (Join-Path $WorkRoot 'receipt-dir/previous.txt')) { throw 'Idempotent retry invented a rollback pointer.' }
+    # A receipt failure with a previously selected version preserves its route.
+    Expect 'resume_existing_base' (Invoke-Life install 'resume-existing' $a1 @{TrustedPublisherThumbprints = $pinsA}) $true
+    New-Item -ItemType Directory -Path (Join-Path $WorkRoot 'resume-existing/verification-policy.signed-a2.json') | Out-Null
+    Expect 'resume_existing_receipt_failure' (Invoke-Life upgrade 'resume-existing' $a2) $false 'verification policy is unsafe'
+    Assert-Current 'resume-existing' 'signed-a1'
+    Remove-Item -LiteralPath (Join-Path $WorkRoot 'resume-existing/verification-policy.signed-a2.json')
+    Expect 'resume_existing_after_repair' (Invoke-Life upgrade 'resume-existing' $a2) $true
+    Expect 'resume_existing_repeat' (Invoke-Life upgrade 'resume-existing' $a2) $true
+    Assert-Current 'resume-existing' 'signed-a2'
+    if ((Get-Content -LiteralPath (Join-Path $WorkRoot 'resume-existing/previous.txt') -Raw).Trim() -cne 'signed-a1') { throw 'Repeated upgrade destroyed rollback history.' }
+    foreach ($phase in @('trust', 'pointer')) {
+        $rootName = 'resume-' + $phase
+        Expect ($phase + '_base') (Invoke-Life install $rootName $a1 @{TrustedPublisherThumbprints = $pinsA}) $true
+        $blockedName = if ($phase -eq 'trust') { 'trusted-publishers.json' } else { 'current.txt' }
+        $heldFile = [IO.File]::Open((Join-Path $WorkRoot ($rootName + '/' + $blockedName)),
+            [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        try {
+            Expect ($phase + '_failure_is_reported') (Invoke-Life upgrade $rootName $a2 @{TrustedPublisherThumbprints = $pinsA}) $false
+        }
+        finally { $heldFile.Dispose() }
+        Assert-Current $rootName 'signed-a1'
+        Expect ($phase + '_failure_same_version_retry') (Invoke-Life upgrade $rootName $a2) $true
+        Assert-Current $rootName 'signed-a2'
+        if ((Get-Content -LiteralPath (Join-Path $WorkRoot ($rootName + '/previous.txt')) -Raw).Trim() -cne 'signed-a1') { throw 'Recovery lost the prior selected version.' }
+    }
+    # Neither corrupt nor different same-version contents may be overwritten.
+    New-Item -ItemType Directory -Path (Join-Path $WorkRoot 'resume-damaged/versions') -Force | Out-Null
+    Copy-Item -LiteralPath $b3 -Destination (Join-Path $WorkRoot 'resume-damaged/versions/signed-b3') -Recurse
+    [IO.File]::WriteAllText((Join-Path $WorkRoot 'resume-damaged/versions/signed-b3/module.py'), 'corrupt', $utf8)
+    Expect 'retry_reverifies_existing_payload' (Invoke-Life install 'resume-damaged' $b3 @{TrustedPublisherThumbprints = $pinsB}) $false 'hash mismatch'
+    Expect 'resume_conflict_base' (Invoke-Life install 'resume-conflict' $u1) $true
+    $alternate = Join-Path $WorkRoot 'alternate'
+    Copy-Item -LiteralPath $u1 -Destination $alternate -Recurse
+    [IO.File]::WriteAllText((Join-Path $alternate 'module.py'), 'different valid payload', $utf8)
+    $alternateManifest = Get-Content -LiteralPath (Join-Path $alternate 'noyra-package.json') -Raw | ConvertFrom-Json
+    foreach ($entry in $alternateManifest.files) {
+        $entry.sha256 = (Get-FileHash -LiteralPath (Join-Path $alternate $entry.path) -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    [IO.File]::WriteAllText((Join-Path $alternate 'noyra-package.json'), ($alternateManifest | ConvertTo-Json -Depth 8 -Compress), $utf8)
+    Expect 'different_same_version_is_not_replaced' (Invoke-Life install 'resume-conflict' $alternate) $false 'differs from the supplied package'
+    Assert-Current 'resume-conflict' 'unsigned-u1'
+    if ([IO.File]::ReadAllText((Join-Path $WorkRoot 'resume-conflict/versions/unsigned-u1/module.py')) -cne 'original-unsigned-u1') { throw 'Existing version contents changed.' }
     Expect 'unsigned_initial_install' (Invoke-Life install 'guard' $u1) $true
     Expect 'strict_upgrade_for_recovery_guard' (Invoke-Life upgrade 'guard' $a1 @{TrustedPublisherThumbprints = $pinsA}) $true
     [IO.File]::WriteAllText((Join-Path $WorkRoot 'guard/versions/signed-a1/noyra-package.json'), '{broken', $utf8)

@@ -46,7 +46,27 @@ def test_windows_saved_trust_rotation_and_damaged_recovery(tmp_path: Path) -> No
         "legacy_unsigned_damaged_current_rollback",
         "saved_single_pin_reaches_executable_verification",
         "malformed_recovery_requirement_rejected",
+        "receipt_failure_same_version_retry",
+        "selected_version_retry_is_idempotent",
+        "resume_existing_after_repair",
+        "resume_existing_repeat",
+        "trust_failure_same_version_retry",
+        "pointer_failure_same_version_retry",
+        "retry_reverifies_existing_payload",
+        "different_same_version_is_not_replaced",
     } <= evidence.keys(), evidence
     assert all(value is True for value in evidence.values()), evidence
-    for directory in ("single", "saved-single", "untrusted", "bad-pin", "no-policy", "receipt-dir"):
+    for directory in (
+        "single",
+        "saved-single",
+        "untrusted",
+        "bad-pin",
+        "no-policy",
+        "resume-damaged",
+    ):
         assert not (tmp_path / directory / "current.txt").exists()
+
+    assert (tmp_path / "receipt-dir/current.txt").read_text(encoding="utf-8-sig") == "signed-b3"
+    assert (tmp_path / "resume-existing/previous.txt").read_text(
+        encoding="utf-8-sig"
+    ) == "signed-a1"

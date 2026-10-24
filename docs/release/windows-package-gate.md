@@ -85,3 +85,14 @@ The native regression fixture uses in-memory certificates for detached CMS and
 a signed Windows system binary as an unexecuted launcher fixture. It does not
 import certificates, change the system certificate store, start an executable,
 or replace the official publisher and clean-VM release gates.
+
+If installation stops after promoting `versions/<version>` but before publishing
+its receipt, trust policy, or version pointer, repair the external filesystem
+fault and run the same install/upgrade command again. The lifecycle verifies both
+the supplied package and the existing version, including signatures, publisher
+policy, full inventory, and hashes, then requires identical manifest bytes before
+finishing publication. It never replaces or deletes that existing version.
+A successful retry of the selected version preserves the previous-version
+pointer. Damaged or different same-version contents require operator review;
+they are never silently overwritten. Installation and rollback share the process
+lifecycle lock for the configured data root.
