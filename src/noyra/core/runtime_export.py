@@ -707,6 +707,7 @@ _OWNERSHIP_GRAPHS[104] = {
         )
     },
 }
+_OWNERSHIP_GRAPHS[105] = _OWNERSHIP_GRAPHS[104]
 
 
 @dataclass(frozen=True)

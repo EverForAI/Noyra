@@ -311,7 +311,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 104
+CURRENT_SCHEMA_VERSION = 105
 
 # The schema DDL fingerprint is checked after every successful initialization.
 # Update this value only alongside a reviewed schema migration and its tests.
@@ -319,6 +319,7 @@ CURRENT_SCHEMA_VERSION = 104
 # installations persist this value in ``schema_meta`` and therefore require
 # the value to remain stable across compatible runtime fixes.
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
+    105: "f117dc793fddf96e769abef73c30127b5494ce8fb8b7f6598e6b1e093f554950",
     104: "72e5c15e4793cbe3b743b5eca667cea5bef3c34af05a4674bde7ce720234dc8e",
     103: "b13fec71f4c1a40287f7b7b272f7ba8e12bdd9625aa53ca08568023c25f84334",
     102: "f731a5afa55d7e6c7adf170f93e985e0b1efee544f365dfd746f31afc997db09",
@@ -354,6 +355,7 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 # auditable P0 finding.  Tables, indexes, and views still fail closed during
 # database construction because they define the storage contract itself.
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
+    105: "8feff8b35da5fad5d7c530dd492dcf78347c038456f48857c4afad63fd220a2e",
     104: "1c17714c61ce55ec2a36af8dfdb439bbae32428bab58c7d842a34802426650e4",
     103: "1147ca9c2c26d160b0b20186536e1bf4a4f34211aab668a25af36610bdaa284b",
     102: "cb7f1359673e8949c90b1706e14de28c857d8df4b54c07aa0e4f136bf3aa4900",
@@ -7115,6 +7117,19 @@ CREATE INDEX IF NOT EXISTS idx_audit_subject_action_call
 -- observed embedding dimensions are added idempotently below.
 """,
     104: PARTICIPANT_SCHEMA,
+    105: """
+CREATE INDEX IF NOT EXISTS idx_participant_messages_timeline
+ ON participant_message_links(subject_id,entity_id,interaction_created_at DESC,interaction_id DESC);
+CREATE INDEX IF NOT EXISTS idx_interactions_correspondent_timeline
+ ON interactions(subject_id,counterparty,created_at DESC,interaction_id DESC);
+CREATE INDEX IF NOT EXISTS idx_relationships_social_priority
+ ON relationships(subject_id,familiarity DESC,affinity DESC,updated_at DESC,relationship_id DESC);
+CREATE TRIGGER IF NOT EXISTS validate_participant_message_time
+BEFORE INSERT ON participant_message_links
+WHEN EXISTS(SELECT 1 FROM interactions i WHERE i.interaction_id=NEW.interaction_id
+ AND i.subject_id=NEW.subject_id AND i.created_at<>NEW.interaction_created_at)
+BEGIN SELECT RAISE(ABORT,'participant message time mismatch'); END;
+""",
 }
 
 
@@ -10980,6 +10995,17 @@ END;
                         connection.rollback()
                         raise
                     continue
+                if target_version == 105:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._ensure_participant_message_time(connection)
+                        self._execute_sql_script(connection, migration)
+                        self._set_schema_version(connection, target_version)
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
                 if target_version == 103:
                     try:
                         connection.execute("BEGIN IMMEDIATE")
@@ -10998,6 +11024,33 @@ END;
                 except Exception:
                     connection.rollback()
                     raise
+
+    @staticmethod
+    def _ensure_participant_message_time(connection: sqlite3.Connection) -> None:
+        if any(
+            row[1] == "interaction_created_at"
+            for row in connection.execute("PRAGMA table_info(participant_message_links)")
+        ):
+            return
+        # Add an indexed copy of the immutable interaction timestamp. Preserve
+        # the attribution guard exactly after this one-time atomic backfill.
+        guard = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' "
+            "AND name='prevent_participant_message_links_update'"
+        ).fetchone()
+        if guard is None:
+            raise SchemaContractError("participant attribution guard is missing")
+        connection.execute("DROP TRIGGER prevent_participant_message_links_update")
+        connection.execute(
+            "ALTER TABLE participant_message_links ADD COLUMN interaction_created_at "
+            "TEXT NOT NULL DEFAULT ''"
+        )
+        connection.execute(
+            "UPDATE participant_message_links SET interaction_created_at=(SELECT i.created_at "
+            "FROM interactions i WHERE i.interaction_id=participant_message_links.interaction_id "
+            "AND i.subject_id=participant_message_links.subject_id)"
+        )
+        connection.execute(guard[0])
 
     @staticmethod
     def _ensure_project_execution_columns(connection: sqlite3.Connection) -> None:

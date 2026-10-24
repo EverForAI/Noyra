@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from noyra.core import Database, IdentityStore
+from noyra.core.database import CURRENT_SCHEMA_VERSION
 from noyra.interaction.participants import ParticipantStore
 
 
@@ -33,14 +34,13 @@ def test_sources_are_stable_scoped_and_do_not_merge_nicknames(tmp_path: Path) ->
             )
 
 
-def test_schema104_strict_reopen_and_foreign_key_check(tmp_path: Path) -> None:
+def test_current_schema_strict_reopen_and_foreign_key_check(tmp_path: Path) -> None:
     db = Database(tmp_path / "db", strict_schema_contract=True)
     with db.connection() as c:
         assert c.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert (
-            c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]
-            == "104"
-        )
+        assert c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[
+            0
+        ] == str(CURRENT_SCHEMA_VERSION)
     Database(db.path, strict_schema_contract=True)
 
 
@@ -100,7 +100,7 @@ def test_schema103_upgrade_preserves_sources_and_export_omits_credentials(tmp_pa
         assert "tables/participant_credentials.jsonl" not in archive.namelist()
         assert b"PASSWORD-HASH-SECRET" not in b"".join(archive.read(n) for n in archive.namelist())
         manifest = json.loads(archive.read("manifest.json"))
-        assert manifest["schema_version"] == 104
+        assert manifest["schema_version"] == CURRENT_SCHEMA_VERSION
 
 
 def test_telegram_sender_identity_is_stable_across_chat_addresses() -> None:
@@ -147,7 +147,8 @@ def test_attribution_cannot_be_reassigned_and_cross_subject_links_are_rejected(
     message = InteractionStore(db).receive("subject-b", "test", "someone", "private subject-b")
     with db.transaction() as c, pytest.raises(sqlite3.IntegrityError, match="ownership"):
         c.execute(
-            "INSERT INTO participant_message_links VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO participant_message_links(interaction_id,subject_id,entity_id,source_id,"
+            "conversation_key,visibility,created_at) VALUES(?,?,?,?,?,?,?)",
             (
                 message.interaction_id,
                 "subject-a",

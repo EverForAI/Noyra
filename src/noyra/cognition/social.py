@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
@@ -195,16 +198,17 @@ class RelationshipSocialCognition:
 
     def _candidate_relationships(
         self,
+        connection: Any | None = None,
     ) -> tuple[list[RelationshipRecord], tuple[float, float, str, str] | None]:
         # Always inspect the priority head, then one bounded continuation page.
         # Persist continuation only after a scan with no eligible recipient so
         # disabled contacts cannot hide the rest of the directory after restart.
         page_size = 32
         key = f"relationship_social_cursor:{self.subject_id}"
-        with self.database.connection() as connection:
-            saved = connection.execute(
-                "SELECT value FROM schema_meta WHERE key=?", (key,)
-            ).fetchone()
+        with (
+            self.database.connection() if connection is None else nullcontext(connection)
+        ) as reader:
+            saved = reader.execute("SELECT value FROM schema_meta WHERE key=?", (key,)).fetchone()
             after: tuple[float, float, str, str] | None = None
             if saved is not None:
                 try:
@@ -224,7 +228,7 @@ class RelationshipSocialCognition:
             order = (
                 " ORDER BY familiarity DESC, affinity DESC, updated_at DESC, relationship_id DESC"
             )
-            head = connection.execute(
+            head = reader.execute(
                 "SELECT * FROM relationships WHERE subject_id=?" + order + " LIMIT ?",
                 (self.subject_id, page_size),
             ).fetchall()
@@ -240,7 +244,7 @@ class RelationshipSocialCognition:
                 )
                 if after is None or after > head_end:
                     after = head_end
-                tail = connection.execute(
+                tail = reader.execute(
                     "SELECT * FROM relationships WHERE subject_id=? AND "
                     "(familiarity,affinity,updated_at,relationship_id) < (?,?,?,?)"
                     + order
@@ -259,7 +263,66 @@ class RelationshipSocialCognition:
         return [RelationshipStore._from_row(row) for row in rows], next_cursor
 
     def _context(self) -> _SocialContext | None:
-        relationships, next_cursor = self._candidate_relationships()
+        # The SQL budget bounds execution, not just the number of returned rows.
+        deadline = time.monotonic() + 0.5
+        instructions = 0
+        exhausted = False
+
+        def progress() -> int:
+            nonlocal instructions, exhausted
+            instructions += 1000
+            exhausted = instructions > 250_000 or time.monotonic() > deadline
+            return int(exhausted)
+
+        with self.database.connection() as connection:
+            connection.execute("PRAGMA busy_timeout=50")
+            connection.set_progress_handler(progress, 1000)
+            try:
+                return self._context_connection(connection)
+            except sqlite3.OperationalError:
+                if exhausted:
+                    return None
+                raise
+            finally:
+                connection.set_progress_handler(None, 0)
+
+    def _recipient_interactions(
+        self, connection: Any, relationship: RelationshipRecord
+    ) -> list[Any]:
+        fields = (
+            "i.interaction_id,i.direction,i.kind,i.channel,i.counterparty,"
+            "i.related_interaction_id,i.status,i.created_at"
+        )
+        # An attributed participant is indexed by immutable identity and the
+        # original interaction time, not the time a source was later linked.
+        if connection.execute(
+            "SELECT 1 FROM participant_entities WHERE subject_id=? AND entity_id=?",
+            (self.subject_id, relationship.entity_key),
+        ).fetchone():
+            sql = (
+                "SELECT " + fields + " FROM participant_message_links m "
+                "INDEXED BY idx_participant_messages_timeline JOIN interactions i "
+                "ON i.interaction_id=m.interaction_id AND i.subject_id=m.subject_id "
+                "WHERE m.subject_id=? AND m.entity_id=? AND NOT "
+                + WITHDRAWN_PARTICIPANT_INVITATION
+                + " "
+                "ORDER BY m.interaction_created_at DESC,m.interaction_id DESC LIMIT 48"
+            )
+        else:
+            # A legacy address never acquires somebody else's attributed history.
+            sql = (
+                "SELECT " + fields + " FROM interactions i "
+                "INDEXED BY idx_interactions_correspondent_timeline "
+                "WHERE i.subject_id=? AND i.counterparty=? AND NOT EXISTS("
+                "SELECT 1 FROM participant_message_links m "
+                "WHERE m.interaction_id=i.interaction_id AND m.subject_id=i.subject_id) "
+                "AND NOT " + WITHDRAWN_PARTICIPANT_INVITATION + " "
+                "ORDER BY i.created_at DESC,i.interaction_id DESC LIMIT 48"
+            )
+        return list(connection.execute(sql, (self.subject_id, relationship.entity_key)).fetchall())
+
+    def _context_connection(self, connection: Any) -> _SocialContext | None:
+        relationships, next_cursor = self._candidate_relationships(connection)
         if not relationships:
             return None
         now = self._parse_time(self.clock())
@@ -267,22 +330,7 @@ class RelationshipSocialCognition:
         routes: dict[str, _SocialRoute] = {}
         candidates: list[tuple[RelationshipRecord, list[Any], str | None, str | None]] = []
         for relationship in relationships:
-            # Limit within this recipient's established identity, rather than
-            # slicing the global feed before attribution. Legacy messages are
-            # eligible only when they have no participant identity link.
-            with self.database.connection() as connection:
-                interactions = list(
-                    connection.execute(
-                        "SELECT i.interaction_id,i.direction,i.kind,i.channel,i.counterparty,"
-                        "i.related_interaction_id,i.status,i.created_at FROM interactions i "
-                        "LEFT JOIN participant_message_links m ON m.subject_id=i.subject_id "
-                        "AND m.interaction_id=i.interaction_id WHERE i.subject_id=? "
-                        "AND (m.entity_id=? OR (m.interaction_id IS NULL AND i.counterparty=?)) "
-                        "AND NOT " + WITHDRAWN_PARTICIPANT_INVITATION + " "
-                        "ORDER BY i.created_at DESC,i.interaction_id DESC LIMIT 48",
-                        (self.subject_id, relationship.entity_key, relationship.entity_key),
-                    ).fetchall()
-                )
+            interactions = self._recipient_interactions(connection, relationship)
             established = next(
                 (
                     row
@@ -293,11 +341,10 @@ class RelationshipSocialCognition:
             )
             if established is not None:
                 channels[relationship.relationship_id] = str(established["channel"])
-                with self.database.connection() as connection:
-                    try:
-                        route = self._route(connection, relationship, established["interaction_id"])
-                    except RelationshipSocialValidationError:
-                        route = None
+                try:
+                    route = self._route(connection, relationship, established["interaction_id"])
+                except RelationshipSocialValidationError:
+                    route = None
                 if route is not None:
                     routes[relationship.relationship_id] = route
             last_outgoing = next(
@@ -341,23 +388,29 @@ class RelationshipSocialCognition:
                     )
             return None
         relationship, interactions, last_incoming, last_outgoing = candidates[0]
-        with self.database.connection() as connection:
-            event_rows = connection.execute(
-                """SELECT event_id, event_type, occurred_at FROM events
-                   WHERE subject_id = ? AND event_type IN (
-                       'interaction_received', 'interaction_sent', 'interaction_decision',
-                       'sleep_reflection', 'goal_governance_committed', 'outcome_evaluated'
-                   ) ORDER BY occurred_at DESC, event_id DESC LIMIT 64""",
-                (self.subject_id,),
-            ).fetchall()
-            affect_rows = connection.execute(
-                """SELECT emotion_type, target_type, target_id, intensity, valence, arousal
-                   FROM affect_components WHERE subject_id = ? AND (
-                     (target_type = ? AND target_id = ?) OR
-                     (target_type IN ('subject', 'world') AND target_id IS NULL)
-                   ) ORDER BY intensity DESC, emotion_type LIMIT 12""",
-                (self.subject_id, relationship.entity_type, relationship.entity_key),
-            ).fetchall()
+        event_rows = connection.execute(
+            """SELECT event_id, event_type, occurred_at FROM events
+               WHERE subject_id = ? AND event_type IN (
+                   'interaction_received', 'interaction_sent', 'interaction_decision',
+                   'sleep_reflection', 'goal_governance_committed', 'outcome_evaluated'
+               ) ORDER BY occurred_at DESC, event_id DESC LIMIT 64""",
+            (self.subject_id,),
+        ).fetchall()
+        affect_rows = connection.execute(
+            """SELECT emotion_type, target_type, target_id, intensity, valence, arousal
+               FROM affect_components WHERE subject_id = ? AND (
+                 (target_type = ? AND target_id = ?) OR
+                 (target_type IN ('subject', 'world') AND target_id IS NULL)
+               ) ORDER BY intensity DESC, emotion_type LIMIT 12""",
+            (self.subject_id, relationship.entity_type, relationship.entity_key),
+        ).fetchall()
+        decision_affect_rows = connection.execute(
+            "SELECT emotion_type,intensity,valence,arousal,dominance "
+            "FROM affect_components WHERE subject_id=? AND "
+            "((target_type=? AND target_id IS ?) OR target_type IN ('subject','world')) "
+            "ORDER BY intensity DESC LIMIT 32",
+            (self.subject_id, relationship.entity_type, relationship.entity_key),
+        ).fetchall()
         # This context will generate content for a specific recipient. Global
         # memories have no durable per-recipient sharing grants, including old
         # or mixed-source memories. Keep them available to private cognition,
@@ -388,9 +441,9 @@ class RelationshipSocialCognition:
             # goals in private cognition until explicit disclosure scope exists.
             "active_goals": [],
             "recent_events": [dict(row) for row in event_rows],
-            "affect_decision_profile": AffectPolicy(self.database, self.subject_id)
-            .profile(target_type=relationship.entity_type, target_id=relationship.entity_key)
-            .__dict__,
+            "affect_decision_profile": AffectPolicy.profile_from_rows(
+                decision_affect_rows
+            ).__dict__,
         }
         while len(canonical_json(payload)) > self.settings.max_social_context_chars:
             if payload["recent_events"]:

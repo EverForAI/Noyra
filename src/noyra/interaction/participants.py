@@ -119,7 +119,7 @@ class ParticipantStore:
         private: bool = False,
     ) -> None:
         row = c.execute(
-            "SELECT subject_id FROM interactions WHERE interaction_id=?", (interaction,)
+            "SELECT subject_id,created_at FROM interactions WHERE interaction_id=?", (interaction,)
         ).fetchone()
         source = c.execute(
             "SELECT subject_id,entity_id FROM participant_sources WHERE source_id=?",
@@ -159,8 +159,10 @@ class ParticipantStore:
                 raise IntegrityError("participant message attribution conflict")
             return
         c.execute(
-            "INSERT INTO participant_message_links VALUES(?,?,?,?,?,?,?)",
-            (interaction, *values, utc_now()),
+            "INSERT INTO participant_message_links(interaction_id,subject_id,entity_id,source_id,"
+            "conversation_key,visibility,created_at,interaction_created_at) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (interaction, *values, utc_now(), row["created_at"]),
         )
 
     @staticmethod

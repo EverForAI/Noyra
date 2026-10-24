@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from noyra.core import SubjectKernel
+from noyra.core.database import CURRENT_SCHEMA_VERSION
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.event_archive import EventPayloadArchive
 from noyra.core.events import EventStore
@@ -128,23 +129,20 @@ def test_public_schema_has_fixed_reviewed_fingerprints(
     archive: tuple[PublicArchive, SubjectKernel],
 ) -> None:
     _, kernel = archive
-    # These are the reviewed whole-database schema 104 fingerprints, not just
-    # the public archive tables. Versions 100-104 add embedding bindings and
+    # These are the reviewed whole-database schema 105 fingerprints, not just
+    # the public archive tables. Versions 100-105 add embedding bindings and
     # bounded lookup indexes without changing any public archive object.
     with kernel.database.connection() as connection:
-        assert (
-            connection.execute(
-                "SELECT value FROM schema_meta WHERE key='schema_version'"
-            ).fetchone()[0]
-            == "104"
-        )
+        assert connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == str(CURRENT_SCHEMA_VERSION)
         assert (
             kernel.database.schema_ddl_fingerprint(connection)
-            == "72e5c15e4793cbe3b743b5eca667cea5bef3c34af05a4674bde7ce720234dc8e"
+            == "f117dc793fddf96e769abef73c30127b5494ce8fb8b7f6598e6b1e093f554950"
         )
         assert (
             kernel.database.schema_structure_fingerprint(connection)
-            == "1c17714c61ce55ec2a36af8dfdb439bbae32428bab58c7d842a34802426650e4"
+            == "8feff8b35da5fad5d7c530dd492dcf78347c038456f48857c4afad63fd220a2e"
         )
 
 
