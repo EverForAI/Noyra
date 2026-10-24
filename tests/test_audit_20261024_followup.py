@@ -755,3 +755,110 @@ async def test_cancelled_unknown_retry_is_not_a_permanent_scheduler_block(
     with resource_cooldown_elapsed():
         assert await engine.run_due() == "interaction_silent"
     assert len(provider.requests) == 2
+
+
+@pytest.mark.parametrize("legacy_recipient", [False, True])
+def test_social_generation_never_recalls_unshared_or_mixed_memories(
+    kernel: SubjectKernel, legacy_recipient: bool
+) -> None:
+    from noyra.cognition import CognitionSettings, InteractionCognition
+    from noyra.cognition.social import RelationshipSocialCognition
+    from noyra.core import EventStore
+    from noyra.interaction import InteractionStore
+    from noyra.mind import MemoryStore, RelationshipStore
+    from noyra.model import BudgetLimits, FakeProvider, ModelGateway, ModelLedger
+
+    first: InteractionRecord | InboundAccepted
+    if legacy_recipient:
+        first = InteractionStore(kernel.database).receive(
+            kernel.subject_id, "webhook", "legacy-alice", "Hello"
+        )
+        with kernel.database.connection() as c:
+            event = c.execute(
+                "SELECT event_id FROM events WHERE json_extract(payload_json,'$.interaction_id')=?",
+                (first.interaction_id,),
+            ).fetchone()[0]
+        RelationshipStore(kernel.database).ensure(
+            kernel.subject_id, "human", "legacy-alice", "Alice", source_event_ids=(event,)
+        )
+        gateway = ModelGateway(
+            FakeProvider([]),
+            ModelLedger(kernel.database),
+            model="test-model",
+            limits=BudgetLimits(20, 500000, 100000, 5000000),
+        )
+        social = RelationshipSocialCognition(
+            kernel.database, kernel.subject_id, gateway, CognitionSettings()
+        )
+    else:
+        social, _, _, _, _, _, first, _, _ = social_fixture(kernel)
+        with kernel.database.connection() as c:
+            event = c.execute(
+                "SELECT event_id FROM events WHERE json_extract(payload_json,'$.interaction_id')=?",
+                (first.interaction_id,),
+            ).fetchone()[0]
+    accounts = AccountStore(kernel.database, kernel.subject_id)
+    accounts.register("bob", "correct horse battery", "Bob")
+    bob = accounts.authenticate(accounts.login("bob", "correct horse battery")[0])
+    assert bob
+    other = InteractionStore(kernel.database).receive(
+        kernel.subject_id,
+        "participant",
+        bob.entity_id,
+        "PRIVATE_BOB_MARKER relationship with Alice",
+        participant=bob,
+        participant_private=True,
+        participant_conversation="participant:" + bob.entity_id,
+    )
+    with kernel.database.connection() as c:
+        private_event = c.execute(
+            "SELECT event_id FROM events WHERE json_extract(payload_json,'$.interaction_id')=?",
+            (other.interaction_id,),
+        ).fetchone()[0]
+    public = EventStore(kernel.database).append(
+        kernel.subject_id, "experience", "test", {"kind": "Public fixture"}, privacy_level="public"
+    )
+    historical = EventStore(kernel.database).append(
+        kernel.subject_id, "experience", "test", {"kind": "Unattributed historical fixture"}
+    )
+    memories = MemoryStore(kernel.database)
+    cases = [
+        ("PRIVATE_BOB_MARKER", (private_event,), "private"),
+        ("MIXED_SOURCES_MARKER", (event, private_event), "private"),
+        ("UNATTRIBUTED_HISTORY_MARKER", (historical.event_id,), "private"),
+        ("PUBLIC_MEMORY_MARKER", (public.event_id,), "public"),
+    ]
+    records = [
+        memories.create(
+            kernel.subject_id,
+            "episodic",
+            marker + " relationship with Alice",
+            salience=1.0,
+            confidence=1.0,
+            source_event_ids=sources,
+            privacy_level=level,
+        )
+        for marker, sources, level in cases
+    ]
+    with patch.object(
+        MemoryStore, "recall", side_effect=AssertionError("recipient has no global sharing grant")
+    ):
+        context = social._context()
+        assert context
+        messages = social._messages(context)
+        for marker, _, _ in cases:
+            assert marker not in str(messages)
+        if not legacy_recipient:
+            # The direct attributed-response boundary retains the same isolation.
+            direct = InteractionCognition(
+                kernel.database, kernel.subject_id, social.gateway, CognitionSettings()
+            )
+            direct_messages = direct._messages(
+                InteractionStore(kernel.database).get(first.interaction_id)
+            )
+            for marker, _, _ in cases:
+                assert marker not in str(direct_messages)
+    with kernel.database.connection() as c:
+        assert c.execute("SELECT COUNT(*) FROM memory_accesses").fetchone()[0] == 0
+    for record in records:
+        assert memories.get(record.memory_id).content == record.content
