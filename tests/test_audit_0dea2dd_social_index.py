@@ -187,3 +187,69 @@ def test_v104_migration_failure_is_atomic_and_can_retry(tmp_path: Path) -> None:
             ("prevent_participant_message_links_update",),
         ).fetchone()
     Database(db.path, strict_schema_contract=True)
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+def test_full_history_pages_keep_advancing_under_instruction_budget(
+    kernel: SubjectKernel,
+    blocked: bool,
+) -> None:
+    social, _, _, _, _, _, first, who, _ = social_fixture(kernel)
+    with kernel.database.connection() as c:
+        event = c.execute(
+            "SELECT event_id FROM events WHERE json_extract(payload_json,'$.interaction_id')=?",
+            (first.interaction_id,),
+        ).fetchone()[0]
+    for n in range(64):
+        relation = social.relationships.ensure(
+            kernel.subject_id,
+            "human",
+            f"unavailable:{n}",
+            f"Unavailable {n}",
+            source_event_ids=(event,),
+        )
+        social.relationships.revise(
+            relation.relationship_id,
+            trust=0,
+            affinity=0,
+            conflict=0,
+            familiarity=1,
+            boundaries={"no_contact": True} if blocked else {},
+            reason="Local history fixture",
+            source_event_ids=(event,),
+        )
+    with kernel.database.transaction() as c:
+        for n in range(64):
+            for i in range(48):
+                social.interactions._create_connection(
+                    c,
+                    kernel.subject_id,
+                    "incoming" if blocked else "outgoing",
+                    "human_message" if blocked else "subject_message",
+                    "unsupported",
+                    f"unavailable:{n}",
+                    "An old invitation",
+                    None,
+                    f"unavailable:{n}:{i}",
+                    "offered" if blocked else "sent",
+                    None,
+                )
+    # Exercise the VM cap deterministically; the independent wall-clock cap
+    # still applies in production, regardless of machine load in parallel CI.
+    with (
+        patch("noyra.cognition.social.time.monotonic", return_value=0),
+        patch.object(
+            social, "_recipient_interactions", wraps=social._recipient_interactions
+        ) as read,
+    ):
+        assert social._context() is None
+        assert read.call_count == (0 if blocked else 64)
+        with kernel.database.connection() as c:
+            assert c.execute(
+                "SELECT value FROM schema_meta WHERE key=?",
+                (f"relationship_social_cursor:{kernel.subject_id}",),
+            ).fetchone()
+        context = social._context()
+    assert context
+    assert {r.entity_key for r in context.relationships.values()} == {who.entity_id}
+    assert next(iter(context.routes.values())).interaction_id == first.interaction_id

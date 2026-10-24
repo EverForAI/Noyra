@@ -263,7 +263,9 @@ class RelationshipSocialCognition:
         return [RelationshipStore._from_row(row) for row in rows], next_cursor
 
     def _context(self) -> _SocialContext | None:
-        # The SQL budget bounds execution, not just the number of returned rows.
+        # Allow the indexed 64-recipient/48-message page to finish, while
+        # independently bounding VM work and elapsed time. Explicit contact
+        # boundaries are checked before loading any recipient history.
         deadline = time.monotonic() + 0.5
         instructions = 0
         exhausted = False
@@ -271,7 +273,7 @@ class RelationshipSocialCognition:
         def progress() -> int:
             nonlocal instructions, exhausted
             instructions += 1000
-            exhausted = instructions > 250_000 or time.monotonic() > deadline
+            exhausted = instructions > 1_000_000 or time.monotonic() > deadline
             return int(exhausted)
 
         with self.database.connection() as connection:
@@ -330,6 +332,18 @@ class RelationshipSocialCognition:
         routes: dict[str, _SocialRoute] = {}
         candidates: list[tuple[RelationshipRecord, list[Any], str | None, str | None]] = []
         for relationship in relationships:
+            boundary = relationship.boundaries
+            blocked = bool(boundary.get("no_contact")) or boundary.get("contact") in {
+                "blocked",
+                "refused",
+            }
+            cooling = False
+            cooldown_until = boundary.get("contact_cooldown_until")
+            if isinstance(cooldown_until, str):
+                cooling = self._parse_time(cooldown_until) > now
+            high_conflict = relationship.conflict > 0.85 and relationship.trust < -0.5
+            if blocked or cooling or high_conflict:
+                continue
             interactions = self._recipient_interactions(connection, relationship)
             established = next(
                 (
@@ -355,21 +369,8 @@ class RelationshipSocialCognition:
                 (row["created_at"] for row in interactions if row["direction"] == "incoming"),
                 None,
             )
-            boundary = relationship.boundaries
-            blocked = bool(boundary.get("no_contact")) or boundary.get("contact") in {
-                "blocked",
-                "refused",
-            }
-            cooling = False
-            cooldown_until = boundary.get("contact_cooldown_until")
-            if isinstance(cooldown_until, str):
-                cooling = self._parse_time(cooldown_until) > now
-            high_conflict = relationship.conflict > 0.85 and relationship.trust < -0.5
             if (
-                blocked
-                or cooling
-                or high_conflict
-                or relationship.relationship_id not in channels
+                relationship.relationship_id not in channels
                 or relationship.relationship_id not in routes
             ):
                 continue
