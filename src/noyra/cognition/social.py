@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -12,6 +12,7 @@ from noyra.core.events import EventStore
 from noyra.core.payload_codec import decompress_text
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.interaction import InteractionStore
+from noyra.interaction.participants import ParticipantStore
 from noyra.mind import AffectPolicy, MemoryStore, MindEngine, RelationshipStore
 from noyra.mind.types import RelationshipRecord
 from noyra.model import ModelGateway, ModelMessage
@@ -48,10 +49,22 @@ class RelationshipSocialRecord:
 
 
 @dataclass(frozen=True)
+class _SocialRoute:
+    interaction_id: str
+    channel: str
+    counterparty: str
+    source_id: str | None
+    conversation_key: str | None
+    transport_id: str | None
+    binding_id: str | None
+
+
+@dataclass(frozen=True)
 class _SocialContext:
     serialized: str
     relationships: dict[str, RelationshipRecord]
     channels: dict[str, str]
+    routes: dict[str, _SocialRoute]
     event_ids: frozenset[str]
     contact_tendency: float
 
@@ -89,7 +102,27 @@ class RelationshipSocialCognition:
         if context is None:
             return None
         period = self.clock()[:13]
-        purpose = f"relationship_social:{period}"
+        # Bind recovery and cached model results to the exact recipient route.
+        # An older response must never be adopted for a new room after restart.
+        route_key = content_hash(
+            {
+                "relationships": sorted(context.relationships),
+                "routes": {key: asdict(route) for key, route in context.routes.items()},
+            }
+        )
+        purpose = f"relationship_social:{period}:route:{route_key}"
+        # A new room cannot bypass an unfinished request. An explicitly
+        # prepared retry may continue only on the very same frozen route.
+        prefix = f"relationship_social:{period}"
+        with self.database.connection() as connection:
+            unfinished = connection.execute(
+                "SELECT purpose,status FROM model_calls WHERE subject_id=? AND "
+                "(purpose=? OR substr(purpose,1,?)=?) AND "
+                "status IN ('prepared','executing','unknown')",
+                (self.subject_id, prefix, len(prefix + ":route:"), prefix + ":route:"),
+            ).fetchall()
+        if any(row["status"] != "prepared" or row["purpose"] != purpose for row in unfinished):
+            return "relationship_social_model_failed"
         existing = self._successful_proposal(purpose, context)
         if existing is None:
             try:
@@ -98,7 +131,7 @@ class RelationshipSocialCognition:
                     purpose,
                     self._messages(context),
                     RelationshipSocialProposal,
-                    idempotency_key=f"relationship-social:{period}",
+                    idempotency_key=f"relationship-social:{period}:{route_key}",
                     max_output_tokens=min(2_000, self.settings.max_output_tokens),
                     temperature=self.settings.temperature,
                 )
@@ -111,9 +144,9 @@ class RelationshipSocialCognition:
             proposal, call_id = existing
         try:
             relationship, channel = self._validate(proposal, context)
+            record = self._commit(proposal, call_id, relationship, channel, context)
         except RelationshipSocialValidationError:
             return "relationship_social_rejected"
-        record = self._commit(proposal, call_id, relationship, channel)
         return f"relationship_social_{record.disposition}"
 
     def latest(self) -> RelationshipSocialRecord | None:
@@ -167,8 +200,6 @@ class RelationshipSocialCognition:
                    ORDER BY priority DESC, updated_at DESC LIMIT 8""",
                 (self.subject_id,),
             ).fetchall()
-        from noyra.interaction.participants import ParticipantStore
-
         with self.database.connection() as connection:
             identities = {
                 row["interaction_id"]: ParticipantStore.for_message_connection(
@@ -177,6 +208,7 @@ class RelationshipSocialCognition:
                 for row in interaction_rows
             }
         channels: dict[str, str] = {}
+        routes: dict[str, _SocialRoute] = {}
         candidates: list[tuple[RelationshipRecord, list[Any], str | None, str | None]] = []
         for relationship in relationships:
             interactions = [
@@ -198,6 +230,13 @@ class RelationshipSocialCognition:
             )
             if established is not None:
                 channels[relationship.relationship_id] = str(established["channel"])
+                with self.database.connection() as connection:
+                    try:
+                        route = self._route(connection, relationship, established["interaction_id"])
+                    except RelationshipSocialValidationError:
+                        route = None
+                if route is not None:
+                    routes[relationship.relationship_id] = route
             last_outgoing = next(
                 (row["created_at"] for row in interactions if row["direction"] == "outgoing"),
                 None,
@@ -283,6 +322,9 @@ class RelationshipSocialCognition:
             canonical_json(payload),
             {relationship.relationship_id: relationship},
             {relationship.relationship_id: channels[relationship.relationship_id]},
+            {relationship.relationship_id: routes[relationship.relationship_id]}
+            if relationship.relationship_id in routes
+            else {},
             frozenset(str(row["event_id"]) for row in payload["recent_events"]),
             float(payload["affect_decision_profile"]["contact_tendency"]),
         )
@@ -343,12 +385,95 @@ class RelationshipSocialCognition:
                 raise RelationshipSocialValidationError("help request uses coercive language")
         return relationship, channel or "none"
 
+    def _route(
+        self, connection: Any, relationship: RelationshipRecord, interaction_id: str
+    ) -> _SocialRoute:
+        row = connection.execute(
+            "SELECT * FROM interactions WHERE subject_id=? AND interaction_id=?",
+            (self.subject_id, interaction_id),
+        ).fetchone()
+        if row is not None and row["direction"] == "outgoing" and row["related_interaction_id"]:
+            row = connection.execute(
+                "SELECT * FROM interactions WHERE subject_id=? AND interaction_id=?",
+                (self.subject_id, row["related_interaction_id"]),
+            ).fetchone()
+        if row is None or row["direction"] != "incoming":
+            raise RelationshipSocialValidationError("contact source unavailable")
+        InteractionStore._from_row(row)
+        identity = ParticipantStore.for_message_connection(
+            connection, self.subject_id, row["interaction_id"]
+        )
+        entity = connection.execute(
+            "SELECT status FROM participant_entities WHERE subject_id=? AND entity_id=?",
+            (self.subject_id, relationship.entity_key),
+        ).fetchone()
+        if identity is not None:
+            if (
+                identity.entity_id != relationship.entity_key
+                or entity is None
+                or entity[0] != "active"
+                or identity.relationship_type != relationship.entity_type
+            ):
+                raise RelationshipSocialValidationError("contact identity unavailable")
+        elif entity is not None or row["counterparty"] != relationship.entity_key:
+            raise RelationshipSocialValidationError("contact attribution unavailable")
+        if connection.execute(
+            "SELECT 1 FROM private_conversation_messages m JOIN private_conversations c "
+            "ON c.conversation_id=m.conversation_id WHERE m.interaction_id=? "
+            "AND c.status IN ('deleting','deleted')",
+            (row["interaction_id"],),
+        ).fetchone():
+            raise RelationshipSocialValidationError("contact source withdrawn")
+        link = connection.execute(
+            "SELECT conversation_key FROM participant_message_links "
+            "WHERE interaction_id=? AND subject_id=?",
+            (row["interaction_id"], self.subject_id),
+        ).fetchone()
+        inbound = connection.execute(
+            "SELECT transport_id,channel,external_account_id,external_sender_id "
+            "FROM interaction_inbound_events WHERE subject_id=? AND interaction_id=? LIMIT 2",
+            (self.subject_id, row["interaction_id"]),
+        ).fetchall()
+        transport, binding = None, None
+        if inbound:
+            if len(inbound) != 1:
+                raise RelationshipSocialValidationError("contact source ambiguous")
+            source = inbound[0]
+            permitted = connection.execute(
+                "SELECT b.binding_id FROM interaction_bindings b JOIN interaction_transports t "
+                "ON t.transport_id=b.transport_id AND t.subject_id=b.subject_id "
+                "WHERE b.subject_id=? "
+                "AND b.transport_id=? AND b.channel=? AND b.external_account_id=? "
+                "AND b.external_sender_id=? "
+                "AND b.status='active' AND t.status='active'",
+                (
+                    self.subject_id,
+                    source["transport_id"],
+                    source["channel"],
+                    source["external_account_id"],
+                    source["external_sender_id"],
+                ),
+            ).fetchone()
+            if permitted is None:
+                raise RelationshipSocialValidationError("contact source disabled")
+            transport, binding = source["transport_id"], permitted[0]
+        return _SocialRoute(
+            row["interaction_id"],
+            row["channel"],
+            row["counterparty"],
+            identity.source_id if identity else None,
+            link[0] if link else None,
+            transport,
+            binding,
+        )
+
     def _commit(
         self,
         proposal: RelationshipSocialProposal,
         call_id: str,
         relationship: RelationshipRecord,
         channel: str,
+        context: _SocialContext,
     ) -> RelationshipSocialRecord:
         payload = proposal.model_dump(mode="json")
         proposal_hash = content_hash(payload)
@@ -364,21 +489,25 @@ class RelationshipSocialCognition:
                     raise IntegrityError("social cognition key identifies another proposal")
                 return self._from_row(existing)
             interaction_id = None
-            destination, related = relationship.entity_key, None
-            if destination.startswith("entity_"):
-                source = connection.execute(
-                    "SELECT i.interaction_id,i.channel,i.counterparty FROM "
-                    "participant_message_links m "
-                    "JOIN interactions i ON i.interaction_id=m.interaction_id AND "
-                    "i.subject_id=m.subject_id "
-                    "WHERE m.subject_id=? AND m.entity_id=? AND i.direction='incoming' "
-                    "ORDER BY i.rowid DESC LIMIT 1",
-                    (self.subject_id, destination),
-                ).fetchone()
-                if source is None or source["channel"] != channel:
-                    raise RelationshipSocialValidationError("contact channel changed")
-                destination, related = source["counterparty"], source["interaction_id"]
             if proposal.disposition in {"contact", "request_help"}:
+                route = context.routes.get(relationship.relationship_id)
+                if (
+                    route is None
+                    or self._route(connection, relationship, route.interaction_id) != route
+                    or route.channel != channel
+                ):
+                    raise RelationshipSocialValidationError("contact route changed")
+                current_row = connection.execute(
+                    "SELECT * FROM relationships WHERE subject_id=? AND relationship_id=?",
+                    (self.subject_id, relationship.relationship_id),
+                ).fetchone()
+                if current_row is None:
+                    raise RelationshipSocialValidationError("contact relationship unavailable")
+                current = RelationshipStore._from_row(current_row)
+                self._validate(
+                    proposal, replace(context, relationships={current.relationship_id: current})
+                )
+                destination, related = route.counterparty, route.interaction_id
                 assert proposal.content is not None
                 interaction = self.interactions._create_connection(
                     connection,
