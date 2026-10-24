@@ -8,6 +8,7 @@ import os
 import sqlite3
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Self, cast
 from urllib.request import Request, urlopen
 
@@ -310,7 +311,7 @@ def test_creator_priority_is_used_by_interaction_scheduler(tmp_path: Path) -> No
     cognition = InteractionCognition(
         kernel.database,
         kernel.subject_id,
-        cast(ModelGateway, object()),
+        cast(ModelGateway, SimpleNamespace(requires_explicit_prepared_retry=False)),
         CognitionSettings(interaction_cooldown_seconds=0),
     )
     due = cognition._due_interaction()

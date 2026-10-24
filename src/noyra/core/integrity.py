@@ -1155,10 +1155,13 @@ _DEEP_PROFILES: frozenset[IntegrityProfile] = frozenset({"periodic_deep", "manua
 _CORE_AUDIT_ACTIONS = frozenset(
     {
         "integrity_safe_pause_fallback",
+        "model_request_context_conflict",
         "model_unknown_reconciled",
         "model_unknown_retry_authorized",
         "model_unknown_retry_cancelled",
         "model_unknown_retry_closed",
+        "participant_application_withdrawn",
+        "participant_source_bound",
         "runtime_exported",
         "training_export_aborted",
         "training_exported",
@@ -3082,7 +3085,8 @@ def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
         "referenced_export.subject_id AS referenced_export_subject_id "
         "FROM audit_records a "
         "LEFT JOIN model_calls referenced_call ON "
-        "a.action IN ('model_unknown_retry_authorized', 'model_unknown_retry_cancelled', "
+        "a.action IN ('model_request_context_conflict', 'model_unknown_retry_authorized', "
+        "'model_unknown_retry_cancelled', "
         "'model_unknown_retry_closed', "
         "'model_unknown_reconciled') "
         "AND referenced_call.call_id = CASE "
@@ -3133,6 +3137,65 @@ def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
             ):
                 raise IntegrityError(f"{context_label} payload is invalid")
             _provenance_int(payload["version"], f"{context_label} version", minimum=1)
+        elif action == "model_request_context_conflict":
+            _provenance_keys(payload, {"call_id", "purpose", "reason"}, context_label)
+            call_id = _provenance_text(payload["call_id"], f"{context_label} call id")
+            purpose = _provenance_text(payload["purpose"], f"{context_label} purpose")
+            reason = _provenance_text(payload["reason"], f"{context_label} reason")
+            if reason != "prepared_request_context_changed":
+                raise IntegrityError(f"{context_label} context conflict reason is invalid")
+            call = _audit_reference(context, "model_calls", "call_id", call_id, context_label)
+            if call["purpose"] != purpose:
+                raise IntegrityError(f"{context_label} model call purpose is invalid")
+        elif action == "participant_application_withdrawn":
+            _provenance_keys(payload, {"application_id", "interaction_id"}, context_label)
+            application_id = _provenance_text(
+                payload["application_id"], f"{context_label} application id"
+            )
+            application = _audit_reference(
+                context, "participant_applications", "application_id", application_id, context_label
+            )
+            if application["status"] != "withdrawn" or row["actor"] != (
+                "participant:" + application["entity_id"]
+            ):
+                raise IntegrityError(f"{context_label} application withdrawal is invalid")
+            interaction_id = payload["interaction_id"]
+            if interaction_id is not None:
+                interaction_id = _provenance_text(interaction_id, f"{context_label} interaction id")
+                interaction = _audit_reference(
+                    context, "interactions", "interaction_id", interaction_id, context_label
+                )
+                if interaction["idempotency_key"] != application["idempotency_key"] + ":interest":
+                    raise IntegrityError(f"{context_label} invitation reference is invalid")
+        elif action == "participant_source_bound":
+            _provenance_keys(payload, {"entity_id", "binding_id"}, context_label)
+            entity_id = _provenance_text(payload["entity_id"], f"{context_label} entity id")
+            binding_id = _provenance_text(payload["binding_id"], f"{context_label} binding id")
+            entity = _audit_reference(
+                context, "participant_entities", "entity_id", entity_id, context_label
+            )
+            if entity["status"] != "active" or row["actor"] != "operator":
+                raise IntegrityError(f"{context_label} participant binding is invalid")
+            binding = _audit_reference(
+                context, "interaction_bindings", "binding_id", binding_id, context_label
+            )
+            from noyra.interaction.participants import source_namespace
+
+            namespace = source_namespace(
+                binding["channel"], binding["transport_id"], binding["external_account_id"]
+            )
+            source = context.connection.execute(
+                "SELECT entity_id FROM participant_sources WHERE subject_id=? AND channel=? "
+                "AND namespace=? AND sender_id=?",
+                (
+                    subject_id,
+                    binding["channel"],
+                    namespace,
+                    binding["external_sender_id"],
+                ),
+            ).fetchone()
+            if source is None or source["entity_id"] != entity_id:
+                raise IntegrityError(f"{context_label} participant source reference is invalid")
         elif action == "wallet_legacy_state_authorized":
             _provenance_keys(
                 payload,
