@@ -1,0 +1,145 @@
+{
+  "tested_head": "132b1ff65f2bdd97c117d2e3e15269a919def6e7",
+  "backend_files": 238,
+  "pytest": {
+    "passed": 3150,
+    "skipped": 89,
+    "failed": 0,
+    "errors": 0,
+    "subtests_passed": 302,
+    "junit_cases": 3239
+  },
+  "shards": [
+    {
+      "shard": 0,
+      "exit_code": 0,
+      "seconds": 3345.05,
+      "passed": 918,
+      "skipped": 7,
+      "failed": 0,
+      "errors": 0,
+      "subtests_passed": 291,
+      "junit_cases": 925,
+      "summary": "918 passed, 7 skipped, 291 subtests passed in 3343.95s (0:55:43)"
+    },
+    {
+      "shard": 1,
+      "exit_code": 0,
+      "seconds": 3280.7,
+      "passed": 1152,
+      "skipped": 28,
+      "failed": 0,
+      "errors": 0,
+      "subtests_passed": 5,
+      "junit_cases": 1180,
+      "summary": "1152 passed, 28 skipped, 5 subtests passed in 3279.31s (0:54:39)"
+    },
+    {
+      "shard": 2,
+      "exit_code": 0,
+      "seconds": 3343.12,
+      "passed": 1080,
+      "skipped": 54,
+      "failed": 0,
+      "errors": 0,
+      "subtests_passed": 6,
+      "junit_cases": 1134,
+      "summary": "1080 passed, 54 skipped, 3 warnings, 6 subtests passed in 3341.82s (0:55:41)"
+    }
+  ],
+  "frontend": {
+    "tests": 152,
+    "pass": 152,
+    "fail": 0,
+    "skipped": 0
+  },
+  "static_results": [
+    {
+      "name": "ruff-check",
+      "exit_code": 0
+    },
+    {
+      "name": "ruff-format",
+      "exit_code": 0
+    },
+    {
+      "name": "mypy",
+      "exit_code": 0
+    },
+    {
+      "name": "compileall",
+      "exit_code": 0
+    },
+    {
+      "name": "pip-check",
+      "exit_code": 0
+    },
+    {
+      "name": "admin-syntax",
+      "exit_code": 0
+    },
+    {
+      "name": "app-syntax",
+      "exit_code": 0
+    },
+    {
+      "name": "participant-syntax",
+      "exit_code": 0
+    },
+    {
+      "name": "frontend",
+      "exit_code": 0
+    }
+  ],
+  "source_changes_during_run": [],
+  "skip_reasons": {
+    "POSIX token-file permission checks are not portable": 1,
+    "POSIX ownership and mode contract": 1,
+    "portable symlink setup is unavailable on Windows CI": 1,
+    "POSIX symlink contract": 1,
+    "requires an actual unprivileged POSIX user": 3,
+    "POSIX directory modes": 1,
+    "requires real Linux root and service-account permissions": 20,
+    "requires native POSIX Bash/filesystem": 6,
+    "requires Linux root ownership": 7,
+    "POSIX ownership and mode checks are not available on Windows": 1,
+    "POSIX filesystem contract": 5,
+    "filesystem symlinks are unavailable": 1,
+    "requires POSIX root to model the installer verifier": 1,
+    "requires Linux root and a real unprivileged account": 1,
+    "POSIX marker ownership contract": 1,
+    "requires actual root and separate service UID": 1,
+    "real privileged evidence metadata": 1,
+    "test volume does not generate Windows 8.3 aliases": 4,
+    "POSIX permission boundary": 9,
+    "POSIX backup artifact permissions": 1,
+    "POSIX permission contract": 1,
+    "Bash installer recovery": 2,
+    "requires Linux root and a real service user": 1,
+    "requires Linux root-owned report directory": 1,
+    "requires Bash and a real SQLite path": 1,
+    "requires Bash": 10,
+    "requires POSIX root to exercise a separate unprivileged service account": 6
+  },
+  "python": "3.12.10 (tags/v3.12.10:0cc8128, Apr  8 2025, 12:21:36) [MSC v.1943 64 bit (AMD64)]",
+  "certifi_installed": "2026.7.22",
+  "certifi_source_minimum_and_lock": "2026.10.19",
+  "warnings": {
+    "count": 3,
+    "kind": "PytestUnhandledThreadExceptionWarning: UnicodeDecodeError in existing Windows mklink fixture stdout reader with PYTHONUTF8=1",
+    "scope": "tests/test_m42_p2_01_training_workspace.py",
+    "review": "Fixture checks return code and real junction isolation; no product source change needed for these localized cmd output decoding warnings.",
+    "followup": {
+      "environment": "PYTHONUTF8=0, native Windows locale; warning promoted to error",
+      "passed": 6,
+      "skipped": 0,
+      "warnings": 0,
+      "seconds": 15.21
+    }
+  },
+  "validation_limits": [
+    "89 platform/privilege/filesystem skips are not passed tests; Linux root/service-UID/Bash gates remain for Linux CI.",
+    "Installed certifi 2026.7.22 differs from project and lock requirement 2026.10.19; this local run does not certify a fully lock-matched environment.",
+    "No paid provider requests, real outgoing delivery, blockchain transactions, or production deployments were executed."
+  ]
+}
