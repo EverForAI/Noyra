@@ -54,3 +54,34 @@ key to the build process. Certificate rotation therefore requires an explicit
 trust-policy update and a clean-VM install/upgrade/rollback check. The Windows
 CMS signature complements, rather than replaces, the release pipeline's
 checksum signature and clean-VM evidence gate.
+
+
+## Recovery records and certificate rotation
+
+The lifecycle normalizes omitted, null and empty publisher parameters before
+loading saved policy. One or more explicit pins remain a per-call override;
+only a successful strict install persists that allowlist.
+
+Each new installation writes `verification-policy.<version>.json` beside the
+version pointers, outside the package inventory. This operator-controlled
+record stores the signature requirement that passed verification before the
+current pointer is published. Rollback reads that requirement and completely
+verifies the previous package against the effective external publisher policy;
+it does not require the damaged current package to pass verification. Invalid
+records fail closed. A legacy install with no record conservatively requires
+signed recovery when a publisher policy is configured. Legacy unsigned
+installations without publisher policy can recover their verified development
+packages. A new development install records its own unsigned requirement;
+historical pins do not silently create a permanent global strict-mode switch.
+The per-call `-RequireSignature` switch still enforces signed recovery.
+
+Package publisher metadata describes the package; it cannot grant trust. Every
+actual manifest and executable signer must be in both the signed metadata and
+the external allowlist. Extending external policy from A to A+B permits rollback
+to a valid A package. Removing A rejects actual A signatures. An unused A entry
+in metadata does not prevent verification of a package actually signed by B.
+
+The native regression fixture uses in-memory certificates for detached CMS and
+a signed Windows system binary as an unexecuted launcher fixture. It does not
+import certificates, change the system certificate store, start an executable,
+or replace the official publisher and clean-VM release gates.

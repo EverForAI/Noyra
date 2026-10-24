@@ -116,6 +116,55 @@ function Write-PublisherTrustPolicy([string[]]$Thumbprints) {
     }
 }
 
+function Write-InstalledVerificationPolicy([string]$InstalledVersion, [bool]$SignatureRequired) {
+    Assert-SafeSegment $InstalledVersion 'verification policy version'
+    $path = Join-Path $InstallRoot ("verification-policy.$InstalledVersion.json")
+    if (Test-Path -LiteralPath $path) {
+        $item = Get-Item -LiteralPath $path -Force
+        if ($item.PSIsContainer -or $item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw 'Installed verification policy is unsafe.'
+        }
+    }
+    $temporary = Join-Path $InstallRoot ('.verification-policy.' + [guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        [ordered]@{
+            format = 'noyra-installed-verification/v1'
+            version = $InstalledVersion
+            signature_required = $SignatureRequired
+        } | ConvertTo-Json -Compress |
+            Set-Content -LiteralPath $temporary -NoNewline -Encoding utf8
+        Move-Item -LiteralPath $temporary -Destination $path -Force
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+    }
+}
+
+function Read-RecoverySignatureRequirement([string]$InstalledVersion) {
+    if (-not [string]::IsNullOrWhiteSpace($InstalledVersion)) {
+        Assert-SafeSegment $InstalledVersion 'verification policy version'
+        $path = Join-Path $InstallRoot ("verification-policy.$InstalledVersion.json")
+        if (Test-Path -LiteralPath $path) {
+            $item = Get-Item -LiteralPath $path -Force
+            if ($item.PSIsContainer -or $item.Attributes -band [IO.FileAttributes]::ReparsePoint -or
+                $item.Length -gt 16KB) {
+                throw 'Installed verification policy is unsafe.'
+            }
+            $document = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            if ($document.format -ne 'noyra-installed-verification/v1' -or
+                $document.version -cne $InstalledVersion -or
+                $document.signature_required -isnot [bool]) {
+                throw 'Installed verification policy is invalid.'
+            }
+            return [bool]$document.signature_required
+        }
+    }
+    # Older strict installs persisted only the external publisher allowlist.
+    # Missing receipts must not turn such an installation into unsigned recovery.
+    return ($TrustedPublisherThumbprints.Count -gt 0 -or
+        @(Read-PublisherTrustPolicy).Count -gt 0)
+}
+
 function Assert-PackageTree([string]$Root) {
     # Enumerate one directory at a time: never descend into an unverified link.
     $ancestor = Get-Item -LiteralPath $Root -Force
@@ -218,11 +267,15 @@ function Verify-Package([string]$Root, [switch]$ForceSignature) {
         if ($manifestThumbprints.Count -eq 0) {
             throw 'Strict package verification requires trusted publisher metadata in the manifest.'
         }
-        if ($externalThumbprints.Count -gt 0 -and
-            (@($manifestThumbprints) -join ',') -ne (@($externalThumbprints) -join ',')) {
-            throw 'Package trusted publisher metadata does not match installer trust policy.'
+        # Metadata describes this package's publishers; only the external
+        # policy grants trust. Rotation may add or remove unused publishers.
+        # Every actual CMS and executable signer must remain in both sets.
+        $effectiveThumbprints = @($externalThumbprints | Where-Object {
+            $manifestThumbprints -contains $_
+        })
+        if ($effectiveThumbprints.Count -eq 0) {
+            throw 'Package has no publishers authorized by installer trust policy.'
         }
-        $effectiveThumbprints = $externalThumbprints
         Verify-ManifestSignature -Root $Root -ManifestBytes $manifestBytes `
             -TrustedThumbprints $effectiveThumbprints
     }
@@ -262,7 +315,8 @@ function Verify-Package([string]$Root, [switch]$ForceSignature) {
     return $manifest
 }
 
-if (@($TrustedPublisherThumbprints).Count -eq 0) {
+$TrustedPublisherThumbprints = @(Normalize-Thumbprints $TrustedPublisherThumbprints)
+if ($TrustedPublisherThumbprints.Count -eq 0) {
     $TrustedPublisherThumbprints = @(Read-PublisherTrustPolicy)
 }
 
@@ -409,11 +463,17 @@ switch ($Action) {
                 (Join-Path $staging 'noyra-package.json'),
                 [IO.File]::ReadAllBytes((Join-Path $packagePath 'noyra-package.json'))
             )
-            Verify-Package $staging | Out-Null
+            $stagedManifest = Verify-Package -Root $staging -ForceSignature:([bool]$manifest.signature_required)
+            if ([string]$stagedManifest.version -cne $version) {
+                throw 'Staged package version changed after initial verification.'
+            }
             Move-Item -LiteralPath $staging -Destination $target
             if ($manifest.signature_required) {
                 Write-PublisherTrustPolicy $TrustedPublisherThumbprints
             }
+            # Record the verified requirement outside the mutable package tree.
+            # Recovery never needs to verify a damaged current package first.
+            Write-InstalledVerificationPolicy $version ([bool]$manifest.signature_required)
             $old = Get-CurrentVersion
             if ($null -ne $old) { Write-PointerAtomic $previousPointer $old }
             Write-PointerAtomic $currentPointer $version
@@ -430,11 +490,7 @@ switch ($Action) {
         $previous = Read-Pointer $previousPointer
         if ($null -eq $previous -or -not (Test-Path -LiteralPath (Join-Path $versions $previous))) { throw 'No usable previous version is available.' }
         $current = Get-CurrentVersion
-        $forceSignature = [bool]$RequireSignature
-        if ($null -ne $current) {
-            $currentManifest = Verify-Package (Join-Path $versions $current)
-            $forceSignature = $forceSignature -or [bool]$currentManifest.signature_required
-        }
+        $forceSignature = [bool]$RequireSignature -or (Read-RecoverySignatureRequirement $current)
         Verify-Package -Root (Join-Path $versions $previous) -ForceSignature:$forceSignature | Out-Null
         if ($null -ne $current) { Write-PointerAtomic $previousPointer $current }
         Write-PointerAtomic $currentPointer $previous
