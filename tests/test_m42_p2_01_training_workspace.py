@@ -159,6 +159,26 @@ class TrainingWorkspaceIsolationTestCase(unittest.TestCase):
         self.subject_root = self.subject_root / ".." / self.subject_storage_key
         self.test_rename_race_cannot_substitute_foreign_bytes()
 
+    def test_windows_junction_output_is_captured_as_bytes(self: Self) -> None:
+        # cmd output can use an OEM code page even with PYTHONUTF8=1.
+        completed = subprocess.CompletedProcess([], 0, b"\xc1\xaa\xbd\xd3", b"")
+        link = self.subject_root / "junction-probe"
+        with patch("os.name", "nt"), patch("subprocess.run", return_value=completed) as run:
+            self._make_directory_link(link, self.other_subject_root)
+        self.assertEqual(run.call_args.kwargs, {"check": False, "capture_output": True})
+
+    def test_windows_junction_failure_keeps_non_utf8_diagnostics(self: Self) -> None:
+        completed = subprocess.CompletedProcess([], 1, b"", b"denied: \xff\xfe")
+        link = self.subject_root / "junction-probe"
+        with (
+            patch("os.name", "nt"),
+            patch("subprocess.run", return_value=completed),
+            self.assertRaises(AssertionError) as raised,
+        ):
+            self._make_directory_link(link, self.other_subject_root)
+        self.assertIn("failed to create Windows junction", str(raised.exception))
+        self.assertIn(r"denied: \xff\xfe", str(raised.exception))
+
     def _make_directory_link(self: Self, link: Path, target: Path) -> None:
         if os.name != "nt":
             link.symlink_to(target, target_is_directory=True)
@@ -167,10 +187,12 @@ class TrainingWorkspaceIsolationTestCase(unittest.TestCase):
             ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(target)],
             check=False,
             capture_output=True,
-            text=True,
         )
         if completed.returncode != 0:
-            self.fail(f"failed to create Windows junction: {completed.stderr}")
+            diagnostics = (completed.stdout + completed.stderr).decode(
+                "utf-8", errors="backslashreplace"
+            )
+            self.fail(f"failed to create Windows junction: {diagnostics}")
 
     @staticmethod
     def _remove_directory_link(link: Path) -> None:
