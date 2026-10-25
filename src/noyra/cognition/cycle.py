@@ -42,6 +42,7 @@ from noyra.model import (
 )
 from noyra.model.errors import (
     BudgetExhaustedError,
+    EmbeddingShutdownIncompleteError,
     ModelCallStateError,
     ProviderCallError,
     StructuredOutputError,
@@ -300,6 +301,7 @@ class CognitionCycle:
                 component.memories.embedding_index = self.embedding_index
         self._bootstrapped = False
         self._closed = False
+        self._close_lock = asyncio.Lock()
 
     def bootstrap(self) -> None:
         if self._bootstrapped:
@@ -525,21 +527,28 @@ class CognitionCycle:
             return self._finalize_genesis_cycle(current)
         return "cognition_committed"
 
-    async def aclose(self) -> None:
+    async def aclose(self, *, embedding_timeout: float | None = None) -> None:
         if self._closed:
             return
-        self._closed = True
-        await self.autonomous_research.aclose()
-        await self.reader.aclose()
-        if self.embedding_gateway is not None:
-            self.embedding_gateway.close(wait=True)
-        close_gateway = getattr(self.gateway, "aclose", None)
-        if close_gateway is not None:
-            await close_gateway()
-        else:
-            close_provider = getattr(self.gateway.provider, "aclose", None)
-            if close_provider is not None:
-                await close_provider()
+        async with self._close_lock:
+            if self._closed:
+                return
+            # An incomplete embedding drain must not be mistaken for success:
+            # the service must keep its runtime lock until workers have exited.
+            if self.embedding_gateway is not None and not await self.embedding_gateway.aclose(
+                timeout=embedding_timeout
+            ):
+                raise EmbeddingShutdownIncompleteError()
+            await self.autonomous_research.aclose()
+            await self.reader.aclose()
+            close_gateway = getattr(self.gateway, "aclose", None)
+            if close_gateway is not None:
+                await close_gateway()
+            else:
+                close_provider = getattr(self.gateway.provider, "aclose", None)
+                if close_provider is not None:
+                    await close_provider()
+            self._closed = True
 
     async def reflect_sleep(self, run: SleepRunRecord) -> SleepReflectionPlan:
         self.autonomous_projects.reflect_for_sleep(run.sleep_id)

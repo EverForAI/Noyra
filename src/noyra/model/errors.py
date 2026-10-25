@@ -30,6 +30,14 @@ class EmbeddingProviderError(ModelGatewayError):
         self.usage_unknown = usage_unknown
 
 
+class EmbeddingShutdownIncompleteError(ModelGatewayError):
+    """Embedding work is still live; callers must retain runtime ownership."""
+
+    def __init__(self) -> None:
+        super().__init__("embedding_shutdown_incomplete")
+        self.code = "embedding_shutdown_incomplete"
+
+
 class ModelCallConflictError(ModelGatewayError):
     """An idempotency key conflicts with another logical model call."""
 

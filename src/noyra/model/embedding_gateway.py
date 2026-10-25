@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import math
 import threading
 import time
@@ -27,6 +28,9 @@ from .errors import (
     EmbeddingCircuitOpenError,
     EmbeddingProviderError,
 )
+
+DEFAULT_EMBEDDING_CLOSE_TIMEOUT_SECONDS = 1.0
+_MAX_EMBEDDING_CLOSE_TIMEOUT_SECONDS = 300.0
 
 
 class RawEmbeddingProvider(Protocol):
@@ -81,16 +85,31 @@ class EmbeddingGateway:
         # use daemon threads so a provider that ignores cancellation cannot keep
         # the interpreter alive after the hard deadline.
         self._executor = executor
-        self._owns_executor = False
         self._worker_condition = threading.Condition()
         self._workers: set[threading.Thread] = set()
         self._futures: set[Future[Any]] = set()
+        self._active_calls = 0
+        self._closed = False
 
     @property
     def name(self) -> str:
         return self.provider.name
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        # Track the caller as well as the provider worker: settlement and
+        # accounting can still access the database after a worker has returned.
+        with self._worker_condition:
+            if self._closed:
+                raise EmbeddingProviderError("embedding_gateway_closed", usage_unknown=False)
+            self._active_calls += 1
+        try:
+            return self._embed(texts)
+        finally:
+            with self._worker_condition:
+                self._active_calls -= 1
+                self._worker_condition.notify_all()
+
+    def _embed(self, texts: Sequence[str]) -> list[list[float]]:
         normalized = tuple(texts)
         if not normalized or len(normalized) > 128:
             raise ValueError("embedding batch size must be between one and 128")
@@ -183,22 +202,44 @@ class EmbeddingGateway:
         return [list(vector) for vector in vectors]
 
     def close(self, *, wait: bool = False, timeout: float | None = None) -> bool:
-        if self._owns_executor and self._executor is not None:
-            self._executor.shutdown(wait=wait, cancel_futures=True)
-        if not wait:
-            return not self._workers and not self._futures
+        """Stop admission and report drain status; never wait without a deadline.
+
+        False means callers must retain runtime ownership and retry cleanup.
+        A supplied executor remains owned by its caller, even during shutdown.
+        """
+        seconds = self._close_timeout(timeout)
+        end = time.monotonic() + seconds
         with self._worker_condition:
-            if timeout is None:
-                while self._workers or self._futures:
-                    self._worker_condition.wait()
-                return True
-            end = time.monotonic() + max(0.0, timeout)
-            while self._workers or self._futures:
+            self._closed = True
+            while self._active_calls or self._workers or self._futures:
+                if not wait:
+                    return False
                 remaining = end - time.monotonic()
                 if remaining <= 0:
                     return False
                 self._worker_condition.wait(remaining)
             return True
+
+    async def aclose(self, *, timeout: float | None = None) -> bool:
+        """Cancellable bounded drain, without blocking the event loop or a pool."""
+        end = time.monotonic() + self._close_timeout(timeout)
+        while not self.close():
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(0.01, remaining))
+        return True
+
+    @staticmethod
+    def _close_timeout(timeout: float | None) -> float:
+        value = DEFAULT_EMBEDDING_CLOSE_TIMEOUT_SECONDS if timeout is None else timeout
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not 0 <= value <= _MAX_EMBEDDING_CLOSE_TIMEOUT_SECONDS
+        ):
+            raise ValueError("embedding close timeout must be finite and between 0 and 300 seconds")
+        return float(value)
 
     def _call_with_timeout(self, texts: tuple[str, ...]) -> EmbeddingProviderResponse:
         context = copy_context()

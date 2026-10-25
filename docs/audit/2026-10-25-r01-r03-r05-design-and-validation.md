@@ -28,7 +28,7 @@ EmbeddingGateway 的 hard timeout 只结束调用者等待，不能终止 Python
 
 1. gateway 开始关闭即拒绝新的 embed，拒绝发生在预算授权和账本创建之前；已接入调用仍须完成原有结算。
 2. 将完整 embed 调用计入活动集合（包含授权、线程提交、响应校验、账本结算和 accounting 回调），不能只统计 provider 线程；否则线程已退出但调用者仍在写账本时会虚报排空。
-3. 同步 close 默认不等待；显式 wait=True 且未提供 timeout 时使用有限默认值 1 秒。timeout 只允许非负有限数；0 表示立即检查，不提供无限等待模式。
+3. 同步 close 默认不等待；显式 wait=True 且未提供 timeout 时使用有限默认值 1 秒。timeout 只允许 0–300 秒的有限数（上限同时避免条件等待的底层溢出）；0 表示立即检查，不提供无限等待模式。
 4. 增加 async aclose，以事件循环可取消的短间隔轮询排空；不用 asyncio.to_thread 搬运无限等待，不创建默认线程池遗留 join。默认 1 秒只约束 embedding 排空，不是服务整体停机期限，也不改变供应商请求超时。
 5. caller 提供的 ThreadPoolExecutor 由 caller 管理；gateway 不 shutdown、不擅自取消该 executor 的任务。移除已无真实 owned executor 的遗留无限 shutdown 分支。
 6. gateway 同步/异步关闭以 bool 明确返回是否排空；未排空不是成功。CognitionCycle 将 False 转为明确的 embedding_shutdown_incomplete 错误，在所有组件成功关闭前不标记 complete；可取消、可重试、并发关闭串行化。

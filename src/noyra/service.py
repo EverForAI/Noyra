@@ -178,6 +178,7 @@ from noyra.model import (
 from noyra.model.capabilities import CapabilityProfileStore
 from noyra.model.errors import (
     BudgetExhaustedError,
+    EmbeddingShutdownIncompleteError,
     ModelAuthorizationError,
     ModelCallStateError,
     ModelLifecycleBlockedError,
@@ -11166,6 +11167,15 @@ class NoyraService:
         # startup/error paths where the async ``run`` finalizer is not present.
         with suppress(Exception):
             self.kernel.admission.wait_for_drain()
+        # A timed-out embedding worker may outlive its operation lease. Do not
+        # suppress this failure or let synchronous error cleanup release its lock.
+        cognition = getattr(self, "cognition", None)
+        if (
+            cognition is not None
+            and cognition.embedding_gateway is not None
+            and not cognition.embedding_gateway.close(wait=True)
+        ):
+            raise EmbeddingShutdownIncompleteError()
         with suppress(Exception):
             self.kernel.close()
 
