@@ -43,8 +43,9 @@ function Initialize-R03Probe([string]$Root, [string]$Data) {
     $script:publisherTrustPath = Join-Path $script:InstallRoot 'trusted-publishers.json'
     $script:currentPointer = Join-Path $script:InstallRoot 'current.txt'
     $script:previousPointer = Join-Path $script:InstallRoot 'previous.txt'
-    $script:R03StatePath = Join-Path $script:InstallRoot 'r03-state.json'
-    $script:R03MarkerPath = Join-Path $script:InstallRoot 'r03-protocol-required'
+    $script:R03StatePath = Join-Path $script:InstallRoot '.r03-probe-state.json'
+    $script:R03MarkerPath = Join-Path $script:InstallRoot '.r03-probe-required'
+    $script:R03TransitionPath = Join-Path $script:InstallRoot '.r03-probe-transition.json'
     $identityText = $script:InstallRoot.ToUpperInvariant() + "|" + $script:R03Data.ToUpperInvariant()
     $script:R03Installation = Get-R03Hash ([Text.UTF8Encoding]::new($false).GetBytes($identityText))
     $script:R03Fault = ''; $script:R03Crash = $false

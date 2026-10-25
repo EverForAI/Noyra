@@ -120,9 +120,13 @@ try {
                 throw 'Rejected state type changed another state file.'
             }
         }
-        if ($stateName -ne 'trusted-publishers.json') {
-            Expect ($rootName + '_status_rejected') (Invoke-Life status $rootName) $false 'state path must be a regular file'
+        $statusResult = Invoke-Life status $rootName
+        Expect ($rootName + '_status_uses_authority') $statusResult $true
+        $status = & $Lifecycle -Action status -InstallRoot (Join-Path $WorkRoot $rootName) -DataRoot (Join-Path $WorkRoot ($rootName + '-data')) | ConvertFrom-Json
+        if ($status.current_version -cne 'signed-a2' -or $status.protocol_version -ne 1) {
+            throw 'Status trusted a compatibility mirror instead of R03 authority.'
         }
+        $results[$rootName + '_status_uses_authority'] = $true
         [IO.Directory]::Delete($blocked)
         [IO.File]::WriteAllBytes($blocked, $retained[$stateName])
         Expect ($rootName + '_upgrade_retry') (Invoke-Life upgrade $rootName $b3 @{TrustedPublisherThumbprints = $pinsAB}) $true
@@ -147,10 +151,16 @@ try {
     Copy-Item -LiteralPath (Join-Path $b3 'noyra-package.json') -Destination (Join-Path $WorkRoot 'strict/versions/signed-b3/noyra-package.json') -Force
     Expect 'empty_pins_load_saved_policy' (Invoke-Life rollback 'strict' '' @{TrustedPublisherThumbprints = @()}) $true
     Assert-Current 'strict' 'signed-b3'
+    # Mutating a compatibility projection cannot change authoritative trust.
     Set-Trust 'strict' $pinsB
-    Expect 'revoked_actual_signer_rejected' (Invoke-Life rollback 'strict') $false 'not a trusted publisher'
-    Assert-Current 'strict' 'signed-b3'
+    $mirrorStatus = & $Lifecycle -Action status -InstallRoot (Join-Path $WorkRoot 'strict') -DataRoot (Join-Path $WorkRoot 'strict-data') | ConvertFrom-Json
+    if ($mirrorStatus.protocol_version -ne 1 -or $mirrorStatus.current_version -cne 'signed-b3') { throw 'Status trusted a modified trust mirror.' }
     Set-Trust 'strict' $pinsAB
+    # Actual signer revocation is applied by a transaction and must reject A rollback.
+    Expect 'revoked_base_install' (Invoke-Life install 'revoked' $a1 @{TrustedPublisherThumbprints = $pinsA}) $true
+    Expect 'revoked_signer_upgrade' (Invoke-Life upgrade 'revoked' $b3 @{TrustedPublisherThumbprints = $pinsB}) $true
+    Expect 'revoked_actual_signer_rejected' (Invoke-Life rollback 'revoked') $false 'no publishers authorized|not a trusted publisher'
+    Assert-Current 'revoked' 'signed-b3'
     # Rewriting manifest JSON cannot retain a valid detached signature.
     $oldManifest = Join-Path $WorkRoot 'strict/versions/signed-a1/noyra-package.json'
     $validBytes = [IO.File]::ReadAllBytes($oldManifest)
@@ -160,14 +170,15 @@ try {
     [IO.File]::WriteAllBytes($oldManifest, $validBytes)
     $policy = Join-Path $WorkRoot 'strict/trusted-publishers.json'
     [IO.File]::WriteAllText($policy, '{invalid', $utf8)
-    Expect 'malformed_saved_policy_rejected' (Invoke-Life rollback 'strict') $false
-    Assert-Current 'strict' 'signed-b3'
+    $malformedMirror = & $Lifecycle -Action status -InstallRoot (Join-Path $WorkRoot 'strict') -DataRoot (Join-Path $WorkRoot 'strict-data') | ConvertFrom-Json
+    if ($malformedMirror.current_version -cne 'signed-b3') { throw 'Malformed trust projection changed authority status.' }
     Set-Trust 'strict' $pinsAB
     $receipt = Join-Path $WorkRoot 'strict/verification-policy.signed-b3.json'
     $validReceipt = [IO.File]::ReadAllBytes($receipt)
     [IO.File]::WriteAllText($receipt, '{"format":"noyra-installed-verification/v1","version":"signed-b3","signature_required":"false"}', $utf8)
-    Expect 'malformed_recovery_requirement_rejected' (Invoke-Life rollback 'strict') $false 'verification policy is invalid'
-    Assert-Current 'strict' 'signed-b3'
+    $malformedReceipt = & $Lifecycle -Action status -InstallRoot (Join-Path $WorkRoot 'strict') -DataRoot (Join-Path $WorkRoot 'strict-data') | ConvertFrom-Json
+    if ($malformedReceipt.current_version -cne 'signed-b3') { throw 'Malformed receipt projection changed authority status.' }
+    $results.malformed_receipt_does_not_override_authority = $true
     [IO.File]::WriteAllBytes($receipt, $validReceipt)
     Expect 'null_pins_load_saved_policy' (Invoke-Life rollback 'strict' '' @{TrustedPublisherThumbprints = $null}) $true
     Remove-Item -LiteralPath (Join-Path $WorkRoot 'strict/verification-policy.signed-a1.json') -Force
@@ -204,8 +215,10 @@ try {
     Expect 'resume_existing_base' (Invoke-Life install 'resume-existing' $a1 @{TrustedPublisherThumbprints = $pinsA}) $true
     New-Item -ItemType Directory -Path (Join-Path $WorkRoot 'resume-existing/verification-policy.signed-a2.json') | Out-Null
     Expect 'resume_existing_receipt_failure' (Invoke-Life upgrade 'resume-existing' $a2) $false 'verification policy is unsafe'
-    Assert-Current 'resume-existing' 'signed-a1'
+    $pendingStatus = & $Lifecycle -Action status -InstallRoot (Join-Path $WorkRoot 'resume-existing') -DataRoot (Join-Path $WorkRoot 'resume-existing-data') | ConvertFrom-Json
+    if (-not $pendingStatus.recovery_required -or $pendingStatus.recovery_target_version -cne 'signed-a2') { throw 'Accepted receipt failure did not expose its durable intent.' }
     Remove-Item -LiteralPath (Join-Path $WorkRoot 'resume-existing/verification-policy.signed-a2.json')
+    & $Lifecycle -Action recover -InstallRoot (Join-Path $WorkRoot 'resume-existing') -DataRoot (Join-Path $WorkRoot 'resume-existing-data') | Out-Null
     Expect 'resume_existing_after_repair' (Invoke-Life upgrade 'resume-existing' $a2) $true
     Expect 'resume_existing_repeat' (Invoke-Life upgrade 'resume-existing' $a2) $true
     Assert-Current 'resume-existing' 'signed-a2'
@@ -220,6 +233,8 @@ try {
             Expect ($phase + '_failure_is_reported') (Invoke-Life upgrade $rootName $a2 @{TrustedPublisherThumbprints = $pinsA}) $false
         }
         finally { $heldFile.Dispose() }
+        $failureStatus = & $Lifecycle -Action status -InstallRoot (Join-Path $WorkRoot $rootName) -DataRoot (Join-Path $WorkRoot ($rootName + '-data')) | ConvertFrom-Json
+        if ($failureStatus.recovery_required) { & $Lifecycle -Action recover -InstallRoot (Join-Path $WorkRoot $rootName) -DataRoot (Join-Path $WorkRoot ($rootName + '-data')) | Out-Null }
         Assert-Current $rootName 'signed-a1'
         Expect ($phase + '_failure_same_version_retry') (Invoke-Life upgrade $rootName $a2) $true
         Assert-Current $rootName 'signed-a2'

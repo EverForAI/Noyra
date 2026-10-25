@@ -34,6 +34,7 @@ try {
     $strictData=Join-Path $WorkRoot 'strict-data'
     & $Lifecycle -Action install -InstallRoot $strict -DataRoot $strictData -PackageRoot $a1 -TrustedPublisherThumbprints $pinsA | Out-Null
     & $Lifecycle -Action upgrade -InstallRoot $strict -DataRoot $strictData -PackageRoot $a2 | Out-Null
+    Remove-Item -LiteralPath (Join-Path $strict 'r03-state.json'), (Join-Path $strict 'r03-protocol-required') -Force
     foreach ($version in @('a3','b3')) {
         Copy-Item -LiteralPath (Join-Path $WorkRoot $version) -Destination (Join-Path $strict ('versions/' + $version)) -Recurse
     }
@@ -41,6 +42,7 @@ try {
     $developmentData=Join-Path $WorkRoot 'development-data'
     & $Lifecycle -Action install -InstallRoot $development -DataRoot $developmentData -PackageRoot $u1 | Out-Null
     & $Lifecycle -Action upgrade -InstallRoot $development -DataRoot $developmentData -PackageRoot $u2 | Out-Null
+    Remove-Item -LiteralPath (Join-Path $development 'r03-state.json'), (Join-Path $development 'r03-protocol-required') -Force
     foreach ($version in @('a3','b3')) {
         Copy-Item -LiteralPath (Join-Path $WorkRoot $version) -Destination (Join-Path $development ('versions/' + $version)) -Recurse
     }

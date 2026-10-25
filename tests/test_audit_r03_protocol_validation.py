@@ -80,13 +80,21 @@ def test_r03_single_authority_protocol_fault_crash_and_revocation_matrix(
     )
     assert hashlib.sha256(lifecycle.read_bytes()).hexdigest() == before
     assert result["fault_matrix_cases"] == 108
+    for key in (
+        "production_r03_transaction_recovers",
+        "production_r03_status_uses_authority",
+        "production_r03_revocation_survives_recovery",
+        "production_r03_rollback_transaction",
+        "production_r03_bootstrap_fails_closed",
+    ):
+        assert result[key] is True, (key, result)
+    assert result["legacy_mirror_remains_non_authoritative_during_prepared"] is True
     assert result["fault_matrix_points_per_policy"] == 18
     assert result["adoption_crash_points"] == 4
     assert result["native_locked_file_cases"] == 10
     assert result["invalid_target_cases"] == 6
     assert result["corrupt_or_unsafe_state_cases"] == 9
     for key in (
-        "unchanged_product_r03_reproduced",
         "fault_matrix_revocation_safe",
         "fault_matrix_repeated_recovery_idempotent",
         "missing_authority_never_falls_back",
@@ -98,13 +106,13 @@ def test_r03_single_authority_protocol_fault_crash_and_revocation_matrix(
         "compatibility_mirrors_never_authoritative",
         "real_cross_process_and_legacy_lock_enforced",
         "explicit_development_and_strict_no_downgrade",
-        "unchanged_old_entry_bypass_demonstrated",
         "prototype_is_not_deployable_without_entry_gate",
     ):
         assert result[key] is True, (key, result)
     assert result["launchers_executed"] == result["certificates_imported"] == 0
     evidence = os.environ.get("NOYRA_R03_VALIDATION_EVIDENCE_DIR")
     if evidence:
+        Path(evidence).mkdir(parents=True, exist_ok=True)
         output = Path(evidence)
         output.mkdir(parents=True, exist_ok=True)
         label = "ps7" if powershell == POWERSHELL_7 else "ps5"
@@ -158,6 +166,7 @@ def test_windows_powershell_host_boundary_is_reported_without_faking_signed_cove
     capability["full_signed_protocol_matrix_executed_on_this_host"] = False
     evidence = os.environ.get("NOYRA_R03_VALIDATION_EVIDENCE_DIR")
     if evidence:
+        Path(evidence).mkdir(parents=True, exist_ok=True)
         (Path(evidence) / "windows-powershell-host-boundary.json").write_text(
             json.dumps(capability, indent=2), encoding="utf-8"
         )

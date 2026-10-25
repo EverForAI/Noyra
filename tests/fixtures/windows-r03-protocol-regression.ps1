@@ -15,7 +15,7 @@ function Must-Fail([scriptblock]$Operation,[string]$Pattern='') {
         $failed=$true
         if ($Pattern -and $_.Exception.Message -notmatch $Pattern) { throw }
     }
-    if (-not $failed) { throw 'Expected explicit failure, got success.' }
+    if (-not $failed) { throw ("Expected explicit failure at test line $($MyInvocation.ScriptLineNumber), got success.") }
 }
 function New-Case([string]$Name,[switch]$Development) {
     Assert-R03Segment $Name
@@ -68,19 +68,56 @@ function Assert-Data([hashtable]$Case) {
 }
 function Restore-ProbeContext([hashtable]$Case) { Initialize-R03Probe $Case.root $Case.data }
 
-# Reproduce the actual unchanged product defect with native CMS and file locks.
-$case=New-Case 'legacy-defect'
-$held=[IO.File]::Open((Join-Path $case.root 'current.txt'),[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+# Production regression: a locked current mirror leaves COMMITTED authority,
+# then explicit recovery repairs projections without resurrecting signer A.
+$case=New-Case 'product-transaction'
+& $Lifecycle -Action recover -InstallRoot $case.root -DataRoot $case.data | Out-Null
+[IO.File]::WriteAllText((Join-Path $case.root 'verification-policy.b3.json'),'')
+$held=[IO.File]::Open((Join-Path $case.root 'verification-policy.b3.json'),[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
 try {
     Must-Fail { & $Lifecycle -Action upgrade -InstallRoot $case.root -DataRoot $case.data -PackageRoot $fixture.package_b -TrustedPublisherThumbprints $pinsB }
 }
 finally { $held.Dispose() }
-Restore-ProbeContext $case
-Assert-That ((Read-Pointer $currentPointer) -ceq 'a2') 'Legacy current unexpectedly changed.'
-Assert-That ((Read-Pointer $previousPointer) -ceq 'a2') 'Did not reproduce lost previous.'
-Assert-That (@(Read-PublisherTrustPolicy) -notcontains $fixture.pin_a) 'Did not reproduce removed A trust.'
-Must-Fail { & $Lifecycle -Action rollback -InstallRoot $case.root -DataRoot $case.data }
-$results.unchanged_product_r03_reproduced=$true
+$productStatus=& $Lifecycle -Action status -InstallRoot $case.root -DataRoot $case.data | ConvertFrom-Json
+Assert-That ($productStatus.protocol_version -eq 1 -and $productStatus.recovery_phase -cin @('prepared','committed') -and $productStatus.recovery_required -and $productStatus.recovery_target_version -ceq 'b3') ('Status did not expose accepted recovery state: '+($productStatus|ConvertTo-Json -Compress))
+Assert-That ($productStatus.current_version -cin @('a2','b3')) 'Status selected an invalid authority version.'
+Assert-That ($productStatus.current_version -cin @('a2','b3')) 'Status selected a version outside the pending/committed authority.'
+Must-Fail { Read-Pointer (Join-Path $case.root 'current.txt') }
+Must-Fail { Read-Pointer (Join-Path $case.root 'previous.txt') }
+Must-Fail { Read-PublisherTrustPolicy } 'unsupported format'
+& $Lifecycle -Action recover -InstallRoot $case.root -DataRoot $case.data | Out-Null
+Assert-That ((Read-Pointer (Join-Path $case.root 'current.txt')) -ceq 'b3') 'Recovery failed to repair the current mirror.'
+Assert-That ((Read-Pointer (Join-Path $case.root 'previous.txt')) -ceq 'a2') 'Recovery lost previous selection.'
+Assert-That (@(Read-PublisherTrustPolicy) -notcontains $fixture.pin_a) 'Recovery resurrected revoked signer A.'
+$productStatus=& $Lifecycle -Action status -InstallRoot $case.root -DataRoot $case.data | ConvertFrom-Json
+Assert-That ($productStatus.recovery_phase -ceq 'ready' -and -not $productStatus.recovery_required) 'Recovery did not reach ready.'
+Must-Fail { & $Lifecycle -Action rollback -InstallRoot $case.root -DataRoot $case.data } 'not trusted publisher|no publishers authorized|not a trusted publisher'
+Assert-That ((Read-Pointer (Join-Path $case.root 'current.txt')) -ceq 'b3') 'Rejected revoked rollback changed current.'
+Assert-Data $case
+$results.production_r03_transaction_recovers=$true
+$results.production_r03_status_uses_authority=$true
+$results.production_r03_revocation_survives_recovery=$true
+
+# Legacy adoption, authority-first status, marker repair, and an actual rollback
+# all go through the production lifecycle without executing a package launcher.
+$case=New-Case 'product-rollback'
+$packageRoot=Split-Path -Parent $FixtureJson
+& $Lifecycle -Action install -InstallRoot $case.root -DataRoot $case.data -PackageRoot (Join-Path $packageRoot 'a2') -TrustedPublisherThumbprints $pinsA | Out-Null
+Write-PointerAtomic (Join-Path $case.root 'current.txt') 'a1'
+$staleStatus=& $Lifecycle -Action status -InstallRoot $case.root -DataRoot $case.data | ConvertFrom-Json
+Assert-That ($staleStatus.current_version -ceq 'a2' -and $staleStatus.previous_version -ceq 'a1') 'Status trusted stale pointer mirrors.'
+& $Lifecycle -Action rollback -InstallRoot $case.root -DataRoot $case.data | Out-Null
+Assert-That ((Read-Pointer (Join-Path $case.root 'current.txt')) -ceq 'a1') 'Transactional rollback failed to select previous.'
+$results.production_r03_rollback_transaction=$true
+$marker=Join-Path $case.root 'r03-protocol-required'
+[IO.File]::Delete($marker)
+Must-Fail { & $Lifecycle -Action status -InstallRoot $case.root -DataRoot $case.data } 'without its protocol marker'
+& $Lifecycle -Action recover -InstallRoot $case.root -DataRoot $case.data | Out-Null
+Assert-That ([IO.File]::Exists($marker)) 'Explicit recover did not repair a missing bootstrap marker.'
+[IO.File]::Delete((Join-Path $case.root 'r03-state.json'))
+Must-Fail { & $Lifecycle -Action status -InstallRoot $case.root -DataRoot $case.data } 'authority is missing'
+$results.production_r03_bootstrap_fails_closed=$true
+if ($env:R03_PRODUCT_ONLY) { $results | ConvertTo-Json -Compress; return }
 
 # Fault and native process-crash matrix: A->A, A->B retained A, A->B revoked A.
 $points=@('verify.before','verify.after','prepare.before','prepare.after','reverify.before','reverify.after',
@@ -175,7 +212,7 @@ $results.missing_authority_never_falls_back=$true
 
 # Native sharing-denied handles: authority, receipt, mirrors; release then retry.
 $lockCases=0
-foreach ($name in @('r03-state.json','verification-policy.b3.json','trusted-publishers.json','previous.txt','current.txt')) {
+foreach ($name in @('.r03-probe-state.json','verification-policy.b3.json','trusted-publishers.json','previous.txt','current.txt')) {
     foreach ($shareName in @('Read','None')) {
         $case=Adopt-Case ('lock-'+$lockCases)
         $target=Join-Path $case.root $name
@@ -185,7 +222,7 @@ foreach ($name in @('r03-state.json','verification-policy.b3.json','trusted-publ
         try { Must-Fail { Invoke-R03Probe -Action upgrade -Version b3 -Pins $pinsB } }
         finally { $held.Dispose() }
         $state=Invoke-R03Probe -Action status
-        if ($name -ceq 'r03-state.json') {
+        if ($name -ceq '.r03-probe-state.json') {
             Assert-That ($state.phase -ceq 'ready' -and @($state.pins) -contains $fixture.pin_a) 'Failed authority publication accepted revocation.'
             Invoke-R03Probe -Action upgrade -Version b3 -Pins $pinsB | Out-Null
         }
@@ -202,7 +239,7 @@ $results.native_locked_file_cases=$lockCases
 
 # State/marker/destination types never become containers or recovery sources.
 $typeCases=0
-foreach ($name in @('r03-state.json','r03-protocol-required','current.txt','previous.txt','trusted-publishers.json')) {
+foreach ($name in @('.r03-probe-state.json','.r03-probe-required','current.txt','previous.txt','trusted-publishers.json')) {
     $case=Adopt-Case ('type-'+$typeCases)
     $target=Join-Path $case.root $name
     [IO.File]::Delete($target)
@@ -325,20 +362,17 @@ Assert-That ((Invoke-R03Probe -Action status).strict -eq $true) 'Signed package 
 Must-Fail { Invoke-R03Probe -Action authorize-rollback } 'signed manifest must require'
 $results.explicit_development_and_strict_no_downgrade=$true
 
-# Honest rollout limitation: unchanged old entry ignores the new marker/authority.
-$case=Adopt-Case 'old-entry'
+# PREPARED changes authority immediately but keeps old mirrors until commit.
+# Supported lifecycle commands use authority; executing an old copied script is
+# outside the file protocol and must be controlled by deployment/OS versioning.
+$case=Adopt-Case 'legacy-mirror-gate'
 Must-Fail { Invoke-R03Probe -Action upgrade -Version b3 -Pins $pinsB -Fault 'prepare.after' } 'injected'
 Must-Fail { Invoke-R03Probe -Action authorize-start } 'recovery required'
-$legacyStatus=& $Lifecycle -Action status -InstallRoot $case.root -DataRoot $case.data | ConvertFrom-Json
-Assert-That ($legacyStatus.current_version -ceq 'a2') 'Legacy bypass observation changed.'
-# No launcher is ever run; prove old rollback can still use the stale A mirror.
-& $Lifecycle -Action rollback -InstallRoot $case.root -DataRoot $case.data | Out-Null
-Restore-ProbeContext $case
-Assert-That ((Read-Pointer $currentPointer) -ceq 'a1') 'Did not reproduce old entry bypass.'
-Assert-That ((Invoke-R03Probe -Action status).phase -ceq 'prepared') 'Old entry changed authoritative record.'
+Assert-That ((Read-Pointer (Join-Path $case.root 'current.txt')) -ceq 'a2') 'Prepared protocol unexpectedly rewrote mirrors.'
+Assert-That (@(Read-PublisherTrustPolicy) -contains $fixture.pin_a) 'Legacy mirror observation changed.'
 Invoke-R03Probe -Action recover | Out-Null
 Assert-That ((Invoke-R03Probe -Action status).current -ceq 'b3') 'Authority did not overwrite stale mirrors.'
-$results.unchanged_old_entry_bypass_demonstrated=$true
+$results.legacy_mirror_remains_non_authoritative_during_prepared=$true
 $results.prototype_is_not_deployable_without_entry_gate=$true
 
 # Mirrors alone cannot undo the authority's revocation after successful cleanup.

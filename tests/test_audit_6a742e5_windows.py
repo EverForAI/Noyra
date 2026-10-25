@@ -40,12 +40,14 @@ def test_windows_saved_trust_rotation_and_damaged_recovery(tmp_path: Path) -> No
         "damaged_current_payload_rollback",
         "rotation_and_damaged_manifest_rollback",
         "revoked_actual_signer_rejected",
+        "revoked_base_install",
+        "revoked_signer_upgrade",
         "strict_receipt_rejects_unsigned_previous",
         "legacy_strict_damaged_current_rollback",
         "legacy_strict_policy_rejects_unsigned_previous",
         "legacy_unsigned_damaged_current_rollback",
         "saved_single_pin_reaches_executable_verification",
-        "malformed_recovery_requirement_rejected",
+        "malformed_receipt_does_not_override_authority",
         "receipt_failure_same_version_retry",
         "selected_version_retry_is_idempotent",
         "resume_existing_after_repair",
@@ -63,6 +65,7 @@ def test_windows_saved_trust_rotation_and_damaged_recovery(tmp_path: Path) -> No
             "rollback_rejected",
             "upgrade_retry",
             "normal_rollback",
+            "status_uses_authority",
         ):
             assert evidence[f"state-{state_name}_{scenario}"] is True, evidence
     assert all(value is True for value in evidence.values()), evidence
