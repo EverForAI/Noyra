@@ -96,3 +96,50 @@ A successful retry of the selected version preserves the previous-version
 pointer. Damaged or different same-version contents require operator review;
 they are never silently overwritten. Installation and rollback share the process
 lifecycle lock for the configured data root.
+
+## R03 authoritative lifecycle state and recovery
+
+The Windows lifecycle now commits the selected version, rollback selection,
+verification policy, trust pins and generation through one `r03-state.json`
+authority. `current.txt`, `previous.txt` and `trusted-publishers.json` remain
+compatibility projections only; supported lifecycle operations do not derive
+selection or trust from them after protocol adoption. The helper
+`deploy/windows/noyra-r03-recovery.ps1` is packaged and signed by the package
+manifest together with the lifecycle entry.
+
+On a legacy installation, the new lifecycle validates the legacy pointer paths
+and referenced version trees before recording an authority state. A new install
+or upgrade verifies and stages its candidate before publishing acceptance. The
+new trust policy becomes effective when the durable `prepared` authority record
+is published. If publication has not succeeded, the previous trust policy and
+selection remain authoritative. After it succeeds, recovery only moves forward
+or remains blocked; it never re-adds a signer removed by that intent. Start,
+rollback and another install/upgrade first recover a pending transaction. Stop
+remains available while recovery is blocked; uninstall requires a ready state
+and retains `DataRoot`.
+
+Inspect state with the lifecycle `-Action status`; the JSON includes protocol
+version, generation, recovery phase, target operation/version and whether
+recovery is required. To retry a recoverable transaction, run the same supported
+PowerShell 7 lifecycle script with `-Action recover`, `-InstallRoot` and
+`-DataRoot`. If the authority is missing after the protocol marker was written,
+or the authority is corrupt or bound to another installation, the lifecycle
+fails closed and will not reconstruct trust from compatibility files. Do not
+delete the marker or authority to force legacy fallback; preserve the tree and
+use an operator-reviewed repair procedure.
+
+All supported start/stop/upgrade/rollback/status/recover actions must use the
+same current lifecycle implementation and data root. Historical package copies
+of older lifecycle scripts do not understand R03 and are not supported control
+entries after adoption. An administrator who deliberately runs stale code can
+modify local installation files and is outside the filesystem protocol's
+protection boundary; deployments that must defend against a hostile local
+administrator require a separate OS-enforced entry/version gate. The SHA-256
+inside the authority envelope detects accidental corruption; it is not an
+administrator-resistant signature or external anti-rollback counter.
+
+The native regression suite exercises signed A-to-B rotation, actual signer
+revocation, bootstrap, rollback, per-file sharing failures and recovery retry
+without executing packaged launchers or importing test certificates. It does
+not prove sudden power-loss durability or protect against malicious local
+administrators; those remain separate deployment acceptance boundaries.

@@ -18,6 +18,7 @@ SECURITY.md
 deploy/noyra.env.example
 deploy/systemd/noyra.service
 deploy/windows/noyra-lifecycle.ps1
+deploy/windows/noyra-r03-recovery.ps1
 deploy/windows/start-noyra.ps1
 docker-compose.yml
 docs/NOYRA_PROJECT_PLAN.md

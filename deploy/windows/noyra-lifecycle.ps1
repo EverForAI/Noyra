@@ -1,7 +1,7 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('install', 'uninstall', 'start', 'stop', 'upgrade', 'rollback', 'status')]
+    [ValidateSet('install', 'uninstall', 'start', 'stop', 'upgrade', 'rollback', 'recover', 'status')]
     [string]$Action,
     [Parameter(Mandatory = $false)]
     [string]$InstallRoot = "$env:ProgramFiles\Noyra",
@@ -37,6 +37,9 @@ $versions = Join-Path $InstallRoot 'versions'
 $currentPointer = Join-Path $InstallRoot 'current.txt'
 $previousPointer = Join-Path $InstallRoot 'previous.txt'
 $publisherTrustPath = Join-Path $InstallRoot 'trusted-publishers.json'
+$script:r03StatePath = Join-Path $InstallRoot 'r03-state.json'
+$script:r03TransitionPath = Join-Path $InstallRoot 'r03-transition.json'
+$script:r03MarkerPath = Join-Path $InstallRoot 'r03-protocol-required'
 $pidFile = Join-Path $DataRoot 'noyra.pid'
 
 function Assert-SafeSegment([string]$Value, [string]$Name) {
@@ -339,12 +342,28 @@ function Verify-Package([string]$Root, [switch]$ForceSignature) {
     return $manifest
 }
 
-$TrustedPublisherThumbprints = @(Normalize-Thumbprints $TrustedPublisherThumbprints)
-if ($TrustedPublisherThumbprints.Count -eq 0) {
+. (Join-Path $PSScriptRoot 'noyra-r03-recovery.ps1')
+$script:R03RequestedPins = @(Normalize-Thumbprints $TrustedPublisherThumbprints)
+$TrustedPublisherThumbprints = @($script:R03RequestedPins)
+$script:R03CurrentState = $null
+$script:R03TransitionState = $null
+$hasR03Files = Test-R03ProtocolFiles
+if ($script:R03RequestedPins.Count -eq 0 -and -not $hasR03Files) {
     $TrustedPublisherThumbprints = @(Read-PublisherTrustPolicy)
 }
 
-function Get-CurrentVersion { return Read-Pointer $currentPointer }
+function Get-CurrentVersion {
+    if ($null -ne $script:R03CurrentState) {
+        if ($script:R03CurrentState.phase -cne 'ready') { throw 'R03 recovery is required before selecting a version.' }
+        return [string]$script:R03CurrentState.current
+    }
+    if (Test-R03ProtocolFiles) {
+        $state = Read-R03State
+        if ($state.phase -cne 'ready') { throw 'R03 recovery is required before selecting a version.' }
+        return [string]$state.current
+    }
+    return Read-Pointer $currentPointer
+}
 
 function Read-NoyraProcessIdentity {
     if (-not (Test-Path -LiteralPath $pidFile -PathType Leaf)) { return $null }
@@ -414,7 +433,7 @@ function Start-Noyra {
     New-Item -ItemType Directory -Force -Path $DataRoot | Out-Null
     $versionRoot = Join-Path $versions $current
     # Revalidate installed inventory and select only the manifest-declared launcher.
-    $installedManifest = Verify-Package $versionRoot
+    $installedManifest = Verify-Package -Root $versionRoot -ForceSignature:([bool]($RequireSignature -or ($null -ne $script:R03CurrentState -and $script:R03CurrentState.strict)))
     $launcher = Join-Path $versionRoot ([string]$installedManifest.launcher)
     if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
         throw "Installed package has no launcher: $current"
@@ -452,12 +471,60 @@ function Stop-Noyra {
 
 # Serialize installation, pointer changes, and process identity publication.
 $instanceLock = $null
-if ($Action -in @('install', 'rollback', 'start', 'stop', 'uninstall')) {
+if ($Action -in @('install', 'rollback', 'start', 'stop', 'uninstall', 'recover')) {
     New-Item -ItemType Directory -Force -Path $DataRoot | Out-Null
     $instanceLock = [IO.File]::Open((Join-Path $DataRoot '.noyra-lifecycle.lock'),
         [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
 }
 try {
+
+# Resolve/repair authority only while holding the same lifecycle lock as pointer changes.
+if ($Action -in @('install', 'rollback', 'start', 'recover')) {
+    if ($Action -eq 'install' -and -not (Test-R03ProtocolFiles)) {
+        # Verify and stage the requested package before creating adoption state.
+        $script:R03CurrentState = $null
+    }
+    else { $script:R03CurrentState = Get-OrAdopt-R03State -RepairMarker:($Action -eq 'recover') }
+    if ($null -ne $script:R03CurrentState) {
+        if ($Action -eq 'install' -and $script:R03RequestedPins.Count -gt 0) {
+            $script:TrustedPublisherThumbprints = @($script:R03RequestedPins)
+        }
+        else { $script:TrustedPublisherThumbprints = @($script:R03CurrentState.pins) }
+        if ($script:R03CurrentState.phase -cne 'ready') {
+            # A durable PREPARED record may outlive a failed marker publish. Keep
+            # the protocol discoverable before completing that accepted intent.
+            Write-R03Marker
+            $script:R03CurrentState = Complete-R03Recovery $script:R03CurrentState
+        }
+        if ($script:R03RequestedPins.Count -gt 0 -and $Action -in @('start', 'rollback', 'recover')) {
+            Set-R03VerificationPins @($script:R03CurrentState.pins) -AllowNarrowing
+        }
+    }
+    elseif ($Action -eq 'recover') { throw 'No R03 transaction or legacy installation is available to recover.' }
+}
+elseif ($Action -eq 'status') {
+    $script:R03CurrentState = Read-R03State
+    $script:R03TransitionState = Read-R03Transition
+    if ($null -eq $script:R03CurrentState -and $null -ne $script:R03TransitionState) {
+        $script:R03CurrentState = $script:R03TransitionState.prior_state
+    }
+    elseif ($null -ne $script:R03CurrentState -and $null -ne $script:R03TransitionState) {
+        if (Test-R03TransitionAccepted $script:R03CurrentState $script:R03TransitionState) {
+            $script:R03TransitionState = $null
+        }
+        elseif ($script:R03CurrentState.phase -ceq 'ready') {
+            $script:R03CurrentState = $script:R03TransitionState.prior_state
+        }
+        else { $script:R03TransitionState = $null }
+    }
+}
+elseif ($Action -eq 'uninstall' -and (Test-R03ProtocolFiles)) {
+    if ($null -ne (Read-R03Transition)) { throw 'R03 recovery must complete before uninstall.' }
+    $script:R03CurrentState = Read-R03State
+    if ($null -eq $script:R03CurrentState -or $script:R03CurrentState.phase -cne 'ready') {
+        throw 'R03 recovery must complete before uninstall.'
+    }
+}
 
 # Validate every shared publication target before changing receipts, trust or
 # pointers. The writer rechecks immediately before its file-only atomic publish.
@@ -514,17 +581,14 @@ switch ($Action) {
                 }
                 Move-Item -LiteralPath $staging -Destination $target
             }
-            # Record the verified requirement before changing external trust
-            # or pointers. A failed receipt must leave existing trust intact.
-            Write-InstalledVerificationPolicy $version ([bool]$manifest.signature_required)
-            if ($manifest.signature_required) {
-                Write-PublisherTrustPolicy $TrustedPublisherThumbprints
+            # Only after the candidate has been verified and staged do we
+            # persist legacy adoption and begin the transaction.
+            if ($null -eq $script:R03CurrentState) {
+                $script:R03CurrentState = Get-OrAdopt-R03State
             }
-            $old = Get-CurrentVersion
-            if ($old -cne $version) {
-                if ($null -ne $old) { Write-PointerAtomic $previousPointer $old }
-                Write-PointerAtomic $currentPointer $version
-            }
+            # The authority transaction is the only commit point. Legacy files
+            # are repaired from it and never drive selection after bootstrap.
+            $script:R03CurrentState = Invoke-R03InstallTransaction $script:R03CurrentState $version ([bool]$RequireSignature)
         }
         finally {
             if ($null -ne $staging -and (Test-Path -LiteralPath $staging)) {
@@ -541,15 +605,17 @@ switch ($Action) {
         & $PSCommandPath -Action install -InstallRoot $InstallRoot -DataRoot $DataRoot -PackageRoot $PackageRoot -RequireSignature:$RequireSignature -TrustedPublisherThumbprints $TrustedPublisherThumbprints
     }
     'rollback' {
-        $previous = Read-Pointer $previousPointer
-        if ($null -eq $previous -or -not (Test-Path -LiteralPath (Join-Path $versions $previous))) { throw 'No usable previous version is available.' }
-        $current = Get-CurrentVersion
-        $forceSignature = [bool]$RequireSignature -or (Read-RecoverySignatureRequirement $current)
-        Verify-Package -Root (Join-Path $versions $previous) -ForceSignature:$forceSignature | Out-Null
-        if ($null -ne $current) { Write-PointerAtomic $previousPointer $current }
-        Write-PointerAtomic $currentPointer $previous
+        $script:R03CurrentState = Invoke-R03RollbackTransaction $script:R03CurrentState
     }
-    'start' { Start-Noyra }
+    'start' {
+        $null = Invoke-R03AuthorizeStart $script:R03CurrentState
+        Start-Noyra
+    }
+    'recover' {
+        if ($null -eq $script:R03CurrentState) { throw 'No R03 state is available to recover.' }
+        $script:R03CurrentState = Complete-R03Recovery $script:R03CurrentState
+        [pscustomobject]@{ phase = $script:R03CurrentState.phase; generation = $script:R03CurrentState.generation; current_version = $script:R03CurrentState.current; previous_version = $script:R03CurrentState.previous } | ConvertTo-Json -Compress
+    }
     'stop' { Stop-Noyra }
     'uninstall' {
         Stop-Noyra
@@ -560,12 +626,20 @@ switch ($Action) {
         $tracked = Get-TrackedNoyraProcess
         $running = $null -ne $tracked
         if ($null -ne $tracked) { $tracked.Dispose() }
+        $current = if ($null -ne $script:R03CurrentState) { $script:R03CurrentState.current } else { Get-CurrentVersion }
+        $previous = if ($null -ne $script:R03CurrentState) { $script:R03CurrentState.previous } else { Read-Pointer $previousPointer }
         [pscustomobject]@{
             install_root = $InstallRoot
             data_root = $DataRoot
-            current_version = Get-CurrentVersion
-            previous_version = Read-Pointer $previousPointer
+            current_version = $current
+            previous_version = $previous
             running = $running
+            protocol_version = if ($null -ne $script:R03CurrentState -or $null -ne $script:R03TransitionState) { 1 } else { 0 }
+            recovery_phase = if ($null -ne $script:R03TransitionState) { 'pre_acceptance_transition' } elseif ($null -ne $script:R03CurrentState) { $script:R03CurrentState.phase } else { 'legacy' }
+            recovery_target_version = if ($null -ne $script:R03TransitionState) { $script:R03TransitionState.version } elseif ($null -ne $script:R03CurrentState -and $null -ne $script:R03CurrentState.intent) { $script:R03CurrentState.intent.version } else { $null }
+            recovery_kind = if ($null -ne $script:R03TransitionState) { $script:R03TransitionState.kind } elseif ($null -ne $script:R03CurrentState -and $null -ne $script:R03CurrentState.intent) { $script:R03CurrentState.intent.kind } else { $null }
+            generation = if ($null -ne $script:R03CurrentState) { $script:R03CurrentState.generation } else { $null }
+            recovery_required = ($null -ne $script:R03TransitionState -or ($null -ne $script:R03CurrentState -and $script:R03CurrentState.phase -ne 'ready'))
         } | ConvertTo-Json -Compress
     }
 }
