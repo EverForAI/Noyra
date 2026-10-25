@@ -6,6 +6,7 @@ from typing import Any
 
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
+from noyra.core.relationship_identity import verify_binding
 from noyra.core.types import (
     canonical_json,
     content_hash,
@@ -371,6 +372,16 @@ class MindEngine:
                 belief_count += 1
             counts["beliefs"] = belief_count
 
+            # A subject_id mutation can move a row out of this subject's main
+            # SELECT. Check its independently owned witnesses as well.
+            for binding in connection.execute(
+                "SELECT b.* FROM relationship_identity_bindings b LEFT JOIN relationships r "
+                "ON r.relationship_id=b.relationship_id WHERE b.subject_id=? AND "
+                "(r.relationship_id IS NULL OR r.subject_id<>b.subject_id OR "
+                "r.entity_type<>b.entity_type OR r.entity_key<>b.entity_key)",
+                (subject_id,),
+            ):
+                verify_binding(connection, binding, subject_id=subject_id)
             relationship_count = 0
             relationships = connection.execute(
                 "SELECT rel.*, rev.revision_number AS verified_revision_number, "
@@ -385,7 +396,12 @@ class MindEngine:
             )
             for row in relationships:
                 relationship_id = row["relationship_id"]
-                _integrity_row("relationship", relationship_id, RelationshipStore._from_row, row)
+                _integrity_row(
+                    "relationship",
+                    relationship_id,
+                    lambda value: RelationshipStore._from_row(value, connection=connection),
+                    row,
+                )
                 current_revision = _integrity_int(
                     row["current_revision"], "relationship", relationship_id, minimum=1
                 )

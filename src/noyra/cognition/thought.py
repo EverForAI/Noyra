@@ -10,6 +10,7 @@ from noyra.core.database import Database
 from noyra.core.errors import IntegrityError
 from noyra.core.events import EventStore
 from noyra.core.payload_codec import decompress_text
+from noyra.core.relationship_identity import context_rows
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.mind import GoalCandidate, GoalStore, MindEngine
 from noyra.model import ModelGateway, ModelMessage
@@ -443,6 +444,7 @@ class IntrinsicThought:
                 "ORDER BY MAX(affinity, conflict) DESC LIMIT 8",
                 (self.subject_id,),
             ).fetchall()
+            relationships = context_rows(connection, relationships, self.subject_id)
         candidates: list[dict[str, Any]] = []
         for row in goals:
             emotional = min(1.0, abs(float(row["emotional_pressure"])))
@@ -586,6 +588,7 @@ class IntrinsicThought:
                 "FROM relationships WHERE subject_id = ? ORDER BY familiarity DESC LIMIT 8",
                 (self.subject_id,),
             ).fetchall()
+            relationship_rows = context_rows(connection, relationship_rows, self.subject_id)
             affect_rows = connection.execute(
                 "SELECT emotion_type, target_type, target_id, intensity, valence, arousal, "
                 "dominance FROM affect_components WHERE subject_id = ? "

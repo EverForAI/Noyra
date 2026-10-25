@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+from noyra.core.relationship_identity import verify_binding
+
 from .errors import CausalValidationError
 
 
@@ -82,6 +84,14 @@ def validate_causal_source_ids(
         ).fetchone()
         if event is not None:
             validate_event_ids(connection, subject_id, (source_id,))
+        relationship = connection.execute(
+            "SELECT * FROM relationships WHERE subject_id=? AND relationship_id=?",
+            (subject_id, source_id),
+        ).fetchone()
+        if relationship is not None:
+            _, reasons = verify_binding(connection, relationship, subject_id=subject_id)
+            if reasons:
+                raise CausalValidationError("relationship identity requires review")
         if not any(
             connection.execute(
                 f"SELECT 1 FROM {table} WHERE subject_id = ? AND {key} = ?",

@@ -5,6 +5,7 @@ from typing import Any
 from noyra.core.database import Database, public_post_identity_hash
 from noyra.core.errors import IntegrityError
 from noyra.core.payload_codec import decompress_text
+from noyra.core.relationship_identity import verify_binding
 from noyra.core.types import content_hash, strict_json_loads
 
 from .diary import PublicDiaryStore
@@ -466,14 +467,28 @@ class InteractionIntegrity:
         if expected != row["state_hash"]:
             raise IntegrityError(f"social state mismatch: {row['social_id']}")
         relationship = connection.execute(
-            "SELECT subject_id, entity_type, entity_key FROM relationships "
+            "SELECT relationship_id, subject_id, entity_type, entity_key FROM relationships "
             "WHERE relationship_id = ?",
             (row["relationship_id"],),
         ).fetchone()
-        if (
-            relationship is None
-            or relationship["subject_id"] != subject_id
-            or relationship["entity_key"] != row["counterparty"]
+        if relationship is None:
+            raise IntegrityError(f"social relationship missing: {row['social_id']}")
+        origin, reasons = verify_binding(connection, relationship, subject_id=subject_id)
+        witness = connection.execute(
+            "SELECT review_social_hashes_json FROM relationship_identity_bindings "
+            "WHERE relationship_id=?",
+            (row["relationship_id"],),
+        ).fetchone()
+        recorded_conflicts = strict_json_loads(witness[0])
+        if reasons and recorded_conflicts.get(row["social_id"]) != row["state_hash"]:
+            raise IntegrityError("social run is not in the quarantined legacy baseline")
+        legacy_conflict = (
+            origin == "legacy_observed"
+            and "social_identity_conflict" in reasons
+            and recorded_conflicts.get(row["social_id"]) == row["state_hash"]
+        )
+        if relationship["subject_id"] != subject_id or (
+            relationship["entity_key"] != row["counterparty"] and not legacy_conflict
         ):
             raise IntegrityError(f"social relationship mismatch: {row['social_id']}")
         entity = connection.execute(
@@ -487,7 +502,7 @@ class InteractionIntegrity:
             if entity[0] in {"agent", "noyra"}
             else "entity"
         )
-        if relationship["entity_type"] != expected_type:
+        if relationship["entity_type"] != expected_type and not legacy_conflict:
             raise IntegrityError(f"social relationship type mismatch: {row['social_id']}")
         model_call = connection.execute(
             "SELECT subject_id, status, response_json, response_hash FROM model_calls "

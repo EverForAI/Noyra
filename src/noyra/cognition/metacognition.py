@@ -9,6 +9,7 @@ from noyra.core.database import Database
 from noyra.core.errors import IntegrityError
 from noyra.core.events import EventStore
 from noyra.core.payload_codec import decompress_text
+from noyra.core.relationship_identity import context_rows
 from noyra.core.types import content_hash, new_id, utc_now
 
 from ._integrity import durable_boundary, durable_float, durable_int
@@ -353,6 +354,10 @@ class MetacognitiveControl:
                 "ORDER BY MAX(affinity, conflict) DESC, familiarity DESC LIMIT 1",
                 (self.subject_id,),
             ).fetchone()
+            safe_relationships = context_rows(
+                connection, [] if relationship is None else [relationship], self.subject_id
+            )
+            relationship = safe_relationships[0] if safe_relationships else None
             recent = connection.execute(
                 "SELECT strategy FROM metacognitive_decisions WHERE subject_id = ? "
                 "ORDER BY created_at DESC, decision_id DESC LIMIT 4",

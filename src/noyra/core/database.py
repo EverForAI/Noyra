@@ -29,6 +29,7 @@ from .private_sources import MIGRATION_V86, assert_private_inputs_available
 from .public_archive_schema import MIGRATION_V93
 from .public_policy import MIGRATION_V82
 from .public_sitemap_schema import MIGRATION_V94
+from .relationship_identity import RELATIONSHIP_IDENTITY_SCHEMA, backfill_legacy_bindings
 from .resource_policy import (
     LIMIT_DIMENSIONS,
     MIGRATION_V81,
@@ -311,7 +312,7 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 # Schema versions describe the complete SQLite contract. Optional runtime
 # features may still be repaired idempotently, but they must not be invisible
 # to migration/export consumers.
-CURRENT_SCHEMA_VERSION = 106
+CURRENT_SCHEMA_VERSION = 107
 
 # The schema DDL fingerprint is checked after every successful initialization.
 # Update this value only alongside a reviewed schema migration and its tests.
@@ -319,6 +320,7 @@ CURRENT_SCHEMA_VERSION = 106
 # installations persist this value in ``schema_meta`` and therefore require
 # the value to remain stable across compatible runtime fixes.
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
+    107: "927d782afd08592da1313d8ad17c1c7f3110127564328541ae94f2d3252ff31c",
     105: "f117dc793fddf96e769abef73c30127b5494ce8fb8b7f6598e6b1e093f554950",
     106: "236bf850b21704b51478101c6a979682307f69f4530f937287eaec46c14870c5",
     104: "72e5c15e4793cbe3b743b5eca667cea5bef3c34af05a4674bde7ce720234dc8e",
@@ -356,6 +358,7 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 # auditable P0 finding.  Tables, indexes, and views still fail closed during
 # database construction because they define the storage contract itself.
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
+    107: "6f8c0acae3783f1c6053c14161e5203c1369371e9c95d8bb3630a5211426725f",
     105: "8feff8b35da5fad5d7c530dd492dcf78347c038456f48857c4afad63fd220a2e",
     106: "60c959c1499b63793106847aae7da21ad44733ecc143373b44e5ea2313450241",
     104: "1c17714c61ce55ec2a36af8dfdb439bbae32428bab58c7d842a34802426650e4",
@@ -7132,6 +7135,7 @@ WHEN EXISTS(SELECT 1 FROM interactions i WHERE i.interaction_id=NEW.interaction_
  AND i.subject_id=NEW.subject_id AND i.created_at<>NEW.interaction_created_at)
 BEGIN SELECT RAISE(ABORT,'participant message time mismatch'); END;
 """,
+    107: RELATIONSHIP_IDENTITY_SCHEMA,
     106: """
 CREATE TRIGGER IF NOT EXISTS prevent_goal_origin_update
 BEFORE UPDATE OF goal_id,subject_id,origin,created_at,origin_evidence,origin_evidence_hash ON goals
@@ -11019,6 +11023,17 @@ END;
                         self._execute_sql_script(connection, migration)
                         self._ensure_embedding_config_hash_column(connection)
                         self._backfill_embedding_config_hashes(connection)
+                        self._set_schema_version(connection, target_version)
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
+                if target_version == 107:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._execute_sql_script(connection, migration)
+                        backfill_legacy_bindings(connection)
                         self._set_schema_version(connection, target_version)
                         connection.commit()
                     except Exception:

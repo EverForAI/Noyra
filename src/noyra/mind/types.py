@@ -244,6 +244,10 @@ class RelationshipRecord:
     created_at: str
     updated_at: str
 
+    identity_origin: str = "created"
+    identity_status: str = "consistent"
+    identity_reasons: tuple[str, ...] = ()
+
 
 @dataclass(frozen=True)
 class CausalLinkRecord:

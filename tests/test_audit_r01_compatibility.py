@@ -208,8 +208,10 @@ def test_indistinguishable_histories_defeat_automatic_backfill_even_with_valid_c
             patch("noyra.mind.relationship.utc_now", return_value=formation_at),
         ):
             relation(database, original, (event,))
-    # Both are legal writes through the existing API; B can cite A's event.
+    # Legacy-only rows remain ambiguous, but schema 107 witnesses distinguish
+    # the two histories. Explicitly bypass the new guard to inject corruption.
     with second.transaction() as c:
+        c.execute("DROP TRIGGER prevent_relationship_identity_update")
         c.execute(
             "UPDATE relationships SET entity_key=? WHERE relationship_id='rel-fixed'",
             (alice.entity_id,),
@@ -219,7 +221,11 @@ def test_indistinguishable_histories_defeat_automatic_backfill_even_with_valid_c
     assert read_evidence(first)[0].category == "correlated_not_proven"
     for database in (first, second):
         assert EventStore(database).verify_chain(SUBJECT)["event_count"] == 1
-        assert MindEngine(database).verify_integrity(SUBJECT)["relationships"] == 1
+        if database is first:
+            assert MindEngine(database).verify_integrity(SUBJECT)["relationships"] == 1
+        else:
+            with pytest.raises(IntegrityError):
+                MindEngine(database).verify_integrity(SUBJECT)
         assert not read_evidence(database)[0].identity_at_creation_proven
 
 
@@ -231,7 +237,13 @@ def test_identity_changes_are_review_signals_without_inventing_repair(
     _, event = message(db, alice)
     created = relation(db, alice, (event,))
     value = {"entity_key": bob.entity_id, "entity_type": "agent", "subject_id": OTHER}[field]
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"), db.transaction() as c:
+        c.execute(
+            f"UPDATE relationships SET {field}=? WHERE relationship_id=?",
+            (value, created.relationship_id),
+        )
     with db.transaction() as c:
+        c.execute("DROP TRIGGER prevent_relationship_identity_update")
         c.execute(
             f"UPDATE relationships SET {field}=? WHERE relationship_id=?",
             (value, created.relationship_id),
@@ -240,9 +252,8 @@ def test_identity_changes_are_review_signals_without_inventing_repair(
         (evidence,) = inspect(c, OTHER if field == "subject_id" else SUBJECT)
     assert evidence.category == "review_required"
     assert not evidence.identity_at_creation_proven
-    assert RelationshipStore(db).get(created.relationship_id).entity_key == (
-        bob.entity_id if field == "entity_key" else alice.entity_id
-    )
+    with pytest.raises(IntegrityError):
+        RelationshipStore(db).get(created.relationship_id)
 
 
 @pytest.mark.parametrize("kind", ["human", "agent", "noyra", "unknown"])
@@ -553,6 +564,7 @@ def test_changed_source_or_relation_between_survey_and_cutover_is_rejected(
                 (who.entity_id,),
             )
         else:
+            c.execute("DROP TRIGGER prevent_relationship_identity_update")
             c.execute("UPDATE relationships SET entity_key='changed-before-cutover'")
     after = legacy_rows(db)
     with pytest.raises(ValueError, match="stale survey"):
@@ -693,6 +705,7 @@ async def test_later_social_snapshot_corroborates_only_its_own_time_not_formatio
     assert observed.matching_social_snapshots == 1
     assert not observed.identity_at_creation_proven
     with db.transaction() as c:
+        c.execute("DROP TRIGGER prevent_relationship_identity_update")
         c.execute(
             "UPDATE relationships SET entity_key=? WHERE relationship_id=?",
             (bob.entity_id, created.relationship_id),
@@ -700,8 +713,8 @@ async def test_later_social_snapshot_corroborates_only_its_own_time_not_formatio
     (observed,) = read_evidence(db)
     assert observed.category == "review_required"
     assert "social_snapshot_disagrees" in observed.reasons
-    # Existing interaction integrity already catches this stronger later witness.
-    with db.connection() as c, pytest.raises(IntegrityError, match="social relationship mismatch"):
+    # Schema 107 also detects corruption against the creation-time binding.
+    with db.connection() as c, pytest.raises(IntegrityError, match="identity binding mismatch"):
         InteractionIntegrity._verify_social_run(
             c, SUBJECT, c.execute("SELECT * FROM relationship_social_runs").fetchone()
         )
@@ -732,11 +745,6 @@ def test_original_source_is_not_replaced_by_a_more_recent_matching_revision(db: 
     alice, bob = person(db, "alice"), person(db, "bob")
     events = [message(db, p)[1] for p in (alice, bob)]
     created = relation(db, alice, (events[0],))
-    with db.transaction() as c:
-        c.execute(
-            "UPDATE relationships SET entity_key=? WHERE relationship_id=?",
-            (bob.entity_id, created.relationship_id),
-        )
     RelationshipStore(db).revise(
         created.relationship_id,
         trust=0.8,
@@ -747,6 +755,12 @@ def test_original_source_is_not_replaced_by_a_more_recent_matching_revision(db: 
         reason="later source",
         source_event_ids=(events[1],),
     )
+    with db.transaction() as c:
+        c.execute("DROP TRIGGER prevent_relationship_identity_update")
+        c.execute(
+            "UPDATE relationships SET entity_key=? WHERE relationship_id=?",
+            (bob.entity_id, created.relationship_id),
+        )
     (observed,) = read_evidence(db)
     assert observed.category == "review_required"
     assert "multiple_source_entities" in observed.reasons

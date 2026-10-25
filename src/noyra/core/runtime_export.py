@@ -709,6 +709,10 @@ _OWNERSHIP_GRAPHS[104] = {
 }
 _OWNERSHIP_GRAPHS[105] = _OWNERSHIP_GRAPHS[104]
 _OWNERSHIP_GRAPHS[106] = _OWNERSHIP_GRAPHS[105]
+_OWNERSHIP_GRAPHS[107] = {
+    **_OWNERSHIP_GRAPHS[106],
+    "relationship_identity_bindings": _subject_rule(),
+}
 
 
 @dataclass(frozen=True)

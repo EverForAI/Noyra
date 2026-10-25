@@ -21,6 +21,7 @@ from noyra.interaction.conversations import ConversationStore
 from noyra.interaction.participants import ParticipantStore
 from noyra.interaction.types import InteractionRecord
 from noyra.mind import AffectImpulse, MemoryStore, MindEngine, RelationshipStore
+from noyra.mind.errors import RelationshipIdentityReviewRequired
 from noyra.model import ModelGateway, ModelMessage
 from noyra.model.errors import (
     BudgetExhaustedError,
@@ -88,6 +89,8 @@ class InteractionCognition:
                     return await self._run_due_locked(interaction, messages)
         except PermissionError:
             return "interaction_private_input_withdrawn"
+        except RelationshipIdentityReviewRequired:
+            return "interaction_relationship_review_required"
         finally:
             self._processing_lock.release()
 
@@ -241,6 +244,12 @@ class InteractionCognition:
                 "WHERE m.interaction_id=i.interaction_id "
                 "AND c.status IN ('deleting','deleted')) AND "
                 "(i.status = 'offered' OR (i.status = 'deferred' AND i.decided_at <= :cutoff)) "
+                "AND NOT EXISTS (SELECT 1 FROM relationships r "
+                "JOIN relationship_identity_bindings b "
+                "ON b.relationship_id=r.relationship_id WHERE r.subject_id=i.subject_id "
+                "AND b.review_reasons_json<>'[]' AND r.entity_key=COALESCE((SELECT p.entity_id "
+                "FROM participant_message_links p WHERE p.subject_id=i.subject_id "
+                "AND p.interaction_id=i.interaction_id),i.counterparty)) "
                 "AND NOT EXISTS (SELECT 1 FROM model_calls c WHERE c.subject_id=i.subject_id "
                 "AND c.purpose='interaction_cognition:'||i.interaction_id||':'||(SELECT COUNT(*) "
                 "FROM interaction_decisions d WHERE d.interaction_id=i.interaction_id) AND "

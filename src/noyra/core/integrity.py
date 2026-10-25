@@ -1376,7 +1376,7 @@ def _default_checks() -> tuple[IntegrityCheckSpec, ...]:
             _DEEP_PROFILES,
             _check_retention_runs,
         ),
-        IntegrityCheckSpec("mind.state", 1, "mind", _DEEP_PROFILES, _check_mind),
+        IntegrityCheckSpec("mind.state", 2, "mind", _DEEP_PROFILES, _check_mind),
         IntegrityCheckSpec("mind.memory_blocks", 1, "mind", _DEEP_PROFILES, _check_memory_blocks),
         IntegrityCheckSpec("mind.entities", 1, "mind", _DEEP_PROFILES, _check_entities),
         IntegrityCheckSpec(

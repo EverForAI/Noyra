@@ -283,6 +283,13 @@ class PublicProjection:
                 "SELECT COALESCE(SUM(access_count), 0) FROM memory_accesses WHERE subject_id = ?",
                 (subject_id,),
             ).fetchone()[0]
+            identity_counts = connection.execute(
+                "SELECT COUNT(*) AS total, "
+                "SUM(CASE WHEN origin='legacy_observed' THEN 1 ELSE 0 END) AS legacy, "
+                "SUM(CASE WHEN review_reasons_json<>'[]' THEN 1 ELSE 0 END) AS review "
+                "FROM relationship_identity_bindings WHERE subject_id=?",
+                (subject_id,),
+            ).fetchone()
             social_counts = connection.execute(
                 "SELECT COUNT(*) AS total, "
                 "SUM(CASE WHEN disposition = 'contact' THEN 1 ELSE 0 END) AS contacts, "
@@ -415,6 +422,13 @@ class PublicProjection:
             },
             "relationship_summary": {
                 "known_human_count": int(relationship_count),
+                "identity_binding_count": int(identity_counts["total"]),
+                "legacy_observed_count": int(identity_counts["legacy"] or 0),
+                "identity_review_required_count": int(identity_counts["review"] or 0),
+                "identity_evidence_note": (
+                    "旧关系保留升级时的身份绑定。这不代表更早的归属已被证明。"
+                    "需要复核的关系不会用于自动外联。"
+                ),
                 "social_review_count": int(social_counts["total"]),
                 "contact_count": int(social_counts["contacts"] or 0),
                 "help_request_count": int(social_counts["help_requests"] or 0),

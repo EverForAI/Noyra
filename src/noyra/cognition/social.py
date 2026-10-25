@@ -260,7 +260,9 @@ class RelationshipSocialCognition:
                         str(last["updated_at"]),
                         str(last["relationship_id"]),
                     )
-        return [RelationshipStore._from_row(row) for row in rows], next_cursor
+            return [
+                RelationshipStore._from_row(row, connection=reader) for row in rows
+            ], next_cursor
 
     def _context(self) -> _SocialContext | None:
         # Allow the indexed 64-recipient/48-message page to finish, while
@@ -332,6 +334,8 @@ class RelationshipSocialCognition:
         routes: dict[str, _SocialRoute] = {}
         candidates: list[tuple[RelationshipRecord, list[Any], str | None, str | None]] = []
         for relationship in relationships:
+            if relationship.identity_status != "consistent":
+                continue
             boundary = relationship.boundaries
             blocked = bool(boundary.get("no_contact")) or boundary.get("contact") in {
                 "blocked",
@@ -421,6 +425,8 @@ class RelationshipSocialCognition:
                 "relationship_id": relationship.relationship_id,
                 "entity_key": relationship.entity_key,
                 "display_name": relationship.display_name,
+                "identity_origin": relationship.identity_origin,
+                "identity_status": relationship.identity_status,
                 "trust": relationship.trust,
                 "affinity": relationship.affinity,
                 "conflict": relationship.conflict,
@@ -494,8 +500,10 @@ class RelationshipSocialCognition:
         self, proposal: RelationshipSocialProposal, context: _SocialContext
     ) -> tuple[RelationshipRecord, str]:
         relationship = context.relationships.get(proposal.relationship_id)
-        if relationship is None:
-            raise RelationshipSocialValidationError("relationship is unavailable")
+        if relationship is None or relationship.identity_status != "consistent":
+            raise RelationshipSocialValidationError(
+                "relationship is unavailable or requires review"
+            )
         if not set(proposal.evidence_event_ids).issubset(context.event_ids):
             raise RelationshipSocialValidationError("social proposal cites unavailable evidence")
         channel = context.channels.get(relationship.relationship_id)
@@ -621,6 +629,15 @@ class RelationshipSocialCognition:
         proposal_hash = content_hash(payload)
         key = f"relationship-social:{call_id}"
         with self.database.transaction() as connection:
+            current = self.relationships._load_connection(connection, relationship.relationship_id)
+            if (
+                current.subject_id != self.subject_id
+                or current.entity_key != relationship.entity_key
+            ):
+                raise RelationshipSocialValidationError("relationship identity changed")
+            self._validate(
+                proposal, replace(context, relationships={current.relationship_id: current})
+            )
             existing = connection.execute(
                 "SELECT * FROM relationship_social_runs WHERE subject_id = ? "
                 "AND idempotency_key = ?",
@@ -645,7 +662,7 @@ class RelationshipSocialCognition:
                 ).fetchone()
                 if current_row is None:
                     raise RelationshipSocialValidationError("contact relationship unavailable")
-                current = RelationshipStore._from_row(current_row)
+                current = RelationshipStore._from_row(current_row, connection=connection)
                 self._validate(
                     proposal, replace(context, relationships={current.relationship_id: current})
                 )
