@@ -76,6 +76,60 @@ try {
     $u1 = Make-Package 'unsigned-u1' $false $null @()
     $u2 = Make-Package 'unsigned-u2' $false $null @()
     $u3 = Make-Package 'unsigned-u3' $false $null @()
+    # Fixed state paths are files, never directory containers. Reject before
+    # staging or changing trust, receipts or either version selection.
+    foreach ($stateName in @('current.txt', 'previous.txt', 'trusted-publishers.json')) {
+        $rootName = 'state-' + $stateName.Replace('.', '-')
+        $root = Join-Path $WorkRoot $rootName
+        $blocked = Join-Path $root $stateName
+        # All fault injection and nonrecursive cleanup stay inside the pytest fixture.
+        $fixturePrefix = [IO.Path]::GetFullPath($WorkRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        if (-not [IO.Path]::GetFullPath($blocked).StartsWith($fixturePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'State fixture escaped its temporary workspace.'
+        }
+        New-Item -ItemType Directory -Path $blocked -Force | Out-Null
+        $marker = Join-Path $blocked 'retained.txt'
+        [IO.File]::WriteAllText($marker, 'retained', $utf8)
+        Expect ($rootName + '_fresh_install_rejected') (Invoke-Life install $rootName $a1 @{TrustedPublisherThumbprints = $pinsA}) $false 'state path must be a regular file'
+        if (@(Get-ChildItem -LiteralPath $blocked -Force).Count -ne 1 -or
+            [IO.File]::ReadAllText($marker) -cne 'retained' -or
+            (Test-Path -LiteralPath (Join-Path $root 'versions'))) {
+            throw 'Rejected directory was modified or package staging began.'
+        }
+        [IO.File]::Delete($marker)
+        [IO.Directory]::Delete($blocked)
+        Expect ($rootName + '_initial_retry') (Invoke-Life install $rootName $a1 @{TrustedPublisherThumbprints = $pinsA}) $true
+        Expect ($rootName + '_base_upgrade') (Invoke-Life upgrade $rootName $a2) $true
+        $retained = @{}
+        foreach ($name in @('current.txt', 'previous.txt', 'trusted-publishers.json')) {
+            $retained[$name] = [IO.File]::ReadAllBytes((Join-Path $root $name))
+        }
+        [IO.File]::Delete($blocked)
+        New-Item -ItemType Directory -Path $blocked | Out-Null
+        Expect ($rootName + '_upgrade_rejected') (Invoke-Life upgrade $rootName $b3 @{TrustedPublisherThumbprints = $pinsB}) $false 'state path must be a regular file'
+        Expect ($rootName + '_rollback_rejected') (Invoke-Life rollback $rootName) $false 'state path must be a regular file'
+        if (@(Get-ChildItem -LiteralPath $blocked -Force).Count -ne 0 -or
+            (Test-Path -LiteralPath (Join-Path $root 'versions/signed-b3')) -or
+            (Test-Path -LiteralPath (Join-Path $root 'verification-policy.signed-b3.json'))) {
+            throw 'Rejected state type changed installation publication state.'
+        }
+        foreach ($name in $retained.Keys) {
+            if ($name -ceq $stateName) { continue }
+            if ([Convert]::ToBase64String($retained[$name]) -cne
+                [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $root $name)))) {
+                throw 'Rejected state type changed another state file.'
+            }
+        }
+        if ($stateName -ne 'trusted-publishers.json') {
+            Expect ($rootName + '_status_rejected') (Invoke-Life status $rootName) $false 'state path must be a regular file'
+        }
+        [IO.Directory]::Delete($blocked)
+        [IO.File]::WriteAllBytes($blocked, $retained[$stateName])
+        Expect ($rootName + '_upgrade_retry') (Invoke-Life upgrade $rootName $b3 @{TrustedPublisherThumbprints = $pinsAB}) $true
+        Assert-Current $rootName 'signed-b3'
+        Expect ($rootName + '_normal_rollback') (Invoke-Life rollback $rootName) $true
+        Assert-Current $rootName 'signed-a2'
+    }
     Expect 'explicit_multiple_pins_install' (Invoke-Life install 'strict' $a1 @{TrustedPublisherThumbprints = $pinsA; RequireSignature = $true}) $true
     $installedManifest = [IO.File]::ReadAllBytes((Join-Path $WorkRoot 'strict/versions/signed-a1/noyra-package.json'))
     if ([Convert]::ToBase64String($installedManifest) -ne [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $a1 'noyra-package.json')))) { throw 'Signed bytes changed during staging.' }

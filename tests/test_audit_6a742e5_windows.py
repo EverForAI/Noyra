@@ -55,6 +55,16 @@ def test_windows_saved_trust_rotation_and_damaged_recovery(tmp_path: Path) -> No
         "retry_reverifies_existing_payload",
         "different_same_version_is_not_replaced",
     } <= evidence.keys(), evidence
+    for state_name in ("current-txt", "previous-txt", "trusted-publishers-json"):
+        for scenario in (
+            "fresh_install_rejected",
+            "initial_retry",
+            "upgrade_rejected",
+            "rollback_rejected",
+            "upgrade_retry",
+            "normal_rollback",
+        ):
+            assert evidence[f"state-{state_name}_{scenario}"] is True, evidence
     assert all(value is True for value in evidence.values()), evidence
     for directory in (
         "single",

@@ -59,7 +59,28 @@ function Normalize-Thumbprints([object[]]$Values) {
     } | Sort-Object -Unique)
 }
 
+function Assert-StateFileTarget([string]$Path) {
+    try { $attributes = [IO.File]::GetAttributes($Path) }
+    catch [IO.FileNotFoundException] { return }
+    catch [IO.DirectoryNotFoundException] { return }
+    if (($attributes -band [IO.FileAttributes]::Directory) -or
+        ($attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Installation state path must be a regular file: $Path"
+    }
+}
+
+function Publish-StateFile([string]$Temporary, [string]$Path) {
+    Assert-StateFileTarget $Path
+    # Unlike Move-Item, these APIs never interpret a directory as a container.
+    # Do not delete a selected state file first or fall back after a failed replace.
+    if ([IO.File]::Exists($Path)) {
+        [IO.File]::Replace($Temporary, $Path, [NullString]::Value)
+    }
+    else { [IO.File]::Move($Temporary, $Path) }
+}
+
 function Read-Pointer([string]$Path) {
+    Assert-StateFileTarget $Path
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
     $value = (Get-Content -LiteralPath $Path -Raw).Trim()
     if ($null -eq $value -or $value -eq '') { return $null }
@@ -69,12 +90,13 @@ function Read-Pointer([string]$Path) {
 
 function Write-PointerAtomic([string]$Path, [string]$Value) {
     Assert-SafeSegment $Value 'pointer'
+    Assert-StateFileTarget $Path
     $parent = Split-Path -Parent $Path
     New-Item -ItemType Directory -Force -Path $parent | Out-Null
     $temporary = Join-Path $parent ('.' + [IO.Path]::GetFileName($Path) + '.' + [guid]::NewGuid().ToString('N') + '.tmp')
     try {
         Set-Content -LiteralPath $temporary -Value $Value -NoNewline -Encoding utf8
-        Move-Item -LiteralPath $temporary -Destination $Path -Force
+        Publish-StateFile $temporary $Path
     }
     finally {
         if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
@@ -82,6 +104,7 @@ function Write-PointerAtomic([string]$Path, [string]$Value) {
 }
 
 function Read-PublisherTrustPolicy {
+    Assert-StateFileTarget $publisherTrustPath
     if (-not (Test-Path -LiteralPath $publisherTrustPath -PathType Leaf)) { return @() }
     $item = Get-Item -LiteralPath $publisherTrustPath -Force
     if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint -or $item.Length -gt 16KB) {
@@ -100,6 +123,7 @@ function Read-PublisherTrustPolicy {
 function Write-PublisherTrustPolicy([string[]]$Thumbprints) {
     $normalized = @(Normalize-Thumbprints $Thumbprints)
     if ($normalized.Count -eq 0) { throw 'Cannot persist an empty publisher trust policy.' }
+    Assert-StateFileTarget $publisherTrustPath
     New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
     $temporary = Join-Path $InstallRoot ('.trusted-publishers.' + [guid]::NewGuid().ToString('N') + '.tmp')
     try {
@@ -109,7 +133,7 @@ function Write-PublisherTrustPolicy([string[]]$Thumbprints) {
         }
         $document | ConvertTo-Json -Depth 4 -Compress |
             Set-Content -LiteralPath $temporary -NoNewline -Encoding utf8
-        Move-Item -LiteralPath $temporary -Destination $publisherTrustPath -Force
+        Publish-StateFile $temporary $publisherTrustPath
     }
     finally {
         if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
@@ -133,7 +157,7 @@ function Write-InstalledVerificationPolicy([string]$InstalledVersion, [bool]$Sig
             signature_required = $SignatureRequired
         } | ConvertTo-Json -Compress |
             Set-Content -LiteralPath $temporary -NoNewline -Encoding utf8
-        Move-Item -LiteralPath $temporary -Destination $path -Force
+        Publish-StateFile $temporary $path
     }
     finally {
         if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
@@ -434,6 +458,14 @@ if ($Action -in @('install', 'rollback', 'start', 'stop', 'uninstall')) {
         [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
 }
 try {
+
+# Validate every shared publication target before changing receipts, trust or
+# pointers. The writer rechecks immediately before its file-only atomic publish.
+if ($Action -in @('install', 'rollback')) {
+    foreach ($path in @($currentPointer, $previousPointer, $publisherTrustPath)) {
+        Assert-StateFileTarget $path
+    }
+}
 
 switch ($Action) {
     'install' {
