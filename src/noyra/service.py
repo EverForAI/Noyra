@@ -887,7 +887,7 @@ class ServiceSettings(BaseModel):
 
     data_dir: Path
     backup_root: Path = Path("/var/backups/noyra")
-    subject_id: str = Field(min_length=8, max_length=128)
+    subject_id: str = Field(min_length=3, max_length=128)
     genesis_hash: str = Field(min_length=64, max_length=64)
     profile: Literal["development", "test", "production"] = "development"
     deployment_profile: Literal["host", "container_internal"] = "host"

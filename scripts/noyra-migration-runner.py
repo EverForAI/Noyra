@@ -18,6 +18,17 @@ from typing import Any
 MAX_REQUEST_BYTES = 1_000_000
 DATA_ROOT = Path(os.environ.get("NOYRA_MIGRATION_DATA_ROOT", "/var/lib/noyra/migration"))
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}\Z")
+# Keep this root-owned runner stdlib-only for plain SQLite recovery. Its subject
+# contract mirrors core.identity and is guarded by cross-boundary parity tests.
+SUBJECT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
+_RESERVED_SUBJECT_IDS = {
+    "aux",
+    "con",
+    "nul",
+    "prn",
+    *(f"com{index}" for index in range(1, 10)),
+    *(f"lpt{index}" for index in range(1, 10)),
+}
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _FORBIDDEN = frozenset(
     {"secret", "token", "password", "private_key", "api_key", "bearer", "credential"}
@@ -35,8 +46,11 @@ def _now() -> str:
 
 
 def _safe_id(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not ID.fullmatch(value):
+    pattern = SUBJECT_ID if label == "subject_id" else ID
+    if not isinstance(value, str) or not pattern.fullmatch(value):
         raise RunnerError(f"invalid_{label}")
+    if label == "subject_id" and value.casefold() in _RESERVED_SUBJECT_IDS:
+        raise RunnerError("invalid_subject_id")
     return value
 
 
