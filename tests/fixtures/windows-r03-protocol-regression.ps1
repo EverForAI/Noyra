@@ -6,6 +6,24 @@ Import-R03LifecycleHelpers $Lifecycle
 $fixture=Get-Content -LiteralPath $FixtureJson -Raw | ConvertFrom-Json
 $pinsA=@($fixture.pins_a); $pinsB=@($fixture.pins_b); $pinsAB=@($fixture.pins_ab)
 $results=[ordered]@{}
+function Write-R03Evidence {
+    $product=[ordered]@{implementation='production-lifecycle'}
+    $model=[ordered]@{implementation='test-only-protocol'}
+    foreach($key in $results.Keys) {
+        if($key.StartsWith('production_')) {$product[$key]=$results[$key]}
+        elseif($key -notin @('launchers_executed','certificates_imported','power_shell_version')) {$model[$key]=$results[$key]}
+    }
+    [ordered]@{
+        format='noyra-r03-validation/v2'
+        production=$product
+        prototype=$model
+        safety=[ordered]@{
+            launchers_executed=$(if($results.Contains('launchers_executed')){$results.launchers_executed}else{0})
+            certificates_imported=$(if($results.Contains('certificates_imported')){$results.certificates_imported}else{0})
+            power_shell_version=$PSVersionTable.PSVersion.ToString()
+        }
+    } | ConvertTo-Json -Depth 8 -Compress
+}
 $worker=Join-Path $PSScriptRoot 'windows-r03-protocol-worker.ps1'
 function Assert-That([bool]$Condition,[string]$Reason) { if (-not $Condition) { throw $Reason } }
 function Must-Fail([scriptblock]$Operation,[string]$Pattern='') {
@@ -117,7 +135,7 @@ Assert-That ([IO.File]::Exists($marker)) 'Explicit recover did not repair a miss
 [IO.File]::Delete((Join-Path $case.root 'r03-state.json'))
 Must-Fail { & $Lifecycle -Action status -InstallRoot $case.root -DataRoot $case.data } 'authority is missing'
 $results.production_r03_bootstrap_fails_closed=$true
-if ($env:R03_PRODUCT_ONLY) { $results | ConvertTo-Json -Compress; return }
+if ($env:R03_PRODUCT_ONLY) { Write-R03Evidence; return }
 
 # Fault and native process-crash matrix: A->A, A->B retained A, A->B revoked A.
 $points=@('verify.before','verify.after','prepare.before','prepare.after','reverify.before','reverify.after',
@@ -391,4 +409,4 @@ $results.compatibility_mirrors_never_authoritative=$true
 $results.launchers_executed=0
 $results.certificates_imported=0
 $results.power_shell_version=$PSVersionTable.PSVersion.ToString()
-$results | ConvertTo-Json -Depth 6 -Compress
+Write-R03Evidence

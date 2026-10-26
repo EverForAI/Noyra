@@ -190,6 +190,7 @@ docs/audit/2026-10-25-r06-r02-r04-remediation.md
 docs/audit/2026-10-25-remediation-0dea2dd.md
 docs/audit/2026-10-26-f01-windows-data-root-remediation.md
 docs/audit/2026-10-26-f03-model-retry-cancellation-remediation.md
+docs/audit/2026-10-26-f04-signature-policy-validation-remediation.md
 docs/audit/2026-10-26-public-manifest-remediation.md
 docs/audit/2026-10-26-r03-remediation.md
 docs/audit/participant-collaboration-final-review.md

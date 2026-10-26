@@ -79,7 +79,14 @@ def test_r03_single_authority_protocol_fault_crash_and_revocation_matrix(
         timeout=1200,
     )
     assert hashlib.sha256(lifecycle.read_bytes()).hexdigest() == before
-    assert result["fault_matrix_cases"] == 108
+    assert result["format"] == "noyra-r03-validation/v2"
+    product = result["production"]
+    prototype = result["prototype"]
+    safety = result["safety"]
+    assert product["implementation"] == "production-lifecycle"
+    assert prototype["implementation"] == "test-only-protocol"
+    assert "fault_matrix_cases" not in product
+    assert prototype["fault_matrix_cases"] == 108
     for key in (
         "production_r03_transaction_recovers",
         "production_r03_status_uses_authority",
@@ -87,13 +94,13 @@ def test_r03_single_authority_protocol_fault_crash_and_revocation_matrix(
         "production_r03_rollback_transaction",
         "production_r03_bootstrap_fails_closed",
     ):
-        assert result[key] is True, (key, result)
-    assert result["legacy_mirror_remains_non_authoritative_during_prepared"] is True
-    assert result["fault_matrix_points_per_policy"] == 18
-    assert result["adoption_crash_points"] == 4
-    assert result["native_locked_file_cases"] == 10
-    assert result["invalid_target_cases"] == 6
-    assert result["corrupt_or_unsafe_state_cases"] == 9
+        assert product[key] is True, (key, product)
+    assert prototype["legacy_mirror_remains_non_authoritative_during_prepared"] is True
+    assert prototype["fault_matrix_points_per_policy"] == 18
+    assert prototype["adoption_crash_points"] == 4
+    assert prototype["native_locked_file_cases"] == 10
+    assert prototype["invalid_target_cases"] == 6
+    assert prototype["corrupt_or_unsafe_state_cases"] == 9
     for key in (
         "fault_matrix_revocation_safe",
         "fault_matrix_repeated_recovery_idempotent",
@@ -108,8 +115,8 @@ def test_r03_single_authority_protocol_fault_crash_and_revocation_matrix(
         "per_selection_policy_and_explicit_strict_enforcement",
         "prototype_is_not_deployable_without_entry_gate",
     ):
-        assert result[key] is True, (key, result)
-    assert result["launchers_executed"] == result["certificates_imported"] == 0
+        assert prototype[key] is True, (key, prototype)
+    assert safety["launchers_executed"] == safety["certificates_imported"] == 0
     evidence = os.environ.get("NOYRA_R03_VALIDATION_EVIDENCE_DIR")
     if evidence:
         Path(evidence).mkdir(parents=True, exist_ok=True)
@@ -210,3 +217,82 @@ def test_signature_policy_model_matches_real_lifecycle_contract(
         (destination / "signature-policy.json").write_text(
             json.dumps(result, indent=2), encoding="utf-8"
         )
+
+
+@pytest.mark.skipif(
+    os.name != "nt" or POWERSHELL_7 is None, reason="native Windows signatures and file sharing"
+)
+def test_production_signature_policy_survives_acceptance_and_recovery_faults(
+    tmp_path: Path, signed_fixtures: Path
+) -> None:
+    assert POWERSHELL_7 is not None
+    result = _run(
+        POWERSHELL_7,
+        "windows-signature-policy-regression.ps1",
+        "-Lifecycle",
+        str(ROOT / "deploy/windows/noyra-lifecycle.ps1"),
+        "-FixtureJson",
+        str(signed_fixtures),
+        "-WorkRoot",
+        str(tmp_path),
+        "-Mode",
+        "Faults",
+        timeout=240,
+    )
+    assert result["format"] == "noyra-windows-signature-policy/v1"
+    assert result["production"]["implementation"] == "production-lifecycle"
+    assert result["prototype"]["cases"] == {}
+    assert result["production"]["cases"] == {}
+    cases = result["production"]["fault_recovery"]
+    assert len(cases) == 6
+    for name, case in cases.items():
+        before_acceptance = case["stage"] == "authority-before-acceptance"
+        strict = case["direction"] == "development-to-signed"
+        assert case["recovered"]["strict"] is (not strict if before_acceptance else strict), name
+        assert case["recovered"]["phase"] == "ready", name
+        if not before_acceptance:
+            assert case["recovered"]["current"] == ("b3" if strict else "u1"), name
+            assert case["interrupted"]["phase"] == (
+                "prepared" if case["stage"] == "receipt-after-acceptance" else "committed"
+            ), name
+        assert case["repeated_recovery_stable"] and case["data_retained"], name
+    assert result["safety"] == {"launchers_executed": 0, "certificates_imported": 0}
+    evidence = os.environ.get("NOYRA_R03_VALIDATION_EVIDENCE_DIR")
+    if evidence:
+        output = Path(evidence)
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "production-policy-recovery.json").write_text(
+            json.dumps(result, indent=2), encoding="utf-8"
+        )
+
+
+@pytest.mark.skipif(
+    os.name != "nt" or POWERSHELL_7 is None, reason="native Windows signatures require PowerShell 7"
+)
+def test_product_only_evidence_does_not_claim_the_prototype_matrix(
+    tmp_path: Path, signed_fixtures: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert POWERSHELL_7 is not None
+    monkeypatch.setenv("R03_PRODUCT_ONLY", "1")
+    result = _run(
+        POWERSHELL_7,
+        "windows-r03-protocol-regression.ps1",
+        "-Lifecycle",
+        str(ROOT / "deploy/windows/noyra-lifecycle.ps1"),
+        "-FixtureJson",
+        str(signed_fixtures),
+        "-WorkRoot",
+        str(tmp_path),
+        "-PowerShell",
+        POWERSHELL_7,
+        timeout=120,
+    )
+    assert set(result) == {"format", "production", "prototype", "safety"}
+    assert result["format"] == "noyra-r03-validation/v2"
+    product = result["production"]
+    assert product.pop("implementation") == "production-lifecycle"
+    assert len(product) == 5 and all(value is True for value in product.values())
+    assert all(key.startswith("production_") for key in product)
+    assert result["prototype"] == {"implementation": "test-only-protocol"}
+    assert result["safety"]["launchers_executed"] == 0
+    assert result["safety"]["certificates_imported"] == 0

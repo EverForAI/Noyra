@@ -170,3 +170,9 @@ An existing regular nonempty `noyra.sqlite3` is opened using the existing identi
 New process records use `noyra-process/v2` and include the bound data root. Valid v1 records remain usable for stopping the matching process; an already running v1 process must be stopped and its actual data location reviewed before a new managed start.
 
 The entry scans the installation tree before adoption/version changes and before uninstall. Legacy `.runtime` or `noyra.sqlite3*` entries block these operations; links or unreadable trees fail closed. `stop` and `status` remain available. Status reports `data_root_status` and `legacy_data_paths`; uninstall rechecks after stopping before removal. See the [legacy-data migration runbook](../deployment/windows-data-root-migration.md); the lifecycle does not automatically migrate or merge old subjects.
+
+## Verification evidence scope
+
+`tests/test_audit_r03_protocol_validation.py` records versioned `noyra-r03-validation/v2` evidence with separate `production`, `prototype` and `safety` sections. The 108-point native error/process-crash matrix belongs to the test-only protocol model. Production lifecycle checks are separately named and must not inherit that count or stronger model-only claims.
+
+The signature-policy regression compares 15 explicit policy inputs through the actual lifecycle and the test model, and separately exercises six production recovery scenarios across pre-acceptance authority failure, post-acceptance receipt failure and post-commit mirror failure. Each section identifies the executed implementation. These checks retain actual CMS/Authenticode verification and do not execute packaged launchers or import fixture certificates. They do not replace the signed release launcher/clean-VM or power-loss gates.
