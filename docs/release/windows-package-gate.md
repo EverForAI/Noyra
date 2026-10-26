@@ -62,18 +62,35 @@ The lifecycle normalizes omitted, null and empty publisher parameters before
 loading saved policy. One or more explicit pins remain a per-call override;
 only a successful strict install persists that allowlist.
 
-Each new installation writes `verification-policy.<version>.json` beside the
-version pointers, outside the package inventory. This operator-controlled
-record stores the signature requirement that passed verification before the
-current pointer is published. Rollback reads that requirement and completely
-verifies the previous package against the effective external publisher policy;
-it does not require the damaged current package to pass verification. Invalid
-records fail closed. A legacy install with no record conservatively requires
-signed recovery when a publisher policy is configured. Legacy unsigned
-installations without publisher policy can recover their verified development
-packages. A new development install records its own unsigned requirement;
-historical pins do not silently create a permanent global strict-mode switch.
-The per-call `-RequireSignature` switch still enforces signed recovery.
+Each accepted selection writes a `verification-policy.<version>.json` receipt
+outside the package inventory. For an R03 installation, `r03-state.json` and its
+accepted intent are authoritative; receipts and compatibility pointers cannot
+override that authority. Legacy adoption still uses the existing external saved
+trust and receipt rules before creating an R03 state. This change does not relax
+those legacy checks or repair the separately tracked F02 adoption limitation.
+
+The `strict` field records the selected version's policy. It is not a permanent
+installation-wide prohibition on development packages:
+
+| Operation | Verification requirement | Persisted policy and trust |
+|---|---|---|
+| `install` / `upgrade` | Explicit `-RequireSignature` OR the candidate's `signature_required=true` | A verified strict candidate saves the requested external allowlist, or reuses saved authority pins if omitted. A selected development candidate records `strict=false` and retains existing authority pins; passing new pins with development does not grant or replace trust. |
+| `start` / `rollback` | Current authority `strict` OR explicit `-RequireSignature`, plus the candidate's own signed-manifest requirement | These operations cannot add trust outside the authority. A strict current selection cannot silently roll back to a development package. |
+| `recover` | Replay the already accepted intent's `strict`, pins and exact manifest hash | Recovery advances or stays blocked; new command arguments or stale mirror files do not rewrite an accepted policy. |
+
+An operator may deliberately select a development package through ordinary
+install/upgrade without `-RequireSignature`, even after a signed selection.
+This retains the documented development workflow. With `-RequireSignature`,
+the same candidate is rejected because it does not declare the signed-manifest
+contract. A candidate declaring `signature_required=true` must pass manifest
+and executable verification even when the switch is omitted. Package metadata
+cannot authorize its own signer.
+
+Historical pins alone do not make development permanently strict. Returning to
+a signed candidate still requires its actual signers to be allowed by external
+trust. Same-version changes to strictness or pins are rejected rather than
+guessed. A future permanent installation policy would need its own design and
+explicit policy-change interface; current receipts and `strict` do not provide it.
 
 Package publisher metadata describes the package; it cannot grant trust. Every
 actual manifest and executable signer must be in both the signed metadata and

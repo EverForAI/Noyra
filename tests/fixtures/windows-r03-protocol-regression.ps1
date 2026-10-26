@@ -347,20 +347,25 @@ try {
 finally { $held.Dispose() }
 $results.real_cross_process_and_legacy_lock_enforced=$true
 
-# Deliberate unsigned development stays explicit; strictness cannot downgrade.
+# Model the production per-selection policy; explicit strict requests still reject development.
 $case=New-Case 'development' -Development
 Invoke-R03Probe -Action adopt -Pins @() -Strict:$false | Out-Null
 Invoke-R03Probe -Action upgrade -Version u1 -Pins @() -Strict:$false | Out-Null
 Assert-That ((Invoke-R03Probe -Action status).strict -eq $false) 'Development profile changed implicitly.'
-$case=Adopt-Case 'strict-no-downgrade'
+$case=Adopt-Case 'selected-development-policy'
 Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $FixtureJson) 'u1') -Destination (Join-Path $case.root 'versions/u1') -Recurse
-Must-Fail { Invoke-R03Probe -Action upgrade -Version u1 -Pins $pinsB -Strict:$false } 'signed manifest must require'
+Must-Fail { Invoke-R03Probe -Action upgrade -Version u1 -Pins $pinsB -Strict:$true } 'signed manifest must require'
+Invoke-R03Probe -Action upgrade -Version u1 -Pins $pinsB -Strict:$false | Out-Null
+$developmentState=Invoke-R03Probe -Action status
+Assert-That ($developmentState.strict -eq $false -and $developmentState.current -ceq 'u1') 'Explicit development selection did not persist its policy.'
+Assert-That ((@($developmentState.pins) -join ',') -ceq (@(Normalize-Thumbprints $pinsA) -join ',')) 'Development selection replaced saved trust.'
+Assert-That ((Invoke-R03Probe -Action authorize-rollback) -ceq 'a2') 'Development selection could not verify the signed previous package.'
 $case=New-Case 'development-to-signed' -Development
 Invoke-R03Probe -Action adopt -Pins @() -Strict:$false | Out-Null
 Invoke-R03Probe -Action upgrade -Version b3 -Pins $pinsB -Strict:$false | Out-Null
 Assert-That ((Invoke-R03Probe -Action status).strict -eq $true) 'Signed package did not persist strict recovery.'
 Must-Fail { Invoke-R03Probe -Action authorize-rollback } 'signed manifest must require'
-$results.explicit_development_and_strict_no_downgrade=$true
+$results.per_selection_policy_and_explicit_strict_enforcement=$true
 
 # PREPARED changes authority immediately but keeps old mirrors until commit.
 # Supported lifecycle commands use authority; executing an old copied script is

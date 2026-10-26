@@ -702,6 +702,7 @@ tests/fixtures/windows-r03-prepare-fixtures.ps1
 tests/fixtures/windows-r03-protocol-prototype.ps1
 tests/fixtures/windows-r03-protocol-regression.ps1
 tests/fixtures/windows-r03-protocol-worker.ps1
+tests/fixtures/windows-signature-policy-regression.ps1
 tests/fixtures/windows-state-publish-regression.ps1
 tests/fixtures/windows-verification-regression.ps1
 tests/frontend/admin-optimization.test.cjs

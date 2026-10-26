@@ -105,7 +105,7 @@ def test_r03_single_authority_protocol_fault_crash_and_revocation_matrix(
         "manifest_and_launcher_signers_cannot_self_authorize",
         "compatibility_mirrors_never_authoritative",
         "real_cross_process_and_legacy_lock_enforced",
-        "explicit_development_and_strict_no_downgrade",
+        "per_selection_policy_and_explicit_strict_enforcement",
         "prototype_is_not_deployable_without_entry_gate",
     ):
         assert result[key] is True, (key, result)
@@ -169,4 +169,44 @@ def test_windows_powershell_host_boundary_is_reported_without_faking_signed_cove
         Path(evidence).mkdir(parents=True, exist_ok=True)
         (Path(evidence) / "windows-powershell-host-boundary.json").write_text(
             json.dumps(capability, indent=2), encoding="utf-8"
+        )
+
+
+@pytest.mark.skipif(
+    os.name != "nt" or POWERSHELL_7 is None, reason="native Windows signatures require PowerShell 7"
+)
+def test_signature_policy_model_matches_real_lifecycle_contract(
+    tmp_path: Path, signed_fixtures: Path
+) -> None:
+    assert POWERSHELL_7 is not None
+    result = _run(
+        POWERSHELL_7,
+        "windows-signature-policy-regression.ps1",
+        "-Lifecycle",
+        str(ROOT / "deploy/windows/noyra-lifecycle.ps1"),
+        "-FixtureJson",
+        str(signed_fixtures),
+        "-WorkRoot",
+        str(tmp_path),
+        timeout=240,
+    )
+    assert result["format"] == "noyra-windows-signature-policy/v1"
+    assert result["production"]["implementation"] == "production-lifecycle"
+    assert result["prototype"]["implementation"] == "test-only-protocol"
+    product = result["production"]["cases"]
+    prototype = result["prototype"]["cases"]
+    assert len(product) == len(prototype) == 15
+    assert product == prototype
+    assert product["strict_to_development_saved_pins"]["state"]["strict"] is False
+    assert product["explicit_strict_rejects_development"]["accepted"] is False
+    assert product["signed_manifest_keeps_strict"]["state"]["strict"] is True
+    assert product["signed_metadata_cannot_grant_trust"]["accepted"] is False
+    assert product["same_version_policy_change_rejected"]["accepted"] is False
+    assert result["safety"] == {"launchers_executed": 0, "certificates_imported": 0}
+    evidence = os.environ.get("NOYRA_R03_VALIDATION_EVIDENCE_DIR")
+    if evidence:
+        destination = Path(evidence)
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "signature-policy.json").write_text(
+            json.dumps(result, indent=2), encoding="utf-8"
         )

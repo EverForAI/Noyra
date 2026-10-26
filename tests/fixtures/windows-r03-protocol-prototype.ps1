@@ -248,11 +248,15 @@ function Invoke-R03Probe {
         $state = Read-R03State
         if ($Action -ceq 'upgrade') {
             Assert-R03Segment $Transaction; Assert-R03Segment $Version
+            # Mirror the production per-selection policy; state.strict is not
+            # a permanent installation-wide switch. A development selection
+            # also cannot replace existing trust merely by passing new pins.
             $normalized = @(Normalize-Thumbprints $Pins)
-            $effectiveStrict = $state.strict -or $Strict
+            if ($normalized.Count -eq 0) { $normalized = @($state.pins) }
             Invoke-R03Fault 'verify.before'
-            $manifest = Test-R03Package $Version $normalized $effectiveStrict
-            $effectiveStrict = $effectiveStrict -or [bool]$manifest.signature_required
+            $manifest = Test-R03Package $Version $normalized $Strict
+            $effectiveStrict = $Strict -or [bool]$manifest.signature_required
+            if (-not $effectiveStrict) { $normalized = @($state.pins) }
             $digest = Get-R03ManifestHash $Version
             Invoke-R03Fault 'verify.after'
             if ($null -ne $state.intent -and $state.intent.id -ceq $Transaction) {
