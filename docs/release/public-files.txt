@@ -291,6 +291,7 @@ docs/roadmap/2026-10-22-operability-implementation.md
 docs/roadmap/2026-10-23-participants-collaboration.md
 docs/roadmap/2026-10-23-runtime-public-experience.md
 docs/roadmap/2026-10-26-f01-windows-data-root.md
+docs/roadmap/2026-10-26-f03-model-retry-cancellation.md
 docs/roadmap/2026-10-26-public-manifest-remediation.md
 docs/security-model.md
 docs/security/threat-model.md
