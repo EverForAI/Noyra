@@ -866,6 +866,7 @@ tests/test_migration_wallet.py
 tests/test_mind.py
 tests/test_model_authorization.py
 tests/test_model_gateway.py
+tests/test_model_retry_cancellation.py
 tests/test_model_wire_contract.py
 tests/test_motivation_development.py
 tests/test_outcome_learning.py

@@ -338,7 +338,7 @@ class ModelGateway:
                             error_code="runtime_epoch_invalidated",
                         )
                         raise
-                    await self._retry_delay(attempt_index)
+                    await self._retry_after_settlement(call.call_id, attempt_index)
                     continue
                 self.ledger.finish_call(call.call_id, "failed", error_code=error.code)
                 raise
@@ -423,7 +423,7 @@ class ModelGateway:
                             error_code="runtime_epoch_invalidated",
                         )
                         raise
-                    await self._retry_delay(attempt_index)
+                    await self._retry_after_settlement(call.call_id, attempt_index)
                     continue
                 self.ledger.finish_call(
                     call.call_id,
@@ -461,6 +461,21 @@ class ModelGateway:
             )
 
         raise AssertionError("retry loop ended without a terminal model-call result")
+
+    async def _retry_after_settlement(self, call_id: str, completed_attempts: int) -> None:
+        """Wait only after an attempt is settled and before admitting another.
+
+        Cancellation here has no in-flight provider request. Finish the logical
+        call without rewriting paid attempts or releasing unknown usage. Actual
+        request cancellation retains its separate, conservative unknown outcome.
+        """
+        try:
+            await self._retry_delay(completed_attempts)
+        except asyncio.CancelledError:
+            # finish_call uses the existing synchronous accounting transaction:
+            # no await or new provider work can interrupt this terminal write.
+            self.ledger.finish_call(call_id, "failed", error_code="model_retry_cancelled")
+            raise
 
     async def _retry_delay(self, completed_attempts: int) -> None:
         unjittered = min(
