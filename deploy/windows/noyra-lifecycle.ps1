@@ -486,6 +486,11 @@ if ($Action -in @('install', 'rollback', 'start', 'stop', 'uninstall', 'recover'
 }
 try {
 
+# Detect misplaced subject state before adoption, receipt/pointer writes, or version changes.
+# Stop and status stay available so an operator can shut down and review legacy data.
+if ($Action -notin @('stop', 'status')) { Assert-NoyraNoInstalledData }
+if ($Action -eq 'start') { Assert-NoyraStartDataRoot ([bool]$InitializeDataRoot) }
+
 # Resolve/repair authority only while holding the same lifecycle lock as pointer changes.
 if ($Action -in @('install', 'rollback', 'start', 'recover')) {
     if ($Action -eq 'install' -and -not (Test-R03ProtocolFiles)) {
@@ -627,10 +632,14 @@ switch ($Action) {
     'stop' { Stop-Noyra }
     'uninstall' {
         Stop-Noyra
+        # The child has stopped; inspect again under the lifecycle lock before deletion.
+        Assert-NoyraNoInstalledData
+        Assert-NoyraRootSeparation
         if (Test-Path -LiteralPath $InstallRoot) { Remove-Item -LiteralPath $InstallRoot -Recurse -Force }
         # DataRoot is intentionally retained; deleting subject data requires a separate explicit action.
     }
     'status' {
+        $dataDiagnostics = Get-NoyraDataRootDiagnostics
         $tracked = Get-TrackedNoyraProcess
         $running = $null -ne $tracked
         if ($null -ne $tracked) { $tracked.Dispose() }
@@ -639,6 +648,8 @@ switch ($Action) {
         [pscustomobject]@{
             install_root = $InstallRoot
             data_root = $DataRoot
+            data_root_status = $dataDiagnostics.status
+            legacy_data_paths = @($dataDiagnostics.legacy_data_paths)
             current_version = $current
             previous_version = $previous
             running = $running

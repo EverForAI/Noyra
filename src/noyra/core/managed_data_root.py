@@ -17,6 +17,11 @@ def _directory_path(raw: str, label: str) -> Path:
     path = Path(raw)
     if not raw or not path.is_absolute() or path.parent == path:
         raise ValueError(f"managed_data_root: {label} must be an absolute non-root directory")
+    if os.name == "nt" and (
+        raw.startswith(("\\\\?\\", "\\\\.\\"))
+        or any(part.endswith((".", " ")) or ":" in part for part in path.parts[1:])
+    ):
+        raise ValueError(f"managed_data_root: {label} contains an ambiguous Windows path")
     for component in (path, *path.parents):
         try:
             metadata = component.lstat()

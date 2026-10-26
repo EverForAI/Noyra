@@ -3,6 +3,15 @@ Set-StrictMode -Version Latest
 
 function Assert-NoyraDirectoryChain([string]$Path) {
     $current = [IO.Path]::GetFullPath($Path)
+    if ($current.StartsWith('\\?\') -or $current.StartsWith('\\.\')) {
+        throw 'NOYRA-DATA-ROOT[unsafe-path]: device namespace paths are not supported.'
+    }
+    $root = [IO.Path]::GetPathRoot($current)
+    foreach ($part in $current.Substring($root.Length).Split([IO.Path]::DirectorySeparatorChar)) {
+        if ($part.EndsWith('.') -or $part.EndsWith(' ') -or $part.Contains(':')) {
+            throw 'NOYRA-DATA-ROOT[unsafe-path]: ambiguous directory components are not supported.'
+        }
+    }
     while ($null -ne $current) {
         try {
             $attributes = [IO.File]::GetAttributes($current)
@@ -83,4 +92,65 @@ function Start-NoyraBoundProcess([string]$Launcher, [string]$WorkingDirectory, [
         return $process
     }
     catch { $process.Dispose(); throw }
+}
+
+
+function Get-NoyraInstallationDataFindings {
+    Assert-NoyraRootSeparation
+    $findings = [Collections.Generic.List[string]]::new()
+    if (-not [IO.Directory]::Exists($InstallRoot)) { return @() }
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $pending.Push($InstallRoot)
+    $count = 0
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($entry in [IO.Directory]::EnumerateFileSystemEntries($directory)) {
+            $count++
+            if ($count -gt 100000) {
+                throw 'NOYRA-DATA-ROOT[inspection-limit]: installation inspection limit exceeded; no changes are permitted.'
+            }
+            $full = [IO.Path]::GetFullPath($entry)
+            if (-not $full.StartsWith($InstallRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'NOYRA-DATA-ROOT[unsafe-install-tree]: installation inspection escaped its root.'
+            }
+            $attributes = [IO.File]::GetAttributes($full)
+            if ($attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "NOYRA-DATA-ROOT[unsafe-install-tree]: refusing to follow or delete an installation link: $full"
+            }
+            $name = [IO.Path]::GetFileName($full)
+            if ($name -ieq '.runtime' -or $name -ilike 'noyra.sqlite3*') {
+                $findings.Add($full)
+                # A runtime root is evidence, not a directory to inspect/copy/delete.
+                continue
+            }
+            if ($attributes -band [IO.FileAttributes]::Directory) { $pending.Push($full) }
+        }
+    }
+    return @($findings.ToArray())
+}
+
+function Assert-NoyraNoInstalledData {
+    $findings = @(Get-NoyraInstallationDataFindings)
+    if ($findings.Count -gt 0) {
+        $sample = ($findings | Select-Object -First 8) -join '; '
+        throw "NOYRA-DATA-ROOT[legacy-data-detected]: runtime data remains inside the installation. Stop and review/backup/migrate it before changing versions or uninstalling. Paths: $sample"
+    }
+}
+
+function Get-NoyraDataRootDiagnostics {
+    $findings = @()
+    try {
+        $findings = @(Get-NoyraInstallationDataFindings)
+        if ($findings.Count -gt 0) {
+            return [pscustomobject]@{status='legacy-data-detected'; legacy_data_paths=@($findings | Select-Object -First 20)}
+        }
+        Assert-NoyraStartDataRoot $false
+        return [pscustomobject]@{status='ready'; legacy_data_paths=@()}
+    }
+    catch {
+        $message = $_.Exception.Message
+        $code = 'inspection-unavailable'
+        if ($message -match 'NOYRA-DATA-ROOT\[([a-z-]+)\]') { $code = $Matches[1] }
+        return [pscustomobject]@{status=$code; legacy_data_paths=@($findings | Select-Object -First 20)}
+    }
 }
