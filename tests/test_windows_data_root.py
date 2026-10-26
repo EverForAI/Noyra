@@ -246,10 +246,14 @@ $second=New-NoyraProcessStartInfo $Python $InstallRoot $true
     )
     reporter = tmp_path / "reporter.py"
     reporter.write_text(
-        "import json,os\n"
-        "print(json.dumps({k:os.environ[k] for k in "
+        "import json,os,sys\n"
+        + f"sys.path.insert(0,{str(ROOT / 'src')!r})\n"
+        + "from noyra.core.managed_data_root import managed_data_root\n"
+        + "data={k:os.environ[k] for k in "
         "['NOYRA_DATA_DIR','NOYRA_MANAGED_INSTALL_ROOT','NOYRA_MANAGED_DATA_ROOT',"
-        "'NOYRA_MANAGED_INITIALIZE']},ensure_ascii=True))\n",
+        "'NOYRA_MANAGED_INITIALIZE']}\n"
+        "data['validated_data_root']=str(managed_data_root())\n"
+        "print(json.dumps(data,ensure_ascii=True))\n",
         encoding="utf-8",
     )
     result = _powershell(
@@ -268,6 +272,7 @@ $second=New-NoyraProcessStartInfo $Python $InstallRoot $true
     for child in result["children"]:
         assert child["NOYRA_DATA_DIR"] == child["NOYRA_MANAGED_DATA_ROOT"] == expected
         assert child["NOYRA_MANAGED_INITIALIZE"] == "0"
+        assert child["validated_data_root"] == expected
         assert child["NOYRA_MANAGED_INSTALL_ROOT"] == str(tmp_path / "installed versions")
     assert result["second_data"] == str(tmp_path / "second independent instance")
     assert result["second_initialization"] == "1"

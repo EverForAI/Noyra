@@ -64,7 +64,10 @@ def test_windows_package_install_upgrade_and_rollback_are_atomic(tmp_path: Path)
     data = tmp_path / "data"
     builder = ROOT / "scripts" / "build-windows-package.ps1"
     lifecycle = ROOT / "deploy" / "windows" / "noyra-lifecycle.ps1"
-    recovery_helper = "deploy/windows/noyra-r03-recovery.ps1"
+    packaged_helpers = (
+        "deploy/windows/noyra-r03-recovery.ps1",
+        "deploy/windows/noyra-data-root.ps1",
+    )
     for version in ("v1", "v2"):
         _run(
             builder,
@@ -77,8 +80,9 @@ def test_windows_package_install_upgrade_and_rollback_are_atomic(tmp_path: Path)
         )
     for version in ("v1", "v2"):
         manifest = json.loads((output / version / "noyra-package.json").read_text(encoding="utf-8"))
-        assert recovery_helper in {entry["path"] for entry in manifest["files"]}
-        assert (output / version / recovery_helper.replace("/", os.sep)).is_file()
+        for helper in packaged_helpers:
+            assert helper in {entry["path"] for entry in manifest["files"]}
+            assert (output / version / helper.replace("/", os.sep)).is_file()
     _run(
         lifecycle,
         "-Action",
