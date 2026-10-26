@@ -255,7 +255,7 @@ adea6b0ecc431b91e4d61c62dc2e91b52b4e6dccb9287f8da268b3893f0af08d  docs/release/2
 c9e55170a54b66eb8ae877dc373424a4222963367d893e2277d156ddb824a55d  docs/release/README.md
 83d4ebffc8de723a993ebdd2e86a4642ec9ac3273a8392595cab4e74846ce553  docs/release/external-gates.md
 344d2a6a2f58aed202fff7bf4444a2bc4b0adc2c1cc6fe5c4c5911ca6108eacb  docs/release/public-files-excluded.txt
-64599b15496a0b994fada01289a4eadd88dccce440595ac6e2f244c5e511ee3d  docs/release/public-files.txt
+5b2655f82df55e5ff6d55d51184f771ec9de809bee90bdd7726e601e35d2505c  docs/release/public-files.txt
 00426df84cbd29b32af0926ae7307b5ef77ea3f22960542223ea37f3211d2fc7  docs/release/windows-package-gate.md
 e96c5ea052e91daa171873c021d239c422d9ac8dfbcbc0c5fc4f04ac4aa1c0e3  docs/research/2026-09-06-ncas-prior-art.md
 79b46a570c4a85bd19b073018321f60f2739e9ec101e6c20e4c5cdec1c2a4959  docs/research/2026-10-23-positioning.md
@@ -292,6 +292,7 @@ ebd46b13bd369405189bf31cb8f4eafa0e908dea4ae4890ff1a79f1160dbf945  docs/roadmap/2
 21773ce651544666324326ef03ec63245274e9f36d73b21909d5cf8f10c94192  docs/roadmap/2026-10-23-runtime-public-experience.md
 99b7d564aad2e9caab4eeb99a2680e4278dbccb7032b7df2b7c9fd268f69e133  docs/roadmap/2026-10-26-f01-windows-data-root.md
 92a42eb9a85c127a21be92a81db8fc376e38135b6fef289969cd73b6cd190254  docs/roadmap/2026-10-26-f03-model-retry-cancellation.md
+9c4898389aeac8cb3ae1baa5fe8a9a48786a110a6804bec4478dcf5d2e825a01  docs/roadmap/2026-10-26-f04-signature-policy-validation.md
 58527f5f2da8fd528acd2ab328f89abb0914d1c0cfee4add6598dd4cc227978e  docs/roadmap/2026-10-26-public-manifest-remediation.md
 94f6a5fb4fc57e36ef2f8b31adfcbdd145206c2350068c9c5331d6ef8dd03c5c  docs/security-model.md
 7ff292489a1bba67cc7516dbea02c4c5d7839aa80d1208d4397dbe1393ebaec0  docs/security/threat-model.md
