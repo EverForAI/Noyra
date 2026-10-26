@@ -31,3 +31,7 @@
 - [账户、消息来源与协作接口](api/participants.md)
 - [分模块实施与复审记录](roadmap/2026-10-23-participants-collaboration.md)
 - [完成后风险与验证复审](audit/participant-collaboration-final-review.md)
+
+## 公开源码发布
+
+- [当前公开清单、维护与源码包校验](release/README.md)

@@ -151,4 +151,6 @@ pytest tests/test_audit_6a742e5_windows.py \
 4. 合并前在实际目标 Windows 主机用受支持 PowerShell 7 做一次 disposable install→upgrade→signer rotation→recover→rollback rehearsal；
 5. 如果未来要把“断电持久性”或“恶意本机管理员防护”纳入目标，再单独立项，不要把它们混入当前 R03 修复。
 
-A separate release-integrity check of the pre-existing public checksum inventory reported 240 mismatches among 528 listed entries when compared with current Git-normalized file contents. This R03 change updates and verifies only the entries it changes; it intentionally does not rewrite the other 240 values because that would expand the task into a broad public-snapshot audit. Treat public source-bundle publication as blocked until those unrelated manifest differences are reconciled in a separate review.
+### 公开清单统计勘误（2026-10-26）
+
+此前“528 项中有 240 项不匹配”的核查把二进制文件当作 UTF-8 文本并处理换行，产生 16 项误报。按基线 `fd007df` 的 Git blob 原始字节复核，实际为 304 项一致、224 项不一致，无缺失或重复。其中 223 项沿用此前失效校验值，另 1 项是本轮新增 `noyra-r03-recovery.ps1` 的记录值与最终提交内容不一致。因此，之前“本轮变更涉及条目均已核验”的表述撤回；这属于清单最终提交复核缺失。完整根因、清单范围修复与验收见[公开清单修复复审](2026-10-26-public-manifest-remediation.md)。本文前述 R03 功能验证与该发布清单问题应分别依据各自证据评估。

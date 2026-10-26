@@ -36,7 +36,7 @@ python scripts/public-file-manifest.py export --revision HEAD --output noyra-sou
 python scripts/public-file-manifest.py verify-export --revision HEAD --archive noyra-source.zip
 ```
 
-也可以将 `HEAD` 替换为明确的提交 SHA 或标签。输出目录需事先存在；已有归档不会被覆盖。测试用输出应放在仓库外或已忽略的 `dist/` 中。
+也可以将 `HEAD` 替换为明确的提交 SHA 或标签；所选提交须包含本格式的三份清单。早期发布仍按当时规则核验，本工具不自动迁移或认可旧版本。输出目录需事先存在；已有归档不会被覆盖。测试用输出应放在仓库外或已忽略的 `dist/` 中。
 
 导出器只复制所选快照中允许的原始 blob，保留 Git 执行位，固定 ZIP 条目顺序和时间，绕过 `.gitattributes` 的 `export-ignore` / `export-subst` 转换。导出后再次核对实际 ZIP 的路径、重复条目、文件类型、执行位和每个文件的精确字节。校验表自身也会与 Git 中的内容比较。
 
