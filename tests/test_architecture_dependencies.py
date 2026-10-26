@@ -59,10 +59,27 @@ def test_schema_definition_modules_cannot_depend_on_the_database_facade() -> Non
                     modules == ["noyra.core"]
                     and any(alias.name == "database" for alias in node.names)
                 ), (path.name, node.lineno)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        for call in ast.walk(tree):
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute):
                 assert not (
-                    isinstance(node.func.value, ast.Name)
-                    and node.func.value.id == "sqlite3"
-                    and node.func.attr == "connect"
-                ), (path.name, node.lineno)
+                    isinstance(call.func.value, ast.Name)
+                    and call.func.value.id == "sqlite3"
+                    and call.func.attr == "connect"
+                ), (path.name, call.lineno)
+
+
+def test_configuration_and_transport_do_not_import_the_runtime_root() -> None:
+    root = Path(__file__).resolve().parents[1] / "src/noyra"
+    for name in ("service_configuration.py", "http_transport.py"):
+        path = root / name
+        for node in _runtime_imports(ast.parse(path.read_text(encoding="utf-8"))):
+            modules = (
+                [resolve_name("." * node.level + (node.module or ""), "noyra")]
+                if isinstance(node, ast.ImportFrom)
+                else [alias.name for alias in node.names]
+            )
+            assert "noyra.service" not in modules, (name, node.lineno)
+            if isinstance(node, ast.ImportFrom):
+                assert not (
+                    modules == ["noyra"] and any(alias.name == "service" for alias in node.names)
+                ), (name, node.lineno)

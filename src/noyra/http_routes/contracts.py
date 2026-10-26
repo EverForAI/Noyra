@@ -15,7 +15,7 @@ from noyra.core.operator_controls import OperatorControlConflict
 from noyra.model.reasoning import ReasoningEffort
 
 if TYPE_CHECKING:
-    from noyra.service import _AdminSession
+    from .auth import _AdminSession
 
 
 class RequestHandler(Protocol):
