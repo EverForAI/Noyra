@@ -23,6 +23,9 @@ POWERSHELL = shutil.which("pwsh") or shutil.which("powershell")
         "invalid",
         "duplicate-start",
         "forced",
+        "v1-stoppable",
+        "v1-start-blocked",
+        "wrong-data-root",
     ],
 )
 def test_windows_lifecycle_never_controls_unverified_pid(tmp_path: Path, scenario: str) -> None:
@@ -85,6 +88,18 @@ function Get-Process {
 }
 function Start-Process { throw 'An already-running instance must not be started again.' }
 Write-NoyraProcessIdentity $script:fakeProcess $launcher 'v1'
+if ($Scenario -in @('v1-stoppable','v1-start-blocked','wrong-data-root')) {
+    $record=Get-Content -LiteralPath $pidFile -Raw | ConvertFrom-Json
+    if ($Scenario -eq 'wrong-data-root') {
+        $record.data_root=Join-Path $Root 'other-data'
+    }
+    else {
+        $record.format='noyra-process/v1'
+        $record.PSObject.Properties.Remove('data_root')
+    }
+    $record | ConvertTo-Json -Compress | Set-Content -LiteralPath $pidFile -Encoding utf8
+}
+
 if ($Scenario -eq 'reused-pid') { $script:fakeProcess.StartTime = $start.AddMinutes(1) }
 if ($Scenario -eq 'wrong-path') {
     $script:fakeProcess.MainModule.FileName = Join-Path $Root 'other.exe'
@@ -95,7 +110,8 @@ if ($Scenario -eq 'invalid') {
 }
 $failure = $null
 try {
-    if ($Scenario -eq 'duplicate-start') { Start-Noyra } else { Stop-Noyra }
+    if ($Scenario -in @('duplicate-start','v1-start-blocked')) { Start-Noyra }
+    else { Stop-Noyra }
 }
 catch { $failure = $_.Exception.Message }
 [pscustomobject]@{
@@ -131,12 +147,17 @@ catch { $failure = $_.Exception.Message }
     assert result.returncode == 0, result.stdout + result.stderr
     data = json.loads(result.stdout)
     assert not data["real_process_apis_called"]
-    if scenario in {"legacy", "invalid"}:
+    if scenario in {"legacy", "invalid", "wrong-data-root"}:
         assert data["failure"]
         assert data["identity_retained"]
         assert data["lookups"] == data["kills"] == data["closes"] == 0
+    elif scenario == "v1-start-blocked":
+        assert "legacy-running-process" in data["failure"]
+        assert data["identity_retained"]
+        assert data["lookups"] == 1
+        assert data["kills"] == data["closes"] == 0
     else:
         assert data["failure"] is None
         assert data["kills"] == (1 if scenario == "forced" else 0)
-        assert data["closes"] == (1 if scenario in {"matching", "forced"} else 0)
+        assert data["closes"] == (1 if scenario in {"matching", "forced", "v1-stoppable"} else 0)
         assert data["identity_retained"] == (scenario == "duplicate-start")

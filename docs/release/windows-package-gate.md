@@ -143,3 +143,11 @@ revocation, bootstrap, rollback, per-file sharing failures and recovery retry
 without executing packaged launchers or importing test certificates. It does
 not prove sudden power-loss durability or protect against malicious local
 administrators; those remain separate deployment acceptance boundaries.
+
+## Retained data-root launch contract
+
+The supported lifecycle passes an absolute `DataRoot` in a child-only environment; it never changes the caller's environment. The standard service entry verifies that data root before creating directories or opening SQLite. Source/Linux/container launches without a managed contract keep their existing configuration.
+
+An existing regular nonempty `noyra.sqlite3` is opened using the existing identity, ownership and integrity gates. A missing or empty database is not silently replaced. A deliberately new instance requires `-Action start -InitializeDataRoot`, and the directory must have no subject data. This switch is not a recovery or data-migration operation.
+
+New process records use `noyra-process/v2` and include the bound data root. Valid v1 records remain usable for stopping the matching process; an already running v1 process must be stopped and its actual data location reviewed before a new managed start.

@@ -14,7 +14,9 @@ param(
     [Parameter(Mandatory = $false)]
     [switch]$RequireSignature,
     [Parameter(Mandatory = $false)]
-    [string[]]$TrustedPublisherThumbprints
+    [string[]]$TrustedPublisherThumbprints,
+    [Parameter(Mandatory = $false)]
+    [switch]$InitializeDataRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,17 +24,9 @@ Set-StrictMode -Version Latest
 
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
 $DataRoot = [IO.Path]::GetFullPath($DataRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
-if ($InstallRoot -eq [IO.Path]::GetPathRoot($InstallRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) -or
-    $DataRoot.Equals($InstallRoot, [StringComparison]::OrdinalIgnoreCase) -or
-    $DataRoot.StartsWith($InstallRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'InstallRoot must be a non-root directory separate from retained DataRoot.'
-}
-foreach ($path in @($InstallRoot, (Join-Path $InstallRoot 'versions'), $DataRoot)) {
-    if ((Test-Path -LiteralPath $path) -and
-        ((Get-Item -LiteralPath $path).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        throw 'Installation and data roots must not use reparse points.'
-    }
-}
+. (Join-Path $PSScriptRoot 'noyra-data-root.ps1')
+Assert-NoyraRootSeparation
+if ($InitializeDataRoot -and $Action -ne 'start') { throw 'InitializeDataRoot is only valid for start.' }
 $versions = Join-Path $InstallRoot 'versions'
 $currentPointer = Join-Path $InstallRoot 'current.txt'
 $previousPointer = Join-Path $InstallRoot 'previous.txt'
@@ -373,9 +367,14 @@ function Read-NoyraProcessIdentity {
     if ((Get-Item -LiteralPath $pidFile).Length -gt 8192) { throw 'Process identity file is too large.' }
     try {
         $record = Get-Content -LiteralPath $pidFile -Raw | ConvertFrom-Json
-        if ($record.format -ne 'noyra-process/v1' -or [long]$record.process_id -le 0 -or
+        if ($record.format -notin @('noyra-process/v1', 'noyra-process/v2') -or [long]$record.process_id -le 0 -or
             [long]$record.process_id -gt [int]::MaxValue -or
             [string]$record.start_time_utc_ticks -notmatch '^[0-9]{1,19}$') { throw 'Invalid process identity.' }
+        if ($record.format -eq 'noyra-process/v2' -and
+            ($record.data_root -isnot [string] -or -not [IO.Path]::IsPathRooted($record.data_root) -or
+            -not ([IO.Path]::GetFullPath($record.data_root)).Equals($DataRoot, [StringComparison]::OrdinalIgnoreCase))) {
+            throw 'Tracked process data root does not match the lifecycle data root.'
+        }
         Assert-SafeSegment ([string]$record.version) 'process version'
         $versionRoot = [IO.Path]::GetFullPath((Join-Path $versions ([string]$record.version)))
         $path = [IO.Path]::GetFullPath([string]$record.executable)
@@ -411,7 +410,8 @@ function Get-TrackedNoyraProcess {
 
 function Write-NoyraProcessIdentity($Process, [string]$Launcher, [string]$Current) {
     $record = @{
-        format = 'noyra-process/v1'
+        format = 'noyra-process/v2'
+        data_root = $DataRoot
         process_id = $Process.Id
         start_time_utc_ticks = $Process.StartTime.ToUniversalTime().Ticks.ToString()
         executable = [IO.Path]::GetFullPath($Launcher)
@@ -427,7 +427,15 @@ function Write-NoyraProcessIdentity($Process, [string]$Launcher, [string]$Curren
 
 function Start-Noyra {
     $existing = Get-TrackedNoyraProcess
-    if ($null -ne $existing) { $existing.Dispose(); return }
+    if ($null -ne $existing) {
+        try {
+            if ((Read-NoyraProcessIdentity).format -ne 'noyra-process/v2') {
+                throw 'NOYRA-DATA-ROOT[legacy-running-process]: stop the verified legacy process and review its actual data location before restarting.'
+            }
+        }
+        finally { $existing.Dispose() }
+        return
+    }
     $current = Get-CurrentVersion
     if ($null -eq $current) { throw 'No installed Noyra version is selected.' }
     New-Item -ItemType Directory -Force -Path $DataRoot | Out-Null
@@ -443,7 +451,7 @@ function Start-Noyra {
             throw 'Installed launchers must not use reparse points.'
         }
     }
-    $process = Start-Process -FilePath $launcher -WorkingDirectory $versionRoot -WindowStyle Hidden -PassThru
+    $process = Start-NoyraBoundProcess $launcher $versionRoot ([bool]$InitializeDataRoot)
     try { Write-NoyraProcessIdentity $process $launcher $current }
     catch {
         if (-not $process.HasExited) { $process.Kill(); $null = $process.WaitForExit(5000) }

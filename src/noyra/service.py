@@ -62,6 +62,7 @@ from noyra.core.integrity import (
     IntegrityRuntimeController,
 )
 from noyra.core.locking import ProcessLock
+from noyra.core.managed_data_root import managed_data_root
 from noyra.core.operator_controls import (
     OperatorControlConflict,
     OperatorControlNotFound,
@@ -1219,6 +1220,7 @@ class ServiceSettings(BaseModel):
 
     @classmethod
     def from_env(cls) -> ServiceSettings:
+        managed_root = managed_data_root()
         profile = os.getenv("NOYRA_PROFILE", "development").strip().lower()
         subject_id = os.getenv("NOYRA_SUBJECT_ID", "Noyra-0001")
         configured_genesis_hash = os.getenv("NOYRA_GENESIS_HASH", "").strip()
@@ -1258,7 +1260,7 @@ class ServiceSettings(BaseModel):
         export_token = os.getenv("NOYRA_EXPORT_TOKEN")
         break_glass_token = os.getenv("NOYRA_BREAK_GLASS_TOKEN")
         return cls(
-            data_dir=Path(os.getenv("NOYRA_DATA_DIR", ".runtime/data")),
+            data_dir=managed_root or Path(os.getenv("NOYRA_DATA_DIR", ".runtime/data")),
             subject_id=subject_id,
             genesis_hash=genesis_hash,
             profile=cast(Literal["development", "test", "production"], profile),
@@ -10644,6 +10646,7 @@ class NoyraService:
         wallet_signer: WalletSigner | None = None,
         close_wallet_signer: bool = False,
     ):
+        managed_data_root(configured=settings.data_dir)
         self.settings = settings
         database_path = (settings.data_dir / "noyra.sqlite3").resolve()
         self._startup_lock = ProcessLock(f"{database_path}.lock")

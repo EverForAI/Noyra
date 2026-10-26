@@ -34,6 +34,7 @@ deploy/systemd/noyra-upgrade-recover.service
 deploy/systemd/noyra-upgrade.path
 deploy/systemd/noyra-upgrade.service
 deploy/systemd/noyra.service
+deploy/windows/noyra-data-root.ps1
 deploy/windows/noyra-lifecycle.ps1
 deploy/windows/noyra-r03-recovery.ps1
 deploy/windows/start-noyra.ps1
@@ -495,6 +496,7 @@ src/noyra/core/integrity.py
 src/noyra/core/lifecycle.py
 src/noyra/core/locking.py
 src/noyra/core/maintenance_evidence.py
+src/noyra/core/managed_data_root.py
 src/noyra/core/operator_controls.py
 src/noyra/core/participant_schema.py
 src/noyra/core/payload_codec.py
@@ -958,6 +960,7 @@ tests/test_wallet_rpc.py
 tests/test_wallet_schema60.py
 tests/test_wallet_setup.py
 tests/test_web_contract.py
+tests/test_windows_data_root.py
 tests/test_windows_process_identity.py
 tests/test_world.py
 website/build.mjs

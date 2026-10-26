@@ -78,6 +78,7 @@ try {
         'deploy\windows\start-noyra.ps1',
         'deploy\windows\noyra-lifecycle.ps1',
         'deploy\windows\noyra-r03-recovery.ps1',
+        'deploy\windows\noyra-data-root.ps1',
         'README.md',
         'pyproject.toml',
         'requirements.lock',
