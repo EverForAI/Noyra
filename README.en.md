@@ -265,6 +265,12 @@ Contributions are welcome in independent NCAS reproduction, adversarial testing,
 real-world coupling, communication boundaries, wallet and signer security, memory and value evolution,
 and reproducible public evidence. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Maintenance and Feedback
+
+**Jaxon Grey (GitHub: EverForAI)** maintains the project. General issues and pull requests have no fixed response time; work is scheduled by impact, reproducibility, and maintainer capacity, with progress recorded in the issue or PR. Private security reporting and acknowledgement expectations are defined in [SECURITY.md](SECURITY.md).
+
+See [MAINTAINING.md](MAINTAINING.md) for maintenance scope and [architecture boundaries](docs/development/architecture-boundaries.md) for module ownership and regression requirements.
+
 ## License and Security
 
 Noyra is licensed under the [Apache License 2.0](LICENSE).

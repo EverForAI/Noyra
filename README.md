@@ -226,6 +226,12 @@ Noyra 将代码审查、本地测试和真实部署区分为不同证据等级�
 
 贡献规范见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
+## 维护与反馈
+
+项目由 **Jaxon Grey（GitHub：EverForAI）**维护。普通问题和 PR 目前没有固定响应时限，按问题影响、复现情况和维护容量安排；进展记录在对应 Issue 或 PR 中。安全报告的私密渠道与确认时限见 [SECURITY.md](SECURITY.md)。
+
+维护范围与反馈方式见 [MAINTAINING.md](MAINTAINING.md)，代码模块边界与关键验证规则见 [架构维护说明](docs/development/architecture-boundaries.md)。
+
 ## 许可证与安全报告
 
 本项目采用 [Apache License 2.0](LICENSE)。

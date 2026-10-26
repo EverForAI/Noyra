@@ -13,6 +13,7 @@ CITATION.cff
 CONTRIBUTING.md
 Dockerfile
 LICENSE
+MAINTAINING.md
 README.en.md
 README.md
 SECURITY.md
@@ -196,6 +197,7 @@ docs/audit/2026-10-26-modularization-http-review.md
 docs/audit/2026-10-26-modularization-transport-review.md
 docs/audit/2026-10-26-public-manifest-remediation.md
 docs/audit/2026-10-26-r03-remediation.md
+docs/audit/2026-10-26-service-database-modularization-delivery.md
 docs/audit/participant-collaboration-final-review.md
 docs/charter.md
 docs/deployment/2026-10-05-final-acceptance.md
@@ -213,6 +215,7 @@ docs/deployment/runtime-observation.md
 docs/deployment/setup-modes.md
 docs/deployment/ubuntu.md
 docs/deployment/windows-data-root-migration.md
+docs/development/architecture-boundaries.md
 docs/evaluation.md
 docs/genesis-experience.md
 docs/goal-origin-evidence.md
