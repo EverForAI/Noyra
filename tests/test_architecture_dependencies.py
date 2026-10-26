@@ -39,3 +39,30 @@ def test_http_domains_do_not_import_the_runtime_composition_root() -> None:
                 assert not (
                     modules == ["noyra"] and any(alias.name == "service" for alias in node.names)
                 ), (path.name, node.lineno)
+
+
+def test_schema_definition_modules_cannot_depend_on_the_database_facade() -> None:
+    root = Path(__file__).resolve().parents[1] / "src/noyra/core/schema"
+    paths = list(root.glob("*.py"))
+    assert paths, "Frozen schema definitions must be packaged"
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in _runtime_imports(tree):
+            modules = (
+                [resolve_name("." * node.level + (node.module or ""), "noyra.core.schema")]
+                if isinstance(node, ast.ImportFrom)
+                else [name.name for name in node.names]
+            )
+            assert "noyra.core.database" not in modules, (path.name, node.lineno)
+            if isinstance(node, ast.ImportFrom):
+                assert not (
+                    modules == ["noyra.core"]
+                    and any(alias.name == "database" for alias in node.names)
+                ), (path.name, node.lineno)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                assert not (
+                    isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "sqlite3"
+                    and node.func.attr == "connect"
+                ), (path.name, node.lineno)
