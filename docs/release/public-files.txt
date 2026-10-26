@@ -685,6 +685,7 @@ src/noyra/world/prediction.py
 src/noyra/world/source.py
 src/noyra/world/store.py
 src/noyra/world/types.py
+tests/contracts/database-definition-contract.json
 tests/contracts/remediation_acceptance.json
 tests/fixtures/benchmarks/memory_locomo_pinned_v1.json
 tests/fixtures/historical/manifest.json
@@ -730,6 +731,7 @@ tests/test_action_integrity_diagnostic.py
 tests/test_admin_optimization_logs.py
 tests/test_admin_session_durable.py
 tests/test_affect_policy.py
+tests/test_architecture_properties.py
 tests/test_archive.py
 tests/test_archive_s3.py
 tests/test_audit_0dea2dd_contracts.py
