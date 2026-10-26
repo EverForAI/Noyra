@@ -44,11 +44,37 @@ R03 综合证据升级为 `noyra-r03-validation/v2`：
 
 每个场景还验证重复恢复不会重写 authority 或增加代数，DataRoot 哨兵保留。开发选择不会保存本次传入的 B 以替换 A；进入严格 B 后 A 不会因恢复而重现，回滚到开发包仍被严格 manifest 规则拒绝。拒绝原因须匹配签名/信任规则，不把任意异常都视为成功拒绝。
 
-模块二定向运行 3 个 pytest 用例全部通过，分别覆盖 15 组策略对照、6 个生产故障场景及仅生产输出的证据隔离。后续完整矩阵/兼容回归属于模块三，不将本段定向结果冒充整个门禁。
+模块二提交 `815dae3`；定向运行 3 个 pytest 用例全部通过，分别覆盖 15 组策略对照、6 个生产故障场景及仅生产输出的证据隔离。完整矩阵/兼容回归结果见下一节；本段定向重跑不重复计入最终通过总数。
 
 ## 完整验证
 
-VALIDATION_PENDING
+Windows / Python 3.12.10 / 完整 PowerShell 7 的实际执行：
+
+| 范围 | 结果 | 说明 |
+|---|---|---|
+| R03 综合验证、PS5 主机能力边界、新策略对照、生产故障、product-only 证据隔离 | 5 passed | 含 15 个策略对照、6 个生产文件故障；仅在各自分组记录 |
+| F01 数据根、进程身份、桌面、包组装/篡改、R02 文件发布、原有真实签名与恢复回归 | 65 passed | 没有改变这些生产实现 |
+| 不同 pytest 用例合计 | 70 passed，0 failed，0 skipped | 两个 JUnit 去重；之前定向重跑的 3 项不重复计入 |
+| 原型内部矩阵 | 108 场景通过 | 18 个故障点 × 3 个签名者策略 × 2 种故障模式；仅是 prototype，不计为额外 108 个生产用例 |
+| 静态 | 全库 Ruff/格式通过，严格 Mypy 483 个源文件通过 | 修改的三个 PowerShell 测试文件 AST 解析通过 |
+
+最终回归命令：
+
+```sh
+python -m pytest -q tests/test_audit_r03_protocol_validation.py
+python -m pytest -q tests/test_windows_data_root.py tests/test_windows_process_identity.py tests/test_desktop.py tests/test_m42_p3_05_windows_package.py tests/test_audit_r02_windows_state.py tests/test_audit_6a742e5_windows.py
+python -m ruff check .
+python -m ruff format --check .
+python -m mypy src tests scripts/public-file-manifest.py
+```
+
+原始结果保存在仓库外 `D:/metagrowh/.user-temp/noyra-f04-validation-yFvtSs`：r03-full.xml、windows-compatibility.xml、test-summary.json、native-ps7.json、signature-policy.json、production-policy-recovery.json 及静态检查输出。没有批量加入本机原始日志到公开源码清单。
+
+独立读取 JSON 证据复核：production 分组只有 5 个具名原有 lifecycle 检查，fault_matrix_cases=108 只存在于 prototype；15 个生产策略状态与对应模型相同，六个恢复后的信任和严格字段符合接受点。A+B 的 pins 为 A/B 集合的准确并集，仅保留 B 后 A 确实不存在；开发选择保留 A，没有通过新参数添加 B。独立结果见 independent-policy-review.json 和 independent-evidence-scope.json。
+
+本轮没有重跑整个 Python 运行时或真实 Linux/链上/供应商测试；生产源码、安装器和 CI 字节均不变，回归聚焦本次修改的原型/证据及 Windows 兼容边界。
+
+公开范围最终为 984 个文件、983 个 SHA-256 条目、202 个明确排除路径。提交前按暂存区重算并校验；最终提交后独立核对原始 Git blob 和实际源码 ZIP。确切 SHA 及最后核验结果以交付记录为准，避免文档自引用。
 
 ## 差异复审与不变边界
 

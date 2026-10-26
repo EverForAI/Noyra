@@ -190,7 +190,7 @@ e8ec105e4560778892ed91d432b0286cafc072021b916310a9837c1db37b8658  docs/audit/202
 4e7731d9733323fedcd769ef4b05879a94f784de33cd6ee7974ab737cf4cb89d  docs/audit/2026-10-25-remediation-0dea2dd.md
 81181f5fd8a1c02d4017016b534b7d1ec9f3b3d70a46991301328ea3b746c19f  docs/audit/2026-10-26-f01-windows-data-root-remediation.md
 a6d3cdcf80ce2ae9da76e8ef8e2074db7d706ab6eb2525b758e770dc250c38b7  docs/audit/2026-10-26-f03-model-retry-cancellation-remediation.md
-0a2e40f610b40e479e5b219e2cf8ef62387c8bae3719e7e921bd387e87995fa0  docs/audit/2026-10-26-f04-signature-policy-validation-remediation.md
+02ced18a61e8b4d908374c2148281d20afcf531488910e583dda886ccebd7c1d  docs/audit/2026-10-26-f04-signature-policy-validation-remediation.md
 dab96fa820d636bbaab49592b41ac49953f3784f73f43ff096ad0df081de84ab  docs/audit/2026-10-26-public-manifest-remediation.md
 b0f6f9e021d21dde64b6dd98ee891557cb672c6502c190d6e56ad492ddd12039  docs/audit/2026-10-26-r03-remediation.md
 bb4f48f1d3bd5ca9af59465af4d9e57302c7139bb4b2b10c4a6cdbef8ef5444d  docs/audit/participant-collaboration-final-review.md
@@ -293,7 +293,7 @@ ebd46b13bd369405189bf31cb8f4eafa0e908dea4ae4890ff1a79f1160dbf945  docs/roadmap/2
 21773ce651544666324326ef03ec63245274e9f36d73b21909d5cf8f10c94192  docs/roadmap/2026-10-23-runtime-public-experience.md
 99b7d564aad2e9caab4eeb99a2680e4278dbccb7032b7df2b7c9fd268f69e133  docs/roadmap/2026-10-26-f01-windows-data-root.md
 92a42eb9a85c127a21be92a81db8fc376e38135b6fef289969cd73b6cd190254  docs/roadmap/2026-10-26-f03-model-retry-cancellation.md
-a4d4d0b33eb8482697cd5a352c9bbc3f952de80ce16c99b469883f1c3f1a3946  docs/roadmap/2026-10-26-f04-signature-policy-validation.md
+26de702f220a145ecea34d47b46d6b5db13425ff723d5c6f7a234be725adcd34  docs/roadmap/2026-10-26-f04-signature-policy-validation.md
 58527f5f2da8fd528acd2ab328f89abb0914d1c0cfee4add6598dd4cc227978e  docs/roadmap/2026-10-26-public-manifest-remediation.md
 94f6a5fb4fc57e36ef2f8b31adfcbdd145206c2350068c9c5331d6ef8dd03c5c  docs/security-model.md
 7ff292489a1bba67cc7516dbea02c4c5d7839aa80d1208d4397dbe1393ebaec0  docs/security/threat-model.md
