@@ -202,7 +202,14 @@ def test_public_health_does_not_leak_cached_admin_diagnostics(
         with pytest.raises(HTTPError) as error:
             urlopen(f"http://127.0.0.1:{port}/health/ready", timeout=5)
         assert error.value.code == 503
-        assert json.loads(error.value.read()) == {"status": "degraded", "service": "noyra"}
+        public_failure = json.loads(error.value.read())
+        assert public_failure == {
+            "status": "degraded",
+            "service": "noyra",
+            "reason_code": "integrity_quarantine",
+        }
+        assert "private-volume" not in json.dumps(public_failure)
+        assert "private-fingerprint" not in json.dumps(public_failure)
     finally:
         service.http.close()
         service.kernel.close()
