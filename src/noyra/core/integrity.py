@@ -3811,7 +3811,17 @@ def _check_secret_file_intents(context: IntegrityContext) -> Mapping[str, Any]:
         if operation == "create" and state == "committed" and resource is None:
             raise IntegrityError(f"committed create intent has no resource: {intent_id}")
         if operation == "create" and state == "removed" and resource is not None:
-            raise IntegrityError(f"removed create intent has a resource: {intent_id}")
+            # Revocation retains the durable resource for audit history. Startup
+            # reconciliation closes its create intent after deleting the secret.
+            # Accept that terminal state only with the matching completed delete.
+            deleted = context.connection.execute(
+                "SELECT 1 FROM secret_file_intents WHERE subject_id = ? "
+                "AND resource_type = ? AND resource_id = ? AND secret_reference = ? "
+                "AND operation = 'delete' AND state = 'removed'",
+                (subject_id, resource_type, resource_id, reference),
+            ).fetchone()
+            if resource["status"] != revoked_status or deleted is None:
+                raise IntegrityError(f"removed create intent has a resource: {intent_id}")
         if subject_id == context.subject_id:
             subject_count += 1
     return {"secret_file_intents": subject_count}

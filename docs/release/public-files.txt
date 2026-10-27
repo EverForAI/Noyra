@@ -198,6 +198,7 @@ docs/audit/2026-10-26-modularization-transport-review.md
 docs/audit/2026-10-26-public-manifest-remediation.md
 docs/audit/2026-10-26-r03-remediation.md
 docs/audit/2026-10-26-service-database-modularization-delivery.md
+docs/audit/2026-10-27-overnight-health-remediation.md
 docs/audit/participant-collaboration-final-review.md
 docs/charter.md
 docs/deployment/2026-10-05-final-acceptance.md
@@ -303,6 +304,7 @@ docs/roadmap/2026-10-26-f03-model-retry-cancellation.md
 docs/roadmap/2026-10-26-f04-signature-policy-validation.md
 docs/roadmap/2026-10-26-public-manifest-remediation.md
 docs/roadmap/2026-10-26-service-database-modularization.md
+docs/roadmap/2026-10-27-overnight-health-remediation.md
 docs/security-model.md
 docs/security/threat-model.md
 docs/state-model.md
