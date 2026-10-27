@@ -13,6 +13,19 @@ CI = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 RELEASE = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 
 
+def test_quality_workflow_scopes_pushes_and_cancels_stale_runs() -> None:
+    trigger_block = CI[CI.index("on:\n") : CI.index("\npermissions:")]
+    assert "  push:\n    branches:\n      - main" in trigger_block
+    assert "  pull_request:\n    branches:\n      - main" in trigger_block
+    assert "  push:\n\n" not in trigger_block
+    assert "concurrency:\n" in trigger_block
+    assert (
+        "group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
+        in trigger_block
+    )
+    assert "cancel-in-progress: true" in trigger_block
+
+
 def test_ci_cloud_profile_installs_cloud_lock_and_runs_security_tests_without_skips() -> None:
     start = CI.index("  cloud-profile:")
     section = CI[start:]
