@@ -1,7 +1,0 @@
-............................................ss.......................... [ 56%]
-.........................................sss...........                  [100%]
-=========================== short test summary info ============================
-SKIPPED [2] ../noyra-audit-20261020/tests/test_m42_p2_14_at_rest.py:370: requires real Windows ACLs and PowerShell
-SKIPPED [2] tests/test_storage_mode.py:506: requires an actual unprivileged POSIX user
-SKIPPED [1] tests/test_storage_mode.py:532: requires an actual unprivileged POSIX user
-122 passed, 5 skipped in 208.19s (0:03:28)

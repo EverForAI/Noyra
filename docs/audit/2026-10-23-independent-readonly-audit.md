@@ -3,7 +3,7 @@
 ## 审计范围与方法
 
 - 审计时间：2026-10-23（Asia/Shanghai）。
-- 工作区：`E:\我的项目\Noyra\开发版`，分支 `codex/terminal-waits-operability`，HEAD `b0162fd40cb436bbed34e9dc0a15c3a8313d45b1`。
+- 工作区：`[私有验证记录]`，分支 `codex/terminal-waits-operability`，HEAD `b0162fd40cb436bbed34e9dc0a15c3a8313d45b1`。
 - 对象是审计开始时的**实际工作区**，包括 29 个相对 HEAD 已修改文件及当时已存在的未跟踪文件；不是只看 HEAD，也不表示这些更改已部署。
 - 本轮没有改产品代码、测试、配置或旧报告；没有暂存、提交、推送、连接生产服务器、调用真实模型/支付、启动合成 Windows 启动器。唯一新增的仓库文件是本报告；隔离复现输出写入被忽略的 `.runtime/20261022-independent-audit-round2/`。
 - 建立了审计前 1,098 个非忽略工作区文件的 SHA-256 基线。最终检查确认它们没有被本审计改写；此前已有的工作区差异均保留。
@@ -34,7 +34,7 @@
 
 **触发条件**：安装者以 `-RequireSignature` 安装一个攻击者可提供或替换的包；包中的启动器是任意 Windows 信任链认可的 Authenticode 签名文件，并且攻击者为包重算普通 JSON 清单中的 hash。条件需要攻击者影响安装输入/分发来源，不是未认证 HTTP 请求直接执行。
 
-**隔离复现**：把系统签名的 Microsoft `C:\Windows\System32\whoami.exe` 复制为合成包的 `noyra.exe`，给它正确 hash，设置 `signature_required=true`，执行实际 lifecycle install 并传 `-RequireSignature`，退出码为 0。证书主体为 Microsoft Windows，thumbprint `58FD671E2D4D200CE92D6E799EC70DF96E6D2664`。合成启动器没有执行。另一个只含 README 的空启动器包也能以严格签名模式 install 成功，说明没有要求启动器清单必须存在。
+**隔离复现**：把系统签名的 Microsoft `[私有验证记录]` 复制为合成包的 `noyra.exe`，给它正确 hash，设置 `signature_required=true`，执行实际 lifecycle install 并传 `-RequireSignature`，退出码为 0。证书主体为 Microsoft Windows，thumbprint `58FD671E2D4D200CE92D6E799EC70DF96E6D2664`。合成启动器没有执行。另一个只含 README 的空启动器包也能以严格签名模式 install 成功，说明没有要求启动器清单必须存在。
 
 **影响**：严格签名选项不能表达“由 Noyra 发布者签署”。运营人员可能把“任意有效签名”误当作“Noyra 官方构建”，也无法用该包证明 Python 源码及依赖清单来自经过审核的发布 SHA。当前仓库本身说明 Windows 包仍是基础生命周期实现而非正式签名 MSI/MSIX，因此风险是发布信任属性缺失，不能扩张成已证明远程 RCE。
 

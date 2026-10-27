@@ -3,7 +3,7 @@
 ## 1. 对象、方法与结论
 
 - 审计基线：`560ec7fbca31f9de150cfbaa7aa3dfa1d4fb9f0d`，分支 `codex/participant-collaboration`。
-- 工作区：`E:\我的项目\Noyra\开发版`；开始时干净。
+- 工作区：`[私有验证记录]`；开始时干净。
 - 日期与时区：2026-10-24，Asia/Shanghai；本轮开始时间 08:11。
 - 结论仅对应本地上述提交，没有查询或推断 GitHub 合并状态，也没有连接生产实例。
 - 方法：从当前代码重新追踪输入、身份、事务、调度、模型调用、来源、上下文和外部交付；在临时数据库和本地 HTTP 服务中构造并发或异常路径。历史审计和历史“通过”记录不是本轮结论的依据。
@@ -273,7 +273,7 @@ RelationshipSocialValidationError: contact channel changed
 复现目录：
 
 ```text
-D:\metagrowh\.user-temp\noyra-audit2-20261024-xotl5q3b
+[私有验证记录]
 ```
 
 - baseline.json / meta.json：文件 SHA-256 与 Git 基线。

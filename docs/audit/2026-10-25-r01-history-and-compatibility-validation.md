@@ -150,4 +150,4 @@ R01 专项包含在组合回归中，不能将两组数字相加为独立用例�
 
 **先按第 6 节确认兼容策略，再进入 R01 单独产品实施；不要直接执行历史“可信回填”，也不要同时推进 R03。** 下一轮按“创建/迁移/身份核验 → 所有消费者与发送前核验 → 导出/保留/备份恢复及说明 → 固定版本集成回归”推进，每段独立复核。正式交付前不能缺少任何强制边界。
 
-证据目录：D:/metagrowh/.user-temp/noyra-r01-compat-20261025/。主要文件：historical-inventory.json、各历史版本 compatibility.json、synthetic-distribution.json、direct-sql-consumers.json、compatibility.xml、regression.xml、frozen-source.json。归档原件哈希保持原 manifest；私人消息只存在于临时合成测试，不进入报告或统计输出。
+证据目录：[私有验证记录]。主要文件：historical-inventory.json、各历史版本 compatibility.json、synthetic-distribution.json、direct-sql-consumers.json、compatibility.xml、regression.xml、frozen-source.json。归档原件哈希保持原 manifest；私人消息只存在于临时合成测试，不进入报告或统计输出。

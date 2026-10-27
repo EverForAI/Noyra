@@ -1,7 +1,7 @@
 # Noyra 独立只读代码审计（修复后工作区）
 
 - 审计日期：2026-10-22（Asia/Shanghai）。
-- 审计对象：`E:\我的项目\Noyra\开发版` 的当前工作区，包括审计开始前已有的未提交修复；**不是仅审计 HEAD，也不是审计服务器上的实际部署**。
+- 审计对象：`[私有验证记录]` 的当前工作区，包括审计开始前已有的未提交修复；**不是仅审计 HEAD，也不是审计服务器上的实际部署**。
 - 分支：`codex/terminal-waits-operability`。
 - HEAD：`b0162fd40cb436bbed34e9dc0a15c3a8313d45b1`。
 - 方式：重新追踪代码、隔离复现、跨平台选定回归；旧审计报告和旧测试通过记录不作为本报告的问题成立依据。
@@ -32,7 +32,7 @@
 - 本轮重点覆盖：模型调度/未知结果与恢复、生命周期/授权、记忆向量一致性、配置生效、钱包广播与确认边界、外部 HTTP、备份恢复/迁移解包、保留清理、安装/回滚、Windows 生命周期、后台认证和解释性。
 - 全仓 AST/语法、类型检查、测试通过不能替代全仓人工逐行审计。没有把“未发现问题”写成“证明没有问题”。
 
-覆盖清单：`E:\我的项目\Noyra\开发版\.runtime\20261022-post-remediation-independent-audit\manual-review-coverage.json`。
+覆盖清单：`../../.runtime/20261022-post-remediation-independent-audit/manual-review-coverage.json`。
 
 ## 二、分级与归因口径
 
@@ -59,9 +59,9 @@
 
 **代码位置**
 
-- `E:\我的项目\Noyra\开发版\deploy\windows\noyra-lifecycle.ps1:67-101`：`Verify-Package` 只遍历清单中的文件，对这些文件计算 hash，并按扩展名检查签名。
-- `E:\我的项目\Noyra\开发版\deploy\windows\noyra-lifecycle.ps1:224-245`：安装时递归复制包目录内全部文件，并没有仅复制经过验证的清单集合。
-- `E:\我的项目\Noyra\开发版\deploy\windows\noyra-lifecycle.ps1:165-187`：启动时按固定文件名选择启动器，不要求该文件曾列入清单。
+- `../../deploy/windows/noyra-lifecycle.ps1#L67`：`Verify-Package` 只遍历清单中的文件，对这些文件计算 hash，并按扩展名检查签名。
+- `../../deploy/windows/noyra-lifecycle.ps1#L224`：安装时递归复制包目录内全部文件，并没有仅复制经过验证的清单集合。
+- `../../deploy/windows/noyra-lifecycle.ps1#L165`：启动时按固定文件名选择启动器，不要求该文件曾列入清单。
 
 **根因**：被校验的文件集合，与被复制/随后可能执行的文件集合不一致。清单既不是闭合的文件库存，也不强制包含启动器。
 
@@ -83,11 +83,11 @@
 
 **代码位置**
 
-- `E:\我的项目\Noyra\开发版\src\noyra\model\resources.py:3305-3322`：业务 purpose 查询跨逻辑 key 包含历史已授权且未取消的 failed 调用。
-- `E:\我的项目\Noyra\开发版\src\noyra\model\resources.py:3423-3437`：这类 failed 调用继续返回 quarantine。
-- `E:\我的项目\Noyra\开发版\src\noyra\core\operator_controls.py:350-363`：failed 已被视作终态，再次确认 failed 直接返回幂等成功；不追加关闭围栏所需的事件。
-- `E:\我的项目\Noyra\开发版\src\noyra\model\ledger.py:734-768,835-882`：重试授权只接受 unknown，取消授权只走 prepared 关闭路径。
-- `E:\我的项目\Noyra\开发版\src\noyra\model\request_identity.py:39-64`：调用变为终态后产生下一代业务 key，但新围栏仍追溯旧 failed 调用。
+- `../../src/noyra/model/resources.py#L3305`：业务 purpose 查询跨逻辑 key 包含历史已授权且未取消的 failed 调用。
+- `../../src/noyra/model/resources.py#L3423`：这类 failed 调用继续返回 quarantine。
+- `../../src/noyra/core/operator_controls.py#L350`：failed 已被视作终态，再次确认 failed 直接返回幂等成功；不追加关闭围栏所需的事件。
+- `../../src/noyra/model/ledger.py:734-768,835-882`：重试授权只接受 unknown，取消授权只走 prepared 关闭路径。
+- `../../src/noyra/model/request_identity.py#L39`：调用变为终态后产生下一代业务 key，但新围栏仍追溯旧 failed 调用。
 
 **根因**：执行状态与恢复授权状态没有完整建模。管理接口认为“failed 已终结”，调度器却认为“此前的未知重试授权尚未关闭”；两个状态机对同一记录是否已处理完的定义不一致。
 
@@ -113,9 +113,9 @@
 
 **代码位置**
 
-- `E:\我的项目\Noyra\开发版\src\noyra\model\embedding.py:135-140,221-223`：资源 ID 与 provider 名称是不同概念；provider 名称只为 `openai-compatible:{model}`，环境资源 ID 也未包含 dimensions。
-- `E:\我的项目\Noyra\开发版\src\noyra\model\embedding_gateway.py:89-91`：gateway 原样透传 provider.name。
-- `E:\我的项目\Noyra\开发版\src\noyra\mind\retrieval.py:145-158,202-245`：缺失检测及相似度查询依据该名称和正文 hash，未绑定真正的向量空间标识。
+- `../../src/noyra/model/embedding.py:135-140,221-223`：资源 ID 与 provider 名称是不同概念；provider 名称只为 `openai-compatible:{model}`，环境资源 ID 也未包含 dimensions。
+- `../../src/noyra/model/embedding_gateway.py#L89`：gateway 原样透传 provider.name。
+- `../../src/noyra/mind/retrieval.py:145-158,202-245`：缺失检测及相似度查询依据该名称和正文 hash，未绑定真正的向量空间标识。
 
 **根因**：计费资源身份、API 模型别名、向量空间兼容性被混为一谈。新加的正文 hash 绑定能证明正文版本一致，却不能证明查询和库存向量来自同一语义坐标系。
 
@@ -139,9 +139,9 @@
 
 **代码位置**
 
-- `E:\我的项目\Noyra\开发版\src\noyra\service.py:10885-10910`：仅在服务工厂构造 CognitionCycle 时读取 active_settings 并创建 gateway/index。
-- `E:\我的项目\Noyra\开发版\src\noyra\service.py:8696-8730,8846-8870`：配置/启停 API 只更新持久化存储并返回状态，没有更新已构造的认知对象，也没有返回“待重启应用”。
-- `E:\我的项目\Noyra\开发版\src\noyra\model\embedding_resources.py:208-238,240-273`：数据库选择当前资源与已构造 provider 的发出前鉴权是两个独立操作。
+- `../../src/noyra/service.py#L10885`：仅在服务工厂构造 CognitionCycle 时读取 active_settings 并创建 gateway/index。
+- `../../src/noyra/service.py:8696-8730,8846-8870`：配置/启停 API 只更新持久化存储并返回状态，没有更新已构造的认知对象，也没有返回“待重启应用”。
+- `../../src/noyra/model/embedding_resources.py:208-238,240-273`：数据库选择当前资源与已构造 provider 的发出前鉴权是两个独立操作。
 
 **根因**：后台资源“配置已启用”被用作成功结果，但没有运行时应用协议或明确的待应用状态。运行中的 cycle、gateway、index 和 MemoryStore 持有旧对象引用。
 
@@ -166,9 +166,9 @@
 
 **代码位置**
 
-- `E:\我的项目\Noyra\开发版\src\noyra\model\resources.py:3305-3331`：对 failed 的同业务 purpose 调用执行相关 EXISTS / NOT EXISTS，按 JSON 内 call_id 搜索审计。
-- `E:\我的项目\Noyra\开发版\src\noyra\core\database.py:7086-7097`：新增的 model_calls 索引不覆盖审计 action/call_id 关联。
-- `E:\我的项目\Noyra\开发版\src\noyra\core\database.py:220-227,4050-4051`：现有审计索引只按主体/时间定位，未按授权动作和 call_id 定位。
+- `../../src/noyra/model/resources.py#L3305`：对 failed 的同业务 purpose 调用执行相关 EXISTS / NOT EXISTS，按 JSON 内 call_id 搜索审计。
+- `../../src/noyra/core/database.py#L7086`：新增的 model_calls 索引不覆盖审计 action/call_id 关联。
+- `../../src/noyra/core/database.py:220-227,4050-4051`：现有审计索引只按主体/时间定位，未按授权动作和 call_id 定位。
 
 **根因**：将业务级安全围栏扩展到历史失败调用时，新增了按每个候选调用执行的审计相关子查询，没有对应的可索引查询形态。`LIMIT 257` 仅限制返回行数，不限制为证明“不存在授权”所做的扫描工作。
 
@@ -230,15 +230,15 @@
 
 所有以下文件都在本轮独立、Git 忽略的目录中：
 
-- 基准：`E:\我的项目\Noyra\开发版\.runtime\20261022-post-remediation-independent-audit\baseline.json`。
-- 源码摘录：`E:\我的项目\Noyra\开发版\.runtime\20261022-post-remediation-independent-audit\finding-source-excerpts.json`。
-- R1/R3/R4：`E:\我的项目\Noyra\开发版\.runtime\20261022-post-remediation-independent-audit\reproductions.json`。
-- R4 重启及替换：`E:\我的项目\Noyra\开发版\.runtime\20261022-post-remediation-independent-audit\embedding-restart.json`；`E:\我的项目\Noyra\开发版\.runtime\20261022-post-remediation-independent-audit\embedding-hot-swap.json`。
-- R2：`E:\我的项目\Noyra\开发版\.runtime\20261022-post-remediation-independent-audit\retry-deadend.json`。
-- R2 来源 / R5：`E:\我的项目\Noyra\开发版\.runtime\20261022-post-remediation-independent-audit\query-scaling.json`。
-- 来源摘要：`E:\我的项目\Noyra\开发版\.runtime\20261022-post-remediation-independent-audit\origin-comparison.json`。
-- 测试统计：`E:\我的项目\Noyra\开发版\.runtime\20261022-post-remediation-independent-audit\validation-summary.json`。
-- 最终只读复核：`E:\我的项目\Noyra\开发版\.runtime\20261022-post-remediation-independent-audit\read-only-verification.json`。
+- 基准：`../../.runtime/20261022-post-remediation-independent-audit/baseline.json`。
+- 源码摘录：`../../.runtime/20261022-post-remediation-independent-audit/finding-source-excerpts.json`。
+- R1/R3/R4：`../../.runtime/20261022-post-remediation-independent-audit/reproductions.json`。
+- R4 重启及替换：`../../.runtime/20261022-post-remediation-independent-audit/embedding-restart.json`；`../../.runtime/20261022-post-remediation-independent-audit/embedding-hot-swap.json`。
+- R2：`../../.runtime/20261022-post-remediation-independent-audit/retry-deadend.json`。
+- R2 来源 / R5：`../../.runtime/20261022-post-remediation-independent-audit/query-scaling.json`。
+- 来源摘要：`../../.runtime/20261022-post-remediation-independent-audit/origin-comparison.json`。
+- 测试统计：`../../.runtime/20261022-post-remediation-independent-audit/validation-summary.json`。
+- 最终只读复核：`../../.runtime/20261022-post-remediation-independent-audit/read-only-verification.json`。
 
 证据目录保留了合成库、脚本、最终日志和中间失败日志；它不是已签名的生产审计证据包，不包含本轮获取的真实供应商凭据。
 

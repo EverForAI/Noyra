@@ -3,7 +3,7 @@
 ## 1. 审计对象与结论
 
 - 审计日期：2026-10-24，Asia/Shanghai。
-- 本地仓库：`E:\我的项目\Noyra\开发版`。
+- 本地仓库：`[私有验证记录]`。
 - 分支：`codex/participant-collaboration`。
 - 基线提交：`0a0c031dc6cdf4e08d3b6b5b0430a9503dce7aa5`。
 - 开始时工作区干净。结论针对该提交的本地代码，不代表 GitHub 当前合并状态或服务器部署状态。
@@ -375,7 +375,7 @@ existing application still present
 本轮原始基线、合成复现脚本、JSON 结果和测试日志保存在：
 
 ```text
-D:\metagrowh\.user-temp\noyra-audit-20261024-1f7o1m_s
+[私有验证记录]
 ```
 
 - `baseline.json`：开始时产品源文件 SHA-256 清单。

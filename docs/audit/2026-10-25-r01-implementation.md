@@ -68,7 +68,7 @@ MIGRATIONS[107] 创建表/索引/触发器，backfill_legacy_bindings 与版本�
 
 全仓库 Ruff / format、Mypy（477 文件）、compileall、pip check 已通过；前端 Node 测试 152 passed。完整后端与最终哈希以结束时实测为准，不预先宣称通过。
 
-证据目录：D:/metagrowh/.user-temp/noyra-r01-implementation-20261025/。
+证据目录：[私有验证记录]。
 
 
 ### 首轮全量回归中的已定位项（尚未改动冻结源代码）

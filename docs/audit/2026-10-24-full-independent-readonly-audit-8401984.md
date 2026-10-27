@@ -3,7 +3,7 @@
 ## 1. 审计对象、结论和操作边界
 
 - 审计日期：2026-10-24，Asia/Shanghai。
-- 仓库：`E:\我的项目\Noyra\开发版`。
+- 仓库：`[私有验证记录]`。
 - 分支：`codex/participant-collaboration`。
 - 当前审计提交：`8401984f694a65e174311793bb13f169da8db743`。
 - 上一轮修复的比较基线：`560ec7fbca31f9de150cfbaa7aa3dfa1d4fb9f0d`。上一轮包括 `ad76560`、`24aa46b`、`30c43a1`、`9b455aa`、`646e240` 及对应文档提交。
@@ -89,12 +89,12 @@ C07 的 P1 仅针对 Windows 分发包来源认证；不表示 Linux 已遭入�
 
 **代码证据**
 
-- [上下文冲突事件写入](<E:/我的项目/Noyra/开发版/src/noyra/model/ledger.py:742>)：`quarantine_prepared_context()` 写入 `model_request_context_conflict`。
-- [交互恢复触发点](<E:/我的项目/Noyra/开发版/src/noyra/cognition/interaction.py:132>)：捕获请求指纹冲突后调用上述方法。
-- [申请撤回事件写入](<E:/我的项目/Noyra/开发版/src/noyra/interaction/collaboration.py:572>)：写入 `participant_application_withdrawn`。
-- [渠道来源绑定事件写入](<E:/我的项目/Noyra/开发版/src/noyra/interaction/participant_http.py:106>)：写入 `participant_source_bound`。
-- [完整性事件集合](<E:/我的项目/Noyra/开发版/src/noyra/core/integrity.py:1155>)、[未知事件拒绝分支](<E:/我的项目/Noyra/开发版/src/noyra/core/integrity.py:3119>)：上述事件不在 core、management、wallet 的已验证契约中，最终抛 `IntegrityError`。
-- [暂停策略](<E:/我的项目/Noyra/开发版/src/noyra/core/integrity.py:4923>)：存在 finding 且策略为 `pause` 时，调用 `kernel.safe_pause()`。
+- [上下文冲突事件写入](<../../src/noyra/model/ledger.py#L742>)：`quarantine_prepared_context()` 写入 `model_request_context_conflict`。
+- [交互恢复触发点](<../../src/noyra/cognition/interaction.py#L132>)：捕获请求指纹冲突后调用上述方法。
+- [申请撤回事件写入](<../../src/noyra/interaction/collaboration.py#L572>)：写入 `participant_application_withdrawn`。
+- [渠道来源绑定事件写入](<../../src/noyra/interaction/participant_http.py#L106>)：写入 `participant_source_bound`。
+- [完整性事件集合](<../../src/noyra/core/integrity.py#L1155>)、[未知事件拒绝分支](<../../src/noyra/core/integrity.py#L3119>)：上述事件不在 core、management、wallet 的已验证契约中，最终抛 `IntegrityError`。
+- [暂停策略](<../../src/noyra/core/integrity.py#L4923>)：存在 finding 且策略为 `pause` 时，调用 `kernel.safe_pause()`。
 
 **根因**：业务写入者与全局审计验证器分别维护事件契约。新增事件没有同步注册验证、引用归属和合法 payload，单模块的“写入成功/队列隔离成功”就会在深度完整性检查时变成整体故障。
 
@@ -137,9 +137,9 @@ C07 的 P1 仅针对 Windows 分发包来源认证；不表示 Linux 已遭入�
 
 **代码证据**
 
-- [旧交互全局召回分支](<E:/我的项目/Noyra/开发版/src/noyra/cognition/interaction.py:297>)：只有 `who is not None` 时不召回；`who is None` 时按消息文本召回全局记忆。
-- [记忆候选读取](<E:/我的项目/Noyra/开发版/src/noyra/mind/memory.py:305>)：按 subject、active、类型和候选 ID 读取，没有面向当前联系人的分享授权条件。
-- [回应提交](<E:/我的项目/Noyra/开发版/src/noyra/cognition/interaction.py:151>)：将模型回应写回原 channel/counterparty。
+- [旧交互全局召回分支](<../../src/noyra/cognition/interaction.py#L297>)：只有 `who is not None` 时不召回；`who is None` 时按消息文本召回全局记忆。
+- [记忆候选读取](<../../src/noyra/mind/memory.py#L305>)：按 subject、active、类型和候选 ID 读取，没有面向当前联系人的分享授权条件。
+- [回应提交](<../../src/noyra/cognition/interaction.py#L151>)：将模型回应写回原 channel/counterparty。
 
 **根因**：把“没有新联系人归属记录”解释成“可以使用全局记忆”。这是来源信息不足，不能证明所有全局记忆都可向这位旧联系人披露。长度截断解决了检索异常，但没有给旧记录补足收件人授权。
 
@@ -172,9 +172,9 @@ C07 的 P1 仅针对 Windows 分发包来源认证；不表示 Linux 已遭入�
 
 **代码证据**
 
-- [全局情感查询](<E:/我的项目/Noyra/开发版/src/noyra/cognition/social.py:192>)：按 subject 和 target_type 读取 `human/agent/entity/subject`，未限定为当前联系人。
-- [当前收件人的提示词 payload](<E:/我的项目/Noyra/开发版/src/noyra/cognition/social.py:288>)：把全部所选情感行放入 `affect`。同一 payload 还包含全局 active goal 的标题；本轮动态复现确认情感行，不据此声称每个目标标题都属于秘密。
-- [更严格的直接回应情感筛选](<E:/我的项目/Noyra/开发版/src/noyra/cognition/interaction.py:278>)：已经有按当前主体/联系人/交互目标收缩的实现，可作为语义对照。
+- [全局情感查询](<../../src/noyra/cognition/social.py#L192>)：按 subject 和 target_type 读取 `human/agent/entity/subject`，未限定为当前联系人。
+- [当前收件人的提示词 payload](<../../src/noyra/cognition/social.py#L288>)：把全部所选情感行放入 `affect`。同一 payload 还包含全局 active goal 的标题；本轮动态复现确认情感行，不据此声称每个目标标题都属于秘密。
+- [更严格的直接回应情感筛选](<../../src/noyra/cognition/interaction.py#L278>)：已经有按当前主体/联系人/交互目标收缩的实现，可作为语义对照。
 
 **根因**：禁用了未经授权的 memory recall，但没有统一定义“面向一个收件人的生成上下文”。全局情感快照仍被当作普通内部控制信息，包含其他联系人的 target_id、emotion_type、强度和效价。
 
@@ -204,10 +204,10 @@ C07 的 P1 仅针对 Windows 分发包来源认证；不表示 Linux 已遭入�
 
 **代码证据**
 
-- [先记录历史 channel、再尝试获取路由](<E:/我的项目/Noyra/开发版/src/noyra/cognition/social.py:233>)：路由验证失败只得到 `route=None`，channel 仍保留。
-- [候选准入与首项选择](<E:/我的项目/Noyra/开发版/src/noyra/cognition/social.py:260>)：检查的是 `channels`，然后固定取 `candidates[0]`，没有把已知不能发送的路由从发送候选中移出。
-- [提交时正确失败关闭](<E:/我的项目/Noyra/开发版/src/noyra/cognition/social.py:480>)：没有冻结 route 或路由已失效时拒绝提交。
-- [完成时间决定再次评审](<E:/我的项目/Noyra/开发版/src/noyra/cognition/social.py:163>)：没有 social run 被提交时，仍视为到期。
+- [先记录历史 channel、再尝试获取路由](<../../src/noyra/cognition/social.py#L233>)：路由验证失败只得到 `route=None`，channel 仍保留。
+- [候选准入与首项选择](<../../src/noyra/cognition/social.py#L260>)：检查的是 `channels`，然后固定取 `candidates[0]`，没有把已知不能发送的路由从发送候选中移出。
+- [提交时正确失败关闭](<../../src/noyra/cognition/social.py#L480>)：没有冻结 route 或路由已失效时拒绝提交。
+- [完成时间决定再次评审](<../../src/noyra/cognition/social.py#L163>)：没有 social run 被提交时，仍视为到期。
 
 **根因**：上一轮把“冻结且重新验证路由”接到了提交边界，但调度候选仍沿用“过去有这个渠道”这一旧标准。发送权限与可运行性没有形成一致的选择条件。
 
@@ -241,10 +241,10 @@ C07 的 P1 仅针对 Windows 分发包来源认证；不表示 Linux 已遭入�
 
 **代码证据**
 
-- [社交异常处理](<E:/我的项目/Noyra/开发版/src/noyra/cognition/social.py:130>)：只捕获预算、provider、structured output 和 `ModelCallStateError`，遗漏独立的 `ModelCallConflictError`。
-- [异常类型关系](<E:/我的项目/Noyra/开发版/src/noyra/model/errors.py:33>)：Conflict 与 State 是并列子类，捕获 State 不会捕获 Conflict。
-- [持久请求指纹比较](<E:/我的项目/Noyra/开发版/src/noyra/model/ledger.py:49>)：同一幂等身份对应不同 request_hash 时拒绝。
-- [策略结果记录](<E:/我的项目/Noyra/开发版/src/noyra/cognition/cycle.py:576>)：社交调用异常时到不了后续的策略结果记录。
+- [社交异常处理](<../../src/noyra/cognition/social.py#L130>)：只捕获预算、provider、structured output 和 `ModelCallStateError`，遗漏独立的 `ModelCallConflictError`。
+- [异常类型关系](<../../src/noyra/model/errors.py#L33>)：Conflict 与 State 是并列子类，捕获 State 不会捕获 Conflict。
+- [持久请求指纹比较](<../../src/noyra/model/ledger.py#L49>)：同一幂等身份对应不同 request_hash 时拒绝。
+- [策略结果记录](<../../src/noyra/cognition/cycle.py#L576>)：社交调用异常时到不了后续的策略结果记录。
 
 **根因**：prepared 调用要求延续原始请求，而新一轮社交会用当前情感、目标、事件等重新构造输入。路由相同不代表请求指纹相同；异常及恢复状态没有被该模块完整建模。
 
@@ -274,8 +274,8 @@ C07 的 P1 仅针对 Windows 分发包来源认证；不表示 Linux 已遭入�
 
 **代码证据**
 
-- [Normalize-Thumbprints 的返回值](<E:/我的项目/Noyra/开发版/deploy/windows/noyra-lifecycle.ps1:46>)：函数输出经 PowerShell pipeline 枚举，0 项/1 项不保证调用端获得数组。
-- [调用端及 Count 检查](<E:/我的项目/Noyra/开发版/deploy/windows/noyra-lifecycle.ps1:133>)：直接赋给 `$manifestThumbprints`、`$externalThumbprints`，严格模式下读取 `.Count`。
+- [Normalize-Thumbprints 的返回值](<../../deploy/windows/noyra-lifecycle.ps1#L46>)：函数输出经 PowerShell pipeline 枚举，0 项/1 项不保证调用端获得数组。
+- [调用端及 Count 检查](<../../deploy/windows/noyra-lifecycle.ps1#L133>)：直接赋给 `$manifestThumbprints`、`$externalThumbprints`，严格模式下读取 `.Count`。
 
 **根因**：函数内部用 `@(...)` 并不保证跨函数 pipeline 输出后仍保留数组形状。调用端没显式收集数组；单个字符串在当前 StrictMode 下没有可用的 Count 属性。
 
@@ -305,9 +305,9 @@ at Verify-Package ... noyra-lifecycle.ps1:138
 
 **代码证据**
 
-- [普通 JSON 清单和逐文件 hash](<E:/我的项目/Noyra/开发版/deploy/windows/noyra-lifecycle.ps1:117>)：manifest 提供文件清单、版本及各项 hash，但没有签名/外部可信摘要验证。
-- [只对指定可执行扩展名检查 Authenticode](<E:/我的项目/Noyra/开发版/deploy/windows/noyra-lifecycle.ps1:164>)：launcher 发布者受到约束，非 PE 源码和其他文件没有同一包来源证明。
-- [builder 清单生成](<E:/我的项目/Noyra/开发版/scripts/build-windows-package.ps1:118>)：写入普通 JSON，没有为完整清单建立由发布者认证的绑定。
+- [普通 JSON 清单和逐文件 hash](<../../deploy/windows/noyra-lifecycle.ps1#L117>)：manifest 提供文件清单、版本及各项 hash，但没有签名/外部可信摘要验证。
+- [只对指定可执行扩展名检查 Authenticode](<../../deploy/windows/noyra-lifecycle.ps1#L164>)：launcher 发布者受到约束，非 PE 源码和其他文件没有同一包来源证明。
+- [builder 清单生成](<../../scripts/build-windows-package.ps1#L118>)：写入普通 JSON，没有为完整清单建立由发布者认证的绑定。
 
 **根因**：自述 hash 可证明文件与清单一致，不能证明清单来自受信发布者。认证了一个 launcher 的签名，不等于认证它旁边所有源码、脚本、配置和依赖库存。
 
@@ -341,16 +341,16 @@ at Verify-Package ... noyra-lifecycle.ps1:138
 
 **第一处：入站调度测试替身不符合新增网关契约**
 
-- [旧测试替身](<E:/我的项目/Noyra/开发版/tests/test_inbound.py:310>) 使用 `cast(ModelGateway, object())`，没有任何网关属性。
-- [新的调度读取](<E:/我的项目/Noyra/开发版/src/noyra/cognition/interaction.py:255>) 需要 `requires_explicit_prepared_retry`，这对实际 ModelGateway/RoutedModelGateway 是合法契约。
+- [旧测试替身](<../../tests/test_inbound.py#L310>) 使用 `cast(ModelGateway, object())`，没有任何网关属性。
+- [新的调度读取](<../../src/noyra/cognition/interaction.py#L255>) 需要 `requires_explicit_prepared_retry`，这对实际 ModelGateway/RoutedModelGateway 是合法契约。
 - 真实测试报 `AttributeError: 'object' object has no attribute 'requires_explicit_prepared_retry'`。
 
 **归因**：`30c43a1` 改变了 `_due_interaction()` 的依赖契约，但没有同步现有测试，属于上一轮次生验收遗漏。没有证据说明实际生产网关缺少该字段，不能把测试替身失败当作生产构造必然崩溃。
 
 **第二处：runtime export 跳过表清单没有跟随 schema 104**
 
-- [过期断言](<E:/我的项目/Noyra/开发版/tests/test_m42_p1_04_runtime_export.py:670>) 只允许历史 skipped 集合。
-- [当前安全导出契约](<E:/我的项目/Noyra/开发版/src/noyra/core/runtime_export.py:696>) 正确跳过 `participant_credentials`、`participant_sessions`、`participant_api_credentials`、`participant_auth_limits`。
+- [过期断言](<../../tests/test_m42_p1_04_runtime_export.py#L670>) 只允许历史 skipped 集合。
+- [当前安全导出契约](<../../src/noyra/core/runtime_export.py#L696>) 正确跳过 `participant_credentials`、`participant_sessions`、`participant_api_credentials`、`participant_auth_limits`。
 - 测试因为这四张额外的 skipped 表而失败。
 
 **归因**：schema 104 的 `6baff1c` 集成遗漏，在 `560ec7f` 已存在，非上一轮新增。
@@ -447,7 +447,7 @@ O01 先明确业务契约，避免把未经确认的语义观察变成新的全�
 
 ## 9. 证据和只读完整性
 
-本轮独立证据目录：`D:\metagrowh\.user-temp\noyra-readonly-audit-8401984-20261024`。
+本轮独立证据目录：`[私有验证记录]`。
 
 | 文件 | 内容 |
 | --- | --- |

@@ -77,7 +77,7 @@ HTTP 首轮综合测试出现 5 项失败：拆出分支后提前返回，破坏
 
 ## 可追溯证据
 
-实施计划见 [roadmap](../roadmap/2026-10-26-service-database-modularization.md)。原始对照、失败与成功 JUnit、静态结果、wheel 及 smoke 输出保存在仓库外本轮目录：D:/metagrowh/.user-temp/noyra-modularization-429xlran。
+实施计划见 [roadmap](../roadmap/2026-10-26-service-database-modularization.md)。原始对照、失败与成功 JUnit、静态结果、wheel 及 smoke 输出保存在仓库外本轮目录：[私有验证记录]。
 
 关键文件：http-extraction-map.json、http-ast-equivalence.json、http-forwarding-equivalence.json、database-equivalence.json、configuration-transport-equivalence.json、final-regression-summary.json、final-static.json、wheel-inventory.json、wheel-runtime-smoke.stdout。
 
@@ -95,4 +95,4 @@ HTTP 首轮综合测试出现 5 项失败：拆出分支后提前返回，破坏
 
 验证结果：修正前定向运行 1 failed、1 passed，失败与 CI 同项；修正后公开契约、公开归档 HTTP、阅读渲染、架构属性、依赖边界及站点元信息综合回归为 38 passed、26 subtests passed。全库 Ruff 和格式检查通过，严格 Mypy 对 533 个源文件通过。两项缺路由的反向验证均按预期失败。没有执行全部约 3,500 项本地测试，最终跨平台结果由新提交的 GitHub CI 验证。
 
-原始复现、成功 JUnit、静态检查和反向验证保存在仓库外 `D:/metagrowh/.user-temp/noyra-public-contract-ci-fix-20261027-ie6dtpax/`。本修正的提交 SHA 和 GitHub 运行编号以 Git 记录和 PR #22 为准。
+原始复现、成功 JUnit、静态检查和反向验证保存在仓库外 `[私有验证记录]`。本修正的提交 SHA 和 GitHub 运行编号以 Git 记录和 PR #22 为准。

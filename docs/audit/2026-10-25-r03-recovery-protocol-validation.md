@@ -104,10 +104,10 @@ pytest tests/test_audit_r03_protocol_validation.py \
 
 关键结果均记录在工作区外的证据文件中：
 
-- `D:/metagrowh/.user-temp/noyra-r03-prototype-20261025/native-ps7.json`
-- `D:/metagrowh/.user-temp/noyra-r03-prototype-20261025/native-validation.xml`
-- `D:/metagrowh/.user-temp/noyra-r03-prototype-20261025/windows-powershell-host-boundary.json`
-- `D:/metagrowh/.user-temp/noyra-r03-prototype-20261025/frozen-source.json`
+- `[私有验证记录]`
+- `[私有验证记录]`
+- `[私有验证记录]`
+- `[私有验证记录]`
 
 ## 6. 旧入口绕过：正式落地的阻断条件
 

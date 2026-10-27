@@ -49,4 +49,9 @@ node_modules/
 dist/
 build/
 .playwright-cli/
-output/playwright/
+
+# Generated publication material and private validation evidence
+/output/
+*.bundle
+/docs/audit/*-evidence/
+/docs/audit/*-verification.json

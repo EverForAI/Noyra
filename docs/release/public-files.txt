@@ -2,6 +2,7 @@
 .editorconfig
 .env.example
 .gitattributes
+.githooks/pre-commit
 .github/workflows/ci.yml
 .github/workflows/external-gates.yml
 .github/workflows/pages.yml
@@ -399,6 +400,7 @@ scripts/build-historical-fixtures.py
 scripts/build-release-evidence.py
 scripts/build-reproducible-wheel.py
 scripts/build-windows-package.ps1
+scripts/check-publication-boundary.py
 scripts/check-site.py
 scripts/deployment-maintenance.py
 scripts/diagnose-action-integrity.py
@@ -964,6 +966,7 @@ tests/test_public_reading.py
 tests/test_public_sitemap_capacity.py
 tests/test_public_visual_contract.py
 tests/test_public_web_contract.py
+tests/test_publication_boundary.py
 tests/test_reasoning_profile.py
 tests/test_recovery_manifest.py
 tests/test_reflection_cognition.py

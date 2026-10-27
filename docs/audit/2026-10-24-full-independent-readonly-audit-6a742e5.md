@@ -4,7 +4,7 @@
 
 - 审计提交：`6a742e562365cb2eb6770120cc93ff75c74c39d4`。
 - 分支：`codex/participant-collaboration`。
-- 工作目录：`E:\我的项目\Noyra\开发版`。
+- 工作目录：`[私有验证记录]`。
 - 日期与时区：2026-10-24，Asia/Shanghai。
 - 上一轮修复比较基线：`8401984f694a65e174311793bb13f169da8db743`；其后审计文档提交 `d18b255` 不包含产品修复。
 - 被评价的上一轮修复：`1039614`、`22f052c`、`1440113`、`de27fd9`、`56a89b5`、`6a742e5`。
@@ -79,11 +79,11 @@
 
 **位置**
 
-- [协作申请撤回写入](<E:/我的项目/Noyra/开发版/src/noyra/interaction/collaboration.py:572>)：`participant_application_withdrawn` payload 用普通 `json.dumps()`。
-- [管理员来源绑定写入](<E:/我的项目/Noyra/开发版/src/noyra/interaction/participant_http.py:106>)：`participant_source_bound` 也用普通 `json.dumps()`，字段顺序是 entity_id、binding_id。
-- [规范 JSON 验证](<E:/我的项目/Noyra/开发版/src/noyra/core/integrity.py:1515>)：`_provenance_object()` 比较 `canonical_json(parsed) == value`；只对 `_ADMIN_AUDIT_ACTIONS` 允许一种旧管理端序列化格式。
-- [实际调用验证器](<E:/我的项目/Noyra/开发版/src/noyra/core/integrity.py:3115>)：两个参与者 action 不属于该旧格式例外，进入业务分支前已经失败。
-- [QQ 私聊关联](<E:/我的项目/Noyra/开发版/src/noyra/interaction/inbound.py:1176>) 与 [解除关联](<E:/我的项目/Noyra/开发版/src/noyra/interaction/inbound.py:1204>)：写入 `private_route_changed` / `private_route_unlinked`；当前 core/management/wallet action 集合均未注册它们。
+- [协作申请撤回写入](<../../src/noyra/interaction/collaboration.py#L572>)：`participant_application_withdrawn` payload 用普通 `json.dumps()`。
+- [管理员来源绑定写入](<../../src/noyra/interaction/participant_http.py#L106>)：`participant_source_bound` 也用普通 `json.dumps()`，字段顺序是 entity_id、binding_id。
+- [规范 JSON 验证](<../../src/noyra/core/integrity.py#L1515>)：`_provenance_object()` 比较 `canonical_json(parsed) == value`；只对 `_ADMIN_AUDIT_ACTIONS` 允许一种旧管理端序列化格式。
+- [实际调用验证器](<../../src/noyra/core/integrity.py#L3115>)：两个参与者 action 不属于该旧格式例外，进入业务分支前已经失败。
+- [QQ 私聊关联](<../../src/noyra/interaction/inbound.py#L1176>) 与 [解除关联](<../../src/noyra/interaction/inbound.py#L1204>)：写入 `private_route_changed` / `private_route_unlinked`；当前 core/management/wallet action 集合均未注册它们。
 
 **根因**
 
@@ -124,7 +124,7 @@
 
 **问题风险 P2；修复风险低至中；置信度高。**
 
-**位置**：[信任策略恢复条件](<E:/我的项目/Noyra/开发版/deploy/windows/noyra-lifecycle.ps1:265>)、[严格验证外部指纹检查](<E:/我的项目/Noyra/开发版/deploy/windows/noyra-lifecycle.ps1:211>)、[策略写入](<E:/我的项目/Noyra/开发版/deploy/windows/noyra-lifecycle.ps1:414>)。
+**位置**：[信任策略恢复条件](<../../deploy/windows/noyra-lifecycle.ps1#L265>)、[严格验证外部指纹检查](<../../deploy/windows/noyra-lifecycle.ps1#L211>)、[策略写入](<../../deploy/windows/noyra-lifecycle.ps1#L414>)。
 
 **根因**
 
@@ -164,7 +164,7 @@ Signature verification requires an external trusted publisher thumbprint.
 
 **问题风险 P2；修复风险中；置信度高。**
 
-**位置**：[rollback 新增当前版本验证](<E:/我的项目/Noyra/开发版/deploy/windows/noyra-lifecycle.ps1:432>)。
+**位置**：[rollback 新增当前版本验证](<../../deploy/windows/noyra-lifecycle.ps1#L432>)。
 
 **根因**
 
@@ -208,7 +208,7 @@ Signature verification requires an external trusted publisher thumbprint.
 
 **问题风险 P2；修复风险中；置信度高。**
 
-**位置**：[清单与外部 allowlist 严格相等](<E:/我的项目/Noyra/开发版/deploy/windows/noyra-lifecycle.ps1:221>)、[新策略覆盖保存](<E:/我的项目/Noyra/开发版/deploy/windows/noyra-lifecycle.ps1:414>)。
+**位置**：[清单与外部 allowlist 严格相等](<../../deploy/windows/noyra-lifecycle.ps1#L221>)、[新策略覆盖保存](<../../deploy/windows/noyra-lifecycle.ps1#L414>)。
 
 **根因**
 
@@ -246,7 +246,7 @@ A→A+B→B 的轮换、两证书同时有效、A 已撤信、显式回滚授权
 
 **问题风险 P2；修复风险中至高；置信度高。**
 
-**位置**：[全局活动目标查询](<E:/我的项目/Noyra/开发版/src/noyra/cognition/social.py:207>)、[加入社交 payload](<E:/我的项目/Noyra/开发版/src/noyra/cognition/social.py:314>)、[外发草稿提交](<E:/我的项目/Noyra/开发版/src/noyra/cognition/social.py:523>)。
+**位置**：[全局活动目标查询](<../../src/noyra/cognition/social.py#L207>)、[加入社交 payload](<../../src/noyra/cognition/social.py#L314>)、[外发草稿提交](<../../src/noyra/cognition/social.py#L523>)。
 
 **根因**
 
@@ -292,7 +292,7 @@ Bob 私人事实进入给 Alice 生成内容的模型输入，并存在被复述
 
 **问题风险 P2；修复风险中；置信度高。**
 
-**位置**：[先截取前 12 个关系](<E:/我的项目/Noyra/开发版/src/noyra/cognition/social.py:186>)、[之后才做路由准入](<E:/我的项目/Noyra/开发版/src/noyra/cognition/social.py:268>)、[从合格候选取首项](<E:/我的项目/Noyra/开发版/src/noyra/cognition/social.py:279>)。
+**位置**：[先截取前 12 个关系](<../../src/noyra/cognition/social.py#L186>)、[之后才做路由准入](<../../src/noyra/cognition/social.py#L268>)、[从合格候选取首项](<../../src/noyra/cognition/social.py#L279>)。
 
 **根因**
 
@@ -385,7 +385,7 @@ purpose 仍含小时与 route_key。旧 unknown、executing 或不匹配 route �
 
 说明：最初调用裸 `pytest -q` 在 `tests/test_external_gates.py` 因找不到根目录 `scripts` 包而收集失败；随后使用 CI 实际采用的 `python -m pytest` 入口，收集和该文件 11 项均正常。该入口差异单列为运行环境事实，没有伪报为 GitHub CI 已失败的产品缺陷。
 
-本地环境另有一项实测限制：全量后端使用 `E:/我的项目/Noyra/.tools/Python312/python.exe`（3.12.10）；静态验证和独立复现使用项目 `.venv`（同为 3.12.10）。两者都从本工作区 `src/noyra` 导入产品，但 cryptography/pydantic 分别为 50.0.0/2.13.4 与 50.0.1/2.13.5。两者的 certifi 都是 **2026.7.22**，低于当前 pyproject/锁文件的 **2026.10.19** 要求。
+本地环境另有一项实测限制：全量后端使用 `[私有验证记录]`（3.12.10）；静态验证和独立复现使用项目 `.venv`（同为 3.12.10）。两者都从本工作区 `src/noyra` 导入产品，但 cryptography/pydantic 分别为 50.0.0/2.13.4 与 50.0.1/2.13.5。两者的 certifi 都是 **2026.7.22**，低于当前 pyproject/锁文件的 **2026.10.19** 要求。
 
 项目旧 `noyra-0.1.0.dist-info` 未声明新 certifi 约束，与 `src/noyra.egg-info` 当前 metadata 并存，导致 `pip check` 返回 0。**本轮没有安装/升级/重装依赖；这些测试不能当作干净锁文件环境已通过。** 该状态记录为本地环境限制，没有计为产品逻辑缺陷；真实无网络合成复现不依赖 certifi 的信任根内容。
 
@@ -434,7 +434,7 @@ purpose 仍含小时与 route_key。旧 unknown、executing 或不匹配 route �
 
 ## 9. 证据与只读完整性
 
-证据目录：`D:\metagrowh\.user-temp\noyra-readonly-audit-6a742e5-20261024`。
+证据目录：`[私有验证记录]`。
 
 | 文件 | 内容 |
 | --- | --- |

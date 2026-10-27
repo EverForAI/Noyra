@@ -29,9 +29,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 3
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
+      - name: Check publication boundary
+        run: python scripts/check-publication-boundary.py --revision "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Check reviewed public source inventory
         run: python scripts/public-file-manifest.py check --revision "${{ github.sha }}"
       - name: Export exact public Git blobs

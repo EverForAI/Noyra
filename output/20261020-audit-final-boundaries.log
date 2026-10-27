@@ -1,4 +1,0 @@
-.................................................................s.      [100%]
-=========================== short test summary info ===========================
-SKIPPED [1] tests\test_deployment_setup.py:734: POSIX backup artifact permissions
-66 passed, 1 skipped in 99.39s (0:01:39)

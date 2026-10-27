@@ -16,8 +16,10 @@ python -m pip check
 git diff --check
 ```
 
-Security-sensitive changes need a focused regression test, an audit note, and
-an explicit statement of the data and capability boundary they affect. Do not
+Security-sensitive changes need a focused regression test, a private audit note,
+and a reviewed public summary of the data and capability boundary they affect.
+Do not publish unresolved vulnerability details or raw reproduction evidence as
+ordinary delivery documentation. Do not
 commit API keys, private subject data, generated archives, or local runtime
 directories. Report vulnerabilities privately using `SECURITY.md`.
 
@@ -32,3 +34,35 @@ Run focused tests first and then the relevant cross-module checks. Record any
 failed or skipped checks with their cause; a retry is not a reason to discard
 the original result. Update and verify the reviewed public file inventory for
 the staged Git snapshot before committing new public files.
+
+## Publication boundary
+
+Keep detailed audit findings, machine-local evidence, logs and repository backups
+outside the source checkout. Public summaries must distinguish implementation,
+verification, deployment and open work; redaction must never turn an unresolved
+finding into a claim that it was fixed. Retain necessary public safety warnings.
+
+Enable the versioned native Git pre-commit hook in this clone:
+
+```sh
+git config core.hooksPath .githooks
+python scripts/check-publication-boundary.py --staged
+```
+
+If this clone already has a custom hook, integrate the same command rather than
+overwriting that setup. Python must be available on PATH; hook failure blocks the
+commit. The hook checks the index, not unstaged working files. It rejects tracked
+output, Git bundles and raw audit evidence, and checks only added audit/roadmap
+text for machine-local drive and WSL references. Synthetic source/tests and normal
+deployment examples are not subject to that text rule. It does not scan secrets
+or certify that a summary is safe to publish. Hooks are local and can be bypassed;
+the existing public-source CI matrix runs the same guard as a backstop.
+
+Keep GitHub Secret scanning and Push protection enabled for supported credential
+patterns. They complement, but do not replace, review of personal information and
+coordinated disclosure. The curated source export exclusions are not a secrecy
+mechanism: any tracked path can still be public through the repository itself.
+
+A normal cleanup commit affects the new snapshot only. Older commits, PR views,
+caches and previously downloaded copies may remain accessible. Do not describe
+such cleanup as erasing history or recalling public copies.

@@ -1,9 +1,0 @@
-......................s....ss........................................... [ 57%]
-........................................sss..........                    [100%]
-=========================== short test summary info ===========================
-SKIPPED [1] tests\test_deployment_maintenance.py:786: POSIX marker ownership contract
-SKIPPED [1] tests\test_deployment_maintenance.py:951: requires actual root and separate service UID
-SKIPPED [1] tests\test_deployment_maintenance.py:1037: real privileged evidence metadata
-SKIPPED [2] tests\test_storage_mode.py:507: requires an actual unprivileged POSIX user
-SKIPPED [1] tests\test_storage_mode.py:533: requires an actual unprivileged POSIX user
-119 passed, 6 skipped in 187.76s (0:03:07)

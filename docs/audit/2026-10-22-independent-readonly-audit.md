@@ -21,12 +21,12 @@
 | 项目 | 值 |
 |---|---|
 | 审计日期 | 2026-10-22，Asia/Shanghai |
-| 工作区 | `E:/我的项目/Noyra/开发版` |
+| 工作区 | `[私有验证记录]` |
 | 分支 | `codex/terminal-waits-operability` |
 | HEAD | `b0162fd40cb436bbed34e9dc0a15c3a8313d45b1` |
 | 最近修复前对照点 | `c9e2d9c`，只用于确认来源，不作为本次结论的替代证据 |
 | 初始状态 | 无已跟踪文件修改；有 22 个原有、未跟踪的旧审计证据文件，全部保留 |
-| 本轮证据目录 | `E:/我的项目/Noyra/开发版/.runtime/20261022-independent-audit` |
+| 本轮证据目录 | `../../.runtime/20261022-independent-audit` |
 
 报告针对上述**本地代码快照**，不表示此提交已经合并到远端 `main`，也不表示生产正在运行此版本。本次没有查询 GitHub、生产构建标记或生产数据库，因此不对这些外部事实作判断。
 
@@ -46,10 +46,10 @@
 | 未完成的覆盖 | 不是完整全仓 pytest；大型模块如 service、database、integrity、cognition execution/projects 没有全部逐行人工精读；完整外部行为与生产门禁不在本次只读验证之内 |
 
 覆盖证据：
-- `E:/我的项目/Noyra/开发版/.runtime/20261022-independent-audit/all-tracked-manifest.json`
-- `E:/我的项目/Noyra/开发版/.runtime/20261022-independent-audit/ast-index.json`
-- `E:/我的项目/Noyra/开发版/.runtime/20261022-independent-audit/source-coverage.csv`（保守标明结构扫描或定位区间精读，不冒充整文件逐行覆盖）
-- `E:/我的项目/Noyra/开发版/.runtime/20261022-independent-audit/source-evidence.json`（逐项源码片段和 Git blame）
+- `../../.runtime/20261022-independent-audit/all-tracked-manifest.json`
+- `../../.runtime/20261022-independent-audit/ast-index.json`
+- `../../.runtime/20261022-independent-audit/source-coverage.csv`（保守标明结构扫描或定位区间精读，不冒充整文件逐行覆盖）
+- `../../.runtime/20261022-independent-audit/source-evidence.json`（逐项源码片段和 Git blame）
 
 ## 2. 分级规则
 
@@ -91,10 +91,10 @@
 **问题风险：P1；修复风险：高。**
 
 **代码位置**
-- `E:/我的项目/Noyra/开发版/src/noyra/cognition/reflection.py:67–105`，核心是第 75、85 行。
-- `E:/我的项目/Noyra/开发版/src/noyra/cognition/cycle.py:835–896`，核心是第 847–851、864–871 行。
-- `E:/我的项目/Noyra/开发版/src/noyra/cognition/interaction.py:86–110`，核心是第 93–106 行。
-- `E:/我的项目/Noyra/开发版/src/noyra/model/resources.py:3248–3285`、`3419–3427`。
+- `../../src/noyra/cognition/reflection.py:67–105`，核心是第 75、85 行。
+- `../../src/noyra/cognition/cycle.py:835–896`，核心是第 847–851、864–871 行。
+- `../../src/noyra/cognition/interaction.py:86–110`，核心是第 93–106 行。
+- `../../src/noyra/model/resources.py:3248–3285`、`3419–3427`。
 
 **根因**
 
@@ -114,8 +114,8 @@
 - **不是已证明双重付款或无限重试。** 本次验证的是重复物理模型请求；调用次数和预算上限仍存在。
 
 **离线证据**
-- 脚本：`E:/我的项目/Noyra/开发版/.runtime/20261022-independent-audit/reproduce_core.py`。
-- 结果：`E:/我的项目/Noyra/开发版/.runtime/20261022-independent-audit/reproduction-results.json` 的 `unknown_reflection`。
+- 脚本：`../../.runtime/20261022-independent-audit/reproduce_core.py`。
+- 结果：`../../.runtime/20261022-independent-audit/reproduction-results.json` 的 `unknown_reflection`。
 - 使用真实睡眠反思业务类、资源路由和账本，FakeProvider 首次返回未知，第二次返回合法结构化结果。
 - 首次抛 `ReflectionCognitionPending`；只模拟正常时间推进至退避期之后，不修改账本。
 - 第二次得到合法 plan；`physical_requests = 2`，`operator_retry_grants = 0`。
@@ -141,8 +141,8 @@ world/reflection/interaction 三条链；同进程重入、重启后继续、跨
 **问题风险：P2；修复风险：中。**
 
 **代码位置**
-- `E:/我的项目/Noyra/开发版/src/noyra/mind/memory.py:139–225`。
-- `E:/我的项目/Noyra/开发版/src/noyra/mind/retrieval.py:80–164`，特别是第 114–118、141–161 行。
+- `../../src/noyra/mind/memory.py:139–225`。
+- `../../src/noyra/mind/retrieval.py:80–164`，特别是第 114–118、141–161 行。
 - 同文件的 `similarities` 校验向量内容完整性，但没有校验它对应当前记忆内容版本。
 
 **根因**
@@ -180,9 +180,9 @@ world/reflection/interaction 三条链；同进程重入、重启后继续、跨
 **问题风险：P2（条件性）；修复风险：中。**
 
 **代码位置**
-- `E:/我的项目/Noyra/开发版/src/noyra/model/openai_compatible.py:195–233`，第 217–222 行。
-- `E:/我的项目/Noyra/开发版/src/noyra/model/resources.py:3466–3507`，第 3505 行。
-- `E:/我的项目/Noyra/开发版/src/noyra/service.py:8729–8818` 的新错误解释没有统一上述测试预算。
+- `../../src/noyra/model/openai_compatible.py:195–233`，第 217–222 行。
+- `../../src/noyra/model/resources.py:3466–3507`，第 3505 行。
+- `../../src/noyra/service.py:8729–8818` 的新错误解释没有统一上述测试预算。
 
 **根因**
 
@@ -221,10 +221,10 @@ world/reflection/interaction 三条链；同进程重入、重启后继续、跨
 **问题风险：P2；修复风险：高。**
 
 **代码位置**
-- `E:/我的项目/Noyra/开发版/src/noyra/model/gateway.py:100–106`：入口查询生命周期。
+- `../../src/noyra/model/gateway.py:100–106`：入口查询生命周期。
 - 同文件 `:204–246`：`before_send` 只复核 lease 和资源授权，没有复核生命周期。
-- `E:/我的项目/Noyra/开发版/src/noyra/model/openai_compatible.py:116–139`：实际发送边界具备回调，但回调未涵盖生命周期。
-- `E:/我的项目/Noyra/开发版/src/noyra/sleep/engine.py:98–105`、`273–299`、`721–730`：睡眠转换及 quiescent 检查；后者只检查 actions。
+- `../../src/noyra/model/openai_compatible.py:116–139`：实际发送边界具备回调，但回调未涵盖生命周期。
+- `../../src/noyra/sleep/engine.py:98–105`、`273–299`、`721–730`：睡眠转换及 quiescent 检查；后者只检查 actions。
 
 **根因**
 
@@ -240,8 +240,8 @@ world/reflection/interaction 三条链；同进程重入、重启后继续、跨
 
 **离线证据**
 
-- 脚本：`E:/我的项目/Noyra/开发版/.runtime/20261022-independent-audit/reproduce_sleep_race.py`。
-- 结果：`E:/我的项目/Noyra/开发版/.runtime/20261022-independent-audit/sleep-race-result.json`。
+- 脚本：`../../.runtime/20261022-independent-audit/reproduce_sleep_race.py`。
+- 结果：`../../.runtime/20261022-independent-audit/sleep-race-result.json`。
 - 真实 kernel、admission lease、保存后资源测试、SleepEngine；仅 provider 在调用真实发送逻辑之前等待同步信号，网络使用 MockTransport。
 - 入口时 active；正常推进至 deep_sleep 后释放；`actual_send_lifecycles = ["deep_sleep"]`，该测试最终成功，生命周期仍为 deep_sleep。
 
@@ -264,10 +264,10 @@ world/reflection/interaction 三条链；同进程重入、重启后继续、跨
 **问题风险：P2（规模相关）；修复风险：中。**
 
 **代码位置**
-- `E:/我的项目/Noyra/开发版/src/noyra/core/cognitive_waits.py:90–101`、`149–188`。
-- `E:/我的项目/Noyra/开发版/src/noyra/core/database.py:2407–2416`：revisions 表没有 `task_id` 索引。
-- `E:/我的项目/Noyra/开发版/src/noyra/world/store.py:149–174`、`E:/我的项目/Noyra/开发版/src/noyra/sleep/engine.py:261–263`：同一业务事务内执行收口。
-- `E:/我的项目/Noyra/开发版/src/noyra/cognitive_wait_maintenance.py:174–190`、`233–249`：批处理也会反复校验。
+- `../../src/noyra/core/cognitive_waits.py:90–101`、`149–188`。
+- `../../src/noyra/core/database.py:2407–2416`：revisions 表没有 `task_id` 索引。
+- `../../src/noyra/world/store.py:149–174`、`../../src/noyra/sleep/engine.py:261–263`：同一业务事务内执行收口。
+- `../../src/noyra/cognitive_wait_maintenance.py:174–190`、`233–249`：批处理也会反复校验。
 
 **根因**
 
@@ -283,8 +283,8 @@ world/reflection/interaction 三条链；同进程重入、重启后继续、跨
 
 **离线证据**
 
-- 脚本：`E:/我的项目/Noyra/开发版/.runtime/20261022-independent-audit/reproduce_wait_scan.py`。
-- 结果：`E:/我的项目/Noyra/开发版/.runtime/20261022-independent-audit/wait-scan-results.json`。
+- 脚本：`../../.runtime/20261022-independent-audit/reproduce_wait_scan.py`。
+- 结果：`../../.runtime/20261022-independent-audit/wait-scan-results.json`。
 - 在独立内存库使用产品真实 revisions DDL，插入 250,000 条无关修订和目标合法证据，执行真实校验函数。
 - `EXPLAIN QUERY PLAN` 显示 `SCAN waiting_cognitive_task_revisions`。
 - 100 次校验约 2.500 秒；只在这个合成库加 task_id 索引作反事实对照后约 0.016 秒，约 156 倍差异。
@@ -309,11 +309,11 @@ world/reflection/interaction 三条链；同进程重入、重启后继续、跨
 **问题风险：P2；修复风险：中。**
 
 **代码位置**
-- `E:/我的项目/Noyra/开发版/scripts/install-ubuntu.sh:997–1008`：取 HEAD 作为 source SHA。
+- `../../scripts/install-ubuntu.sh:997–1008`：取 HEAD 作为 source SHA。
 - 同文件 `:1067–1075`：pip 从当前工作树安装。
 - 同文件 `:1186–1200`：按 SHA 选择和验证 external-gates 证据。
 - 同文件 `:1228–1234`：发布并写 `.noyra-source-sha`。
-- `E:/我的项目/Noyra/开发版/src/noyra/core/release_assurance.py:70–91`：后续按标记解释验收状态。
+- `../../src/noyra/core/release_assurance.py:70–91`：后续按标记解释验收状态。
 
 **根因**
 
@@ -331,7 +331,7 @@ HEAD 标识的是提交，pip 消费的却是当前工作树字节。手工安�
 
 静态调用链确认。未为验证而执行真实 root 安装、写 `/etc` 或重启 systemd。
 
-自动升级 runner `E:/我的项目/Noyra/开发版/scripts/upgrade-ubuntu-runner.sh:460–478` 已有源码 dirty 检查；本发现**不能扩大为所有自动升级都缺检查**。手工安装入口需要独立保证，因为它可被单独使用。
+自动升级 runner `../../scripts/upgrade-ubuntu-runner.sh:460–478` 已有源码 dirty 检查；本发现**不能扩大为所有自动升级都缺检查**。手工安装入口需要独立保证，因为它可被单独使用。
 
 **来源判断**
 
@@ -350,10 +350,10 @@ HEAD 标识的是提交，pip 消费的却是当前工作树字节。手工安�
 **问题风险：P3；修复风险：中。**
 
 **代码位置**
-- `E:/我的项目/Noyra/开发版/scripts/install-ubuntu.sh:1067–1072`：在 staging 创建 venv 并安装入口。
+- `../../scripts/install-ubuntu.sh:1067–1072`：在 staging 创建 venv 并安装入口。
 - 同文件 `:1228`：将整个 staging 移到最终 release_root。
-- `E:/我的项目/Noyra/开发版/pyproject.toml` 的 `project.scripts`：`noyra`、`noyra-service`、`noyra-desktop`。
-- `E:/我的项目/Noyra/开发版/deploy/systemd/noyra.service:16–18`：服务使用 `python -m noyra`。
+- `../../pyproject.toml` 的 `project.scripts`：`noyra`、`noyra-service`、`noyra-desktop`。
+- `../../deploy/systemd/noyra.service:16–18`：服务使用 `python -m noyra`。
 
 **根因与触发条件**
 
@@ -365,7 +365,7 @@ venv 中 pip 生成的 console script 含创建时的绝对解释器路径。安
 
 **离线证据**
 
-`E:/我的项目/Noyra/开发版/.runtime/20261022-independent-audit/venv-relocation-result.json`：WSL 中本地创建 venv，pip 入口 shebang 指向 `.staging-release/.venv/bin/python3`；搬迁后直接运行最终 `python -c` 返回 0，但执行最终 `pip --version` 抛 `FileNotFoundError(errno=2)`。该机制同样适用于安装时生成的 Noyra console 入口；本次没有执行真实生产安装。
+`../../.runtime/20261022-independent-audit/venv-relocation-result.json`：WSL 中本地创建 venv，pip 入口 shebang 指向 `.staging-release/.venv/bin/python3`；搬迁后直接运行最终 `python -c` 返回 0，但执行最终 `pip --version` 抛 `FileNotFoundError(errno=2)`。该机制同样适用于安装时生成的 Noyra console 入口；本次没有执行真实生产安装。
 
 **来源判断**
 
@@ -384,11 +384,11 @@ staging 中建 venv 后整体 mv 的语义在最近修复前已存在。
 **问题风险：P2（条件性）；修复风险：中。**
 
 **代码位置**
-- `E:/我的项目/Noyra/开发版/scripts/rotate-operator-token.sh:12–15`：只判断配置和 token 文件存在。
+- `../../scripts/rotate-operator-token.sh:12–15`：只判断配置和 token 文件存在。
 - 同文件 `:33–34`：先替换 token 文件。
 - 同文件 `:37–55`：无条件设置 FILE，不检查 CREDENTIAL 等已有源。
-- `E:/我的项目/Noyra/开发版/src/noyra/core/credentials.py:160–165`：多源冲突拒绝启动。
-- `E:/我的项目/Noyra/开发版/src/noyra/service.py:1235–1249`：启动时调用凭据源解析。
+- `../../src/noyra/core/credentials.py:160–165`：多源冲突拒绝启动。
+- `../../src/noyra/service.py:1235–1249`：启动时调用凭据源解析。
 
 **根因**
 
@@ -404,7 +404,7 @@ staging 中建 venv 后整体 mv 的语义在最近修复前已存在。
 
 **离线证据**
 
-`E:/我的项目/Noyra/开发版/.runtime/20261022-independent-audit/reproduce_rotation.py` 仅提取执行原脚本的配置变换 Python 段；变换后 FILE 和 CREDENTIAL 共存，真实凭据解析器抛 `choose one secret source for operator token`。结果保存在 `rotation-result.json`。未执行真实 chown/mv/systemctl，未使用真实 token。
+`../../.runtime/20261022-independent-audit/reproduce_rotation.py` 仅提取执行原脚本的配置变换 Python 段；变换后 FILE 和 CREDENTIAL 共存，真实凭据解析器抛 `choose one secret source for operator token`。结果保存在 `rotation-result.json`。未执行真实 chown/mv/systemctl，未使用真实 token。
 
 **来源判断**
 
@@ -423,7 +423,7 @@ FILE-only、CREDENTIAL-only、其他受支持源、多源冲突、残留旧文�
 **问题风险：P2（Windows 限定）；修复风险：中。**
 
 **代码位置**
-- `E:/我的项目/Noyra/开发版/deploy/windows/noyra-lifecycle.ps1:92–114`。
+- `../../deploy/windows/noyra-lifecycle.ps1:92–114`。
 - 同文件 `:157–168`：uninstall 调用 stop，status 只看 PID 文件是否存在。
 
 **根因**
@@ -440,8 +440,8 @@ start 仅保存 PID；stop 读取该整数后只要进程存在就 `Stop-Process
 
 **离线证据**
 
-- 脚本：`E:/我的项目/Noyra/开发版/.runtime/20261022-independent-audit/reproduce_windows_pid.ps1`。
-- 结果：`E:/我的项目/Noyra/开发版/.runtime/20261022-independent-audit/windows-pid-result.json`。
+- 脚本：`../../.runtime/20261022-independent-audit/reproduce_windows_pid.ps1`。
+- 结果：`../../.runtime/20261022-independent-audit/windows-pid-result.json`。
 - 使用 PowerShell Parser 只提取当前源码 `Stop-Noyra` 函数体，临时 PID 文件在审计目录。
 - mock `Get-Process` 返回明显不是 Noyra 的路径，mock `Stop-Process` 只记录参数。原函数仍请求对该 PID 强杀，随后删除临时 PID 文件。
 - **真实 Get-Process/Stop-Process 均未被调用，没有结束本机任何进程。** 本次也没有运行整个安装/卸载脚本。
@@ -487,7 +487,7 @@ start 仅保存 PID；stop 读取该整数后只要进程存在就 `Stop-Process
 
 ### 5.2 本轮离线复现索引
 
-以下文件全部位于 `E:/我的项目/Noyra/开发版/.runtime/20261022-independent-audit`：
+以下文件全部位于 `../../.runtime/20261022-independent-audit`：
 
 | 证据 | 用途 |
 |---|---|
@@ -532,6 +532,6 @@ start 仅保存 PID；stop 读取该整数后只要进程存在就 `Stop-Process
 
 唯一新增的非忽略交付文件是本报告：
 
-`E:/我的项目/Noyra/开发版/docs/audit/2026-10-22-independent-readonly-audit.md`
+`../../docs/audit/2026-10-22-independent-readonly-audit.md`
 
 本次没有修改产品源码、测试源码、配置或依赖锁文件；没有生产操作、提交、推送、合并、部署、真实模型付费请求或真实进程终止。独立临时库上的合成写入、反事实建索引及 mock 验证，仅用于证明问题，不构成对产品或生产数据的修复。

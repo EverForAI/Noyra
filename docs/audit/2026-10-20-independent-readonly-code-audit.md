@@ -30,7 +30,7 @@
 
 ### 2.1 基线
 
-- 仓库：E:/我的项目/Noyra/开发版。
+- 仓库：[私有验证记录]。
 - HEAD：c67526d6b28f995823936687d9c59bb03b612463。
 - HEAD 提交主题：docs: record third readonly project audit。
 - 审计开始时已有 30 个已跟踪文件处于修改状态，另有未跟踪的实现、测试、报告和旧输出文件。
@@ -49,7 +49,7 @@
 
 本轮只新增本报告；不修改实现、测试、部署配置及已有报告，不提交或推送，不连接用户生产实例执行操作。复现实验使用临时目录、临时数据库、回环 HTTP、受控 transport 或 Linux 临时文件权限。没有真实模型付费调用、真实钱包签名广播、真实磁盘卸载或生产密钥轮换。
 
-临时验证和日志目录：D:/metagrowh/.user-temp/noyra-independent-audit-bHYkn6。该目录位于仓库之外。本报告保留关键输出，避免把后续复核完全绑定在临时日志的存续上。
+临时验证和日志目录：[私有验证记录]。该目录位于仓库之外。本报告保留关键输出，避免把后续复核完全绑定在临时日志的存续上。
 
 ### 2.3 分级口径
 
@@ -76,11 +76,11 @@
 
 **源码定位**
 
-- [gateway.py:117](<E:/我的项目/Noyra/开发版/src/noyra/model/gateway.py:117>)：把输出类型的 model_json_schema() 直接放入请求。
-- [openai_compatible.py:492](<E:/我的项目/Noyra/开发版/src/noyra/model/openai_compatible.py:492>)：把原始 Schema 放进 response_format，同时声明 strict=true。
-- [openai_compatible.py:202](<E:/我的项目/Noyra/开发版/src/noyra/model/openai_compatible.py:202>)：连接探测另用一份简单、合规的固定 Schema。
-- [cognition/types.py:36](<E:/我的项目/Noyra/开发版/src/noyra/cognition/types.py:36>)、[cognition/types.py:54](<E:/我的项目/Noyra/开发版/src/noyra/cognition/types.py:54>)：认知输出包含具有默认值的字段。
-- [sleep/types.py:131](<E:/我的项目/Noyra/开发版/src/noyra/sleep/types.py:131>)：睡眠反思计划有多个具有默认值的字段。
+- [gateway.py:117](<../../src/noyra/model/gateway.py#L117>)：把输出类型的 model_json_schema() 直接放入请求。
+- [openai_compatible.py:492](<../../src/noyra/model/openai_compatible.py#L492>)：把原始 Schema 放进 response_format，同时声明 strict=true。
+- [openai_compatible.py:202](<../../src/noyra/model/openai_compatible.py#L202>)：连接探测另用一份简单、合规的固定 Schema。
+- [cognition/types.py:36](<../../src/noyra/cognition/types.py#L36>)、[cognition/types.py:54](<../../src/noyra/cognition/types.py#L54>)：认知输出包含具有默认值的字段。
+- [sleep/types.py:131](<../../src/noyra/sleep/types.py#L131>)：睡眠反思计划有多个具有默认值的字段。
 
 **根因**
 
@@ -126,9 +126,9 @@
 
 **源码定位**
 
-- [openai_compatible.py:492](<E:/我的项目/Noyra/开发版/src/noyra/model/openai_compatible.py:492>)：正式请求无条件使用 max_tokens 和 temperature。
-- [openai_compatible.py:202](<E:/我的项目/Noyra/开发版/src/noyra/model/openai_compatible.py:202>)：探测请求也固定使用 max_tokens=8、temperature=0。
-- [reasoning.py:59](<E:/我的项目/Noyra/开发版/src/noyra/model/reasoning.py:59>)：项目把 o1、o3、o4、gpt-5 和 codex 前缀识别为支持思考强度的模型。
+- [openai_compatible.py:492](<../../src/noyra/model/openai_compatible.py#L492>)：正式请求无条件使用 max_tokens 和 temperature。
+- [openai_compatible.py:202](<../../src/noyra/model/openai_compatible.py#L202>)：探测请求也固定使用 max_tokens=8、temperature=0。
+- [reasoning.py:59](<../../src/noyra/model/reasoning.py#L59>)：项目把 o1、o3、o4、gpt-5 和 codex 前缀识别为支持思考强度的模型。
 
 **根因**
 
@@ -162,10 +162,10 @@
 
 **源码定位**
 
-- [at_rest.py:207](<E:/我的项目/Noyra/开发版/src/noyra/core/at_rest.py:207>)：rotate 先读取当前 keyring，再生成下一代并写入，缺少跨进程锁或代际比较交换。
-- [at_rest.py:265](<E:/我的项目/Noyra/开发版/src/noyra/core/at_rest.py:265>)：临时文件原子替换保证单次写入完整，但不保证多次读改写的串行性。
-- [at_rest.py:712](<E:/我的项目/Noyra/开发版/src/noyra/core/at_rest.py:712>)：备份创建读取当时的 keyring 并使用其活动密钥。
-- [__main__.py:81](<E:/我的项目/Noyra/开发版/src/noyra/__main__.py:81>)：命令行直接调用轮换，没有额外序列化边界。
+- [at_rest.py:207](<../../src/noyra/core/at_rest.py#L207>)：rotate 先读取当前 keyring，再生成下一代并写入，缺少跨进程锁或代际比较交换。
+- [at_rest.py:265](<../../src/noyra/core/at_rest.py#L265>)：临时文件原子替换保证单次写入完整，但不保证多次读改写的串行性。
+- [at_rest.py:712](<../../src/noyra/core/at_rest.py#L712>)：备份创建读取当时的 keyring 并使用其活动密钥。
+- [__main__.py:81](<../../src/noyra/__main__.py#L81>)：命令行直接调用轮换，没有额外序列化边界。
 
 **根因及触发条件**
 
@@ -201,11 +201,11 @@
 
 **源码定位**
 
-- [service.py:10540](<E:/我的项目/Noyra/开发版/src/noyra/service.py:10540>)：服务构造时调用 detect_storage_layout。
-- [service.py:10602](<E:/我的项目/Noyra/开发版/src/noyra/service.py:10602>)：将该结果交给 HTTP owner。
-- [service.py:2906](<E:/我的项目/Noyra/开发版/src/noyra/service.py:2906>)：readiness 从这个已有对象读取状态，并生成当前 checked_at。
-- [storage_mode.py:50](<E:/我的项目/Noyra/开发版/src/noyra/core/storage_mode.py:50>)：存储布局是冻结的数据快照。
-- [storage_mode.py:71](<E:/我的项目/Noyra/开发版/src/noyra/core/storage_mode.py:71>)：backup_ready 只结合已有 reason 与路径存在性，不重新核对当前挂载身份。
+- [service.py:10540](<../../src/noyra/service.py#L10540>)：服务构造时调用 detect_storage_layout。
+- [service.py:10602](<../../src/noyra/service.py#L10602>)：将该结果交给 HTTP owner。
+- [service.py:2906](<../../src/noyra/service.py#L2906>)：readiness 从这个已有对象读取状态，并生成当前 checked_at。
+- [storage_mode.py:50](<../../src/noyra/core/storage_mode.py#L50>)：存储布局是冻结的数据快照。
+- [storage_mode.py:71](<../../src/noyra/core/storage_mode.py#L71>)：backup_ready 只结合已有 reason 与路径存在性，不重新核对当前挂载身份。
 
 **根因及触发条件**
 
@@ -235,9 +235,9 @@
 
 **源码定位**
 
-- [backup_retention.py:110](<E:/我的项目/Noyra/开发版/src/noyra/core/backup_retention.py:110>)，特别是第 121 行：通过 Path.glob 枚举备份。
-- [retention.py:619](<E:/我的项目/Noyra/开发版/src/noyra/core/retention.py:619>)：注释和异常处理希望把无权限情况报告为 unavailable。
-- [retention.py:649](<E:/我的项目/Noyra/开发版/src/noyra/core/retention.py:649>)：只要下层没有抛异常，就把结果标为 planned。
+- [backup_retention.py:110](<../../src/noyra/core/backup_retention.py#L110>)，特别是第 121 行：通过 Path.glob 枚举备份。
+- [retention.py:619](<../../src/noyra/core/retention.py#L619>)：注释和异常处理希望把无权限情况报告为 unavailable。
+- [retention.py:649](<../../src/noyra/core/retention.py#L649>)：只要下层没有抛异常，就把结果标为 planned。
 
 **根因及触发条件**
 
@@ -269,11 +269,11 @@ root 在 /var/tmp 的隔离目录内创建 0700 备份目录并放入一份非�
 
 **源码定位**
 
-- [reflection.py:110](<E:/我的项目/Noyra/开发版/src/noyra/cognition/reflection.py:110>)：当前反思只读取 lower_bound 之后、当前 run.started_at 及以前的事件。
-- [reflection.py:147](<E:/我的项目/Noyra/开发版/src/noyra/cognition/reflection.py:147>)：互动记录采用相同的时间边界。
-- [reflection.py:347](<E:/我的项目/Noyra/开发版/src/noyra/cognition/reflection.py:347>)：下一轮 lower_bound 取上一轮 completed_at。
-- [sleep/engine.py:305](<E:/我的项目/Noyra/开发版/src/noyra/sleep/engine.py:305>)：completed_at 表示完成唤醒的时间，晚于上一轮 started_at。
-- [test_reflection_cognition.py:412](<E:/我的项目/Noyra/开发版/tests/test_reflection_cognition.py:412>)：已有测试检查晚到事件不进入当前轮，但没有证明其进入下一轮。
+- [reflection.py:110](<../../src/noyra/cognition/reflection.py#L110>)：当前反思只读取 lower_bound 之后、当前 run.started_at 及以前的事件。
+- [reflection.py:147](<../../src/noyra/cognition/reflection.py#L147>)：互动记录采用相同的时间边界。
+- [reflection.py:347](<../../src/noyra/cognition/reflection.py#L347>)：下一轮 lower_bound 取上一轮 completed_at。
+- [sleep/engine.py:305](<../../src/noyra/sleep/engine.py#L305>)：completed_at 表示完成唤醒的时间，晚于上一轮 started_at。
+- [test_reflection_cognition.py:412](<../../tests/test_reflection_cognition.py#L412>)：已有测试检查晚到事件不进入当前轮，但没有证明其进入下一轮。
 
 **根因及触发条件**
 
@@ -309,9 +309,9 @@ late_in_second_context      = false
 
 **源码定位**
 
-- [deployment_setup.py:988](<E:/我的项目/Noyra/开发版/src/noyra/deployment_setup.py:988>)：从已导入模块的 parents[2] 向下寻找 deploy/systemd/cloudflared-noyra.service.example。
-- [pyproject.toml:40](<E:/我的项目/Noyra/开发版/pyproject.toml:40>)：package-data 包含前端资源等，没有这个模板。
-- [install-ubuntu.sh:977](<E:/我的项目/Noyra/开发版/scripts/install-ubuntu.sh:977>)：原生安装器使用非 editable 的 pip 安装。
+- [deployment_setup.py:988](<../../src/noyra/deployment_setup.py#L988>)：从已导入模块的 parents[2] 向下寻找 deploy/systemd/cloudflared-noyra.service.example。
+- [pyproject.toml:40](<../../pyproject.toml#L40>)：package-data 包含前端资源等，没有这个模板。
+- [install-ubuntu.sh:977](<../../scripts/install-ubuntu.sh#L977>)：原生安装器使用非 editable 的 pip 安装。
 
 **根因及触发条件**
 
@@ -343,10 +343,10 @@ late_in_second_context      = false
 
 **源码定位**
 
-- [deployment_setup.py:189](<E:/我的项目/Noyra/开发版/src/noyra/deployment_setup.py:189>)：SubprocessRunner 使用 subprocess.run，没有 timeout。
-- [deployment_setup.py:730](<E:/我的项目/Noyra/开发版/src/noyra/deployment_setup.py:730>)：健康检查 curl 没有 connect-timeout 和 max-time。
-- [deployment_setup.py:630](<E:/我的项目/Noyra/开发版/src/noyra/deployment_setup.py:630>)：先发布配置、reload Caddy、restart Noyra，再执行健康检查；只有返回错误或抛出已处理异常才进入回滚。
-- [deployment_setup.py:706](<E:/我的项目/Noyra/开发版/src/noyra/deployment_setup.py:706>)：命令包装层没有把执行超时转换为 SetupError 的分支。
+- [deployment_setup.py:189](<../../src/noyra/deployment_setup.py#L189>)：SubprocessRunner 使用 subprocess.run，没有 timeout。
+- [deployment_setup.py:730](<../../src/noyra/deployment_setup.py#L730>)：健康检查 curl 没有 connect-timeout 和 max-time。
+- [deployment_setup.py:630](<../../src/noyra/deployment_setup.py#L630>)：先发布配置、reload Caddy、restart Noyra，再执行健康检查；只有返回错误或抛出已处理异常才进入回滚。
+- [deployment_setup.py:706](<../../src/noyra/deployment_setup.py#L706>)：命令包装层没有把执行超时转换为 SetupError 的分支。
 
 **根因及触发条件**
 
@@ -357,7 +357,7 @@ setup 没有总体 deadline，具体命令和健康请求也没有自身上限�
 捕获真实 SubprocessRunner 调用 subprocess.run 的参数：
 
 ~~~json
-{"timeout":null,"argv":["curl","--fail","https://test.invalid/health/ready"]}
+{"timeout":null,"argv":["curl","--fail","http[私有验证记录]"]}
 ~~~
 
 结合实际健康检查 argv 与 try/rollback 调用链，可以确认缺少有限等待边界。本轮没有故意留下无期限运行的子进程，也没有把静态路径证据描述成已发生的生产挂起。
@@ -376,11 +376,11 @@ setup 没有总体 deadline，具体命令和健康请求也没有自身上限�
 
 **源码定位**
 
-- [autonomy/loop.py:231](<E:/我的项目/Noyra/开发版/src/noyra/autonomy/loop.py:231>)：run_forever 的错误分支在 min 之前执行 math.pow(2, failures-1)。
-- [autonomy/loop.py:313](<E:/我的项目/Noyra/开发版/src/noyra/autonomy/loop.py:313>)：失败计数持久化递增，没有饱和上限。
-- [autonomy/loop.py:275](<E:/我的项目/Noyra/开发版/src/noyra/autonomy/loop.py:275>)：熔断等待不重置计数，冷却后失败继续累加。
-- [autonomy/types.py:14](<E:/我的项目/Noyra/开发版/src/noyra/autonomy/types.py:14>)：配置虽然限制最终 backoff，但没有限制求幂输入。
-- [service.py:11119](<E:/我的项目/Noyra/开发版/src/noyra/service.py:11119>)：服务直接等待 run_forever；异常离开循环后进入服务清理。
+- [autonomy/loop.py:231](<../../src/noyra/autonomy/loop.py#L231>)：run_forever 的错误分支在 min 之前执行 math.pow(2, failures-1)。
+- [autonomy/loop.py:313](<../../src/noyra/autonomy/loop.py#L313>)：失败计数持久化递增，没有饱和上限。
+- [autonomy/loop.py:275](<../../src/noyra/autonomy/loop.py#L275>)：熔断等待不重置计数，冷却后失败继续累加。
+- [autonomy/types.py:14](<../../src/noyra/autonomy/types.py#L14>)：配置虽然限制最终 backoff，但没有限制求幂输入。
+- [service.py:11119](<../../src/noyra/service.py#L11119>)：服务直接等待 run_forever；异常离开循环后进入服务清理。
 
 **根因及触发条件**
 
@@ -498,8 +498,8 @@ ef316ebb13e855bd9dcf85cc19078a3ba98067a30594714ddf80035d94b8eef4
 可复核来源地址（代码块保留固定提交）：
 
 ~~~text
-https://github.com/openai/openai-python/blob/0e5794dc48b8f8d51f6047f8a0b1814eb1e65850/src/openai/lib/_pydantic.py
-https://github.com/openai/openai-python/blob/0e5794dc48b8f8d51f6047f8a0b1814eb1e65850/src/openai/types/chat/completion_create_params.py
+http[私有验证记录]
+http[私有验证记录]
 ~~~
 
 ## 7. 证据索引与复核入口

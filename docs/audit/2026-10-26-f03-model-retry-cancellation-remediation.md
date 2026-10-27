@@ -81,7 +81,7 @@ python -m mypy src tests scripts/public-file-manifest.py
 
 没有重复整个项目的所有运行时/前端/Windows 安装测试；执行范围针对本次唯一生产差异和其相关屏障。供应商由隔离夹具、MockTransport 等替代，没有真实付费请求；不能由此声称实机账单对账已完成。
 
-JUnit 与静态检查原始结果保存在仓库外目录 `D:/metagrowh/.user-temp/noyra-f03-validation-kQCpRP`，文件为 model-regression.xml、runtime-boundaries.xml、test-summary.json、ruff-check.txt、ruff-format.txt、mypy.txt。JUnit 中没有单独输出的 subtests_passed 字段，175 个子测试以 pytest 完成输出为据，不从该字段 0 推断未执行。
+JUnit 与静态检查原始结果保存在仓库外目录 `[私有验证记录]`，文件为 model-regression.xml、runtime-boundaries.xml、test-summary.json、ruff-check.txt、ruff-format.txt、mypy.txt。JUnit 中没有单独输出的 subtests_passed 字段，175 个子测试以 pytest 完成输出为据，不从该字段 0 推断未执行。
 
 公开范围最终为 981 个文件、980 个 SHA-256 条目、202 个明确排除路径。提交前按 Git 暂存区生成并校验；最后提交后以 HEAD 和另一套 Git 原始 blob 哈希/ZIP 比对独立核验。最后提交 SHA 与末次结果在交付记录中提供，避免文档自引用。
 

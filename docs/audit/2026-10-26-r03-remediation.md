@@ -130,7 +130,7 @@ pytest tests/test_audit_6a742e5_windows.py \
 - `pip check` 通过；
 - `git diff --check` 通过。
 
-证据目录：`D:/metagrowh/.user-temp/noyra-r03-production-20261026/`。其中保存原生 JUnit、PS7 matrix 和 PS5 runtime boundary 记录。
+证据目录：`[私有验证记录]`。其中保存原生 JUnit、PS7 matrix 和 PS5 runtime boundary 记录。
 
 ## 5. 残余风险和不应过度宣称的边界
 

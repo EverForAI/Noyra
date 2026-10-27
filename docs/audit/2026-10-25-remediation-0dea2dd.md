@@ -88,7 +88,7 @@
 - 全仓库 Ruff check 通过；Ruff format **760 files already formatted**；Mypy **470 files、0 issues**；compileall、pip check 通过。
 - 受测 src/tests/deploy/scripts 跟踪文件逐文件 SHA-256 在运行前后相同（变化 0），避免产品变化时混用旧结果。每个测试文件仅分配给一个分片；pytest 子测试数不重复叠加到 passed。
 - 全量运行出现 3 个已有 Windows junction 夹具的 UTF-8 解码线程警告：全量环境启用 PYTHONUTF8=1，但 cmd mklink 输出使用本地代码页。复核夹具实际检查 returncode 与真实隔离行为；再以本机原生 locale、将 PytestUnhandledThreadExceptionWarning 升为错误，重跑该文件 **6 passed、0 skipped、0 warnings（15.21 秒）**。不把带警告的运行描述为无警告。
-- 原始清单、文件哈希、JUnit、全量日志、静态/前端日志及汇总：`D:/metagrowh/.user-temp/noyra-remediation-0dea2dd-final-20261025T024956/`。仓库内精简机器摘要：`docs/audit/2026-10-25-remediation-0dea2dd-verification.json`。
+- 原始清单、文件哈希、JUnit、全量日志、静态/前端日志及汇总：`[私有验证记录]`。仓库内精简机器摘要：`docs/audit/2026-10-25-remediation-0dea2dd-verification.json`。
 
 ### 验收范围与发布边界
 

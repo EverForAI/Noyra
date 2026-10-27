@@ -4,7 +4,7 @@
 
 本轮依据同日独立只读审计的 R1–R9 实施修复，并落实用户指定的模型连接超时 20 秒、单次请求总超时 100 秒。原始审计报告保持不变；本文件另行记录修复方案、风险、验证和未覆盖边界。
 
-- 工作区：`E:/我的项目/Noyra/开发版`。
+- 工作区：`[私有验证记录]`。
 - 分支：`codex/terminal-waits-operability`。
 - 基线 HEAD：`b0162fd40cb436bbed34e9dc0a15c3a8313d45b1`。
 - 本轮仅本地修改和离线验证：没有提交、推送、合并、部署或连接生产；没有调用真实模型、支付或修改生产数据库。
@@ -34,8 +34,8 @@
 
 **修改**：
 
-- `E:/我的项目/Noyra/开发版/src/noyra/model/config.py`：`timeout_seconds=100`、`connect_timeout_seconds=20`。
-- `E:/我的项目/Noyra/开发版/src/noyra/model/openai_compatible.py`：去掉草稿测试与发现的局部 30 秒覆盖；实际 HTTP 客户端与绝对请求 deadline 使用共享设置。
+- `../../src/noyra/model/config.py`：`timeout_seconds=100`、`connect_timeout_seconds=20`。
+- `../../src/noyra/model/openai_compatible.py`：去掉草稿测试与发现的局部 30 秒覆盖；实际 HTTP 客户端与绝对请求 deadline 使用共享设置。
 - 连接等待属于 100 秒内的阶段，不是先等 20 秒再额外等 100 秒。100 秒是单次 HTTP 尝试的总时限，不是整个业务任务跨重试、退避和多个资源的统一时限。
 - 显式传入不同超时的调用者仍采用其显式值；没有添加未接线的环境变量或后台选项。
 
@@ -51,9 +51,9 @@
 
 **根因修复**：
 
-1. 新增 `E:/我的项目/Noyra/开发版/src/noyra/model/request_identity.py`，把业务目的限定为明确的三种轮次格式；未完成状态复用账本中的原逻辑键。只有已结算的调用推进业务代次，不再用当天全局调用计数构造未完成身份。
-2. `E:/我的项目/Noyra/开发版/src/noyra/cognition/cycle.py`、`E:/我的项目/Noyra/开发版/src/noyra/cognition/reflection.py`、`E:/我的项目/Noyra/开发版/src/noyra/cognition/interaction.py` 接入共享身份。
-3. `E:/我的项目/Noyra/开发版/src/noyra/model/resources.py` 对业务轮次按 purpose 取得进程内/进程间锁；路由检查覆盖不同逻辑键的 prepared/executing/unknown，以及尚未取消的已消耗重试授权。
+1. 新增 `../../src/noyra/model/request_identity.py`，把业务目的限定为明确的三种轮次格式；未完成状态复用账本中的原逻辑键。只有已结算的调用推进业务代次，不再用当天全局调用计数构造未完成身份。
+2. `../../src/noyra/cognition/cycle.py`、`../../src/noyra/cognition/reflection.py`、`../../src/noyra/cognition/interaction.py` 接入共享身份。
+3. `../../src/noyra/model/resources.py` 对业务轮次按 purpose 取得进程内/进程间锁；路由检查覆盖不同逻辑键的 prepared/executing/unknown，以及尚未取消的已消耗重试授权。
 4. 显式人工重试仍固定到原 physical call、group、key。历史无路由后缀的 legacy 调用也隔离；授权后只允许原 provider/model/pool 恢复，不因新增资源而换路。
 5. 不把管理员每次主动测试等非业务请求全部合并成一个身份。
 6. 不把同 purpose 的全部成功/普通失败历史纳入 256 条未完成路由限额，避免长期使用后被错误永久隔离；同时确保排在 300 多条结算历史之后的 unknown 仍可发现。schema100 另加 `(subject_id, purpose, resource_pool)` 索引，避免新的业务身份查找/计数随主体全部调用历史线性增长。
@@ -71,10 +71,10 @@
 **根因修复**：
 
 - schema100 新增 `memory_embedding_inputs(memory_id, content_hash)`；外键绑定 `memory_embeddings`，删除向量时级联删除输入绑定，不改变原 embedding 表列布局。
-- `E:/我的项目/Noyra/开发版/src/noyra/mind/retrieval.py` 在外部计算前检查主体/active/正文哈希，计算后在短事务中再次 CAS 验证；向量和输入哈希原子写入。
+- `../../src/noyra/mind/retrieval.py` 在外部计算前检查主体/active/正文哈希，计算后在短事务中再次 CAS 验证；向量和输入哈希原子写入。
 - `missing()` 包括无输入绑定、正文哈希变化；相似度查询 JOIN 当前 active 正文，只接受哈希相同的绑定，继续保留候选数量、向量大小和索引边界。
 - 旧向量不伪造输入版本、不全部删除、不启动无上限付费重算，而是视为 stale，由现有有界重建逐批补齐。
-- `E:/我的项目/Noyra/开发版/src/noyra/core/runtime_export.py` 新增 schema100 明确导出归属：输入绑定通过其直接主体归属的 embedding 父表筛选，保持 fail-closed 的完整表清单校验。
+- `../../src/noyra/core/runtime_export.py` 新增 schema100 明确导出归属：输入绑定通过其直接主体归属的 embedding 父表筛选，保持 fail-closed 的完整表清单校验。
 
 **防次生问题验证**：正文更新后旧向量排除与重建、计算期间修订的 CAS、错误主体/旧输入不先花费、99→100 迁移、已有向量 stale、跨主体导出不串数据、私密记忆擦除连带删除输入绑定、规模检索计划。
 
@@ -96,9 +96,9 @@
 
 **修复**：
 
-- `E:/我的项目/Noyra/开发版/src/noyra/model/ledger.py` 统一策略：普通请求只允许 active；sleep_reflection 只允许 reflective_sleep。无 runtime owner 的独立账本维持原独立用法。
+- `../../src/noyra/model/ledger.py` 统一策略：普通请求只允许 active；sleep_reflection 只允许 reflective_sleep。无 runtime owner 的独立账本维持原独立用法。
 - 尝试准入、尝试启动、发送回调全部调用同一策略；发送授权用短 `BEGIN IMMEDIATE` 与生命周期转换序列化，并在发请求头前再次检查。此授权是线性化点，不跨网络持有数据库写锁。
-- `E:/我的项目/Noyra/开发版/src/noyra/model/gateway.py` 区分：第二次尝试尚未准入则不制造 reservation；已经准备但确定未发则 cancelled、call failed；已发请求收到有效响应后仍允许正确结算。
+- `../../src/noyra/model/gateway.py` 区分：第二次尝试尚未准入则不制造 reservation；已经准备但确定未发则 cancelled、call failed；已发请求收到有效响应后仍允许正确结算。
 - 路由层原样保留 `ModelLifecycleBlockedError`，记录本地 deferred 原因，不改成 provider in-progress、unknown 或供应商故障；不因本地暂停惩罚密钥/健康统计。
 
 **验证**：发送前进入 paused/deep_sleep 无 HTTP 请求；反思合法 reflective_sleep；重试退避时暂停阻止第二次发送并正确结束 call；响应已经在途时暂停仍结算；路由层显示真实拒绝原因且不生成供应商失败统计。
@@ -117,7 +117,7 @@
 
 **根因**：手工安装从工作树 pip 构建，却直接以 HEAD 申报版本和继承门禁身份；tracked 修改、untracked/ignored 额外代码可能混入不同内容。
 
-**修复**：新增 `E:/我的项目/Noyra/开发版/scripts/lib/release-source.sh`。安装有 commit 身份时必须 HEAD 一致且无 tracked/untracked 脏改，再用 `git archive` 固定 commit 快照；后续包、锁文件、unit、脚本来自快照。拒绝不支持的 submodule/快照 symlink，不把未校验额外输入混进同一 SHA。清理快照后安装报告器仍保留可用路径。
+**修复**：新增 `../../scripts/lib/release-source.sh`。安装有 commit 身份时必须 HEAD 一致且无 tracked/untracked 脏改，再用 `git archive` 固定 commit 快照；后续包、锁文件、unit、脚本来自快照。拒绝不支持的 submodule/快照 symlink，不把未校验额外输入混进同一 SHA。清理快照后安装报告器仍保留可用路径。
 
 **验证**：dirty tracked、untracked、错误 SHA、submodule 拒绝；ignored 文件不进快照；快照建立后原工作树变化不污染已固定输入；安装器预检仍早于停止旧服务。
 
@@ -127,7 +127,7 @@
 
 **根因**：pip 生成 console shebang 指向创建时解释器路径，移动整个 venv 后旧 staging 路径消失。
 
-**修复**：`E:/我的项目/Noyra/开发版/scripts/install-ubuntu.sh` 在最终 release 目录创建未发布环境；构建、导入、备份校验通过后才选 current/previous，失败清理未发布目录；不移动新 venv。
+**修复**：`../../scripts/install-ubuntu.sh` 在最终 release 目录创建未发布环境；构建、导入、备份校验通过后才选 current/previous，失败清理未发布目录；不移动新 venv。
 
 **验证**：最终目录经 current 符号链接调用真实 pip 成功，覆盖长路径/含空格情况下 distlib 的 shell trampoline；静态契约仍检查打包入口预检、停旧服务、发布与指针切换顺序。
 
@@ -139,7 +139,7 @@
 
 **修复**：
 
-- `E:/我的项目/Noyra/开发版/scripts/rotate-operator-token.sh` 先锁定轮换，Python 解析配置但不 source；校验绝对常规文件、无 symlink、root ownership、权限、nlink、重复项、FILE 路径一致和旧 token 格式。
+- `../../scripts/rotate-operator-token.sh` 先锁定轮换，Python 解析配置但不 source；校验绝对常规文件、无 symlink、root ownership、权限、nlink、重复项、FILE 路径一致和旧 token 格式。
 - 只支持 FILE-only 来源。CREDENTIAL/inline/重复或不匹配在更改 token 和重启前拒绝；没有假装实现 systemd credential 轮换。
 - 不改配置文件；原子替换 token，保存原所有者与模式。原来 stopped 的服务保持 stopped。
 - restart 失败恢复旧 token 并尝试恢复服务；HUP/INT/TERM 与 EXIT 中断也走恢复逻辑。无法恢复时保留受保护恢复副本并明确告警，不打印 token。
@@ -152,7 +152,7 @@
 
 **根因**：Windows PID 复用时，旧数字 PID 记录可能指向无关程序；Stop-Process 按 PID 重新查找还存在验证/执行时间窗。
 
-**修复**：`E:/我的项目/Noyra/开发版/deploy/windows/noyra-lifecycle.ps1` 使用 JSON 身份记录：format/process_id/UTC 启动 ticks/受允许安装 launcher 路径/version。拒绝旧数字 PID-only、损坏/超大/reparse 记录。固定 Process.Handle 后比较身份，对同一 Process 对象关闭/等待/必要时 Kill，不重新按 PID 查找；启动/停止/卸载由文件锁串行，已存在匹配实例时不重复启动。
+**修复**：`../../deploy/windows/noyra-lifecycle.ps1` 使用 JSON 身份记录：format/process_id/UTC 启动 ticks/受允许安装 launcher 路径/version。拒绝旧数字 PID-only、损坏/超大/reparse 记录。固定 Process.Handle 后比较身份，对同一 Process 对象关闭/等待/必要时 Kill，不重新按 PID 查找；启动/停止/卸载由文件锁串行，已存在匹配实例时不重复启动。
 
 **验证**：8 个 Windows mock 场景：身份匹配、PID 复用、错误路径、不存在、旧 PID-only、损坏记录、重复启动、强制结束分支。没有终止真实用户进程；打包安装/升级/回滚原测试保持。
 
@@ -187,7 +187,7 @@ schema 从 99 升至 100，只增加一个输入哈希绑定表和两个索引�
 | Shell 语法 | 49 个脚本通过 | `preservation-and-shell-final.json` |
 | Git diff / 证据保全 | diff --check 通过，原 22 个证据及原审计报告不变 | `final-verification.json` |
 
-以上日志均在：`E:/我的项目/Noyra/开发版/.runtime/20261022-audit-remediation`。
+以上日志均在：`../../.runtime/20261022-audit-remediation`。
 
 另保留两组不能冒称整体全绿的较广运行：
 
@@ -206,12 +206,12 @@ schema 从 99 升至 100，只增加一个输入哈希绑定表和两个索引�
 6. Linux 初次环境缺 eth_account 和 pytest-asyncio，后来从本地 wheel cache 按现有锁与哈希离线补齐；没有改依赖锁。显式 PYTHONPATH 泄入安装权限隔离夹具使其导入真实源码而不是最小 mock，已在最终测试启动环境移除此额外变量，并在独立 venv 安装本项目以支持真正的 CLI 子进程。
 7. 新测试曾错误假设存在 provider_health_attempts；当前健康存储只保留有界 buckets/state，已改验证实际 buckets，无需给产品新增无用表。长路径 pip 测试支持 shebang 与 shell trampoline 两种合法形式。最后修改 Shell helper 后出现的 CRLF 已恢复为 LF，并将拒绝路径测试从“任意非零”收紧为预期退出码 1，避免语法/加载错误被误当成成功拒绝。
 
-中间失败日志全部保留在 `E:/我的项目/Noyra/开发版/.runtime/20261022-audit-remediation`，应以最终指定运行与对应闭环结果判断，不把 earlier failed 日志删除来制造全绿。
+中间失败日志全部保留在 `../../.runtime/20261022-audit-remediation`，应以最终指定运行与对应闭环结果判断，不把 earlier failed 日志删除来制造全绿。
 
 ### 4.2 证据保全
 
 - 原 22 个 `output/20261020-audit-*` 文件逐一与只读审计保存的 SHA-256 比对一致。
-- `E:/我的项目/Noyra/开发版/docs/audit/2026-10-22-independent-readonly-audit.md` SHA-256 保持 `9038ec29feb400654d9b2f9df5da7b778d2367e4f5bfb35987be85b6de60cb6a`。
+- `../../docs/audit/2026-10-22-independent-readonly-audit.md` SHA-256 保持 `9038ec29feb400654d9b2f9df5da7b778d2367e4f5bfb35987be85b6de60cb6a`。
 - 没有暂存、提交、推送、合并或生产部署；最终 diff 仅包含本轮修复、相关测试与新文档。
 
 ## 5. 最终建议与质量边界

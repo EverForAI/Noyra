@@ -135,4 +135,4 @@ relationships 与 relationship_revisions 的状态散列只覆盖社会权重和
 
 R05 的完整服务退出保证限定为受支持生命周期与可信 provider 接口；不能用该修复承诺所有异步客户端、任意插件或整个进程退出都具有统一硬期限。既有 Windows 长路径条件不在本次修改范围；测试使用仓库外短临时根，不屏蔽断言。
 
-设计依据：本地代码、原审计探针与 Python 的 executor 生命周期合同（官方文档：`https://docs.python.org/3.12/library/concurrent.futures.html`）。
+设计依据：本地代码、原审计探针与 Python 的 executor 生命周期合同（官方文档：`http[私有验证记录]`）。

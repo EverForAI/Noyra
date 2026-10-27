@@ -21,6 +21,15 @@ The maintainer will acknowledge a report within seven days, provide a severity
 assessment, and coordinate a fix or mitigation. Security fixes should include a
 regression test and a changelog entry.
 
+## Maintainer disclosure boundary
+
+Keep detailed unresolved findings, reproduction material and deployment evidence
+in private maintenance records. Publish reviewed summaries and necessary user
+mitigations without machine-local identifiers or private operational details.
+Redaction is not remediation: retain open work honestly and distinguish source
+fixes, checks, rollout and real-environment acceptance. Ordinary file cleanup does
+not remove older public history or previously downloaded copies.
+
 ## Research-preview limitations
 
 This source preview is not a production-stable release. Revision

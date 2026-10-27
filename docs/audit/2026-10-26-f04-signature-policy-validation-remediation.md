@@ -68,7 +68,7 @@ python -m ruff format --check .
 python -m mypy src tests scripts/public-file-manifest.py
 ```
 
-原始结果保存在仓库外 `D:/metagrowh/.user-temp/noyra-f04-validation-yFvtSs`：r03-full.xml、windows-compatibility.xml、test-summary.json、native-ps7.json、signature-policy.json、production-policy-recovery.json 及静态检查输出。没有批量加入本机原始日志到公开源码清单。
+原始结果保存在仓库外 `[私有验证记录]`：r03-full.xml、windows-compatibility.xml、test-summary.json、native-ps7.json、signature-policy.json、production-policy-recovery.json 及静态检查输出。没有批量加入本机原始日志到公开源码清单。
 
 独立读取 JSON 证据复核：production 分组只有 5 个具名原有 lifecycle 检查，fault_matrix_cases=108 只存在于 prototype；15 个生产策略状态与对应模型相同，六个恢复后的信任和严格字段符合接受点。A+B 的 pins 为 A/B 集合的准确并集，仅保留 B 后 A 确实不存在；开发选择保留 A，没有通过新参数添加 B。独立结果见 independent-policy-review.json 和 independent-evidence-scope.json。
 
