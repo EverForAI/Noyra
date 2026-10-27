@@ -82,3 +82,17 @@ HTTP 首轮综合测试出现 5 项失败：拆出分支后提前返回，破坏
 关键文件：http-extraction-map.json、http-ast-equivalence.json、http-forwarding-equivalence.json、database-equivalence.json、configuration-transport-equivalence.json、final-regression-summary.json、final-static.json、wheel-inventory.json、wheel-runtime-smoke.stdout。
 
 公开源清单按最终 Git index 生成和校验，提交后再次独立核对 Git blob SHA-256，并导出/校验实际源码 ZIP。最终范围为 1,043 个公开文件、1,042 个校验项、202 个排除文件；具体提交与最终校验结果以交付记录为准。
+
+## 2026-10-27：完整 CI 暴露的公开路由测试兼容遗漏
+
+后续统一候选 545d991 的 GitHub quality #136、#137、#138 完成后，Windows/Linux、Python 3.11/3.12 都在同一个用例失败：`test_public_web_inventory_is_separate_and_matches_handlers`。其余测试分别为 Windows 3,498 passed、97 skipped，Linux 3,496 passed、98 skipped。此前本文的局部验证没有覆盖这个源码布局断言，不能替代完整 CI；本项属于本轮模块化遗漏的测试兼容问题。
+
+根因是测试使用 `inspect.getsource(NoyraHTTPServer)` 搜索两段路由判断字面量。判断已随职责拆分移到 `http_routes/get.py`，但测试仍要求其位于服务所有者类中。实际路由仍存在，独立 HTTP 相关用例通过；失败影响为阻止质量门禁和自动合并，不是已确认的运行时路由缺失。该问题按 P2 记录，修复风险低。
+
+修正保留公开路径集合、重复检查、方法、缓存策略、响应状态集合、API/公开文档边界和公开内容种类白名单，使用真实本地 HTTP 请求替代源码字面量匹配。在临时数据库中启动主体和监听 127.0.0.1 随机端口的 HTTP 服务，以现有公开生命周期记录验证文章路由，并验证 sitemap 路由；两者均检查 200、契约 Content-Type 和 no-store，另检查文章规范链接和 sitemap XML 根元素。ExitStack 保证失败时依次关闭 HTTP 服务和数据库。测试不依赖路由所在文件。
+
+反向验证在独立进程中分别模拟文章或 sitemap 路由缺失，修正后的原用例均以 HTTP 404 失败，确认没有通过删除断言或跳过来消除门禁。变更限于测试、本文和公开文件校验清单；生产实现、HTTP 协议和 CI 必需检查保持。
+
+验证结果：修正前定向运行 1 failed、1 passed，失败与 CI 同项；修正后公开契约、公开归档 HTTP、阅读渲染、架构属性、依赖边界及站点元信息综合回归为 38 passed、26 subtests passed。全库 Ruff 和格式检查通过，严格 Mypy 对 533 个源文件通过。两项缺路由的反向验证均按预期失败。没有执行全部约 3,500 项本地测试，最终跨平台结果由新提交的 GitHub CI 验证。
+
+原始复现、成功 JUnit、静态检查和反向验证保存在仓库外 `D:/metagrowh/.user-temp/noyra-public-contract-ci-fix-20261027-ie6dtpax/`。本修正的提交 SHA 和 GitHub 运行编号以 Git 记录和 PR #22 为准。
