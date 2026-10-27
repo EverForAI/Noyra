@@ -689,6 +689,7 @@ src/noyra/model/request_identity.py
 src/noyra/model/resources.py
 src/noyra/model/types.py
 src/noyra/model/wire.py
+src/noyra/monitoring.py
 src/noyra/py.typed
 src/noyra/research/__init__.py
 src/noyra/research/browser.py
@@ -981,6 +982,7 @@ tests/test_retrieval.py
 tests/test_route_evidence_capacity.py
 tests/test_runtime_export_schema75.py
 tests/test_runtime_logging.py
+tests/test_runtime_monitoring.py
 tests/test_runtime_observation.py
 tests/test_schema_contract.py
 tests/test_search_routing_failover.py

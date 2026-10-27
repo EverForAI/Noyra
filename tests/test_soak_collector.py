@@ -78,10 +78,15 @@ def test_snapshot_is_bounded_and_contains_only_operational_summaries(tmp_path: P
         snapshot["storage"]["database"]["database_bytes"] == (data / "noyra.sqlite3").stat().st_size
     )
     assert snapshot["retention"]["failed_reason"] == "OperationalError"
-    assert snapshot["providers"] == {"available": False, "error": "OperationalError"}
+    assert snapshot["providers"] == {
+        "available": False,
+        "error": "OperationalError",
+        "sqlite_errorname": "SQLITE_ERROR",
+    }
     serialized = json.dumps(snapshot)
     assert "secret" not in serialized
-    assert "sqlite" not in serialized
+    assert "noyra.sqlite3" not in serialized
+    assert str(data) not in serialized
 
 
 def test_provider_snapshot_contains_aggregates_without_provider_identifiers(tmp_path: Path) -> None:

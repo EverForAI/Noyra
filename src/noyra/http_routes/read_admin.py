@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import hmac
+import ipaddress
+import json
+from datetime import datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 from urllib.parse import SplitResult, parse_qs
@@ -392,3 +396,69 @@ def self_modification(self: RequestHandler, owner: NoyraHTTPServer, limit: int) 
     ]
     self._json(HTTPStatus.OK, mod_records)
     return False
+
+
+def monitoring_soak(self: RequestHandler, owner: NoyraHTTPServer, parsed: SplitResult) -> bool:
+    from noyra.monitoring import operational_summary
+
+    token = owner.monitoring_token
+    supplied = self.headers.get("X-Noyra-Monitor-Token", "")
+    try:
+        local = ipaddress.ip_address(str(self.client_address[0])).is_loopback
+    except ValueError:
+        local = False
+    local_monitor = (
+        local
+        and token is not None
+        and supplied.isascii()
+        and hmac.compare_digest(supplied, token.get_secret_value())
+    )
+    if not local_monitor and not self._authorized("read"):
+        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+        return True
+    try:
+        if len(parsed.query) > 4096:
+            raise ValueError("monitor state too large")
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        if set(params) - {"state"} or any(len(v) != 1 for v in params.values()):
+            raise ValueError("invalid monitor query")
+        state = json.loads(params.get("state", ["{}"])[0])
+        if not isinstance(state, dict) or set(state) - {"since", "activity_cursors"}:
+            raise ValueError("invalid monitor state")
+        since = state.get("since")
+        if since is not None:
+            if not isinstance(since, str) or len(since) > 40:
+                raise ValueError("invalid monitoring time")
+            parsed_since = datetime.fromisoformat(since.replace("Z", "+00:00"))
+            if parsed_since.tzinfo is None:
+                raise ValueError("monitoring time needs offset")
+        cursors = state.get("activity_cursors")
+        if cursors is not None:
+            if not isinstance(cursors, dict) or set(cursors) - {"calls", "attempts"}:
+                raise ValueError("invalid monitoring cursors")
+            for value in cursors.values():
+                if not isinstance(value, dict) or set(value) != {"timestamp", "id"}:
+                    raise ValueError("invalid monitoring cursor")
+                if any(not isinstance(v, str) or len(v) > 128 for v in value.values()):
+                    raise ValueError("invalid monitoring cursor value")
+                parsed_cursor = datetime.fromisoformat(value["timestamp"].replace("Z", "+00:00"))
+                if parsed_cursor.tzinfo is None:
+                    raise ValueError("monitoring cursor needs offset")
+    except (ValueError, TypeError):
+        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_monitoring_query"})
+        return True
+    result = operational_summary(
+        owner.kernel.database.path, owner.kernel.subject_id, since=since, cursors=cursors
+    )
+    if owner.integrity is not None and owner.integrity.latest_report is not None:
+        report = owner.integrity.latest_report
+        result["integrity"] = {
+            "status": report.status,
+            "policy_mode": report.policy_mode,
+            "completed_at": report.completed_at,
+            "p0": len(report.p0),
+            "p1": len(report.p1),
+            "check_ids": sorted({finding.check_id for finding in report.findings})[:64],
+        }
+    self._json(HTTPStatus.OK, result)
+    return True

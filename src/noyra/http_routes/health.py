@@ -97,8 +97,28 @@ def health_ready_admin_readiness(
             "cloud_archive": owner.cloud_archive_status,
             "components": components,
         }
+        reason_code = next(
+            (
+                value
+                for blocked, value in (
+                    (not storage_runtime_ready, storage.reason_code or "storage_unavailable"),
+                    (
+                        owner.settings.storage_profile == "recovery_capable"
+                        and not storage_backup_ready,
+                        storage.backup_reason_code or "backup_unavailable",
+                    ),
+                    (not at_rest_ready, "at_rest_unavailable"),
+                    (not integrity_ready, "integrity_quarantine"),
+                    (not cloud_ready, "cloud_archive_unavailable"),
+                )
+                if blocked
+            ),
+            "ready",
+        )
         if not detailed:
             payload = {"status": payload["status"], "service": "noyra"}
+        if not ready:
+            payload["reason_code"] = reason_code
         self._json(
             HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE,
             payload,
@@ -106,7 +126,7 @@ def health_ready_admin_readiness(
     except Exception:
         self._json(
             HTTPStatus.SERVICE_UNAVAILABLE,
-            {"status": "degraded", "service": "noyra"},
+            {"status": "degraded", "service": "noyra", "reason_code": "readiness_check_failed"},
         )
     return True
     return False

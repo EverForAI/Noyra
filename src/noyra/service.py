@@ -27,6 +27,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 
+from pydantic import SecretStr
+
 from noyra.autonomy import AutonomyLoop, LoopConfig, TickResult
 from noyra.capability import CapabilityStore
 from noyra.cognition import (
@@ -473,6 +475,7 @@ class NoyraHTTPServer:
         public_hash_key = _load_public_post_hash_key(settings)
         self.kernel = kernel
         self.settings = settings
+        self.monitoring_token: SecretStr | None = None
         self.upgrade_manager = upgrade_manager or UpgradeManager(
             source_path=Path(os.getenv("NOYRA_UPGRADE_SOURCE", str(UPGRADE_SOURCE_PATH))),
             current_release_path=Path(
@@ -846,6 +849,15 @@ class NoyraHTTPServer:
             return
         if not self.kernel.process_lock.held:
             raise RuntimeError("HTTP server cannot start without subject ownership")
+        from noyra.monitoring import load_monitor_token
+
+        try:
+            self.monitoring_token = load_monitor_token(self.settings.data_dir)
+        except (OSError, ValueError, AtRestError) as error:
+            # Monitoring credentials must fail closed without preventing the
+            # already-owned runtime from serving its normal endpoints.
+            self.monitoring_token = None
+            LOGGER.warning("local monitoring key unavailable: %s", type(error).__name__)
         if self.settings.public_sitemap_keyring_path is None:
             from noyra.interaction.sitemap_tokens import SitemapTokens
 

@@ -638,6 +638,29 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { description: Job is already running or terminal }
+  /api/v1/admin/monitoring/soak:
+    get:
+      tags: [observation]
+      operationId: operationalSoakSummary
+      security: [{ readBearer: [] }, { localMonitorKey: [] }]
+      description: |
+        Bounded, subject-scoped model/provider/retention aggregates. The local monitor
+        key is accepted only from a loopback socket and only on this endpoint.
+        No model text, provider identifiers or credentials are returned. Cursor IDs
+        are private monitoring state and must not be copied to public logs.
+      parameters:
+        - name: state
+          in: query
+          schema: { type: string, maxLength: 4096 }
+          description: JSON object containing optional since and activity_cursors.
+      responses:
+        '200':
+          description: Operational aggregates and next private cursors
+          content: { application/json: { schema: { type: object } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/v1/diagnostics:
     get:
       tags: [observation]
@@ -2982,6 +3005,11 @@ paths:
         '503': { description: Password and recovery rotation response }
 components:
   securitySchemes:
+    localMonitorKey:
+      type: apiKey
+      in: header
+      name: X-Noyra-Monitor-Token
+      description: Machine-local read key restricted to the loopback monitoring endpoint.
     ParticipantSession:
       type: apiKey
       in: cookie
