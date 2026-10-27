@@ -50,3 +50,10 @@ Windows 综合回归 117 passed、2 平台 skipped、19 subtests passed，覆盖
 100 秒总超时、20 秒连接超时已存在，不重复修改。现有终态等待维护覆盖预览、WAL 可见性、计划哈希、审计、幂等、并发和未知结果预算保留；本轮相关回归 27 passed。维护入口严格检查 schema，不能对生产 schema99 直接执行最新版本写维护；应先按标准备份/升级流程迁移，再预览计划、逐批维护。未知模型调用与资金记录不随终态等待清理而确认或重放。
 
 完整性修正函数还在生产 mode=ro/query_only 事务中作新旧对照：安装版报 removed/create 错误，修正版通过 24 条意图。只在独立 Python 探针内替换函数，未写生产源码、数据库、告警状态或 hash。生产仍运行原版本 c9e2d9ccfcf3；本轮代码修复是否已部署必须以最终交付和服务器版本核查为准。
+
+
+## 最终模块复审与交付边界
+
+完整性模块提交 `492a759`，观测模块提交 `e96e794`，均保持提交后工作区干净。提交后复核：monitoring/soak 定向回归 49 passed、2 platform skips；Linux WSL root mount namespace 回归（包含最终 root 读取服务账号 0600 监测密钥实现）37 passed；超时与终态等待 27 passed；服务健康/令牌/睡眠/关闭定向 6 passed、1 platform skip；Windows 监测与 API/公开/采样器组合回归 42 passed、2 platform skips；完整服务/架构/依赖组合阶段 117 passed、2 platform skips、19 subtests。全库 Ruff 与严格 Mypy 均通过。
+
+模块二后未改变 production data、部署单元或密钥权限；最后一次 Linux 验证重新覆盖了实际只读挂载。公开清单最终为 1,047 public files、1,046 checksums、202 exclusions，源码 ZIP 导出/校验通过。仍未部署到第一台服务器，原因是 PR #22 尚未合并且生产端仍是 c9e2d9ccfcf3；部署应使用合并后包含 492a759/e96e794 的版本，先按已验证备份与回退边界升级，再只读核验版本、监测 token 生成、健康 reason_code 和 soak source=runtime。
