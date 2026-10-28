@@ -11,13 +11,37 @@ import re
 import unicodedata
 from html import unescape
 
-INJECTION_CLASSIFIER_VERSION = 2
+INJECTION_CLASSIFIER_VERSION = 3
 _ACTION = (
     r"(?:read|reveal|print|send|upload|exfiltrate|show|extract|return|copy|leak|provide|"
     r"retrieve|disclose|dump)"
 )
-_SECRET = r"(?:api\s*keys?|passwords?|private\s+keys?|secrets?|credentials?|access\s+tokens?)"
-_RUNTIME = r"(?:your|internal|system|runtime|environment|process|operator)"
+# These verbs are kept separate from the original broad action set.  They are
+# only treated as extraction directives at an imperative/sentence boundary so
+# that ordinary prose such as "a guide explains how to get credentials" does
+# not become a secret-extraction signal.
+_DIRECTIVE_ACTION = (
+    r"(?:acquire|cat|echo|fetch|get|include|list|obtain|paste|post|share|submit|"
+    r"transmit|forward|write)"
+)
+_SCOPE = (
+    r"(?:the|all|your|my|our|this|that|user(?:'s)?|internal|system(?:'s)?|"
+    r"runtime|environment|process|operator)"
+)
+_SECRET = (
+    r"(?:api[\s_-]*keys?|passwords?|passcodes?|passphrases?|private[\s_-]+keys?|"
+    r"secret[\s_-]+keys?|secrets?|credentials?|access[\s_-]+tokens?|"
+    r"auth(?:entication)?[\s_-]+tokens?|bearer[\s_-]+tokens?|"
+    r"session[\s_-]+(?:tokens?|cookies?)|oauth[\s_-]+tokens?|tokens?|"
+    r"signing[\s_-]+keys?|(?:environment|env)[\s_-]+(?:variables?|vars?))"
+)
+_RUNTIME = r"(?:your|my|our|internal|system|runtime|environment|process|operator)"
+_ZH_ACTION = (
+    r"(?:读取|导出|发送|泄露|打印|提取|获取|查看|显示|展示|输出|列出|上传|转发|复制|"
+    r"提供|放入|放进|写入|贴出|包含)"
+)
+_ZH_SCOPE = r"(?:你的|我的|系统|环境|内部|运行时|操作员|本机|当前)"
+_ZH_SECRET = r"(?:api\s*密钥|私钥|密钥|密码|口令|凭据|令牌|访问令牌|会话令牌|环境变量)"
 INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("instruction_override", re.compile(r"ignore\s+(all\s+)?previous\s+instructions", re.I)),
     ("system_impersonation", re.compile(r"\b(system|developer)\s+(message|prompt)\b", re.I)),
@@ -27,11 +51,16 @@ INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(
             rf"\b{_ACTION}\b.{{0,100}}\b{_RUNTIME}\b.{{0,50}}\b{_SECRET}\b"
             rf"|\b{_ACTION}\b.{{0,80}}\b{_SECRET}\b.{{0,60}}\b{_RUNTIME}\b"
-            rf"|\b{_ACTION}\b\s+(?:(?:the|all|your|internal)\s+){{0,3}}{_SECRET}\b"
+            rf"|\b{_ACTION}\b\s+(?:(?:{_SCOPE})\s+){{0,3}}{_SECRET}\b"
+            rf"|(?:^|[.!?;:\n])\s*(?:please\s+|now\s+|then\s+|you\s+should\s+)?"
+            rf"{_DIRECTIVE_ACTION}\b\s+(?:(?:{_SCOPE})\s+){{0,3}}{_SECRET}\b"
             rf"|\b{_ACTION}\b.{{0,100}}"
             r"(?:\.env\b|/proc/[^ ]*/environ|/root/\.ssh/|\bid_(?:rsa|ed25519)\b)"
-            r"|(?:读取|导出|发送|泄露|打印|提取).{0,40}(?:你的|系统|环境|内部).{0,30}"
-            r"(?:密钥|密码|凭据|令牌)",
+            rf"|{_ZH_ACTION}.{{0,30}}(?:{_ZH_SCOPE}.{{0,20}})?{_ZH_SECRET}"
+            rf"|(?:请(?:将|把)?|将|把)(?:{_ZH_SCOPE})?{_ZH_SECRET}.{{0,30}}{_ZH_ACTION}"
+            r"|(?:读取|导出|发送|泄露|打印|提取|获取|查看|显示|展示|输出|列出|上传|转发|复制|提供|放入|放进|写入|贴出|包含).{0,40}"
+            r"(?:你的|我的|系统|环境|内部|运行时|操作员).{0,30}"
+            r"(?:私钥|密钥|密码|凭据|令牌)",
             re.I,
         ),
     ),
