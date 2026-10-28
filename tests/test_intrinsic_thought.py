@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from collections.abc import Mapping
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Self
 from unittest.mock import patch
@@ -45,6 +46,85 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
     def tearDown(self: Self) -> None:
         self.kernel.close()
         self.temp_dir.cleanup()
+
+    def test_discovery_materializes_cold_start_without_calling_model(self: Self) -> None:
+        from noyra.cognition import MetacognitiveControl
+
+        gateway, provider = self.gateway([])
+        thought = IntrinsicThought(
+            self.kernel.database,
+            self.subject_id,
+            gateway,
+            self.settings(),
+            clock=lambda: self.clock_value,
+        )
+        control = MetacognitiveControl(
+            self.kernel.database, self.subject_id, self.settings(), clock=lambda: self.clock_value
+        )
+        before, _ = control._candidates()
+        self.assertFalse(any(candidate.strategy == "think" for candidate in before))
+        self.assertTrue(thought.discover_agenda())
+        self.assertEqual(provider.requests, [])
+        self.assertEqual(len(thought.agenda()), 1)
+        self.assertIn("Waiting without a new goal", thought.agenda()[0].topic)
+        after, _ = control._candidates()
+        self.assertTrue(any(candidate.strategy == "think" for candidate in after))
+        self.assertEqual(thought.verify_integrity()["thought_agenda_items"], 1)
+
+    def test_discovery_is_throttled_and_restart_does_not_duplicate_agenda(self: Self) -> None:
+        gateway, provider = self.gateway([])
+        thought = IntrinsicThought(
+            self.kernel.database,
+            self.subject_id,
+            gateway,
+            self.settings(),
+            clock=lambda: self.clock_value,
+        )
+        self.assertTrue(thought.discover_agenda())
+        original = thought.agenda()
+        with patch.object(thought, "_agenda_candidates", wraps=thought._agenda_candidates) as scan:
+            for _ in range(20):
+                self.assertFalse(thought.discover_agenda())
+            self.assertEqual(scan.call_count, 0)
+            self.clock_value = (
+                datetime.fromisoformat(self.clock_value) + timedelta(minutes=5)
+            ).isoformat()
+            self.assertTrue(thought.discover_agenda())
+            self.assertEqual(scan.call_count, 1)
+        restarted = IntrinsicThought(
+            self.kernel.database,
+            self.subject_id,
+            gateway,
+            self.settings(),
+            clock=lambda: self.clock_value,
+        )
+        self.assertTrue(restarted.discover_agenda())
+        self.assertEqual(restarted.agenda(), original)
+        self.assertEqual(provider.requests, [])
+        with self.kernel.database.connection() as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM thought_agenda_revisions").fetchone()[0], 1
+            )
+
+    def test_absence_agenda_resolves_when_real_goal_appears(self: Self) -> None:
+        gateway, _ = self.gateway([])
+        thought = IntrinsicThought(
+            self.kernel.database,
+            self.subject_id,
+            gateway,
+            self.settings(),
+            clock=lambda: self.clock_value,
+        )
+        thought.discover_agenda()
+        absence_id = thought.agenda()[0].agenda_id
+        self.establish_goal_and_affect()
+        self.clock_value = (
+            datetime.fromisoformat(self.clock_value) + timedelta(minutes=5)
+        ).isoformat()
+        thought.discover_agenda()
+        absence = next(item for item in thought.agenda() if item.agenda_id == absence_id)
+        self.assertEqual(absence.status, "resolved")
+        thought.verify_integrity()
 
     def test_agenda_parser_rejects_non_finite_durable_number(self: Self) -> None:
         with self.assertRaises(IntegrityError):
@@ -207,6 +287,51 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
         with patch.object(cognition, "_select_agenda", return_value=None):
             self.assertIsNone(await cognition.run_due())
         self.assertEqual(len(provider.requests), 2)
+
+    async def test_discovery_does_not_reset_cooling_or_daily_calls(self: Self) -> None:
+        ids = self.establish_goal_and_affect()
+        gateway, provider = self.gateway(
+            [
+                self.proposal(ids, insight="One possible framing", next_question=None),
+                self.proposal(ids, insight="Another framing", next_question=None),
+            ]
+        )
+        thought = IntrinsicThought(
+            self.kernel.database,
+            self.subject_id,
+            gateway,
+            self.settings(),
+            clock=lambda: self.clock_value,
+        )
+        thought.discover_agenda()
+        selected = thought._select_agenda()
+        assert selected is not None
+        with patch.object(thought, "_select_agenda", return_value=selected):
+            await thought.run_due()
+            self.clock_value = (
+                datetime.fromisoformat(self.clock_value) + timedelta(minutes=5)
+            ).isoformat()
+            await thought.run_due()
+        before = thought.agenda()
+        calls = thought._calls_today()
+        self.assertTrue(any(item.status == "cooling" for item in before))
+        self.clock_value = (
+            datetime.fromisoformat(self.clock_value) + timedelta(minutes=5)
+        ).isoformat()
+        candidates = thought._agenda_candidates()
+        for candidate in candidates:
+            if candidate["source_id"] == selected.source_id:
+                candidate["novelty"] = max(0.0, float(candidate["novelty"]) - 0.01)
+        with patch.object(thought, "_agenda_candidates", return_value=candidates):
+            thought.discover_agenda()
+        after = thought.agenda()
+        self.assertEqual(
+            sorted((i.agenda_id, i.cooldown_until, i.consecutive_no_change) for i in before),
+            sorted((i.agenda_id, i.cooldown_until, i.consecutive_no_change) for i in after),
+        )
+        self.assertEqual(calls, thought._calls_today())
+        self.assertEqual(len(provider.requests), 2)
+        thought.verify_integrity()
 
     async def test_duplicate_result_is_rejected_and_not_retried_forever(self: Self) -> None:
         ids = self.establish_goal_and_affect()

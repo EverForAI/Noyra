@@ -62,3 +62,17 @@ motive/evidence validation, capability restrictions and per-call budgets are unc
 signals and filtered proposals are not reclassified or replayed. Tests use a frozen synthetic
 positive/negative control set, title-only and split-field attacks, and a motivated benign-topic
 integration case. Expanding sources still requires separate review and controlled deployment.
+
+## M3 independent attention discovery
+
+Before metacognitive selection, discovery scans bounded internal state at most once per five minutes
+per process; it invokes no model. Existing stable source identities plus candidate-field comparison
+coalesce unchanged relevant state. Do not key on the global subject version: unrelated ticks would
+create new items and bypass cooldown. Restart can rescan once; the durable source identity prevents
+duplicate insertion. Existing recurrence revisions, no-change streaks, cooldowns and daily call/goal
+budgets remain in force.
+
+An absence of current intrinsic goals is a factual, optional reflection question, not an imposed goal
+or instruction to search. Waiting and not forming a goal are valid. Its agenda is resolved when the
+absence condition clears. The existing optional goal-candidate path is retained, including affect
+and evidence validation; no second goal-generation mechanism or forced call each tick is added.

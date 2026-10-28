@@ -566,6 +566,9 @@ class CognitionCycle:
         return await self.sleep_reflection_cognition.propose(run)
 
     async def _run_metacognitive_strategy(self) -> str | None:
+        # Discovery is cheap, bounded and independent of model availability.
+        # Otherwise think can never be selected when its agenda starts empty.
+        self.intrinsic_thought.discover_agenda()
         decision = self.metacognitive_control.run_due()
         with self.kernel.database.connection() as connection:
             pending = connection.execute(

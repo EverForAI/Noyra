@@ -121,11 +121,30 @@ class IntrinsicThought:
         self.goals = GoalStore(database)
         self.mind = MindEngine(database, clock=clock)
         self.fatigue = FatigueTracker(database)
+        self._last_agenda_discovery: datetime | None = None
+
+    def discover_agenda(self) -> bool:
+        """Materialize bounded internal attention, without invoking the model.
+
+        Stable source identity plus the existing candidate-state comparison
+        coalesces unchanged state; discovery never resets budgets or cooldowns.
+        A restart may rescan once but cannot duplicate the same agenda item.
+        """
+        if not self.settings.enabled:
+            return False
+        now = self._parse_time(self.clock())
+        if self._last_agenda_discovery is not None:
+            elapsed = (now - self._last_agenda_discovery).total_seconds()
+            if elapsed < 300:
+                return False
+        self._refresh_agenda()
+        self._last_agenda_discovery = now
+        return True
 
     async def run_due(self) -> str | None:
         if self._calls_today() >= self.settings.max_thought_model_calls_per_day:
             return None
-        self._refresh_agenda()
+        self.discover_agenda()
         agenda = self._select_agenda()
         if agenda is None:
             return None
@@ -291,6 +310,9 @@ class IntrinsicThought:
         candidates = self._agenda_candidates()
         now = self.clock()
         with self.database.transaction() as connection:
+            absence_key = self._absence_source_id()
+            if not any(candidate["source_id"] == absence_key for candidate in candidates):
+                self._resolve_absence_agenda(connection, absence_key, now)
             for candidate in candidates:
                 existing = connection.execute(
                     "SELECT * FROM thought_agenda_items WHERE subject_id = ? "
@@ -411,6 +433,55 @@ class IntrinsicThought:
                     created_at=now,
                 )
 
+    def _absence_source_id(self) -> str:
+        return content_hash(
+            {
+                "subject_id": self.subject_id,
+                "condition": "no_intrinsic_goals",
+                "condition_version": 1,
+            }
+        )
+
+    def _resolve_absence_agenda(self, connection: Any, source_id: str, now: str) -> None:
+        row = connection.execute(
+            "SELECT * FROM thought_agenda_items WHERE subject_id=? "
+            "AND source_type='question' AND source_id=? AND status IN ('open','cooling')",
+            (self.subject_id, source_id),
+        ).fetchone()
+        if row is None:
+            return
+        agenda = self._agenda_from_row(row)
+        state_hash = self._agenda_hash(
+            agenda.source_type,
+            agenda.source_id,
+            agenda.topic,
+            agenda.urgency,
+            agenda.novelty,
+            agenda.emotional_weight,
+            agenda.recurrence_count,
+            agenda.consecutive_no_change,
+            "resolved",
+            None,
+        )
+        connection.execute(
+            "UPDATE thought_agenda_items SET status='resolved',cooldown_until=NULL,"
+            "state_hash=?,updated_at=? WHERE agenda_id=?",
+            (state_hash, now, agenda.agenda_id),
+        )
+        self._insert_agenda_revision(
+            connection,
+            agenda.agenda_id,
+            old_status=agenda.status,
+            new_status="resolved",
+            old_recurrence=agenda.recurrence_count,
+            new_recurrence=agenda.recurrence_count,
+            old_no_change=agenda.consecutive_no_change,
+            new_no_change=agenda.consecutive_no_change,
+            cooldown_until=None,
+            reason="internal absence condition no longer present",
+            created_at=now,
+        )
+
     def _agenda_candidates(self) -> list[dict[str, Any]]:
         with self.database.connection() as connection:
             goals = connection.execute(
@@ -446,6 +517,21 @@ class IntrinsicThought:
             ).fetchall()
             relationships = context_rows(connection, relationships, self.subject_id)
         candidates: list[dict[str, Any]] = []
+        if not goals:
+            candidates.append(
+                {
+                    "source_type": "question",
+                    "source_id": self._absence_source_id(),
+                    "topic": (
+                        "No current autonomous goals are recorded. Is this consistent with "
+                        "current values, affect and evidence? Waiting without a new goal "
+                        "is an acceptable outcome."
+                    ),
+                    "urgency": 0.35,
+                    "novelty": 0.45,
+                    "emotional_weight": 0.05,
+                }
+            )
         for row in goals:
             emotional = min(1.0, abs(float(row["emotional_pressure"])))
             candidates.append(
