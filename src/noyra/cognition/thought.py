@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -32,6 +33,9 @@ from ._integrity import (
 )
 from .settings import CognitionSettings
 from .types import IntrinsicThoughtProposal
+
+_ABSENCE_CLEARED_REASON = "internal absence condition no longer present"
+_ABSENCE_RETURNED_REASON = "internal absence condition recurred"
 
 
 class IntrinsicThoughtValidationError(ValueError):
@@ -235,38 +239,7 @@ class IntrinsicThought:
                 ):
                     raise IntegrityError(f"thought agenda revision mismatch: {agenda.agenda_id}")
                 for revision in revisions:
-                    revision_id = revision["revision_id"]
-                    with durable_boundary("thought agenda revision", revision_id):
-                        expected = self._agenda_revision_hash(
-                            revision["old_status"],
-                            revision["new_status"],
-                            durable_int(
-                                revision["old_recurrence_count"],
-                                "thought agenda revision",
-                                revision_id,
-                            ),
-                            durable_int(
-                                revision["new_recurrence_count"],
-                                "thought agenda revision",
-                                revision_id,
-                            ),
-                            durable_int(
-                                revision["old_consecutive_no_change"],
-                                "thought agenda revision",
-                                revision_id,
-                            ),
-                            durable_int(
-                                revision["new_consecutive_no_change"],
-                                "thought agenda revision",
-                                revision_id,
-                            ),
-                            revision["cooldown_until"],
-                            revision["reason"],
-                        )
-                    if expected != revision["state_hash"]:
-                        raise IntegrityError(
-                            f"thought agenda revision hash mismatch: {agenda.agenda_id}"
-                        )
+                    self._verify_agenda_revision(revision)
             episodes = connection.execute(
                 "SELECT * FROM thought_episodes WHERE subject_id = ?",
                 (self.subject_id,),
@@ -307,9 +280,11 @@ class IntrinsicThought:
             return {"thought_agenda_items": len(agendas), "thought_episodes": len(episodes)}
 
     def _refresh_agenda(self) -> None:
-        candidates = self._agenda_candidates()
         now = self.clock()
         with self.database.transaction() as connection:
+            # The observed condition and its transition share one serialized
+            # snapshot. No provider/model/advisory calls occur in discovery.
+            candidates = self._agenda_candidates(connection=connection)
             absence_key = self._absence_source_id()
             if not any(candidate["source_id"] == absence_key for candidate in candidates):
                 self._resolve_absence_agenda(connection, absence_key, now)
@@ -369,6 +344,17 @@ class IntrinsicThought:
                     continue
                 status = str(existing["status"])
                 cooldown_until = existing["cooldown_until"]
+                resumed = False
+                if (
+                    status == "resolved"
+                    and candidate["source_type"] == "question"
+                    and candidate["source_id"] == absence_key
+                ):
+                    restored = self._absence_recurrence_state(connection, existing, now)
+                    if restored is None:
+                        continue
+                    status, cooldown_until = restored
+                    resumed = True
                 if (
                     status == "cooling"
                     and cooldown_until is not None
@@ -429,7 +415,11 @@ class IntrinsicThought:
                     old_no_change=int(existing["consecutive_no_change"]),
                     new_no_change=int(existing["consecutive_no_change"]),
                     cooldown_until=cooldown_until,
-                    reason="intrinsic attention source recurred",
+                    reason=(
+                        _ABSENCE_RETURNED_REASON
+                        if resumed
+                        else "intrinsic attention source recurred"
+                    ),
                     created_at=now,
                 )
 
@@ -461,10 +451,10 @@ class IntrinsicThought:
             agenda.recurrence_count,
             agenda.consecutive_no_change,
             "resolved",
-            None,
+            agenda.cooldown_until,
         )
         connection.execute(
-            "UPDATE thought_agenda_items SET status='resolved',cooldown_until=NULL,"
+            "UPDATE thought_agenda_items SET status='resolved',"
             "state_hash=?,updated_at=? WHERE agenda_id=?",
             (state_hash, now, agenda.agenda_id),
         )
@@ -477,13 +467,65 @@ class IntrinsicThought:
             new_recurrence=agenda.recurrence_count,
             old_no_change=agenda.consecutive_no_change,
             new_no_change=agenda.consecutive_no_change,
-            cooldown_until=None,
-            reason="internal absence condition no longer present",
+            cooldown_until=agenda.cooldown_until,
+            reason=_ABSENCE_CLEARED_REASON,
             created_at=now,
         )
 
-    def _agenda_candidates(self) -> list[dict[str, Any]]:
-        with self.database.connection() as connection:
+    def _absence_recurrence_state(
+        self, connection: Any, row: Any, now: str
+    ) -> tuple[str, str | None] | None:
+        agenda = self._agenda_from_row(row)
+        revisions = connection.execute(
+            "SELECT * FROM thought_agenda_revisions WHERE agenda_id=? ORDER BY rowid DESC LIMIT 2",
+            (agenda.agenda_id,),
+        ).fetchall()
+        if not revisions:
+            raise IntegrityError("thought absence agenda has no resolution evidence")
+        latest = revisions[0]
+        self._verify_agenda_revision(latest)
+        if (
+            latest["new_status"] != agenda.status
+            or latest["new_recurrence_count"] != agenda.recurrence_count
+            or latest["new_consecutive_no_change"] != agenda.consecutive_no_change
+            or latest["cooldown_until"] != agenda.cooldown_until
+        ):
+            raise IntegrityError("thought absence resolution state mismatch")
+        # A model's resolve/abandon decision is not an automatic condition
+        # transition. A continuously true condition must not undo that choice.
+        if latest["reason"] != _ABSENCE_CLEARED_REASON:
+            return None
+        if len(revisions) != 2:
+            raise IntegrityError("thought absence resolution predecessor is missing")
+        previous = revisions[1]
+        self._verify_agenda_revision(previous)
+        if (
+            latest["old_status"] not in {"open", "cooling"}
+            or previous["new_status"] != latest["old_status"]
+            or previous["new_recurrence_count"] != latest["old_recurrence_count"]
+            or previous["new_consecutive_no_change"] != latest["old_consecutive_no_change"]
+            or latest["old_recurrence_count"] != agenda.recurrence_count
+            or latest["old_consecutive_no_change"] != agenda.consecutive_no_change
+        ):
+            raise IntegrityError("thought absence resolution history mismatch")
+        # Older automatic resolutions cleared this field. The append-only
+        # predecessor still proves the original cooldown; never invent one or
+        # reset episode identity, no-change streaks or daily accounting.
+        cooldown = previous["cooldown_until"]
+        if (previous["new_status"] == "cooling") != (cooldown is not None) or (
+            agenda.cooldown_until is not None and agenda.cooldown_until != cooldown
+        ):
+            raise IntegrityError("thought absence cooldown evidence mismatch")
+        with durable_boundary("thought absence cooldown", agenda.agenda_id):
+            if cooldown is not None and self._parse_time(cooldown) > self._parse_time(now):
+                return "cooling", cooldown
+        return "open", None
+
+    def _agenda_candidates(self, *, connection: Any | None = None) -> list[dict[str, Any]]:
+        read_context = (
+            nullcontext(connection) if connection is not None else self.database.connection()
+        )
+        with read_context as connection:
             goals = connection.execute(
                 "SELECT goal_id, title, priority, commitment, emotional_pressure, progress "
                 "FROM goals WHERE subject_id = ? AND origin != 'human_proposal' "
@@ -1162,6 +1204,31 @@ class IntrinsicThought:
                 row["created_at"],
                 row["updated_at"],
             )
+
+    @classmethod
+    def _verify_agenda_revision(cls, revision: Any) -> None:
+        revision_id = revision["revision_id"]
+        with durable_boundary("thought agenda revision", revision_id):
+            expected = cls._agenda_revision_hash(
+                revision["old_status"],
+                revision["new_status"],
+                durable_int(
+                    revision["old_recurrence_count"], "thought agenda revision", revision_id
+                ),
+                durable_int(
+                    revision["new_recurrence_count"], "thought agenda revision", revision_id
+                ),
+                durable_int(
+                    revision["old_consecutive_no_change"], "thought agenda revision", revision_id
+                ),
+                durable_int(
+                    revision["new_consecutive_no_change"], "thought agenda revision", revision_id
+                ),
+                revision["cooldown_until"],
+                revision["reason"],
+            )
+        if expected != revision["state_hash"]:
+            raise IntegrityError(f"thought agenda revision hash mismatch: {revision['agenda_id']}")
 
     @staticmethod
     def _insert_agenda_revision(

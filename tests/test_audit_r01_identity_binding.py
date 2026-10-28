@@ -322,7 +322,12 @@ def test_backup_export_retention_and_private_explanation_include_binding(tmp_pat
         RelationshipStore(recovered).get(METADATA["relationship_id"]).identity_origin
         == "legacy_observed"
     )
-    assert CURRENT_SCHEMA_VERSION == 107
+    with recovered.connection() as c:
+        recovered_version = int(
+            c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]
+        )
+    assert recovered_version == CURRENT_SCHEMA_VERSION
+    assert recovered_version >= 107
 
 
 @pytest.mark.parametrize("reader", ["thought_agenda", "metacognition"])
@@ -475,6 +480,7 @@ def test_actual_migration_process_crash_recovers_without_partial_identity_state(
     with open_readonly(path) as c:
         before = snapshot(c)
     program = """import os,sys
+sys.path.insert(0, sys.argv[2])
 from unittest.mock import patch
 from noyra.core import Database
 from noyra.core.relationship_identity import backfill_legacy_bindings
@@ -486,7 +492,15 @@ with patch.object(module,'backfill_legacy_bindings',crash):
     Database(sys.argv[1])
 """
     result = subprocess.run(
-        [sys.executable, "-c", program, str(path)],
+        # pytest's in-process pythonpath is not inherited by a child. Pin this
+        # crash/recovery probe to the current checkout, not an old installation.
+        [
+            sys.executable,
+            "-c",
+            program,
+            str(path),
+            str(Path(__file__).resolve().parents[1] / "src"),
+        ],
         capture_output=True,
         text=True,
         encoding="utf-8",

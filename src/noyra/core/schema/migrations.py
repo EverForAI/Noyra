@@ -31,4 +31,8 @@ CREATE TRIGGER IF NOT EXISTS prevent_world_feed_seen_update
 BEFORE UPDATE ON world_feed_seen
 BEGIN SELECT RAISE(ABORT,'world feed seen entries are immutable'); END;
 """,
+    110: """
+CREATE INDEX IF NOT EXISTS idx_thought_agenda_revision_agenda
+ON thought_agenda_revisions(agenda_id);
+""",
 }

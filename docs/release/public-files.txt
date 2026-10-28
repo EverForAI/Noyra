@@ -868,6 +868,7 @@ tests/test_installer_operability.py
 tests/test_integrity_hardening.py
 tests/test_interaction.py
 tests/test_intrinsic_thought.py
+tests/test_intrinsic_thought_recurrence.py
 tests/test_kernel.py
 tests/test_legacy_schema71_upgrade.py
 tests/test_locking.py

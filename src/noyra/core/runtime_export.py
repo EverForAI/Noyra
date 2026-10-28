@@ -720,6 +720,8 @@ _OWNERSHIP_GRAPHS[108] = {
 }
 # v109 adds only a trigger; table ownership and subject filtering are unchanged.
 _OWNERSHIP_GRAPHS[109] = _OWNERSHIP_GRAPHS[108]
+# v110 adds only an index; table ownership is unchanged.
+_OWNERSHIP_GRAPHS[110] = _OWNERSHIP_GRAPHS[109]
 
 
 @dataclass(frozen=True)
