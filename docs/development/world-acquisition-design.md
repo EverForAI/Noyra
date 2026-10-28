@@ -44,3 +44,21 @@ Acceptance: repeated 200 responses, changed channel timestamps, reordering and r
 observations for retained entry versions; new and revised items still enter cognition; unchanged checks
 advance scheduling; crashes roll back all ingestion state; existing observation evidence stays intact.
 There is no quota requiring a particular number of daily observations or new goals.
+
+## M2 external-text boundary
+
+Classifier version 2 keeps override/impersonation/tool signals and replaces the bare secret-word
+match with directed extraction/runtime-file signals. It also recognizes boundary spoofing and
+concrete credential-shaped values coupled to outbound URLs. These are conservative heuristics,
+not a semantic security proof; legitimate quotations can remain flagged. All extracted fields
+are classified together after bounded Unicode/HTML normalization. Removed scripts/comments never
+enter model input; arbitrary opaque Base64/hex content is not recursively decoded. No model is used
+as a classifier. Observation events record classifier version for future explanation.
+
+The world prompt keeps its system policy separate from source data. Source names, titles, recalled
+memory text and memory blocks are explicitly untrusted text fields in context JSON; observation
+body is JSON-quoted inside data markers, not interpolated as an instruction block. Existing goal
+motive/evidence validation, capability restrictions and per-call budgets are unchanged. Historical
+signals and filtered proposals are not reclassified or replayed. Tests use a frozen synthetic
+positive/negative control set, title-only and split-field attacks, and a motivated benign-topic
+integration case. Expanding sources still requires separate review and controlled deployment.

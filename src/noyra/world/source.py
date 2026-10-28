@@ -28,6 +28,8 @@ from noyra.core.types import content_hash, new_id, utc_now
 
 from .errors import FetchError, UnsafeSourceError, WorldStateConflictError
 from .feed import feed_content, parse_feed
+from .injection import INJECTION_PATTERNS as INJECTION_PATTERNS
+from .injection import classify_external_text
 from .types import FetchedDocument, SourceRecord, SourceStatus, SourceType
 
 Resolver = Callable[[str, int], Awaitable[Sequence[str]]]
@@ -42,12 +44,6 @@ ALLOWED_MEDIA_TYPES = frozenset(
         "text/xml",
         "text/plain",
     }
-)
-INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("instruction_override", re.compile(r"ignore\s+(all\s+)?previous\s+instructions", re.I)),
-    ("system_impersonation", re.compile(r"\b(system|developer)\s+(message|prompt)\b", re.I)),
-    ("tool_coercion", re.compile(r"\b(call|invoke|use)\s+(the\s+)?(tool|function)\b", re.I)),
-    ("secret_extraction", re.compile(r"\b(api\s*key|password|private\s+key|secret)\b", re.I)),
 )
 
 
@@ -449,9 +445,12 @@ class SafeWebReader:
                 else:
                     title, content = self._extract(media_type, text)
                     content = content[: self.max_text_chars]
-                signals = tuple(
-                    name for name, pattern in INJECTION_PATTERNS if pattern.search(content)
+                fields = (
+                    tuple(value for item in feed_items for value in item.payload().values())
+                    if feed_items is not None
+                    else (content,)
                 )
+                signals = classify_external_text(title or "", *fields)
                 return FetchedDocument(
                     url=url,
                     title=title,

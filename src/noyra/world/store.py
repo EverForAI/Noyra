@@ -13,6 +13,7 @@ from noyra.mind.causal import CausalStore
 
 from .errors import WorldStateConflictError
 from .feed import FEED_FINGERPRINT_VERSION, feed_content
+from .injection import INJECTION_CLASSIFIER_VERSION, classify_external_text
 from .observation_archive import ObservationContentArchive
 from .poll import SourcePollStore
 from .source import canonical_public_url
@@ -104,11 +105,8 @@ class ObservationStore:
                 content = feed_content(unseen)
                 # Classification must use the new subset only, never a signal
                 # carried solely by a previously seen entry in the same feed.
-                from .source import INJECTION_PATTERNS
-
-                signals = tuple(
-                    name for name, pattern in INJECTION_PATTERNS if pattern.search(content)
-                )
+                fields = tuple(value for item in unseen for value in item.payload().values())
+                signals = classify_external_text(document.title or "", *fields)
                 observation, created = self._record_connection(
                     connection,
                     subject_id,
@@ -207,6 +205,7 @@ class ObservationStore:
                 "content_hash": document.content_hash,
                 "media_type": document.media_type,
                 "injection_signals": list(document.injection_signals),
+                "injection_classifier_version": INJECTION_CLASSIFIER_VERSION,
                 "feed_fingerprint_version": (
                     FEED_FINGERPRINT_VERSION if document.feed_items is not None else None
                 ),

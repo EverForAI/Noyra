@@ -742,6 +742,7 @@ src/noyra/world/__init__.py
 src/noyra/world/errors.py
 src/noyra/world/feed.py
 src/noyra/world/genesis.py
+src/noyra/world/injection.py
 src/noyra/world/integrity.py
 src/noyra/world/observation_archive.py
 src/noyra/world/poll.py
@@ -1042,6 +1043,7 @@ tests/test_windows_data_root.py
 tests/test_windows_process_identity.py
 tests/test_world.py
 tests/test_world_feed_poll.py
+tests/test_world_injection_classification.py
 website/build.mjs
 website/content.mjs
 website/icons/LICENSE
