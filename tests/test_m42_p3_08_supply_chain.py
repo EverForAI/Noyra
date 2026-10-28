@@ -57,6 +57,14 @@ def test_certifi_security_floor_and_profile_locks_agree() -> None:
     assert versions[0] == versions[1]
 
 
+def test_development_msgpack_lock_retains_fixed_security_floor() -> None:
+    # Keep the audit toolchain on a patched release without weakening the audit gate.
+    lock = (ROOT / "requirements-dev.lock").read_text(encoding="utf-8")
+    match = re.search(r"^msgpack==([0-9.]+)(?=\s)", lock, re.MULTILINE)
+    assert match is not None
+    assert tuple(int(part) for part in match[1].split(".")) >= (1, 2, 3)
+
+
 def test_ci_and_release_actions_are_immutable_and_install_hashes() -> None:
     for path in (
         ROOT / ".github" / "workflows" / "ci.yml",
