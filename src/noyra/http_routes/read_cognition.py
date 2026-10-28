@@ -23,6 +23,21 @@ if TYPE_CHECKING:
     from .contracts import RequestHandler
 
 
+def admin_world_acquisition(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
+    if not self._authorized("operator"):
+        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+        return True
+    from noyra.world.diagnostics import AcquisitionQueryLimit, WorldAcquisitionProjection
+
+    try:
+        payload = WorldAcquisitionProjection(owner.kernel.database).summary(owner.kernel.subject_id)
+    except (AcquisitionQueryLimit, IntegrityError, ValueError):
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "world_acquisition_unavailable"})
+        return True
+    self._json(HTTPStatus.OK, payload)
+    return False
+
+
 def admin_usage(self: RequestHandler, owner: NoyraHTTPServer, query: dict[str, list[str]]) -> bool:
     if not self._authorized("read"):
         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})

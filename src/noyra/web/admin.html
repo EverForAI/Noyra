@@ -63,6 +63,13 @@
         <section class="overview-band"><h2>需要处理</h2><div id="overview-attention" aria-live="polite"></div></section>
         <div class="two-column"><section class="overview-band"><h2>运行与生命周期</h2><div id="overview-lifecycle" class="summary-list"></div><button type="button" data-setup-go="logs">查看活动日志</button></section><section class="overview-band"><h2>近期活动</h2><div id="overview-events"></div></section></div>
         <div class="two-column"><article class="surface-card"><div class="card-heading"><h2>认知资源</h2><span class="card-state" id="cognition-state">-</span></div><div id="cognition-summary" class="summary-list"></div><button type="button" data-setup-go="models">管理资源</button></article><article class="surface-card"><div class="card-heading"><h2>资源与检查边界</h2></div><div id="storage-summary" class="summary-list"></div><button type="button" data-setup-go="runtime">查看运行防护</button></article></div>
+        <details class="surface-card" id="world-acquisition">
+          <summary>世界探索：采集与新内容</summary>
+          <p class="muted">检查过来源，不等于发现了新内容；读到新内容，也不等于形成了目标。这里显示真实采集记录，不会为了刷新面板再次抓取网页或调用模型。</p>
+          <button id="refresh-world-acquisition" type="button">读取采集状态</button>
+          <p id="world-acquisition-status" class="muted" role="status">按需读取，不自动轮询。</p>
+          <div id="world-acquisition-summary"></div>
+        </details>
         <details id="overview-setup"><summary>配置检查</summary>
         <article class="surface-card setup-guide-card" id="setup-guide" aria-labelledby="setup-guide-title">
           <div class="card-heading"><div><h2 id="setup-guide-title">首次配置向导</h2><p class="muted">先配置认知模型，搜索、通讯与付款都可以按需启用。</p></div><span class="card-state" id="setup-guide-state">正在检查</span></div>

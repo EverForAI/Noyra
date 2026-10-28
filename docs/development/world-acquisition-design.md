@@ -76,3 +76,17 @@ An absence of current intrinsic goals is a factual, optional reflection question
 or instruction to search. Waiting and not forming a goal are valid. Its agenda is resolved when the
 absence condition clears. The existing optional goal-candidate path is retained, including affect
 and evidence validation; no second goal-generation mechanism or forced call each tick is added.
+
+## M4 private diagnostics
+
+An operator-only read endpoint and on-demand administration panel distinguish last attempt, last
+successful check, last new content, cumulative checks/unchanged checks and retained RSS/Atom versions.
+They read durable poll state, not observation counts. Missing tracking is unknown, not zero; read
+failure returns 503 and the panel labels any retained previous display as stale. The projection has a
+25-source cap, short SQLite lock wait and query deadline; it neither fetches sources nor loads archives,
+performs full integrity scans or invokes models. No diagnostic heartbeat events are appended.
+
+Fingerprint version is read from each durable poll state. The displayed classifier version is
+explicitly the current rule version, not a claim that old observations have been reclassified;
+new observation event metadata retains the classifier version used at ingestion. No raw observation
+text, credentials or production host details are exposed. Public pages are unchanged.

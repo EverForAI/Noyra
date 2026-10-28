@@ -739,6 +739,7 @@ src/noyra/web/index.html
 src/noyra/web/participant.js
 src/noyra/web/styles.css
 src/noyra/world/__init__.py
+src/noyra/world/diagnostics.py
 src/noyra/world/errors.py
 src/noyra/world/feed.py
 src/noyra/world/genesis.py
@@ -777,6 +778,7 @@ tests/frontend/admin-optimization.test.cjs
 tests/frontend/participant.test.cjs
 tests/frontend/public-archive.test.cjs
 tests/frontend/publication-admin.test.cjs
+tests/frontend/world-acquisition.test.cjs
 tests/shell/test-audit-environment.sh
 tests/shell/test-control-layout-rollback.sh
 tests/shell/test-install-ubuntu-backup-boundary.sh
@@ -1042,6 +1044,7 @@ tests/test_web_contract.py
 tests/test_windows_data_root.py
 tests/test_windows_process_identity.py
 tests/test_world.py
+tests/test_world_acquisition_diagnostics.py
 tests/test_world_feed_poll.py
 tests/test_world_injection_classification.py
 website/build.mjs
