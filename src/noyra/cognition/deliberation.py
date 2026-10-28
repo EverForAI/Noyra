@@ -305,6 +305,7 @@ class ActionDeliberation:
                     "source_type": source.source_type,
                     "trust_score": source.trust_score,
                     "last_observed_at": self._last_observed_at(source.source_id),
+                    "last_checked_at": self._last_checked_at(source.source_id),
                 }
                 for source in sources
             ],
@@ -446,11 +447,15 @@ class ActionDeliberation:
         observation_id: str | None = None
         status = "failed"
         if result.status == "succeeded" and result.document is not None:
-            observation, created = self.observations.record(
+            observation, created = self.observations.ingest(
                 self.subject_id, source.source_id, result.document
             )
-            observation_id = observation.observation_id
-            status = "succeeded" if created or observation.status == "new" else "unchanged"
+            observation_id = observation.observation_id if observation is not None else None
+            status = (
+                "succeeded"
+                if observation is not None and (created or observation.status == "new")
+                else "unchanged"
+            )
         elif result.status == "succeeded":
             observation_id = self._observation_for_action(result.action_id)
             status = "unchanged" if observation_id is not None else "outcome_unavailable"
@@ -644,9 +649,15 @@ class ActionDeliberation:
     def _last_observed_at(self, source_id: str) -> str | None:
         with self.database.connection() as connection:
             row = connection.execute(
-                "SELECT MAX(fetched_at) FROM observations WHERE source_id = ?", (source_id,)
+                "SELECT MAX(fetched_at) FROM observations WHERE subject_id=? AND source_id=?",
+                (self.subject_id, source_id),
             ).fetchone()
         return None if row is None else row[0]
+
+    def _last_checked_at(self, source_id: str) -> str | None:
+        from noyra.world.poll import SourcePollStore
+
+        return SourcePollStore(self.database).last_checked_at(self.subject_id, source_id)
 
     def _goal_actions_today(self, goal_id: str, budget_day: str) -> int:
         with self.database.connection() as connection:

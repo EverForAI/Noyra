@@ -212,6 +212,41 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
             clock=lambda: self.clock_value,
         )
 
+    async def test_successful_unchanged_poll_respects_source_refresh(self: Self) -> None:
+        from noyra.world import FetchedDocument
+
+        settings = self.settings().model_copy(update={"source_refresh_seconds": 900})
+        cycle = self.cycle(FakeProvider([]), settings=settings)
+        cycle.bootstrap()
+        source = cycle._select_source()
+        self.assertIsNotNone(source)
+        assert source is not None
+        text = "Unchanged source content."
+        document = FetchedDocument(
+            source.url,
+            "News",
+            text,
+            content_hash(text),
+            "text/plain",
+            (),
+            None,
+            None,
+            self.clock_value,
+        )
+        cycle.observations.ingest(self.subject_id, source.source_id, document)
+        self.assertIsNone(cycle._select_source())
+        self.clock_value = (
+            datetime.fromisoformat(self.clock_value) + timedelta(seconds=901)
+        ).isoformat()
+        self.assertIsNotNone(cycle._select_source())
+        from dataclasses import replace
+
+        _, created = cycle.observations.ingest(
+            self.subject_id, source.source_id, replace(document, fetched_at=self.clock_value)
+        )
+        self.assertFalse(created)
+        self.assertIsNone(cycle._select_source())
+
     async def test_world_cognition_commits_causal_state_and_skips_unchanged_content(
         self: Self,
     ) -> None:

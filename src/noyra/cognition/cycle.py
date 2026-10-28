@@ -60,6 +60,7 @@ from noyra.world import (
     SourceRegistry,
     WorldClaimStore,
 )
+from noyra.world.poll import SourcePollStore
 from noyra.world.types import GenesisRunRecord, ObservationRecord
 
 from .consciousness import ConsciousnessFrameStore
@@ -451,12 +452,12 @@ class CognitionCycle:
             if lease is None:
                 raise OperationInvalidated("observation commit has no runtime lease")
             with self.kernel.admission.commit_scope(lease):
-                pending, created = self.observations.record(
+                pending, created = self.observations.ingest(
                     self.subject_id,
                     source.source_id,
                     fetch.document,
                 )
-            if not created and pending.status != "new":
+            if pending is None or (not created and pending.status != "new"):
                 return "observation_unchanged"
         else:
             source = self.sources.get(pending.source_id, subject_id=self.subject_id)
@@ -801,26 +802,21 @@ class CognitionCycle:
     def _select_source(self) -> SourceRecord | None:
         now = self._parse_time(self.clock())
         candidates: list[tuple[datetime | None, SourceRecord]] = []
-        with self.kernel.database.connection() as connection:
-            for source in self.sources.active(self.subject_id):
-                if not self.capabilities.allows(
-                    self.subject_id,
-                    "web_read",
-                    source.url,
-                    side_effect=False,
-                    now=self.clock(),
-                ):
-                    continue
-                row = connection.execute(
-                    "SELECT MAX(fetched_at) FROM observations WHERE source_id = ?",
-                    (source.source_id,),
-                ).fetchone()
-                last = self._parse_time(row[0]) if row is not None and row[0] else None
-                if (
-                    last is None
-                    or (now - last).total_seconds() >= self.settings.source_refresh_seconds
-                ):
-                    candidates.append((last, source))
+        for source in self.sources.active(self.subject_id):
+            if not self.capabilities.allows(
+                self.subject_id,
+                "web_read",
+                source.url,
+                side_effect=False,
+                now=self.clock(),
+            ):
+                continue
+            checked = SourcePollStore(self.kernel.database).last_checked_at(
+                self.subject_id, source.source_id
+            )
+            last = self._parse_time(checked) if checked else None
+            if last is None or (now - last).total_seconds() >= self.settings.source_refresh_seconds:
+                candidates.append((last, source))
         if not candidates:
             return None
         candidates.sort(

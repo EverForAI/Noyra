@@ -27,6 +27,7 @@ from noyra.core.http import (
 from noyra.core.types import content_hash, new_id, utc_now
 
 from .errors import FetchError, UnsafeSourceError, WorldStateConflictError
+from .feed import feed_content, parse_feed
 from .types import FetchedDocument, SourceRecord, SourceStatus, SourceType
 
 Resolver = Callable[[str, int], Awaitable[Sequence[str]]]
@@ -436,8 +437,18 @@ class SafeWebReader:
                         raise FetchError("world_fetch_response_too_large") from error
                     text = body.decode(response.encoding or "utf-8", errors="replace")
                 authorize()
-                title, content = self._extract(media_type, text)
-                content = content[: self.max_text_chars]
+                feed_items = None
+                if source.source_type == "rss" or media_type in {
+                    "application/rss+xml",
+                    "application/atom+xml",
+                }:
+                    title, feed_items = parse_feed(text, url)
+                    content = feed_content(feed_items)
+                    if len(content) > self.max_text_chars:
+                        raise FetchError("world_feed_text_limit")
+                else:
+                    title, content = self._extract(media_type, text)
+                    content = content[: self.max_text_chars]
                 signals = tuple(
                     name for name, pattern in INJECTION_PATTERNS if pattern.search(content)
                 )
@@ -451,6 +462,7 @@ class SafeWebReader:
                     etag=response.headers.get("etag"),
                     last_modified=response.headers.get("last-modified"),
                     fetched_at=utc_now(),
+                    feed_items=feed_items,
                 )
         except (FetchError, UnsafeSourceError):
             raise

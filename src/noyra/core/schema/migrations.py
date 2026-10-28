@@ -11,6 +11,7 @@ from .migrations_v043_v052 import MIGRATIONS_V043_V052
 from .migrations_v053_v054 import MIGRATIONS_V053_V054
 from .migrations_v055_v069 import MIGRATIONS_V055_V069
 from .migrations_v070_v107 import MIGRATIONS_V070_V107
+from .world_poll import WORLD_POLL_SCHEMA
 
 MIGRATIONS: dict[int, str] = {
     **MIGRATIONS_V002_V005,
@@ -22,4 +23,5 @@ MIGRATIONS: dict[int, str] = {
     **MIGRATIONS_V053_V054,
     **MIGRATIONS_V055_V069,
     **MIGRATIONS_V070_V107,
+    108: WORLD_POLL_SCHEMA,
 }

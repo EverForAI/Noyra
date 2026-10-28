@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+from dataclasses import replace
 from typing import Any
 
 from noyra.core.cognitive_waits import cancel_terminal_waits
@@ -10,7 +12,9 @@ from noyra.core.types import canonical_json, content_hash, new_id, strict_json_l
 from noyra.mind.causal import CausalStore
 
 from .errors import WorldStateConflictError
+from .feed import FEED_FINGERPRINT_VERSION, feed_content
 from .observation_archive import ObservationContentArchive
+from .poll import SourcePollStore
 from .source import canonical_public_url
 from .types import ClaimProposal, ClaimRecord, FetchedDocument, ObservationRecord
 
@@ -26,103 +30,247 @@ class ObservationStore:
     def record(
         self, subject_id: str, source_id: str, document: FetchedDocument
     ) -> tuple[ObservationRecord, bool]:
-        if len(document.content) > 500_000:
-            raise ValueError("observation content exceeds the storage limit")
         with self.database.transaction() as connection:
-            source = connection.execute(
-                "SELECT * FROM world_sources WHERE source_id = ? AND subject_id = ?",
-                (source_id, subject_id),
-            ).fetchone()
-            if source is None:
-                raise NotFoundError("world source is missing or belongs to another subject")
-            if source["status"] != "active":
-                raise WorldStateConflictError("observation source is not active")
-            normalized_document_url = canonical_public_url(document.url)
-            if normalized_document_url != document.url or normalized_document_url != source["url"]:
-                raise WorldStateConflictError(
-                    "fetched document URL must match the canonical registered source"
+            return self._record_connection(connection, subject_id, source_id, document)
+
+    def ingest(
+        self, subject_id: str, source_id: str, document: FetchedDocument
+    ) -> tuple[ObservationRecord | None, bool]:
+        """Commit unseen entry versions and poll heartbeat atomically.
+
+        Legacy generic extraction did not preserve RSS entry boundaries. In
+        that case the current bounded feed is interpreted once, honestly
+        marked legacy_unavailable; never silently swallow potentially new
+        entries, replay stored proposals, or alter old observations.
+        """
+        if content_hash(document.content) != document.content_hash:
+            raise IntegrityError("fetched document content hash mismatch")
+        with self.database.transaction() as connection:
+            self._validate_source(connection, subject_id, source_id, document)
+            observation: ObservationRecord | None
+            if document.feed_items is None:
+                previous = SourcePollStore._read(connection, subject_id, source_id)
+                had_legacy = (
+                    connection.execute(
+                        "SELECT 1 FROM observations WHERE subject_id=? AND source_id=? LIMIT 1",
+                        (subject_id, source_id),
+                    ).fetchone()
+                    is not None
                 )
-            existing = connection.execute(
-                "SELECT * FROM observations WHERE subject_id = ? AND source_id = ? "
-                "AND content_hash = ?",
-                (subject_id, source_id, document.content_hash),
-            ).fetchone()
-            if existing is not None:
-                return self._from_row(self._materialize_row(existing)), False
-            if content_hash(document.content) != document.content_hash:
-                raise IntegrityError("fetched document content hash mismatch")
-            event = self.events._append_connection(
-                connection,
-                subject_id,
-                "world_observation",
-                "safe_web_reader",
-                {
-                    "source_id": source_id,
-                    "url": document.url,
-                    "content_hash": document.content_hash,
-                    "media_type": document.media_type,
-                    "injection_signals": list(document.injection_signals),
-                },
-                privacy_level="private",
-                causal_parent_ids=(),
-                occurred_at=document.fetched_at,
-                event_id=None,
-            )
-            observation_id = new_id("obs")
-            record_hash = self._record_hash(source_id, event.event_id, document)
-            connection.execute(
-                """INSERT INTO observations(
-                    observation_id, subject_id, source_id, event_id, canonical_url,
-                    title, content, content_hash, media_type, injection_signals_json,
-                    record_hash,
-                    http_etag, http_last_modified, fetched_at, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')""",
-                (
-                    observation_id,
+                observation, created = self._record_connection(
+                    connection, subject_id, source_id, document
+                )
+                # Mark a fresh baseline before insertion can look like legacy.
+                SourcePollStore.complete(
+                    connection,
                     subject_id,
                     source_id,
-                    event.event_id,
-                    document.url,
-                    document.title,
-                    document.content,
-                    document.content_hash,
-                    document.media_type,
-                    canonical_json(list(document.injection_signals)),
-                    record_hash,
-                    document.etag,
-                    document.last_modified,
                     document.fetched_at,
-                ),
+                    outcome="changed" if created else "unchanged",
+                )
+                if previous is None and not had_legacy:
+                    self._fresh_baseline(connection, subject_id, source_id)
+                return observation, created
+            items = document.feed_items
+            if feed_content(items) != document.content:
+                raise IntegrityError("feed metadata does not match fetched content")
+            had_legacy = (
+                connection.execute(
+                    "SELECT 1 FROM observations WHERE subject_id=? AND source_id=? LIMIT 1",
+                    (subject_id, source_id),
+                ).fetchone()
+                is not None
             )
-            now = utc_now()
-            connection.execute(
-                """INSERT INTO observation_status_transitions(
-                    transition_id, observation_id, from_status, to_status,
-                    reason, state_hash, created_at
-                ) VALUES (?, ?, NULL, 'new', 'observation recorded', ?, ?)""",
-                (
-                    new_id("ostr"),
-                    observation_id,
-                    self._transition_hash(None, "new", "observation recorded"),
-                    now,
-                ),
+            state = SourcePollStore._read(connection, subject_id, source_id)
+            unseen = tuple(
+                item
+                for item in items
+                if connection.execute(
+                    "SELECT 1 FROM world_feed_seen WHERE source_id=? AND subject_id=? "
+                    "AND fingerprint_version=? AND item_key=? AND fingerprint=?",
+                    (
+                        source_id,
+                        subject_id,
+                        FEED_FINGERPRINT_VERSION,
+                        item.item_key,
+                        item.fingerprint,
+                    ),
+                ).fetchone()
+                is None
             )
-            self.causal._add_connection(
+            observation = None
+            created = False
+            if unseen:
+                content = feed_content(unseen)
+                # Classification must use the new subset only, never a signal
+                # carried solely by a previously seen entry in the same feed.
+                from .source import INJECTION_PATTERNS
+
+                signals = tuple(
+                    name for name, pattern in INJECTION_PATTERNS if pattern.search(content)
+                )
+                observation, created = self._record_connection(
+                    connection,
+                    subject_id,
+                    source_id,
+                    replace(
+                        document,
+                        content=content,
+                        content_hash=content_hash(content),
+                        injection_signals=signals,
+                        feed_items=unseen,
+                    ),
+                )
+                for item in unseen:
+                    connection.execute(
+                        "INSERT INTO world_feed_seen(source_id,subject_id,fingerprint_version,"
+                        "item_key,fingerprint,first_seen_at) VALUES (?,?,?,?,?,?)",
+                        (
+                            source_id,
+                            subject_id,
+                            FEED_FINGERPRINT_VERSION,
+                            item.item_key,
+                            item.fingerprint,
+                            document.fetched_at,
+                        ),
+                    )
+            SourcePollStore.complete(
                 connection,
                 subject_id,
-                "event",
-                event.event_id,
-                "recorded_as",
-                "observation",
-                observation_id,
-                strength=1,
-                metadata={"source_id": source_id},
+                source_id,
+                document.fetched_at,
+                outcome="changed" if unseen else "unchanged",
+                new_versions=len(unseen),
             )
-            row = connection.execute(
-                "SELECT * FROM observations WHERE observation_id = ? AND subject_id = ?",
-                (observation_id, subject_id),
-            ).fetchone()
-            return self._from_row(self._materialize_row(row)), True
+            if state is None and not had_legacy:
+                self._fresh_baseline(connection, subject_id, source_id)
+            SourcePollStore.prune(connection, source_id)
+            return observation, created
+
+    @staticmethod
+    def _fresh_baseline(connection: sqlite3.Connection, subject_id: str, source_id: str) -> None:
+        payload = SourcePollStore._read(connection, subject_id, source_id)
+        assert payload is not None
+        payload["baseline"] = "fresh"
+        connection.execute(
+            "UPDATE world_poll_state SET baseline=?,state_hash=? WHERE source_id=?",
+            ("fresh", content_hash(payload), source_id),
+        )
+
+    @staticmethod
+    def _validate_source(
+        connection: sqlite3.Connection, subject_id: str, source_id: str, document: FetchedDocument
+    ) -> None:
+        source = connection.execute(
+            "SELECT * FROM world_sources WHERE source_id=? AND subject_id=?",
+            (source_id, subject_id),
+        ).fetchone()
+        if source is None:
+            raise NotFoundError("world source is missing or belongs to another subject")
+        if source["status"] != "active":
+            raise WorldStateConflictError("observation source is not active")
+        url = canonical_public_url(document.url)
+        if url != document.url or url != source["url"]:
+            raise WorldStateConflictError(
+                "fetched document URL must match the canonical registered source"
+            )
+
+    def _record_connection(
+        self,
+        connection: sqlite3.Connection,
+        subject_id: str,
+        source_id: str,
+        document: FetchedDocument,
+    ) -> tuple[ObservationRecord, bool]:
+        if len(document.content) > 500_000:
+            raise ValueError("observation content exceeds the storage limit")
+        self._validate_source(connection, subject_id, source_id, document)
+        if content_hash(document.content) != document.content_hash:
+            raise IntegrityError("fetched document content hash mismatch")
+        existing = connection.execute(
+            "SELECT * FROM observations WHERE subject_id = ? AND source_id = ? "
+            "AND content_hash = ?",
+            (subject_id, source_id, document.content_hash),
+        ).fetchone()
+        if existing is not None:
+            return self._from_row(self._materialize_row(existing)), False
+        if content_hash(document.content) != document.content_hash:
+            raise IntegrityError("fetched document content hash mismatch")
+        event = self.events._append_connection(
+            connection,
+            subject_id,
+            "world_observation",
+            "safe_web_reader",
+            {
+                "source_id": source_id,
+                "url": document.url,
+                "content_hash": document.content_hash,
+                "media_type": document.media_type,
+                "injection_signals": list(document.injection_signals),
+                "feed_fingerprint_version": (
+                    FEED_FINGERPRINT_VERSION if document.feed_items is not None else None
+                ),
+            },
+            privacy_level="private",
+            causal_parent_ids=(),
+            occurred_at=document.fetched_at,
+            event_id=None,
+        )
+        observation_id = new_id("obs")
+        record_hash = self._record_hash(source_id, event.event_id, document)
+        connection.execute(
+            """INSERT INTO observations(
+                observation_id, subject_id, source_id, event_id, canonical_url,
+                title, content, content_hash, media_type, injection_signals_json,
+                record_hash,
+                http_etag, http_last_modified, fetched_at, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')""",
+            (
+                observation_id,
+                subject_id,
+                source_id,
+                event.event_id,
+                document.url,
+                document.title,
+                document.content,
+                document.content_hash,
+                document.media_type,
+                canonical_json(list(document.injection_signals)),
+                record_hash,
+                document.etag,
+                document.last_modified,
+                document.fetched_at,
+            ),
+        )
+        now = utc_now()
+        connection.execute(
+            """INSERT INTO observation_status_transitions(
+                transition_id, observation_id, from_status, to_status,
+                reason, state_hash, created_at
+            ) VALUES (?, ?, NULL, 'new', 'observation recorded', ?, ?)""",
+            (
+                new_id("ostr"),
+                observation_id,
+                self._transition_hash(None, "new", "observation recorded"),
+                now,
+            ),
+        )
+        self.causal._add_connection(
+            connection,
+            subject_id,
+            "event",
+            event.event_id,
+            "recorded_as",
+            "observation",
+            observation_id,
+            strength=1,
+            metadata={"source_id": source_id},
+        )
+        row = connection.execute(
+            "SELECT * FROM observations WHERE observation_id = ? AND subject_id = ?",
+            (observation_id, subject_id),
+        ).fetchone()
+        return self._from_row(self._materialize_row(row)), True
 
     def get(self, observation_id: str, *, subject_id: str) -> ObservationRecord:
         with self.database.connection() as connection:
