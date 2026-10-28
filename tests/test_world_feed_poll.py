@@ -351,6 +351,91 @@ def test_atom_content_and_unicode_normalization() -> None:
     assert entries[0].body == "A discovery"
 
 
+def test_atom_text_construct_preserves_literal_markup_and_detects_revisions() -> None:
+    template = (
+        '<feed xmlns="http://www.w3.org/2005/Atom"><title>News</title>'
+        '<entry><id>item</id><title type="text">Use &lt;{word}&gt; for storage</title>'
+        '<content type="text">Use &lt;{word}&gt; for storage</content></entry></feed>'
+    )
+    _, vector = parse_feed(template.format(word="vector"), "https://example.com/rss")
+    _, deque = parse_feed(template.format(word="deque"), "https://example.com/rss")
+
+    assert vector[0].title == "Use <vector> for storage"
+    assert vector[0].body == "Use <vector> for storage"
+    assert vector[0].item_key == deque[0].item_key
+    assert vector[0].fingerprint != deque[0].fingerprint
+
+
+def test_atom_semantic_correction_emits_one_bounded_upgrade_version(
+    context: tuple[Database, SourceRecord, ObservationStore],
+) -> None:
+    database, source, store = context
+    xml = (
+        '<feed xmlns="http://www.w3.org/2005/Atom"><title>News</title><entry>'
+        '<id>item</id><title type="text">Use &lt;vector&gt; for storage</title>'
+        '<content type="text">Use &lt;vector&gt; for storage</content></entry></feed>'
+    )
+    title, entries = parse_feed(xml, source.url)
+    content = feed_content(entries)
+    document_value = FetchedDocument(
+        source.url,
+        title,
+        content,
+        content_hash(content),
+        "application/atom+xml",
+        (),
+        None,
+        None,
+        T1,
+        entries,
+    )
+    old_payload = {"title": "Use for storage", "link": "", "summary": "", "body": "Use for storage"}
+    old_identity = {"id": "item", "link": ""}
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO world_feed_seen(source_id,subject_id,fingerprint_version,"
+            "item_key,fingerprint,first_seen_at) VALUES (?,?,?,?,?,?)",
+            (
+                source.source_id,
+                SUBJECT,
+                1,
+                content_hash({"version": 1, "identity": old_identity}),
+                content_hash({"version": 1, "content": old_payload}),
+                T1,
+            ),
+        )
+
+    first, created = store.ingest(SUBJECT, source.source_id, document_value)
+    second, second_created = store.ingest(
+        SUBJECT, source.source_id, replace(document_value, fetched_at=T2)
+    )
+    assert first is not None and created
+    assert second is None and not second_created
+    with database.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == 1
+
+
+def test_atom_xhtml_skips_hidden_subtrees_and_decodes_html_once() -> None:
+    xml = (
+        '<feed xmlns="http://www.w3.org/2005/Atom"><title>News</title><entry>'
+        '<id>item</id><content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml">'
+        "Hello <script>hidden instruction</script>world<style>hidden style</style>"
+        "<span>visible</span></div></content></entry></feed>"
+    )
+    _, xhtml = parse_feed(xml, "https://example.com/rss")
+    html = (
+        '<feed xmlns="http://www.w3.org/2005/Atom"><title>News</title><entry>'
+        '<id>item</id><content type="html">&amp;lt;vector&amp;gt;</content>'
+        "</entry></feed>"
+    )
+    _, escaped = parse_feed(html, "https://example.com/rss")
+
+    assert xhtml[0].body == "Hello world visible"
+    assert "hidden instruction" not in xhtml[0].body
+    assert "hidden style" not in xhtml[0].body
+    assert escaped[0].body == "<vector>"
+
+
 def test_duplicate_or_missing_ids_do_not_merge_different_items() -> None:
     _, entries = parse_feed(
         rss(item(), item("two").replace("<guid>two</guid>", "<guid>one</guid>")),

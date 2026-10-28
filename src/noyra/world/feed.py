@@ -13,6 +13,10 @@ from noyra.core.types import canonical_json, content_hash
 
 from .errors import FetchError
 
+# Keep the on-disk fingerprint contract at version 1. The semantic parser fix
+# may produce one corrected version for an already-seen item; the old row stays
+# immutable, the corrected row is bounded by the normal seen-cache, and later
+# polls remain unchanged without a broad replay or schema migration.
 FEED_FINGERPRINT_VERSION = 1
 RDF_NAMESPACE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 MAX_FEED_ITEMS = 512
@@ -81,9 +85,15 @@ class _VisibleText(HTMLParser):
             self.parts.append(data)
 
 
-def _text(element: ET.Element | None) -> str:
-    if element is None:
-        return ""
+_HIDDEN_XML_ELEMENTS = frozenset({"script", "style", "template", "noscript"})
+
+
+def _raw_text(element: ET.Element) -> str:
+    value = " ".join(element.itertext())
+    return normalize(value)
+
+
+def _html_text(element: ET.Element) -> str:
     value = " ".join(element.itertext())
     if len(value) > MAX_FIELD_CHARS:
         raise FetchError("world_feed_field_limit")
@@ -91,6 +101,41 @@ def _text(element: ET.Element | None) -> str:
     parser.feed(value)
     parser.close()
     return normalize(" ".join(parser.parts))
+
+
+def _xhtml_text(element: ET.Element) -> str:
+    parts: list[str] = []
+
+    def visit(node: ET.Element) -> None:
+        if _local(node.tag) in _HIDDEN_XML_ELEMENTS:
+            return
+        if node.text:
+            parts.append(node.text)
+        for child in node:
+            visit(child)
+            if child.tail:
+                parts.append(child.tail)
+
+    visit(element)
+    value = " ".join(parts)
+    if len(value) > MAX_FIELD_CHARS:
+        raise FetchError("world_feed_field_limit")
+    return normalize(value)
+
+
+def _field_text(element: ET.Element | None, *, atom: bool, html: bool = False) -> str:
+    if element is None:
+        return ""
+    if not atom:
+        return _html_text(element) if html else _raw_text(element)
+    content_type = element.attrib.get("type", "text").strip().lower()
+    if content_type in {"xhtml", "application/xhtml+xml"}:
+        return _xhtml_text(element)
+    if content_type in {"html", "text/html"}:
+        return _html_text(element)
+    # Atom text constructs default to plain text. XML entity decoding has
+    # already happened once, so angle brackets remain literal data here.
+    return _raw_text(element)
 
 
 def _local(tag: str) -> str:
@@ -146,13 +191,24 @@ def parse_feed(text: str, source_url: str) -> tuple[str | None, tuple[FeedItem, 
         raise FetchError("world_feed_format_unsupported")
     if len(entries) > MAX_FEED_ITEMS:
         raise FetchError("world_feed_item_limit")
-    title = next((_text(c) for c in container if _local(c.tag) == "title"), "") or None
+    is_atom = kind == "feed"
+    title = (
+        next(
+            (_field_text(c, atom=is_atom) for c in container if _local(c.tag) == "title"),
+            "",
+        )
+        or None
+    )
     items: dict[tuple[str, str], FeedItem] = {}
     for entry in entries:
         fields = {_local(child.tag): child for child in entry}
-        item_title = _text(fields.get("title"))
-        summary = _text(fields.get("description")) or _text(fields.get("summary"))
-        body = _text(fields.get("encoded")) or _text(fields.get("content"))
+        item_title = _field_text(fields.get("title"), atom=is_atom)
+        summary = _field_text(fields.get("description"), atom=is_atom, html=True) or _field_text(
+            fields.get("summary"), atom=is_atom, html=True
+        )
+        body = _field_text(fields.get("encoded"), atom=is_atom, html=True) or _field_text(
+            fields.get("content"), atom=is_atom, html=True
+        )
         links = [c for c in entry if _local(c.tag) == "link"]
         raw_link = next(
             (
