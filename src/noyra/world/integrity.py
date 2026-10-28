@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +10,7 @@ from noyra.core.database import Database
 from noyra.core.errors import IntegrityError
 from noyra.core.types import content_hash, strict_bool, strict_finite_float, strict_int
 
+from .feed import FEED_FINGERPRINT_VERSION
 from .genesis import GenesisProtocol
 from .observation_archive import ObservationContentArchive
 from .prediction import PredictionStore
@@ -27,6 +30,23 @@ def _world_float(value: object, context: str) -> float:
         return strict_finite_float(value)
     except (TypeError, ValueError) as error:
         raise IntegrityError(f"{context} is invalid") from error
+
+
+def _world_timestamp(value: object, context: str) -> datetime:
+    try:
+        if not isinstance(value, str):
+            raise ValueError("timestamp must be text")
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("timestamp must include a timezone")
+        return parsed
+    except (TypeError, ValueError) as error:
+        raise IntegrityError(f"{context} is invalid") from error
+
+
+def _world_digest(value: object, context: str) -> None:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise IntegrityError(f"{context} is invalid")
 
 
 class WorldIntegrity:
@@ -138,6 +158,7 @@ class WorldIntegrity:
                 ):
                     raise IntegrityError(f"world source current state mismatch: {row['source_id']}")
             counts["world_sources"] = len(sources)
+            counts.update(self._verify_acquisition(connection, subject_id))
 
             observations = connection.execute(
                 "SELECT * FROM observations WHERE subject_id = ?", (subject_id,)
@@ -372,6 +393,114 @@ class WorldIntegrity:
                 for row in runs
             )
         return counts
+
+    @staticmethod
+    def _verify_acquisition(connection: Any, subject_id: str) -> dict[str, int]:
+        # Inspect both sides of the binding. Filtering only on the cache's
+        # subject_id would hide a row moved away from its source's real owner.
+        polls = connection.execute(
+            "SELECT p.*,s.subject_id AS source_subject_id FROM world_poll_state p "
+            "LEFT JOIN world_sources s ON s.source_id=p.source_id "
+            "WHERE p.subject_id=? OR s.subject_id=?",
+            (subject_id, subject_id),
+        ).fetchall()
+        for row in polls:
+            source_id = row["source_id"]
+            context = f"world poll state {source_id}"
+            if row["subject_id"] != subject_id or row["source_subject_id"] != subject_id:
+                raise IntegrityError(f"{context} crosses a subject boundary")
+            # Recompute exactly the writer's payload, without joined columns or
+            # numeric coercions that could hide a changed SQLite storage type.
+            payload = dict(row)
+            state_hash = payload.pop("state_hash")
+            payload.pop("source_subject_id")
+            _world_digest(state_hash, f"{context} hash")
+            try:
+                expected_hash = content_hash(payload)
+            except (TypeError, ValueError) as error:
+                raise IntegrityError(f"{context} payload is invalid") from error
+            if expected_hash != state_hash:
+                raise IntegrityError(f"{context} hash mismatch")
+            for name, minimum in (
+                ("fingerprint_version", 1),
+                ("checks", 1),
+                ("unchanged_checks", 0),
+                ("new_item_versions", 0),
+            ):
+                if type(row[name]) is not int or row[name] < minimum:
+                    raise IntegrityError(f"{context} {name} is invalid")
+            if row["fingerprint_version"] != FEED_FINGERPRINT_VERSION:
+                raise IntegrityError(f"{context} fingerprint version is unsupported")
+            if row["outcome"] not in ("changed", "unchanged", "failed"):
+                raise IntegrityError(f"{context} outcome is invalid")
+            if row["baseline"] not in ("fresh", "legacy_unavailable"):
+                raise IntegrityError(f"{context} baseline is invalid")
+            attempt = _world_timestamp(row["last_attempt_at"], f"{context} last_attempt_at")
+            success = (
+                None
+                if row["last_success_at"] is None
+                else _world_timestamp(row["last_success_at"], f"{context} last_success_at")
+            )
+            change = (
+                None
+                if row["last_change_at"] is None
+                else _world_timestamp(row["last_change_at"], f"{context} last_change_at")
+            )
+            if (
+                (success is not None and success > attempt)
+                or (change is not None and (success is None or change > success))
+                or (row["outcome"] != "failed" and success != attempt)
+                or (row["outcome"] == "changed" and change != attempt)
+                or row["unchanged_checks"] > row["checks"]
+                or (row["outcome"] != "unchanged" and row["unchanged_checks"] == row["checks"])
+                or (row["unchanged_checks"] and success is None)
+                or (change is not None and row["unchanged_checks"] == row["checks"])
+                or (row["new_item_versions"] and change is None)
+            ):
+                raise IntegrityError(f"{context} history is inconsistent")
+
+        seen = connection.execute(
+            "SELECT f.*,s.subject_id AS source_subject_id,p.subject_id AS poll_subject_id,"
+            "p.fingerprint_version AS poll_version,p.last_change_at "
+            "FROM world_feed_seen f LEFT JOIN world_sources s ON s.source_id=f.source_id "
+            "LEFT JOIN world_poll_state p ON p.source_id=f.source_id "
+            "WHERE f.subject_id=? OR s.subject_id=?",
+            (subject_id, subject_id),
+        ).fetchall()
+        seen_counts: dict[str, int] = {}
+        for row in seen:
+            source_id = row["source_id"]
+            context = f"world feed seen {source_id}"
+            if (
+                row["subject_id"] != subject_id
+                or row["source_subject_id"] != subject_id
+                or row["poll_subject_id"] != subject_id
+            ):
+                raise IntegrityError(f"{context} source/poll binding is invalid")
+            if (
+                type(row["fingerprint_version"]) is not int
+                or row["fingerprint_version"] != FEED_FINGERPRINT_VERSION
+                or row["fingerprint_version"] != row["poll_version"]
+            ):
+                raise IntegrityError(f"{context} fingerprint version is unsupported")
+            _world_digest(row["item_key"], f"{context} item key")
+            _world_digest(row["fingerprint"], f"{context} fingerprint")
+            first_seen = _world_timestamp(row["first_seen_at"], f"{context} first_seen_at")
+            if row["last_change_at"] is None or first_seen > _world_timestamp(
+                row["last_change_at"], f"{context} last_change_at"
+            ):
+                raise IntegrityError(f"{context} chronology is inconsistent")
+            seen_counts[source_id] = seen_counts.get(source_id, 0) + 1
+        for row in polls:
+            retained = seen_counts.get(row["source_id"], 0)
+            # This is a bounded cache, not a complete historical ledger. Legal
+            # pruning may leave fewer rows than the lifetime version counter,
+            # but it never removes every row of a nonempty cache.
+            if retained > row["new_item_versions"] or (
+                row["new_item_versions"] > 0 and retained == 0
+            ):
+                raise IntegrityError(f"world feed seen count mismatch: {row['source_id']}")
+        return {"world_poll_state": len(polls), "world_feed_seen": len(seen)}
 
     @staticmethod
     def _evidence_ids(value: object, context: str) -> tuple[str, ...]:

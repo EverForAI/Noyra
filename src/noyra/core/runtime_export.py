@@ -718,6 +718,8 @@ _OWNERSHIP_GRAPHS[108] = {
     "world_poll_state": _subject_rule(),
     "world_feed_seen": _subject_rule(),
 }
+# v109 adds only a trigger; table ownership and subject filtering are unchanged.
+_OWNERSHIP_GRAPHS[109] = _OWNERSHIP_GRAPHS[108]
 
 
 @dataclass(frozen=True)

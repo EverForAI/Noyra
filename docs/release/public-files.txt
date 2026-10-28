@@ -1047,6 +1047,7 @@ tests/test_world.py
 tests/test_world_acquisition_diagnostics.py
 tests/test_world_feed_poll.py
 tests/test_world_injection_classification.py
+tests/test_world_poll_integrity.py
 website/build.mjs
 website/content.mjs
 website/icons/LICENSE

@@ -24,4 +24,11 @@ MIGRATIONS: dict[int, str] = {
     **MIGRATIONS_V055_V069,
     **MIGRATIONS_V070_V107,
     108: WORLD_POLL_SCHEMA,
+    # v108 stays immutable: old installations must receive this guard through
+    # a real additive migration, not a silently changed historical contract.
+    109: """
+CREATE TRIGGER IF NOT EXISTS prevent_world_feed_seen_update
+BEFORE UPDATE ON world_feed_seen
+BEGIN SELECT RAISE(ABORT,'world feed seen entries are immutable'); END;
+""",
 }
