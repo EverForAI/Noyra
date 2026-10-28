@@ -7,16 +7,20 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
+from pydantic import ValidationError
+
 from noyra.core.database import Database
-from noyra.core.errors import IntegrityError
+from noyra.core.errors import IntegrityError, RuntimeOwnershipError
 from noyra.core.events import EventStore
+from noyra.core.locking import ProcessLock
 from noyra.core.payload_codec import decompress_text
 from noyra.core.relationship_identity import context_rows
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.mind import GoalCandidate, GoalStore, MindEngine
-from noyra.model import ModelGateway, ModelMessage
+from noyra.model import ModelGateway, ModelLedger, ModelMessage
 from noyra.model.errors import (
     BudgetExhaustedError,
+    ModelCallConflictError,
     ModelCallStateError,
     ProviderCallError,
     StructuredOutputError,
@@ -32,6 +36,7 @@ from ._integrity import (
     durable_string_list,
 )
 from .settings import CognitionSettings
+from .thought_rounds import ThoughtRounds
 from .types import IntrinsicThoughtProposal
 
 _ABSENCE_CLEARED_REASON = "internal absence condition no longer present"
@@ -126,6 +131,12 @@ class IntrinsicThought:
         self.mind = MindEngine(database, clock=clock)
         self.fatigue = FatigueTracker(database)
         self._last_agenda_discovery: datetime | None = None
+        self.rounds = ThoughtRounds(database, subject_id)
+        self._processing_lock = ProcessLock(
+            database.path.with_name(
+                f".{database.path.name}.thought-{content_hash(subject_id)[:16]}.lock"
+            )
+        )
 
     def discover_agenda(self) -> bool:
         """Materialize bounded internal attention, without invoking the model.
@@ -146,27 +157,40 @@ class IntrinsicThought:
         return True
 
     async def run_due(self) -> str | None:
-        if self._calls_today() >= self.settings.max_thought_model_calls_per_day:
+        if not self.settings.enabled:
             return None
+        try:
+            acquired = self._processing_lock.acquire()
+        except RuntimeOwnershipError:
+            return "intrinsic_thought_in_progress"
+        if not acquired:
+            return "intrinsic_thought_in_progress"
+        try:
+            return await self._run_due_locked()
+        finally:
+            self._processing_lock.release()
+
+    async def _run_due_locked(self) -> str | None:
         self.discover_agenda()
         agenda = self._select_agenda()
-        if agenda is None:
+        if agenda is None or not self._is_due(agenda):
             return None
-        if not self._is_due(agenda):
+        number, _ = self.rounds.current(agenda.agenda_id)
+        purpose, idempotency_key = self.rounds.identity(agenda.agenda_id, number)
+        calls, blocked = self.rounds.calls(agenda.agenda_id, number)
+        if blocked:
             return None
+        # A prior known failure needs a durable business closure, not another
+        # request using a date, resource or episode-only counter as a new key.
+        if calls and all(call.status == "failed" for call in calls):
+            self._close_round(agenda.agenda_id, number, "model_failed")
+            return "intrinsic_thought_model_failed"
         context = self._context(agenda)
-        round_number = self._episode_count(agenda.agenda_id)
-        purpose = f"intrinsic_thought:{agenda.agenda_id}:{round_number}"
-        idempotency_key = f"intrinsic-thought:{agenda.agenda_id}:{round_number}"
-        existing = self._existing(idempotency_key)
-        if existing is not None:
-            return f"intrinsic_thought_{existing.disposition}"
-        recovered = self._successful_proposal(purpose, context)
-        if recovered is None:
-            if self._terminal_call_exists(idempotency_key):
+        if not calls or any(call.status == "prepared" for call in calls):
+            if self._calls_today() >= self.settings.max_thought_model_calls_per_day:
                 return None
             try:
-                result = await self.gateway.complete_structured(
+                await self.gateway.complete_structured(
                     self.subject_id,
                     purpose,
                     self._messages(context),
@@ -175,19 +199,47 @@ class IntrinsicThought:
                     max_output_tokens=min(3_000, self.settings.max_output_tokens),
                     temperature=self.settings.temperature,
                 )
+            except ModelCallConflictError:
+                ModelLedger(self.database).quarantine_prepared_context(self.subject_id, purpose)
+                return "intrinsic_thought_model_failed"
             except BudgetExhaustedError:
+                self._close_round(agenda.agenda_id, number, "model_failed")
                 return "intrinsic_thought_budget_exhausted"
             except (ProviderCallError, StructuredOutputError, ModelCallStateError):
+                self._close_round(agenda.agenda_id, number, "model_failed")
                 return "intrinsic_thought_model_failed"
-            proposal, call_id = result.output, result.call_id
-        else:
-            proposal, call_id = recovered
+            calls, blocked = self.rounds.calls(agenda.agenda_id, number)
+            if blocked:
+                return None
+        succeeded = next((call for call in calls if call.status == "succeeded"), None)
+        if succeeded is None or succeeded.response is None:
+            raise IntegrityError("successful thought result is absent from model ledger")
+        content = succeeded.response.get("content")
+        if not isinstance(content, str):
+            raise IntegrityError("successful thought call has no content")
         try:
+            proposal = IntrinsicThoughtProposal.model_validate_json(content)
             self._validate(proposal, context)
-        except IntrinsicThoughtValidationError:
+        except (ValidationError, IntrinsicThoughtValidationError):
+            self._close_round(agenda.agenda_id, number, "proposal_rejected")
             return "intrinsic_thought_rejected"
-        record = self._commit(proposal, call_id, idempotency_key, context)
+        # Recovery consumes only the existing verified response, including when
+        # today's new-request budget is exhausted. The real episode and agenda
+        # mutation are still atomic; no failure is represented as a fake thought.
+        record = self._commit(proposal, succeeded.call_id, idempotency_key, context)
         return f"intrinsic_thought_{record.disposition}"
+
+    def _close_round(self, agenda_id: str, number: int, reason: str) -> bool:
+        now = self.clock()
+        retry_after = (
+            self._parse_time(now)
+            + timedelta(
+                seconds=max(
+                    self.settings.thought_interval_seconds, self.settings.thought_cooldown_seconds
+                )
+            )
+        ).isoformat(timespec="milliseconds")
+        return self.rounds.close(agenda_id, number, reason, now, retry_after)
 
     def agenda(self, *, limit: int = 100) -> list[ThoughtAgendaRecord]:
         bounded = max(1, min(limit, 1_000))
@@ -277,7 +329,12 @@ class IntrinsicThought:
                         content, "thought proposal", thought_id
                     ) != durable_json(row["proposal_json"], "thought proposal", thought_id):
                         raise IntegrityError(f"thought proposal differs from call: {thought_id}")
-            return {"thought_agenda_items": len(agendas), "thought_episodes": len(episodes)}
+            closed = ThoughtRounds(self.database, self.subject_id).verify(connection)
+            return {
+                "thought_agenda_items": len(agendas),
+                "thought_episodes": len(episodes),
+                "thought_round_closures": closed,
+            }
 
     def _refresh_agenda(self) -> None:
         now = self.clock()
@@ -654,15 +711,19 @@ class IntrinsicThought:
 
     def _select_agenda(self) -> ThoughtAgendaRecord | None:
         now = self._parse_time(self.clock())
+        allow_new_calls = self._calls_today() < self.settings.max_thought_model_calls_per_day
         available = [
             item
             for item in self.agenda(limit=200)
-            if item.status == "open"
-            or (
-                item.status == "cooling"
-                and item.cooldown_until is not None
-                and self._parse_time(item.cooldown_until) <= now
+            if (
+                item.status == "open"
+                or (
+                    item.status == "cooling"
+                    and item.cooldown_until is not None
+                    and self._parse_time(item.cooldown_until) <= now
+                )
             )
+            and self._is_due(item, allow_new_calls=allow_new_calls)
         ]
         if not available:
             return None
@@ -671,7 +732,24 @@ class IntrinsicThought:
             key=lambda item: (item.attention_score, item.updated_at, item.agenda_id),
         )
 
-    def _is_due(self, agenda: ThoughtAgendaRecord) -> bool:
+    def _is_due(self, agenda: ThoughtAgendaRecord, *, allow_new_calls: bool | None = None) -> bool:
+        now = self._parse_time(self.clock())
+        if agenda.status not in {"open", "cooling"} or (
+            agenda.cooldown_until is not None and self._parse_time(agenda.cooldown_until) > now
+        ):
+            return False
+        number, closure = self.rounds.current(agenda.agenda_id)
+        calls, blocked = self.rounds.calls(agenda.agenda_id, number)
+        if blocked:
+            return False
+        if calls and not any(call.status == "prepared" for call in calls):
+            return True  # Settle/recover existing work, not a fresh paid request.
+        if allow_new_calls is None:
+            allow_new_calls = self._calls_today() < self.settings.max_thought_model_calls_per_day
+        if not allow_new_calls:
+            return False
+        if closure is not None and self._parse_time(closure["retry_after"]) > now:
+            return False
         with self.database.connection() as connection:
             latest = connection.execute(
                 "SELECT created_at FROM thought_episodes WHERE agenda_id = ? "
@@ -878,6 +956,13 @@ class IntrinsicThought:
             ).fetchone()
             if agenda_row is None or agenda_row["subject_id"] != self.subject_id:
                 raise IntegrityError("thought agenda disappeared before commit")
+            number, _ = self.rounds._current(connection, context.agenda.agenda_id)
+            _purpose, expected_key = self.rounds.identity(context.agenda.agenda_id, number)
+            if idempotency_key != expected_key:
+                raise IntegrityError("thought business round changed before commit")
+            calls, blocked = self.rounds._calls(connection, context.agenda.agenda_id, number)
+            if blocked or call_id not in {c.call_id for c in calls if c.status == "succeeded"}:
+                raise IntegrityError("thought business round model binding changed")
             created_goal_id = None
             event_id = new_id("evt")
             self.events._append_connection(
@@ -1029,45 +1114,8 @@ class IntrinsicThought:
                     now,
                 ),
             )
+            self.rounds.cancel_waits(connection, context.agenda.agenda_id, number, now)
             return self._load_episode(connection, thought_id)
-
-    def _successful_proposal(
-        self, purpose: str, context: _ThoughtContext
-    ) -> tuple[IntrinsicThoughtProposal, str] | None:
-        with self.database.connection() as connection:
-            rows = connection.execute(
-                "SELECT call_id, response_json FROM model_calls WHERE subject_id = ? "
-                "AND purpose = ? AND status = 'succeeded' ORDER BY created_at DESC",
-                (self.subject_id, purpose),
-            ).fetchall()
-        for row in rows:
-            response = json.loads(decompress_text(row["response_json"]) or "null")
-            content = response.get("content") if isinstance(response, dict) else None
-            if not isinstance(content, str):
-                raise IntegrityError("successful thought call has no content")
-            proposal = IntrinsicThoughtProposal.model_validate_json(content)
-            try:
-                self._validate(proposal, context)
-            except IntrinsicThoughtValidationError:
-                continue
-            return proposal, str(row["call_id"])
-        return None
-
-    def _existing(self, idempotency_key: str) -> ThoughtEpisodeRecord | None:
-        with self.database.connection() as connection:
-            row = connection.execute(
-                "SELECT * FROM thought_episodes WHERE subject_id = ? AND idempotency_key = ?",
-                (self.subject_id, idempotency_key),
-            ).fetchone()
-        return None if row is None else self._episode_from_row(row)
-
-    def _terminal_call_exists(self, idempotency_key: str) -> bool:
-        with self.database.connection() as connection:
-            row = connection.execute(
-                "SELECT status FROM model_calls WHERE subject_id = ? AND idempotency_key = ?",
-                (self.subject_id, idempotency_key),
-            ).fetchone()
-        return row is not None and row["status"] in {"succeeded", "failed", "unknown"}
 
     def _calls_today(self) -> int:
         with self.database.connection() as connection:

@@ -1452,7 +1452,7 @@ def _default_checks() -> tuple[IntegrityCheckSpec, ...]:
             _DEEP_PROFILES,
             _check_self_modification,
         ),
-        IntegrityCheckSpec("cognition.thought", 1, "cognition", _DEEP_PROFILES, _check_thought),
+        IntegrityCheckSpec("cognition.thought", 2, "cognition", _DEEP_PROFILES, _check_thought),
         IntegrityCheckSpec("model.ledger", 1, "model", _DEEP_PROFILES, _check_model_ledger),
         IntegrityCheckSpec("model.resources", 1, "model", _DEEP_PROFILES, _check_model_resources),
         IntegrityCheckSpec(

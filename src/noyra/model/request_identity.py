@@ -43,7 +43,7 @@ def is_business_round(purpose: str) -> bool:
         len(parts) == 2 and parts[0] in {"world_cognition", "sleep_reflection"} and bool(parts[1])
     ) or (
         len(parts) == 3
-        and parts[0] == "interaction_cognition"
+        and parts[0] in {"interaction_cognition", "intrinsic_thought"}
         and bool(parts[1])
         and parts[2].isdigit()
     )

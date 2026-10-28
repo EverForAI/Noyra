@@ -206,4 +206,4 @@ INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '1');
 """
 
 
-CURRENT_SCHEMA_VERSION = 110
+CURRENT_SCHEMA_VERSION = 111

@@ -722,6 +722,10 @@ _OWNERSHIP_GRAPHS[108] = {
 _OWNERSHIP_GRAPHS[109] = _OWNERSHIP_GRAPHS[108]
 # v110 adds only an index; table ownership is unchanged.
 _OWNERSHIP_GRAPHS[110] = _OWNERSHIP_GRAPHS[109]
+_OWNERSHIP_GRAPHS[111] = {
+    **_OWNERSHIP_GRAPHS[110],
+    "thought_round_closures": _subject_rule(),
+}
 
 
 @dataclass(frozen=True)
