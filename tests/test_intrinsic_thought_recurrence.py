@@ -128,6 +128,59 @@ def proposal(
     }
 
 
+def test_terminal_parent_goal_retires_its_current_tension_agenda(
+    fixture: fixtures.IntrinsicThoughtTestCase,
+) -> None:
+    thought = thought_for(fixture)
+    goal = create_goal(fixture)
+    advance(fixture)
+    assert thought.discover_agenda()
+    original = next(item for item in thought.agenda() if item.source_id == goal[0])
+    assert original.status == "open"
+
+    finish_goal(fixture, goal)
+    assert thought.inspect_agenda(original.agenda_id).status == "source_terminal"
+
+    advance(fixture)
+    assert thought.discover_agenda()
+    retired = next(item for item in thought.agenda() if item.agenda_id == original.agenda_id)
+    assert retired.status == "abandoned"
+    assert retired.cooldown_until is None
+    with fixture.kernel.database.connection() as connection:
+        revision = connection.execute(
+            "SELECT * FROM thought_agenda_revisions WHERE agenda_id=? ORDER BY rowid DESC LIMIT 1",
+            (original.agenda_id,),
+        ).fetchone()
+    assert revision is not None
+    assert revision["old_status"] == "open"
+    assert revision["new_status"] == "abandoned"
+    assert revision["reason"] == "parent goal abandoned; agenda retired"
+    thought.verify_integrity()
+
+
+@pytest.mark.asyncio
+async def test_terminal_parent_goal_is_not_executed_or_replaced(
+    fixture: fixtures.IntrinsicThoughtTestCase,
+) -> None:
+    thought = thought_for(fixture, [proposal()])
+    goal = create_goal(fixture)
+    advance(fixture)
+    assert thought.discover_agenda()
+    original = next(item for item in thought.agenda() if item.source_id == goal[0])
+    finish_goal(fixture, goal)
+
+    assert await thought.run_due() is None
+    with fixture.kernel.database.connection() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM model_calls WHERE subject_id=?",
+                (fixture.subject_id,),
+            ).fetchone()[0]
+            == 0
+        )
+    assert thought.inspect_agenda(original.agenda_id).status == "source_terminal"
+
+
 def test_absence_recurrence_reuses_the_same_agenda(
     fixture: fixtures.IntrinsicThoughtTestCase,
 ) -> None:

@@ -41,6 +41,7 @@ from .types import IntrinsicThoughtProposal
 
 _ABSENCE_CLEARED_REASON = "internal absence condition no longer present"
 _ABSENCE_RETURNED_REASON = "internal absence condition recurred"
+_CONTINUABLE_GOAL_STATUSES = frozenset({"candidate", "active", "paused", "reconsidering"})
 
 
 class IntrinsicThoughtValidationError(ValueError):
@@ -84,6 +85,7 @@ AgendaExecutionStatus = Literal[
     "missing",
     "wrong_subject",
     "terminal",
+    "source_terminal",
     "cooling",
     "not_due",
     "budget_exhausted",
@@ -320,6 +322,14 @@ class IntrinsicThought:
         if row["subject_id"] != self.subject_id:
             return AgendaExecutionCheck(agenda_id, "wrong_subject")
         agenda = self._agenda_from_row(row)
+        if agenda.source_type == "goal":
+            with self.database.read_transaction() as connection:
+                goal = connection.execute(
+                    "SELECT status FROM goals WHERE subject_id = ? AND goal_id = ?",
+                    (self.subject_id, agenda.source_id),
+                ).fetchone()
+            if goal is None or str(goal["status"]) not in _CONTINUABLE_GOAL_STATUSES:
+                return AgendaExecutionCheck(agenda_id, "source_terminal", agenda)
         now = self._parse_time(self.clock())
         if agenda.status not in {"open", "cooling"}:
             return AgendaExecutionCheck(agenda_id, "terminal", agenda)
@@ -354,7 +364,7 @@ class IntrinsicThought:
 
     @staticmethod
     def _target_result(check: AgendaExecutionCheck) -> str:
-        if check.status in {"missing", "terminal"}:
+        if check.status in {"missing", "terminal", "source_terminal"}:
             return "intrinsic_thought_target_expired"
         if check.status == "wrong_subject":
             return "intrinsic_thought_target_invalid"
@@ -474,6 +484,7 @@ class IntrinsicThought:
         with self.database.transaction() as connection:
             # The observed condition and its transition share one serialized
             # snapshot. No provider/model/advisory calls occur in discovery.
+            self._retire_terminal_goal_agendas(connection, now)
             candidates = self._agenda_candidates(connection=connection)
             absence_key = self._absence_source_id()
             if not any(candidate["source_id"] == absence_key for candidate in candidates):
@@ -661,6 +672,56 @@ class IntrinsicThought:
             reason=_ABSENCE_CLEARED_REASON,
             created_at=now,
         )
+
+    def _retire_terminal_goal_agendas(self, connection: Any, now: str) -> None:
+        rows = connection.execute(
+            """SELECT a.*, g.status AS goal_status
+               FROM thought_agenda_items a
+               LEFT JOIN goals g ON g.subject_id = a.subject_id AND g.goal_id = a.source_id
+               WHERE a.subject_id = ? AND a.source_type = 'goal'
+                 AND a.status IN ('open', 'cooling')
+                 AND (g.goal_id IS NULL OR g.status NOT IN (
+                     'candidate', 'active', 'paused', 'reconsidering'
+                 ))""",
+            (self.subject_id,),
+        ).fetchall()
+        for row in rows:
+            agenda = self._agenda_from_row(row)
+            goal_status = None if row["goal_status"] is None else str(row["goal_status"])
+            new_status: Literal["resolved", "abandoned"] = (
+                "abandoned" if goal_status != "achieved" else "resolved"
+            )
+            reason = f"parent goal {goal_status or 'missing'}; agenda retired"
+            state_hash = self._agenda_hash(
+                agenda.source_type,
+                agenda.source_id,
+                agenda.topic,
+                agenda.urgency,
+                agenda.novelty,
+                agenda.emotional_weight,
+                agenda.recurrence_count,
+                agenda.consecutive_no_change,
+                new_status,
+                None,
+            )
+            connection.execute(
+                "UPDATE thought_agenda_items SET status=?, cooldown_until=NULL, "
+                "state_hash=?, updated_at=? WHERE agenda_id=?",
+                (new_status, state_hash, now, agenda.agenda_id),
+            )
+            self._insert_agenda_revision(
+                connection,
+                agenda.agenda_id,
+                old_status=agenda.status,
+                new_status=new_status,
+                old_recurrence=agenda.recurrence_count,
+                new_recurrence=agenda.recurrence_count,
+                old_no_change=agenda.consecutive_no_change,
+                new_no_change=agenda.consecutive_no_change,
+                cooldown_until=None,
+                reason=reason,
+                created_at=now,
+            )
 
     def _absence_recurrence_state(
         self, connection: Any, row: Any, now: str

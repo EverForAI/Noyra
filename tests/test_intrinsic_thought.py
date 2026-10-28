@@ -182,7 +182,7 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         now = self.clock_value
         state_hash = thought._agenda_hash(
-            "goal",
+            "question",
             agenda_id,
             topic,
             urgency,
@@ -199,7 +199,7 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
                     agenda_id, subject_id, source_type, source_id, topic, urgency, novelty,
                     emotional_weight, recurrence_count, consecutive_no_change, status,
                     cooldown_until, state_hash, created_at, updated_at
-                ) VALUES (?, ?, 'goal', ?, ?, ?, ?, ?, 1, 0, 'open', NULL, ?, ?, ?)""",
+                ) VALUES (?, ?, 'question', ?, ?, ?, ?, ?, 1, 0, 'open', NULL, ?, ?, ?)""",
                 (
                     agenda_id,
                     self.subject_id,
@@ -483,7 +483,7 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
         )
         with self.kernel.database.transaction() as connection:
             state_hash = cognition._agenda_hash(
-                "goal",
+                "question",
                 target_id,
                 "Target A: already resolved",
                 0.8,
