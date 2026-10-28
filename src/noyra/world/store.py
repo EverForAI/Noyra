@@ -11,8 +11,8 @@ from noyra.core.events import EventStore
 from noyra.core.types import canonical_json, content_hash, new_id, strict_json_loads, utc_now
 from noyra.mind.causal import CausalStore
 
-from .errors import WorldStateConflictError
-from .feed import FEED_FINGERPRINT_VERSION, feed_content
+from .errors import ObservationBudgetError, WorldStateConflictError
+from .feed import FEED_FINGERPRINT_VERSION, FeedItem, feed_content
 from .injection import INJECTION_CLASSIFIER_VERSION, classify_external_text
 from .observation_archive import ObservationContentArchive
 from .poll import SourcePollStore
@@ -34,15 +34,55 @@ class ObservationStore:
         with self.database.transaction() as connection:
             return self._record_connection(connection, subject_id, source_id, document)
 
+    @staticmethod
+    def _feed_item_batches(
+        items: tuple[FeedItem, ...], max_content_chars: int | None
+    ) -> tuple[tuple[FeedItem, ...], ...]:
+        """Partition feed entries without splitting an entry or losing its tail."""
+        if max_content_chars is None:
+            return (items,)
+        if max_content_chars < 1:
+            raise ValueError("observation content budget must be positive")
+
+        empty_size = len(feed_content(()))
+        batches: list[tuple[FeedItem, ...]] = []
+        current: list[FeedItem] = []
+        current_size = empty_size
+        for item in items:
+            item_size = len(canonical_json(item.payload()))
+            if empty_size + item_size > max_content_chars:
+                raise ObservationBudgetError(
+                    "a world feed item exceeds the configured cognition observation budget"
+                )
+            if current and current_size + 1 + item_size > max_content_chars:
+                batches.append(tuple(current))
+                current = []
+                current_size = empty_size
+            current.append(item)
+            current_size += item_size + (1 if len(current) > 1 else 0)
+        if current:
+            batches.append(tuple(current))
+        return tuple(batches)
+
     def ingest(
-        self, subject_id: str, source_id: str, document: FetchedDocument
+        self,
+        subject_id: str,
+        source_id: str,
+        document: FetchedDocument,
+        *,
+        max_content_chars: int | None = None,
     ) -> tuple[ObservationRecord | None, bool]:
-        """Commit unseen entry versions and poll heartbeat atomically.
+        """Commit bounded unseen entry batches and the poll heartbeat atomically.
 
         Legacy generic extraction did not preserve RSS entry boundaries. In
         that case the current bounded feed is interpreted once, honestly
         marked legacy_unavailable; never silently swallow potentially new
         entries, replay stored proposals, or alter old observations.
+
+        Structured feeds are partitioned at entry boundaries when a cognition
+        input budget is supplied. Every batch is durable before its entries
+        are marked seen, so a later model call can consume every byte that was
+        acknowledged by the poller.
         """
         if content_hash(document.content) != document.content_hash:
             raise IntegrityError("fetched document content hash mismatch")
@@ -99,39 +139,42 @@ class ObservationStore:
                 ).fetchone()
                 is None
             )
-            observation = None
-            created = False
+            selected: tuple[ObservationRecord, bool] | None = None
             if unseen:
-                content = feed_content(unseen)
-                # Classification must use the new subset only, never a signal
-                # carried solely by a previously seen entry in the same feed.
-                fields = tuple(value for item in unseen for value in item.payload().values())
-                signals = classify_external_text(document.title or "", *fields)
-                observation, created = self._record_connection(
-                    connection,
-                    subject_id,
-                    source_id,
-                    replace(
-                        document,
-                        content=content,
-                        content_hash=content_hash(content),
-                        injection_signals=signals,
-                        feed_items=unseen,
-                    ),
-                )
-                for item in unseen:
-                    connection.execute(
-                        "INSERT INTO world_feed_seen(source_id,subject_id,fingerprint_version,"
-                        "item_key,fingerprint,first_seen_at) VALUES (?,?,?,?,?,?)",
-                        (
-                            source_id,
-                            subject_id,
-                            FEED_FINGERPRINT_VERSION,
-                            item.item_key,
-                            item.fingerprint,
-                            document.fetched_at,
+                batches = self._feed_item_batches(unseen, max_content_chars)
+                for batch in batches:
+                    content = feed_content(batch)
+                    # Classification must use the new subset only, never a signal
+                    # carried solely by a previously seen entry in the same feed.
+                    fields = tuple(value for item in batch for value in item.payload().values())
+                    signals = classify_external_text(document.title or "", *fields)
+                    candidate, created = self._record_connection(
+                        connection,
+                        subject_id,
+                        source_id,
+                        replace(
+                            document,
+                            content=content,
+                            content_hash=content_hash(content),
+                            injection_signals=signals,
+                            feed_items=batch,
                         ),
                     )
+                    if selected is None and candidate.status == "new":
+                        selected = (candidate, created)
+                    for item in batch:
+                        connection.execute(
+                            "INSERT INTO world_feed_seen(source_id,subject_id,fingerprint_version,"
+                            "item_key,fingerprint,first_seen_at) VALUES (?,?,?,?,?,?)",
+                            (
+                                source_id,
+                                subject_id,
+                                FEED_FINGERPRINT_VERSION,
+                                item.item_key,
+                                item.fingerprint,
+                                document.fetched_at,
+                            ),
+                        )
             SourcePollStore.complete(
                 connection,
                 subject_id,
@@ -143,7 +186,7 @@ class ObservationStore:
             if state is None and not had_legacy:
                 self._fresh_baseline(connection, subject_id, source_id)
             SourcePollStore.prune(connection, source_id)
-            return observation, created
+            return selected if selected is not None else (None, False)
 
     @staticmethod
     def _fresh_baseline(connection: sqlite3.Connection, subject_id: str, source_id: str) -> None:

@@ -301,6 +301,50 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await cycle.run_once(), "observation_unchanged")
         self.assertEqual(len(provider.requests), 1)
 
+    async def test_oversized_structured_feed_stays_pending_without_model_call(
+        self: Self,
+    ) -> None:
+        from noyra.world import FetchedDocument
+        from noyra.world.feed import feed_content, parse_feed
+
+        settings = self.settings().model_copy(update={"max_observation_chars": 1_024})
+        provider = FakeProvider([])
+        cycle = self.cycle(provider, settings=settings)
+        cycle.bootstrap()
+        source = cycle.sources.active(self.subject_id)[0]
+        _, entries = parse_feed(
+            "<rss><channel><title>News</title>"
+            "<item><guid>large</guid><link>/large</link><title>Update</title>"
+            "<description>" + ("X" * 3_000) + "</description></item>"
+            "</channel></rss>",
+            source.url,
+        )
+        content = feed_content(entries)
+        cycle.observations.record(
+            self.subject_id,
+            source.source_id,
+            FetchedDocument(
+                source.url,
+                "News",
+                content,
+                content_hash(content),
+                "application/rss+xml",
+                (),
+                None,
+                None,
+                self.clock_value,
+                entries,
+            ),
+        )
+
+        assert await cycle.run_once() == "world_observation_too_large"
+        assert provider.requests == []
+        with self.kernel.database.connection() as connection:
+            assert (
+                connection.execute("SELECT status FROM observations WHERE status='new'").fetchone()
+                is not None
+            )
+
     async def test_password_topic_does_not_suppress_a_valid_motivated_goal(self: Self) -> None:
         self.web_text = "Ubuntu security notice: password validation fix."
         provider = FakeProvider(

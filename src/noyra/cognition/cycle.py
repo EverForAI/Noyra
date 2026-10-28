@@ -60,6 +60,7 @@ from noyra.world import (
     SourceRegistry,
     WorldClaimStore,
 )
+from noyra.world.errors import ObservationBudgetError
 from noyra.world.poll import SourcePollStore
 from noyra.world.types import GenesisRunRecord, ObservationRecord
 
@@ -451,12 +452,23 @@ class CognitionCycle:
             lease = current_lease()
             if lease is None:
                 raise OperationInvalidated("observation commit has no runtime lease")
-            with self.kernel.admission.commit_scope(lease):
-                pending, created = self.observations.ingest(
-                    self.subject_id,
-                    source.source_id,
-                    fetch.document,
+            try:
+                with self.kernel.admission.commit_scope(lease):
+                    pending, created = self.observations.ingest(
+                        self.subject_id,
+                        source.source_id,
+                        fetch.document,
+                        max_content_chars=self.settings.max_observation_chars,
+                    )
+            except ObservationBudgetError:
+                assert_current_lease()
+                SourcePollStore(self.kernel.database).failed(
+                    self.subject_id, source.source_id, self.clock()
                 )
+                self._assess_failure(
+                    "world observation exceeded cognition input budget", frustration=0.25
+                )
+                return "world_observation_too_large"
             if pending is None or (not created and pending.status != "new"):
                 return "observation_unchanged"
         else:
@@ -469,7 +481,13 @@ class CognitionCycle:
                 "new observation recorded for interpretation",
             )
 
-        proposal_result = await self._proposal_for(source, pending)
+        try:
+            proposal_result = await self._proposal_for(source, pending)
+        except ObservationBudgetError:
+            self._assess_failure(
+                "world observation exceeded cognition input budget", frustration=0.25
+            )
+            return "world_observation_too_large"
         assert_current_lease()
         if isinstance(proposal_result, str):
             return proposal_result
@@ -985,7 +1003,16 @@ class CognitionCycle:
                 ],
             }
         )
-        content = observation.content[: self.settings.max_observation_chars]
+        is_structured_feed = observation.content.startswith('{"feed_fingerprint_version":')
+        if is_structured_feed and len(observation.content) > self.settings.max_observation_chars:
+            raise ObservationBudgetError(
+                "structured world feed observation exceeds cognition input budget"
+            )
+        content = (
+            observation.content
+            if is_structured_feed
+            else observation.content[: self.settings.max_observation_chars]
+        )
         system = (
             "You are a cognition component proposing bounded state changes for Noyra, an "
             "experimental artificial subject, not a user-command assistant. The model is not "

@@ -10,6 +10,10 @@ class FetchError(WorldError):
     """A sanitized external fetch failure."""
 
 
+class ObservationBudgetError(WorldError):
+    """A world observation cannot fit the configured cognition input budget."""
+
+
 class WorldStateConflictError(WorldError):
     """A world-state revision conflicts with durable state."""
 

@@ -12,7 +12,7 @@ from noyra.core import Database, IdentityStore
 from noyra.core.errors import IntegrityError, SchemaContractError
 from noyra.core.types import content_hash
 from noyra.world import FetchedDocument, ObservationStore, SafeWebReader, SourceRegistry
-from noyra.world.errors import FetchError
+from noyra.world.errors import FetchError, ObservationBudgetError
 from noyra.world.feed import MAX_FEED_ITEMS, feed_content, parse_feed
 from noyra.world.poll import SourcePollStore
 from noyra.world.types import SourceRecord
@@ -123,6 +123,76 @@ def test_reverting_to_seen_revision_is_not_new(
         None,
         False,
     )
+
+
+def test_large_feed_is_batched_before_entries_are_marked_seen(
+    context: tuple[Database, SourceRecord, ObservationStore],
+) -> None:
+    database, source, store = context
+    xml = rss(
+        item("one", "A" * 500),
+        item("two", "B" * 500),
+        item("three", "C" * 500),
+    )
+    fetched = document(source, xml)
+    assert fetched.feed_items is not None
+    max_chars = max(len(feed_content((entry,))) for entry in fetched.feed_items)
+
+    first, created = store.ingest(
+        SUBJECT,
+        source.source_id,
+        fetched,
+        max_content_chars=max_chars,
+    )
+
+    assert first is not None and created
+    assert store.ingest(
+        SUBJECT,
+        source.source_id,
+        fetched,
+        max_content_chars=max_chars,
+    ) == (None, False)
+    with database.connection() as connection:
+        observations = [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT content FROM observations WHERE source_id=? ORDER BY rowid",
+                (source.source_id,),
+            ).fetchall()
+        ]
+        seen_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM world_feed_seen WHERE source_id=?",
+                (source.source_id,),
+            ).fetchone()[0]
+        )
+    assert len(observations) == 3
+    assert all(len(content) <= max_chars for content in observations)
+    combined = "".join(observations)
+    assert all(entry.link in combined for entry in fetched.feed_items)
+    assert all(marker in combined for marker in ("A" * 500, "B" * 500, "C" * 500))
+    assert seen_count == 3
+    assert state(database, source)["new_item_versions"] == 3
+
+
+def test_oversized_feed_item_is_not_marked_seen(
+    context: tuple[Database, SourceRecord, ObservationStore],
+) -> None:
+    database, source, store = context
+    fetched = document(source, rss(item("large", "X" * 3_000)))
+
+    with pytest.raises(ObservationBudgetError, match="exceeds"):
+        store.ingest(
+            SUBJECT,
+            source.source_id,
+            fetched,
+            max_content_chars=1_024,
+        )
+
+    with database.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM world_feed_seen").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM world_poll_state").fetchone()[0] == 0
 
 
 def test_empty_feed_is_a_successful_heartbeat(

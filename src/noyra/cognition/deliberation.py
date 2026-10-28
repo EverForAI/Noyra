@@ -22,6 +22,7 @@ from noyra.model.errors import (
 )
 from noyra.sleep import FatigueInputs, FatigueTracker
 from noyra.world import ObservationStore, SafeWebReader, SourceRecord, SourceRegistry
+from noyra.world.errors import ObservationBudgetError
 
 from ._integrity import durable_boundary, durable_json, durable_string_list
 from .settings import CognitionSettings
@@ -447,15 +448,24 @@ class ActionDeliberation:
         observation_id: str | None = None
         status = "failed"
         if result.status == "succeeded" and result.document is not None:
-            observation, created = self.observations.ingest(
-                self.subject_id, source.source_id, result.document
-            )
-            observation_id = observation.observation_id if observation is not None else None
-            status = (
-                "succeeded"
-                if observation is not None and (created or observation.status == "new")
-                else "unchanged"
-            )
+            try:
+                observation, created = self.observations.ingest(
+                    self.subject_id,
+                    source.source_id,
+                    result.document,
+                    max_content_chars=self.settings.max_observation_chars,
+                )
+            except ObservationBudgetError:
+                observation = None
+                created = False
+                status = "outcome_unavailable"
+            else:
+                observation_id = observation.observation_id if observation is not None else None
+                status = (
+                    "succeeded"
+                    if observation is not None and (created or observation.status == "new")
+                    else "unchanged"
+                )
         elif result.status == "succeeded":
             observation_id = self._observation_for_action(result.action_id)
             status = "unchanged" if observation_id is not None else "outcome_unavailable"
