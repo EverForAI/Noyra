@@ -434,11 +434,20 @@ class SafeWebReader:
                     text = body.decode(response.encoding or "utf-8", errors="replace")
                 authorize()
                 feed_items = None
-                if source.source_type == "rss" or media_type in {
+                declared_feed = source.source_type == "rss" or media_type in {
                     "application/rss+xml",
                     "application/atom+xml",
-                }:
-                    title, feed_items = parse_feed(text, url)
+                }
+                if declared_feed or media_type in {"application/xml", "text/xml"}:
+                    try:
+                        title, feed_items = parse_feed(text, url)
+                    except FetchError as error:
+                        # XML API documents remain supported. Only a valid,
+                        # bounded non-feed root can use generic extraction;
+                        # malformed XML/DTD/limits never fall back permissively.
+                        if declared_feed or str(error) != "world_feed_format_unsupported":
+                            raise
+                if feed_items is not None:
                     content = feed_content(feed_items)
                     if len(content) > self.max_text_chars:
                         raise FetchError("world_feed_text_limit")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -325,3 +326,93 @@ def test_v107_upgrade_preserves_observations_and_matches_new_contract(
         connection.execute("DROP TABLE world_poll_state")
     with pytest.raises(SchemaContractError):
         Database(database.path, initialize=False, strict_schema_contract=True)
+
+
+def test_acquisition_export_preserves_subject_isolation(
+    context: tuple[Database, SourceRecord, ObservationStore],
+) -> None:
+    from io import BytesIO
+    from zipfile import ZipFile
+
+    from noyra.core.runtime_export import RuntimeLogExporter
+    from noyra.core.types import strict_json_loads
+
+    database, source, store = context
+    store.ingest(SUBJECT, source.source_id, document(source, rss(item())))
+    other_subject = "other-feed-subject"
+    IdentityStore(database).ensure(other_subject, content_hash(other_subject))
+    other_source = SourceRegistry(database).register(
+        other_subject, "Other source", "https://example.org/rss", "rss", status="active"
+    )
+    store.ingest(other_subject, other_source.source_id, document(other_source, rss(item("other"))))
+    artifact = RuntimeLogExporter(database).export(SUBJECT, actor="synthetic-test")
+    with ZipFile(BytesIO(artifact.content)) as archive:
+        for name in ("world_poll_state", "world_feed_seen"):
+            rows = [
+                strict_json_loads(line.decode())
+                for line in archive.read(f"tables/{name}.jsonl").splitlines()
+            ]
+            assert len(rows) == 1
+            assert rows[0]["subject_id"] == SUBJECT
+            assert rows[0]["source_id"] == source.source_id
+
+
+def test_older_runtime_rejects_new_schema_without_silently_polling(
+    context: tuple[Database, SourceRecord, ObservationStore],
+) -> None:
+    database, source, store = context
+    store.ingest(SUBJECT, source.source_id, document(source, rss(item())))
+    with (
+        patch("noyra.core.database.CURRENT_SCHEMA_VERSION", 107),
+        pytest.raises(RuntimeError, match="newer than runtime"),
+    ):
+        Database(database.path)
+    current = Database(database.path)
+    current.assert_schema_contract()
+    assert state(current, source)["checks"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("media_type", ["text/xml", "application/xml"])
+async def test_generic_xml_feed_is_detected_without_rss_source_label(
+    context: tuple[Database, SourceRecord, ObservationStore],
+    media_type: str,
+) -> None:
+    _, source, _ = context
+
+    async def resolver(host: str, port: int) -> tuple[str, ...]:
+        return ("93.184.216.34",)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, headers={"Content-Type": media_type}, text=rss(item())
+            )
+        )
+    ) as client:
+        reader = SafeWebReader(client=client, resolver=resolver, verify_peer_address=False)
+        result = await reader.fetch(replace(source, source_type="web"))
+    assert result.feed_items and len(result.feed_items) == 1
+
+
+@pytest.mark.asyncio
+async def test_valid_non_feed_xml_keeps_generic_api_extraction(
+    context: tuple[Database, SourceRecord, ObservationStore],
+) -> None:
+    _, source, _ = context
+
+    async def resolver(host: str, port: int) -> tuple[str, ...]:
+        return ("93.184.216.34",)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                headers={"Content-Type": "application/xml"},
+                text="<weather><summary>Cloudy</summary></weather>",
+            )
+        )
+    ) as client:
+        reader = SafeWebReader(client=client, resolver=resolver, verify_peer_address=False)
+        result = await reader.fetch(replace(source, source_type="api"))
+    assert result.feed_items is None and result.content == "Cloudy"

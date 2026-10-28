@@ -713,6 +713,11 @@ _OWNERSHIP_GRAPHS[107] = {
     **_OWNERSHIP_GRAPHS[106],
     "relationship_identity_bindings": _subject_rule(),
 }
+_OWNERSHIP_GRAPHS[108] = {
+    **_OWNERSHIP_GRAPHS[107],
+    "world_poll_state": _subject_rule(),
+    "world_feed_seen": _subject_rule(),
+}
 
 
 @dataclass(frozen=True)

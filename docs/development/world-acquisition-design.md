@@ -90,3 +90,15 @@ Fingerprint version is read from each durable poll state. The displayed classifi
 explicitly the current rule version, not a claim that old observations have been reclassified;
 new observation event metadata retains the classifier version used at ingestion. No raw observation
 text, credentials or production host details are exposed. Public pages are unchanged.
+
+## Cross-module compatibility review
+
+Schema 108 explicitly extends the runtime export ownership graph. Poll and seen-entry tables use
+subject-scoped export rules, so acquisition state remains available without exporting another
+subject's data. Regression coverage includes a real v107 additive upgrade, legacy-v71 upgrade,
+current-schema export inventory, cross-subject acquisition export, and rejection by an older runtime.
+The pre-deployment integration review checks these consumers as well as ingestion itself.
+
+Valid RSS/Atom served with generic XML media types is recognized even if the source label is web/API;
+valid non-feed XML keeps generic extraction. XML parsing failures, DTD declarations and resource limits
+never fall back to a permissive text parser. Migration 108 is frozen in the executable DDL contract.
