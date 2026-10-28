@@ -75,6 +75,7 @@ class IntegrityHardeningTestCase(unittest.TestCase):
                 "secret_cleanup",
                 "secret_file_intents",
                 "model_capability_profiles",
+                "world_poll_state",
             },
         )
         self.assertTrue(all(int(row["feature_version"]) >= 1 for row in rows))
