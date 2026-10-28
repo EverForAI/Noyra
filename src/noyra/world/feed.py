@@ -14,6 +14,7 @@ from noyra.core.types import canonical_json, content_hash
 from .errors import FetchError
 
 FEED_FINGERPRINT_VERSION = 1
+RDF_NAMESPACE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 MAX_FEED_ITEMS = 512
 MAX_FEED_BYTES = 2_000_000
 MAX_FIELD_CHARS = 100_000
@@ -129,6 +130,15 @@ def parse_feed(text: str, source_url: str) -> tuple[str | None, tuple[FeedItem, 
             raise FetchError("world_feed_channel_invalid")
         container = channels[0]
         entries = [child for child in container if _local(child.tag) == "item"]
+    elif root.tag == f"{{{RDF_NAMESPACE}}}RDF":
+        # RSS 1.0 puts the channel and item resources directly below an RDF
+        # root. Keep the same bounded XML parser and field handling as RSS 2.0;
+        # RDF syntax is only accepted with its standard namespace.
+        channels = [child for child in root if _local(child.tag) == "channel"]
+        if len(channels) != 1:
+            raise FetchError("world_feed_channel_invalid")
+        container = channels[0]
+        entries = [child for child in root if _local(child.tag) == "item"]
     elif root.tag == "{http://www.w3.org/2005/Atom}feed":
         container = root
         entries = [child for child in root if child.tag == "{http://www.w3.org/2005/Atom}entry"]
@@ -159,6 +169,8 @@ def parse_feed(text: str, source_url: str) -> tuple[str | None, tuple[FeedItem, 
         if identifier is None:
             identifier = fields.get("id")
         guid = normalize("".join(identifier.itertext())) if identifier is not None else ""
+        if not guid and kind == "rdf":
+            guid = normalize(entry.attrib.get(f"{{{RDF_NAMESPACE}}}about", ""))
         payload = {"title": item_title, "link": link, "summary": summary, "body": body}
         if not any(payload.values()):
             continue

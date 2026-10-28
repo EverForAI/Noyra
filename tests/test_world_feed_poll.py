@@ -35,6 +35,28 @@ def item(guid: str = "one", text: str = "A discovery", title: str = "Update") ->
     return f"<item><guid>{guid}</guid><link>https://example.com/{guid}</link><title>{title}</title><description>{text}</description></item>"
 
 
+def rdf_feed(body: str = "A discovery") -> str:
+    return f"""
+    <rdf:RDF
+        xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+        xmlns="http://purl.org/rss/1.0/"
+        xmlns:content="http://purl.org/rss/1.0/modules/content/">
+      <channel rdf:about="https://example.com/rss">
+        <title>News</title>
+        <link>https://example.com/</link>
+        <description>Feed description</description>
+        <items><rdf:Seq><rdf:li rdf:resource="https://example.com/one" /></rdf:Seq></items>
+      </channel>
+      <item rdf:about="https://example.com/one">
+        <title>Update</title>
+        <link>https://example.com/one</link>
+        <description>A discovery</description>
+        <content:encoded><![CDATA[{body}]]></content:encoded>
+      </item>
+    </rdf:RDF>
+    """
+
+
 @pytest.fixture
 def context(tmp_path: Path) -> tuple[Database, SourceRecord, ObservationStore]:
     database = Database(tmp_path / "test.sqlite3")
@@ -285,6 +307,29 @@ def test_poll_hash_drift_and_missing_schema_fail_closed(
 )
 def test_hostile_xml_is_rejected(payload: str) -> None:
     with pytest.raises(FetchError):
+        parse_feed(payload, "https://example.com/rss")
+
+
+def test_rss_10_rdf_is_supported_with_stable_identity_and_fingerprint() -> None:
+    title, entries = parse_feed(rdf_feed(), "https://example.com/rss")
+    changed_title, changed = parse_feed(rdf_feed("A changed discovery"), "https://example.com/rss")
+
+    assert title == changed_title == "News"
+    assert len(entries) == len(changed) == 1
+    assert entries[0].summary == "A discovery"
+    assert entries[0].body == "A discovery"
+    assert entries[0].item_key == changed[0].item_key
+    assert entries[0].fingerprint != changed[0].fingerprint
+
+
+def test_rss_10_rdf_keeps_xml_hardening() -> None:
+    payload = rdf_feed()
+    payload = payload.replace(
+        "<rdf:RDF",
+        '<!DOCTYPE rdf:RDF [<!ENTITY x "blocked">]><rdf:RDF',
+        1,
+    )
+    with pytest.raises(FetchError, match="world_feed_dtd_rejected"):
         parse_feed(payload, "https://example.com/rss")
 
 
