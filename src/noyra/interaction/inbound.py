@@ -33,6 +33,7 @@ from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.core.xml import parse_untrusted_xml
 
+from .participants import source_namespace
 from .store import InteractionStore
 
 InboundChannel = Literal["telegram", "qq", "feishu", "wechat", "email", "webhook"]
@@ -1446,6 +1447,22 @@ class InboundStore:
                     else envelope.conversation_id
                 ),
                 envelope.content,
+                participant_source=(
+                    source_namespace(
+                        envelope.channel, envelope.transport_id, envelope.external_account_id
+                    ),
+                    envelope.external_sender_id,
+                    envelope.sender_label,
+                ),
+                participant_conversation=content_hash(
+                    [
+                        envelope.channel,
+                        envelope.transport_id,
+                        envelope.external_account_id,
+                        envelope.conversation_id,
+                        envelope.thread_id,
+                    ]
+                ),
                 **(
                     {"conversation_id": route[0], "verified_binding_id": binding["binding_id"]}
                     if route is not None

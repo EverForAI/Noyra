@@ -215,6 +215,7 @@ class GoalRecord:
     current_revision: int
     created_at: str
     updated_at: str
+    origin_evidence: str = "unverified"
 
     @property
     def selection_score(self) -> float:
@@ -242,6 +243,10 @@ class RelationshipRecord:
     current_revision: int
     created_at: str
     updated_at: str
+
+    identity_origin: str = "created"
+    identity_status: str = "consistent"
+    identity_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

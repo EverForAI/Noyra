@@ -8,6 +8,7 @@ import os
 import sqlite3
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Self, cast
 from urllib.request import Request, urlopen
 
@@ -32,6 +33,7 @@ from noyra.interaction import (
     TransportStore,
     WebhookInboundAdapter,
 )
+from noyra.interaction.participants import Participant
 from noyra.interaction.types import InteractionKind
 from noyra.model import ModelGateway
 from noyra.service import NoyraService, ServiceSettings
@@ -128,6 +130,10 @@ def test_rejected_inbound_event_can_retry_without_creating_a_ghost_interaction(
             idempotency_key: str | None = None,
             conversation_id: str | None = None,
             verified_binding_id: str | None = None,
+            participant_source: tuple[str, str, str] | None = None,
+            participant_conversation: str | None = None,
+            participant: Participant | None = None,
+            participant_private: bool = False,
         ) -> InteractionRecord:
             self.calls += 1
             if self.calls == 1:
@@ -142,6 +148,10 @@ def test_rejected_inbound_event_can_retry_without_creating_a_ghost_interaction(
                 idempotency_key=idempotency_key,
                 conversation_id=conversation_id,
                 verified_binding_id=verified_binding_id,
+                participant_source=participant_source,
+                participant_conversation=participant_conversation,
+                participant=participant,
+                participant_private=participant_private,
             )
 
     store = InboundStore(kernel.database, FailOnce(kernel.database))
@@ -191,6 +201,10 @@ def test_successful_inbound_recovers_rejected_state_from_concurrent_failure(
             idempotency_key: str | None = None,
             conversation_id: str | None = None,
             verified_binding_id: str | None = None,
+            participant_source: tuple[str, str, str] | None = None,
+            participant_conversation: str | None = None,
+            participant: Participant | None = None,
+            participant_private: bool = False,
         ) -> InteractionRecord:
             interaction = super().receive(
                 subject_id,
@@ -202,6 +216,10 @@ def test_successful_inbound_recovers_rejected_state_from_concurrent_failure(
                 idempotency_key=idempotency_key,
                 conversation_id=conversation_id,
                 verified_binding_id=verified_binding_id,
+                participant_source=participant_source,
+                participant_conversation=participant_conversation,
+                participant=participant,
+                participant_private=participant_private,
             )
             with kernel.database.transaction() as connection:
                 changed = connection.execute(
@@ -293,7 +311,7 @@ def test_creator_priority_is_used_by_interaction_scheduler(tmp_path: Path) -> No
     cognition = InteractionCognition(
         kernel.database,
         kernel.subject_id,
-        cast(ModelGateway, object()),
+        cast(ModelGateway, SimpleNamespace(requires_explicit_prepared_retry=False)),
         CognitionSettings(interaction_cooldown_seconds=0),
     )
     due = cognition._due_interaction()

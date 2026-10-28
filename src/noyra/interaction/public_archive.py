@@ -795,6 +795,10 @@ class PublicArchive:
             "public_diary_count": count,
             "last_sleep_completed_at": sleep_time,
             "recent": self.page(subject_id, limit=3)["items"],
+            # Keep writing discoverable even when several stage changes occupy
+            # the latest timeline slots. This is the existing public diary
+            # projection (no detail body or private reflection is copied).
+            "writing": self.page(subject_id, kind="diary", limit=1)["items"],
             "goals": self.page(subject_id, kind="goal", limit=2)["items"],
             "projects": self.page(subject_id, kind="project", limit=2)["items"],
         }

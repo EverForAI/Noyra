@@ -30,12 +30,36 @@ class EmbeddingProviderError(ModelGatewayError):
         self.usage_unknown = usage_unknown
 
 
+class EmbeddingShutdownIncompleteError(ModelGatewayError):
+    """Embedding work is still live; callers must retain runtime ownership."""
+
+    def __init__(self) -> None:
+        super().__init__("embedding_shutdown_incomplete")
+        self.code = "embedding_shutdown_incomplete"
+
+
 class ModelCallConflictError(ModelGatewayError):
     """An idempotency key conflicts with another logical model call."""
 
 
 class ModelCallStateError(ModelGatewayError):
     """A model call cannot advance from its current durable state."""
+
+
+class UnknownRetryResolutionEvidenceRequired(ModelCallStateError):
+    """Closing an ambiguous retry requires evidence and explicit risk acceptance."""
+
+
+class ModelResourceInactiveError(ModelCallStateError):
+    """A saved resource is disabled or revoked; it is not an incomplete draft."""
+
+
+class ModelLifecycleBlockedError(ModelCallStateError):
+    """The durable lifecycle forbids sending a model request."""
+
+    def __init__(self, lifecycle: str):
+        super().__init__("model calls are disabled by the current lifecycle")
+        self.lifecycle = lifecycle
 
 
 class ModelAuthorizationError(ModelCallStateError):

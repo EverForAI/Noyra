@@ -5,6 +5,7 @@ from typing import Any
 
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
+from noyra.core.relationship_identity import insert_binding, verify_binding
 from noyra.core.types import (
     canonical_json,
     content_hash,
@@ -15,7 +16,7 @@ from noyra.core.types import (
     utc_now,
 )
 
-from .errors import MindStateConflictError
+from .errors import MindStateConflictError, RelationshipIdentityReviewRequired
 from .types import RelationshipRecord
 from .validation import validate_event_ids
 
@@ -70,7 +71,7 @@ class RelationshipStore:
                 raise MindStateConflictError(
                     "relationship key already has a different display name"
                 )
-            return self._from_row(row)
+            return self._from_row(row, connection=connection)
         sources = validate_event_ids(connection, subject_id, source_event_ids)
         relationship_id = new_id("rel")
         now = utc_now()
@@ -110,6 +111,8 @@ class RelationshipStore:
             sources=sources,
             created_at=now,
         )
+        row = self._get_row(connection, relationship_id)
+        insert_binding(connection, row, origin="created", sources=sources)
         return self._load_connection(connection, relationship_id)
 
     def revise(
@@ -164,6 +167,9 @@ class RelationshipStore:
         if len(canonical_json(boundaries).encode("utf-8")) > 65_536:
             raise ValueError("relationship boundaries are too large")
         row = self._get_row(connection, relationship_id)
+        _, reasons = verify_binding(connection, row)
+        if reasons:
+            raise RelationshipIdentityReviewRequired("relationship identity requires review")
         current_revision = int(row["current_revision"])
         if expected_revision is not None and expected_revision != current_revision:
             raise MindStateConflictError("relationship revision changed before update")
@@ -222,7 +228,7 @@ class RelationshipStore:
                     "ORDER BY familiarity DESC, affinity DESC, updated_at DESC",
                     (subject_id, entity_type),
                 ).fetchall()
-        return [self._from_row(row) for row in rows]
+            return [self._from_row(row, connection=connection) for row in rows]
 
     def get(self, relationship_id: str) -> RelationshipRecord:
         with self.database.connection() as connection:
@@ -235,13 +241,13 @@ class RelationshipStore:
                 "AND entity_key = ?",
                 (subject_id, entity_type, entity_key),
             ).fetchone()
-        if row is None:
-            raise NotFoundError(f"relationship not found: {entity_type}:{entity_key}")
-        return self._from_row(row)
+            if row is None:
+                raise NotFoundError(f"relationship not found: {entity_type}:{entity_key}")
+            return self._from_row(row, connection=connection)
 
     def revisions(self, relationship_id: str) -> builtins.list[dict[str, Any]]:
         with self.database.connection() as connection:
-            self._get_row(connection, relationship_id)
+            verify_binding(connection, self._get_row(connection, relationship_id))
             rows = connection.execute(
                 "SELECT * FROM relationship_revisions WHERE relationship_id = ? "
                 "ORDER BY revision_number",
@@ -307,10 +313,11 @@ class RelationshipStore:
 
     @classmethod
     def _load_connection(cls, connection: Any, relationship_id: str) -> RelationshipRecord:
-        return cls._from_row(cls._get_row(connection, relationship_id))
+        return cls._from_row(cls._get_row(connection, relationship_id), connection=connection)
 
     @staticmethod
-    def _from_row(row: Any) -> RelationshipRecord:
+    def _from_row(row: Any, *, connection: Any) -> RelationshipRecord:
+        identity_origin, identity_reasons = verify_binding(connection, row)
         relationship_id = row["relationship_id"]
         raw_boundaries = row["boundaries_json"]
         if not isinstance(raw_boundaries, str):
@@ -359,6 +366,9 @@ class RelationshipStore:
             current_revision=current_revision,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            identity_origin=identity_origin,
+            identity_status="review_required" if identity_reasons else "consistent",
+            identity_reasons=identity_reasons,
         )
 
     @staticmethod

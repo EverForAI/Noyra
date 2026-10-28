@@ -1,0 +1,3 @@
+#!/bin/sh
+# Git supplies the worktree root as the hook working directory.
+exec python scripts/check-publication-boundary.py --staged

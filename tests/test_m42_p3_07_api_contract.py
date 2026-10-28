@@ -145,7 +145,9 @@ def test_route_contract_has_no_duplicate_or_unversioned_entries() -> None:
     assert all(
         route.path.startswith("/health") or route.path.startswith("/api/v1/") for route in contracts
     )
-    assert all(route.role in {"none", "read", "operator", "export"} for route in contracts)
+    assert all(
+        route.role in {"none", "read", "operator", "export", "participant"} for route in contracts
+    )
 
 
 def test_shared_http_boundary_errors_are_explicitly_contractual() -> None:

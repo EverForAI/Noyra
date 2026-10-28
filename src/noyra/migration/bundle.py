@@ -22,6 +22,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from noyra.core.identity import validate_subject_id
 from noyra.core.types import canonical_json
 
 BUNDLE_FORMAT = "noyra-migration-bundle/v1"
@@ -298,6 +299,11 @@ def _validate_context(context: Mapping[str, str]) -> None:
         )
     ):
         raise ValueError("migration bundle context is invalid")
+    if "subject_id" in context:
+        try:
+            validate_subject_id(context["subject_id"])
+        except ValueError as error:
+            raise ValueError("migration bundle subject is invalid") from error
 
 
 def _validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
@@ -347,10 +353,11 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
         not isinstance(values["artifact_id"], str) or not values["artifact_id"]
     ):
         raise ValueError("migration bundle artifact id is invalid")
-    if "subject_id" in values and (
-        not isinstance(values["subject_id"], str) or not values["subject_id"]
-    ):
-        raise ValueError("migration bundle subject is invalid")
+    if "subject_id" in values:
+        try:
+            validate_subject_id(values["subject_id"])
+        except ValueError as error:
+            raise ValueError("migration bundle subject is invalid") from error
     if "schema_version" in values and (
         not (
             (type(values["schema_version"]) is int and values["schema_version"] >= 1)

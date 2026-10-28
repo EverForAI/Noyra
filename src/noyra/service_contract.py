@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-RouteRole = Literal["none", "read", "operator", "export"]
+RouteRole = Literal["none", "read", "operator", "export", "participant"]
 
 
 @dataclass(frozen=True)
@@ -137,6 +137,7 @@ API_ROUTE_CONTRACTS: tuple[APIRouteContract, ...] = (
     _get("/api/v1/outcomes", "read", 200, 401),
     _get("/api/v1/runtime-logs", "read", 200, 400, 401),
     _get("/api/v1/diagnostics", "read", 200, 401),
+    _get("/api/v1/admin/monitoring/soak", "read", 200, 400, 401, 503),
     _get("/api/v1/admin/health", "operator", 200, 401, 503),
     _get("/api/v1/admin/readiness", "operator", 200, 401, 503),
     _get("/api/v1/admin/migration/policy", "operator", 200, 401, 503),
@@ -269,6 +270,7 @@ API_ROUTE_CONTRACTS: tuple[APIRouteContract, ...] = (
     _get("/api/v1/admin/usage", "operator", 200, 400, 401, 503),
     _get("/api/v1/admin/activity-logs", "operator", 200, 400, 401),
     _get("/api/v1/admin/lifecycle-summary", "operator", 200, 401),
+    _get("/api/v1/admin/runtime-summary", "operator", 200, 401, 503),
     _get("/api/v1/admin/retention", "operator", 200, 401, 503),
     _post("/api/v1/admin/retention/run", "operator", 200, 400, 401, 415, 503),
     _post("/api/v1/admin/retention/settings", "operator", 200, 400, 401, 409, 415, 503),
@@ -787,6 +789,33 @@ API_ROUTE_CONTRACTS: tuple[APIRouteContract, ...] = (
         409,
         415,
     ),
+)
+
+
+# Participant cookies/bearers are independent of every operator/read role.
+API_ROUTE_CONTRACTS += (
+    _post("/api/v1/participants/password", "participant", 200, 400, 401, 403, 404, 409, 415),
+    _get("/api/v1/participants/session", "none", 200, 400, 401, 403, 404, 413),
+    _get("/api/v1/participants/opportunities", "none", 200, 400, 401, 403, 404, 413),
+    _get("/api/v1/participants/posts", "participant", 200, 400, 401, 403, 404, 413),
+    _get("/api/v1/participants/applications", "participant", 200, 400, 401, 403, 404, 413),
+    _get("/api/v1/participants/submissions", "participant", 200, 400, 401, 403, 404, 413),
+    _get("/api/v1/participants/messages", "participant", 200, 400, 401, 403, 404, 413),
+    _get("/api/v1/participants/notifications", "participant", 200, 400, 401, 403, 404, 413),
+    _post("/api/v1/participants/register", "none", 201, 200, 400, 401, 403, 404, 409, 415),
+    _post("/api/v1/participants/login", "none", 200, 400, 401, 403, 404, 409, 415),
+    _post("/api/v1/participants/recover", "none", 200, 400, 401, 403, 404, 409, 415),
+    _post("/api/v1/participants/logout", "participant", 200, 400, 401, 403, 404, 409, 415),
+    _post("/api/v1/participants/credential", "participant", 200, 400, 401, 403, 404, 409, 415),
+    _post("/api/v1/participants/messages", "participant", 200, 400, 401, 403, 404, 409, 415),
+    _post("/api/v1/participants/posts", "participant", 200, 400, 401, 403, 404, 409, 415),
+    _post("/api/v1/participants/apply", "participant", 200, 400, 401, 403, 404, 409, 415),
+    _post("/api/v1/participants/submit", "participant", 200, 400, 401, 403, 404, 409, 415),
+    _post("/api/v1/participants/withdraw", "participant", 200, 400, 401, 403, 404, 409, 415),
+    _post(
+        "/api/v1/participants/notification-read", "participant", 200, 400, 401, 403, 404, 409, 415
+    ),
+    _post("/api/v1/admin/participant-sources", "operator", 200, 401, 409),
 )
 
 

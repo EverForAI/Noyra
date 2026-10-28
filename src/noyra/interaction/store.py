@@ -10,6 +10,7 @@ from noyra.core.types import content_hash, new_id, utc_now
 
 from .conversations import link_message
 from .errors import InteractionStateConflictError
+from .participants import Participant, ParticipantStore
 from .types import InteractionDecision, InteractionKind, InteractionRecord
 
 
@@ -32,6 +33,10 @@ class InteractionStore:
         idempotency_key: str | None = None,
         conversation_id: str | None = None,
         verified_binding_id: str | None = None,
+        participant: Participant | None = None,
+        participant_source: tuple[str, str, str] | None = None,
+        participant_conversation: str | None = None,
+        participant_private: bool = False,
     ) -> InteractionRecord:
         self._validate_message(channel, counterparty, content)
         if kind == "subject_message":
@@ -71,6 +76,25 @@ class InteractionStore:
                 None,
                 conversation_id=conversation_id,
             )
+            if participant_source is not None:
+                namespace, sender, name = participant_source
+                participant = ParticipantStore.source(
+                    connection,
+                    subject_id,
+                    channel,
+                    namespace,
+                    sender,
+                    label=name,
+                )
+            if participant is not None:
+                ParticipantStore.link(
+                    connection,
+                    subject_id,
+                    record.interaction_id,
+                    participant,
+                    participant_conversation or counterparty,
+                    private=participant_private,
+                )
             if verified_binding_id is not None:
                 connection.execute(
                     "UPDATE private_conversation_messages SET author_verified=1 "
@@ -303,6 +327,24 @@ class InteractionStore:
             channel=channel,
             counterparty=counterparty,
         )
+        if related_interaction_id:
+            who = ParticipantStore.for_message_connection(
+                connection, subject_id, related_interaction_id
+            )
+            if who is not None:
+                source = connection.execute(
+                    "SELECT conversation_key,visibility FROM participant_message_links "
+                    "WHERE interaction_id=? AND subject_id=?",
+                    (related_interaction_id, subject_id),
+                ).fetchone()
+                ParticipantStore.link(
+                    connection,
+                    subject_id,
+                    interaction_id,
+                    who,
+                    source[0],
+                    private=source[1] == "private",
+                )
         return self._load_connection(connection, interaction_id)
 
     @staticmethod

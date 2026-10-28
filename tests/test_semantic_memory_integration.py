@@ -24,12 +24,17 @@ from noyra.model import (
 
 class SemanticMemoryIntegrationTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_model_candidate_is_supervised_and_originals_remain(self: Self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            kernel = SubjectKernel(
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            SubjectKernel(
                 Path(directory) / "noyra.sqlite3",
                 "Noyra-semantic-integration",
                 content_hash({"seed": "semantic-integration"}),
-            )
+            ) as kernel,
+        ):
+            kernel.boot()
+            kernel.orient()
+            kernel.activate()
             event = EventStore(kernel.database).append(
                 kernel.subject_id, "observation", "test", {"topic": "continuity"}
             )
@@ -80,7 +85,66 @@ class SemanticMemoryIntegrationTestCase(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(await integrator.run_due(), "memory_integration_committed")
             self.assertEqual(memories.get(first.memory_id).status, "superseded")
+            self.assertEqual(memories.get(second.memory_id).status, "superseded")
+            self.assertEqual(memories.get(first.memory_id).content, first.content)
+            self.assertEqual(memories.get(second.memory_id).content, second.content)
             with kernel.database.connection() as connection:
                 self.assertEqual(
                     connection.execute("SELECT COUNT(*) FROM memories").fetchone()[0], 3
                 )
+
+    async def test_inactive_subject_never_sends_or_rewrites_memory(self: Self) -> None:
+        for state in ("booting", "paused", "stopped"):
+            with (
+                self.subTest(state=state),
+                tempfile.TemporaryDirectory() as directory,
+                SubjectKernel(
+                    Path(directory) / "noyra.sqlite3",
+                    "Noyra-inactive-memory",
+                    content_hash({"seed": "inactive-memory"}),
+                ) as kernel,
+            ):
+                if state != "booting":
+                    kernel.boot()
+                    kernel.orient()
+                    kernel.activate()
+                    if state == "paused":
+                        kernel.pause("synthetic pause")
+                    else:
+                        kernel.stop("synthetic stop")
+                event = EventStore(kernel.database).append(
+                    kernel.subject_id, "observation", "test", {"topic": "continuity"}
+                )
+                memories = MemoryStore(kernel.database)
+                originals = [
+                    memories.create(
+                        kernel.subject_id,
+                        "semantic",
+                        text,
+                        salience=0.8,
+                        confidence=0.8,
+                        source_event_ids=(event.event_id,),
+                    )
+                    for text in ("Continuity needs state.", "Continuity needs history.")
+                ]
+                provider = FakeProvider([])
+                gateway = ModelGateway(
+                    provider,
+                    ModelLedger(kernel.database),
+                    model="test-model",
+                    limits=BudgetLimits(10, 100_000, 100_000, 1_000_000),
+                    pricing=ModelPricing(),
+                    retry_policy=RetryPolicy(max_attempts=1),
+                )
+                integrator = SemanticMemoryIntegrator(
+                    kernel.database, kernel.subject_id, gateway, CognitionSettings()
+                )
+                self.assertEqual(await integrator.run_due(), "memory_integration_model_failed")
+                self.assertEqual(provider.requests, [])
+                self.assertEqual([memories.get(item.memory_id) for item in originals], originals)
+                with kernel.database.connection() as connection:
+                    for table in ("model_calls", "model_attempts", "memory_integrations"):
+                        self.assertEqual(
+                            connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0],
+                            0,
+                        )

@@ -25,6 +25,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from noyra.core.at_rest import AtRestConfig, VolumeEncryptionProbe, VolumeEncryptionStatus
+from noyra.core.identity import validate_subject_id
 from noyra.core.types import canonical_json, content_hash
 
 from .activation_contract import validate_activation_receipt, validate_activation_request
@@ -72,7 +73,6 @@ MAX_CHUNK_BYTES = 4 * 1024 * 1024
 MAX_CHUNKS = 2_000_000
 _NONCE = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}\Z")
-_SUBJECT = re.compile(r"Noyra-[A-Za-z0-9_-]{1,120}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 _REFERENCE = re.compile(r"(?:systemd|kms|secret):[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,511}\Z")
 _FILE_REFERENCE = re.compile(r"file:/[A-Za-z0-9_./@:+,-]{1,510}\Z")
@@ -340,10 +340,12 @@ class MigrationAgent:
             if not isinstance(request, Mapping) or set(request) - {"subject_id", "policy_revision"}:
                 raise ValueError("enrollment request is invalid")
             subject_id = request.get("subject_id")
-            if not isinstance(subject_id, str) or not re.fullmatch(
-                r"Noyra-[A-Za-z0-9_-]{1,120}", subject_id
-            ):
+            if not isinstance(subject_id, str):
                 raise ValueError("enrollment subject is invalid")
+            try:
+                validate_subject_id(subject_id)
+            except ValueError as error:
+                raise ValueError("enrollment subject is invalid") from error
         return EnrollmentReceipt(
             self.target_id, self.key_fingerprint, self.generation, self.host_identity
         )
@@ -431,7 +433,6 @@ class MigrationAgent:
             not isinstance(task_id, str)
             or not _IDENTITY.fullmatch(task_id)
             or not isinstance(subject_id, str)
-            or not _SUBJECT.fullmatch(subject_id)
             or target_id != self.target_id
             or not isinstance(source_epoch, str)
             or not _IDENTITY.fullmatch(source_epoch)
@@ -443,6 +444,10 @@ class MigrationAgent:
             or not _HEX64.fullmatch(recipient_fingerprint)
         ):
             raise ValueError("migration binding request identity is invalid")
+        try:
+            validate_subject_id(subject_id)
+        except ValueError as error:
+            raise ValueError("migration binding request identity is invalid") from error
         if self._signing_key is None or self.public_key is None:
             raise ValueError("target signing identity is not configured")
         if self.data_root is None:
@@ -1344,11 +1349,11 @@ class MigrationAgent:
         artifact_sha256 = self._verify_artifact(artifact_path, values)
         subject_id = values.get("subject_id")
         tip = values.get("event_chain_tip")
-        if subject_id is not None and (
-            not isinstance(subject_id, str)
-            or not re.fullmatch(r"Noyra-[A-Za-z0-9_-]{1,120}", subject_id)
-        ):
-            raise ValueError("migration subject identity is invalid")
+        if subject_id is not None:
+            try:
+                validate_subject_id(subject_id)
+            except ValueError as error:
+                raise ValueError("migration subject identity is invalid") from error
         if tip is not None and (not isinstance(tip, str) or not re.fullmatch(r"[0-9a-f]{64}", tip)):
             raise ValueError("migration event-chain tip is invalid")
         restore_values = values
@@ -1796,6 +1801,11 @@ class MigrationAgent:
             raise ValueError("migration artifact path or id is invalid")
         if type(byte_size) is not int or not 0 <= byte_size <= 10 * 1024 * 1024 * 1024:
             raise ValueError("migration artifact metadata is invalid")
+        if values.get("subject_id") is not None:
+            try:
+                validate_subject_id(values["subject_id"])
+            except ValueError as error:
+                raise ValueError("migration subject identity is invalid") from error
         artifact_sha256 = values.get("artifact_sha256")
         if artifact_sha256 is not None and (
             not isinstance(artifact_sha256, str)

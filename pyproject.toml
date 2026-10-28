@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=75"]
+requires = ["setuptools>=84.1.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -53,10 +53,6 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
-
-[tool.ruff.lint.per-file-ignores]
-# These artwork builders intentionally contain Chinese display punctuation.
-"output/noyra-continuity-20261008/build-*.py" = ["RUF001"]
 
 [tool.mypy]
 python_version = "3.11"

@@ -822,3 +822,48 @@ and separates service soak, deterministic synthetic soak, fault injection, and r
   call limits. Repeated no-change thoughts enter cooldown, identical conclusions are rejected, and
   internally generated goals require current affect plus a separate daily limit. Tune this behavior
   with the `NOYRA_THOUGHT_*` settings.
+
+
+## Installation outcomes and explicit startup (2026-10-22)
+
+The installer builds public program artifacts with a scoped `umask 0022`, regardless
+of the caller's mask. Data, backup and key permissions are unchanged. Deployment
+maintenance runs with the staged/new release's isolated Python (`-I`); it does not
+require a globally installed `noyra` or an old release's dependencies. A dependency-free
+release-space check precedes dependency installation; the full storage/backup budget
+runs before stopping the existing service. The full preflight conservatively retains
+its additional 2 GB release reserve even after building; low-space machines may
+therefore need more free space than before.
+A real `noyra`-user import check runs before stopping the old service and again
+after publication, before migration. The release includes its own
+`deployment-maintenance.py` entrypoint.
+
+An already stopped service stays stopped by default. Installation/schema completion
+is **not** runtime-readiness verification. After reviewing configuration and resource
+budgets, explicitly opt into startup and readiness checking with:
+
+```bash
+sudo ./scripts/install-ubuntu.sh --profile base --start
+```
+
+This starts the service for this installation; it does not imply boot auto-unlock or
+change the service's enablement policy. `--start` cannot be combined with `--rollback`.
+A running service continues to be restarted and checked after an upgrade as before.
+No automatic payment, external-gate result, or disk auto-unlock is enabled by this flag.
+
+Once the managed installation lifecycle begins, normal success and failure exits
+write a root-only JSON outcome to `/opt/noyra/install-reports/install-*.json`
+(directory 0700, files 0600). The report records the last phase, exit status, selected
+release, backup verification, migration attempt/completion, service/startup intent,
+and whether readiness actually passed. It does not dump environment variables, raw
+command output or credentials. Failure to persist it is reported explicitly without silently
+rolling back a successfully deployed database. Argument-validation failures before
+this lifecycle, initial prerequisite/storage checks, and SIGKILL/power loss cannot
+produce a final report; absence is not success.
+
+Code-only rollback checks the previous version's schema compatibility before stopping
+or switching, and rechecks after stopping. Failure after migration but before pointer
+publication must also pass the old-schema contract before restarting old code; otherwise
+the new runtime is retained and the service stays stopped for recovery. The installer
+never automatically overwrites migrated data from a cold backup. Read the saved recovery
+manifest and restore a verified compatible backup when required.

@@ -40,7 +40,7 @@
 **重要边界：这不是对全部 143,475 行人工逐行证明正确，也没有获得全项目路径/分支覆盖率。** 自动 AST/sink 扫描、读到一个文件的部分函数、测试命中一个模块，不能冒称该文件所有代码均已人工逐行通过。用户要求的“逐代码级别”在本报告中体现为具体函数、分支、状态、触发步骤与版本对照；未审完的每一行不会被伪装成已审完。
 
 覆盖索引：
-[coverage.json](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/coverage.json)
+coverage.json（原始证据私下保留）
 
 ### 1.3 风险口径
 
@@ -114,10 +114,10 @@ development 模式不受这一新门影响。不是任何大小的目录都会�
 - 混合树 HEAD 严格检查约 4.57 秒；较早全文件树约 6.19 秒。这些时间受机器和并行测试 IO 影响，**不是生产容量 benchmark**。
 
 证据：
-[mixed-tree-head.json](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/mixed-tree-head.json)、
-[mixed-tree-baseline.json](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/mixed-tree-baseline.json)、
-[count-head.json](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/count-head.json)、
-[probe-head.json](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/probe-head.json)。
+mixed-tree-head.json（原始证据私下保留）、
+mixed-tree-baseline.json（原始证据私下保留）、
+count-head.json（原始证据私下保留）、
+probe-head.json（原始证据私下保留）。
 
 **归因依据**
 
@@ -170,10 +170,10 @@ development 模式不受这一新门影响。不是任何大小的目录都会�
 - `cbdfaa0` 和 `170d476` 的同一探针输出一致，故判为原生遗漏，不是上一轮引入的次生问题。
 
 证据：
-[extra-head.json](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/extra-head.json)、
-[extra-baseline.json](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/extra-baseline.json)、
-[probe-head.json](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/probe-head.json)、
-[probe-baseline.json](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/probe-baseline.json)。
+extra-head.json（原始证据私下保留）、
+extra-baseline.json（原始证据私下保留）、
+probe-head.json（原始证据私下保留）、
+probe-baseline.json（原始证据私下保留）。
 
 **根因修复建议及次生风险**
 
@@ -240,8 +240,8 @@ model_attempts = 0
 基线与 HEAD 均复现，相关聚合逻辑不是本轮修改，因此判为原生。
 
 证据：
-[extra-head.json](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/extra-head.json)、
-[extra-baseline.json](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/extra-baseline.json)。
+extra-head.json（原始证据私下保留）、
+extra-baseline.json（原始证据私下保留）。
 
 **根因修复建议及次生风险**
 
@@ -283,8 +283,8 @@ helper 虽会 `copy_context()` 给工作线程，但入口的 `_SYNC_HTTP_GATE.a
 这是线程/计时隔离探针，callback 不发网络请求；它验证 helper 语义，不是假装做过生产 RPC 的晚到发送实验。相关 helper 在基线与 HEAD 相同，本轮新增迁移 transport 对它的使用扩大了需要统一验证的调用范围，但**没有凭此把原生根因改判为次生**。
 
 证据：
-[deadline-head.json](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/deadline-head.json)、
-[deadline-baseline.json](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/deadline-baseline.json)。
+deadline-head.json（原始证据私下保留）、
+deadline-baseline.json（原始证据私下保留）。
 
 **根因修复建议及次生风险**
 
@@ -322,9 +322,9 @@ helper 虽会 `copy_context()` 给工作线程，但入口的 `_SYNC_HTTP_GATE.a
 - 本次审计证据脚本以 `.py.txt` 保存；没有为了存证向项目新增未格式化的可执行 Python 模块。
 
 证据：
-[ruff-pinned-all-format.log](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/ruff-pinned-all-format.log)、
-[doc-format-pinned-baseline.json](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/doc-format-pinned-baseline.json)、
-[tool-versions.json](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/tool-versions.json)。
+ruff-pinned-all-format.log（原始证据私下保留）、
+doc-format-pinned-baseline.json（原始证据私下保留）、
+tool-versions.json（原始证据私下保留）。
 
 **根因修复建议及次生风险**
 
@@ -385,13 +385,13 @@ helper 虽会 `copy_context()` 给工作线程，但入口的 `_SYNC_HTTP_GATE.a
 
 ### 5.2 主要证据入口
 
-- [机器可读汇总](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/summary.json)
-- [Linux 新全量分片清单](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/linux-summary.json)
-- [Windows 边界结果](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/windows-targeted.log)
-- [前端结果](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/frontend.log)
-- [nobody 原始失败](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/nobody.log)
-- [nobody 隔离后结果](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/nobody-host-isolated-final.log)
-- [明确列出的主机隔离 plugin](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/audit_host_isolation.py.txt)
+- 机器可读汇总（原始证据私下保留）
+- Linux 新全量分片清单（原始证据私下保留）
+- Windows 边界结果（原始证据私下保留）
+- 前端结果（原始证据私下保留）
+- nobody 原始失败（原始证据私下保留）
+- nobody 隔离后结果（原始证据私下保留）
+- 明确列出的主机隔离 plugin（原始证据私下保留）
 
 四个 Linux 分片均有本轮 `.log` 和 JUnit `.xml`；Windows 与 nobody 最终运行也有 XML。原始结果留存，未把旧轮次 log 拷贝过来充当新执行结果。
 
@@ -440,8 +440,8 @@ helper 虽会 `copy_context()` 给工作线程，但入口的 `_SYNC_HTTP_GATE.a
 - 不创建修复提交、不自动回滚，不把审计文档作为生产源码变更。
 
 证据：
-[manifest-before.json](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/manifest-before.json)、
-[manifest-after.json](E:/我的项目/Noyra/开发版/docs/audit/2026-10-21-independent-readonly-evidence/manifest-after.json)。
+manifest-before.json（原始证据私下保留）、
+manifest-after.json（原始证据私下保留）。
 
 复现脚本集中在证据目录，以 `.py.txt` 原样文本保存，避免只读审计证据成为项目新增可执行模块或被全仓库 lint 当成生产代码。复现时复制到仓库外并恢复 `.py` 后缀：`independent_probes.py.txt`、`mixed_tree_probe.py.txt`、`extra_probes.py.txt`、`deadline_probe.py.txt`；host isolation plugin 同理。它们的参数是**隔离源码快照根目录**，依赖与项目锁一致的 Linux Python 环境；创建/删除的测试数据位于脚本自己的 `/var/tmp` 随机临时目录。混合树探针会创建约十万条目，应在独立测试机或有空间的隔离环境运行，不能对真实 data_root 执行。
 

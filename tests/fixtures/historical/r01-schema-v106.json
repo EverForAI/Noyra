@@ -1,0 +1,12 @@
+{
+  "format_version": 1,
+  "schema_version": 106,
+  "source_commit": "ac17c5d925237864a65a24e26668e9356cc193e7",
+  "source_note": "Actual schema 106 baseline; synthetic data including real Social workflow with FakeProvider, no external calls",
+  "archive": "r01-schema-v106.sqlite3.gz",
+  "archive_sha256": "c6657268a04a8fbe2d4022ce33424a7cde51730ba130b8e192d8a94a8cbbd049",
+  "database_sha256": "fc34154dfb95ccdeb913a31ff072100878c788fd7237e50d4492519a7d0ae59c",
+  "subject_id": "Noyra-r01-validation",
+  "relationship_id": "rel_5ab6e2e902db4b66ac670cea37828d4a",
+  "anchor_event_id": "evt_b5f1a58cb5bf49e08a3d7ce8d509437b"
+}

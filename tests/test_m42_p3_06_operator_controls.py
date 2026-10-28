@@ -621,6 +621,47 @@ def test_operator_route_errors_inventory_and_model_call_reconciliation(
         {"call_id": retry_call.call_id, "status": "prepared", "idempotent": True},
     )
 
+    known_retry_attempt = retry_ledger.authorize_attempt(
+        retry_call.call_id,
+        BudgetLimits(10, 10_000, 10_000, 1_000_000),
+        reserved_input_tokens=1,
+        reserved_output_tokens=1,
+        reserved_cost_microusd=1,
+    )
+    retry_ledger.start_attempt(known_retry_attempt.attempt_id)
+    retry_ledger.finish_attempt(
+        known_retry_attempt.attempt_id,
+        "failed",
+        usage=None,
+        cost_microusd=None,
+        error_code="synthetic_known_retry_failure",
+    )
+    retry_ledger.finish_call(
+        retry_call.call_id,
+        "failed",
+        error_code="synthetic_known_retry_failure",
+    )
+    assert _request(
+        instance,
+        retry_path,
+        token=operator_token,
+        payload={"reason": "not enough evidence", "outcome": "failed"},
+    ) == (409, {"error": "model_unknown_retry_resolution_evidence_required"})
+    status, resolved = _request(
+        instance,
+        retry_path,
+        token=operator_token,
+        payload={
+            "reason": "provider record reviewed; residual duplicate risk accepted",
+            "outcome": "failed",
+            "resolution_evidence": "provider record PR-123 confirms the request was not executed",
+            "accept_duplicate_risk": True,
+        },
+    )
+    assert status == 200
+    assert resolved["retry_grant_closed"] is True
+    assert resolved["duplicate_risk_accepted"] is True
+
     assert _request(
         instance,
         "/api/admin/actions/missing/reconcile",

@@ -20,6 +20,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from noyra.core.database import CURRENT_SCHEMA_VERSION, Database
+from noyra.core.identity import validate_subject_id
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 
 from .fencing import EpochLease
@@ -98,7 +99,11 @@ class RecoveryCoordinator:
         """Register a verified backup object before it can be used for recovery."""
         if self.database is None:
             raise ValueError("backup registry requires a database")
-        if not _ID.fullmatch(subject_id) or not _ID.fullmatch(backup_id):
+        try:
+            validate_subject_id(subject_id)
+        except ValueError as error:
+            raise ValueError("backup identity is invalid") from error
+        if not _ID.fullmatch(backup_id):
             raise ValueError("backup identity is invalid")
         if not re.fullmatch(r"[0-9a-f]{64}", content_hash_value):
             raise ValueError("backup content hash is invalid")

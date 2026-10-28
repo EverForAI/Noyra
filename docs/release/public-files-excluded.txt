@@ -1,0 +1,5 @@
+# Exact tracked paths excluded from the curated public source ZIP; see README.md.
+.superpowers/sdd/2026-10-01-admin-upgrade/task-1-report.md	Local task handoff notes; not source-release inputs.
+.superpowers/sdd/2026-10-01-deployment-modes/task-3-report.md	Local task handoff notes; not source-release inputs.
+.superpowers/sdd/2026-10-03-followup-audit-remediation/task-3-report.md	Local task handoff notes; not source-release inputs.
+site/pelican-bike.html	Standalone animation experiment; not runtime source or required site assets.

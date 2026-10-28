@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import re
@@ -16,8 +17,10 @@ import tempfile
 from contextlib import closing, contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlencode, urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, urlopen
 
 _SAFE_LABEL = re.compile(r"[A-Za-z0-9_.:-]{1,80}\Z")
 _SYSTEMD_FIELDS = {"ActiveState", "SubState", "MainPID", "NRestarts", "Result"}
@@ -37,7 +40,7 @@ def _safe_health_body(body: object) -> dict[str, object]:
     if not isinstance(body, dict):
         return {}
     result: dict[str, object] = {}
-    for key in ("status", "service", "version"):
+    for key in ("status", "service", "version", "reason_code"):
         value = _safe_label(body.get(key))
         if value is not None:
             result[key] = value
@@ -62,6 +65,96 @@ def _health(url: str) -> dict[str, object]:
         return {"status": error.code, "body": safe_body}
     except (OSError, URLError, ValueError, TimeoutError) as error:
         return {"status": None, "error": type(error).__name__}
+
+
+class _NoMonitorRedirect(HTTPRedirectHandler):
+    def redirect_request(
+        self, req: Any, fp: Any, code: Any, msg: Any, headers: Any, newurl: Any
+    ) -> None:
+        return None
+
+
+def _read_monitor_token(data_dir: Path) -> str:
+    token_path = data_dir / "cache" / "monitoring" / "read-token"
+    if token_path.is_symlink() or not token_path.is_file():
+        raise ValueError("monitoring token is unavailable")
+    data_meta = data_dir.lstat()
+    token_meta = token_path.lstat()
+    if token_meta.st_nlink != 1 or token_meta.st_dev != data_meta.st_dev:
+        raise ValueError("unsafe monitoring token file")
+    if os.name == "posix" and os.geteuid() == 0:
+        if token_meta.st_uid != data_meta.st_uid or token_meta.st_mode & 0o077:
+            raise ValueError("unsafe monitoring token permissions")
+        descriptor = os.open(token_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            raw = os.read(descriptor, 65)
+        finally:
+            os.close(descriptor)
+        token = raw.decode("ascii")
+    else:
+        token = token_path.read_text(encoding="ascii")
+    if not re.fullmatch(r"[0-9a-f]{64}", token):
+        raise ValueError("invalid monitoring token")
+    return token
+
+
+def _local_monitoring(
+    data_dir: Path,
+    health_base: str,
+    *,
+    since: str | None,
+    cursors: dict[str, object] | None,
+) -> dict[str, Any]:
+    """Read aggregates from the owner; never send its narrow token off-host."""
+    try:
+        base = urlsplit(health_base)
+        if (
+            base.scheme != "http"
+            or not base.hostname
+            or not ipaddress.ip_address(base.hostname).is_loopback
+            or base.username is not None
+            or base.password is not None
+            or base.query
+            or base.fragment
+            or base.path not in {"", "/"}
+        ):
+            raise ValueError("monitoring requires a loopback origin")
+        token = _read_monitor_token(data_dir)
+        state = {"since": since, "activity_cursors": cursors}
+        query = urlencode({"state": json.dumps(state, separators=(",", ":"))})
+        if len(query) > 4096:
+            raise ValueError("monitoring cursor too large")
+        request = Request(
+            health_base.rstrip("/") + "/api/v1/admin/monitoring/soak?" + query,
+            headers={"X-Noyra-Monitor-Token": token},
+        )
+        opener = build_opener(ProxyHandler({}), _NoMonitorRedirect())
+        with opener.open(request, timeout=3) as response:
+            raw = response.read(131_073)
+        if len(raw) > 131_072:
+            raise ValueError("monitoring response too large")
+        payload = json.loads(raw)
+        if not isinstance(payload, dict) or payload.get("format") != "noyra-monitoring/v1":
+            raise ValueError("invalid monitoring response")
+        if any(
+            not isinstance(payload.get(k), dict)
+            for k in ("model_activity", "providers", "retention", "activity_cursors")
+        ):
+            raise ValueError("incomplete monitoring response")
+        return payload
+    except HTTPError as error:
+        with closing(error):
+            return {"available": False, "error": "HTTPError", "status": error.code}
+    except (OSError, ValueError, UnicodeError, URLError, TimeoutError) as error:
+        return {"available": False, "error": type(error).__name__}
+
+
+def _database_error(error: BaseException) -> dict[str, object]:
+    result: dict[str, object] = {"available": False, "error": type(error).__name__}
+    name = _safe_label(getattr(error, "sqlite_errorname", None))
+    if name is not None:
+        result["sqlite_errorname"] = name
+    return result
 
 
 def _systemd() -> dict[str, object]:
@@ -176,7 +269,7 @@ def _retention(database: Path) -> dict[str, object]:
                 "FROM retention_runs ORDER BY started_at DESC LIMIT 1"
             ).fetchone()
     except (sqlite3.Error, OSError, ValueError) as error:
-        return {"available": False, "error": type(error).__name__}
+        return _database_error(error)
     return {
         "available": True,
         "started_at": _safe_timestamp(row[0]) if row else None,
@@ -209,7 +302,7 @@ def _provider_health(database: Path, *, since: str | None = None) -> dict[str, o
                 else []
             )
     except (sqlite3.Error, OSError, ValueError) as error:
-        return {"available": False, "error": type(error).__name__}
+        return _database_error(error)
     states: dict[str, dict[str, int]] = {}
     for kind, state, count in rows:
         safe_kind = _safe_label(kind)
@@ -315,7 +408,7 @@ def _model_activity(
                     ).fetchone()[0]
                 )
     except (sqlite3.Error, OSError, ValueError) as error:
-        return {"available": False, "error": type(error).__name__}
+        return _database_error(error)
 
     def summarize(rows: list[tuple[object, ...]]) -> dict[str, object]:
         status_counts: dict[str, int] = {}
@@ -468,18 +561,34 @@ def collect_snapshot(
     activity_cursor_sink: dict[str, dict[str, str]] | None = None,
     fault_state: dict[str, object] | None = None,
     output: Path | None = None,
+    use_runtime_monitor: bool = False,
 ) -> dict[str, object]:
     collected_at = now or datetime.now(UTC).isoformat(timespec="milliseconds")
     service = _systemd()
     live = _health(f"{health_base}/health/live")
     ready = _health(f"{health_base}/health/ready")
-    activity = _model_activity(
-        data_dir / "noyra.sqlite3",
-        since=since,
-        until=collected_at,
-        cursors=activity_cursors,
-        cursor_sink=activity_cursor_sink,
+    monitoring = (
+        _local_monitoring(data_dir, health_base, since=since, cursors=activity_cursors)
+        if use_runtime_monitor
+        else {}
     )
+    runtime_data = monitoring.get("format") == "noyra-monitoring/v1"
+    if runtime_data:
+        activity = monitoring["model_activity"]
+        providers = monitoring["providers"]
+        retention = monitoring["retention"]
+        if activity_cursor_sink is not None:
+            activity_cursor_sink.update(monitoring["activity_cursors"])
+    else:
+        activity = _model_activity(
+            data_dir / "noyra.sqlite3",
+            since=since,
+            until=collected_at,
+            cursors=activity_cursors,
+            cursor_sink=activity_cursor_sink,
+        )
+        providers = _provider_health(data_dir / "noyra.sqlite3", since=since)
+        retention = _retention(data_dir / "noyra.sqlite3")
     degraded = (
         live.get("status") != 200
         or ready.get("status") != 200
@@ -509,9 +618,14 @@ def collect_snapshot(
             },
             "database": _database_size(data_dir / "noyra.sqlite3"),
         },
-        "providers": _provider_health(data_dir / "noyra.sqlite3", since=since),
+        "providers": providers,
         "model_activity": activity,
-        "retention": _retention(data_dir / "noyra.sqlite3"),
+        "retention": retention,
+        "monitoring": {
+            "source": "runtime" if runtime_data else "database",
+            "runtime_error": monitoring.get("error"),
+        },
+        "integrity": monitoring.get("integrity"),
         "fault_window": window,
     }
 
@@ -684,6 +798,7 @@ def main() -> int:
         activity_cursor_sink=next_activity_cursors,
         fault_state=state,
         output=args.output,
+        use_runtime_monitor=True,
     )
     if state_reset_reason is not None:
         snapshot["state_reset_reason"] = state_reset_reason

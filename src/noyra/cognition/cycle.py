@@ -42,10 +42,12 @@ from noyra.model import (
 )
 from noyra.model.errors import (
     BudgetExhaustedError,
+    EmbeddingShutdownIncompleteError,
     ModelCallStateError,
     ProviderCallError,
     StructuredOutputError,
 )
+from noyra.model.request_identity import business_request_key
 from noyra.model.types import CallRecord
 from noyra.sleep import FatigueInputs, FatigueTracker, SleepEngine
 from noyra.sleep.types import SleepReflectionPlan, SleepRunRecord
@@ -104,6 +106,7 @@ class CognitionCycle:
         reader: SafeWebReader | None = None,
         embedding_settings: EmbeddingSettings | None = None,
         embedding_call_authorizer: Callable[[], None] | None = None,
+        embedding_observed_dimension_recorder: Callable[[int], None] | None = None,
         common_knowledge: CommonKnowledgeStore | None = None,
         clock: Callable[[], str] = utc_now,
     ):
@@ -134,6 +137,7 @@ class CognitionCycle:
                 OpenAIEmbeddingProvider(
                     embedding_settings,
                     call_authorizer=embedding_call_authorizer,
+                    observed_dimension_recorder=embedding_observed_dimension_recorder,
                 ),
                 EmbeddingLedger(kernel.database, clock=clock),
                 subject_id=self.subject_id,
@@ -297,6 +301,7 @@ class CognitionCycle:
                 component.memories.embedding_index = self.embedding_index
         self._bootstrapped = False
         self._closed = False
+        self._close_lock = asyncio.Lock()
 
     def bootstrap(self) -> None:
         if self._bootstrapped:
@@ -522,21 +527,28 @@ class CognitionCycle:
             return self._finalize_genesis_cycle(current)
         return "cognition_committed"
 
-    async def aclose(self) -> None:
+    async def aclose(self, *, embedding_timeout: float | None = None) -> None:
         if self._closed:
             return
-        self._closed = True
-        await self.autonomous_research.aclose()
-        await self.reader.aclose()
-        if self.embedding_gateway is not None:
-            self.embedding_gateway.close(wait=True)
-        close_gateway = getattr(self.gateway, "aclose", None)
-        if close_gateway is not None:
-            await close_gateway()
-        else:
-            close_provider = getattr(self.gateway.provider, "aclose", None)
-            if close_provider is not None:
-                await close_provider()
+        async with self._close_lock:
+            if self._closed:
+                return
+            # An incomplete embedding drain must not be mistaken for success:
+            # the service must keep its runtime lock until workers have exited.
+            if self.embedding_gateway is not None and not await self.embedding_gateway.aclose(
+                timeout=embedding_timeout
+            ):
+                raise EmbeddingShutdownIncompleteError()
+            await self.autonomous_research.aclose()
+            await self.reader.aclose()
+            close_gateway = getattr(self.gateway, "aclose", None)
+            if close_gateway is not None:
+                await close_gateway()
+            else:
+                close_provider = getattr(self.gateway.provider, "aclose", None)
+                if close_provider is not None:
+                    await close_provider()
+            self._closed = True
 
     async def reflect_sleep(self, run: SleepRunRecord) -> SleepReflectionPlan:
         self.autonomous_projects.reflect_for_sleep(run.sleep_id)
@@ -868,7 +880,9 @@ class CognitionCycle:
                 purpose,
                 self._messages(source, observation),
                 CognitionProposal,
-                idempotency_key=(f"world-cognition:{observation.observation_id}:{attempt_number}"),
+                idempotency_key=business_request_key(
+                    self.kernel.database, self.subject_id, purpose
+                ),
                 max_output_tokens=self.settings.max_output_tokens,
                 temperature=self.settings.temperature,
             )

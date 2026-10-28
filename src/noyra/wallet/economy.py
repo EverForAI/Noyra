@@ -291,7 +291,12 @@ class WalletEconomyStore:
             return self._bounty_from_row(row, status=status)
 
     def list_bounties(
-        self, subject_id: str, *, status: str | None = None, limit: int = 100
+        self,
+        subject_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+        before: tuple[str, str] | None = None,
     ) -> list[BountyRecord]:
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError("invalid bounty limit")
@@ -313,6 +318,17 @@ class WalletEconomyStore:
             else:
                 query += " AND status=?"
                 args.append(status)
+        if before is not None:
+            if (
+                not isinstance(before, tuple)
+                or len(before) != 2
+                or not all(isinstance(value, str) for value in before)
+                or len(before[0]) > 40
+                or len(before[1]) > 128
+            ):
+                raise ValueError("invalid bounty cursor")
+            query += " AND (created_at,bounty_id)<(?,?)"
+            args.extend(before)
         query += " ORDER BY created_at DESC,bounty_id DESC LIMIT ?"
         args.append(limit)
         with self.database.connection() as c:
@@ -382,12 +398,6 @@ class WalletEconomyStore:
             ).fetchone()
             if bounty is None:
                 raise NotFoundError("wallet bounty not found")
-            status = self._effective_bounty_status(bounty)
-            if status != bounty["status"]:
-                self._set_bounty_status(c, bounty, "expired", "expiry", "system")
-                status = "expired"
-            if status != "published" or _parse_time(now) < _parse_time(bounty["opens_at"]):
-                raise ValueError("bounty is not accepting submissions")
             existing = c.execute(
                 "SELECT * FROM wallet_bounty_submissions WHERE subject_id=? AND bounty_id=? AND idempotency_key=?",
                 (subject_id, bounty_id, proposal.idempotency_key),
@@ -396,6 +406,12 @@ class WalletEconomyStore:
                 if not self._submission_input_matches(existing, proposal):
                     raise ValueError("submission idempotency key conflicts with different input")
                 return self._submission_from_row(existing)
+            status = self._effective_bounty_status(bounty)
+            if status != bounty["status"]:
+                self._set_bounty_status(c, bounty, "expired", "expiry", "system")
+                status = "expired"
+            if status != "published" or _parse_time(now) < _parse_time(bounty["opens_at"]):
+                raise ValueError("bounty is not accepting submissions")
             count = c.execute(
                 "SELECT count(*) AS n FROM wallet_bounty_submissions WHERE bounty_id=? AND status IN ('submitted','accepted')",
                 (bounty_id,),

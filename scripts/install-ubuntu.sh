@@ -8,6 +8,7 @@ set -euo pipefail
 profile="${NOYRA_INSTALL_PROFILE:-base}"
 release_id="${NOYRA_RELEASE_ID:-}"
 rollback=false
+start_requested=false
 ready_timeout="${NOYRA_READY_TIMEOUT_SECONDS:-60}"
 backup_dir="${NOYRA_UPGRADE_BACKUP_DIR:-/var/backups/noyra}"
 backup_dir_default=false
@@ -37,6 +38,10 @@ while [[ $# -gt 0 ]]; do
       backup_dir_default=false
       shift 2
       ;;
+    --start)
+      start_requested=true
+      shift
+      ;;
     --rollback)
       rollback=true
       shift
@@ -47,6 +52,10 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+if [[ "$rollback" == true && "$start_requested" == true ]]; then
+  echo "--start cannot be combined with --rollback." >&2
+  exit 2
+fi
 case "$profile" in
   base|cloud) ;;
   *) echo 'Install profile must be base or cloud.' >&2; exit 2 ;;
@@ -69,6 +78,8 @@ SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SOURCE_DIR/scripts/lib/upgrade-components.sh"
 source "$SOURCE_DIR/scripts/lib/control-layout.sh"
 source "$SOURCE_DIR/scripts/lib/release-scripts.sh"
+source "$SOURCE_DIR/scripts/lib/release-source.sh"
+INSTALLER_REPORTER="$SOURCE_DIR/scripts/installer-report.py"
 INSTALL_DIR=/opt/noyra
 RELEASES_DIR="$INSTALL_DIR/releases"
 UPGRADE_INSTALL_DIR="$INSTALL_DIR/upgrade"
@@ -420,6 +431,35 @@ PY
   chmod 0600 "$RECOVERY_MANIFEST"
 }
 
+install_phase=prepare
+install_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+install_report_id="install-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+backup_restore_verified=false
+migration_started=false
+migration_completed=false
+database_recovery_required=false
+readiness_verified=false
+service_observed=false
+write_install_report() {
+  local status="$1" final_service=unknown
+  # Do not turn a failed systemd query or a transitional state into "stopped".
+  case "$(systemctl is-active noyra 2>/dev/null || true)" in
+    active) final_service=running ;;
+    inactive|failed) final_service=stopped ;;
+    *) final_service=unknown ;;
+  esac
+  python3 -I "$INSTALLER_REPORTER" \
+    --directory "$INSTALL_DIR/install-reports" --report-id "$install_report_id" \
+    --started-at "$install_started_at" --exit-code "$status" --phase "$install_phase" \
+    --release "${release_id:-}" --source-sha "${source_sha:-}" \
+    --previous-release "$old_current" --backup "$backup_path" \
+    --backup-verified "$backup_restore_verified" --migration-started "$migration_started" \
+    --migration-completed "$migration_completed" --readiness-verified "$readiness_verified" \
+    --service-observed "$service_observed" --previously-running "$service_active" \
+    --start-requested "$start_requested" --service-state "$final_service" --rollback "$rollback" \
+    --database-recovery-required "$database_recovery_required"
+}
+
 service_active=false
 service_was_stopped=false
 switched=false
@@ -434,6 +474,7 @@ backup_inode=""
 noyra_uid=""
 noyra_gid=""
 staging=""
+source_snapshot=""
 cleanup_failed=false
 failure_handled=false
 upgrade_components_restored=true
@@ -503,6 +544,13 @@ cleanup_stale_backup_staging() {
 
 cleanup_staging() {
   local failed=false
+  if [[ -n "${source_snapshot:-}" && -d "$source_snapshot" && ! -L "$source_snapshot" ]]; then
+    if rm -rf --one-file-system -- "$source_snapshot"; then
+      source_snapshot=""
+    else
+      failed=true
+    fi
+  fi
   if [[ -n "${STORAGE_IDENTITY_TEMPORARY:-}" && ( -e "$STORAGE_IDENTITY_TEMPORARY" || -L "$STORAGE_IDENTITY_TEMPORARY" ) ]]; then
     rm -f -- "$STORAGE_IDENTITY_TEMPORARY" || failed=true
     STORAGE_IDENTITY_TEMPORARY=""
@@ -533,10 +581,17 @@ cleanup_staging() {
 }
 on_exit() {
   local status=$?
+  trap - ERR
   if [[ "$status" != 0 && "$failure_handled" == false ]]; then
-    on_error "$status"
+    on_error "$status" from-exit || status=$?
   fi
   cleanup_staging
+  if [[ "$cleanup_failed" == true ]]; then status=1; fi
+  if ! write_install_report "$status"; then
+    echo 'Could not persist installation report; inspect installer output. No automatic data rollback was attempted.' >&2
+    if [[ "$status" == 0 ]]; then status=1; fi
+  fi
+  exit "$status"
 }
 trap on_exit EXIT
 
@@ -683,6 +738,7 @@ ensure_backup_storage_identity() {
 }
 
 stop_old_service() {
+  service_observed=true
   if systemctl is-active --quiet noyra; then
     service_active=true
     systemctl stop noyra
@@ -705,9 +761,10 @@ migrate_database_before_switch() {
     echo 'The staged release has no usable migration Python.' >&2
     return 1
   }
+  migration_started=true
   runuser --user=noyra --group=noyra -- /usr/bin/env \
     NOYRA_DATA_DIR="$DATA_DIR" \
-    "$release_root/.venv/bin/python" - "$DATA_DIR/noyra.sqlite3" <<'PY'
+    "$release_root/.venv/bin/python" -I - "$DATA_DIR/noyra.sqlite3" <<'PY'
 import sys
 from pathlib import Path
 
@@ -717,10 +774,15 @@ Database(Path(sys.argv[1]), strict_schema_contract=True)
 PY
 }
 
+verify_service_user_import() {
+  runuser --user=noyra --group=noyra -- "$1" -I -c \
+    'import noyra; from noyra.core.database import Database; from noyra.service import ServiceSettings; assert noyra.__version__ and Database and ServiceSettings'
+}
+
 verify_release_schema_contract() {
   local release_path="$1"
   [[ -x "$release_path/.venv/bin/python" && -f "$DATA_DIR/noyra.sqlite3" ]] || return 1
-  "$release_path/.venv/bin/python" - "$DATA_DIR/noyra.sqlite3" <<'PY'
+  "$release_path/.venv/bin/python" -I - "$DATA_DIR/noyra.sqlite3" <<'PY'
 import inspect
 import sys
 from pathlib import Path
@@ -835,6 +897,7 @@ on_error() {
     if [[ "$restored" == true && -n "$old_current" && -f "$DATA_DIR/noyra.sqlite3" ]] && \
       ! verify_release_schema_contract "$RELEASES_DIR/$old_current"; then
       restored=false
+      database_recovery_required=true
       echo 'Previous release failed the schema contract check after rollback; leaving Noyra stopped.' >&2
     fi
     restore_profile_dropin_after_failure
@@ -847,7 +910,18 @@ on_error() {
       echo "The data backup is at ${backup_path}. Keep the service stopped until migration compatibility is confirmed; restore data manually if the new release ran migrations." >&2
     fi
   elif [[ "$release_published" == true ]]; then
-    rm -rf -- "$release_root"
+    # Migrations can succeed before component publication fails. Never restart
+    # schema-incompatible old code or discard the only compatible new runtime.
+    local old_data_compatible=true
+    if [[ "$migration_started" == true && -f "$DATA_DIR/noyra.sqlite3" ]]; then
+      if [[ -z "$old_current" ]] || ! verify_release_schema_contract "$RELEASES_DIR/$old_current"; then
+        old_data_compatible=false
+        database_recovery_required=true
+        service_was_stopped=false
+        echo 'Database may require the new schema; keeping the new release and leaving Noyra stopped. Restore a verified backup before starting incompatible old code.' >&2
+      fi
+    fi
+    if [[ "$old_data_compatible" == true ]]; then rm -rf -- "$release_root"; fi
     if [[ "$legacy_moved" == true ]]; then
       mkdir -p -- "$RELEASES_DIR/$legacy_id"
       mv -- "$RELEASES_DIR/$legacy_id/.venv" "$INSTALL_DIR/.venv" || true
@@ -870,7 +944,8 @@ on_error() {
   elif [[ "$service_was_stopped" == true && "$upgrade_components_restored" == true && "$migration_components_restored" == true ]]; then
     systemctl start noyra >/dev/null 2>&1 || true
   fi
-  exit "$status"
+  if [[ "${2:-}" != from-exit ]]; then exit "$status"; fi
+  return "$status"
 }
 trap on_error ERR
 
@@ -899,7 +974,18 @@ if [[ "$rollback" == true ]]; then
   if [[ -L "$PREVIOUS_LINK" ]]; then old_previous="$(read_pointer "$PREVIOUS_LINK")"; fi
   [[ -n "$old_current" && -n "$old_previous" ]] || { echo 'No usable current and previous releases are available.' >&2; exit 1; }
   [[ "$old_current" != "$old_previous" ]] || { echo 'Current and previous releases are identical; refusing rollback.' >&2; exit 1; }
+  install_phase=rollback_compatibility
+  if [[ -f "$DATA_DIR/noyra.sqlite3" ]]; then
+    verify_release_schema_contract "$RELEASES_DIR/$old_previous" || {
+      echo 'Previous code is incompatible with current data. Restore a compatible cold backup using the recovery procedure; no code pointer was changed.' >&2
+      exit 1
+    }
+  fi
   stop_old_service
+  if [[ -f "$DATA_DIR/noyra.sqlite3" ]]; then
+    verify_release_schema_contract "$RELEASES_DIR/$old_previous"
+  fi
+  install_phase=rollback_switch
   switched=true
   if [[ -n "$old_current" ]]; then
     atomic_pointer "$PREVIOUS_LINK" "$old_current"
@@ -907,12 +993,13 @@ if [[ "$rollback" == true ]]; then
   atomic_pointer "$CURRENT_LINK" "$old_previous"
   if [[ "$service_active" == true ]]; then
     if start_and_check; then
-      :
+      readiness_verified=true
     else
       echo 'Rollback selected the previous code but readiness failed; service remains stopped.' >&2
       on_error 1
     fi
   fi
+  install_phase=rollback_complete
   echo "Rolled back Noyra code to release: $old_previous"
   exit 0
 fi
@@ -967,21 +1054,52 @@ if [[ -n "$old_current" || -n "$legacy_venv" ]]; then
 fi
 assert_absolute_backup_dir
 ensure_backup_storage_identity
-python3 "$SOURCE_DIR/scripts/deployment-maintenance.py" preflight \
-  --releases "$RELEASES_DIR" --backups "$backup_dir" --data "$DATA_DIR"
+# This dependency-free space check runs before pip; the full storage/restore
+# budget below uses the newly installed package, never system or previous code.
+install_phase=bootstrap_space
+python3 -I - "$RELEASES_DIR" <<'PY'
+import shutil
+import sys
 
-# Prepare and import-check the new code while the old service is still running.
-# Its installed backup reader, never the old release's reader, verifies restore.
-staging="$RELEASES_DIR/.staging-${release_id}-$$-$RANDOM"
-python3 -m venv "$staging/.venv"
-"$staging/.venv/bin/python" -m pip install --require-hashes --requirement "$SOURCE_DIR/requirements.lock"
-if [[ "$profile" == cloud ]]; then
-  "$staging/.venv/bin/python" -m pip install --require-hashes --requirement "$SOURCE_DIR/requirements-cloud.lock"
+if shutil.disk_usage(sys.argv[1]).free < 2_500_000_000:
+    raise SystemExit("deployment_release_headroom_insufficient")
+PY
+
+# Pin all package, lockfile and deployment inputs before building. An ignored
+# extra source file must never inherit HEAD's version or external-gate evidence.
+if [[ -n "$source_sha" ]]; then
+  install_phase=source_snapshot
+  source_snapshot="$(mktemp -d "$RELEASES_DIR/.source-${release_id}.XXXXXX")"
+  noyra_snapshot_release_source "$SOURCE_DIR" "$source_sha" "$source_snapshot"
+  SOURCE_DIR="$source_snapshot"
 fi
-"$staging/.venv/bin/python" -m pip install --no-deps --no-build-isolation "$SOURCE_DIR"
-"$staging/.venv/bin/python" -m pip check
-"$staging/.venv/bin/python" -c 'from noyra.service import ServiceSettings; assert ServiceSettings'
-noyra_install_release_scripts "$SOURCE_DIR" "$staging"
+
+# Build at the final immutable path, but do not select it with current/previous
+# until every check succeeds. Relocating a venv breaks generated entrypoints.
+# cleanup_staging owns this unpublished path until publication below.
+staging="$release_root"
+install_phase=build_release
+# Only public, root-owned program artifacts use 0022. Never widen data/key modes
+# or recursively chmod a release (it may contain private deployment artifacts).
+(
+  trap - EXIT ERR
+  umask 0022
+  python3 -m venv "$staging/.venv"
+  "$staging/.venv/bin/python" -m pip install --require-hashes --requirement "$SOURCE_DIR/requirements.lock"
+  if [[ "$profile" == cloud ]]; then
+    "$staging/.venv/bin/python" -m pip install --require-hashes --requirement "$SOURCE_DIR/requirements-cloud.lock"
+  fi
+  "$staging/.venv/bin/python" -m pip install --no-deps --no-build-isolation "$SOURCE_DIR"
+  "$staging/.venv/bin/python" -m pip check
+  "$staging/.venv/bin/python" -c 'from noyra.service import ServiceSettings; assert ServiceSettings'
+  noyra_install_release_scripts "$SOURCE_DIR" "$staging"
+)
+install_phase=service_user_import_staged
+verify_service_user_import "$staging/.venv/bin/python"
+install_phase=storage_preflight
+"$staging/.venv/bin/python" -I "$SOURCE_DIR/scripts/deployment-maintenance.py" preflight \
+  --releases "$RELEASES_DIR" --backups "$backup_dir" --data "$DATA_DIR"
+install_phase=cold_backup
 stop_old_service
 
 # A cold encrypted backup is mandatory before replacing an active release.
@@ -1082,6 +1200,7 @@ if [[ -n "$old_current" || -n "$legacy_venv" ]]; then
   sync -d "$backup_dir" 2>/dev/null || sync 2>/dev/null || true
   "$staging/.venv/bin/python" -I "$SOURCE_DIR/scripts/deployment-maintenance.py" verify-backup \
     --releases "$RELEASES_DIR" --backups "$backup_dir" --data "$DATA_DIR" --backup "$backup_path"
+  backup_restore_verified=true
 fi
 
 "$staging/.venv/bin/python" - "$INSTALL_DIR" "$source_sha" "$staging" <<'PY'
@@ -1126,7 +1245,7 @@ if [[ -n "$legacy_venv" ]]; then
   legacy_venv=""
 fi
 
-mv -- "$staging" "$release_root"
+# The environment already lives at its final path; publishing never moves it.
 staging=""
 release_published=true
 if [[ -n "$source_sha" ]]; then
@@ -1140,10 +1259,15 @@ chmod 0755 "$release_root" "$release_root/.venv" "$release_root/.venv/bin"
 ensure_backup_keyring "$release_root/.venv/bin/python"
 
 # Migrate the durable database while the old pointer is still intact.  A
-# failed migration therefore removes only the unpublished release and leaves
-# the old service and pointer untouched.
+# failed or partially applied migration must be checked against the old schema
+# before any recovery restart; never overwrite durable data automatically.
+install_phase=service_user_import
+verify_service_user_import "$release_root/.venv/bin/python"
+install_phase=migrate_database
 migrate_database_before_switch
+migration_completed=true
 
+install_phase=publish_components
 noyra_control_layout_snapshot "$DATA_DIR" \
   "$DATA_DIR/upgrade" "$DATA_DIR/upgrade/requests" "$DATA_DIR/upgrade/processing" \
   "$UPGRADE_HANDOFF_LOCK" "$DATA_DIR/upgrade/status.json" \
@@ -1325,6 +1449,7 @@ chmod 0644 "$profile_dropin_tmp"
 mv -Tf -- "$profile_dropin_tmp" "$PROFILE_DROPIN"
 profile_dropin_changed=true
 
+install_phase=switch_release
 switched=true
 if [[ -n "$old_current" ]]; then
   # Record the rollback target before publishing current.
@@ -1353,9 +1478,10 @@ if [[ "$(env_value NOYRA_PROFILE development)" == "production" ]]; then
     on_error 1
   }
 fi
-if [[ "$service_active" == true ]]; then
+if [[ "$service_active" == true || "$start_requested" == true ]]; then
+  install_phase=start_and_readiness
   if start_and_check; then
-    :
+    readiness_verified=true
   else
     echo 'New release failed readiness; restoring the previous code pointer.' >&2
     on_error 1
@@ -1390,19 +1516,26 @@ if [[ -n "$backup_path" ]]; then
   echo "Cold backup: $backup_path"
 fi
 echo "Recovery manifest: $RECOVERY_MANIFEST"
-echo 'Edit /etc/noyra/noyra.env, then run: systemctl enable --now noyra'
+if [[ "$readiness_verified" == true ]]; then
+  echo 'Service started and readiness passed.'
+else
+  echo 'Release and data installed; service intentionally left stopped. Readiness has NOT been verified.'
+  echo 'Review /etc/noyra/noyra.env, then run: systemctl enable --now noyra'
+fi
 rm -f -- "$profile_dropin_backup"
 noyra_upgrade_components_commit
 noyra_migration_components_commit
 CONTROL_LAYOUT_CHANGED=false
-if [[ "$service_active" == true ]]; then
+if [[ "$readiness_verified" == true ]]; then
   maintenance_backup=()
   if [[ -n "$backup_path" ]]; then maintenance_backup=(--backup "$backup_path"); fi
-  python3 "$SOURCE_DIR/scripts/deployment-maintenance.py" mark-release \
+  "$release_root/.venv/bin/python" -I "$release_root/scripts/deployment-maintenance.py" mark-release \
     --releases "$RELEASES_DIR" --backups "$backup_dir" --release "$release_id" "${maintenance_backup[@]}" || \
     echo 'Release retention marker deferred; no unmarked artifacts will be removed.' >&2
   # Retention failures do not turn a successfully installed release into a rollback.
-  python3 "$SOURCE_DIR/scripts/deployment-maintenance.py" gc \
+  "$release_root/.venv/bin/python" -I "$release_root/scripts/deployment-maintenance.py" gc \
     --releases "$RELEASES_DIR" --backups "$backup_dir" --apply --lock-fd 9 || \
     echo 'Deployment retention deferred; current and previous releases remain available.' >&2
 fi
+
+install_phase=complete

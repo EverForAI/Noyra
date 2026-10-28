@@ -40,7 +40,11 @@ function harness(extra = {}) {
         setTimeout,
         clearTimeout,
         Date,
-        location: {href:"https://example.test/",origin:"https://example.test",hash:""},
+        location: {
+            href: "https://example.test/",
+            origin: "https://example.test",
+            hash: "",
+        },
         console,
         ...extra,
     });
@@ -192,7 +196,7 @@ test("overview failure cannot hide independently successful archive", async () =
     };
     await h.sandbox.refresh();
     assert.ok(h.node("#content").innerHTML.includes("Public title"));
-    assert.ok(h.node("#header-state-label").textContent.includes("连接未更新"));
+    assert.ok(h.node("#header-state-label").textContent.includes("等待更新"));
 });
 test("overview late response cannot overwrite a later overview", async () => {
     const old = deferred(),
@@ -481,7 +485,10 @@ test("duplicate post clicks send only once and successful submission clears the 
     assert.equal(h.node("#public-post-content").value, "");
     assert.equal(h.node("#public-post-submit").disabled, false);
     assert.equal(h.get("publicPostIdempotencyKey"), "");
-    assert.match(h.node("#public-post-status").textContent, /等待管理者审核/);
+    assert.match(
+        h.node("#public-post-status").textContent,
+        /审核后会出现在留言广场/,
+    );
 });
 
 test("structured summaries render zero progress and probability without private fields", () => {
@@ -557,60 +564,115 @@ test("article links identify independent pages and structured text stays inert",
 });
 
 test("ordinary article clicks retain SPA context while modified clicks keep canonical navigation", () => {
-    const h=harness();
-    h.set('activeView="diary";batchPath="/api/public/diary?limit=20&cursor=200";currentQueryPath="/api/public/diary?limit=20";visibleRows=Array.from({length:200},(_,i)=>({id:String(i)}));batchNumber=2');
-    h.node("#archive-search").value="draft search";
-    const link={href:"https://example.test/public/diary/example",target:"",hasAttribute:()=>false};
-    let prevented=0;
-    const event={target:{closest:()=>link},button:0,preventDefault(){prevented++}};
-    h.sandbox.publicReadingClick({...event,ctrlKey:true});
-    assert.equal(prevented,0);
+    const h = harness();
+    h.set(
+        'activeView="diary";batchPath="/api/public/diary?limit=20&cursor=200";currentQueryPath="/api/public/diary?limit=20";visibleRows=Array.from({length:200},(_,i)=>({id:String(i)}));batchNumber=2',
+    );
+    h.node("#archive-search").value = "draft search";
+    const link = {
+        href: "https://example.test/public/diary/example",
+        target: "",
+        hasAttribute: () => false,
+    };
+    let prevented = 0;
+    const event = {
+        target: { closest: () => link },
+        button: 0,
+        preventDefault() {
+            prevented++;
+        },
+    };
+    h.sandbox.publicReadingClick({ ...event, ctrlKey: true });
+    assert.equal(prevented, 0);
     h.sandbox.publicReadingClick(event);
-    assert.equal(prevented,1);
-    assert.equal(h.sandbox.location.hash,"diary/example");
-    assert.equal(h.get("readingReturn.count"),200);
-    assert.equal(h.get("readingReturn.search"),"draft search");
+    assert.equal(prevented, 1);
+    assert.equal(h.sandbox.location.hash, "diary/example");
+    assert.equal(h.get("readingReturn.count"), 200);
+    assert.equal(h.get("readingReturn.search"), "draft search");
     h.set('readingReturn.view="timeline"');
     assert.ok(h.sandbox.renderArticle(record()).includes('href="#timeline"'));
 });
 
-test("restoring a reading context rereads content and preserves batch/query metadata",async()=>{
-    const h=harness();
+test("restoring a reading context rereads content and preserves batch/query metadata", async () => {
+    const h = harness();
     h.set('activeView="diary";loadOverview=async()=>{}');
-    let reads=0;
-    h.sandbox.getJson=async path=>{reads++;const q=new URL(path,"https://example.test").searchParams,start=Number(q.get("cursor")||0),limit=Number(q.get("limit"));return {...page(Array.from({length:limit},(_,i)=>record(String(start+i)))),next_cursor:String(start+limit)};};
-    await h.sandbox.refresh({restore:{path:"/api/public/diary?limit=20&cursor=200",count:200,query:"/api/public/diary?limit=20&search=x",paths:[{path:"/api/public/diary?limit=20",count:200}],number:2}});
-    assert.equal(h.get("visibleRows.length"),200);
-    assert.equal(h.get("visibleRows[0].id"),"200");
-    assert.equal(h.get("nextCursor"),"400");
-    assert.equal(h.get("batchNumber"),2);
+    let reads = 0;
+    h.sandbox.getJson = async (path) => {
+        reads++;
+        const q = new URL(path, "https://example.test").searchParams,
+            start = Number(q.get("cursor") || 0),
+            limit = Number(q.get("limit"));
+        return {
+            ...page(
+                Array.from({ length: limit }, (_, i) =>
+                    record(String(start + i)),
+                ),
+            ),
+            next_cursor: String(start + limit),
+        };
+    };
+    await h.sandbox.refresh({
+        restore: {
+            path: "/api/public/diary?limit=20&cursor=200",
+            count: 200,
+            query: "/api/public/diary?limit=20&search=x",
+            paths: [{ path: "/api/public/diary?limit=20", count: 200 }],
+            number: 2,
+        },
+    });
+    assert.equal(h.get("visibleRows.length"), 200);
+    assert.equal(h.get("visibleRows[0].id"), "200");
+    assert.equal(h.get("nextCursor"), "400");
+    assert.equal(h.get("batchNumber"), 2);
     assert.ok(h.get("currentQueryPath").includes("search=x"));
-    assert.equal(reads,3);
+    assert.equal(reads, 3);
 });
 
-test("irregular bounded pages cannot skip rows at the 200 record batch boundary",async()=>{
-    const h=harness();
+test("irregular bounded pages cannot skip rows at the 200 record batch boundary", async () => {
+    const h = harness();
     h.set('activeView="diary";loadOverview=async()=>{}');
-    h.sandbox.getJson=async path=>{const q=new URL(path,"https://example.test").searchParams,start=Number(q.get("cursor")||0),count=Math.min(Number(q.get("limit")),13,450-start);return {...page(Array.from({length:count},(_,i)=>record(String(start+i)))),next_cursor:start+count<450?String(start+count):null};};
-    const ids=new Set();
+    h.sandbox.getJson = async (path) => {
+        const q = new URL(path, "https://example.test").searchParams,
+            start = Number(q.get("cursor") || 0),
+            count = Math.min(Number(q.get("limit")), 13, 450 - start);
+        return {
+            ...page(
+                Array.from({ length: count }, (_, i) =>
+                    record(String(start + i)),
+                ),
+            ),
+            next_cursor: start + count < 450 ? String(start + count) : null,
+        };
+    };
+    const ids = new Set();
     await h.sandbox.refresh();
-    for(let reads=0;reads<100;reads++){
-        h.get("visibleRows").forEach(row=>ids.add(row.id));
-        assert.ok(h.get("visibleRows.length")<=200);
-        if(!h.get("nextCursor"))break;
-        await h.sandbox.refresh({append:true});
+    for (let reads = 0; reads < 100; reads++) {
+        h.get("visibleRows").forEach((row) => ids.add(row.id));
+        assert.ok(h.get("visibleRows.length") <= 200);
+        if (!h.get("nextCursor")) break;
+        await h.sandbox.refresh({ append: true });
     }
-    assert.equal(ids.size,450);
+    assert.equal(ids.size, 450);
 });
 
 test("reading return is confined to its article navigation chain", () => {
     const h = harness();
     h.sandbox.document.querySelectorAll = () => [];
-    vm.runInContext(source.slice(source.indexOf("function showView()"), source.indexOf("function updatePostLength()")), h.sandbox);
+    vm.runInContext(
+        source.slice(
+            source.indexOf("function showView()"),
+            source.indexOf("function updatePostLength()"),
+        ),
+        h.sandbox,
+    );
     h.sandbox.setMenu = () => {};
     let options;
-    h.sandbox.refresh = input => { options = input; };
-    h.set('activeView="diary";activeId="example";readingReturn={article:"diary/example",view:"diary",search:"old",period:"all",category:"all",status:""}');
+    h.sandbox.refresh = (input) => {
+        options = input;
+    };
+    h.set(
+        'activeView="diary";activeId="example";readingReturn={article:"diary/example",view:"diary",search:"old",period:"all",category:"all",status:""}',
+    );
     h.sandbox.location.hash = "#about";
     h.sandbox.showView();
     assert.equal(h.get("readingReturn"), null);
@@ -619,7 +681,9 @@ test("reading return is confined to its article navigation chain", () => {
     h.sandbox.showView();
     assert.equal(options.restore, null);
     assert.equal(h.node("#archive-search").value, "new");
-    h.set('activeView="diary";activeId="example";readingReturn={article:"diary/example",view:"diary",search:"old",period:"all",category:"all",status:""}');
+    h.set(
+        'activeView="diary";activeId="example";readingReturn={article:"diary/example",view:"diary",search:"old",period:"all",category:"all",status:""}',
+    );
     h.sandbox.showView();
     assert.equal(options.restore.search, "old");
     assert.equal(h.get("readingReturn"), null);
@@ -630,24 +694,319 @@ test("extremely short and empty pages restore only with bounded user continuatio
     const h = harness();
     h.set('activeView="diary";loadOverview=async()=>{}');
     let reads = 0;
-    h.sandbox.getJson = async path => {
+    h.sandbox.getJson = async (path) => {
         reads++;
         const q = new URL(path, "https://example.test").searchParams;
         const position = Number(q.get("cursor") || 0);
         const empty = position % 7 === 0;
-        return {...page(empty ? [] : [record(String(position))]), next_cursor: String(position + 1)};
+        return {
+            ...page(empty ? [] : [record(String(position))]),
+            next_cursor: String(position + 1),
+        };
     };
-    await h.sandbox.refresh({restore:{path:"/api/public/diary?limit=20",count:200,query:"/api/public/diary?limit=20",paths:[],number:1}});
+    await h.sandbox.refresh({
+        restore: {
+            path: "/api/public/diary?limit=20",
+            count: 200,
+            query: "/api/public/diary?limit=20",
+            paths: [],
+            number: 1,
+        },
+    });
     assert.equal(reads, 20);
     assert.ok(h.get("visibleRows.length") < 200);
     assert.equal(h.get("restoreTarget"), 200);
     assert.match(h.node("#list-status").textContent, /尚未恢复完/);
     while (h.get("restoreTarget")) {
         const before = reads;
-        await h.sandbox.refresh({append:true});
+        await h.sandbox.refresh({ append: true });
         assert.ok(reads - before <= 20);
     }
     assert.equal(h.get("visibleRows.length"), 200);
-    assert.equal(new Set(h.get("visibleRows").map(row => row.id)).size, 200);
+    assert.equal(new Set(h.get("visibleRows").map((row) => row.id)).size, 200);
     assert.doesNotMatch(h.node("#list-status").textContent, /尚未恢复完/);
+});
+
+test("home uses one existing public request and only published previews", async () => {
+    const h = harness();
+    const paths = [];
+    const diary = {
+        ...record("writing"),
+        body: "DETAIL-ONLY-NOT-A-PREVIEW",
+        summary: "A shared moment",
+    };
+    const project = {
+        ...record("project"),
+        kind: "project",
+        provenance: "operator_summary",
+        details: { private_reason: "DO-NOT-DISPLAY" },
+    };
+    h.sandbox.getJson = async (path) => {
+        paths.push(path);
+        return {
+            display_name: "Aster <img src=x onerror=alert(1)>",
+            lifecycle: {
+                state: "deep_sleep",
+                changed_at: "2026-10-12T01:00:00Z",
+            },
+            public_diary_count: 1,
+            last_sleep_completed_at: null,
+            recent: [diary],
+            projects: [project],
+            goals: [],
+        };
+    };
+    await h.sandbox.loadOverview();
+    assert.deepEqual(paths, ["/api/public/overview"]);
+    assert.equal(
+        h.node("#hero-title").textContent,
+        "认识 Aster <img src=x onerror=alert(1)>。",
+    );
+    const html = h.node("#content").innerHTML;
+    assert.match(html, /A shared moment/);
+    assert.match(html, /管理者整理/);
+    assert.doesNotMatch(html, /DETAIL-ONLY-NOT-A-PREVIEW|DO-NOT-DISPLAY|<img/);
+    assert.equal((html.match(/A shared moment/g) || []).length, 1);
+    assert.match(h.node("#overview-content").innerHTML, /正在休息/);
+    assert.match(h.node("#overview-content").innerHTML, /深度休眠/);
+    assert.doesNotMatch(
+        h.node("#overview-content").innerHTML,
+        /梦|整理今天|预计醒来/,
+    );
+});
+
+test("home empty state offers real participation without inventing projects or accounts", () => {
+    const h = harness();
+    h.set(
+        'overviewData={lifecycle:{state:"active",changed_at:"2026-10-12T01:00:00Z"},public_diary_count:0,recent:[],projects:[],goals:[]}',
+    );
+    h.node("#period-filter").value = "7";
+    h.node("#archive-search").value = "old list filter";
+    h.sandbox.renderOverview();
+    const html = h.node("#content").innerHTML;
+    assert.match(html, /还很安静/);
+    assert.match(html, /href="#participate"/);
+    assert.doesNotMatch(
+        html,
+        /没有找到匹配|featured-record|home-record|login|register|我的投稿|私信/,
+    );
+    assert.equal(h.node("#hero-title").textContent, "认识 Noyra。");
+});
+
+test("home and compact cards keep author names and hostile text escaped in both languages", () => {
+    const h = harness();
+    const hostile = {
+        ...record('a/b"'),
+        kind: "post",
+        provenance: "visitor",
+        title: "<script>evil()</script>",
+        summary: '<svg onload="evil()">',
+        details: { author_label: "<img onerror=evil()>" },
+    };
+    for (const language of ["zh", "en"]) {
+        h.set(`language="${language}"`);
+        const html = h.sandbox.renderHomeCard(hostile, true);
+        assert.doesNotMatch(html, /<script>|<svg|<img/);
+        assert.match(html, /&lt;script&gt;/);
+        assert.match(html, /%2F/);
+        assert.match(
+            html,
+            language === "en" ? /Visitor name.*unverified/ : /访客署名.*未验证/,
+        );
+    }
+});
+
+test("empty results distinguish filters from a genuinely empty guestbook", () => {
+    const h = harness();
+    h.set('activeView="posts"');
+    assert.match(h.sandbox.emptyState(), /留下第一个想法/);
+    h.node("#archive-search").value = "not found";
+    assert.match(h.sandbox.emptyState(), /没有找到匹配/);
+    assert.doesNotMatch(h.sandbox.emptyState(), /第一个想法/);
+    h.set('activeView="diary";activeId="withdrawn"');
+    assert.match(
+        h.sandbox.emptyState("This entry was withdrawn"),
+        /This entry was withdrawn/,
+    );
+    assert.doesNotMatch(
+        h.sandbox.emptyState("This entry was withdrawn"),
+        /没有找到匹配/,
+    );
+});
+
+test("old detailed routes remain reachable and reveal the secondary navigation", () => {
+    const h = harness();
+    h.sandbox.document.querySelectorAll = () => [];
+    h.sandbox.setMenu = () => {};
+    h.sandbox.refresh = () => {};
+    h.sandbox.loadPublicPostCaptcha = async () => {};
+    for (const view of [
+        "timeline",
+        "goals",
+        "interactions",
+        "behavior",
+        "research",
+        "predictions",
+        "sleep",
+        "lifecycle",
+        "updates",
+    ]) {
+        h.sandbox.location.hash = `#${view}`;
+        h.sandbox.showView();
+        assert.equal(h.get("activeView"), view);
+        assert.equal(h.node("#more-records").open, true);
+        assert.equal(h.node("#home-entrypoints").hidden, true);
+    }
+    for (const view of [
+        "overview",
+        "diary",
+        "projects",
+        "posts",
+        "about",
+        "participate",
+    ]) {
+        h.sandbox.location.hash = `#${view}`;
+        h.sandbox.showView();
+        assert.equal(h.node("#more-records").open, false);
+        assert.equal(h.node("#home-entrypoints").hidden, view !== "overview");
+    }
+});
+
+test("visitor guidance never sends people to operator login or invents private messaging", () => {
+    const h = harness();
+    for (const language of ["zh", "en"]) {
+        h.set(`language="${language}"`);
+        const about = h.sandbox.renderAbout();
+        assert.doesNotMatch(
+            about,
+            /href="\/admin|For private conversations use|私密交流请使用管理台/,
+        );
+        assert.match(
+            about,
+            language === "en" ? /without an account/ : /无需注册/,
+        );
+        assert.match(
+            about,
+            language === "en"
+                ? /Signed-in private messages/
+                : /登录后的独立消息/,
+        );
+        const note = h.get("tr(...i18n.postPrivacy)");
+        assert.doesNotMatch(note, /admin console|管理台/);
+    }
+});
+
+test("dedicated writing stays visible after stage changes without duplicating timeline entries", () => {
+    const h = harness();
+    const writing = record("diary-one");
+    const lifecycle = {
+        ...record("stage"),
+        kind: "lifecycle",
+        title: "",
+        details: { from: "active", to: "deep_sleep" },
+    };
+    h.sandbox.overviewFixture = {
+        lifecycle: { state: "deep_sleep", changed_at: "2026-10-12T01:00:00Z" },
+        public_diary_count: 1,
+        writing: [writing],
+        recent: [lifecycle],
+        projects: [],
+        goals: [],
+    };
+    h.set("overviewData=overviewFixture");
+    h.sandbox.renderOverview();
+    assert.match(h.node("#content").innerHTML, /featured-record/);
+    assert.match(h.node("#content").innerHTML, /diary-one/);
+    assert.match(h.node("#content").innerHTML, /stage/);
+    h.set("overviewData.recent=[{...overviewData.writing[0]}]");
+    h.sandbox.renderOverview();
+    // The same writing returned as separate objects in both projections is
+    // one home card, with a heading link and a continuation link.
+    assert.equal(
+        (h.node("#content").innerHTML.match(/diary-one/g) || []).length,
+        2,
+    );
+});
+
+test("unchanged overview refresh preserves content nodes instead of rebuilding the reader", () => {
+    const h = harness();
+    h.set(
+        'overviewData={display_name:"Aster",lifecycle:{state:"active",changed_at:"2026-10-12T01:00:00Z"},public_diary_count:1,recent:[],writing:[],projects:[],goals:[]}',
+    );
+    h.sandbox.renderOverview();
+    let writes = 0;
+    const node = h.node("#content");
+    let markup = node.innerHTML;
+    Object.defineProperty(node, "innerHTML", {
+        get: () => markup,
+        set: (value) => {
+            writes++;
+            markup = value;
+        },
+    });
+    h.sandbox.renderOverview();
+    assert.equal(writes, 0);
+    h.set(
+        'overviewData.recent=[{id:"new-entry",kind:"diary",title:"New writing",summary:"A new paragraph",body:"",details:{},provenance:"subject",status:"published"}]',
+    );
+    h.sandbox.renderOverview();
+    assert.equal(writes, 1);
+    assert.match(markup, /New writing/);
+});
+
+test("preview formatting keeps quoted article bodies out of summary cards", () => {
+    const h = harness();
+    const row = {
+        ...record(),
+        summary: "# A heading\n\nA short paragraph.\nAnother line.",
+        body: "Do not use the full body as a fallback",
+    };
+    assert.equal(
+        h.sandbox.previewText(row.summary),
+        "A heading A short paragraph. Another line.",
+    );
+    assert.doesNotMatch(
+        h.sandbox.renderCard({ ...row, summary: "" }),
+        /Do not use the full body/,
+    );
+    assert.match(h.sandbox.renderArticle(row), /Do not use the full body/);
+});
+
+test("a stage-only instance explains missing writing without claiming there is no activity", () => {
+    const h = harness();
+    h.set(
+        'overviewData={lifecycle:{state:"active",changed_at:"2026-10-12T01:00:00Z"},public_diary_count:0,recent:[{id:"stage",kind:"lifecycle",details:{from:"orienting",to:"active"},status:"active",provenance:"runtime"}],writing:[],projects:[],goals:[]}',
+    );
+    h.sandbox.renderOverview();
+    assert.match(h.node("#content").innerHTML, /日记还没有公开/);
+    assert.match(h.node("#content").innerHTML, /orienting|初始化/);
+    assert.doesNotMatch(h.node("#content").innerHTML, /这里还没有公开记录/);
+});
+
+test("private page refresh uses its authenticated view rather than the public overview", async () => {
+    const h = harness();
+    let shown = "";
+    let publicReads = 0;
+    h.sandbox.noyraParticipant = { show: async (view) => (shown = view) };
+    h.sandbox.loadOverview = async () => publicReads++;
+    for (const view of ["account", "collaborate", "mine", "messages"]) {
+        h.set(`activeView="${view}"`);
+        await h.sandbox.refresh();
+        assert.equal(shown, view);
+    }
+    assert.equal(publicReads, 0);
+});
+
+test("late public-post response after account logout cannot clear a new draft", async () => {
+    const pending = deferred();
+    const { h, event } = submissionHarness(() => pending.promise);
+    const writing = h.sandbox.submitPublicPost(event);
+    await new Promise((resolve) => setImmediate(resolve));
+    h.set("publicAccountGeneration++");
+    h.node("#public-post-content").value = "A new account draft";
+    h.node("#public-post-status").textContent = "New session";
+    pending.resolve({ ok: true, json: async () => ({ status: "pending" }) });
+    await writing;
+    assert.equal(h.node("#public-post-content").value, "A new account draft");
+    assert.equal(h.node("#public-post-status").textContent, "New session");
 });

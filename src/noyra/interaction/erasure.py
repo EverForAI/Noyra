@@ -48,6 +48,7 @@ _UNREVIEWED_DOMAINS = (
     "beliefs",
     "goals",
     "relationships",
+    "relationship_identity_bindings",
     "self_models",
     "thought_episodes",
     "relationship_social_runs",
@@ -504,6 +505,24 @@ class ConversationErasure:
         if any(row["purpose"].startswith("sleep_reflection:") for row in calls):
             raise ErasureReviewRequired("reflection_derivative_review_required")
         for table in _UNREVIEWED_DOMAINS:
+            if (
+                table == "relationship_identity_bindings"
+                and not connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                ).fetchone()
+            ):
+                # Historical privacy recovery can run before schema 107.
+                # Missing current-schema evidence is still an integrity error.
+                version = connection.execute(
+                    "SELECT value FROM schema_meta WHERE key='schema_version'"
+                ).fetchone()
+                try:
+                    historical_version = int(version[0]) if version is not None else 0
+                except (TypeError, ValueError):
+                    historical_version = 0
+                if 1 <= historical_version < 107:
+                    continue
+                raise IntegrityError("relationship identity storage is unavailable")
             if connection.execute(
                 f'SELECT 1 FROM "{table}" WHERE subject_id=? LIMIT 1', (subject,)
             ).fetchone():

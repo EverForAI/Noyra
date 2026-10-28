@@ -136,6 +136,14 @@ class RetentionTableSpec:
 # retention policy.
 RETENTION_REGISTRY: tuple[RetentionTableSpec, ...] = (
     RetentionTableSpec(
+        "relationship_identity_bindings",
+        "core_evidence",
+        "preserve",
+        "recorded_at",
+        ("relationship_id",),
+        None,
+    ),
+    RetentionTableSpec(
         "retention_policies",
         "required_audit",
         "preserve",

@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
+from noyra.core.identity import validate_subject_id
+
 ACTIVATION_FORMAT = "noyra-target-activation/v2"
 ACTIVATION_REQUEST_KEYS = frozenset(
     {
@@ -45,14 +47,17 @@ def validate_activation_request(request: Mapping[str, Any]) -> dict[str, Any]:
     patterns = {
         "task_id": r"[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}",
         "source_epoch": r"[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}",
-        "subject_id": r"Noyra-[A-Za-z0-9_-]{1,120}",
         "target_id": r"[A-Za-z0-9_-]{3,128}",
         "artifact_id": r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}",
     }
     for key, pattern in patterns.items():
         if not isinstance(request[key], str) or not re.fullmatch(pattern, request[key]):
             raise ValueError("migration activation identity is invalid")
-    for key in ACTIVATION_REQUEST_KEYS - {*patterns, "format", "wallet_mode"}:
+    try:
+        validate_subject_id(request["subject_id"])
+    except ValueError as error:
+        raise ValueError("migration activation identity is invalid") from error
+    for key in ACTIVATION_REQUEST_KEYS - {*patterns, "subject_id", "format", "wallet_mode"}:
         value = request[key]
         if value is None and key in {
             "signer_binding_digest",

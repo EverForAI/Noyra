@@ -7,6 +7,7 @@ from typing import Any
 
 from noyra.core.admission import OperationInvalidated, assert_current_lease
 from noyra.core.errors import IntegrityError, InvalidTransitionError
+from noyra.core.private_sources import InvitationWithdrawnError
 from noyra.core.redaction import redact_payload
 from noyra.core.types import canonical_json, content_hash
 
@@ -14,6 +15,7 @@ from .errors import (
     BudgetExhaustedError,
     ModelAuthorizationError,
     ModelCallStateError,
+    ModelLifecycleBlockedError,
     ProviderCallError,
     StructuredOutputError,
 )
@@ -35,6 +37,8 @@ from .types import (
 
 class ModelGateway:
     """Validated, budgeted, idempotent boundary around an untrusted model provider."""
+
+    requires_explicit_prepared_retry = False
 
     def __init__(
         self,
@@ -97,14 +101,7 @@ class ModelGateway:
     ) -> GatewayResult[OutputT]:
         if not subject_id.strip() or not purpose.strip() or not idempotency_key.strip():
             raise ValueError("subject_id, purpose and idempotency_key are required")
-        with self.ledger.database.connection() as connection:
-            lifecycle = connection.execute(
-                "SELECT state FROM runtime_state WHERE subject_id = ?", (subject_id,)
-            ).fetchone()
-        if lifecycle is not None and lifecycle["state"] in {"paused", "deep_sleep", "waking"}:
-            raise ModelCallStateError(
-                f"model calls are disabled while lifecycle is {lifecycle['state']}"
-            )
+        self.ledger.check_lifecycle(subject_id, purpose)
         selected_reasoning = self.reasoning_effort if reasoning_effort is None else reasoning_effort
         if self.reasoning_capability_verified:
             if selected_reasoning != self.reasoning_effort:
@@ -180,7 +177,12 @@ class ModelGateway:
                     resource_key_fingerprint=self.resource_key_fingerprint,
                     pricing=self.pricing,
                 )
-            except (BudgetExhaustedError, ModelAuthorizationError) as error:
+            except (
+                BudgetExhaustedError,
+                InvitationWithdrawnError,
+                ModelAuthorizationError,
+                ModelLifecycleBlockedError,
+            ) as error:
                 self.ledger.finish_call(
                     call.call_id,
                     "failed",
@@ -190,6 +192,8 @@ class ModelGateway:
                         else "budget_exhausted"
                     )
                     if isinstance(error, BudgetExhaustedError)
+                    else "model_lifecycle_blocked"
+                    if isinstance(error, ModelLifecycleBlockedError)
                     else "model_authorization_denied",
                 )
                 raise
@@ -231,10 +235,17 @@ class ModelGateway:
                     expected_resource_revision=self.resource_revision,
                 )
                 before_send()
-            except (ModelAuthorizationError, OperationInvalidated) as error:
+            except (
+                InvitationWithdrawnError,
+                ModelAuthorizationError,
+                ModelLifecycleBlockedError,
+                OperationInvalidated,
+            ) as error:
                 code = (
                     "runtime_epoch_invalidated"
                     if isinstance(error, OperationInvalidated)
+                    else "model_lifecycle_blocked"
+                    if isinstance(error, ModelLifecycleBlockedError)
                     else "model_authorization_denied"
                 )
                 self.ledger.cancel_unsent_attempt(attempt.attempt_id, error_code=code)
@@ -254,13 +265,14 @@ class ModelGateway:
                     assert_current_lease()
                 except OperationInvalidated:
                     stale_operation = True
-            except ModelAuthorizationError:
-                self.ledger.cancel_unsent_attempt(
-                    attempt.attempt_id, error_code="model_authorization_denied"
+            except (ModelAuthorizationError, ModelLifecycleBlockedError) as error:
+                code = (
+                    "model_lifecycle_blocked"
+                    if isinstance(error, ModelLifecycleBlockedError)
+                    else "model_authorization_denied"
                 )
-                self.ledger.finish_call(
-                    call.call_id, "failed", error_code="model_authorization_denied"
-                )
+                self.ledger.cancel_unsent_attempt(attempt.attempt_id, error_code=code)
+                self.ledger.finish_call(call.call_id, "failed", error_code=code)
                 raise
             except OperationInvalidated:
                 if send_denied:
@@ -326,7 +338,7 @@ class ModelGateway:
                             error_code="runtime_epoch_invalidated",
                         )
                         raise
-                    await self._retry_delay(attempt_index)
+                    await self._retry_after_settlement(call.call_id, attempt_index)
                     continue
                 self.ledger.finish_call(call.call_id, "failed", error_code=error.code)
                 raise
@@ -411,7 +423,7 @@ class ModelGateway:
                             error_code="runtime_epoch_invalidated",
                         )
                         raise
-                    await self._retry_delay(attempt_index)
+                    await self._retry_after_settlement(call.call_id, attempt_index)
                     continue
                 self.ledger.finish_call(
                     call.call_id,
@@ -449,6 +461,21 @@ class ModelGateway:
             )
 
         raise AssertionError("retry loop ended without a terminal model-call result")
+
+    async def _retry_after_settlement(self, call_id: str, completed_attempts: int) -> None:
+        """Wait only after an attempt is settled and before admitting another.
+
+        Cancellation here has no in-flight provider request. Finish the logical
+        call without rewriting paid attempts or releasing unknown usage. Actual
+        request cancellation retains its separate, conservative unknown outcome.
+        """
+        try:
+            await self._retry_delay(completed_attempts)
+        except asyncio.CancelledError:
+            # finish_call uses the existing synchronous accounting transaction:
+            # no await or new provider work can interrupt this terminal write.
+            self.ledger.finish_call(call_id, "failed", error_code="model_retry_cancelled")
+            raise
 
     async def _retry_delay(self, completed_attempts: int) -> None:
         unjittered = min(

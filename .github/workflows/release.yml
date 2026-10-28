@@ -20,6 +20,8 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+      - name: Verify reviewed public source inventory
+        run: python scripts/public-file-manifest.py check --revision "${{ github.sha }}"
       - run: python -m pip install --require-hashes --requirement requirements-dev.lock
       - run: python -m pip install --no-deps --no-build-isolation -e ".[dev]"
       - name: Install locked cloud security dependencies
@@ -30,6 +32,7 @@ jobs:
       - run: node --version
       - run: node --check src/noyra/web/admin.js
       - run: node --check src/noyra/web/app.js
+      - run: node --check src/noyra/web/participant.js
       - run: node --test tests/frontend/*.test.cjs
       - name: Run cloud security regression without skips
         run: |
@@ -181,6 +184,10 @@ jobs:
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
       - name: Build reproducible wheel
         run: python scripts/build-reproducible-wheel.py --output dist
+      - name: Export reviewed public source for this release commit
+        run: python scripts/public-file-manifest.py export --revision "${{ github.sha }}" --output dist/noyra-source.zip
+      - name: Verify the release source archive against Git
+        run: python scripts/public-file-manifest.py verify-export --revision "${{ github.sha }}" --archive dist/noyra-source.zip
       - name: Generate dependency SBOM
         run: python -m pip_audit -r requirements.lock -r requirements-cloud.lock --no-deps --disable-pip -f cyclonedx-json -o dist/noyra-dependencies.cdx.json
       - name: Create release checksums

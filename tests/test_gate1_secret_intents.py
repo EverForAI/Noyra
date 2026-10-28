@@ -14,7 +14,13 @@ from noyra.core.identity import IdentityStore
 from noyra.core.integrity import IntegrityRegistry
 from noyra.core.secret_cleanup import SecretCleanupQueue
 from noyra.core.types import content_hash
-from noyra.model import CognitiveResourceGroupInput, CognitiveResourceStore
+from noyra.interaction import TransportInput, TransportStore
+from noyra.model import (
+    CognitiveResourceGroupInput,
+    CognitiveResourceStore,
+    EmbeddingResourceInput,
+    EmbeddingResourceStore,
+)
 from noyra.research import SearchProviderInput, SearchProviderStore
 
 
@@ -621,3 +627,124 @@ def test_schema_42_migrates_secret_journal_and_archive_generation_trigger(
     assert version == CURRENT_SCHEMA_VERSION
     assert table is not None and "operation IN ('create', 'delete')" in str(table[0])
     assert trigger is not None and "MAX(generation) + 1" in str(trigger[0])
+
+
+@pytest.mark.parametrize("resource_type", ["cognitive", "search", "embedding", "transport"])
+def test_revoked_secret_history_passes_integrity_after_restart_cleanup(
+    tmp_path: Path, resource_type: str
+) -> None:
+    database, subject_id = _database(tmp_path)
+    root = tmp_path / "secrets" / resource_type
+    queue = SecretCleanupQueue(database)
+    if resource_type == "cognitive":
+        cognitive = CognitiveResourceStore(database, root, repair_on_init=False)
+        group = cognitive.configure(subject_id, _cognitive_group(subject_id), actor="operator")
+        resource_id = cognitive.keys(group.group_id, subject_id=subject_id)[0].key_id
+        cognitive.revoke(group.group_id, reason="retired", actor="operator", subject_id=subject_id)
+    elif resource_type == "search":
+        search = SearchProviderStore(database, root, repair_on_init=False)
+        config = search.configure(subject_id, _proposal("retired-history"), actor="operator")
+        resource_id = config.config_id
+        search.revoke(resource_id, reason="retired", actor="operator", subject_id=subject_id)
+    elif resource_type == "embedding":
+        embedding = EmbeddingResourceStore(database, root, repair_on_init=False)
+        record = embedding.configure(
+            subject_id,
+            EmbeddingResourceInput(
+                label="retired embedding",
+                base_url="https://models.example/v1",
+                model="test-embedding",
+                api_key=SecretStr("retired-embedding-key"),
+            ),
+            actor="operator",
+        )
+        resource_id = record.config_id
+        embedding.revoke(resource_id, reason="retired", actor="operator", subject_id=subject_id)
+    else:
+        transport = TransportStore(database, root, repair_on_init=False)
+        channel = transport.configure(
+            subject_id,
+            TransportInput(
+                channel="webhook", label="retired", endpoint="https://peer.example/hook"
+            ),
+            actor="operator",
+        )
+        resource_id = channel.transport_id
+        transport.revoke(resource_id, reason="retired", actor="operator", subject_id=subject_id)
+
+    # Normal startup keeps the revoked resource row while removing its secret.
+    queue.reconcile(subject_id, resource_type, root)
+    with database.connection() as connection:
+        states = connection.execute(
+            "SELECT operation, state FROM secret_file_intents WHERE resource_id = ? "
+            "ORDER BY operation",
+            (resource_id,),
+        ).fetchall()
+    assert [(row["operation"], row["state"]) for row in states] == [
+        ("create", "removed"),
+        ("delete", "removed"),
+    ]
+    report = IntegrityRegistry().run(
+        database,
+        subject_id,
+        tmp_path,
+        profile="manual",
+        policy_mode="alert",
+        deadline_seconds=15,
+        check_ids=("interaction.transport",),
+    )
+    assert report.status == "ok", report.to_dict()
+    assert not list(root.iterdir())
+
+
+def test_removed_create_intent_still_rejects_an_active_resource(tmp_path: Path) -> None:
+    database, subject_id = _database(tmp_path)
+    store = SearchProviderStore(database, tmp_path / "search", repair_on_init=False)
+    record = store.configure(subject_id, _proposal("active-removed-intent"), actor="operator")
+    with database.connection() as connection:
+        intent_id = connection.execute(
+            "SELECT intent_id FROM secret_file_intents WHERE resource_id=? AND operation='create'",
+            (record.config_id,),
+        ).fetchone()[0]
+    store.secret_cleanup.mark_removed(intent_id)
+    report = IntegrityRegistry().run(
+        database,
+        subject_id,
+        tmp_path,
+        profile="manual",
+        policy_mode="alert",
+        deadline_seconds=15,
+        check_ids=("interaction.transport",),
+    )
+    assert report.status == "corrupt"
+    assert (store.secret_dir / f"{record.config_id}.key").is_file()
+
+
+def test_removed_create_intent_requires_completed_delete_evidence(tmp_path: Path) -> None:
+    database, subject_id = _database(tmp_path)
+    store = SearchProviderStore(database, tmp_path / "search", repair_on_init=False)
+    record = store.configure(subject_id, _proposal("missing-delete-evidence"), actor="operator")
+    store.revoke(record.config_id, reason="retired", actor="operator", subject_id=subject_id)
+    store.secret_cleanup.reconcile(subject_id, "search", store.secret_dir)
+    with database.transaction() as connection:
+        # Simulate damaged historical evidence; the normal journal is append-only.
+        triggers = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' "
+            "AND tbl_name='secret_file_intents' AND sql LIKE '%BEFORE DELETE%'"
+        ).fetchall()
+        for trigger in triggers:
+            connection.execute(f'DROP TRIGGER "{trigger[0]}"')
+        connection.execute(
+            "DELETE FROM secret_file_intents WHERE resource_id=? AND operation='delete'",
+            (record.config_id,),
+        )
+    report = IntegrityRegistry().run(
+        database,
+        subject_id,
+        tmp_path,
+        profile="manual",
+        policy_mode="alert",
+        deadline_seconds=15,
+        check_ids=("interaction.transport",),
+    )
+    assert report.status == "corrupt"

@@ -5,6 +5,7 @@ import heapq
 import json
 import multiprocessing
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -1155,9 +1156,16 @@ _DEEP_PROFILES: frozenset[IntegrityProfile] = frozenset({"periodic_deep", "manua
 _CORE_AUDIT_ACTIONS = frozenset(
     {
         "integrity_safe_pause_fallback",
+        "model_request_context_conflict",
         "model_unknown_reconciled",
         "model_unknown_retry_authorized",
         "model_unknown_retry_cancelled",
+        "model_unknown_retry_closed",
+        "participant_application_withdrawn",
+        "participant_source_bound",
+        "private_route_changed",
+        "private_route_unlinked",
+        "private_erasure_requested",
         "runtime_exported",
         "training_export_aborted",
         "training_exported",
@@ -1257,6 +1265,14 @@ _SEARCH_MANAGEMENT_AUDIT_FIELDS = {
     "search_provider_test_succeeded": {"provider_type", "result_count"},
     "search_provider_test_failed": {"provider_type", "error"},
 }
+_OPERATION_MANAGEMENT_AUDIT_FIELDS = {
+    "admin_login_rate_limited": {"path"},
+    "retention_batch_run": {"reason", "deleted_by_table", "protected_rows"},
+    "retention_policy_updated": {"settings", "revision", "source", "updated_at", "backup"},
+    "search_provider_routing_updated": {"config_id", "priority", "weight", "reason"},
+    "admin_upgrade_rejected": {"error_code"},
+    "admin_upgrade_started": {"task_id", "target_short_sha", "reason"},
+}
 _ADMIN_AUDIT_ACTIONS = frozenset(
     {
         "admin_login_succeeded",
@@ -1268,7 +1284,13 @@ _ADMIN_AUDIT_ACTIONS = frozenset(
         "inbound_message_received",
         *_MODEL_RESOURCE_AUDIT_FIELDS,
         *_SEARCH_MANAGEMENT_AUDIT_FIELDS,
+        *_OPERATION_MANAGEMENT_AUDIT_FIELDS,
     }
+)
+# Only these two pre-canonical participant writers emitted json.dumps defaults.
+# Keep that exact historical encoding without accepting arbitrary JSON for other actions.
+_PARTICIPANT_LEGACY_JSON_ACTIONS = frozenset(
+    {"participant_application_withdrawn", "participant_source_bound"}
 )
 _TRAINING_POLICY_FIELDS = (
     "record_enabled",
@@ -1354,7 +1376,7 @@ def _default_checks() -> tuple[IntegrityCheckSpec, ...]:
             _DEEP_PROFILES,
             _check_retention_runs,
         ),
-        IntegrityCheckSpec("mind.state", 1, "mind", _DEEP_PROFILES, _check_mind),
+        IntegrityCheckSpec("mind.state", 2, "mind", _DEEP_PROFILES, _check_mind),
         IntegrityCheckSpec("mind.memory_blocks", 1, "mind", _DEEP_PROFILES, _check_memory_blocks),
         IntegrityCheckSpec("mind.entities", 1, "mind", _DEEP_PROFILES, _check_entities),
         IntegrityCheckSpec(
@@ -1509,7 +1531,11 @@ def _provenance_time(value: object, context: str) -> str:
 
 
 def _provenance_object(
-    value: object, context: str, *, legacy_admin_json: bool = False
+    value: object,
+    context: str,
+    *,
+    legacy_admin_json: bool = False,
+    legacy_participant_json: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(value, str):
         raise IntegrityError(f"{context} JSON is invalid")
@@ -1523,6 +1549,7 @@ def _provenance_object(
     if not isinstance(parsed, dict) or (
         canonical_json(parsed) != value
         and not (legacy_admin_json and json.dumps(parsed, sort_keys=True) == value)
+        and not (legacy_participant_json and json.dumps(parsed) == value)
     ):
         raise IntegrityError(f"{context} JSON is invalid")
     return {str(key): item for key, item in parsed.items()}
@@ -2754,6 +2781,113 @@ def _audit_reference(
     return row
 
 
+def _verify_operation_management_audit(
+    context: IntegrityContext, row: Any, payload: Mapping[str, Any]
+) -> None:
+    action, actor = row["action"], row["actor"]
+    label = f"audit record {row['audit_id']}"
+    fields = _OPERATION_MANAGEMENT_AUDIT_FIELDS[action]
+    # Early configurable-retention summaries predate backup policy support.
+    if action == "retention_policy_updated" and "backup" not in payload:
+        fields = fields - {"backup"}
+    _provenance_keys(payload, fields, label)
+    if action == "admin_login_rate_limited":
+        if actor != "web-anonymous" or payload["path"] != "/admin/session":
+            raise IntegrityError(f"{label} login evidence is invalid")
+        return
+    if actor not in {"web-admin", "web-operator", "web-break_glass"}:
+        raise IntegrityError(f"{label} management actor is invalid")
+    if action == "retention_batch_run":
+        from .retention import RETENTION_REGISTRY
+
+        # Runs can legitimately be pruned. Validate the historical summary,
+        # not the current maintenance result or a transient run row.
+        reason = payload["reason"]
+        if not isinstance(reason, str):
+            raise IntegrityError(f"{label} retention reason is invalid")
+        counts = payload["deleted_by_table"]
+        # Historical runs also summarized now-preserved evidence domains.
+        tables = {spec.table for spec in RETENTION_REGISTRY}
+        if not isinstance(counts, dict) or not counts or set(counts) - tables:
+            raise IntegrityError(f"{label} retention tables are invalid")
+        for name, count in counts.items():
+            _provenance_int(count, f"{label} {name} count")
+        _provenance_int(payload["protected_rows"], f"{label} protected count")
+    elif action == "retention_policy_updated":
+        from .backup_retention import BackupRetentionPolicy
+        from .retention import RetentionSettings
+
+        if not isinstance(payload["settings"], dict) or (
+            "backup" in payload and not isinstance(payload["backup"], dict)
+        ):
+            raise IntegrityError(f"{label} retention settings are invalid")
+        try:
+            settings = payload["settings"]
+            if "runtime_days" not in settings:
+                settings = {**settings, "runtime_days": 90}
+            RetentionSettings.from_payload(settings)
+            backup = payload.get(
+                "backup",
+                {
+                    "settings": BackupRetentionPolicy().public(),
+                    "revision": 0,
+                    "source": "environment",
+                },
+            )
+            saved = backup.get("source") == "saved"
+            _provenance_keys(
+                backup,
+                {"settings", "revision", "source"}
+                | ({"updated_at", "updated_by"} if saved else set()),
+                label,
+            )
+            BackupRetentionPolicy.from_payload(backup["settings"])
+        except (ValueError, TypeError, KeyError) as error:
+            raise IntegrityError(f"{label} retention policy is invalid") from error
+        for part, table, minimum in (
+            (payload, "retention_policies", 1),
+            (backup, "backup_retention_policies", 0),
+        ):
+            revision = _provenance_int(part["revision"], f"{label} revision", minimum=minimum)
+            source = "saved" if revision else "environment"
+            if part["source"] != source:
+                raise IntegrityError(f"{label} retention source is invalid")
+            if revision:
+                _provenance_time(part["updated_at"], f"{label} updated time")
+                current = context.connection.execute(
+                    f"SELECT revision FROM {table} WHERE subject_id=?", (context.subject_id,)
+                ).fetchone()
+                if current is None or revision > current[0]:
+                    raise IntegrityError(f"{label} retention revision is unavailable")
+        if backup["revision"]:
+            _provenance_text(backup["updated_by"], f"{label} backup actor")
+    elif action == "search_provider_routing_updated":
+        _audit_reference(
+            context, "search_provider_configs", "config_id", payload["config_id"], label
+        )
+        priority = _provenance_int(payload["priority"], f"{label} priority")
+        weight = _provenance_int(payload["weight"], f"{label} weight", minimum=1)
+        if (
+            priority > 1000
+            or weight > 1000
+            or len(_provenance_text(payload["reason"], label)) > 500
+        ):
+            raise IntegrityError(f"{label} provider routing is invalid")
+    elif action == "admin_upgrade_rejected":
+        code = _provenance_text(payload["error_code"], f"{label} error code")
+        if len(code) > 128 or not re.fullmatch(r"(?:upgrade_[a-z0-9_]+|storage_unavailable)", code):
+            raise IntegrityError(f"{label} upgrade error is invalid")
+    elif action == "admin_upgrade_started":
+        if (
+            not isinstance(payload["task_id"], str)
+            or not re.fullmatch(r"[0-9a-f]{32}", payload["task_id"])
+            or not isinstance(payload["target_short_sha"], str)
+            or not re.fullmatch(r"[0-9a-f]{12}", payload["target_short_sha"])
+            or len(_provenance_text(payload["reason"], label)) > 256
+        ):
+            raise IntegrityError(f"{label} upgrade evidence is invalid")
+
+
 def _verify_management_audit_provenance(
     context: IntegrityContext, row: Any, payload: Mapping[str, Any]
 ) -> bool:
@@ -2793,7 +2927,9 @@ def _verify_management_audit_provenance(
         return True
     if action not in _ADMIN_AUDIT_ACTIONS:
         return False
-    if action in _MODEL_RESOURCE_AUDIT_FIELDS:
+    if action in _OPERATION_MANAGEMENT_AUDIT_FIELDS:
+        _verify_operation_management_audit(context, row, payload)
+    elif action in _MODEL_RESOURCE_AUDIT_FIELDS:
         # These drafts intentionally have no persisted resource to reference.
         # Validate the exact redacted writer summary, never infer provider
         # success from it or relax validation of unrelated audit actions.
@@ -3081,7 +3217,9 @@ def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
         "referenced_export.subject_id AS referenced_export_subject_id "
         "FROM audit_records a "
         "LEFT JOIN model_calls referenced_call ON "
-        "a.action IN ('model_unknown_retry_authorized', 'model_unknown_retry_cancelled', "
+        "a.action IN ('model_request_context_conflict', 'model_unknown_retry_authorized', "
+        "'model_unknown_retry_cancelled', "
+        "'model_unknown_retry_closed', "
         "'model_unknown_reconciled') "
         "AND referenced_call.call_id = CASE "
         "WHEN typeof(a.payload_json) = 'text' AND json_valid(a.payload_json) "
@@ -3110,6 +3248,7 @@ def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
             row["payload_json"],
             f"{context_label} payload",
             legacy_admin_json=action in _ADMIN_AUDIT_ACTIONS,
+            legacy_participant_json=action in _PARTICIPANT_LEGACY_JSON_ACTIONS,
         )
         occurred_at = _provenance_time(row["occurred_at"], f"{context_label} occurred_at")
         if row_subject != subject_id:
@@ -3131,6 +3270,108 @@ def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
             ):
                 raise IntegrityError(f"{context_label} payload is invalid")
             _provenance_int(payload["version"], f"{context_label} version", minimum=1)
+        elif action == "model_request_context_conflict":
+            _provenance_keys(payload, {"call_id", "purpose", "reason"}, context_label)
+            call_id = _provenance_text(payload["call_id"], f"{context_label} call id")
+            purpose = _provenance_text(payload["purpose"], f"{context_label} purpose")
+            reason = _provenance_text(payload["reason"], f"{context_label} reason")
+            if row["actor"] != "runtime" or reason != "prepared_request_context_changed":
+                raise IntegrityError(f"{context_label} context conflict reason is invalid")
+            call = _audit_reference(context, "model_calls", "call_id", call_id, context_label)
+            if call["purpose"] != purpose or call["status"] not in {"prepared", "failed"}:
+                raise IntegrityError(f"{context_label} model call purpose is invalid")
+        elif action == "participant_application_withdrawn":
+            _provenance_keys(payload, {"application_id", "interaction_id"}, context_label)
+            application_id = _provenance_text(
+                payload["application_id"], f"{context_label} application id"
+            )
+            application = _audit_reference(
+                context, "participant_applications", "application_id", application_id, context_label
+            )
+            if application["status"] != "withdrawn" or row["actor"] != (
+                "participant:" + application["entity_id"]
+            ):
+                raise IntegrityError(f"{context_label} application withdrawal is invalid")
+            interaction_id = payload["interaction_id"]
+            if interaction_id is not None:
+                interaction_id = _provenance_text(interaction_id, f"{context_label} interaction id")
+                interaction = _audit_reference(
+                    context, "interactions", "interaction_id", interaction_id, context_label
+                )
+                link = context.connection.execute(
+                    "SELECT entity_id FROM participant_message_links WHERE subject_id=? "
+                    "AND interaction_id=?",
+                    (subject_id, interaction_id),
+                ).fetchone()
+                if (
+                    interaction["idempotency_key"] != application["idempotency_key"] + ":interest"
+                    or interaction["direction"] != "incoming"
+                    or link is None
+                    or link["entity_id"] != application["entity_id"]
+                ):
+                    raise IntegrityError(f"{context_label} invitation reference is invalid")
+        elif action == "participant_source_bound":
+            _provenance_keys(payload, {"entity_id", "binding_id"}, context_label)
+            entity_id = _provenance_text(payload["entity_id"], f"{context_label} entity id")
+            binding_id = _provenance_text(payload["binding_id"], f"{context_label} binding id")
+            _audit_reference(context, "participant_entities", "entity_id", entity_id, context_label)
+            if row["actor"] != "operator":
+                raise IntegrityError(f"{context_label} participant binding is invalid")
+            binding = _audit_reference(
+                context, "interaction_bindings", "binding_id", binding_id, context_label
+            )
+            from noyra.interaction.participants import source_namespace
+
+            namespace = source_namespace(
+                binding["channel"], binding["transport_id"], binding["external_account_id"]
+            )
+            source = context.connection.execute(
+                "SELECT entity_id FROM participant_sources WHERE subject_id=? AND channel=? "
+                "AND namespace=? AND sender_id=?",
+                (
+                    subject_id,
+                    binding["channel"],
+                    namespace,
+                    binding["external_sender_id"],
+                ),
+            ).fetchone()
+            if source is None or source["entity_id"] != entity_id:
+                raise IntegrityError(f"{context_label} participant source reference is invalid")
+        elif action == "private_erasure_requested":
+            _provenance_keys(payload, {"job_id"}, context_label)
+            if row["actor"] != "operator":
+                raise IntegrityError(f"{context_label} erasure actor is invalid")
+            job = _audit_reference(
+                context, "private_erasure_jobs", "job_id", payload["job_id"], context_label
+            )
+            _audit_reference(
+                context,
+                "private_conversations",
+                "conversation_id",
+                job["conversation_id"],
+                context_label,
+            )
+        elif action in {"private_route_changed", "private_route_unlinked"}:
+            _provenance_keys(
+                payload,
+                {"binding_id", "push_web_replies"}
+                if action == "private_route_changed"
+                else {"binding_id"},
+                context_label,
+            )
+            if row["actor"] != "operator":
+                raise IntegrityError(f"{context_label} private route actor is invalid")
+            binding = _audit_reference(
+                context, "interaction_bindings", "binding_id", payload["binding_id"], context_label
+            )
+            if action == "private_route_changed":
+                _provenance_json_bool(
+                    payload["push_web_replies"], f"{context_label} reply push consent"
+                )
+                if binding["channel"] != "qq":
+                    raise IntegrityError(f"{context_label} private route channel is invalid")
+            # This is historical consent evidence. Later unlinking, disabling,
+            # revocation or consent changes must not invalidate the old audit.
         elif action == "wallet_legacy_state_authorized":
             _provenance_keys(
                 payload,
@@ -3160,8 +3401,31 @@ def _verify_core_provenance(context: IntegrityContext) -> Mapping[str, int]:
                 f"{context_label} historical authenticity",
             ):
                 raise IntegrityError(f"{context_label} historical authenticity is invalid")
-        elif action in {"model_unknown_retry_authorized", "model_unknown_retry_cancelled"}:
-            _provenance_keys(payload, {"call_id", "reason"}, context_label)
+        elif action in {
+            "model_unknown_retry_authorized",
+            "model_unknown_retry_cancelled",
+            "model_unknown_retry_closed",
+        }:
+            keys = set(payload)
+            basic_keys = {"call_id", "reason"}
+            resolution_keys = basic_keys | {
+                "resolution_evidence_hash",
+                "duplicate_risk_accepted",
+            }
+            if action in {"model_unknown_retry_authorized", "model_unknown_retry_cancelled"}:
+                _provenance_keys(payload, basic_keys, context_label)
+            elif keys == resolution_keys:
+                _provenance_hash(
+                    payload["resolution_evidence_hash"],
+                    f"{context_label} resolution evidence hash",
+                )
+                if not _provenance_json_bool(
+                    payload["duplicate_risk_accepted"],
+                    f"{context_label} duplicate risk acceptance",
+                ):
+                    raise IntegrityError(f"{context_label} risk acceptance is invalid")
+            else:
+                raise IntegrityError(f"{context_label} payload is invalid")
             _provenance_text(payload["call_id"], f"{context_label} call id")
             _provenance_text(payload["reason"], f"{context_label} reason")
             if row["referenced_call_subject_id"] != subject_id:
@@ -3547,7 +3811,17 @@ def _check_secret_file_intents(context: IntegrityContext) -> Mapping[str, Any]:
         if operation == "create" and state == "committed" and resource is None:
             raise IntegrityError(f"committed create intent has no resource: {intent_id}")
         if operation == "create" and state == "removed" and resource is not None:
-            raise IntegrityError(f"removed create intent has a resource: {intent_id}")
+            # Revocation retains the durable resource for audit history. Startup
+            # reconciliation closes its create intent after deleting the secret.
+            # Accept that terminal state only with the matching completed delete.
+            deleted = context.connection.execute(
+                "SELECT 1 FROM secret_file_intents WHERE subject_id = ? "
+                "AND resource_type = ? AND resource_id = ? AND secret_reference = ? "
+                "AND operation = 'delete' AND state = 'removed'",
+                (subject_id, resource_type, resource_id, reference),
+            ).fetchone()
+            if resource["status"] != revoked_status or deleted is None:
+                raise IntegrityError(f"removed create intent has a resource: {intent_id}")
         if subject_id == context.subject_id:
             subject_count += 1
     return {"secret_file_intents": subject_count}
@@ -3929,6 +4203,9 @@ def _check_model_resources(context: IntegrityContext) -> object:
 
 
 def _check_embedding_resources(context: IntegrityContext) -> Mapping[str, Any]:
+    from pydantic import SecretStr
+
+    from noyra.model.embedding import EmbeddingSettings
     from noyra.model.embedding_ledger import EmbeddingLedger
     from noyra.model.embedding_resources import EmbeddingResourceStore
 
@@ -3956,6 +4233,23 @@ def _check_embedding_resources(context: IntegrityContext) -> Mapping[str, Any]:
             raise IntegrityError("embedding resource secret is invalid") from error
         if content_hash({"api_key": value}) != record.key_fingerprint:
             raise IntegrityError("embedding resource secret fingerprint mismatch")
+        settings = EmbeddingSettings(
+            base_url=record.base_url,
+            model=record.model,
+            api_key=SecretStr(value),
+            dimensions=record.dimensions,
+            observed_dimensions=record.observed_dimensions,
+            timeout_seconds=record.timeout_seconds,
+            resource_id=record.config_id,
+            daily_call_limit=record.daily_call_limit,
+            daily_token_limit=record.daily_token_limit,
+            daily_cost_limit_microusd=record.daily_cost_limit_microusd,
+            input_cost_microusd_per_million=record.input_cost_microusd_per_million,
+            circuit_failure_threshold=record.circuit_failure_threshold,
+            circuit_cooldown_seconds=record.circuit_cooldown_seconds,
+        )
+        if record.config_hash != settings.configuration_fingerprint:
+            raise IntegrityError("embedding resource configuration fingerprint mismatch")
         verified_secrets += 1
     ledger_details = EmbeddingLedger(context.database).verify_integrity(
         context.subject_id,

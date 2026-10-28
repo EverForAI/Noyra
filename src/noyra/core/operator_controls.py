@@ -335,6 +335,8 @@ class OperatorControlService:
         reason: str,
         outcome: str,
         response: dict[str, Any] | None,
+        resolution_evidence: str | None = None,
+        accept_duplicate_risk: bool = False,
     ) -> dict[str, Any]:
         actor, reason = self._validate_actor_reason(actor, reason)
         if outcome not in {"succeeded", "failed", "retry"}:
@@ -354,7 +356,47 @@ class OperatorControlService:
             status = str(row["status"])
             if status in {"succeeded", "failed"}:
                 if status == outcome:
-                    return {"call_id": call_id, "status": status, "idempotent": True}
+                    retry_grant_closed = False
+                    if status == "failed" and outcome == "failed":
+                        from noyra.model.errors import (
+                            ModelCallStateError,
+                            UnknownRetryResolutionEvidenceRequired,
+                        )
+                        from noyra.model.ledger import ModelLedger
+
+                        try:
+                            retry_grant_closed = ModelLedger(
+                                self.database
+                            ).close_failed_unknown_retry(
+                                call_id,
+                                actor=actor,
+                                reason=reason,
+                                resolution_evidence=resolution_evidence,
+                                accept_duplicate_risk=accept_duplicate_risk,
+                            )
+                        except UnknownRetryResolutionEvidenceRequired as error:
+                            raise OperatorControlConflict(
+                                "model_unknown_retry_resolution_evidence_required"
+                            ) from error
+                        except (ModelCallStateError, ValueError) as error:
+                            raise OperatorControlConflict(
+                                "model_call_reconciliation_conflict",
+                                detail=type(error).__name__,
+                            ) from error
+                        if retry_grant_closed:
+                            self._audit(
+                                "operator_model_call_reconcile",
+                                actor,
+                                reason,
+                                {"call_id": call_id, "outcome": "failed"},
+                            )
+                    return {
+                        "call_id": call_id,
+                        "status": status,
+                        "idempotent": not retry_grant_closed,
+                        "retry_grant_closed": retry_grant_closed,
+                        "duplicate_risk_accepted": retry_grant_closed,
+                    }
                 raise OperatorControlConflict("model_call_already_terminal")
             from noyra.model.ledger import ModelLedger
 

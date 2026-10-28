@@ -1,2 +1,0 @@
-# Preserve original audit evidence bytes so the recorded SHA-256 hashes remain reproducible.
-* -text

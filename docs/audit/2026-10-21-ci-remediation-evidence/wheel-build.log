@@ -1,9 +1,0 @@
-Processing .\.
-  Preparing metadata (pyproject.toml): started
-  Preparing metadata (pyproject.toml): finished with status 'done'
-Building wheels for collected packages: noyra
-  Building wheel for noyra (pyproject.toml): started
-  Building wheel for noyra (pyproject.toml): finished with status 'done'
-  Created wheel for noyra: filename=noyra-0.1.0-py3-none-any.whl size=2688932 sha256=0435866020379123f2095ea944ff40dc04d908046a6df7c5f4665cfb16d203f9
-  Stored in directory: D:\metagrowh\.user-temp\pip-ephem-wheel-cache-4foz4u3y\wheels\fb\4f\35\38d65b18827c37eeefd2d5bf43e43b4232dc3d26f53941c628
-Successfully built noyra

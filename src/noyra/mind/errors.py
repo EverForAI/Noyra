@@ -8,3 +8,7 @@ class CausalValidationError(MindError):
 
 class MindStateConflictError(MindError):
     """A revision conflicts with the current durable state."""
+
+
+class RelationshipIdentityReviewRequired(MindStateConflictError):
+    """A quarantined binding cannot receive new trust or automatic contact."""

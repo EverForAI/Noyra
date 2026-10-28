@@ -1,0 +1,95 @@
+# F04 签名策略与验证契约修复复审（2026-10-26）
+
+基线：`d4a8dc7c8c2a166a6d948c6b355dec9fea30f3bc`；分支：`codex/fix-f04-signature-policy-validation`。只实施 F04；F01、F03 保留，F02 继续暂缓。本轮不改变生产签名或恢复逻辑。
+
+## 根因、风险与选定规则
+
+F04 属于 R03 接入后的 P2 验证/契约缺口，修复风险低至中。原型使用 state.strict OR 本次 Strict，实际安装则按本次 RequireSignature OR 候选 signature_required 决定所选版本策略。原型的 strict-no-downgrade 断言和混合证据输出，使更强的原型约束容易被误当成生产保证。
+
+本轮按既有生产规则统一：普通 install/upgrade 可由操作者选择开发包；显式 RequireSignature 必须拒绝开发 manifest；signed manifest 不因省略开关而免验；开发选择保留旧 pins，不能借本次新 pins 授予新信任。start/rollback 继续使用当前 authority、显式严格要求及候选自带要求；recover 按已接受 intent，不接受旧镜像或临时参数覆写。
+
+strict 不是永久的安装级政策。若需要长期禁止选择开发包，必须另行设计持久政策和明确变更入口；本轮不通过改变默认行为或禁止旧开发流程来消除验证矛盾。
+
+## 模块一：先复现差异，再对齐原型
+
+- 方案提交 `3caf836` 先固定生产契约、风险和验收范围。
+- 模块一提交 `14fe8d6` 新增直接产品入口对照，修复原型的政策选择和旧的错误断言命名。
+- 新测试首次在未修原型上失败：生产成功选择开发包，原型因永久严格状态和缺少本次外部 pins 而拒绝，明确显示 Production/prototype policy mismatch。
+- 原型改为本次 Strict OR 候选声明，省略 pins 复用保存值；开发候选保留原 pins，签名候选只能使用经过实际验证的外部允许列表。
+- 15 组相同策略输入分别执行真实 lifecycle 与测试专用模型，比较接受/拒绝、current/previous、strict、pins、generation、phase 和 receipt。全部通过后提交。
+
+15 个场景涵盖严格→开发、显式严格拒绝开发、候选自带严格要求、保存 pins 复用、A/B/AB 轮换、未信任实际签名、开发→严格、metadata 不能授权自身、同版本策略变化拒绝与同版本幂等。这是 1 个 pytest 用例中的 15 个场景，不冒充 15 个独立用例。
+
+## 模块二：证据分层与生产故障
+
+R03 综合证据升级为 `noyra-r03-validation/v2`：
+
+| 分组 | 实际执行内容 | 不允许推导的结论 |
+|---|---|---|
+| production | 当前 lifecycle 的命名入口验证 | 不能继承原型的 108 故障场景数量 |
+| prototype | 测试专用协议的模型、真实文件共享与子进程故障/崩溃矩阵 | 原生 OS 机制不等于已经对生产状态机做了等量故障注入 |
+| safety | 夹具启动器执行数、证书导入数和 PowerShell 版本 | 不能代替真实发行启动器或证书链的实机验收 |
+
+消费端分别检查格式、执行实现、各分组要求；product-only 快速路径的 prototype 只含实现标签，不输出未执行的矩阵计数。历史 R03 报告明确勘误了原型/生产覆盖范围及“永久不降级”的误读，没有删除历史执行数量来掩盖差异。
+
+新增六个直接生产故障场景：两种策略转换 × 三个故障阶段。
+
+| 阶段 | 注入方式 | 检查 |
+|---|---|---|
+| 接受前 | 锁定 r03-state.json 阻止替换 | 当前 authority 的策略和代数不变；释放故障后恢复原选择 |
+| 接受后 | 锁定候选 verification receipt | PREPARED 已携带新 strict/pins；恢复按已接受 intent 前滚 |
+| 提交后 | 在收据发布检查点持有 current 镜像真实共享句柄 | COMMITTED 已选新版本；释放后修复镜像并达到 READY |
+
+提交后镜像故障的断点只用于在正确时刻取得真实文件句柄，未向生产源码加入故障开关、未手工修改 envelope/intent。权威状态读取使用独立的 envelope 哈希核验及字段投影。
+
+每个场景还验证重复恢复不会重写 authority 或增加代数，DataRoot 哨兵保留。开发选择不会保存本次传入的 B 以替换 A；进入严格 B 后 A 不会因恢复而重现，回滚到开发包仍被严格 manifest 规则拒绝。拒绝原因须匹配签名/信任规则，不把任意异常都视为成功拒绝。
+
+模块二提交 `815dae3`；定向运行 3 个 pytest 用例全部通过，分别覆盖 15 组策略对照、6 个生产故障场景及仅生产输出的证据隔离。完整矩阵/兼容回归结果见下一节；本段定向重跑不重复计入最终通过总数。
+
+## 完整验证
+
+Windows / Python 3.12.10 / 完整 PowerShell 7 的实际执行：
+
+| 范围 | 结果 | 说明 |
+|---|---|---|
+| R03 综合验证、PS5 主机能力边界、新策略对照、生产故障、product-only 证据隔离 | 5 passed | 含 15 个策略对照、6 个生产文件故障；仅在各自分组记录 |
+| F01 数据根、进程身份、桌面、包组装/篡改、R02 文件发布、原有真实签名与恢复回归 | 65 passed | 没有改变这些生产实现 |
+| 不同 pytest 用例合计 | 70 passed，0 failed，0 skipped | 两个 JUnit 去重；之前定向重跑的 3 项不重复计入 |
+| 原型内部矩阵 | 108 场景通过 | 18 个故障点 × 3 个签名者策略 × 2 种故障模式；仅是 prototype，不计为额外 108 个生产用例 |
+| 静态 | 全库 Ruff/格式通过，严格 Mypy 483 个源文件通过 | 修改的三个 PowerShell 测试文件 AST 解析通过 |
+
+最终回归命令：
+
+```sh
+python -m pytest -q tests/test_audit_r03_protocol_validation.py
+python -m pytest -q tests/test_windows_data_root.py tests/test_windows_process_identity.py tests/test_desktop.py tests/test_m42_p3_05_windows_package.py tests/test_audit_r02_windows_state.py tests/test_audit_6a742e5_windows.py
+python -m ruff check .
+python -m ruff format --check .
+python -m mypy src tests scripts/public-file-manifest.py
+```
+
+原始结果保存在仓库外 `[私有验证记录]`：r03-full.xml、windows-compatibility.xml、test-summary.json、native-ps7.json、signature-policy.json、production-policy-recovery.json 及静态检查输出。没有批量加入本机原始日志到公开源码清单。
+
+独立读取 JSON 证据复核：production 分组只有 5 个具名原有 lifecycle 检查，fault_matrix_cases=108 只存在于 prototype；15 个生产策略状态与对应模型相同，六个恢复后的信任和严格字段符合接受点。A+B 的 pins 为 A/B 集合的准确并集，仅保留 B 后 A 确实不存在；开发选择保留 A，没有通过新参数添加 B。独立结果见 independent-policy-review.json 和 independent-evidence-scope.json。
+
+本轮没有重跑整个 Python 运行时或真实 Linux/链上/供应商测试；生产源码、安装器和 CI 字节均不变，回归聚焦本次修改的原型/证据及 Windows 兼容边界。
+
+公开范围最终为 984 个文件、983 个 SHA-256 条目、202 个明确排除路径。提交前按暂存区重算并校验；最终提交后独立核对原始 Git blob 和实际源码 ZIP。确切 SHA 及最后核验结果以交付记录为准，避免文档自引用。
+
+## 差异复审与不变边界
+
+- 本轮没有修改 src/、deploy/、scripts/ 或 .github/；生产 verifier、R03 状态机、包 builder、数据库 schema、F01 数据目录和 F03 取消结算保持基线内容。
+- 测试没有关闭验签、从包 metadata 授予信任、导入测试证书或执行打包启动器。CMS 签名使用内存测试证书；被打包系统 EXE 只用于真实 Authenticode/哈希验证。
+- 没有让旧镜像改变已接受策略，没有删除恢复标记以触发回退；同版本信任变化仍拒绝，不新增开发降级权限或绕过审批。
+- 原型仍是模型，格式、事务边界和故障点不被宣称与生产逐行等价。已对齐的是本轮选定的签名选择与信任契约，剩余生产覆盖按命名证据解释。
+- 旧安装接管限制 F02 未修改。本轮也未把所有历史签名/恢复风险重新评价为已经消除。
+
+## 文档与交付
+
+发布文档逐项解释 install/upgrade、start/rollback、recover 的责任，receipt 与 authority 的关系，以及测试专用矩阵和生产故障验证的区别。详细方案见 [实施计划](../roadmap/2026-10-26-f04-signature-policy-validation.md)。
+
+模块提交后应保持工作区干净。提交前按暂存区重建公开清单，最终提交后再核验 Git 原始 SHA-256 和实际源码 ZIP。本次不推送、合并、部署；没有操作任何真实运行实例、证书库或主体数据。
+
+## 剩余发布验收
+
+实际签名发行启动器、干净 Windows VM、目标机 BitLocker/ACL、突然断电与长期运行仍需相应发行门禁。模型的 108 个错误/进程崩溃场景和本轮六个生产文件故障场景不能取代这些门禁；本地通过也不等于 GitHub CI 或线上部署成功。
