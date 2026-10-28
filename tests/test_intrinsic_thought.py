@@ -170,6 +170,63 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
             provider,
         )
 
+    def insert_fixture_agenda(
+        self: Self,
+        thought: IntrinsicThought,
+        agenda_id: str,
+        *,
+        topic: str,
+        urgency: float,
+        novelty: float,
+        emotional_weight: float,
+    ) -> None:
+        now = self.clock_value
+        state_hash = thought._agenda_hash(
+            "goal",
+            agenda_id,
+            topic,
+            urgency,
+            novelty,
+            emotional_weight,
+            1,
+            0,
+            "open",
+            None,
+        )
+        with self.kernel.database.transaction() as connection:
+            connection.execute(
+                """INSERT INTO thought_agenda_items(
+                    agenda_id, subject_id, source_type, source_id, topic, urgency, novelty,
+                    emotional_weight, recurrence_count, consecutive_no_change, status,
+                    cooldown_until, state_hash, created_at, updated_at
+                ) VALUES (?, ?, 'goal', ?, ?, ?, ?, ?, 1, 0, 'open', NULL, ?, ?, ?)""",
+                (
+                    agenda_id,
+                    self.subject_id,
+                    agenda_id,
+                    topic,
+                    urgency,
+                    novelty,
+                    emotional_weight,
+                    state_hash,
+                    now,
+                    now,
+                ),
+            )
+            thought._insert_agenda_revision(
+                connection,
+                agenda_id,
+                old_status=None,
+                new_status="open",
+                old_recurrence=0,
+                new_recurrence=1,
+                old_no_change=0,
+                new_no_change=0,
+                cooldown_until=None,
+                reason="target binding fixture",
+                created_at=now,
+            )
+
     def establish_goal_and_affect(self: Self) -> dict[str, str]:
         event = self.events.append(self.subject_id, "experience", "test", {"topic": "continuity"})
         goal = GoalStore(self.kernel.database).create_candidate(
@@ -353,6 +410,99 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await cognition.run_due(), "intrinsic_thought_rejected")
             self.assertIsNone(await cognition.run_due())
         self.assertEqual(len(provider.requests), 2)
+
+    async def test_explicit_target_is_not_replaced_by_higher_scored_agenda(self: Self) -> None:
+        ids = self.establish_goal_and_affect()
+        gateway, provider = self.gateway([self.proposal(ids)])
+        cognition = IntrinsicThought(
+            self.kernel.database,
+            self.subject_id,
+            gateway,
+            self.settings(),
+            clock=lambda: self.clock_value,
+        )
+        target_id = "agenda-target-a"
+        higher_id = "agenda-target-b"
+        self.insert_fixture_agenda(
+            cognition,
+            target_id,
+            topic="Target A: preserve the selected question",
+            urgency=0.2,
+            novelty=0.2,
+            emotional_weight=0.2,
+        )
+        self.insert_fixture_agenda(
+            cognition,
+            higher_id,
+            topic="Target B: tempting higher priority question",
+            urgency=1.0,
+            novelty=1.0,
+            emotional_weight=1.0,
+        )
+        selected = cognition._select_agenda()
+        self.assertIsNotNone(selected)
+        assert selected is not None
+        self.assertEqual(selected.agenda_id, higher_id)
+
+        self.assertEqual(
+            await cognition.run_due(agenda_id=target_id),
+            "intrinsic_thought_reflect",
+        )
+        self.assertEqual(len(provider.requests), 1)
+        context = provider.requests[0].messages[1].content
+        self.assertIn("Target A: preserve the selected question", context)
+        self.assertNotIn("Target B: tempting higher priority question", context)
+
+    async def test_expired_explicit_target_fails_closed_without_fallback(self: Self) -> None:
+        ids = self.establish_goal_and_affect()
+        gateway, provider = self.gateway([self.proposal(ids)])
+        cognition = IntrinsicThought(
+            self.kernel.database,
+            self.subject_id,
+            gateway,
+            self.settings(),
+            clock=lambda: self.clock_value,
+        )
+        target_id = "agenda-expired-target"
+        fallback_id = "agenda-expired-fallback"
+        self.insert_fixture_agenda(
+            cognition,
+            target_id,
+            topic="Target A: already resolved",
+            urgency=0.8,
+            novelty=0.8,
+            emotional_weight=0.8,
+        )
+        self.insert_fixture_agenda(
+            cognition,
+            fallback_id,
+            topic="Target B: fallback must never run",
+            urgency=1.0,
+            novelty=1.0,
+            emotional_weight=1.0,
+        )
+        with self.kernel.database.transaction() as connection:
+            state_hash = cognition._agenda_hash(
+                "goal",
+                target_id,
+                "Target A: already resolved",
+                0.8,
+                0.8,
+                0.8,
+                1,
+                0,
+                "resolved",
+                None,
+            )
+            connection.execute(
+                "UPDATE thought_agenda_items SET status='resolved', state_hash=? WHERE agenda_id=?",
+                (state_hash, target_id),
+            )
+        self.assertEqual(
+            await cognition.run_due(agenda_id=target_id),
+            "intrinsic_thought_target_expired",
+        )
+        self.assertEqual(provider.requests, [])
 
     async def test_supported_thought_may_create_one_candidate_goal(self: Self) -> None:
         ids = self.establish_goal_and_affect()

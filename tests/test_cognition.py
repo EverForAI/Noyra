@@ -863,7 +863,14 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
                 cycle.metacognitive_control,
                 "run_due",
                 return_value=type(
-                    "Decision", (), {"decision_id": "test-meta-think", "strategy": "think"}
+                    "Decision",
+                    (),
+                    {
+                        "decision_id": "test-meta-think",
+                        "strategy": "think",
+                        "target_type": "agenda",
+                        "target_id": "test-agenda",
+                    },
                 )(),
             ),
             patch.object(cycle.metacognitive_control, "record_result"),
@@ -871,9 +878,10 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
                 cycle.intrinsic_thought,
                 "run_due",
                 new=AsyncMock(return_value="intrinsic_thought_reflect"),
-            ),
+            ) as run_thought,
         ):
             self.assertEqual(await cycle.run_once(), "intrinsic_thought_reflect")
+        run_thought.assert_awaited_once_with(agenda_id="test-agenda")
 
     async def test_supervisor_rejects_forged_causal_targets(self: Self) -> None:
         provider = FakeProvider(

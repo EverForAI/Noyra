@@ -263,6 +263,7 @@ class CognitionCycle:
             self.subject_id,
             self.settings,
             clock=clock,
+            agenda_inspector=self.intrinsic_thought.inspect_agenda,
         )
         self.motivation_development = MotivationDevelopment(
             kernel.database,
@@ -607,7 +608,12 @@ class CognitionCycle:
         elif decision.strategy == "social_review":
             result = await self.relationship_social.run_due()
         elif decision.strategy == "think":
-            result = await self.intrinsic_thought.run_due()
+            target_type = getattr(decision, "target_type", None)
+            target_id = getattr(decision, "target_id", None)
+            if target_type != "agenda" or target_id is None:
+                result = "metacognitive_target_missing"
+            else:
+                result = await self.intrinsic_thought.run_due(agenda_id=target_id)
         elif decision.strategy == "sleep":
             if self.sleep.current() is None:
                 wake_after = None

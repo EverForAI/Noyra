@@ -92,12 +92,14 @@ class MetacognitiveControl:
         settings: CognitionSettings,
         *,
         clock: Callable[[], str] = utc_now,
+        agenda_inspector: Callable[[str], Any] | None = None,
     ):
         self.database = database
         self.subject_id = subject_id
         self.settings = settings
         self.clock = clock
         self.events = EventStore(database)
+        self.agenda_inspector = agenda_inspector
 
     def run_due(self) -> MetacognitiveDecisionRecord:
         pending = self._pending_decision()
@@ -392,6 +394,12 @@ class MetacognitiveControl:
                 row["cooldown_until"] is not None and self._parse_time(row["cooldown_until"]) <= now
             )
         ]
+        if self.agenda_inspector is not None:
+            available_agenda = [
+                row
+                for row in available_agenda
+                if self.agenda_inspector(str(row["agenda_id"])).eligible
+            ]
         if available_agenda:
             selected_agenda = max(
                 available_agenda,
@@ -634,9 +642,10 @@ class MetacognitiveControl:
             if decision.strategy == "think":
                 row = connection.execute(
                     "SELECT thought_id, disposition, changed_state, created_at, model_call_id "
-                    "FROM thought_episodes WHERE subject_id = ? AND created_at >= ? "
+                    "FROM thought_episodes WHERE subject_id = ? AND agenda_id = ? "
+                    "AND created_at >= ? "
                     "ORDER BY created_at DESC, thought_id DESC LIMIT 1",
-                    (self.subject_id, decision.created_at),
+                    (self.subject_id, decision.target_id, decision.created_at),
                 ).fetchone()
                 if row is not None:
                     changed = bool(row["changed_state"])
@@ -760,7 +769,14 @@ class MetacognitiveControl:
             outcome = "unknown"
         return (
             "cycle_result",
-            content_hash({"decision": decision.decision_id, "result": result}),
+            content_hash(
+                {
+                    "decision": decision.decision_id,
+                    "strategy": decision.strategy,
+                    "target_id": decision.target_id,
+                    "result": result,
+                }
+            ),
             outcome,
             result,
             0,

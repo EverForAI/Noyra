@@ -79,6 +79,36 @@ class ThoughtAgendaRecord:
         return max(0.0, min(1.0, score))
 
 
+AgendaExecutionStatus = Literal[
+    "eligible",
+    "missing",
+    "wrong_subject",
+    "terminal",
+    "cooling",
+    "not_due",
+    "budget_exhausted",
+    "round_quarantined",
+]
+
+
+@dataclass(frozen=True)
+class AgendaExecutionCheck:
+    """Read-only proof that one agenda may be processed by the thought worker.
+
+    The check deliberately carries the requested agenda ID and never returns a
+    replacement candidate.  Callers that selected a target must either execute
+    this target or record why it could not be executed.
+    """
+
+    agenda_id: str
+    status: AgendaExecutionStatus
+    agenda: ThoughtAgendaRecord | None = None
+
+    @property
+    def eligible(self) -> bool:
+        return self.status == "eligible" and self.agenda is not None
+
+
 @dataclass(frozen=True)
 class ThoughtEpisodeRecord:
     thought_id: str
@@ -156,7 +186,7 @@ class IntrinsicThought:
         self._last_agenda_discovery = now
         return True
 
-    async def run_due(self) -> str | None:
+    async def run_due(self, *, agenda_id: str | None = None) -> str | None:
         if not self.settings.enabled:
             return None
         try:
@@ -166,15 +196,36 @@ class IntrinsicThought:
         if not acquired:
             return "intrinsic_thought_in_progress"
         try:
-            return await self._run_due_locked()
+            return await self._run_due_locked(agenda_id=agenda_id)
         finally:
             self._processing_lock.release()
 
-    async def _run_due_locked(self) -> str | None:
+    async def _run_due_locked(self, *, agenda_id: str | None = None) -> str | None:
         self.discover_agenda()
-        agenda = self._select_agenda()
-        if agenda is None or not self._is_due(agenda):
-            return None
+        if agenda_id is None:
+            agenda = self._select_agenda()
+            if agenda is None:
+                return None
+            if not self.inspect_agenda(agenda.agenda_id).eligible:
+                return None
+        else:
+            check = self.inspect_agenda(agenda_id)
+            if not check.eligible:
+                return self._target_result(check)
+            agenda = check.agenda
+            if agenda is None:
+                raise IntegrityError("eligible agenda check has no agenda")
+
+        # Re-check the selected target immediately before touching the model
+        # gateway.  A stale target must wait or expire; it must never be
+        # replaced with a different agenda.
+        if agenda_id is not None:
+            check = self.inspect_agenda(agenda_id)
+            if not check.eligible:
+                return self._target_result(check)
+            agenda = check.agenda
+            if agenda is None:
+                raise IntegrityError("eligible agenda check has no agenda")
         number, _ = self.rounds.current(agenda.agenda_id)
         purpose, idempotency_key = self.rounds.identity(agenda.agenda_id, number)
         calls, blocked = self.rounds.calls(agenda.agenda_id, number)
@@ -187,8 +238,27 @@ class IntrinsicThought:
             return "intrinsic_thought_model_failed"
         context = self._context(agenda)
         if not calls or any(call.status == "prepared" for call in calls):
+            if agenda_id is not None:
+                # The target may have changed while the private context was
+                # assembled. Re-read the same target and its business round
+                # before authorizing a new provider request.
+                check = self.inspect_agenda(agenda_id)
+                if not check.eligible:
+                    return self._target_result(check)
+                agenda = check.agenda
+                if agenda is None:
+                    raise IntegrityError("eligible agenda check has no agenda")
+                number, _ = self.rounds.current(agenda.agenda_id)
+                purpose, idempotency_key = self.rounds.identity(agenda.agenda_id, number)
+                calls, blocked = self.rounds.calls(agenda.agenda_id, number)
+                if blocked:
+                    return "intrinsic_thought_target_waiting"
+                if calls and all(call.status == "failed" for call in calls):
+                    self._close_round(agenda.agenda_id, number, "model_failed")
+                    return "intrinsic_thought_model_failed"
+                context = self._context(agenda)
             if self._calls_today() >= self.settings.max_thought_model_calls_per_day:
-                return None
+                return None if agenda_id is None else "intrinsic_thought_target_waiting"
             try:
                 await self.gateway.complete_structured(
                     self.subject_id,
@@ -228,6 +298,69 @@ class IntrinsicThought:
         # mutation are still atomic; no failure is represented as a fake thought.
         record = self._commit(proposal, succeeded.call_id, idempotency_key, context)
         return f"intrinsic_thought_{record.disposition}"
+
+    def inspect_agenda(
+        self, agenda_id: str, *, allow_new_calls: bool | None = None
+    ) -> AgendaExecutionCheck:
+        """Return the current execution status for exactly ``agenda_id``.
+
+        This is intentionally side-effect free and reuses the same round,
+        unknown-call and budget rules as the worker.  It is also the boundary
+        used by metacognition to avoid selecting a target the worker cannot
+        legally execute.
+        """
+
+        with self.database.read_transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM thought_agenda_items WHERE agenda_id = ?",
+                (agenda_id,),
+            ).fetchone()
+        if row is None:
+            return AgendaExecutionCheck(agenda_id, "missing")
+        if row["subject_id"] != self.subject_id:
+            return AgendaExecutionCheck(agenda_id, "wrong_subject")
+        agenda = self._agenda_from_row(row)
+        now = self._parse_time(self.clock())
+        if agenda.status not in {"open", "cooling"}:
+            return AgendaExecutionCheck(agenda_id, "terminal", agenda)
+        if agenda.cooldown_until is not None and self._parse_time(agenda.cooldown_until) > now:
+            return AgendaExecutionCheck(agenda_id, "cooling", agenda)
+
+        number, closure = self.rounds.current(agenda_id)
+        calls, blocked = self.rounds.calls(agenda_id, number)
+        if blocked:
+            return AgendaExecutionCheck(agenda_id, "round_quarantined", agenda)
+        if calls and not any(call.status == "prepared" for call in calls):
+            # Existing known evidence can be settled or recovered even when
+            # today's budget is exhausted.
+            return AgendaExecutionCheck(agenda_id, "eligible", agenda)
+        if allow_new_calls is None:
+            allow_new_calls = self._calls_today() < self.settings.max_thought_model_calls_per_day
+        if not allow_new_calls:
+            return AgendaExecutionCheck(agenda_id, "budget_exhausted", agenda)
+        if closure is not None and self._parse_time(closure["retry_after"]) > now:
+            return AgendaExecutionCheck(agenda_id, "not_due", agenda)
+        with self.database.connection() as connection:
+            latest = connection.execute(
+                "SELECT created_at FROM thought_episodes WHERE agenda_id = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (agenda_id,),
+            ).fetchone()
+        if latest is not None:
+            elapsed = now - self._parse_time(latest["created_at"])
+            if elapsed.total_seconds() < self.settings.thought_interval_seconds:
+                return AgendaExecutionCheck(agenda_id, "not_due", agenda)
+        return AgendaExecutionCheck(agenda_id, "eligible", agenda)
+
+    @staticmethod
+    def _target_result(check: AgendaExecutionCheck) -> str:
+        if check.status in {"missing", "terminal"}:
+            return "intrinsic_thought_target_expired"
+        if check.status == "wrong_subject":
+            return "intrinsic_thought_target_invalid"
+        if check.status == "not_due":
+            return "intrinsic_thought_target_not_due"
+        return "intrinsic_thought_target_waiting"
 
     def _close_round(self, agenda_id: str, number: int, reason: str) -> bool:
         now = self.clock()
@@ -710,21 +843,11 @@ class IntrinsicThought:
         return candidates[:48]
 
     def _select_agenda(self) -> ThoughtAgendaRecord | None:
-        now = self._parse_time(self.clock())
         allow_new_calls = self._calls_today() < self.settings.max_thought_model_calls_per_day
-        available = [
-            item
-            for item in self.agenda(limit=200)
-            if (
-                item.status == "open"
-                or (
-                    item.status == "cooling"
-                    and item.cooldown_until is not None
-                    and self._parse_time(item.cooldown_until) <= now
-                )
-            )
-            and self._is_due(item, allow_new_calls=allow_new_calls)
-        ]
+        available = []
+        for item in self.agenda(limit=200):
+            if self.inspect_agenda(item.agenda_id, allow_new_calls=allow_new_calls).eligible:
+                available.append(item)
         if not available:
             return None
         return max(
@@ -733,33 +856,7 @@ class IntrinsicThought:
         )
 
     def _is_due(self, agenda: ThoughtAgendaRecord, *, allow_new_calls: bool | None = None) -> bool:
-        now = self._parse_time(self.clock())
-        if agenda.status not in {"open", "cooling"} or (
-            agenda.cooldown_until is not None and self._parse_time(agenda.cooldown_until) > now
-        ):
-            return False
-        number, closure = self.rounds.current(agenda.agenda_id)
-        calls, blocked = self.rounds.calls(agenda.agenda_id, number)
-        if blocked:
-            return False
-        if calls and not any(call.status == "prepared" for call in calls):
-            return True  # Settle/recover existing work, not a fresh paid request.
-        if allow_new_calls is None:
-            allow_new_calls = self._calls_today() < self.settings.max_thought_model_calls_per_day
-        if not allow_new_calls:
-            return False
-        if closure is not None and self._parse_time(closure["retry_after"]) > now:
-            return False
-        with self.database.connection() as connection:
-            latest = connection.execute(
-                "SELECT created_at FROM thought_episodes WHERE agenda_id = ? "
-                "ORDER BY created_at DESC LIMIT 1",
-                (agenda.agenda_id,),
-            ).fetchone()
-        if latest is None:
-            return True
-        elapsed = self._parse_time(self.clock()) - self._parse_time(latest["created_at"])
-        return elapsed.total_seconds() >= self.settings.thought_interval_seconds
+        return self.inspect_agenda(agenda.agenda_id, allow_new_calls=allow_new_calls).eligible
 
     def _context(self, agenda: ThoughtAgendaRecord) -> _ThoughtContext:
         with self.database.connection() as connection:
