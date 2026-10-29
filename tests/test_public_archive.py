@@ -684,6 +684,11 @@ def test_sitemap_covers_multiple_pages_and_rereads_visibility(
 def test_cold_segment_pages_continue_without_skips_or_filtered_false_end(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # This tests continuation/visibility, not process-startup performance.
+    # A loaded runner can spend the normal query budget importing a spawned
+    # worker. Keep runtime's 2s cap unchanged; physical timeout/reaping is
+    # independently tested in test_public_cold_reader.py.
+    monkeypatch.setattr("noyra.interaction.public_archive.MAX_PUBLIC_QUERY_SECONDS", 10.0)
     monkeypatch.setenv("NOYRA_ARCHIVE_ENCRYPTION_KEY", base64.urlsafe_b64encode(b"S" * 32).decode())
     monkeypatch.setenv("NOYRA_ARCHIVE_ENCRYPTION_KEY_ID", "segment-continuation")
     kernel = SubjectKernel(tmp_path / "db.sqlite3", "segment-test", content_hash("segments"))
