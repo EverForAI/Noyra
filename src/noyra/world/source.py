@@ -20,6 +20,7 @@ from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
     HTTPResponseLimitError,
     PublicDNSAsyncHTTPTransport,
+    is_public_address,
     read_bounded_response,
     validate_public_addresses,
     validate_response_headers,
@@ -101,7 +102,7 @@ def canonical_public_url(url: str) -> str:
         address = ipaddress.ip_address(host)
     except ValueError:
         address = None
-    if address is not None and not address.is_global:
+    if address is not None and not is_public_address(address):
         raise UnsafeSourceError("source address is not globally routable")
     sensitive_query = re.compile(r"(token|key|secret|password|signature|auth)", re.I)
     if any(
@@ -416,7 +417,7 @@ class SafeWebReader:
                             raise UnsafeSourceError(
                                 "world fetch peer address is invalid"
                             ) from error
-                        if not peer_address.is_global:
+                        if not is_public_address(peer_address):
                             raise UnsafeSourceError("world fetch connected to a non-public address")
                     media_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
                     if media_type not in ALLOWED_MEDIA_TYPES:

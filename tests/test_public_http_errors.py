@@ -380,3 +380,45 @@ def test_common_preconnect_failure_is_recorded_and_does_not_starve_other_peers(
         rk.close()
         bk.close()
         pk.close()
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "64:ff9b::7f00:1",
+        "64:ff9b::a9fe:a9fe",
+        "64:ff9b::808:808",
+        "64:ff9b:1::a9fe:a9fe",
+        "2002:7f00:1::",
+        "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+        "224.0.0.1",
+        "239.255.255.250",
+        "ff02::1",
+        "::ffff:8.8.8.8",
+        "192.0.0.8",
+        "192.88.99.1",
+        "100:0:0:1::1",
+        "3fff::1",
+        "5f00::1",
+        "2606:4700:4700::1111%1",
+    ],
+)
+def test_public_endpoint_rejects_conversion_multicast_and_special_use(address: str) -> None:
+    from noyra.core.http import PublicAddressRejected, public_addresses, validate_public_addresses
+    from noyra.world.source import UnsafeSourceError, canonical_public_url
+
+    with pytest.raises(PublicAddressRejected):
+        public_addresses(address, 443)
+    with pytest.raises(PublicAddressRejected):
+        validate_public_addresses(["8.8.8.8", address])
+    literal = f"[{address}]" if ":" in address else address
+    with pytest.raises((UnsafeSourceError, ValueError)):
+        canonical_public_url(f"https://{literal}/")
+
+
+def test_public_unicast_ipv4_ipv6_remain_usable() -> None:
+    from noyra.core.http import public_addresses, validate_public_addresses
+
+    for address in ("8.8.8.8", "93.184.216.34", "2606:4700:4700::1111", "2001:4860:4860::8888"):
+        assert public_addresses(address, 443) == [address]
+        assert validate_public_addresses([address, address]) == [address]

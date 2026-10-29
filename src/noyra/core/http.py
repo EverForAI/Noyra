@@ -245,13 +245,51 @@ class PublicEndpointRejected(httpcore.ConnectError):
     """A non-retryable policy rejection retained as the HTTPX exception cause."""
 
 
+# Conversion/tunnel destinations can name another address after routing. Reject
+# these even when the interpreter's version-dependent IANA tables say global.
+_SPECIAL_IPV6 = tuple(
+    ipaddress.IPv6Network(prefix)
+    for prefix in (
+        "::/96",
+        "::ffff:0:0/96",
+        "64:ff9b::/96",
+        "64:ff9b:1::/48",
+        "100::/64",
+        "100:0:0:1::/64",
+        "2001::/23",
+        "2002::/16",
+        "3ffe::/16",
+        "3fff::/20",
+        "5f00::/16",
+    )
+)
+_SPECIAL_IPV4 = tuple(ipaddress.IPv4Network(p) for p in ("192.0.0.0/24", "192.88.99.0/24"))
+
+
+def is_public_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Public unicast only, with explicit translation/special-use exclusions."""
+    if (
+        not address.is_global
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_unspecified
+        or address.is_private
+    ):
+        return False
+    if isinstance(address, ipaddress.IPv6Address):
+        return address.scope_id is None and not any(address in net for net in _SPECIAL_IPV6)
+    return not any(address in net for net in _SPECIAL_IPV4)
+
+
 def public_addresses(host: str, port: int, *, timeout: float | None = None) -> list[str]:
     """Resolve a host to public addresses without leaving a DNS-to-connect gap."""
     del port
-    literal = host.split("%", 1)[0]
+    literal = host
     try:
         address = ipaddress.ip_address(literal)
-        if not address.is_global:
+        if not is_public_address(address):
             raise PublicAddressRejected("HTTP endpoint resolved to a non-public address")
         return [str(address)]
     except ValueError:
@@ -272,11 +310,11 @@ def public_addresses(host: str, port: int, *, timeout: float | None = None) -> l
     for info in infos:
         raw = str(info[4][0])
         try:
-            address = ipaddress.ip_address(raw.split("%", 1)[0])
+            address = ipaddress.ip_address(raw)
         except ValueError:
             continue
         normalized = str(address)
-        if address.is_global and normalized not in addresses:
+        if is_public_address(address) and normalized not in addresses:
             addresses.append(normalized)
     if not addresses:
         raise PublicAddressRejected("HTTP endpoint resolved to a non-public address")
@@ -293,12 +331,12 @@ def validate_public_addresses(addresses: Sequence[str]) -> list[str]:
     normalized: list[str] = []
     for raw in addresses:
         try:
-            address = ipaddress.ip_address(str(raw).split("%", 1)[0])
+            address = ipaddress.ip_address(str(raw))
         except ValueError as error:
             raise PublicAddressRejected(
                 "HTTP endpoint resolver returned an invalid address"
             ) from error
-        if not address.is_global:
+        if not is_public_address(address):
             raise PublicAddressRejected("HTTP endpoint resolved to a non-public address")
         value = str(address)
         if value not in normalized:
