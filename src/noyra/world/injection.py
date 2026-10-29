@@ -11,7 +11,7 @@ import re
 import unicodedata
 from html import unescape
 
-INJECTION_CLASSIFIER_VERSION = 4
+INJECTION_CLASSIFIER_VERSION = 5
 _ACTION = (
     r"(?:read|reveal|print|send|upload|exfiltrate|show|extract|return|copy|leak|provide|"
     r"retrieve|disclose|dump)"
@@ -67,7 +67,9 @@ INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "boundary_spoofing",
         re.compile(
-            r"(?:BEGIN|END)_UNTRUSTED_WORLD_DATA|<\|(?:im_start|im_end|system|developer)\|>", re.I
+            r"(?:BEGIN|END)_(?:UNTRUSTED_WORLD_DATA|PRIVATE_INTRINSIC_THOUGHT_CONTEXT)"
+            r"|<\|(?:im_start|im_end|system|developer)\|>",
+            re.I,
         ),
     ),
 )
