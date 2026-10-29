@@ -9,6 +9,14 @@ from typing import Any
 from .deadline import remaining_seconds
 
 
+class RequestHeadLimitError(OSError):
+    """A head-byte rejection with framing phase, never attacker-supplied text."""
+
+    def __init__(self, *, request_line: bool) -> None:
+        super().__init__("request header byte limit exceeded")
+        self.request_line = request_line
+
+
 class DeadlineRequestReader(io.RawIOBase):
     def __init__(
         self,
@@ -25,6 +33,9 @@ class DeadlineRequestReader(io.RawIOBase):
         self._remaining_bytes = max_bytes
         self._header_remaining = max_header_bytes
         self._header_tail = b""
+        self._head_limit = max_header_bytes
+        self._request_line_bytes = 0
+        self._request_line_complete = False
 
     def readable(self) -> bool:
         return True
@@ -36,16 +47,36 @@ class DeadlineRequestReader(io.RawIOBase):
         size = len(buffer)
         if self._remaining_bytes is not None:
             size = min(size, max(1, self._remaining_bytes + 1))
+        if self._header_remaining is not None:
+            # Read at most one byte past the head budget, even if the outer
+            # BufferedReader asks for a large buffer. Do not drain an attack.
+            size = min(size, max(1, self._header_remaining + 1))
         data = self._reader.read1(size)
         if self._header_remaining is not None:
+            # read-ahead may cross the request line before parse_request runs.
+            # Classify from wire bytes, not the handler's current call frame.
+            if not self._request_line_complete:
+                newline = data.find(b"\n")
+                self._request_line_bytes += len(data) if newline < 0 else newline + 1
+                self._request_line_complete = newline >= 0
             scan = self._header_tail + data
             boundaries = [
-                index + len(end) for end in (b"\r\n\r\n", b"\n\n") if (index := scan.find(end)) >= 0
+                index + len(end)
+                for end in (b"\r\n\r\n", b"\n\r\n", b"\n\n")
+                if (index := scan.find(end)) >= 0
             ]
             header_size = min(boundaries) - len(self._header_tail) if boundaries else len(data)
             self._header_remaining -= header_size
             if self._header_remaining < 0:
-                raise OSError("request header byte limit exceeded")
+                raise RequestHeadLimitError(
+                    request_line=(
+                        not self._request_line_complete
+                        or (
+                            self._head_limit is not None
+                            and self._request_line_bytes > self._head_limit
+                        )
+                    )
+                )
             if boundaries:
                 self._header_remaining = None
                 self._header_tail = b""

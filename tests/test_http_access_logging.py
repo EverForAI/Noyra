@@ -174,6 +174,15 @@ def raw_call(server: NoyraHTTPServer, line: bytes) -> bytes:
         (b"GET /synthetic-private extra HTTP/1.1", 400, "response_error"),
         (b"GET /synthetic-private HTTP/2.0", 505, "response_error"),
         (b"GET /" + b"synthetic-private" * 4_500 + b" HTTP/1.1", 414, "response_error"),
+        # Cross our 64k combined-head policy before the stdlib 65536 line cap.
+        (b"GET /" + b"x" * 64_000 + b" HTTP/1.1", 414, "response_error"),
+        (
+            b"GET /health/live HTTP/1.1\r\n"
+            + (b"X-Private: synthetic-private" + b"x" * 1_000 + b"\r\n") * 65,
+            431,
+            "response_error",
+        ),
+        (b"HEAD /health/live HTTP/1.1\r\nX-Private: " + b"x" * 70_000, 431, "response_error"),
         (b"GET /health/live HTTP/1.1\r\nX-Private: " + b"x" * 70_000, 431, "response_error"),
     ],
     ids=[
@@ -184,6 +193,9 @@ def raw_call(server: NoyraHTTPServer, line: bytes) -> bytes:
         "malformed-line",
         "unsupported-version",
         "long-target",
+        "target-over-policy-before-stdlib",
+        "aggregate-short-headers",
+        "head-long-header",
         "long-header",
     ],
 )
@@ -212,6 +224,42 @@ def test_raw_protocol_and_control_data_never_reach_log_handlers(
         assert not any(ord(c) < 32 or ord(c) == 127 for c in record.getMessage())
     assert f"event={event}" in caplog.text
     assert f"status={status}" in caplog.text
+
+
+def test_head_budget_rejection_never_dispatches_and_server_recovers(
+    server: NoyraHTTPServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import Mock
+
+    from noyra.http_routes import get
+
+    # Force a rejection in the very first read, before stdlib has even set
+    # requestline/command/version. A coalesced valid request line does not make
+    # a header overflow a 414. Neither the rejected request nor a pipelined
+    # suffix may reach routing, and the next independent connection must work.
+    with monkeypatch.context() as patch:
+        patch.setattr("noyra.http_transport.MAX_REQUEST_HEADER_BYTES", 128)
+        dispatch = Mock(wraps=get.dispatch)
+        patch.setattr(get, "dispatch", dispatch)
+        caplog.set_level(logging.INFO, logger="noyra.service")
+        response = raw_call(
+            server,
+            b"GET /health/live HTTP/1.1\r\nX-Private: "
+            + b"synthetic-private" * 50
+            + b"\r\n\r\nGET /health/live HTTP/1.1",
+        )
+        assert response.startswith(b"HTTP/1.0 431 ")
+        assert b"Connection: close" in response
+        assert response.count(b"HTTP/1.0 ") == 1
+        dispatch.assert_not_called()
+        assert "synthetic-private" not in caplog.text
+        assert "event=response_error" in caplog.text
+        assert "route=unmatched status=431" in caplog.text
+        # Restore the normal cap so urllib's ordinary headers fit.
+    # The next ordinary connection uses the normal cap and dispatch path.
+    assert call(server, "/health/live", authorized=False)[0] == 200
 
 
 def test_every_api_log_template_hides_parameters_and_preserves_version_aliases() -> None:

@@ -25,7 +25,7 @@ from noyra.core.at_rest import AtRestError
 from noyra.core.deadline import operation_deadline
 from noyra.core.errors import IntegrityError, NotFoundError, RuntimeOwnershipError
 from noyra.core.operator_controls import OperatorControlConflict
-from noyra.core.request_io import DeadlineRequestReader
+from noyra.core.request_io import DeadlineRequestReader, RequestHeadLimitError
 from noyra.core.types import strict_json_loads
 from noyra.http_access_logging import http_log_fields
 from noyra.http_routes import (
@@ -109,9 +109,27 @@ def handler_type(
 
         def handle_one_request(self) -> None:
             self._log_request_parsed = False
+            # A bounded read may reject the head before stdlib initializes the
+            # fields send_error uses. Never use raw input to fill that gap.
+            self.requestline = ""
+            self.command = ""
+            self.request_version = self.default_request_version
             try:
                 with operation_deadline(owner.settings.request_timeout_seconds):
                     super().handle_one_request()
+            except RequestHeadLimitError as error:
+                self.close_connection = True
+                self._log_request_parsed = False
+                self.requestline = ""
+                self.request_version = "HTTP/1.0"
+                # Static status/description only; the standard log hooks emit
+                # allowlisted fields, not the rejected line or header content.
+                with suppress(OSError):
+                    self.send_error(
+                        HTTPStatus.REQUEST_URI_TOO_LONG
+                        if error.request_line
+                        else HTTPStatus.REQUEST_HEADER_FIELDS_TOO_LARGE
+                    )
             except OSError:
                 self.close_connection = True
 

@@ -716,3 +716,84 @@ def test_request_reader_separates_header_and_body_budgets() -> None:
     )
     with pytest.raises(OSError, match="header byte"):
         io.BufferedReader(reader).read()
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 3, 7, 8192])
+@pytest.mark.parametrize("request_line", [False, True])
+def test_request_head_budget_has_typed_phase_and_bounded_reads(
+    chunk_size: int,
+    request_line: bool,
+) -> None:
+    import io
+    from unittest.mock import Mock
+
+    from noyra.core.request_io import DeadlineRequestReader, RequestHeadLimitError
+
+    budget = 64
+    raw = (
+        b"GET /" + b"x" * 1000 + b" HTTP/1.1\r\n\r\n"
+        if request_line
+        else b"GET / HTTP/1.1\r\nX-Private: " + b"x" * 1000 + b"\r\n\r\n"
+    )
+
+    class ChunkedInput(io.BytesIO):
+        def read1(self, size: int | None = -1) -> bytes:
+            maximum = chunk_size if size is None or size < 0 else min(size, chunk_size)
+            return super().read1(maximum)
+
+    source = ChunkedInput(raw)
+    reader = DeadlineRequestReader(source, Mock(), 5, max_bytes=2000, max_header_bytes=budget)
+    with io.BufferedReader(reader) as buffered:
+        with pytest.raises(RequestHeadLimitError) as caught:
+            buffered.read()
+        assert caught.value.request_line is request_line
+        assert str(caught.value) == "request header byte limit exceeded"
+        assert source.tell() == budget + 1
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 3, 7, 8192])
+@pytest.mark.parametrize("line_ending", [b"\r\n", b"\n", b"\n\r\n"])
+def test_exact_head_budget_does_not_consume_body_allowance(
+    chunk_size: int,
+    line_ending: bytes,
+) -> None:
+    import io
+    from unittest.mock import Mock
+
+    from noyra.core.request_io import DeadlineRequestReader
+
+    first = b"POST / HTTP/1.0" + (b"\n" if line_ending == b"\n\r\n" else line_ending)
+    header = first + b"Content-Length: 100" + line_ending
+    if line_ending != b"\n\r\n":
+        header += line_ending
+    body = b"b" * 100
+
+    class ChunkedInput(io.BytesIO):
+        def read1(self, size: int | None = -1) -> bytes:
+            maximum = chunk_size if size is None or size < 0 else min(size, chunk_size)
+            return super().read1(maximum)
+
+    reader = DeadlineRequestReader(
+        ChunkedInput(header + body),
+        Mock(),
+        5,
+        max_bytes=len(header) + len(body),
+        max_header_bytes=len(header),
+    )
+    assert io.BufferedReader(reader).read() == header + body
+
+
+def test_total_request_budget_is_not_disabled_after_head() -> None:
+    import io
+    from unittest.mock import Mock
+
+    from noyra.core.request_io import DeadlineRequestReader, RequestHeadLimitError
+
+    head = b"POST / HTTP/1.0\r\nContent-Length: 100\r\n\r\n"
+    source = io.BytesIO(head + b"b" * 100)
+    reader = DeadlineRequestReader(
+        source, Mock(), 5, max_bytes=len(head) + 10, max_header_bytes=len(head)
+    )
+    with pytest.raises(OSError, match="request byte limit") as caught:
+        io.BufferedReader(reader).read()
+    assert not isinstance(caught.value, RequestHeadLimitError)
