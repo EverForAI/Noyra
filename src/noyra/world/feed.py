@@ -180,6 +180,11 @@ def parse_feed(text: str, source_url: str) -> tuple[str | None, tuple[FeedItem, 
         entries = [child for child in container if child.tag == "item"]
     elif root.tag == f"{{{RDF_NAMESPACE}}}RDF":
         prefix = f"{{{RSS1_NAMESPACE}}}"
+        # RDF/XML is a general data format, not itself a feed declaration.
+        # A bounded non-RSS document may use the reader's existing generic XML
+        # path; malformed RSS1 resources must never take that fallback.
+        if not any(child.tag.startswith(prefix) for child in root):
+            raise FetchError("world_feed_format_unsupported")
         channels = [child for child in root if child.tag == f"{prefix}channel"]
         if len(channels) != 1:
             raise FetchError("world_feed_channel_invalid")

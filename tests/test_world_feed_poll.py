@@ -790,3 +790,135 @@ def test_namespace_correction_keeps_old_evidence_and_emits_once(
             connection.execute("SELECT fingerprint_version FROM world_poll_state").fetchone()[0]
             == 1
         )
+
+
+GENERIC_RDF = (
+    '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"'
+    ' xmlns:d="http://purl.org/dc/elements/1.1/" xmlns:e="urn:example:extension">'
+    '<rdf:Description rdf:about="https://example.com/report">'
+    "<d:title>Research metadata</d:title></rdf:Description>"
+    "<e:channel><e:title>Foreign metadata</e:title></e:channel></rdf:RDF>"
+)
+
+
+@pytest.mark.parametrize("media_type", ["application/xml", "text/xml"])
+@pytest.mark.parametrize("declared_feed", [False, True], ids=["web-source", "rss-source"])
+@pytest.mark.asyncio
+async def test_generic_rdf_fallback_requires_a_non_feed_source(
+    context: tuple[Database, SourceRecord, ObservationStore],
+    media_type: str,
+    declared_feed: bool,
+) -> None:
+    _, source, _ = context
+    selected = source if declared_feed else replace(source, source_type="web")
+
+    async def resolver(host: str, port: int) -> tuple[str, ...]:
+        return ("93.184.216.34",)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, headers={"Content-Type": media_type}, text=GENERIC_RDF
+            )
+        )
+    ) as client:
+        reader = SafeWebReader(client=client, resolver=resolver, verify_peer_address=False)
+        if declared_feed:
+            with pytest.raises(FetchError, match="world_feed_format_unsupported"):
+                await reader.fetch(selected)
+        else:
+            result = await reader.fetch(selected)
+            assert result.feed_items is None
+            assert "Research metadata" in result.content
+
+
+@pytest.mark.asyncio
+async def test_declared_feed_mime_does_not_use_rdf_generic_fallback(
+    context: tuple[Database, SourceRecord, ObservationStore],
+) -> None:
+    _, source, _ = context
+
+    async def resolver(host: str, port: int) -> tuple[str, ...]:
+        return ("93.184.216.34",)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                headers={"Content-Type": "application/rss+xml"},
+                text=GENERIC_RDF,
+            )
+        )
+    ) as client:
+        reader = SafeWebReader(client=client, resolver=resolver, verify_peer_address=False)
+        with pytest.raises(FetchError, match="world_feed_format_unsupported"):
+            await reader.fetch(replace(source, source_type="web"))
+
+
+@pytest.mark.parametrize(
+    "payload, error",
+    [
+        (GENERIC_RDF[:-5], "world_feed_xml_invalid"),
+        ('<!DOCTYPE rdf:RDF [<!ENTITY x "blocked">]>' + GENERIC_RDF, "world_feed_dtd_rejected"),
+        (
+            '<!DOCTYPE rdf:RDF SYSTEM "https://example.com/external">' + GENERIC_RDF,
+            "world_feed_dtd_rejected",
+        ),
+        (
+            GENERIC_RDF.replace("</rdf:RDF>", "<x>" * 40 + "</x>" * 40 + "</rdf:RDF>"),
+            "world_feed_structure_limit",
+        ),
+        (
+            GENERIC_RDF.replace("</rdf:RDF>", "<x/>" * 20001 + "</rdf:RDF>"),
+            "world_feed_structure_limit",
+        ),
+        (GENERIC_RDF.replace("</rdf:RDF>", "x" * 2000001 + "</rdf:RDF>"), "world_feed_size_limit"),
+        (
+            '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"'
+            ' xmlns="http://purl.org/rss/1.0/"><item><title>No channel</title></item></rdf:RDF>',
+            "world_feed_channel_invalid",
+        ),
+        (rdf_feed().replace("</channel>", "</channel><channel/>"), "world_feed_channel_invalid"),
+        (
+            rdf_feed().replace("</rdf:RDF>", "<item/>" * MAX_FEED_ITEMS + "</rdf:RDF>"),
+            "world_feed_item_limit",
+        ),
+    ],
+    ids=[
+        "malformed",
+        "internal-dtd",
+        "external-dtd",
+        "depth",
+        "nodes",
+        "bytes",
+        "no-channel",
+        "duplicate-channel",
+        "items",
+    ],
+)
+@pytest.mark.asyncio
+async def test_generic_rdf_fallback_never_masks_xml_or_rss1_errors(
+    context: tuple[Database, SourceRecord, ObservationStore],
+    payload: str,
+    error: str,
+) -> None:
+    _, source, _ = context
+
+    async def resolver(host: str, port: int) -> tuple[str, ...]:
+        return ("93.184.216.34",)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, headers={"Content-Type": "application/xml"}, text=payload
+            )
+        )
+    ) as client:
+        reader = SafeWebReader(
+            client=client,
+            resolver=resolver,
+            verify_peer_address=False,
+            max_response_bytes=3_000_000,
+        )
+        with pytest.raises(FetchError, match=error):
+            await reader.fetch(replace(source, source_type="web"))
