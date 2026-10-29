@@ -31,6 +31,7 @@ test("acquisition diagnostics explain unchanged success and cumulative scope", a
   let calls=0; const {sandbox,nodes}=context(async path=>{calls++;assert.equal(path,"/api/admin/world-acquisition");return payload();});
   assert.equal(calls,0); await sandbox.loadWorldAcquisition(); assert.equal(calls,1);
   const html=nodes.get("#world-acquisition-summary").innerHTML;
+  assert.match(html,/采集版本/); assert.match(html,/含片段/);
   assert.match(html,/检查成功，没有新内容/); assert.match(html,/非每日统计/); assert.match(html,/历史观察保留原记录/);
   assert.match(nodes.get("#world-acquisition-status").textContent,/未触发采集或模型调用/);
 });

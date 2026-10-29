@@ -63,9 +63,8 @@ class _BoundedTree(ET.TreeBuilder):
 
 
 def normalize(value: str) -> str:
-    if len(value) > MAX_FIELD_CHARS:
-        # Reject rather than silently alias two revisions differing beyond a cutoff.
-        raise FetchError("world_feed_field_limit")
+    # The complete XML response already has a byte budget. Preserve long fields
+    # so ingestion can fragment them without aliasing distinct entry revisions.
     return " ".join(unicodedata.normalize("NFC", value).split())
 
 
@@ -98,8 +97,6 @@ def _raw_text(element: ET.Element) -> str:
 
 def _html_text(element: ET.Element) -> str:
     value = " ".join(element.itertext())
-    if len(value) > MAX_FIELD_CHARS:
-        raise FetchError("world_feed_field_limit")
     parser = _VisibleText()
     parser.feed(value)
     parser.close()
@@ -121,8 +118,6 @@ def _xhtml_text(element: ET.Element) -> str:
 
     visit(element)
     value = " ".join(parts)
-    if len(value) > MAX_FIELD_CHARS:
-        raise FetchError("world_feed_field_limit")
     return normalize(value)
 
 
@@ -206,6 +201,8 @@ def parse_feed(text: str, source_url: str) -> tuple[str | None, tuple[FeedItem, 
         )
         or None
     )
+    if title is not None and len(title) > MAX_FIELD_CHARS:
+        title = title[:MAX_FIELD_CHARS] + " [feed title shortened]"
     items: dict[tuple[str, str], FeedItem] = {}
     for entry in entries:
         # XML prefixes are aliases, not identities. Only the format's core

@@ -12,7 +12,10 @@ from noyra.core.types import content_hash
 
 from .feed import FEED_FINGERPRINT_VERSION
 
-MAX_SEEN_VERSIONS = 4_096
+# Bounded transient fragment identities plus complete entries. Completed
+# fragments are compacted; this also accommodates the 2M-character reader
+# limit under the minimum supported (1024-character) cognition budget.
+MAX_SEEN_VERSIONS = 16_384
 
 
 class SourcePollStore:

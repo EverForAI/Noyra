@@ -671,7 +671,7 @@ function renderWorldAcquisition(data) {
   const summary = summaryRows([
     ["统计口径","自本次采集跟踪开始累计，非每日统计；采集计数不是模型调用数"],
     ["当前分类规则",`${version(data.current_classifier_version)}；历史观察保留原记录，不重新判定`],
-    ["去重保留范围",`每个来源最多 ${count(data.retained_version_limit_per_source)} 个条目版本；超出范围后重现的内容可能再被观察`],
+    ["去重保留范围",`每个来源最多 ${count(data.retained_version_limit_per_source)} 个去重身份（含未完成条目的片段）；超出范围后重现的内容可能再被观察`],
     ["来源范围",`最多 ${count(data.source_limit)} 个来源${data.truncated ? "，本次已截断" : ""}`],
   ]);
   const items = data.items.map(row => {
@@ -682,7 +682,7 @@ function renderWorldAcquisition(data) {
       ["最近检查 / 成功检查",`${formatTimestamp(row.last_attempt_at)} / ${formatTimestamp(row.last_success_at)}`],
       ["最近发现新内容",formatTimestamp(row.last_change_at)],
       ["累计检查 / 无新内容",`${count(row.checks)} / ${count(row.unchanged_checks)}`],
-      ["累计 RSS/Atom 新条目版本 / 保留版本",`${count(row.new_item_versions)} / ${count(row.retained_entry_versions)}`],
+      ["累计采集版本（含片段） / 保留去重身份",`${count(row.new_item_versions)} / ${count(row.retained_entry_versions)}`],
       ["条目指纹规则",version(row.fingerprint_version)],
       ["升级基线",row.baseline === "legacy_unavailable" ? "旧抓取缺少条目边界：首次当前来源作一次性过渡，不重放历史记录" : "本次跟踪的首个来源快照"],
     );

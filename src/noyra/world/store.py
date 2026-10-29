@@ -15,9 +15,11 @@ from .errors import ObservationBudgetError, WorldStateConflictError
 from .feed import FEED_FINGERPRINT_VERSION, FeedItem, feed_content
 from .injection import INJECTION_CLASSIFIER_VERSION, classify_external_text
 from .observation_archive import ObservationContentArchive
-from .poll import SourcePollStore
+from .poll import MAX_SEEN_VERSIONS, SourcePollStore
 from .source import canonical_public_url
 from .types import ClaimProposal, ClaimRecord, FetchedDocument, ObservationRecord
+
+MAX_FEED_OBSERVATIONS_PER_POLL = 4
 
 
 class ObservationStore:
@@ -64,6 +66,62 @@ class ObservationStore:
             batches.append(tuple(current))
         return tuple(batches)
 
+    @staticmethod
+    def _bounded_feed_parts(
+        items: tuple[FeedItem, ...], budget: int
+    ) -> tuple[tuple[FeedItem, ...], dict[tuple[str, str], FeedItem]]:
+        """Lossless JSON fragments; each part retains its complete entry identity.
+
+        A fragment is data, not a complete feed entry. Full-entry classification
+        is retained for every part, including directives straddling a split.
+        """
+        parts: list[FeedItem] = []
+        origins: dict[tuple[str, str], FeedItem] = {}
+        for item in items:
+            if len(feed_content((item,))) <= budget:
+                parts.append(item)
+                origins[(item.item_key, item.fingerprint)] = item
+                continue
+            raw = canonical_json(item.payload())
+            offset = 0
+            while offset < len(raw):
+
+                def part(
+                    end: int, *, start: int = offset, original: FeedItem = item, text: str = raw
+                ) -> FeedItem:
+                    metadata = canonical_json(
+                        {
+                            "format": "noyra-feed-fragment/v1",
+                            "item_key": original.item_key,
+                            "item_fingerprint": original.fingerprint,
+                            "offset": start,
+                            "total_chars": len(text),
+                        }
+                    )
+                    payload = {
+                        "title": "Partial feed entry (JSON fragment)",
+                        "link": "",
+                        "summary": text[start:end],
+                        "body": metadata,
+                    }
+                    key = content_hash({"fragment": metadata, "budget": budget})
+                    return FeedItem(key, content_hash(payload), **payload)
+
+                low, high = offset, min(len(raw), offset + budget)
+                while low < high:
+                    middle = (low + high + 1) // 2
+                    if len(feed_content((part(middle),))) <= budget:
+                        low = middle
+                    else:
+                        high = middle - 1
+                if low == offset:
+                    raise ObservationBudgetError("feed fragment metadata exceeds input budget")
+                fragment = part(low)
+                parts.append(fragment)
+                origins[(fragment.item_key, fragment.fingerprint)] = item
+                offset = low
+        return tuple(parts), origins
+
     def ingest(
         self,
         subject_id: str,
@@ -79,13 +137,21 @@ class ObservationStore:
         marked legacy_unavailable; never silently swallow potentially new
         entries, replay stored proposals, or alter old observations.
 
-        Structured feeds are partitioned at entry boundaries when a cognition
-        input budget is supplied. Every batch is durable before its entries
-        are marked seen, so a later model call can consume every byte that was
-        acknowledged by the poller.
+        Structured feeds use entry batches and explicit lossless fragments for
+        oversized entries. A poll writes at most four observations; remaining
+        versions stay unseen for later polls. Every acknowledged fragment is
+        durable; only a complete entry gets its original version marked seen.
         """
         if content_hash(document.content) != document.content_hash:
             raise IntegrityError("fetched document content hash mismatch")
+        prepared: tuple[FeedItem, ...] = ()
+        origins: dict[tuple[str, str], FeedItem] = {}
+        if document.feed_items is not None:
+            if feed_content(document.feed_items) != document.content:
+                raise IntegrityError("feed metadata does not match fetched content")
+            budget = min(500_000, max_content_chars) if max_content_chars is not None else 500_000
+            prepared, origins = self._bounded_feed_parts(document.feed_items, budget)
+            max_content_chars = budget
         with self.database.transaction() as connection:
             self._validate_source(connection, subject_id, source_id, document)
             observation: ObservationRecord | None
@@ -112,9 +178,7 @@ class ObservationStore:
                 if previous is None and not had_legacy:
                     self._fresh_baseline(connection, subject_id, source_id)
                 return observation, created
-            items = document.feed_items
-            if feed_content(items) != document.content:
-                raise IntegrityError("feed metadata does not match fetched content")
+            items = prepared
             had_legacy = (
                 connection.execute(
                     "SELECT 1 FROM observations WHERE subject_id=? AND source_id=? LIMIT 1",
@@ -123,30 +187,41 @@ class ObservationStore:
                 is not None
             )
             state = SourcePollStore._read(connection, subject_id, source_id)
+            # One bounded indexed query, independent of feed entry count.
+            seen_times = {
+                (str(row[0]), str(row[1])): str(row[2])
+                for row in connection.execute(
+                    "SELECT item_key,fingerprint,first_seen_at FROM world_feed_seen "
+                    "WHERE source_id=? AND subject_id=? AND fingerprint_version=? LIMIT ?",
+                    (source_id, subject_id, FEED_FINGERPRINT_VERSION, MAX_SEEN_VERSIONS),
+                )
+            }
+            seen = set(seen_times)
             unseen = tuple(
                 item
                 for item in items
-                if connection.execute(
-                    "SELECT 1 FROM world_feed_seen WHERE source_id=? AND subject_id=? "
-                    "AND fingerprint_version=? AND item_key=? AND fingerprint=?",
-                    (
-                        source_id,
-                        subject_id,
-                        FEED_FINGERPRINT_VERSION,
-                        item.item_key,
-                        item.fingerprint,
-                    ),
-                ).fetchone()
-                is None
+                if (item.item_key, item.fingerprint) not in seen
+                and (
+                    origins[(item.item_key, item.fingerprint)].item_key,
+                    origins[(item.item_key, item.fingerprint)].fingerprint,
+                )
+                not in seen
             )
+            written: set[tuple[str, str]] = set()
             selected: tuple[ObservationRecord, bool] | None = None
             if unseen:
-                batches = self._feed_item_batches(unseen, max_content_chars)
+                batches = self._feed_item_batches(unseen, max_content_chars)[
+                    :MAX_FEED_OBSERVATIONS_PER_POLL
+                ]
                 for batch in batches:
                     content = feed_content(batch)
                     # Classification must use the new subset only, never a signal
                     # carried solely by a previously seen entry in the same feed.
-                    fields = tuple(value for item in batch for value in item.payload().values())
+                    fields = tuple(
+                        value
+                        for item in batch
+                        for value in origins[(item.item_key, item.fingerprint)].payload().values()
+                    )
                     signals = classify_external_text(document.title or "", *fields)
                     candidate, created = self._record_connection(
                         connection,
@@ -163,6 +238,7 @@ class ObservationStore:
                     if selected is None and candidate.status == "new":
                         selected = (candidate, created)
                     for item in batch:
+                        written.add((item.item_key, item.fingerprint))
                         connection.execute(
                             "INSERT INTO world_feed_seen(source_id,subject_id,fingerprint_version,"
                             "item_key,fingerprint,first_seen_at) VALUES (?,?,?,?,?,?)",
@@ -175,13 +251,42 @@ class ObservationStore:
                                 document.fetched_at,
                             ),
                         )
+            # Only a fully durable entry is acknowledged as a complete version.
+            # Completed fragment markers can then be compacted to its original key.
+            groups: dict[tuple[str, str], list[tuple[str, str]]] = {}
+            for key, origin in origins.items():
+                groups.setdefault((origin.item_key, origin.fingerprint), []).append(key)
+            for original, keys in groups.items():
+                if original in seen or not all(key in seen or key in written for key in keys):
+                    continue
+                if keys == [original]:
+                    continue
+                connection.executemany(
+                    "DELETE FROM world_feed_seen WHERE source_id=? AND subject_id=? "
+                    "AND fingerprint_version=? AND item_key=? AND fingerprint=?",
+                    [(source_id, subject_id, FEED_FINGERPRINT_VERSION, *key) for key in keys],
+                )
+                connection.execute(
+                    "INSERT INTO world_feed_seen(source_id,subject_id,fingerprint_version,"
+                    "item_key,fingerprint,first_seen_at) VALUES (?,?,?,?,?,?)",
+                    (
+                        source_id,
+                        subject_id,
+                        FEED_FINGERPRINT_VERSION,
+                        *original,
+                        min(seen_times.get(key, document.fetched_at) for key in keys),
+                    ),
+                )
             SourcePollStore.complete(
                 connection,
                 subject_id,
                 source_id,
                 document.fetched_at,
-                outcome="changed" if unseen else "unchanged",
-                new_versions=len(unseen),
+                outcome="changed" if written else "unchanged",
+                # Count every durably acknowledged identity, including parts.
+                # This preserves retained <= lifetime identities during partial
+                # ingestion and after compaction without weakening integrity.
+                new_versions=len(written),
             )
             if state is None and not had_legacy:
                 self._fresh_baseline(connection, subject_id, source_id)

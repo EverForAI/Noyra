@@ -18,14 +18,22 @@ RSS 2.0 and Atom entries have a versioned structured identity and a separate nor
 GUID and resolved link identify an entry; missing both uses a structured content-based fallback.
 Title, summary and body participate in the content revision; channel timestamps and entry ordering do
 not. Unicode NFC and whitespace normalization precede hashing. Links remain data, not authorizations.
-DTD/entity declarations, excessive XML depth/nodes/items/field size and oversized responses fail closed.
+DTD/entity declarations, excessive XML depth/nodes/items and oversized responses fail closed.
+Long entry fields retain their complete normalized content within the bounded response.
 No XML entity resolution or external XML loading is enabled.
 
-One successful poll emits at most one observation containing the unseen entry versions. An empty or
-unchanged feed emits none but updates last-success time. Failure updates last-attempt without claiming
+One successful poll emits at most four bounded observations containing unseen entry data. Entries
+that exceed the cognition input budget use explicitly labelled JSON fragments, with original entry
+key, content fingerprint, character offset and total length. Full-entry injection classification is
+retained on every fragment. An entry is acknowledged as complete only after all its fragments are
+durable; its fragment markers are then compacted to the original identity while preserving first
+appearance time. No existing observation is rewritten. Fragments are partial evidence, never a
+standalone complete article. Remaining unacknowledged data is eligible on a later poll while it
+remains in the feed; this is bounded sampling, not an archival guarantee for transient entries.
+An empty or unchanged feed emits none but updates last-success time. Failure updates last-attempt without claiming
 success. Selection uses last-attempt, independently of immutable observation timestamps. The exact
 observation and seen-set/poll update share a transaction. Seen versions survive restart and are capped
-at 4096 per source, evicted by first appearance; a version returning after eviction can be seen again.
+at 16384 per source (including incomplete fragment identities), evicted by first appearance; a version returning after eviction can be seen again.
 This is a bounded horizon, not an unbounded lifetime uniqueness guarantee. Conditional HTTP requests
 are not required for correctness and are not introduced by this change.
 
@@ -47,7 +55,7 @@ There is no quota requiring a particular number of daily observations or new goa
 
 ## M2 external-text boundary
 
-Classifier version 2 keeps override/impersonation/tool signals and replaces the bare secret-word
+Classifier version 5 keeps override/impersonation/tool signals and replaces the bare secret-word
 match with directed extraction/runtime-file signals. It also recognizes boundary spoofing and
 concrete credential-shaped values coupled to outbound URLs. These are conservative heuristics,
 not a semantic security proof; legitimate quotations can remain flagged. All extracted fields
@@ -81,7 +89,9 @@ and evidence validation; no second goal-generation mechanism or forced call each
 
 An operator-only read endpoint and on-demand administration panel distinguish last attempt, last
 successful check, last new content, cumulative checks/unchanged checks and retained RSS/Atom versions.
-They read durable poll state, not observation counts. Missing tracking is unknown, not zero; read
+They read durable poll state, not observation counts. Both the cumulative acquisition-version counter and the retained deduplication-identity count
+include fragment identities. They are labelled accordingly; complete-entry acknowledgements still
+wait for all fragments. Compaction does not reset the lifetime counter or first-appearance time. Missing tracking is unknown, not zero; read
 failure returns 503 and the panel labels any retained previous display as stale. The projection has a
 25-source cap, short SQLite lock wait and query deadline; it neither fetches sources nor loads archives,
 performs full integrity scans or invokes models. No diagnostic heartbeat events are appended.
@@ -102,3 +112,20 @@ The pre-deployment integration review checks these consumers as well as ingestio
 Valid RSS/Atom served with generic XML media types is recognized even if the source label is web/API;
 valid non-feed XML keeps generic extraction. XML parsing failures, DTD declarations and resource limits
 never fall back to a permissive text parser. Migration 108 is frozen in the executable DDL contract.
+
+
+## Runtime transport boundaries
+
+Public HTTP connections use one shared public-unicast policy before connecting and when validating
+world-reader peers. Known address-conversion and tunnel prefixes are excluded independently of the
+Python interpreter's address registry tables. Default system DNS runs in a bounded helper process;
+a timed-out child is killed and reaped before its capacity slot is released. Custom trusted resolver
+callbacks retain the bounded-worker contract; they must return in finite time. The world reader uses
+the same system resolver boundary instead of the event loop's unbounded DNS executor.
+
+HTTP request framing is checked before route dispatch. Transfer-Encoding and repeated or malformed
+Content-Length are rejected, oversized requests close the connection, and header/body reads share
+an absolute deadline with separate header and total-byte limits. JSON recursion errors become
+validation failures; XML element depth counts the root as level one and includes attribute values
+in the text budget. Private-thought messages use a structured JSON envelope with textual control
+markers escaped and an explicit data-only trust rule; structured proposal validation remains active.

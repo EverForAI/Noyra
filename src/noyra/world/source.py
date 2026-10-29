@@ -451,8 +451,11 @@ class SafeWebReader:
                             raise
                 if feed_items is not None:
                     content = feed_content(feed_items)
-                    if len(content) > self.max_text_chars:
-                        raise FetchError("world_feed_text_limit")
+                    # Structured feeds remain bounded by MAX_FEED_BYTES, XML
+                    # nodes/items, and the response budget. Ingestion fragments
+                    # their complete normalized data to the cognition budget;
+                    # applying the generic excerpt limit here rejects neighbors
+                    # whenever one entry is long.
                 else:
                     title, content = self._extract(media_type, text)
                     content = content[: self.max_text_chars]

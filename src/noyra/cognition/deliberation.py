@@ -23,6 +23,7 @@ from noyra.model.errors import (
 from noyra.sleep import FatigueInputs, FatigueTracker
 from noyra.world import ObservationStore, SafeWebReader, SourceRecord, SourceRegistry
 from noyra.world.errors import ObservationBudgetError
+from noyra.world.poll import SourcePollStore
 
 from ._integrity import durable_boundary, durable_json, durable_string_list
 from .settings import CognitionSettings
@@ -456,6 +457,9 @@ class ActionDeliberation:
                     max_content_chars=self.settings.max_observation_chars,
                 )
             except ObservationBudgetError:
+                SourcePollStore(self.database).failed(
+                    self.subject_id, source.source_id, self.clock()
+                )
                 observation = None
                 created = False
                 status = "outcome_unavailable"
@@ -665,8 +669,6 @@ class ActionDeliberation:
         return None if row is None else row[0]
 
     def _last_checked_at(self, source_id: str) -> str | None:
-        from noyra.world.poll import SourcePollStore
-
         return SourcePollStore(self.database).last_checked_at(self.subject_id, source_id)
 
     def _goal_actions_today(self, goal_id: str, budget_day: str) -> int:
