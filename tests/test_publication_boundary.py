@@ -170,22 +170,58 @@ def test_ci_and_native_hook_share_one_guard_and_preserve_existing_jobs() -> None
     hook = (ROOT / ".githooks/pre-commit").read_text(encoding="utf-8")
     ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "python scripts/check-publication-boundary.py --staged" in hook
+    assert "set -eu" in hook
+    assert "python scripts/public-file-manifest.py check --index" in hook
+    assert hook.index("check-publication-boundary.py") < hook.index("public-file-manifest.py")
     public_source = ci[ci.index("  public-source:") : ci.index("\n  test:")]
     assert "python scripts/check-publication-boundary.py --revision" in public_source
     assert "fetch-depth: 3" in public_source
     assert "continue-on-error" not in public_source
 
 
-def test_real_git_hook_blocks_forced_output_and_allows_safe_commit(repository: Path) -> None:
+def install_reviewed_hook(repository: Path) -> Path:
     scripts = repository / "scripts"
     scripts.mkdir()
     (scripts / SCRIPT.name).write_bytes(SCRIPT.read_bytes())
+    manifest = scripts / "public-file-manifest.py"
+    manifest.write_bytes((ROOT / "scripts/public-file-manifest.py").read_bytes())
     hooks = repository / ".githooks"
     hooks.mkdir()
     hook = hooks / "pre-commit"
     hook.write_bytes((ROOT / ".githooks/pre-commit").read_bytes())
     hook.chmod(0o755)
+    release = repository / "docs/release"
+    release.mkdir(parents=True)
+    (release / "public-files-excluded.txt").write_bytes(b"")
+    (release / "public-files.sha256").write_bytes(b"")
+    public = [
+        "README.md",
+        ".githooks/pre-commit",
+        "scripts/check-publication-boundary.py",
+        "scripts/public-file-manifest.py",
+        "docs/release/public-files.txt",
+        "docs/release/public-files.sha256",
+        "docs/release/public-files-excluded.txt",
+    ]
+    (release / "public-files.txt").write_bytes(("\n".join(sorted(public)) + "\n").encode())
+    git(repository, "add", "--", "scripts", ".githooks", "docs/release")
+    regenerate_reviewed_manifest(repository, manifest)
     git(repository, "config", "core.hooksPath", ".githooks")
+    return manifest
+
+
+def regenerate_reviewed_manifest(repository: Path, manifest: Path) -> None:
+    subprocess.run(
+        [sys.executable, str(manifest), "generate", "--index"],
+        cwd=repository,
+        capture_output=True,
+        check=True,
+    )
+    git(repository, "add", "--", "docs/release/public-files.sha256")
+
+
+def test_real_git_hook_blocks_forced_output_and_allows_safe_commit(repository: Path) -> None:
+    manifest = install_reviewed_hook(repository)
     output = repository / "output/report.txt"
     output.parent.mkdir()
     output.write_text("synthetic evidence", encoding="utf-8")
@@ -201,7 +237,31 @@ def test_real_git_hook_blocks_forced_output_and_allows_safe_commit(repository: P
     git(repository, "rm", "--cached", "--", "output/report.txt")
     (repository / "README.md").write_text("safe update\n", encoding="utf-8")
     git(repository, "add", "--", "README.md")
+    regenerate_reviewed_manifest(repository, manifest)
     commit(repository)
+
+
+def test_real_hook_requires_current_staged_hashes_not_clean_worktree_bytes(
+    repository: Path,
+) -> None:
+    manifest = install_reviewed_hook(repository)
+    commit(repository)
+    original = (repository / "README.md").read_bytes()
+    (repository / "README.md").write_bytes(b"reviewed staged change\n")
+    git(repository, "add", "--", "README.md")
+    (repository / "README.md").write_bytes(original)
+    failed = subprocess.run(
+        ["git", "-c", "commit.gpgSign=false", "commit", "-m", "stale hashes must fail"],
+        cwd=repository,
+        capture_output=True,
+        check=False,
+    )
+    assert failed.returncode != 0
+    assert b"checksum mismatch" in failed.stderr
+    assert git(repository, "diff", "--cached", "--name-only").decode().splitlines() == ["README.md"]
+    regenerate_reviewed_manifest(repository, manifest)
+    commit(repository)
+    assert git(repository, "show", "HEAD:README.md") == b"reviewed staged change\n"
 
 
 def test_merge_revision_checks_first_parent_and_full_snapshot(repository: Path) -> None:

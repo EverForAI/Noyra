@@ -47,9 +47,17 @@ Enable the versioned native Git pre-commit hook in this clone:
 ```sh
 git config core.hooksPath .githooks
 python scripts/check-publication-boundary.py --staged
+python scripts/public-file-manifest.py generate --index
+git add docs/release/public-files.sha256
+python scripts/public-file-manifest.py check --index
 ```
 
-If this clone already has a custom hook, integrate the same command rather than
+Stage the reviewed source changes first. For a new public file, review and update
+`docs/release/public-files.txt` before generating checksums. Regenerate after the
+last staged edit, including edits to existing source or test files. Generation
+reads staged Git blobs and does not stage files automatically.
+
+If this clone already has a custom hook, integrate both checks rather than
 overwriting that setup. Python must be available on PATH; hook failure blocks the
 commit. The hook checks the index, not unstaged working files. It rejects tracked
 output, Git bundles and raw audit evidence, and checks only added audit/roadmap
@@ -57,6 +65,8 @@ text for machine-local drive and WSL references. Synthetic source/tests and norm
 deployment examples are not subject to that text rule. It does not scan secrets
 or certify that a summary is safe to publish. Hooks are local and can be bypassed;
 the existing public-source CI matrix runs the same guard as a backstop.
+The hook also rejects stale staged public-file hashes without rewriting or
+staging anything; the CI check continues to verify the exact committed snapshot.
 
 Keep GitHub Secret scanning and Push protection enabled for supported credential
 patterns. They complement, but do not replace, review of personal information and

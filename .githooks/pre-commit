@@ -1,3 +1,5 @@
 #!/bin/sh
 # Git supplies the worktree root as the hook working directory.
-exec python scripts/check-publication-boundary.py --staged
+set -eu
+python scripts/check-publication-boundary.py --staged
+exec python scripts/public-file-manifest.py check --index
