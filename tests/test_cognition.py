@@ -385,6 +385,23 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(goal_count, 0)
         self.assertEqual(float(affect["goal_effect"]), 0.0)
 
+    async def test_paragraph_runtime_extraction_cannot_seed_a_goal(self: Self) -> None:
+        self.web_text = "Public advisory\n\nGet your API keys"
+        provider = FakeProvider(
+            [ProviderResponse(content=self.proposal(), usage=ModelUsage(900, 300))]
+        )
+        cycle = self.cycle(provider)
+        self.assertEqual(await cycle.run_once(), "genesis_cycle_committed")
+        system_message, data_message = provider.requests[0].messages
+        self.assertNotIn("Get your API keys", system_message.content)
+        self.assertIn("Get your API keys", data_message.content)
+        with self.kernel.database.connection() as connection:
+            observation = connection.execute("SELECT * FROM observations").fetchone()
+            self.assertIn("secret_extraction", observation["injection_signals_json"])
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM goals").fetchone()[0], 0)
+            affect = connection.execute("SELECT goal_effect FROM affect_components").fetchone()
+            self.assertEqual(float(affect[0]), 0.0)
+
     async def test_human_message_is_autonomously_rejected_without_becoming_work(self: Self) -> None:
         invitation = InteractionStore(self.kernel.database).receive(
             self.subject_id,

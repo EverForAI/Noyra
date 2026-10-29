@@ -11,7 +11,7 @@ import re
 import unicodedata
 from html import unescape
 
-INJECTION_CLASSIFIER_VERSION = 3
+INJECTION_CLASSIFIER_VERSION = 4
 _ACTION = (
     r"(?:read|reveal|print|send|upload|exfiltrate|show|extract|return|copy|leak|provide|"
     r"retrieve|disclose|dump)"
@@ -71,6 +71,19 @@ INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
 )
+# Feed fingerprints intentionally normalize whitespace, and HTML extraction
+# may already have flattened paragraph boundaries. This additional rule needs
+# an explicit runtime-owned secret (not a topic noun) rather than relying on a
+# boundary that the caller can no longer supply. It never weakens existing gates.
+_LOCAL_DIRECTIVE = re.compile(
+    rf"\b{_DIRECTIVE_ACTION}\b\s+(?:(?:the|all|current)\s+){{0,2}}"
+    rf"(?:{_RUNTIME}(?:'s)?\s+(?:own\s+)?{_SECRET}"
+    r"|(?:environment|env)[\s_-]+(?:variables?|vars?))\b",
+    re.I,
+)
+_PROCEDURAL_PREFIX = re.compile(r"\b(?:to|can|could|may|might)\s*$", re.I)
+
+
 _CREDENTIAL = re.compile(r"\b(?:sk-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|ghp_[A-Za-z0-9]{30,})\b")
 _OUTBOUND = re.compile(r"https?://[^\s<>\"]+", re.I)
 
@@ -78,9 +91,22 @@ _OUTBOUND = re.compile(r"https?://[^\s<>\"]+", re.I)
 def classify_external_text(*parts: str) -> tuple[str, ...]:
     # Callers bound input before this step. Normalization is only for detection,
     # never for observation evidence or arbitrary recursive decoding.
-    text = " ".join(unicodedata.normalize("NFKC", unescape(" ".join(parts))).split())
-    text = text.translate(dict.fromkeys(map(ord, "\u200b\u200c\u200d\ufeff")))
-    signals = [name for name, pattern in INJECTION_PATTERNS if pattern.search(text)]
+    decoded = unicodedata.normalize("NFKC", unescape("\n".join(parts)))
+    decoded = decoded.translate(dict.fromkeys(map(ord, "\u200b\u200c\u200d\ufeff")))
+    lines = "\n".join(" ".join(line.split()) for line in decoded.splitlines())
+    text = " ".join(lines.split())
+    # Check both views: retain cross-field/whitespace detection, while keeping
+    # sentence/paragraph anchors meaningful when the original boundary exists.
+    signals = [
+        name
+        for name, pattern in INJECTION_PATTERNS
+        if pattern.search(text) or pattern.search(lines)
+    ]
+    if "secret_extraction" not in signals and any(
+        not _PROCEDURAL_PREFIX.search(text[max(0, match.start() - 40) : match.start()])
+        for match in _LOCAL_DIRECTIVE.finditer(text)
+    ):
+        signals.append("secret_extraction")
     # A concrete credential-shaped value coupled with a URL is distinct from
     # an article merely discussing passwords and linking a security notice.
     if _CREDENTIAL.search(text) and _OUTBOUND.search(text):
