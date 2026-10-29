@@ -85,6 +85,59 @@ class ServiceTestCase(unittest.TestCase):
         _, port = self.http.address
         self.base_url = f"http://127.0.0.1:{port}"
 
+    def test_transport_rejects_ambiguous_framing_before_routes(self: Self) -> None:
+        import socket
+
+        for headers, expected in (
+            (b"Transfer-Encoding: chunked\r\n", 400),
+            (b"Transfer-Encoding: identity\r\nContent-Length: 2\r\n", 400),
+            (b"Content-Length: 2\r\nContent-Length: 2\r\n", 400),
+            (b"Content-Length: 2, 2\r\n", 400),
+            (b"Content-Length: +2\r\n", 400),
+            (b"Content-Length: " + b"9" * 30 + b"\r\n", 400),
+            (f"Content-Length: {self.settings.max_request_bytes + 1}\r\n".encode(), 413),
+        ):
+            with self.subTest(headers=headers):
+                with socket.create_connection(self.http.address, timeout=5) as client:
+                    client.sendall(
+                        b"POST /admin/session HTTP/1.1\r\nHost: localhost\r\n"
+                        + headers
+                        + b"\r\n{}GET /health/live HTTP/1.1\r\nHost: x\r\n\r\n"
+                    )
+                    data = bytearray()
+                    while block := client.recv(8192):
+                        data.extend(block)
+                self.assertIn(f" {expected} ".encode(), data)
+                self.assertIn(b"Connection: close", data)
+                self.assertEqual(data.count(b"HTTP/1.0 "), 1)
+
+    def test_deep_json_is_bad_request_and_service_recovers(self: Self) -> None:
+        body = b'{"value":' + b"[" * 10_000 + b"0" + b"]" * 10_000 + b"}"
+        connection = http.client.HTTPConnection(*self.http.address, timeout=5)
+        connection.request("POST", "/admin/session", body, {"Content-Type": "application/json"})
+        response = connection.getresponse()
+        self.assertEqual(response.status, 400)
+        self.assertEqual(json.loads(response.read())["error"], "invalid_json")
+        connection.close()
+        with urlopen(f"{self.base_url}/health/live", timeout=5) as live:
+            self.assertEqual(live.status, 200)
+
+    def test_logout_cookie_matches_secure_setting(self: Self) -> None:
+        for secure in (False, True):
+            settings = self.settings.model_copy(update={"admin_session_cookie_secure": secure})
+            server = NoyraHTTPServer(self.kernel, settings)
+            server.start()
+            try:
+                connection = http.client.HTTPConnection(*server.address, timeout=5)
+                connection.request("POST", "/admin/session/logout", b"{}")
+                response = connection.getresponse()
+                self.assertEqual(response.status, 204)
+                self.assertEqual("; Secure" in response.getheader("Set-Cookie", ""), secure)
+                response.read()
+                connection.close()
+            finally:
+                server.close()
+
     def tearDown(self: Self) -> None:
         self.http.close()
         self.kernel.close()

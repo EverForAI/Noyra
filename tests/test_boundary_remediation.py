@@ -126,8 +126,14 @@ def test_web_last_dispatch_rechecks_and_records_failure(
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             reader = SafeWebReader(client=client, resolver=resolver, verify_peer_address=False)
             with gate.operation("test") as lease, bind_lease(lease):
-                result = await ToolRunner(database).fetch_document("audit", source, reader)
-            assert result.status == "failed" and result.document is None
+                if change == "pause":
+                    # Accounting finishes the action, but stale work may not
+                    # commit poll/scheduling state after epoch invalidation.
+                    with pytest.raises(OperationInvalidated):
+                        await ToolRunner(database).fetch_document("audit", source, reader)
+                else:
+                    result = await ToolRunner(database).fetch_document("audit", source, reader)
+                    assert result.status == "failed" and result.document is None
 
     asyncio.run(run())
     assert not sent
@@ -663,3 +669,46 @@ def test_http_permission_snapshot_does_not_override_live_failures(
             guard.require_request_ready()
     finally:
         guard.close()
+
+
+def test_xml_element_depth_and_attribute_text_budgets() -> None:
+    assert parse_untrusted_xml(b"<x/>", max_depth=1).tag == "x"
+    with pytest.raises(ValueError, match="structure"):
+        parse_untrusted_xml(b"<x><y/></x>", max_depth=1)
+    assert parse_untrusted_xml(b'<x a="123"/>', max_text_chars=3).attrib["a"] == "123"
+    with pytest.raises(ValueError, match="text"):
+        parse_untrusted_xml(b'<x a="123">4</x>', max_text_chars=3)
+
+
+def test_strict_json_nesting_failure_is_value_error() -> None:
+    from noyra.core.types import strict_json_loads
+
+    with pytest.raises(ValueError, match="nesting"):
+        strict_json_loads("[" * 10_000 + "0" + "]" * 10_000)
+
+
+def test_request_reader_separates_header_and_body_budgets() -> None:
+    import io
+    from unittest.mock import Mock
+
+    from noyra.core.request_io import DeadlineRequestReader
+
+    header = b"POST / HTTP/1.0\r\nContent-Length: 100\r\n\r\n"
+    body = b"x" * 100
+    reader = DeadlineRequestReader(
+        io.BytesIO(header + body),
+        Mock(),
+        5,
+        max_bytes=len(header) + len(body),
+        max_header_bytes=len(header),
+    )
+    assert io.BufferedReader(reader).read() == header + body
+    reader = DeadlineRequestReader(
+        io.BytesIO(header + body),
+        Mock(),
+        5,
+        max_bytes=len(header) + len(body),
+        max_header_bytes=len(header) - 1,
+    )
+    with pytest.raises(OSError, match="header byte"):
+        io.BufferedReader(reader).read()

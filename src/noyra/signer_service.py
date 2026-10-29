@@ -576,7 +576,12 @@ class SignerHTTPServer(ThreadingHTTPServer):
     ):
         if host != "127.0.0.1":
             raise ValueError("signer host must be loopback")
-        if not bearer_token or not isinstance(bearer_token, str) or len(bearer_token) > 4096:
+        if (
+            not isinstance(bearer_token, str)
+            or not bearer_token
+            or len(bearer_token) > 4096
+            or not bearer_token.isascii()
+        ):
             raise ValueError("signer token is invalid")
         self.engine = engine
         self.bearer_token = bearer_token
@@ -637,8 +642,9 @@ class SignerHTTPServer(ThreadingHTTPServer):
                 del format, args
 
             def do_POST(self) -> None:
-                if not secrets.compare_digest(
-                    self.headers.get("Authorization", ""), f"Bearer {owner.bearer_token}"
+                authorization = self.headers.get("Authorization", "")
+                if not authorization.isascii() or not secrets.compare_digest(
+                    authorization, f"Bearer {owner.bearer_token}"
                 ):
                     self._send(401, {"error": "unauthorized"})
                     return

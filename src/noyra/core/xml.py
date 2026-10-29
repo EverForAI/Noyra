@@ -12,6 +12,10 @@ def parse_untrusted_xml(
     max_depth: int = 64,
     max_text_chars: int = 2_000_000,
 ) -> ET.Element:
+    # Depth counts elements: the root is depth 1, its children depth 2.
+    if max_nodes < 1 or max_depth < 1 or max_text_chars < 0:
+        raise ValueError("XML budgets are invalid")
+
     class BoundedTree(ET.TreeBuilder):
         def __init__(self) -> None:
             super().__init__()
@@ -25,8 +29,12 @@ def parse_untrusted_xml(
         def start(self, tag: str, attrs: dict[str, str]) -> ET.Element:
             self.nodes += 1
             self.depth += 1
-            if self.nodes > max_nodes or self.depth > max_depth + 1:
+            if self.nodes > max_nodes or self.depth > max_depth:
                 raise ValueError("XML structure exceeds limit")
+            # Attribute values consume memory and carry data just like text.
+            self.text_size += sum(len(value) for value in attrs.values())
+            if self.text_size > max_text_chars:
+                raise ValueError("XML text exceeds limit")
             return super().start(tag, attrs)
 
         def end(self, tag: str) -> ET.Element:
