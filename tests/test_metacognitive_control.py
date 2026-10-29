@@ -250,6 +250,7 @@ class MetacognitiveControlTestCase(unittest.TestCase):
         control = self.control()
         decision = control.run_due()
         selected = decision.target_id
+        assert selected is not None
         self.assertIn(selected, {target, other})
         other_id = other if selected == target else target
         proposal: dict[str, object] = {
