@@ -13,7 +13,7 @@ from noyra.core.errors import IntegrityError, SchemaContractError
 from noyra.core.types import content_hash
 from noyra.world import FetchedDocument, ObservationStore, SafeWebReader, SourceRegistry
 from noyra.world.errors import FetchError, ObservationBudgetError
-from noyra.world.feed import MAX_FEED_ITEMS, feed_content, parse_feed
+from noyra.world.feed import MAX_FEED_ITEMS, FeedItem, feed_content, parse_feed
 from noyra.world.poll import SourcePollStore
 from noyra.world.types import SourceRecord
 
@@ -616,3 +616,177 @@ async def test_valid_non_feed_xml_keeps_generic_api_extraction(
         reader = SafeWebReader(client=client, resolver=resolver, verify_peer_address=False)
         result = await reader.fetch(replace(source, source_type="api"))
     assert result.feed_items is None and result.content == "Cloudy"
+
+
+def namespaced_feed(
+    kind: str, body: str = "Core body", *, extensions: bool = False, before: bool = False
+) -> str:
+    declarations = (
+        ' xmlns:e="urn:example:extension" xmlns:c="http://purl.org/rss/1.0/modules/content/"'
+    )
+    foreign = (
+        (
+            "<e:title>Foreign title</e:title><e:description>Foreign summary</e:description>"
+            "<e:summary>Foreign summary</e:summary><e:content>Foreign body</e:content>"
+            "<e:encoded>Foreign encoded</e:encoded><e:id>foreign-id</e:id>"
+            '<e:guid>foreign-guid</e:guid><e:link href="https://example.com/foreign"/>'
+        )
+        if extensions
+        else ""
+    )
+    foreign_title = "<e:title>Foreign feed title</e:title>" if extensions else ""
+    if kind == "atom":
+        core = (
+            "<a:id>core-id</a:id><a:title>Core title</a:title>"
+            '<a:link href="https://example.com/core"/>'
+            f'<a:summary>Core summary</a:summary><a:content type="text">{body}</a:content>'
+        )
+        entry = foreign + core if before else core + foreign
+        return (
+            '<a:feed xmlns:a="http://www.w3.org/2005/Atom"'
+            + declarations
+            + ">"
+            + foreign_title
+            + "<a:title>Core feed</a:title><a:entry>"
+            + entry
+            + "</a:entry></a:feed>"
+        )
+    prefix = "r:" if kind == "rdf" else ""
+    core = (
+        f"<{prefix}title>Core title</{prefix}title>"
+        f"<{prefix}link>https://example.com/core</{prefix}link>"
+        f"<{prefix}description>Core summary</{prefix}description>"
+        f"<c:encoded>{body}</c:encoded>"
+    )
+    if kind == "rss":
+        core += "<guid>core-id</guid>"
+    entry = foreign + core if before else core + foreign
+    if kind == "rdf":
+        return (
+            '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"'
+            ' xmlns:r="http://purl.org/rss/1.0/"' + declarations + ">"
+            '<r:channel rdf:about="https://example.com/rss">'
+            + foreign_title
+            + "<r:title>Core feed</r:title></r:channel>"
+            '<r:item rdf:about="core-id">' + entry + "</r:item></rdf:RDF>"
+        )
+    return (
+        "<rss"
+        + declarations
+        + "><channel>"
+        + foreign_title
+        + "<title>Core feed</title><item>"
+        + entry
+        + "</item></channel></rss>"
+    )
+
+
+@pytest.mark.parametrize("kind", ["rss", "rdf", "atom"])
+@pytest.mark.parametrize("before", [False, True], ids=["extension-last", "extension-first"])
+def test_core_feed_fields_ignore_foreign_namespaces(kind: str, before: bool) -> None:
+    expected = parse_feed(namespaced_feed(kind), "https://example.com/rss")
+    actual = parse_feed(
+        namespaced_feed(kind, extensions=True, before=before), "https://example.com/rss"
+    )
+    assert actual == expected
+    assert actual[0] == "Core feed"
+    assert actual[1][0].body == "Core body"
+    assert actual[1][0].link == "https://example.com/core"
+
+
+@pytest.mark.parametrize("kind", ["rss", "rdf", "atom"])
+def test_foreign_fields_cannot_hide_core_content_revision(kind: str) -> None:
+    _, first = parse_feed(
+        namespaced_feed(kind, "Original core", extensions=True), "https://example.com/rss"
+    )
+    _, revised = parse_feed(
+        namespaced_feed(kind, "Revised core", extensions=True), "https://example.com/rss"
+    )
+    assert first[0].item_key == revised[0].item_key
+    assert first[0].fingerprint != revised[0].fingerprint
+    assert revised[0].body == "Revised core"
+
+
+@pytest.mark.parametrize("kind", ["rss", "rdf", "atom"])
+def test_namespace_prefix_spelling_does_not_change_fingerprints(kind: str) -> None:
+    xml = namespaced_feed(kind, extensions=True)
+    renamed = xml
+    for old, new in (("a", "atom"), ("r", "rss1"), ("e", "metadata")):
+        renamed = renamed.replace(f"xmlns:{old}=", f"xmlns:{new}=")
+        renamed = renamed.replace(f"<{old}:", f"<{new}:").replace(f"</{old}:", f"</{new}:")
+    assert parse_feed(renamed, "https://example.com/rss") == parse_feed(
+        xml, "https://example.com/rss"
+    )
+
+
+@pytest.mark.parametrize("kind", ["rss", "rdf", "atom"])
+def test_core_namespaces_preserve_existing_v1_fingerprints(kind: str) -> None:
+    # Captured from the pre-repair parser on canonical, extension-free input.
+    _, entries = parse_feed(namespaced_feed(kind), "https://example.com/rss")
+    assert entries[0].item_key == "f5073c64ea2885cbd92d2f5db92c8c881238a3bde4579e22b3e132ec42d894a0"
+    assert (
+        entries[0].fingerprint == "c78959fdcd4238f154efb93d5fbd57257e0696c7ae28b201204c23dd3aaa31b4"
+    )
+
+
+@pytest.mark.parametrize("kind", ["rss", "rdf", "atom"])
+def test_foreign_entry_resources_are_not_feed_items(kind: str) -> None:
+    xml = namespaced_feed(kind)
+    fake = "<e:item><e:title>Not an RSS item</e:title></e:item>"
+    if kind == "atom":
+        xml = xml.replace("</a:feed>", fake.replace("item", "entry") + "</a:feed>")
+    elif kind == "rdf":
+        xml = xml.replace("</rdf:RDF>", fake + "</rdf:RDF>")
+    else:
+        xml = xml.replace("</channel>", fake + "</channel>")
+        xml = xml.replace("<channel>", "<e:channel/><channel>")
+    assert parse_feed(xml, "https://example.com/rss") == parse_feed(
+        namespaced_feed(kind), "https://example.com/rss"
+    )
+
+
+@pytest.mark.parametrize("kind", ["rss", "rdf", "atom"])
+def test_namespace_correction_keeps_old_evidence_and_emits_once(
+    context: tuple[Database, SourceRecord, ObservationStore], kind: str
+) -> None:
+    database, source, store = context
+    legacy_payload = {
+        "title": "Foreign title",
+        "link": "https://example.com/core" if kind == "atom" else "https://example.com/foreign",
+        "summary": "Foreign summary",
+        "body": "Foreign encoded",
+    }
+    legacy_key = content_hash(
+        {
+            "version": 1,
+            "identity": {
+                "id": "foreign-guid",
+                "link": legacy_payload["link"],
+            },
+        }
+    )
+    legacy_fingerprint = content_hash({"version": 1, "content": legacy_payload})
+    legacy_item = FeedItem(legacy_key, legacy_fingerprint, **legacy_payload)
+    current = document(source, namespaced_feed(kind, extensions=True), T2)
+    legacy_content = feed_content((legacy_item,))
+    legacy_document = replace(
+        current,
+        title="Foreign feed title",
+        content=legacy_content,
+        content_hash=content_hash(legacy_content),
+        feed_items=(legacy_item,),
+        fetched_at=T1,
+    )
+    old, created = store.ingest(SUBJECT, source.source_id, legacy_document)
+    assert old is not None and created
+    corrected, created = store.ingest(SUBJECT, source.source_id, current)
+    assert corrected is not None and created and "Core body" in corrected.content
+    assert store.ingest(SUBJECT, source.source_id, replace(current, fetched_at=T3)) == (None, False)
+    assert store.get(old.observation_id, subject_id=SUBJECT) == old
+    with database.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM world_feed_seen").fetchone()[0] == 2
+        assert (
+            connection.execute("SELECT fingerprint_version FROM world_poll_state").fetchone()[0]
+            == 1
+        )

@@ -19,6 +19,9 @@ from .errors import FetchError
 # polls remain unchanged without a broad replay or schema migration.
 FEED_FINGERPRINT_VERSION = 1
 RDF_NAMESPACE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+RSS1_NAMESPACE = "http://purl.org/rss/1.0/"
+ATOM_NAMESPACE = "http://www.w3.org/2005/Atom"
+CONTENT_NAMESPACE = "http://purl.org/rss/1.0/modules/content/"
 MAX_FEED_ITEMS = 512
 MAX_FEED_BYTES = 2_000_000
 MAX_FIELD_CHARS = 100_000
@@ -168,48 +171,54 @@ def parse_feed(text: str, source_url: str) -> tuple[str | None, tuple[FeedItem, 
         root = ET.fromstring(text, parser=ET.XMLParser(target=_BoundedTree()))
     except (ET.ParseError, ValueError) as error:
         raise FetchError("world_feed_xml_invalid") from error
-    kind = _local(root.tag)
-    if kind == "rss":
-        channels = [child for child in root if _local(child.tag) == "channel"]
+    if root.tag == "rss":
+        prefix = ""
+        channels = [child for child in root if child.tag == "channel"]
         if len(channels) != 1:
             raise FetchError("world_feed_channel_invalid")
         container = channels[0]
-        entries = [child for child in container if _local(child.tag) == "item"]
+        entries = [child for child in container if child.tag == "item"]
     elif root.tag == f"{{{RDF_NAMESPACE}}}RDF":
-        # RSS 1.0 puts the channel and item resources directly below an RDF
-        # root. Keep the same bounded XML parser and field handling as RSS 2.0;
-        # RDF syntax is only accepted with its standard namespace.
-        channels = [child for child in root if _local(child.tag) == "channel"]
+        prefix = f"{{{RSS1_NAMESPACE}}}"
+        channels = [child for child in root if child.tag == f"{prefix}channel"]
         if len(channels) != 1:
             raise FetchError("world_feed_channel_invalid")
         container = channels[0]
-        entries = [child for child in root if _local(child.tag) == "item"]
-    elif root.tag == "{http://www.w3.org/2005/Atom}feed":
+        entries = [child for child in root if child.tag == f"{prefix}item"]
+    elif root.tag == f"{{{ATOM_NAMESPACE}}}feed":
+        prefix = f"{{{ATOM_NAMESPACE}}}"
         container = root
-        entries = [child for child in root if child.tag == "{http://www.w3.org/2005/Atom}entry"]
+        entries = [child for child in root if child.tag == f"{prefix}entry"]
     else:
         raise FetchError("world_feed_format_unsupported")
     if len(entries) > MAX_FEED_ITEMS:
         raise FetchError("world_feed_item_limit")
-    is_atom = kind == "feed"
+    is_atom = prefix == f"{{{ATOM_NAMESPACE}}}"
     title = (
         next(
-            (_field_text(c, atom=is_atom) for c in container if _local(c.tag) == "title"),
+            (_field_text(c, atom=is_atom) for c in container if c.tag == f"{prefix}title"),
             "",
         )
         or None
     )
     items: dict[tuple[str, str], FeedItem] = {}
     for entry in entries:
-        fields = {_local(child.tag): child for child in entry}
-        item_title = _field_text(fields.get("title"), atom=is_atom)
-        summary = _field_text(fields.get("description"), atom=is_atom, html=True) or _field_text(
-            fields.get("summary"), atom=is_atom, html=True
-        )
-        body = _field_text(fields.get("encoded"), atom=is_atom, html=True) or _field_text(
-            fields.get("content"), atom=is_atom, html=True
-        )
-        links = [c for c in entry if _local(c.tag) == "link"]
+        # XML prefixes are aliases, not identities. Only the format's core
+        # namespace (and the explicit RSS content extension) may supply fields.
+        # Unknown extensions cannot shadow content, links, titles or IDs.
+        fields = {child.tag: child for child in entry}
+        item_title = _field_text(fields.get(f"{prefix}title"), atom=is_atom)
+        if is_atom:
+            summary = _field_text(fields.get(f"{prefix}summary"), atom=True)
+            body = _field_text(fields.get(f"{prefix}content"), atom=True)
+        else:
+            summary = _field_text(fields.get(f"{prefix}description"), atom=False, html=True)
+            if not summary:
+                summary = _field_text(fields.get(f"{prefix}summary"), atom=False, html=True)
+            body = _field_text(fields.get(f"{{{CONTENT_NAMESPACE}}}encoded"), atom=False, html=True)
+            if not body:
+                body = _field_text(fields.get(f"{prefix}content"), atom=False, html=True)
+        links = [c for c in entry if c.tag == f"{prefix}link"]
         raw_link = next(
             (
                 c.attrib.get("href", "")
@@ -221,11 +230,11 @@ def parse_feed(text: str, source_url: str) -> tuple[str | None, tuple[FeedItem, 
         if not raw_link and links:
             raw_link = "".join(links[0].itertext())
         link = _link(raw_link, source_url)
-        identifier = fields.get("guid")
+        identifier = None if is_atom else fields.get(f"{prefix}guid")
         if identifier is None:
-            identifier = fields.get("id")
+            identifier = fields.get(f"{prefix}id")
         guid = normalize("".join(identifier.itertext())) if identifier is not None else ""
-        if not guid and kind == "rdf":
+        if not guid and prefix == f"{{{RSS1_NAMESPACE}}}":
             guid = normalize(entry.attrib.get(f"{{{RDF_NAMESPACE}}}about", ""))
         payload = {"title": item_title, "link": link, "summary": summary, "body": body}
         if not any(payload.values()):
