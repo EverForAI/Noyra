@@ -613,7 +613,7 @@ async function logout() {
   runtimeLogCursor=null;runtimeLogBrowsingHistory=false;upgradeTaskId=null;upgradeStatusAvailable=false;upgradeCheckResult=null;
   publicPostCursor="";publicPostRows=[];publicPostActionKeys.clear();publicPostLoadVersion++;
   channelBindings=[]; modelPageOffset=0; usageResourcePage=0; usageLoadVersion++; usageResourceVersion++; healthLoadVersion++; healthPages.model=0; healthPages.search=0; renderedModelQuery=null;
-  for(const id of ["model-list","runtime-log-list","lifecycle-summary","lifecycle-timeline","public-post-review-list","overview-attention","overview-observation","overview-events","overview-lifecycle","overview-metrics","cognition-summary","storage-summary","search-provider-list","capability-list","channel-list","binding-list","migration-policy-summary","migration-target-list","migration-proposal-list","migration-task-list","runtime-summary","public-post-usage","setup-guide-list","model-observability-summary","model-provider-health-list","search-provider-health-list","retention-summary","upgrade-log-summary","upgrade-confirmation-sha"])$("#"+id).replaceChildren();
+  for(const id of ["world-acquisition-summary","world-acquisition-status","model-list","runtime-log-list","lifecycle-summary","lifecycle-timeline","public-post-review-list","overview-attention","overview-observation","overview-events","overview-lifecycle","overview-metrics","cognition-summary","storage-summary","search-provider-list","capability-list","channel-list","binding-list","migration-policy-summary","migration-target-list","migration-proposal-list","migration-task-list","runtime-summary","public-post-usage","setup-guide-list","model-observability-summary","model-provider-health-list","search-provider-health-list","retention-summary","upgrade-log-summary","upgrade-confirmation-sha"])$("#"+id).replaceChildren();
   for(const node of document.querySelectorAll("#admin-shell .form-status, #admin-shell .card-state, #admin-shell dd, #subject-name, #subject-meta, #overview-updated, #upgrade-commit-title"))node.textContent="";
   for(const form of document.querySelectorAll("#admin-shell form")){form.reset();for(const name of ["dirty","revision","lengthRevision"])delete form.dataset[name];}
   for(const control of document.querySelectorAll("#admin-shell button, #migration-policy-form input, #migration-policy-form select")) control.disabled=false;
@@ -660,6 +660,48 @@ async function loadOverview() {
   setStatus("#overview-updated",`读取于 ${formatTimestamp(new Date().toISOString())}${failures.length ? " · 部分数据未更新，保留旧摘要":""}`,Boolean(failures.length));
   return failures;
 }
+function renderWorldAcquisition(data) {
+  if (data?.format !== "noyra-world-acquisition/v1" || !Array.isArray(data.items)) {
+    throw new Error("采集状态格式不完整，未按零处理");
+  }
+  const count = value => Number.isSafeInteger(value) && value >= 0 ? formatInteger(value) : "未读取";
+  const outcome = {changed:"检查成功，发现新内容",unchanged:"检查成功，没有新内容",failed:"最近检查失败"};
+  const status = {active:"启用",candidate:"候选",blocked:"停用"};
+  const version = value => Number.isSafeInteger(value) && value >= 1 ? `v${value}` : "未记录";
+  const summary = summaryRows([
+    ["统计口径","自本次采集跟踪开始累计，非每日统计；采集计数不是模型调用数"],
+    ["当前分类规则",`${version(data.current_classifier_version)}；历史观察保留原记录，不重新判定`],
+    ["去重保留范围",`每个来源最多 ${count(data.retained_version_limit_per_source)} 个去重身份（含未完成条目的片段）；超出范围后重现的内容可能再被观察`],
+    ["来源范围",`最多 ${count(data.source_limit)} 个来源${data.truncated ? "，本次已截断" : ""}`],
+  ]);
+  const items = data.items.map(row => {
+    const rows = [["来源状态",status[row.source_status] || "未提供"]];
+    if(row.tracking !== "available") rows.push(["检查记录","尚未开始本次跟踪，不能推断采集成功或失败"]);
+    else rows.push(
+      ["最近检查结果",outcome[row.outcome] || "未提供"],
+      ["最近检查 / 成功检查",`${formatTimestamp(row.last_attempt_at)} / ${formatTimestamp(row.last_success_at)}`],
+      ["最近发现新内容",formatTimestamp(row.last_change_at)],
+      ["累计检查 / 无新内容",`${count(row.checks)} / ${count(row.unchanged_checks)}`],
+      ["累计采集版本（含片段） / 保留去重身份",`${count(row.new_item_versions)} / ${count(row.retained_entry_versions)}`],
+      ["条目指纹规则",version(row.fingerprint_version)],
+      ["升级基线",row.baseline === "legacy_unavailable" ? "旧抓取缺少条目边界：首次当前来源作一次性过渡，不重放历史记录" : "本次跟踪的首个来源快照"],
+    );
+    return `<article class="surface-card"><h3>${esc(row.name)}</h3>${summaryRows(rows)}</article>`;
+  }).join("");
+  $("#world-acquisition-summary").innerHTML = summary + (items || '<p class="muted">尚未配置来源。</p>');
+}
+async function loadWorldAcquisition() {
+  const current = beginAdminRead("worldAcquisition");
+  try {
+    const data = await adminRead(current, "/api/admin/world-acquisition");
+    if (!current()) return;
+    renderWorldAcquisition(data);
+    setStatus("#world-acquisition-status", `读取于 ${formatTimestamp(data.sampled_at)}，未触发采集或模型调用`);
+  } catch (error) {
+    if (current()) setStatus("#world-acquisition-status", `采集状态读取失败：${errorText(error)}；保留旧显示，不按零处理`, true);
+  }
+}
+
 function observationBytes(value) {
   if(!Number.isSafeInteger(value) || value<0)return "未读取";
   if(value<1048576)return `${formatInteger(value)} B`;
@@ -3476,3 +3518,5 @@ $("#publication-list").addEventListener("click", (event) => {
         void withdrawPublicPublication(withdraw.dataset.publicationWithdraw);
 });
 publicationFields();
+
+$("#refresh-world-acquisition").addEventListener("click", () => { void loadWorldAcquisition(); });

@@ -25,7 +25,8 @@ from noyra.core.at_rest import AtRestError
 from noyra.core.deadline import operation_deadline
 from noyra.core.errors import IntegrityError, NotFoundError, RuntimeOwnershipError
 from noyra.core.operator_controls import OperatorControlConflict
-from noyra.core.request_io import DeadlineRequestReader
+from noyra.core.request_io import DeadlineRequestReader, RequestHeadLimitError
+from noyra.core.types import strict_json_loads
 from noyra.http_access_logging import http_log_fields
 from noyra.http_routes import (
     cognition,
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
     from noyra.service import NoyraHTTPServer
 
 LOGGER = logging.getLogger("noyra.service")
+MAX_REQUEST_HEADER_BYTES = 64_000
 
 
 class PublicArticleRenderer(Protocol):
@@ -97,18 +99,63 @@ def handler_type(
             self.connection.settimeout(owner.settings.request_timeout_seconds)
             self.rfile = io.BufferedReader(
                 DeadlineRequestReader(
-                    self.rfile, self.connection, owner.settings.request_timeout_seconds
+                    self.rfile,
+                    self.connection,
+                    owner.settings.request_timeout_seconds,
+                    max_bytes=MAX_REQUEST_HEADER_BYTES + owner.settings.max_request_bytes,
+                    max_header_bytes=MAX_REQUEST_HEADER_BYTES,
                 )
             )
 
         def handle_one_request(self) -> None:
             self._log_request_parsed = False
-            with operation_deadline(owner.settings.request_timeout_seconds):
-                super().handle_one_request()
+            # A bounded read may reject the head before stdlib initializes the
+            # fields send_error uses. Never use raw input to fill that gap.
+            self.requestline = ""
+            self.command = ""
+            self.request_version = self.default_request_version
+            try:
+                with operation_deadline(owner.settings.request_timeout_seconds):
+                    super().handle_one_request()
+            except RequestHeadLimitError as error:
+                self.close_connection = True
+                self._log_request_parsed = False
+                self.requestline = ""
+                self.request_version = "HTTP/1.0"
+                # Static status/description only; the standard log hooks emit
+                # allowlisted fields, not the rejected line or header content.
+                with suppress(OSError):
+                    self.send_error(
+                        HTTPStatus.REQUEST_URI_TOO_LONG
+                        if error.request_line
+                        else HTTPStatus.REQUEST_HEADER_FIELDS_TOO_LARGE
+                    )
+            except OSError:
+                self.close_connection = True
 
         def parse_request(self) -> bool:
             self._log_request_parsed = super().parse_request()
-            return self._log_request_parsed
+            if not self._log_request_parsed:
+                return False
+            # HTTP/1.0 is intentional. Reject ambiguous framing before routing,
+            # including routes that never call _request_json (GET/webhooks).
+            if self.headers.get_all("Transfer-Encoding"):
+                self.close_connection = True
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request_framing"})
+                return False
+            lengths = self.headers.get_all("Content-Length", [])
+            if len(lengths) > 1 or (
+                lengths
+                and (not lengths[0].isascii() or not lengths[0].isdigit() or len(lengths[0]) > 20)
+            ):
+                self.close_connection = True
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request_framing"})
+                return False
+            if lengths and int(lengths[0]) > owner.settings.max_request_bytes:
+                self.close_connection = True
+                self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "too_large"})
+                return False
+            return True
 
         def do_GET(self) -> None:
             return get.dispatch(self, owner)
@@ -654,6 +701,9 @@ def handler_type(
             )
 
         def _logout_admin_session(self) -> None:
+            # Consume the validated bounded body before closing the HTTP/1.0
+            # connection, otherwise unread bytes can reset the logout response.
+            self._discard_small_request_body()
             session_id, session = self._session_from_cookie()
             if session is not None and not _ascii_token_equal(
                 self.headers.get("X-CSRF-Token", ""), session.csrf_token
@@ -666,7 +716,8 @@ def handler_type(
             self.send_response(HTTPStatus.NO_CONTENT)
             self.send_header(
                 "Set-Cookie",
-                "noyra_admin_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
+                "noyra_admin_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+                + ("; Secure" if owner.settings.admin_session_cookie_secure else ""),
             )
             self._headers("application/json; charset=utf-8", 0)
             self.end_headers()
@@ -704,15 +755,21 @@ def handler_type(
 
         def _request_json(self) -> dict[str, Any] | None:
             raw_length = self.headers.get("Content-Length", "")
-            if not raw_length.isdigit():
+            if not raw_length.isascii() or not raw_length.isdigit():
+                self.close_connection = True
                 self._json(HTTPStatus.LENGTH_REQUIRED, {"error": "length_required"})
                 return None
             length = int(raw_length)
             if length > owner.settings.max_request_bytes:
+                self.close_connection = True
                 self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "too_large"})
                 return None
             try:
-                payload = json.loads(self.rfile.read(length))
+                body = self.rfile.read(length)
+                if len(body) != length:
+                    self.close_connection = True
+                    raise ValueError("incomplete request body")
+                payload = strict_json_loads(body)
             except (UnicodeDecodeError, ValueError):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
                 return None
@@ -749,7 +806,8 @@ def handler_type(
                 self._json(HTTPStatus.NOT_FOUND, {"error": "inbound_route_not_found"})
                 return
             raw_length = self.headers.get("Content-Length", "")
-            if not raw_length.isdigit():
+            if not raw_length.isascii() or not raw_length.isdigit():
+                self.close_connection = True
                 self._json(HTTPStatus.LENGTH_REQUIRED, {"error": "length_required"})
                 return
             length = int(raw_length)
@@ -1040,11 +1098,15 @@ def handler_type(
 
         def _discard_small_request_body(self) -> None:
             raw_length = self.headers.get("Content-Length", "")
-            if not raw_length.isdigit():
+            if not raw_length.isascii() or not raw_length.isdigit() or len(raw_length) > 20:
+                self.close_connection = True
                 return
             length = int(raw_length)
-            if 0 < length <= owner.settings.max_request_bytes:
-                self.rfile.read(length)
+            if length > owner.settings.max_request_bytes:
+                self.close_connection = True
+                return
+            if length > 0 and len(self.rfile.read(length)) != length:
+                self.close_connection = True
 
         def _asset(self, filename: str, content_type: str) -> None:
             path = web_root / filename
@@ -1398,6 +1460,8 @@ def handler_type(
             cache_control: str = "no-store",
             public_contract: bool | str = False,
         ) -> None:
+            if self.close_connection:
+                self.send_header("Connection", "close")
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(length))
             self.send_header("Cache-Control", cache_control)

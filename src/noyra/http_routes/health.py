@@ -20,7 +20,6 @@ if TYPE_CHECKING:
 def health_live(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
     self._json(HTTPStatus.OK, {"status": "ok", "service": "noyra"})
     return True
-    return False
 
 
 def health_ready_admin_readiness(
@@ -129,7 +128,6 @@ def health_ready_admin_readiness(
             {"status": "degraded", "service": "noyra", "reason_code": "readiness_check_failed"},
         )
     return True
-    return False
 
 
 def health_cached(self: RequestHandler, owner: NoyraHTTPServer) -> bool:

@@ -74,6 +74,7 @@ from .social import (
 )
 from .supervisor import CognitionSupervisor
 from .thought import (
+    AgendaExecutionCheck,
     IntrinsicThought,
     IntrinsicThoughtValidationError,
     ThoughtAgendaRecord,
@@ -108,6 +109,7 @@ __all__ = [
     "ActionDeliberationProposal",
     "ActionDeliberationRecord",
     "ActionDeliberationValidationError",
+    "AgendaExecutionCheck",
     "AutonomousProjectBudgetProposal",
     "AutonomousProjectFormationProposal",
     "AutonomousProjectManager",

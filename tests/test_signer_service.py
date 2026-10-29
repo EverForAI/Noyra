@@ -867,3 +867,20 @@ def test_http_identity_cannot_be_used_as_generic_personal_sign(
         TOKEN,
     )
     assert response.status_code == 400
+
+
+def test_signer_non_ascii_authorization_is_unauthorized(http_server: SignerHTTPServer) -> None:
+    import http.client
+
+    connection = http.client.HTTPConnection("127.0.0.1", http_server.server_port, timeout=5)
+    connection.request("POST", "/v1/nonce", b"{}", {"Authorization": "Bearer caf\xe9"})
+    response = connection.getresponse()
+    assert response.status == 401
+    response.read()
+    connection.close()
+    assert (
+        post_json(
+            http_server, "/v1/nonce", {"address": ADDRESS, "chain_id": CHAIN_ID}, TOKEN
+        ).status_code
+        == 200
+    )

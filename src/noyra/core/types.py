@@ -27,7 +27,10 @@ def strict_json_loads(value: str | bytes | bytearray) -> Any:
     def reject_constant(token: str) -> None:
         raise ValueError(f"non-finite JSON value is invalid: {token}")
 
-    return json.loads(value, parse_constant=reject_constant)
+    try:
+        return json.loads(value, parse_constant=reject_constant)
+    except RecursionError as error:
+        raise ValueError("JSON nesting exceeds parser limit") from error
 
 
 def strict_int(value: Any) -> int:

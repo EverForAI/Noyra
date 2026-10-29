@@ -218,6 +218,7 @@ docs/deployment/setup-modes.md
 docs/deployment/ubuntu.md
 docs/deployment/windows-data-root-migration.md
 docs/development/architecture-boundaries.md
+docs/development/world-acquisition-design.md
 docs/evaluation.md
 docs/genesis-experience.md
 docs/goal-origin-evidence.md
@@ -487,6 +488,7 @@ src/noyra/cognition/settings.py
 src/noyra/cognition/social.py
 src/noyra/cognition/supervisor.py
 src/noyra/cognition/thought.py
+src/noyra/cognition/thought_rounds.py
 src/noyra/cognition/types.py
 src/noyra/cognitive_wait_maintenance.py
 src/noyra/core/__init__.py
@@ -551,6 +553,7 @@ src/noyra/core/schema/migrations_v043_v052.py
 src/noyra/core/schema/migrations_v053_v054.py
 src/noyra/core/schema/migrations_v055_v069.py
 src/noyra/core/schema/migrations_v070_v107.py
+src/noyra/core/schema/world_poll.py
 src/noyra/core/secret_cleanup.py
 src/noyra/core/snapshots.py
 src/noyra/core/storage.py
@@ -737,10 +740,14 @@ src/noyra/web/index.html
 src/noyra/web/participant.js
 src/noyra/web/styles.css
 src/noyra/world/__init__.py
+src/noyra/world/diagnostics.py
 src/noyra/world/errors.py
+src/noyra/world/feed.py
 src/noyra/world/genesis.py
+src/noyra/world/injection.py
 src/noyra/world/integrity.py
 src/noyra/world/observation_archive.py
+src/noyra/world/poll.py
 src/noyra/world/prediction.py
 src/noyra/world/source.py
 src/noyra/world/store.py
@@ -772,6 +779,7 @@ tests/frontend/admin-optimization.test.cjs
 tests/frontend/participant.test.cjs
 tests/frontend/public-archive.test.cjs
 tests/frontend/publication-admin.test.cjs
+tests/frontend/world-acquisition.test.cjs
 tests/shell/test-audit-environment.sh
 tests/shell/test-control-layout-rollback.sh
 tests/shell/test-install-ubuntu-backup-boundary.sh
@@ -861,6 +869,8 @@ tests/test_installer_operability.py
 tests/test_integrity_hardening.py
 tests/test_interaction.py
 tests/test_intrinsic_thought.py
+tests/test_intrinsic_thought_recurrence.py
+tests/test_intrinsic_thought_rounds.py
 tests/test_kernel.py
 tests/test_legacy_schema71_upgrade.py
 tests/test_locking.py
@@ -1037,6 +1047,10 @@ tests/test_web_contract.py
 tests/test_windows_data_root.py
 tests/test_windows_process_identity.py
 tests/test_world.py
+tests/test_world_acquisition_diagnostics.py
+tests/test_world_feed_poll.py
+tests/test_world_injection_classification.py
+tests/test_world_poll_integrity.py
 website/build.mjs
 website/content.mjs
 website/icons/LICENSE

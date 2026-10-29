@@ -190,6 +190,9 @@ def dispatch(self: RequestHandler, owner: NoyraHTTPServer) -> None:
     elif parsed.path == "/api/diagnostics":
         if read_admin.diagnostics(self, owner):
             return
+    elif parsed.path == "/api/admin/world-acquisition":
+        if read_cognition.admin_world_acquisition(self, owner):
+            return
     elif parsed.path == "/api/admin/usage":
         if read_cognition.admin_usage(self, owner, query):
             return

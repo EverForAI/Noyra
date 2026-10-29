@@ -5,10 +5,9 @@ import ipaddress
 import json
 import math
 import re
-import socket
 from collections.abc import Awaitable, Callable, Sequence
 from html.parser import HTMLParser
-from typing import Any
+from typing import Any, cast
 from urllib.parse import SplitResult, parse_qsl, urlsplit, urlunsplit
 
 import httpx
@@ -20,6 +19,9 @@ from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
     HTTPResponseLimitError,
     PublicDNSAsyncHTTPTransport,
+    _call_sync_resolver_async,
+    is_public_address,
+    public_addresses,
     read_bounded_response,
     validate_public_addresses,
     validate_response_headers,
@@ -27,6 +29,9 @@ from noyra.core.http import (
 from noyra.core.types import content_hash, new_id, utc_now
 
 from .errors import FetchError, UnsafeSourceError, WorldStateConflictError
+from .feed import feed_content, parse_feed
+from .injection import INJECTION_PATTERNS as INJECTION_PATTERNS
+from .injection import classify_external_text
 from .types import FetchedDocument, SourceRecord, SourceStatus, SourceType
 
 Resolver = Callable[[str, int], Awaitable[Sequence[str]]]
@@ -41,12 +46,6 @@ ALLOWED_MEDIA_TYPES = frozenset(
         "text/xml",
         "text/plain",
     }
-)
-INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("instruction_override", re.compile(r"ignore\s+(all\s+)?previous\s+instructions", re.I)),
-    ("system_impersonation", re.compile(r"\b(system|developer)\s+(message|prompt)\b", re.I)),
-    ("tool_coercion", re.compile(r"\b(call|invoke|use)\s+(the\s+)?(tool|function)\b", re.I)),
-    ("secret_extraction", re.compile(r"\b(api\s*key|password|private\s+key|secret)\b", re.I)),
 )
 
 
@@ -104,7 +103,7 @@ def canonical_public_url(url: str) -> str:
         address = ipaddress.ip_address(host)
     except ValueError:
         address = None
-    if address is not None and not address.is_global:
+    if address is not None and not is_public_address(address):
         raise UnsafeSourceError("source address is not globally routable")
     sensitive_query = re.compile(r"(token|key|secret|password|signature|auth)", re.I)
     if any(
@@ -419,7 +418,7 @@ class SafeWebReader:
                             raise UnsafeSourceError(
                                 "world fetch peer address is invalid"
                             ) from error
-                        if not peer_address.is_global:
+                        if not is_public_address(peer_address):
                             raise UnsafeSourceError("world fetch connected to a non-public address")
                     media_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
                     if media_type not in ALLOWED_MEDIA_TYPES:
@@ -436,11 +435,36 @@ class SafeWebReader:
                         raise FetchError("world_fetch_response_too_large") from error
                     text = body.decode(response.encoding or "utf-8", errors="replace")
                 authorize()
-                title, content = self._extract(media_type, text)
-                content = content[: self.max_text_chars]
-                signals = tuple(
-                    name for name, pattern in INJECTION_PATTERNS if pattern.search(content)
+                feed_items = None
+                declared_feed = source.source_type == "rss" or media_type in {
+                    "application/rss+xml",
+                    "application/atom+xml",
+                }
+                if declared_feed or media_type in {"application/xml", "text/xml"}:
+                    try:
+                        title, feed_items = parse_feed(text, url)
+                    except FetchError as error:
+                        # XML API documents remain supported. Only a valid,
+                        # bounded non-feed root can use generic extraction;
+                        # malformed XML/DTD/limits never fall back permissively.
+                        if declared_feed or str(error) != "world_feed_format_unsupported":
+                            raise
+                if feed_items is not None:
+                    content = feed_content(feed_items)
+                    # Structured feeds remain bounded by MAX_FEED_BYTES, XML
+                    # nodes/items, and the response budget. Ingestion fragments
+                    # their complete normalized data to the cognition budget;
+                    # applying the generic excerpt limit here rejects neighbors
+                    # whenever one entry is long.
+                else:
+                    title, content = self._extract(media_type, text)
+                    content = content[: self.max_text_chars]
+                fields = (
+                    tuple(value for item in feed_items for value in item.payload().values())
+                    if feed_items is not None
+                    else (content,)
                 )
+                signals = classify_external_text(title or "", *fields)
                 return FetchedDocument(
                     url=url,
                     title=title,
@@ -451,6 +475,7 @@ class SafeWebReader:
                     etag=response.headers.get("etag"),
                     last_modified=response.headers.get("last-modified"),
                     fetched_at=utc_now(),
+                    feed_items=feed_items,
                 )
         except (FetchError, UnsafeSourceError):
             raise
@@ -481,9 +506,10 @@ class SafeWebReader:
 
     @staticmethod
     async def _default_resolver(host: str, port: int) -> Sequence[str]:
-        loop = asyncio.get_running_loop()
-        records = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-        return tuple(dict.fromkeys(record[4][0] for record in records))
+        return cast(
+            Sequence[str],
+            await _call_sync_resolver_async(public_addresses, host, port, timeout=30.0),
+        )
 
     @staticmethod
     def _extract(media_type: str, text: str) -> tuple[str | None, str]:

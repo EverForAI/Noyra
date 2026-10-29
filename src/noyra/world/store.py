@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+from dataclasses import replace
 from typing import Any
 
 from noyra.core.cognitive_waits import cancel_terminal_waits
@@ -9,10 +11,15 @@ from noyra.core.events import EventStore
 from noyra.core.types import canonical_json, content_hash, new_id, strict_json_loads, utc_now
 from noyra.mind.causal import CausalStore
 
-from .errors import WorldStateConflictError
+from .errors import ObservationBudgetError, WorldStateConflictError
+from .feed import FEED_FINGERPRINT_VERSION, FeedItem, feed_content
+from .injection import INJECTION_CLASSIFIER_VERSION, classify_external_text
 from .observation_archive import ObservationContentArchive
+from .poll import MAX_SEEN_VERSIONS, SourcePollStore
 from .source import canonical_public_url
 from .types import ClaimProposal, ClaimRecord, FetchedDocument, ObservationRecord
+
+MAX_FEED_OBSERVATIONS_PER_POLL = 4
 
 
 class ObservationStore:
@@ -26,103 +33,391 @@ class ObservationStore:
     def record(
         self, subject_id: str, source_id: str, document: FetchedDocument
     ) -> tuple[ObservationRecord, bool]:
-        if len(document.content) > 500_000:
-            raise ValueError("observation content exceeds the storage limit")
         with self.database.transaction() as connection:
-            source = connection.execute(
-                "SELECT * FROM world_sources WHERE source_id = ? AND subject_id = ?",
-                (source_id, subject_id),
-            ).fetchone()
-            if source is None:
-                raise NotFoundError("world source is missing or belongs to another subject")
-            if source["status"] != "active":
-                raise WorldStateConflictError("observation source is not active")
-            normalized_document_url = canonical_public_url(document.url)
-            if normalized_document_url != document.url or normalized_document_url != source["url"]:
-                raise WorldStateConflictError(
-                    "fetched document URL must match the canonical registered source"
+            return self._record_connection(connection, subject_id, source_id, document)
+
+    @staticmethod
+    def _feed_item_batches(
+        items: tuple[FeedItem, ...], max_content_chars: int | None
+    ) -> tuple[tuple[FeedItem, ...], ...]:
+        """Partition feed entries without splitting an entry or losing its tail."""
+        if max_content_chars is None:
+            return (items,)
+        if max_content_chars < 1:
+            raise ValueError("observation content budget must be positive")
+
+        empty_size = len(feed_content(()))
+        batches: list[tuple[FeedItem, ...]] = []
+        current: list[FeedItem] = []
+        current_size = empty_size
+        for item in items:
+            item_size = len(canonical_json(item.payload()))
+            if empty_size + item_size > max_content_chars:
+                raise ObservationBudgetError(
+                    "a world feed item exceeds the configured cognition observation budget"
                 )
-            existing = connection.execute(
-                "SELECT * FROM observations WHERE subject_id = ? AND source_id = ? "
-                "AND content_hash = ?",
-                (subject_id, source_id, document.content_hash),
-            ).fetchone()
-            if existing is not None:
-                return self._from_row(self._materialize_row(existing)), False
-            if content_hash(document.content) != document.content_hash:
-                raise IntegrityError("fetched document content hash mismatch")
-            event = self.events._append_connection(
-                connection,
-                subject_id,
-                "world_observation",
-                "safe_web_reader",
-                {
-                    "source_id": source_id,
-                    "url": document.url,
-                    "content_hash": document.content_hash,
-                    "media_type": document.media_type,
-                    "injection_signals": list(document.injection_signals),
-                },
-                privacy_level="private",
-                causal_parent_ids=(),
-                occurred_at=document.fetched_at,
-                event_id=None,
-            )
-            observation_id = new_id("obs")
-            record_hash = self._record_hash(source_id, event.event_id, document)
-            connection.execute(
-                """INSERT INTO observations(
-                    observation_id, subject_id, source_id, event_id, canonical_url,
-                    title, content, content_hash, media_type, injection_signals_json,
-                    record_hash,
-                    http_etag, http_last_modified, fetched_at, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')""",
-                (
-                    observation_id,
+            if current and current_size + 1 + item_size > max_content_chars:
+                batches.append(tuple(current))
+                current = []
+                current_size = empty_size
+            current.append(item)
+            current_size += item_size + (1 if len(current) > 1 else 0)
+        if current:
+            batches.append(tuple(current))
+        return tuple(batches)
+
+    @staticmethod
+    def _bounded_feed_parts(
+        items: tuple[FeedItem, ...], budget: int
+    ) -> tuple[tuple[FeedItem, ...], dict[tuple[str, str], FeedItem]]:
+        """Lossless JSON fragments; each part retains its complete entry identity.
+
+        A fragment is data, not a complete feed entry. Full-entry classification
+        is retained for every part, including directives straddling a split.
+        """
+        parts: list[FeedItem] = []
+        origins: dict[tuple[str, str], FeedItem] = {}
+        for item in items:
+            if len(feed_content((item,))) <= budget:
+                parts.append(item)
+                origins[(item.item_key, item.fingerprint)] = item
+                continue
+            raw = canonical_json(item.payload())
+            offset = 0
+            while offset < len(raw):
+
+                def part(
+                    end: int, *, start: int = offset, original: FeedItem = item, text: str = raw
+                ) -> FeedItem:
+                    metadata = canonical_json(
+                        {
+                            "format": "noyra-feed-fragment/v1",
+                            "item_key": original.item_key,
+                            "item_fingerprint": original.fingerprint,
+                            "offset": start,
+                            "total_chars": len(text),
+                        }
+                    )
+                    payload = {
+                        "title": "Partial feed entry (JSON fragment)",
+                        "link": "",
+                        "summary": text[start:end],
+                        "body": metadata,
+                    }
+                    key = content_hash({"fragment": metadata, "budget": budget})
+                    return FeedItem(key, content_hash(payload), **payload)
+
+                low, high = offset, min(len(raw), offset + budget)
+                while low < high:
+                    middle = (low + high + 1) // 2
+                    if len(feed_content((part(middle),))) <= budget:
+                        low = middle
+                    else:
+                        high = middle - 1
+                if low == offset:
+                    raise ObservationBudgetError("feed fragment metadata exceeds input budget")
+                fragment = part(low)
+                parts.append(fragment)
+                origins[(fragment.item_key, fragment.fingerprint)] = item
+                offset = low
+        return tuple(parts), origins
+
+    def ingest(
+        self,
+        subject_id: str,
+        source_id: str,
+        document: FetchedDocument,
+        *,
+        max_content_chars: int | None = None,
+    ) -> tuple[ObservationRecord | None, bool]:
+        """Commit bounded unseen entry batches and the poll heartbeat atomically.
+
+        Legacy generic extraction did not preserve RSS entry boundaries. In
+        that case the current bounded feed is interpreted once, honestly
+        marked legacy_unavailable; never silently swallow potentially new
+        entries, replay stored proposals, or alter old observations.
+
+        Structured feeds use entry batches and explicit lossless fragments for
+        oversized entries. A poll writes at most four observations; remaining
+        versions stay unseen for later polls. Every acknowledged fragment is
+        durable; only a complete entry gets its original version marked seen.
+        """
+        if content_hash(document.content) != document.content_hash:
+            raise IntegrityError("fetched document content hash mismatch")
+        prepared: tuple[FeedItem, ...] = ()
+        origins: dict[tuple[str, str], FeedItem] = {}
+        if document.feed_items is not None:
+            if feed_content(document.feed_items) != document.content:
+                raise IntegrityError("feed metadata does not match fetched content")
+            budget = min(500_000, max_content_chars) if max_content_chars is not None else 500_000
+            prepared, origins = self._bounded_feed_parts(document.feed_items, budget)
+            max_content_chars = budget
+        with self.database.transaction() as connection:
+            self._validate_source(connection, subject_id, source_id, document)
+            observation: ObservationRecord | None
+            if document.feed_items is None:
+                previous = SourcePollStore._read(connection, subject_id, source_id)
+                had_legacy = (
+                    connection.execute(
+                        "SELECT 1 FROM observations WHERE subject_id=? AND source_id=? LIMIT 1",
+                        (subject_id, source_id),
+                    ).fetchone()
+                    is not None
+                )
+                observation, created = self._record_connection(
+                    connection, subject_id, source_id, document
+                )
+                # Mark a fresh baseline before insertion can look like legacy.
+                SourcePollStore.complete(
+                    connection,
                     subject_id,
                     source_id,
-                    event.event_id,
-                    document.url,
-                    document.title,
-                    document.content,
-                    document.content_hash,
-                    document.media_type,
-                    canonical_json(list(document.injection_signals)),
-                    record_hash,
-                    document.etag,
-                    document.last_modified,
                     document.fetched_at,
-                ),
+                    outcome="changed" if created else "unchanged",
+                )
+                if previous is None and not had_legacy:
+                    self._fresh_baseline(connection, subject_id, source_id)
+                return observation, created
+            items = prepared
+            had_legacy = (
+                connection.execute(
+                    "SELECT 1 FROM observations WHERE subject_id=? AND source_id=? LIMIT 1",
+                    (subject_id, source_id),
+                ).fetchone()
+                is not None
             )
-            now = utc_now()
-            connection.execute(
-                """INSERT INTO observation_status_transitions(
-                    transition_id, observation_id, from_status, to_status,
-                    reason, state_hash, created_at
-                ) VALUES (?, ?, NULL, 'new', 'observation recorded', ?, ?)""",
-                (
-                    new_id("ostr"),
-                    observation_id,
-                    self._transition_hash(None, "new", "observation recorded"),
-                    now,
-                ),
+            state = SourcePollStore._read(connection, subject_id, source_id)
+            # One bounded indexed query, independent of feed entry count.
+            seen_times = {
+                (str(row[0]), str(row[1])): str(row[2])
+                for row in connection.execute(
+                    "SELECT item_key,fingerprint,first_seen_at FROM world_feed_seen "
+                    "WHERE source_id=? AND subject_id=? AND fingerprint_version=? LIMIT ?",
+                    (source_id, subject_id, FEED_FINGERPRINT_VERSION, MAX_SEEN_VERSIONS),
+                )
+            }
+            seen = set(seen_times)
+            unseen = tuple(
+                item
+                for item in items
+                if (item.item_key, item.fingerprint) not in seen
+                and (
+                    origins[(item.item_key, item.fingerprint)].item_key,
+                    origins[(item.item_key, item.fingerprint)].fingerprint,
+                )
+                not in seen
             )
-            self.causal._add_connection(
+            written: set[tuple[str, str]] = set()
+            selected: tuple[ObservationRecord, bool] | None = None
+            if unseen:
+                batches = self._feed_item_batches(unseen, max_content_chars)[
+                    :MAX_FEED_OBSERVATIONS_PER_POLL
+                ]
+                for batch in batches:
+                    content = feed_content(batch)
+                    # Classification must use the new subset only, never a signal
+                    # carried solely by a previously seen entry in the same feed.
+                    fields = tuple(
+                        value
+                        for item in batch
+                        for value in origins[(item.item_key, item.fingerprint)].payload().values()
+                    )
+                    signals = classify_external_text(document.title or "", *fields)
+                    candidate, created = self._record_connection(
+                        connection,
+                        subject_id,
+                        source_id,
+                        replace(
+                            document,
+                            content=content,
+                            content_hash=content_hash(content),
+                            injection_signals=signals,
+                            feed_items=batch,
+                        ),
+                    )
+                    if selected is None and candidate.status == "new":
+                        selected = (candidate, created)
+                    for item in batch:
+                        written.add((item.item_key, item.fingerprint))
+                        connection.execute(
+                            "INSERT INTO world_feed_seen(source_id,subject_id,fingerprint_version,"
+                            "item_key,fingerprint,first_seen_at) VALUES (?,?,?,?,?,?)",
+                            (
+                                source_id,
+                                subject_id,
+                                FEED_FINGERPRINT_VERSION,
+                                item.item_key,
+                                item.fingerprint,
+                                document.fetched_at,
+                            ),
+                        )
+            # Only a fully durable entry is acknowledged as a complete version.
+            # Completed fragment markers can then be compacted to its original key.
+            groups: dict[tuple[str, str], list[tuple[str, str]]] = {}
+            for key, origin in origins.items():
+                groups.setdefault((origin.item_key, origin.fingerprint), []).append(key)
+            for original, keys in groups.items():
+                if original in seen or not all(key in seen or key in written for key in keys):
+                    continue
+                if keys == [original]:
+                    continue
+                connection.executemany(
+                    "DELETE FROM world_feed_seen WHERE source_id=? AND subject_id=? "
+                    "AND fingerprint_version=? AND item_key=? AND fingerprint=?",
+                    [(source_id, subject_id, FEED_FINGERPRINT_VERSION, *key) for key in keys],
+                )
+                connection.execute(
+                    "INSERT INTO world_feed_seen(source_id,subject_id,fingerprint_version,"
+                    "item_key,fingerprint,first_seen_at) VALUES (?,?,?,?,?,?)",
+                    (
+                        source_id,
+                        subject_id,
+                        FEED_FINGERPRINT_VERSION,
+                        *original,
+                        min(seen_times.get(key, document.fetched_at) for key in keys),
+                    ),
+                )
+            SourcePollStore.complete(
                 connection,
                 subject_id,
-                "event",
-                event.event_id,
-                "recorded_as",
-                "observation",
-                observation_id,
-                strength=1,
-                metadata={"source_id": source_id},
+                source_id,
+                document.fetched_at,
+                outcome="changed" if written else "unchanged",
+                # Count every durably acknowledged identity, including parts.
+                # This preserves retained <= lifetime identities during partial
+                # ingestion and after compaction without weakening integrity.
+                new_versions=len(written),
             )
-            row = connection.execute(
-                "SELECT * FROM observations WHERE observation_id = ? AND subject_id = ?",
-                (observation_id, subject_id),
-            ).fetchone()
-            return self._from_row(self._materialize_row(row)), True
+            if state is None and not had_legacy:
+                self._fresh_baseline(connection, subject_id, source_id)
+            SourcePollStore.prune(connection, source_id)
+            return selected if selected is not None else (None, False)
+
+    @staticmethod
+    def _fresh_baseline(connection: sqlite3.Connection, subject_id: str, source_id: str) -> None:
+        payload = SourcePollStore._read(connection, subject_id, source_id)
+        assert payload is not None
+        payload["baseline"] = "fresh"
+        connection.execute(
+            "UPDATE world_poll_state SET baseline=?,state_hash=? WHERE source_id=?",
+            ("fresh", content_hash(payload), source_id),
+        )
+
+    @staticmethod
+    def _validate_source(
+        connection: sqlite3.Connection, subject_id: str, source_id: str, document: FetchedDocument
+    ) -> None:
+        source = connection.execute(
+            "SELECT * FROM world_sources WHERE source_id=? AND subject_id=?",
+            (source_id, subject_id),
+        ).fetchone()
+        if source is None:
+            raise NotFoundError("world source is missing or belongs to another subject")
+        if source["status"] != "active":
+            raise WorldStateConflictError("observation source is not active")
+        url = canonical_public_url(document.url)
+        if url != document.url or url != source["url"]:
+            raise WorldStateConflictError(
+                "fetched document URL must match the canonical registered source"
+            )
+
+    def _record_connection(
+        self,
+        connection: sqlite3.Connection,
+        subject_id: str,
+        source_id: str,
+        document: FetchedDocument,
+    ) -> tuple[ObservationRecord, bool]:
+        if len(document.content) > 500_000:
+            raise ValueError("observation content exceeds the storage limit")
+        self._validate_source(connection, subject_id, source_id, document)
+        if content_hash(document.content) != document.content_hash:
+            raise IntegrityError("fetched document content hash mismatch")
+        existing = connection.execute(
+            "SELECT * FROM observations WHERE subject_id = ? AND source_id = ? "
+            "AND content_hash = ?",
+            (subject_id, source_id, document.content_hash),
+        ).fetchone()
+        if existing is not None:
+            return self._from_row(self._materialize_row(existing)), False
+        if content_hash(document.content) != document.content_hash:
+            raise IntegrityError("fetched document content hash mismatch")
+        event = self.events._append_connection(
+            connection,
+            subject_id,
+            "world_observation",
+            "safe_web_reader",
+            {
+                "source_id": source_id,
+                "url": document.url,
+                "content_hash": document.content_hash,
+                "media_type": document.media_type,
+                "injection_signals": list(document.injection_signals),
+                "injection_classifier_version": INJECTION_CLASSIFIER_VERSION,
+                "feed_fingerprint_version": (
+                    FEED_FINGERPRINT_VERSION if document.feed_items is not None else None
+                ),
+            },
+            privacy_level="private",
+            causal_parent_ids=(),
+            occurred_at=document.fetched_at,
+            event_id=None,
+        )
+        observation_id = new_id("obs")
+        record_hash = self._record_hash(source_id, event.event_id, document)
+        connection.execute(
+            """INSERT INTO observations(
+                observation_id, subject_id, source_id, event_id, canonical_url,
+                title, content, content_hash, media_type, injection_signals_json,
+                record_hash,
+                http_etag, http_last_modified, fetched_at, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')""",
+            (
+                observation_id,
+                subject_id,
+                source_id,
+                event.event_id,
+                document.url,
+                document.title,
+                document.content,
+                document.content_hash,
+                document.media_type,
+                canonical_json(list(document.injection_signals)),
+                record_hash,
+                document.etag,
+                document.last_modified,
+                document.fetched_at,
+            ),
+        )
+        now = utc_now()
+        connection.execute(
+            """INSERT INTO observation_status_transitions(
+                transition_id, observation_id, from_status, to_status,
+                reason, state_hash, created_at
+            ) VALUES (?, ?, NULL, 'new', 'observation recorded', ?, ?)""",
+            (
+                new_id("ostr"),
+                observation_id,
+                self._transition_hash(None, "new", "observation recorded"),
+                now,
+            ),
+        )
+        self.causal._add_connection(
+            connection,
+            subject_id,
+            "event",
+            event.event_id,
+            "recorded_as",
+            "observation",
+            observation_id,
+            strength=1,
+            metadata={"source_id": source_id},
+        )
+        row = connection.execute(
+            "SELECT * FROM observations WHERE observation_id = ? AND subject_id = ?",
+            (observation_id, subject_id),
+        ).fetchone()
+        return self._from_row(self._materialize_row(row)), True
 
     def get(self, observation_id: str, *, subject_id: str) -> ObservationRecord:
         with self.database.connection() as connection:

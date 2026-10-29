@@ -236,7 +236,7 @@ async def test_default_async_dns_deadlines_do_not_fill_the_shared_executor(
     call_lock = threading.Lock()
     calls = 0
 
-    def blocking_resolver(_: str, __: int) -> list[str]:
+    def blocking_resolver(_: str, __: int, **kwargs: Any) -> list[str]:
         nonlocal calls
         with call_lock:
             calls += 1

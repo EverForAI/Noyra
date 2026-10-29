@@ -6,7 +6,7 @@ from pathlib import Path
 from noyra.core.actions import ActionLedger
 from noyra.core.admission import OperationInvalidated, accounting_scope, assert_current_lease
 from noyra.core.database import Database
-from noyra.core.types import ActionRecord
+from noyra.core.types import ActionRecord, utc_now
 from noyra.world import SafeWebReader, SourceRecord, SourceRegistry
 
 from .filesystem import normalized_root, read_bounded, write_atomic
@@ -203,6 +203,12 @@ class ToolRunner:
                     public_explanation="Authorized public source read failed.",
                     resource_summary="network read failed",
                 )
+            # Failed checks also back off. Do not create an observation or
+            # swallow lease invalidation to write scheduling state.
+            assert_current_lease()
+            from noyra.world.poll import SourcePollStore
+
+            SourcePollStore(self.database).failed(subject_id, source.source_id, utc_now())
             return WebToolResult(finished.action_id, finished.status, None)
         byte_count = len(document.content.encode("utf-8"))
         with accounting_scope():

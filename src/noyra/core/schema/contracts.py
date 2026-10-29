@@ -19,6 +19,10 @@ from __future__ import annotations
 
 
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
+    111: "a750d174056db2032ae4bae68df71dc79dc2e3ef0bcc2283f3ffdd3f241b0397",
+    110: "3a067074985ff6aec206716ebf33eac1706c241d1a43a09a196c4fb676624075",
+    109: "45218eb2278aaa086cc752cc65c67658747a5c7f17dc5fdf69d751ef13880f54",
+    108: "1da2cb3d1e370734e052decb4c951cf4c0105f847ed46d1daeee9e91de59ffa6",
     107: "927d782afd08592da1313d8ad17c1c7f3110127564328541ae94f2d3252ff31c",
     105: "f117dc793fddf96e769abef73c30127b5494ce8fb8b7f6598e6b1e093f554950",
     106: "236bf850b21704b51478101c6a979682307f69f4530f937287eaec46c14870c5",
@@ -54,6 +58,10 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 
 
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
+    111: "4a5f61c6841f87f06293644d441e0a8071605d2025f1a4f5f859d0a2dcba55dd",
+    110: "80025e49fd4478b25b0ec65e9a5a875271dc5ce726474d4dea443f61446398d0",
+    109: "12c03b4c9b9f39913771c37913e8df12dec9e4d7971829c8db4f41e20d206704",
+    108: "12c03b4c9b9f39913771c37913e8df12dec9e4d7971829c8db4f41e20d206704",
     107: "6f8c0acae3783f1c6053c14161e5203c1369371e9c95d8bb3630a5211426725f",
     105: "8feff8b35da5fad5d7c530dd492dcf78347c038456f48857c4afad63fd220a2e",
     106: "60c959c1499b63793106847aae7da21ad44733ecc143373b44e5ea2313450241",
@@ -89,6 +97,15 @@ _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
 
 
 _PERSISTENT_FEATURE_OBJECTS: dict[str, tuple[str, ...]] = {
+    "world_poll_state": (
+        "world_poll_state",
+        "idx_world_poll_subject",
+        "world_feed_seen",
+        "idx_world_feed_seen_age",
+        "validate_world_poll_subject_insert",
+        "validate_world_poll_subject_update",
+        "validate_world_feed_seen_subject",
+    ),
     "secret_cleanup": ("secret_cleanup_queue", "idx_secret_cleanup_subject_status"),
     "provider_health_metrics": ("provider_health_buckets",),
     "secret_file_intents": (
@@ -114,6 +131,7 @@ _PERSISTENT_FEATURE_OBJECTS: dict[str, tuple[str, ...]] = {
 
 
 _PERSISTENT_FEATURE_MIN_SCHEMA: dict[str, int] = {
+    "world_poll_state": 108,
     "provider_health_metrics": 68,
     "search_provider_routing": 77,
     "model_capability_profiles": 99,

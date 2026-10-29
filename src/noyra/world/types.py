@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from .feed import FeedItem
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -35,6 +38,7 @@ class FetchedDocument:
     etag: str | None
     last_modified: str | None
     fetched_at: str
+    feed_items: tuple[FeedItem, ...] | None = None
 
 
 @dataclass(frozen=True)

@@ -1236,6 +1236,16 @@ paths:
         '200': { $ref: '#/components/responses/JsonObject' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/world-acquisition:
+    get:
+      tags: [observation]
+      operationId: adminWorldAcquisition
+      description: Bounded operator-only acquisition state, independent of observation counts. At most 25 sources; cumulative since tracking began, not daily statistics. No fetch, model call, archive retrieval or historical reclassification. Missing tracking is unknown, and unavailable data returns 503 rather than zero.
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/v1/admin/provider-health:
     get:
       tags: [observation]

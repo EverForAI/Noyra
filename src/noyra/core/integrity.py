@@ -1394,7 +1394,7 @@ def _default_checks() -> tuple[IntegrityCheckSpec, ...]:
         ),
         IntegrityCheckSpec("capability.state", 1, "capability", _DEEP_PROFILES, _check_capability),
         IntegrityCheckSpec("wallet.state", 1, "wallet", _DEEP_PROFILES, _check_wallet),
-        IntegrityCheckSpec("world.state", 1, "world", _DEEP_PROFILES, _check_world),
+        IntegrityCheckSpec("world.state", 2, "world", _DEEP_PROFILES, _check_world),
         IntegrityCheckSpec("learning.outcomes", 1, "learning", _DEEP_PROFILES, _check_outcomes),
         IntegrityCheckSpec(
             "cognition.consciousness",
@@ -1452,7 +1452,7 @@ def _default_checks() -> tuple[IntegrityCheckSpec, ...]:
             _DEEP_PROFILES,
             _check_self_modification,
         ),
-        IntegrityCheckSpec("cognition.thought", 1, "cognition", _DEEP_PROFILES, _check_thought),
+        IntegrityCheckSpec("cognition.thought", 2, "cognition", _DEEP_PROFILES, _check_thought),
         IntegrityCheckSpec("model.ledger", 1, "model", _DEEP_PROFILES, _check_model_ledger),
         IntegrityCheckSpec("model.resources", 1, "model", _DEEP_PROFILES, _check_model_resources),
         IntegrityCheckSpec(

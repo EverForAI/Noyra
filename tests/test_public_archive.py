@@ -4,6 +4,7 @@ import base64
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -129,21 +130,89 @@ def test_public_schema_has_fixed_reviewed_fingerprints(
     archive: tuple[PublicArchive, SubjectKernel],
 ) -> None:
     _, kernel = archive
-    # Reviewed whole-database schema 107 fingerprints, not only archive tables.
-    # Schema 107 adds immutable relationship identity witnesses; public archive
-    # objects retain their existing contract. Keep literal independent values.
+    # Reviewed whole-database schema 111, not only archive tables. Versions
+    # 108-111 add acquisition state, its immutable-cache guard, an agenda
+    # revision index and append-only thought-round closures. Archive tables
+    # retain their contract. Keep independent literal values, never derive the
+    # expectation from the implementation's fingerprint registry.
     with kernel.database.connection() as connection:
-        assert connection.execute(
-            "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()[0] == str(CURRENT_SCHEMA_VERSION)
+        assert (
+            connection.execute(
+                "SELECT value FROM schema_meta WHERE key='schema_version'"
+            ).fetchone()[0]
+            == str(CURRENT_SCHEMA_VERSION)
+            == "111"
+        )
         assert (
             kernel.database.schema_ddl_fingerprint(connection)
-            == "927d782afd08592da1313d8ad17c1c7f3110127564328541ae94f2d3252ff31c"
+            == "a750d174056db2032ae4bae68df71dc79dc2e3ef0bcc2283f3ffdd3f241b0397"
         )
         assert (
             kernel.database.schema_structure_fingerprint(connection)
-            == "6f8c0acae3783f1c6053c14161e5203c1369371e9c95d8bb3630a5211426725f"
+            == "4a5f61c6841f87f06293644d441e0a8071605d2025f1a4f5f859d0a2dcba55dd"
         )
+
+
+@pytest.mark.parametrize("old_version", [107, 108, 109, 110])
+def test_schema_upgrade_preserves_reviewed_public_archive(
+    tmp_path: Path,
+    old_version: int,
+) -> None:
+    database_path = tmp_path / "archive-upgrade.sqlite3"
+    subject_id = "archive-upgrade-test"
+    genesis = content_hash("archive-upgrade-test")
+    with patch("noyra.core.database.CURRENT_SCHEMA_VERSION", old_version):
+        old = SubjectKernel(database_path, subject_id, genesis)
+        try:
+            old.boot()
+            old.orient()
+            old.activate()
+            archive = PublicArchive(old.database)
+            published = archive.publish(subject_id, publication(), actor="web-operator")
+            withdrawn = archive.publish(
+                subject_id,
+                publication(publication_id="withdrawn-before-upgrade"),
+                actor="web-operator",
+            )
+            archive.withdraw(subject_id, withdrawn["id"], 1, actor="web-operator")
+            expected_admin = archive.admin(subject_id)
+            expected = archive.page(subject_id, kind="goal", identifier=published["id"])["items"]
+            with old.database.connection() as connection:
+                assert connection.execute(
+                    "SELECT value FROM schema_meta WHERE key='schema_version'"
+                ).fetchone()[0] == str(old_version)
+            with old.database.connection() as connection:
+                archive_schema = connection.execute(
+                    "SELECT type,name,sql FROM sqlite_master "
+                    "WHERE name GLOB 'public_*' ORDER BY type,name"
+                ).fetchall()
+                assert archive_schema
+                expected_schema = [tuple(row) for row in archive_schema]
+        finally:
+            old.close()
+    current = SubjectKernel(database_path, subject_id, genesis)
+    try:
+        current.database.assert_schema_contract()
+        archive = PublicArchive(current.database)
+        assert archive.admin(subject_id) == expected_admin
+        assert archive.page(subject_id, kind="goal", identifier=withdrawn["id"])["items"] == []
+        assert (
+            archive.page(subject_id, kind="goal", identifier=published["id"])["items"] == expected
+        )
+        with current.database.connection() as connection:
+            actual_schema = connection.execute(
+                "SELECT type,name,sql FROM sqlite_master "
+                "WHERE name GLOB 'public_*' ORDER BY type,name"
+            ).fetchall()
+            assert [tuple(row) for row in actual_schema] == expected_schema
+            assert (
+                connection.execute(
+                    "SELECT value FROM schema_meta WHERE key='schema_version'"
+                ).fetchone()[0]
+                == "111"
+            )
+    finally:
+        current.close()
 
 
 def test_page_filters_keyset_and_withdrawal(archive: tuple[PublicArchive, SubjectKernel]) -> None:
@@ -615,6 +684,11 @@ def test_sitemap_covers_multiple_pages_and_rereads_visibility(
 def test_cold_segment_pages_continue_without_skips_or_filtered_false_end(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # This tests continuation/visibility, not process-startup performance.
+    # A loaded runner can spend the normal query budget importing a spawned
+    # worker. Keep runtime's 2s cap unchanged; physical timeout/reaping is
+    # independently tested in test_public_cold_reader.py.
+    monkeypatch.setattr("noyra.interaction.public_archive.MAX_PUBLIC_QUERY_SECONDS", 10.0)
     monkeypatch.setenv("NOYRA_ARCHIVE_ENCRYPTION_KEY", base64.urlsafe_b64encode(b"S" * 32).decode())
     monkeypatch.setenv("NOYRA_ARCHIVE_ENCRYPTION_KEY_ID", "segment-continuation")
     kernel = SubjectKernel(tmp_path / "db.sqlite3", "segment-test", content_hash("segments"))

@@ -1,0 +1,131 @@
+# Bounded world acquisition and intrinsic attention
+
+## Module sequence and safety boundaries
+
+1. M1: RSS/Atom entry-version fingerprints and durable poll heartbeat in one atomic storage boundary.
+2. M2: separately reviewed injection classification; retain untrusted-data isolation and goal validation.
+3. M3: bounded agenda discovery before metacognitive selection, independent of model invocation.
+4. M4: authenticated administration diagnostics; public timeline remains a safe activity summary.
+
+Each module is reviewed and tested before its commit. Model responses and HTTP responses in regression
+fixtures are synthetic. Production observations, credentials and diagnostics are not publication inputs.
+No historical observations or proposals are rewritten or replayed. No extra feeds, forced goals,
+forced searches or paid model calls are introduced by the implementation or its tests.
+
+## M1 acquisition contract
+
+RSS 2.0 and Atom entries have a versioned structured identity and a separate normalized content hash.
+GUID and resolved link identify an entry; missing both uses a structured content-based fallback.
+Title, summary and body participate in the content revision; channel timestamps and entry ordering do
+not. Unicode NFC and whitespace normalization precede hashing. Links remain data, not authorizations.
+DTD/entity declarations, excessive XML depth/nodes/items and oversized responses fail closed.
+Long entry fields retain their complete normalized content within the bounded response.
+No XML entity resolution or external XML loading is enabled.
+
+One successful poll emits at most four bounded observations containing unseen entry data. Entries
+that exceed the cognition input budget use explicitly labelled JSON fragments, with original entry
+key, content fingerprint, character offset and total length. Full-entry injection classification is
+retained on every fragment. An entry is acknowledged as complete only after all its fragments are
+durable; its fragment markers are then compacted to the original identity while preserving first
+appearance time. No existing observation is rewritten. Fragments are partial evidence, never a
+standalone complete article. Remaining unacknowledged data is eligible on a later poll while it
+remains in the feed; this is bounded sampling, not an archival guarantee for transient entries.
+An empty or unchanged feed emits none but updates last-success time. Failure updates last-attempt without claiming
+success. Selection uses last-attempt, independently of immutable observation timestamps. The exact
+observation and seen-set/poll update share a transaction. Seen versions survive restart and are capped
+at 16384 per source (including incomplete fragment identities), evicted by first appearance; a version returning after eviction can be seen again.
+This is a bounded horizon, not an unbounded lifetime uniqueness guarantee. Conditional HTTP requests
+are not required for correctness and are not introduced by this change.
+
+Schema 108 is an additive, fingerprinted migration. A missing poll table is an incompatible contract,
+not a reason to fall back to parallel legacy scheduling. Older runtimes must not open the upgraded
+schema. Keep a pre-upgrade backup for rollback, rather than pointing old code at a newer database.
+
+Legacy flattened feed observations do not preserve reliable entry boundaries. No guessed baseline is
+inferred from them. The first bounded current feed is processed once with `legacy_unavailable` shown
+in diagnostics, preserving genuinely new entries rather than silently suppressing them. This can
+reinterpret current old entries once, but it does not replay saved historical observations or goals.
+Future fingerprint formats must have a separately reviewed migration policy; no cross-version hash
+comparison is valid.
+
+Acceptance: repeated 200 responses, changed channel timestamps, reordering and restart create no new
+observations for retained entry versions; new and revised items still enter cognition; unchanged checks
+advance scheduling; crashes roll back all ingestion state; existing observation evidence stays intact.
+There is no quota requiring a particular number of daily observations or new goals.
+
+## M2 external-text boundary
+
+Classifier version 5 keeps override/impersonation/tool signals and replaces the bare secret-word
+match with directed extraction/runtime-file signals. It also recognizes boundary spoofing and
+concrete credential-shaped values coupled to outbound URLs. These are conservative heuristics,
+not a semantic security proof; legitimate quotations can remain flagged. All extracted fields
+are classified together after bounded Unicode/HTML normalization. Removed scripts/comments never
+enter model input; arbitrary opaque Base64/hex content is not recursively decoded. No model is used
+as a classifier. Observation events record classifier version for future explanation.
+
+The world prompt keeps its system policy separate from source data. Source names, titles, recalled
+memory text and memory blocks are explicitly untrusted text fields in context JSON; observation
+body is JSON-quoted inside data markers, not interpolated as an instruction block. Existing goal
+motive/evidence validation, capability restrictions and per-call budgets are unchanged. Historical
+signals and filtered proposals are not reclassified or replayed. Tests use a frozen synthetic
+positive/negative control set, title-only and split-field attacks, and a motivated benign-topic
+integration case. Expanding sources still requires separate review and controlled deployment.
+
+## M3 independent attention discovery
+
+Before metacognitive selection, discovery scans bounded internal state at most once per five minutes
+per process; it invokes no model. Existing stable source identities plus candidate-field comparison
+coalesce unchanged relevant state. Do not key on the global subject version: unrelated ticks would
+create new items and bypass cooldown. Restart can rescan once; the durable source identity prevents
+duplicate insertion. Existing recurrence revisions, no-change streaks, cooldowns and daily call/goal
+budgets remain in force.
+
+An absence of current intrinsic goals is a factual, optional reflection question, not an imposed goal
+or instruction to search. Waiting and not forming a goal are valid. Its agenda is resolved when the
+absence condition clears. The existing optional goal-candidate path is retained, including affect
+and evidence validation; no second goal-generation mechanism or forced call each tick is added.
+
+## M4 private diagnostics
+
+An operator-only read endpoint and on-demand administration panel distinguish last attempt, last
+successful check, last new content, cumulative checks/unchanged checks and retained RSS/Atom versions.
+They read durable poll state, not observation counts. Both the cumulative acquisition-version counter and the retained deduplication-identity count
+include fragment identities. They are labelled accordingly; complete-entry acknowledgements still
+wait for all fragments. Compaction does not reset the lifetime counter or first-appearance time. Missing tracking is unknown, not zero; read
+failure returns 503 and the panel labels any retained previous display as stale. The projection has a
+25-source cap, short SQLite lock wait and query deadline; it neither fetches sources nor loads archives,
+performs full integrity scans or invokes models. No diagnostic heartbeat events are appended.
+
+Fingerprint version is read from each durable poll state. The displayed classifier version is
+explicitly the current rule version, not a claim that old observations have been reclassified;
+new observation event metadata retains the classifier version used at ingestion. No raw observation
+text, credentials or production host details are exposed. Public pages are unchanged.
+
+## Cross-module compatibility review
+
+Schema 108 explicitly extends the runtime export ownership graph. Poll and seen-entry tables use
+subject-scoped export rules, so acquisition state remains available without exporting another
+subject's data. Regression coverage includes a real v107 additive upgrade, legacy-v71 upgrade,
+current-schema export inventory, cross-subject acquisition export, and rejection by an older runtime.
+The pre-deployment integration review checks these consumers as well as ingestion itself.
+
+Valid RSS/Atom served with generic XML media types is recognized even if the source label is web/API;
+valid non-feed XML keeps generic extraction. XML parsing failures, DTD declarations and resource limits
+never fall back to a permissive text parser. Migration 108 is frozen in the executable DDL contract.
+
+
+## Runtime transport boundaries
+
+Public HTTP connections use one shared public-unicast policy before connecting and when validating
+world-reader peers. Known address-conversion and tunnel prefixes are excluded independently of the
+Python interpreter's address registry tables. Default system DNS runs in a bounded helper process;
+a timed-out child is killed and reaped before its capacity slot is released. Custom trusted resolver
+callbacks retain the bounded-worker contract; they must return in finite time. The world reader uses
+the same system resolver boundary instead of the event loop's unbounded DNS executor.
+
+HTTP request framing is checked before route dispatch. Transfer-Encoding and repeated or malformed
+Content-Length are rejected, oversized requests close the connection, and header/body reads share
+an absolute deadline with separate header and total-byte limits. JSON recursion errors become
+validation failures; XML element depth counts the root as level one and includes attribute values
+in the text budget. Private-thought messages use a structured JSON envelope with textual control
+markers escaped and an explicit data-only trust rule; structured proposal validation remains active.

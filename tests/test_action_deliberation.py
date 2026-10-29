@@ -177,6 +177,29 @@ class ActionDeliberationTestCase(unittest.IsolatedAsyncioTestCase):
             }
         )
 
+    async def test_ingestion_budget_failure_advances_poll_cooldown(self: Self) -> None:
+        from noyra.world.errors import ObservationBudgetError
+        from noyra.world.poll import SourcePollStore
+
+        provider = FakeProvider(
+            [ProviderResponse(content=self.proposal(), usage=ModelUsage(650, 220))]
+        )
+        deliberation = self.deliberation(provider)
+        with patch.object(
+            deliberation.observations, "ingest", side_effect=ObservationBudgetError("budget")
+        ):
+            self.assertEqual(
+                await deliberation.run_due(), "action_deliberation_outcome_unavailable"
+            )
+        poll = SourcePollStore(self.kernel.database)
+        self.assertIsNotNone(poll.last_checked_at(self.subject_id, self.source.source_id))
+        with self.kernel.database.connection() as connection:
+            state = poll._read(connection, self.subject_id, self.source.source_id)
+        assert state is not None
+        self.assertEqual(state["outcome"], "failed")
+        self.assertIsNone(state["last_success_at"])
+        self.assertEqual(deliberation.verify_integrity(), 1)
+
     async def test_successful_model_call_is_reused_after_action_dispatch_crash(self: Self) -> None:
         provider = FakeProvider(
             [ProviderResponse(content=self.proposal(), usage=ModelUsage(650, 220))]

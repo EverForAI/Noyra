@@ -125,12 +125,12 @@ class MetacognitiveControlTestCase(unittest.TestCase):
         )
         return goal.goal_id
 
-    def insert_agenda(self: Self, *, no_change: int = 0) -> str:
+    def insert_agenda(self: Self, *, no_change: int = 0, source_id: str = "goal_attention") -> str:
         agenda_id = new_id("agenda")
         state_hash = content_hash(
             {
                 "source_type": "goal",
-                "source_id": "goal_attention",
+                "source_id": source_id,
                 "topic": "An unresolved identity question",
                 "urgency": 0.9,
                 "novelty": 0.9,
@@ -147,11 +147,12 @@ class MetacognitiveControlTestCase(unittest.TestCase):
                     agenda_id, subject_id, source_type, source_id, topic, urgency, novelty,
                     emotional_weight, recurrence_count, consecutive_no_change, status,
                     cooldown_until, state_hash, created_at, updated_at
-                ) VALUES (?, ?, 'goal', 'goal_attention', ?, 0.9, 0.9, 0.8, 1, ?,
+                ) VALUES (?, ?, 'goal', ?, ?, 0.9, 0.9, 0.8, 1, ?,
                     'open', NULL, ?, ?, ?)""",
                 (
                     agenda_id,
                     self.subject_id,
+                    source_id,
                     "An unresolved identity question",
                     no_change,
                     state_hash,
@@ -242,6 +243,42 @@ class MetacognitiveControlTestCase(unittest.TestCase):
         self.assertEqual(profile.productive, 1)
         self.assertEqual(profile.last_outcome, "productive")
         self.assertEqual(control.verify_integrity()["metacognitive_outcomes"], 1)
+
+    def test_result_attribution_uses_decision_target_not_latest_other_agenda(self: Self) -> None:
+        target = self.insert_agenda()
+        other = self.insert_agenda(no_change=1, source_id="goal_attention_other")
+        control = self.control()
+        decision = control.run_due()
+        selected = decision.target_id
+        assert selected is not None
+        self.assertIn(selected, {target, other})
+        other_id = other if selected == target else target
+        proposal: dict[str, object] = {
+            "disposition": "reframe",
+            "summary": "A distinct frame was found.",
+            "insight": "Operational continuity can be tested through durable state.",
+            "next_question": "Which state changes matter most?",
+            "source_event_ids": [],
+            "source_memory_ids": [],
+            "source_belief_ids": [],
+            "source_goal_ids": [],
+            "source_relationship_ids": [],
+            "goal_candidate": None,
+        }
+        self.insert_successful_call("target-call", f"intrinsic_thought:{selected}:0", proposal)
+        self.insert_thought_episode(selected, "target-call", proposal, thought_id="aa-target")
+        self.insert_successful_call("other-call", f"intrinsic_thought:{other_id}:0", proposal)
+        self.insert_thought_episode(other_id, "other-call", proposal, thought_id="zz-other")
+
+        control.record_result("intrinsic_thought_reframe")
+        with self.kernel.database.connection() as connection:
+            outcome = connection.execute(
+                "SELECT source_id FROM metacognitive_outcomes WHERE decision_id = ?",
+                (decision.decision_id,),
+            ).fetchone()
+        self.assertIsNotNone(outcome)
+        assert outcome is not None
+        self.assertEqual(outcome["source_id"], "aa-target")
 
     def test_integrity_rejects_fractional_strategy_revision_integer(self: Self) -> None:
         control = self.control()
@@ -409,12 +446,19 @@ class MetacognitiveControlTestCase(unittest.TestCase):
         self.assertEqual(ModelLedger(self.kernel.database).recover_interrupted(self.subject_id), [])
 
     def insert_thought_episode(
-        self: Self, agenda_id: str, call_id: str, proposal: Mapping[str, object]
+        self: Self,
+        agenda_id: str,
+        call_id: str,
+        proposal: Mapping[str, object],
+        *,
+        thought_id: str = "thought_meta",
+        created_at: str | None = None,
     ) -> None:
         from noyra.cognition.thought import IntrinsicThought
 
+        stamp = self.clock_value if created_at is None else created_at
         proposal_hash = content_hash(proposal)
-        result_hash = content_hash({"result": "distinct"})
+        result_hash = content_hash({"result": thought_id})
         state_hash = IntrinsicThought._episode_hash(
             agenda_id,
             call_id,
@@ -431,7 +475,7 @@ class MetacognitiveControlTestCase(unittest.TestCase):
             result_hash,
             True,
             None,
-            self.clock_value,
+            stamp,
         )
         with self.kernel.database.transaction() as connection:
             connection.execute(
@@ -441,12 +485,14 @@ class MetacognitiveControlTestCase(unittest.TestCase):
                     source_memory_ids_json, source_belief_ids_json, source_goal_ids_json,
                     source_relationship_ids_json, proposal_json, proposal_hash, result_hash,
                     changed_state, created_goal_id, state_hash, created_at
-                ) VALUES ('thought_meta', ?, ?, ?, 'thought-meta', 'reframe', ?, ?, ?,
+                ) VALUES (?, ?, ?, ?, ?, 'reframe', ?, ?, ?,
                     '[]', '[]', '[]', '[]', '[]', ?, ?, ?, 1, NULL, ?, ?)""",
                 (
+                    thought_id,
                     self.subject_id,
                     agenda_id,
                     call_id,
+                    f"thought-meta-{thought_id}",
                     proposal["summary"],
                     proposal["insight"],
                     proposal["next_question"],
@@ -454,7 +500,7 @@ class MetacognitiveControlTestCase(unittest.TestCase):
                     proposal_hash,
                     result_hash,
                     state_hash,
-                    self.clock_value,
+                    stamp,
                 ),
             )
 
