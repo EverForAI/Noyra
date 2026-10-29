@@ -919,6 +919,11 @@ class IntrinsicThought:
     def _is_due(self, agenda: ThoughtAgendaRecord, *, allow_new_calls: bool | None = None) -> bool:
         return self.inspect_agenda(agenda.agenda_id, allow_new_calls=allow_new_calls).eligible
 
+    @staticmethod
+    def _escape_context_data(serialized: str) -> str:
+        data = serialized.replace("<", "\\u003c").replace(">", "\\u003e")
+        return data.replace("BEGIN_", "BEGIN\\u005f").replace("END_", "END\\u005f")
+
     def _context(self, agenda: ThoughtAgendaRecord) -> _ThoughtContext:
         with self.database.connection() as connection:
             event_rows = connection.execute(
@@ -997,7 +1002,13 @@ class IntrinsicThought:
             "recent_attempts",
             "common_knowledge_advisories",
         )
-        while len(canonical_json(payload)) > self.settings.max_thought_context_chars:
+        # Account for the actual escaped representation, not just its shorter
+        # decoded values, so hostile marker/angle-bracket floods cannot enlarge
+        # a bounded thought context after source selection.
+        while (
+            len(self._escape_context_data(canonical_json(payload)))
+            > self.settings.max_thought_context_chars
+        ):
             largest = max(list_keys, key=lambda key: len(payload[key]))
             if payload[largest]:
                 payload[largest].pop()
@@ -1005,7 +1016,7 @@ class IntrinsicThought:
             raise IntrinsicThoughtValidationError("thought context cannot fit its limit")
         source_payload = {key: value for key, value in payload.items() if key != "recent_attempts"}
         return _ThoughtContext(
-            canonical_json(payload),
+            self._escape_context_data(canonical_json(payload)),
             content_hash(source_payload),
             agenda,
             frozenset(str(row["event_id"]) for row in payload["events"]),
@@ -1040,8 +1051,7 @@ class IntrinsicThought:
         # The context is already canonical JSON. Preserve its structure rather
         # than adding another layer of quoting; escape textual control markers
         # so hostile values cannot impersonate an out-of-band message boundary.
-        data = context.serialized.replace("<", "\\u003c").replace(">", "\\u003e")
-        data = data.replace("BEGIN_", "BEGIN\\u005f").replace("END_", "END\\u005f")
+        data = IntrinsicThought._escape_context_data(context.serialized)
         user = '{"format":"noyra-private-intrinsic-thought/v2","context":' + data + "}"
         return ModelMessage(role="system", content=system), ModelMessage(role="user", content=user)
 

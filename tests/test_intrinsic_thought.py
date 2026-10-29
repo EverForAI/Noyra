@@ -132,6 +132,24 @@ class IntrinsicThoughtTestCase(unittest.IsolatedAsyncioTestCase):
                 {"agenda_id": "agenda-corrupt", "urgency": "Infinity"}
             )
 
+    def test_escaped_context_stays_inside_configured_budget(self: Self) -> None:
+        gateway, provider = self.gateway([])
+        thought = IntrinsicThought(
+            self.kernel.database,
+            self.subject_id,
+            gateway,
+            self.settings(max_thought_context_chars=8_000),
+            advisory_provider=lambda limit: [{"text": "<" * 3_000}],
+            clock=lambda: self.clock_value,
+        )
+        thought.discover_agenda()
+        context = thought._context(thought.agenda()[0])
+        envelope = thought._messages(context)[1].content
+        self.assertLessEqual(len(context.serialized), 8_000)
+        self.assertLessEqual(len(envelope), 8_000 + 100)
+        self.assertEqual(json.loads(envelope)["context"]["common_knowledge_advisories"], [])
+        self.assertEqual(len(provider.requests), 0)
+
     def settings(self: Self, **updates: object) -> CognitionSettings:
         base = CognitionSettings(
             enabled=True,
