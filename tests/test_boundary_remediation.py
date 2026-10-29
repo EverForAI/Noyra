@@ -139,6 +139,10 @@ def test_web_last_dispatch_rechecks_and_records_failure(
     assert not sent
     with database.connection() as connection:
         assert connection.execute("SELECT status FROM actions").fetchone()[0] == "failed"
+        # Pause must finish accounting without mutating the now-stale epoch.
+        # An ordinary revoked grant may still record its failed poll cooldown.
+        polls = connection.execute("SELECT outcome FROM world_poll_state").fetchall()
+        assert [row[0] for row in polls] == ([] if change == "pause" else ["failed"])
 
 
 @pytest.mark.parametrize("change", ["pause", "revoke"])
