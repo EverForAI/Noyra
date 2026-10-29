@@ -5,10 +5,9 @@ import ipaddress
 import json
 import math
 import re
-import socket
 from collections.abc import Awaitable, Callable, Sequence
 from html.parser import HTMLParser
-from typing import Any
+from typing import Any, cast
 from urllib.parse import SplitResult, parse_qsl, urlsplit, urlunsplit
 
 import httpx
@@ -20,7 +19,9 @@ from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
     HTTPResponseLimitError,
     PublicDNSAsyncHTTPTransport,
+    _call_sync_resolver_async,
     is_public_address,
+    public_addresses,
     read_bounded_response,
     validate_public_addresses,
     validate_response_headers,
@@ -502,9 +503,10 @@ class SafeWebReader:
 
     @staticmethod
     async def _default_resolver(host: str, port: int) -> Sequence[str]:
-        loop = asyncio.get_running_loop()
-        records = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-        return tuple(dict.fromkeys(record[4][0] for record in records))
+        return cast(
+            Sequence[str],
+            await _call_sync_resolver_async(public_addresses, host, port, timeout=30.0),
+        )
 
     @staticmethod
     def _extract(media_type: str, text: str) -> tuple[str | None, str]:

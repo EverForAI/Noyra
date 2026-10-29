@@ -157,7 +157,7 @@ def test_smtp_resolves_public_ipv4_ipv6_and_pins_tls_hostname(
     uses_starttls: bool,
 ) -> None:
     _FakeSMTP.reset()
-    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: _dns_answer(address))
+    monkeypatch.setattr("noyra.core.http._system_address_lookup", lambda *a, **k: [address])
     monkeypatch.setattr(smtplib, "SMTP", _FakeSMTP)
     monkeypatch.setattr(smtplib, "SMTP_SSL", _FakeSMTP)
 
@@ -183,7 +183,10 @@ def test_smtp_rejects_dns_change_to_private_and_peer_rebinding(
 ) -> None:
     _FakeSMTP.reset()
     answers = iter((_dns_answer("8.8.8.8"), _dns_answer("127.0.0.1")))
-    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: next(answers))
+    monkeypatch.setattr(
+        "noyra.core.http._system_address_lookup",
+        lambda *a, **k: [str(r[4][0]) for r in next(answers)],
+    )
     monkeypatch.setattr(smtplib, "SMTP", _FakeSMTP)
 
     DeliveryDispatcher._send_email(
@@ -204,7 +207,7 @@ def test_smtp_rejects_dns_change_to_private_and_peer_rebinding(
     assert len(_FakeSMTP.instances) == 1
 
     _FakeSMTP.peer_override = "127.0.0.1"
-    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: _dns_answer("8.8.8.8"))
+    monkeypatch.setattr("noyra.core.http._system_address_lookup", lambda *a, **k: ["8.8.8.8"])
     with pytest.raises(OSError, match="changed after DNS pinning"):
         DeliveryDispatcher._send_email(
             "smtp://mail.example:587",
@@ -220,7 +223,7 @@ def test_successful_smtp_send_ignores_quit_disconnect(
 ) -> None:
     _FakeSMTP.reset()
     _FakeSMTP.quit_error = smtplib.SMTPServerDisconnected("QUIT response lost")
-    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: _dns_answer("8.8.8.8"))
+    monkeypatch.setattr("noyra.core.http._system_address_lookup", lambda *a, **k: ["8.8.8.8"])
     monkeypatch.setattr(smtplib, "SMTP", _FakeSMTP)
 
     message_id = DeliveryDispatcher._send_email(
@@ -241,7 +244,7 @@ async def test_post_send_smtp_timeout_is_unknown_and_never_retried(
 ) -> None:
     _FakeSMTP.reset()
     _FakeSMTP.send_error = TimeoutError("reply lost after DATA")
-    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: _dns_answer("8.8.8.8"))
+    monkeypatch.setattr("noyra.core.http._system_address_lookup", lambda *a, **k: ["8.8.8.8"])
     monkeypatch.setattr(smtplib, "SMTP", _FakeSMTP)
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

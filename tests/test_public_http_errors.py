@@ -110,7 +110,7 @@ def test_default_dns_failures_and_literal_policy_rejection_are_typed(
     def dns(*args: Any, **kwargs: Any) -> Any:
         raise socket.gaierror("synthetic DNS failure")
 
-    monkeypatch.setattr(socket, "getaddrinfo", dns)
+    monkeypatch.setattr("noyra.core.http._system_address_lookup", dns)
     with httpx.Client(transport=PublicDNSHTTPTransport()) as client:
         with pytest.raises(httpx.ConnectError) as failure:
             client.get("https://example.test")
@@ -405,7 +405,8 @@ def test_common_preconnect_failure_is_recorded_and_does_not_starve_other_peers(
 )
 def test_public_endpoint_rejects_conversion_multicast_and_special_use(address: str) -> None:
     from noyra.core.http import PublicAddressRejected, public_addresses, validate_public_addresses
-    from noyra.world.source import UnsafeSourceError, canonical_public_url
+    from noyra.world.errors import UnsafeSourceError
+    from noyra.world.source import canonical_public_url
 
     with pytest.raises(PublicAddressRejected):
         public_addresses(address, 443)
@@ -422,3 +423,64 @@ def test_public_unicast_ipv4_ipv6_remain_usable() -> None:
     for address in ("8.8.8.8", "93.184.216.34", "2606:4700:4700::1111", "2001:4860:4860::8888"):
         assert public_addresses(address, 443) == [address]
         assert validate_public_addresses([address, address]) == [address]
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.asyncio
+async def test_stuck_system_dns_is_reaped_and_capacity_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+    asynchronous: bool,
+) -> None:
+    import asyncio
+    import subprocess
+
+    import noyra.core.http as boundary
+
+    real_code = boundary._DNS_LOOKUP_CODE
+    children = []
+    real_popen = subprocess.Popen
+
+    def spawn(*args: Any, **kwargs: Any) -> Any:
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    monkeypatch.setattr(boundary, "_DNS_LOOKUP_CODE", "import time; time.sleep(60)")
+    for _ in range(5):
+        with pytest.raises((TimeoutError, httpcore.ConnectTimeout)):
+            if asynchronous:
+                await boundary._PublicDNSAsyncBackend().connect_tcp("stuck.test", 443, timeout=0.15)
+            else:
+                boundary.public_addresses("stuck.test", 443, timeout=0.15)
+    monkeypatch.setattr(boundary, "_DNS_LOOKUP_CODE", real_code)
+    # Give the bounded async cleanup a chance to reap its just-expired child.
+    for _ in range(200):
+        if all(child.poll() is not None for child in children):
+            break
+        await asyncio.sleep(0.01)
+    assert children and all(child.poll() is not None for child in children)
+    with pytest.raises(boundary.PublicAddressRejected):
+        await asyncio.to_thread(boundary.public_addresses, "localhost", 443, timeout=5)
+
+
+@pytest.mark.parametrize("address", ["64:ff9b::a9fe:a9fe", "224.0.0.1", "ff02::1"])
+@pytest.mark.asyncio
+async def test_special_use_dns_never_reaches_sync_or_async_connector(address: str) -> None:
+    from unittest.mock import Mock
+
+    from noyra.core.http import _PublicDNSAsyncBackend, _PublicDNSSyncBackend
+
+    async def resolver(host: str, port: int) -> list[str]:
+        return [address]
+
+    sync = _PublicDNSSyncBackend(lambda host, port: [address])
+    asynchronous = _PublicDNSAsyncBackend(resolver)
+    sync._backend = Mock()
+    asynchronous._backend = Mock()
+    with pytest.raises(PublicEndpointRejected):
+        sync.connect_tcp("untrusted.test", 443, timeout=1)
+    with pytest.raises(PublicEndpointRejected):
+        await asynchronous.connect_tcp("untrusted.test", 443, timeout=1)
+    sync._backend.connect_tcp.assert_not_called()
+    asynchronous._backend.connect_tcp.assert_not_called()

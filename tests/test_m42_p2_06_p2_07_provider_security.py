@@ -305,7 +305,10 @@ async def test_public_dns_is_pinned_for_model_and_embedding_redirects_and_retrie
     def resolve(host: str, *_: Any, **__: Any) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
         return next(answers[host])
 
-    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(
+        "noyra.core.http._system_address_lookup",
+        lambda host, **kwargs: [str(r[4][0]) for r in resolve(host)],
+    )
     async_backend = _PublicDNSAsyncBackend()
     async_connector = _AsyncConnector()
     async_backend._backend = cast(Any, async_connector)

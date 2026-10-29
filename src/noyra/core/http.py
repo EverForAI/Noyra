@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import queue
-import socket
 import ssl
+import subprocess
+import sys
 import threading
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
@@ -26,6 +28,12 @@ DEFAULT_TOTAL_TIMEOUT_SECONDS = 30.0
 AsyncResolver = Callable[[str, int], Awaitable[Sequence[str]]]
 SyncResolver = Callable[[str, int], Sequence[str]]
 _SYNC_RESOLVER_GATE = threading.BoundedSemaphore(4)
+_SYSTEM_DNS_GATE = threading.BoundedSemaphore(4)
+_DNS_LOOKUP_CODE = """
+import json, socket, sys
+records = socket.getaddrinfo(sys.argv[1], None, type=socket.SOCK_STREAM)
+print(json.dumps(list(dict.fromkeys(str(r[4][0]) for r in records))[:256]))
+"""
 _SYNC_HTTP_GATE = threading.BoundedSemaphore(4)
 
 
@@ -283,6 +291,47 @@ def is_public_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) ->
     return not any(address in net for net in _SPECIAL_IPV4)
 
 
+def _system_address_lookup(host: str, *, timeout: float | None) -> list[str]:
+    """Isolate libc DNS so an expired lookup can actually be killed and reaped.
+
+    Never return a semaphore slot while its resolver is still running. No shell,
+    user code, credentials or inherited site imports are used in the helper.
+    """
+    budget = DEFAULT_TOTAL_TIMEOUT_SECONDS if timeout is None else timeout
+    if budget <= 0:
+        raise TimeoutError("HTTP endpoint DNS resolution timed out")
+    started = monotonic_time()
+    if not _SYSTEM_DNS_GATE.acquire(timeout=budget):
+        raise TimeoutError("HTTP resolver capacity deadline exceeded")
+    try:
+        remaining = budget - (monotonic_time() - started)
+        if remaining <= 0:
+            raise TimeoutError("HTTP endpoint DNS resolution timed out")
+        try:
+            result = subprocess.run(
+                [sys.executable, "-I", "-S", "-c", _DNS_LOOKUP_CODE, host],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=remaining,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            # run() kills and waits for the child before raising on all platforms.
+            raise TimeoutError("HTTP endpoint DNS resolution timed out") from error
+        if result.returncode != 0 or len(result.stdout) > DEFAULT_MAX_HEADER_BYTES:
+            raise OSError("HTTP endpoint DNS resolution failed")
+        try:
+            addresses = json.loads(result.stdout)
+        except (ValueError, UnicodeDecodeError) as error:
+            raise OSError("HTTP endpoint DNS resolution failed") from error
+        if not isinstance(addresses, list) or not all(isinstance(a, str) for a in addresses):
+            raise OSError("HTTP endpoint DNS resolution failed")
+        return addresses
+    finally:
+        _SYSTEM_DNS_GATE.release()
+
+
 def public_addresses(host: str, port: int, *, timeout: float | None = None) -> list[str]:
     """Resolve a host to public addresses without leaving a DNS-to-connect gap."""
     del port
@@ -295,20 +344,13 @@ def public_addresses(host: str, port: int, *, timeout: float | None = None) -> l
     except ValueError:
         pass
     try:
-        resolver = socket.getaddrinfo
-        if timeout is None:
-            infos = resolver(host, None, type=socket.SOCK_STREAM)
-        else:
-            infos = _call_sync_with_timeout(
-                lambda: resolver(host, None, type=socket.SOCK_STREAM), timeout=timeout
-            )
+        raw_addresses = _system_address_lookup(host, timeout=timeout)
     except TimeoutError as error:
         raise TimeoutError("HTTP endpoint DNS resolution timed out") from error
     except OSError as error:
         raise OSError("HTTP endpoint DNS resolution failed") from error
     addresses: list[str] = []
-    for info in infos:
-        raw = str(info[4][0])
+    for raw in raw_addresses:
         try:
             address = ipaddress.ip_address(raw)
         except ValueError:
@@ -402,7 +444,9 @@ class _PublicDNSSyncBackend(httpcore.NetworkBackend):
         try:
             remaining = None if deadline is None else deadline - monotonic_time()
             raw_addresses = (
-                _call_sync_with_timeout(public_addresses, host, port, timeout=remaining)
+                _call_sync_with_timeout(
+                    lambda: public_addresses(host, port, timeout=remaining), timeout=remaining
+                )
                 if self._resolver is None
                 else _call_sync_with_timeout(self._resolver, host, port, timeout=remaining)
             )
@@ -557,9 +601,7 @@ class _PublicDNSAsyncBackend(httpcore.AsyncNetworkBackend):
                 async with asyncio.timeout(max(0.0, timeout)):
                     if self._resolver is None:
                         addresses = await _call_sync_resolver_async(
-                            public_addresses,
-                            host,
-                            port,
+                            lambda: public_addresses(host, port, timeout=max(0.0, timeout)),
                             timeout=max(0.0, timeout),
                         )
                     else:
