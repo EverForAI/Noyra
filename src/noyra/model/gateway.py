@@ -7,6 +7,7 @@ from typing import Any
 
 from noyra.core.admission import OperationInvalidated, assert_current_lease
 from noyra.core.errors import IntegrityError, InvalidTransitionError
+from noyra.core.model_admission import notify_model_admission
 from noyra.core.private_sources import InvitationWithdrawnError
 from noyra.core.redaction import redact_payload
 from noyra.core.types import canonical_json, content_hash
@@ -228,6 +229,7 @@ class ModelGateway:
                     raise
 
             try:
+                notify_model_admission()
                 self.ledger.start_attempt(
                     attempt.attempt_id,
                     resource_key_id=self.resource_key_id,

@@ -218,6 +218,7 @@ docs/deployment/setup-modes.md
 docs/deployment/ubuntu.md
 docs/deployment/windows-data-root-migration.md
 docs/development/architecture-boundaries.md
+docs/development/project-coordination.md
 docs/development/world-acquisition-design.md
 docs/evaluation.md
 docs/genesis-experience.md
@@ -479,7 +480,9 @@ src/noyra/cognition/interaction.py
 src/noyra/cognition/memory_integration.py
 src/noyra/cognition/metacognition.py
 src/noyra/cognition/motivation.py
+src/noyra/cognition/project_control.py
 src/noyra/cognition/projects.py
+src/noyra/cognition/recovery.py
 src/noyra/cognition/reflection.py
 src/noyra/cognition/research.py
 src/noyra/cognition/self_model.py
@@ -516,6 +519,7 @@ src/noyra/core/lifecycle.py
 src/noyra/core/locking.py
 src/noyra/core/maintenance_evidence.py
 src/noyra/core/managed_data_root.py
+src/noyra/core/model_admission.py
 src/noyra/core/operator_controls.py
 src/noyra/core/participant_schema.py
 src/noyra/core/payload_codec.py
@@ -525,6 +529,7 @@ src/noyra/core/provider_health.py
 src/noyra/core/public_archive_schema.py
 src/noyra/core/public_policy.py
 src/noyra/core/public_sitemap_schema.py
+src/noyra/core/recovery_budget.py
 src/noyra/core/recovery_manifest.py
 src/noyra/core/redaction.py
 src/noyra/core/relationship_identity.py
@@ -794,6 +799,8 @@ tests/support/faults.py
 tests/support/historical.py
 tests/support/relationship_provenance.py
 tests/support/synthetic.py
+tests/test_a0_project_recovery.py
+tests/test_a0_recovery_budget.py
 tests/test_action_deliberation.py
 tests/test_action_integrity_diagnostic.py
 tests/test_admin_optimization_logs.py

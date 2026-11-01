@@ -840,3 +840,34 @@ test("runtime samples explain resource groups, terminal waits and unknown billin
   assert.ok(text.includes("不证明供应商未执行或未计费"));
   assert.ok(!text.includes("<script>") && !text.includes("<img>"));
 });
+
+
+test("autonomy recovery explains temporary protection and real delivery states", () => {
+  const {sandbox,nodes}=observationContext();
+  vm.runInContext(functionsBetween("function summaryRows(", "const integerFormatter"),sandbox);
+  const sample={database_observation:"ok",autonomy_observation:"ok",resources:{},cognition:{enabled:true},
+    autonomy_recovery:{active:true,reserved_attempts_rolling_day:4},
+    project_coordination:{records:[{project_id:"<img src=x>",reason:"help_delivery_pending",
+      next_due_at:"2026-08-15T00:00:00Z"}]},
+    world_poll_sample:{records:[{source_id:"fixture",last_attempt_at:null,last_success_at:null,
+      last_change_at:null,checks:1,unchanged_checks:0}]}};
+  sandbox.renderRuntimeObservation(sample,null);
+  let html=nodes.get("#cognition-summary").innerHTML;
+  assert.ok(html.includes("保守预留 4") && html.includes("非供应商账单"));
+  assert.ok(html.includes("尚未确认送达") && !html.includes("求助已确认送达"));
+  assert.ok(html.includes("&lt;img") && !html.includes("<img"));
+  sample.autonomy_recovery.active=false;
+  sandbox.renderRuntimeObservation(sample,null);
+  html=nodes.get("#cognition-summary").innerHTML;
+  assert.ok(html.includes("已自动退出临时限额"));
+});
+
+test("missing recovery evidence never implies normal autonomy", () => {
+  const {sandbox,nodes}=observationContext();
+  vm.runInContext(functionsBetween("function summaryRows(", "const integerFormatter"),sandbox);
+  sandbox.renderRuntimeObservation({database_observation:"ok",autonomy_observation:"unavailable",
+    resources:{},cognition:{enabled:true}},null);
+  const html=nodes.get("#cognition-summary").innerHTML;
+  assert.ok(html.includes("不按正常处理"));
+  assert.ok(!html.includes("未触发，按正常资源预算运行"));
+});

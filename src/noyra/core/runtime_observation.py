@@ -8,11 +8,20 @@ import shutil
 import sqlite3
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from .cognitive_waits import terminal_wait_reason
+from .errors import IntegrityError
+from .recovery_budget import (
+    RECOVERY_DAILY_ATTEMPTS,
+    RECOVERY_DAILY_INPUT_TOKENS,
+    RECOVERY_DAILY_OUTPUT_TOKENS,
+    RECOVERY_HOURLY_ATTEMPTS,
+    parse_time,
+    read_recovery,
+)
 
 CALL_LIMIT = 100
 ATTEMPT_LIMIT = 500
@@ -159,6 +168,73 @@ class RuntimeObserver:
                 "FROM autonomy_loop_state WHERE subject_id=?",
                 (self.subject_id,),
             ).fetchone()
+            recovery = None
+            project_rows: list[Any] = []
+            project_waits: list[dict[str, Any]] = []
+            polls: list[Any] = []
+            autonomy_observation = "ok"
+            try:
+                recovery = read_recovery(connection, self.subject_id)
+                project_rows = connection.execute(
+                    "SELECT p.project_id,p.status,p.current_revision,p.current_phase_id,"
+                    "p.updated_at,"
+                    "e.status AS execution_status,e.completed_at AS execution_completed_at "
+                    "FROM autonomous_projects p LEFT JOIN autonomous_project_phases ph "
+                    "ON ph.phase_id=p.current_phase_id AND ph.project_id=p.project_id "
+                    "AND ph.subject_id=p.subject_id LEFT JOIN autonomous_project_executions e "
+                    "ON e.subject_id=p.subject_id AND e.project_id=p.project_id "
+                    "AND e.execution_key=p.project_id||':'||ph.phase_id||':'||ph.attempt_count "
+                    "WHERE p.subject_id=? AND p.status IN ('active','planned','blocked','paused') "
+                    "ORDER BY p.updated_at,p.project_id LIMIT 9",
+                    (self.subject_id,),
+                ).fetchall()
+                from noyra.autonomy.workflow import DurableWorkflowStore
+                from noyra.core.types import content_hash
+
+                project_waits = []
+                for project in project_rows[:8]:
+                    control_key = "project-review-control:" + content_hash(
+                        {
+                            "subject": self.subject_id,
+                            "project": project["project_id"],
+                            "revision": project["current_revision"],
+                        }
+                    )
+                    checkpoint = connection.execute(
+                        "SELECT * FROM workflow_checkpoints WHERE workflow_id=? "
+                        "ORDER BY checkpoint_version DESC LIMIT 1",
+                        (control_key,),
+                    ).fetchone()
+                    control = (
+                        None if checkpoint is None else DurableWorkflowStore._from_row(checkpoint)
+                    )
+                    project_waits.append(
+                        {
+                            "project_id": project["project_id"],
+                            "status": project["status"],
+                            "updated_at": project["updated_at"],
+                            "execution_status": project["execution_status"],
+                            "execution_completed_at": project["execution_completed_at"],
+                            "reason": None if control is None else control.state.get("reason"),
+                            "next_due_at": None
+                            if control is None
+                            else control.state.get("next_due_at"),
+                        }
+                    )
+                polls = connection.execute(
+                    "SELECT source_id,last_attempt_at,last_success_at,last_change_at,"
+                    "outcome,checks,"
+                    "unchanged_checks FROM world_poll_state WHERE subject_id=? "
+                    "ORDER BY last_attempt_at DESC LIMIT 9",
+                    (self.subject_id,),
+                ).fetchall()
+            except (sqlite3.OperationalError, IntegrityError) as error:
+                autonomy_observation = (
+                    "invalid_control_evidence"
+                    if isinstance(error, IntegrityError)
+                    else "unavailable"
+                )
+                recovery, project_rows, project_waits, polls = None, [], [], []
             calls = connection.execute(
                 "SELECT call_id,status,usage_estimated,created_at,completed_at,resource_group_id,"
                 "resource_pool,model,purpose,error_code FROM model_calls "
@@ -290,6 +366,34 @@ class RuntimeObserver:
             result.update(
                 {
                     "database_observation": "ok",
+                    "autonomy_observation": autonomy_observation,
+                    "autonomy_recovery": None
+                    if recovery is None
+                    else {
+                        "active": recovery["active"],
+                        "reason": recovery["reason"],
+                        "started_at": recovery["started_at"],
+                        "stable_since": recovery.get("stable_since"),
+                        "reserved_attempts_rolling_day": sum(
+                            now - timedelta(days=1) < parse_time(r["reserved_at"]) <= now
+                            for r in recovery["reservations"]
+                        ),
+                        "temporary_limits": {
+                            "hourly_attempts": RECOVERY_HOURLY_ATTEMPTS,
+                            "rolling_day_attempts": RECOVERY_DAILY_ATTEMPTS,
+                            "rolling_day_input_tokens": RECOVERY_DAILY_INPUT_TOKENS,
+                            "rolling_day_output_tokens": RECOVERY_DAILY_OUTPUT_TOKENS,
+                        },
+                        "reservation_scope": "conservative_recovery_reservations_not_billing",
+                    },
+                    "project_coordination": {
+                        "records": project_waits,
+                        "truncated": len(project_rows) > 8,
+                    },
+                    "world_poll_sample": {
+                        "records": [dict(p) for p in polls[:8]],
+                        "truncated": len(polls) > 8,
+                    },
                     "attention": attention,
                     "lifecycle": lifecycle,
                     "loop": loop_observation(

@@ -730,6 +730,8 @@ function renderRuntimeObservation(observation,state) {
   $("#overview-metrics").innerHTML=[["当前阶段",lifecycleLabels[observation.lifecycle || state?.lifecycle?.state] || "未读取"],["最近循环成功",formatTimestamp(observation.loop?.last_successful_tick_at)],["连续循环失败",observation.loop?.consecutive_failures ?? "未读取"],["模型样本中的未知调用",sample?.unknown_calls ?? "未读取"]].map(([label,value])=>`<div class="metric"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join("");
   $("#cognition-state").textContent=observation.cognition?.enabled===true ? "模块已启用，连通性未由摘要验证" : observation.cognition?.enabled===false ? "认知未启用" : "状态未提供";
   const latency=value=>value==null ? "无有效记录" : `${formatInteger(value)} ms`;
+  const projectWaitLabels = { review_due: "待复核", review_committed: "复核已提交", subject_wait: "自主选择等待", waiting_daily_quota: "等待复核日额度", waiting_budget: "等待资源额度", review_backoff: "复核退避", review_retry_limit: "复核恢复次数已达上限", awaiting_reconciliation: "等待结果对账", waiting_dependencies: "等待关联证据", help_pending_route: "求助已记录，尚无投递通道", help_delivery_pending: "求助待投递或投递失败，尚未确认送达", help_delivery_unknown: "求助投递结果未知，等待对账", help_waiting_reply: "求助已确认送达，等待回复" };
+  const recovery = observation.autonomy_recovery;
   $("#cognition-summary").innerHTML=summaryRows([
     ["样本口径",sample ? `最近最多 ${sample.call_limit} 次逻辑调用；不是今日总量` : "本次未取得用量，不按零处理"],
     ["样本时间",sample?.calls ? `${formatTimestamp(sample.since)} 至 ${formatTimestamp(sample.until)}` : "暂无有效样本"],
@@ -743,6 +745,9 @@ function renderRuntimeObservation(observation,state) {
     ["样本已记录费用（USD）",sample ? formatMicroUsd(sample.known_cost_microusd) : "未读取"],
     ["费用缺失 / 估算调用",sample ? `${sample.missing_cost_attempts} 次尝试缺费用 / ${sample.estimated_calls} 次调用含估算；非供应商账单` : "未读取"],
     ["调用耗时 P50 / P95",sample ? `${latency(sample.call_elapsed_ms_p50)} / ${latency(sample.call_elapsed_ms_p95)}；含排队与重试，${sample.call_elapsed_samples} 个有效记录` : "未读取"],
+    ["临时恢复保护",observation.autonomy_observation !== "ok" ? "未取得有效恢复观测，不按正常处理" : !recovery ? "未触发，按正常资源预算运行" : recovery.active ? `恢复中：近 24 小时保守预留 ${recovery.reserved_attempts_rolling_day} 次尝试；稳定恢复后自动退出，非供应商账单` : "稳定恢复条件已满足，已自动退出临时限额"],
+    ["项目协调",observation.autonomy_observation !== "ok" ? "未取得有效项目观测" : observation.project_coordination?.records?.length ? observation.project_coordination.records.map(row=>`${row.project_id}：${projectWaitLabels[row.reason] || "尚无协调记录"}；当前阶段执行结果 ${row.execution_status || "未产生"}${row.execution_completed_at ? `（${formatTimestamp(row.execution_completed_at)}）` : ""}${row.next_due_at ? `；下次考虑 ${formatTimestamp(row.next_due_at)}` : ""}`).join("；") : "无活动项目样本"],
+    ["信源检查心跳",observation.autonomy_observation !== "ok" ? "未取得检查记录" : observation.world_poll_sample?.records?.length ? observation.world_poll_sample.records.map(row=>`${row.source_id}：最近尝试 ${formatTimestamp(row.last_attempt_at)} / 成功 ${formatTimestamp(row.last_success_at)} / 内容变化 ${formatTimestamp(row.last_change_at)}；检查 ${row.checks} / 无变化 ${row.unchanged_checks}`).join("；") : "暂无检查记录，不代表已经检查"],
     ["完整额度与用量","展开下方用量，或进入认知资源；没有自动发起付费探测"],
   ]);
   $("#storage-summary").innerHTML=summaryRows([

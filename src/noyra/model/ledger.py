@@ -13,6 +13,7 @@ from noyra.core.private_sources import (
     participant_invitation_withdrawn,
     record_private_sources,
 )
+from noyra.core.recovery_budget import admit_recovery_attempt
 from noyra.core.types import (
     canonical_json,
     content_hash,
@@ -327,6 +328,15 @@ class ModelLedger:
             )
             require_evidence_capacity(connection, str(call["subject_id"]), "model_attempts")
             attempt_id = new_id("matt")
+            admit_recovery_attempt(
+                connection,
+                str(call["subject_id"]),
+                call_id,
+                attempt_id,
+                reserved_input_tokens,
+                reserved_output_tokens,
+                utc_now(),
+            )
             connection.execute(
                 """INSERT INTO model_attempts(
                     attempt_id, call_id, subject_id, budget_day, attempt_number, status,

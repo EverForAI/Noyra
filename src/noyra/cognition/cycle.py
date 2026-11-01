@@ -74,6 +74,7 @@ from .memory_integration import SemanticMemoryIntegrator
 from .metacognition import MetacognitiveControl, metacognitive_wake_after
 from .motivation import MotivationDevelopment
 from .projects import AutonomousProjectManager
+from .recovery import AutonomyRecovery
 from .reflection import SleepReflectionCognition
 from .research import AutonomousResearch
 from .self_model import OperationalSelfModel
@@ -122,6 +123,12 @@ class CognitionCycle:
         )
         self.settings = self.self_modification.effective_settings()
         self.clock = clock
+        self.recovery = AutonomyRecovery(
+            kernel.database,
+            self.subject_id,
+            clock=clock,
+            source_refresh_seconds=self.settings.source_refresh_seconds,
+        )
         self.reader = reader or SafeWebReader()
         self.common_knowledge = common_knowledge
         self.tools = ToolRunner(kernel.database)
@@ -316,6 +323,7 @@ class CognitionCycle:
                 self.subject_id,
                 circuit_policy=self.embedding_gateway.circuit_policy,
             )
+        self.recovery.refresh()
         self.consciousness.ensure_initial()
         self._sync_configured_sources()
         self._ensure_world_grant()
@@ -358,6 +366,7 @@ class CognitionCycle:
         self.bootstrap()
         if self.kernel.lifecycle.current().state != "active":
             return "cognition_inactive"
+        self.recovery.refresh()
         if self.embedding_index is not None:
             with suppress(Exception):
                 await asyncio.to_thread(
@@ -403,10 +412,10 @@ class CognitionCycle:
                 assert_current_lease()
                 if project_execution is not None:
                     return project_execution
-                project_result = await self.autonomous_projects.run_due()
-                assert_current_lease()
-                if project_result is not None:
-                    return project_result
+            project_result = await self.autonomous_projects.run_due()
+            assert_current_lease()
+            if project_result is not None:
+                return project_result
             metacognitive_result = await self._run_metacognitive_strategy()
             assert_current_lease()
             if metacognitive_result != "metacognitive_wait":
@@ -637,26 +646,8 @@ class CognitionCycle:
         return result
 
     def _project_workflow_pending(self) -> bool:
-        with self.kernel.database.connection() as connection:
-            row = connection.execute(
-                "SELECT p.goal_id FROM autonomous_projects p "
-                "WHERE p.subject_id = ? AND p.status = 'active' "
-                "AND ("
-                "EXISTS(SELECT 1 FROM observations o WHERE o.subject_id = p.subject_id "
-                "AND o.status = 'new') OR "
-                "EXISTS(SELECT 1 FROM research_search_runs r WHERE r.subject_id = p.subject_id "
-                "AND r.goal_id = p.goal_id AND NOT EXISTS("
-                "SELECT 1 FROM outcome_evaluations e WHERE e.subject_id = r.subject_id "
-                "AND e.source_type = 'research' AND e.source_id = r.research_id)) OR "
-                "EXISTS(SELECT 1 FROM action_deliberation_runs a "
-                "WHERE a.subject_id = p.subject_id AND a.goal_id = p.goal_id "
-                "AND a.action_id IS NOT NULL AND NOT EXISTS("
-                "SELECT 1 FROM outcome_evaluations e WHERE e.subject_id = a.subject_id "
-                "AND e.source_type = 'action' AND e.source_id = a.action_id))"
-                ") LIMIT 1",
-                (self.subject_id,),
-            ).fetchone()
-        return row is not None
+        project = self.autonomous_projects._selected_project()
+        return project is not None and self.autonomous_projects.pending_dependencies(project)
 
     async def _run_project_phase(self) -> str | None:
         project = self.autonomous_projects._selected_project()
@@ -672,6 +663,25 @@ class CognitionCycle:
         )
         if phase is None or phase.status != "active":
             return None
+        control = self.autonomous_projects.review_control.read(project)
+        if (
+            control["reason"] == "subject_wait"
+            and control["next_due_at"] is not None
+            and (self._parse_time(self.clock()) < self._parse_time(control["next_due_at"]))
+        ):
+            return None
+        prior = self.autonomous_projects.phase_execution(project)
+        if prior is not None and prior.status in {"succeeded", "failed", "blocked", "unknown"}:
+            # A replay is not new work. Let review/reconciliation and later workflows run.
+            return None
+        if prior is not None and not self.autonomous_projects.phase_needs_work(project, prior):
+            return None
+        # Result recovery must not bypass the project's existing resource envelope
+        # simply because phase dispatch precedes periodic governance in this tick.
+        self.autonomous_projects._sync_resource_usage(project)
+        local = self.autonomous_projects._local_resource_decision(project)
+        if local is not None:
+            return local
         session_id = self.autonomous_projects.begin_execution(project.project_id, "phase_execution")
         try:
             execution = await self.project_executor.run_phase(project, phase)
@@ -684,6 +694,8 @@ class CognitionCycle:
                 raise
         if self.autonomous_projects._expire_overdue_projects():
             return "autonomous_project_deadline_expired"
+        if prior is not None and prior.result_hash == execution.result_hash:
+            return None
         if execution.status == "succeeded":
             return "autonomous_project_phase_succeeded"
         if execution.status == "blocked":

@@ -3,19 +3,22 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any
 
 from noyra.core.admission import OperationInvalidated, accounting_scope, assert_current_lease
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError
 from noyra.core.events import EventStore
+from noyra.core.model_admission import track_model_admission
 from noyra.core.payload_codec import decompress_text
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.mind import GoalRecord, GoalStore
 from noyra.model import ModelGateway, ModelMessage
 from noyra.model.errors import (
     BudgetExhaustedError,
+    ModelAuthorizationError,
+    ModelCallConflictError,
     ModelCallStateError,
     ProviderCallError,
     StructuredOutputError,
@@ -29,8 +32,12 @@ from ._integrity import (
     durable_json,
     durable_string_list,
 )
+from .project_control import MAX_REVIEW_RETRIES, ProjectReviewControl
 from .settings import CognitionSettings
 from .types import AutonomousProjectFormationProposal, AutonomousProjectReviewProposal
+
+if TYPE_CHECKING:
+    from .execution import ProjectExecutionRecord
 
 NONTERMINAL_PROJECT_STATUSES = ("planned", "active", "paused", "blocked")
 TERMINAL_PROJECT_STATUSES = ("completed", "abandoned")
@@ -156,6 +163,7 @@ class AutonomousProjectManager:
         self.goals = GoalStore(database)
         self.events = EventStore(database)
         self.fatigue = FatigueTracker(database)
+        self.review_control = ProjectReviewControl(database, subject_id)
         if not defer_recovery:
             self._recover_execution_clocks()
 
@@ -218,45 +226,300 @@ class AutonomousProjectManager:
             return await self._form_due()
         return await self._run_selected_project(project)
 
+    def phase_execution(self, project: AutonomousProjectRecord) -> ProjectExecutionRecord | None:
+        """Read only this revision's attempt; never prepare an execution while polling."""
+        if project.current_phase_id is None:
+            return None
+        from .execution import ProjectExecutionLedger
+
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT e.* FROM autonomous_project_executions e "
+                "JOIN autonomous_project_phases ph ON ph.phase_id=e.phase_id "
+                "WHERE e.subject_id=? AND e.project_id=? AND e.phase_id=? "
+                "AND e.execution_key=e.project_id||':'||e.phase_id||':'||ph.attempt_count",
+                (self.subject_id, project.project_id, project.current_phase_id),
+            ).fetchone()
+        return None if row is None else ProjectExecutionLedger._from_row(row)
+
+    def phase_needs_work(
+        self, project: AutonomousProjectRecord, execution: ProjectExecutionRecord
+    ) -> bool:
+        if execution.status != "executing":
+            return execution.status == "prepared"
+        if execution.execution_type == "prediction_record":
+            evidence = execution.acceptance.get("evidence", {})
+            prediction_id = evidence.get("prediction_id") if isinstance(evidence, dict) else None
+            with self.database.connection() as connection:
+                if prediction_id is not None:
+                    row = connection.execute(
+                        "SELECT status FROM predictions WHERE prediction_id=? AND subject_id=?",
+                        (prediction_id, self.subject_id),
+                    ).fetchone()
+                    return row is None or str(row[0]) != "open"
+                resolved = connection.execute(
+                    "SELECT 1 FROM predictions WHERE subject_id=? AND status='resolved' "
+                    "AND outcome IS NOT NULL LIMIT 3",
+                    (self.subject_id,),
+                ).fetchall()
+                return len(resolved) >= 3
+        if execution.execution_type in {
+            "research_note",
+            "knowledge_collection",
+            "software_prototype",
+        }:
+            # A new tick cannot own an old provider dispatch. Never resend implicitly.
+            self.review_control.record(project, "awaiting_reconciliation")
+            return False
+        return True
+
+    def pending_dependencies(self, project: AutonomousProjectRecord) -> bool:
+        """Only evidence belonging to this project can postpone its review."""
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT 1 WHERE EXISTS(SELECT 1 FROM research_search_runs r "
+                "WHERE r.subject_id=? AND r.status IN ('accepted','no_results','failed') "
+                "AND (r.project_id=? OR "
+                "(r.project_id IS NULL AND r.goal_id=? AND r.created_at>=?)) AND NOT EXISTS("
+                "SELECT 1 FROM outcome_evaluations e WHERE e.subject_id=r.subject_id "
+                "AND e.source_type='research' AND e.source_id=r.research_id)) OR EXISTS("
+                "SELECT 1 FROM action_deliberation_runs a WHERE a.subject_id=? "
+                "AND (a.project_id=? OR "
+                "(a.project_id IS NULL AND a.goal_id=? AND a.created_at>=?)) "
+                "AND a.action_id IS NOT NULL AND NOT EXISTS("
+                "SELECT 1 FROM outcome_evaluations e WHERE e.subject_id=a.subject_id "
+                "AND e.source_type='action' AND e.source_id=a.deliberation_id))",
+                (
+                    self.subject_id,
+                    project.project_id,
+                    project.goal_id,
+                    project.created_at,
+                    self.subject_id,
+                    project.project_id,
+                    project.goal_id,
+                    project.created_at,
+                ),
+            ).fetchone()
+        return row is not None
+
+    def _help_wait(self, project: AutonomousProjectRecord) -> bool:
+        from noyra.interaction import InteractionStore
+
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT request_id,public_summary FROM autonomous_project_assistance_requests "
+                "WHERE subject_id=? AND project_id=? AND status='open' "
+                "ORDER BY created_at,request_id LIMIT 1",
+                (self.subject_id, project.project_id),
+            ).fetchone()
+        if row is None:
+            return False
+        key = f"project-assistance:{row['request_id']}"
+        with self.database.connection() as connection:
+            existing = connection.execute(
+                "SELECT 1 FROM interactions WHERE subject_id=? AND idempotency_key=?",
+                (self.subject_id, key),
+            ).fetchone()
+        if existing is None:
+            # Only the explicitly public summary may enter the web-origin help outbox.
+            InteractionStore(self.database).send(
+                self.subject_id,
+                "web",
+                "web-user",
+                str(row["public_summary"]),
+                kind="help_request",
+                idempotency_key=key,
+            )
+        with self.database.connection() as connection:
+            routed = connection.execute(
+                "SELECT 1 FROM interaction_transports WHERE subject_id=? AND status='active' "
+                "LIMIT 1",
+                (self.subject_id,),
+            ).fetchone()
+            delivery = connection.execute(
+                "SELECT d.status FROM interaction_deliveries d JOIN interactions i "
+                "ON i.interaction_id=d.interaction_id AND i.subject_id=d.subject_id "
+                "WHERE i.subject_id=? AND i.idempotency_key=? ORDER BY d.updated_at DESC LIMIT 1",
+                (self.subject_id, key),
+            ).fetchone()
+        reason = "help_pending_route" if routed is None else "help_delivery_pending"
+        if delivery is not None and delivery[0] == "delivered":
+            reason = "help_waiting_reply"
+        elif delivery is not None and delivery[0] == "unknown":
+            reason = "help_delivery_unknown"
+        self.review_control.record(project, reason)
+        return True
+
     async def _run_selected_project(self, project: AutonomousProjectRecord) -> str | None:
         self._sync_resource_usage(project)
         project = self.get(project.project_id)
         local = self._local_resource_decision(project)
         if local is not None:
             return local
-        if project.status in {"planned", "paused", "blocked"}:
-            review_due = True
-        else:
-            review_due = self._review_due(project)
-        if not review_due:
+        if self._help_wait(project):
             return None
-        session_id = (
-            self.begin_execution(project.project_id, "project_review")
-            if project.status == "active"
-            else None
+        if project.status == "paused":
+            with self.database.connection() as connection:
+                latest = connection.execute(
+                    "SELECT created_at FROM autonomous_project_reviews WHERE project_id=? "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (project.project_id,),
+                ).fetchone()
+            reference = max(project.updated_at, "" if latest is None else str(latest[0]))
+            if not self._interval_due(reference, self.settings.project_review_interval_seconds):
+                return None
+        if self.pending_dependencies(project):
+            previous_control = self.review_control.read(project)
+            self.review_control.record(
+                project, "waiting_dependencies", next_due_at=previous_control["next_due_at"]
+            )
+            return None
+        execution = self.phase_execution(project)
+        if execution is not None and execution.status == "unknown":
+            self.review_control.record(project, "awaiting_reconciliation")
+            return None
+        if (
+            execution is not None
+            and execution.status == "executing"
+            and execution.execution_type != "prediction_record"
+            and not self.phase_needs_work(project, execution)
+        ):
+            return None
+        control = self.review_control.read(project)
+        if control["reason"] == "review_retry_limit":
+            retry_at = control["next_due_at"]
+            if retry_at is None or self._parse_time(self.clock()) < self._parse_time(retry_at):
+                return None
+            # Retry exhaustion cools until the next day; it never grants extra
+            # project resources or replays an ambiguous provider operation.
+            self.review_control.record(
+                project,
+                "review_due",
+                retry_index=0,
+                request_index=int(control["request_index"]) + 1,
+            )
+            control = self.review_control.read(project)
+        due_at = control["next_due_at"]
+        if due_at is not None and self._parse_time(self.clock()) < self._parse_time(due_at):
+            return None
+        result_due = execution is not None and execution.status in {
+            "succeeded",
+            "failed",
+            "blocked",
+        }
+        if project.status == "active" and not result_due and not self._review_due(project):
+            return None
+        return await self._execute_review(project)
+
+    def _review_defer(
+        self, project: AutonomousProjectRecord, reason: str, *, retry: bool = False
+    ) -> None:
+        control = self.review_control.read(project)
+        index = int(control["retry_index"])
+        request_index = int(control["request_index"]) + 1
+        now = self._parse_time(self.clock())
+        if retry:
+            if index >= MAX_REVIEW_RETRIES:
+                tomorrow = (now + timedelta(days=1)).replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
+                self.review_control.record(
+                    project, "review_retry_limit", next_due_at=tomorrow.isoformat()
+                )
+                return
+            index += 1
+            jitter = int(content_hash({"project": project.project_id, "retry": index})[:4], 16) % 31
+            due = now + timedelta(seconds=min(3600, 60 * 2 ** (index - 1)) + jitter)
+        elif reason == "waiting_daily_quota":
+            due = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            due = now + timedelta(minutes=5)
+        self.review_control.record(
+            project,
+            reason,
+            next_due_at=due.isoformat(),
+            retry_index=index,
+            request_index=request_index,
         )
-        try:
-            result = await self._execute_review(project)
-        finally:
-            if session_id is not None:
-                try:
-                    assert_current_lease()
-                    self.finish_execution(project.project_id, session_id)
-                except OperationInvalidated:
-                    self.abort_execution(project.project_id, session_id)
-                    raise
-        if session_id is not None and self._expire_overdue_projects():
-            return "autonomous_project_deadline_expired"
-        return result
+
+    def _review_model_failure(self, project: AutonomousProjectRecord, purpose: str) -> None:
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                "SELECT status,error_code FROM model_calls WHERE subject_id=? AND purpose=?",
+                (self.subject_id, purpose),
+            ).fetchall()
+        # Another owner may have changed the ledger while the gateway awaited a
+        # route/key lock. The ledger wins over the exception's transient category.
+        if any(row["status"] in {"unknown", "executing", "prepared"} for row in rows):
+            self.review_control.record(project, "awaiting_reconciliation")
+            return
+        budget_only = bool(rows) and all(
+            row["status"] == "failed"
+            and row["error_code"]
+            in {
+                "budget_exhausted",
+                "cost_only_pricing_unknown",
+                "autonomy_recovery_budget_exhausted",
+                "recovery_clock_wait",
+            }
+            for row in rows
+        )
+        self._review_defer(
+            project, "waiting_budget" if budget_only else "review_backoff", retry=not budget_only
+        )
 
     async def _execute_review(self, project: AutonomousProjectRecord) -> str | None:
         context = self._review_context(project)
         review_number = self._review_count(project.project_id)
-        purpose = f"autonomous_project_review:{project.project_id}:{review_number}"
-        idempotency_key = f"autonomous-project-review:{project.project_id}:{review_number}"
-        recovered = self._successful_review(purpose, context)
+        request_index = self.review_control.read(project)["request_index"]
+        suffix = (
+            ""
+            if request_index == 0
+            else f":revision:{project.current_revision}:request:{request_index}"
+        )
+        purpose = f"autonomous_project_review:{project.project_id}:{review_number}{suffix}"
+        idempotency_key = f"autonomous-project-review:{project.project_id}:{review_number}{suffix}"
+        try:
+            recovered = self._successful_review(purpose, context)
+        except (ValueError, TypeError):
+            self._review_defer(project, "review_backoff", retry=True)
+            return None
         if recovered is None:
+            with self.database.connection() as connection:
+                calls = connection.execute(
+                    "SELECT call_id,status,error_code FROM model_calls "
+                    "WHERE subject_id=? AND purpose=?",
+                    (self.subject_id, purpose),
+                ).fetchall()
+            if any(row["status"] in {"unknown", "executing"} for row in calls) or (
+                self.review_control.read(project)["reason"] == "awaiting_reconciliation"
+                and any(row["status"] == "prepared" for row in calls)
+            ):
+                self.review_control.record(project, "awaiting_reconciliation")
+                return None
+            if calls and any(row["status"] in {"failed", "succeeded"} for row in calls):
+                # An admission refusal has not spent a provider retry or phase attempt.
+                budget_only = all(
+                    row["status"] == "failed"
+                    and row["error_code"]
+                    in {
+                        "budget_exhausted",
+                        "cost_only_pricing_unknown",
+                        "autonomy_recovery_budget_exhausted",
+                        "recovery_clock_wait",
+                    }
+                    for row in calls
+                )
+                self._review_defer(
+                    project,
+                    "waiting_budget" if budget_only else "review_backoff",
+                    retry=not budget_only,
+                )
+                return None
             if self._project_model_calls(project.project_id) >= project.budget.max_model_calls:
+                self.review_control.record(project, "waiting_budget")
+                if project.status in {"paused", "blocked"}:
+                    return None
                 return self._apply_local_transition(
                     project,
                     "paused",
@@ -266,22 +529,55 @@ class AutonomousProjectManager:
             if self._calls_today("autonomous_project_review:") >= (
                 self.settings.max_project_model_calls_per_day
             ):
+                self._review_defer(project, "waiting_daily_quota")
                 return None
+            session_id: str | None = None
+
+            def admitted() -> None:
+                nonlocal session_id
+                if session_id is None and project.status == "active":
+                    try:
+                        session_id = self.begin_execution(project.project_id, "project_review")
+                    except AutonomousProjectValidationError as error:
+                        raise ModelAuthorizationError(
+                            "project changed before review admission"
+                        ) from error
+
             try:
-                result = await self.gateway.complete_structured(
-                    self.subject_id,
-                    purpose,
-                    self._review_messages(context),
-                    AutonomousProjectReviewProposal,
-                    idempotency_key=idempotency_key,
-                    max_output_tokens=min(3_000, self.settings.max_output_tokens),
-                    temperature=self.settings.temperature,
-                )
+                with track_model_admission(admitted):
+                    result = await self.gateway.complete_structured(
+                        self.subject_id,
+                        purpose,
+                        self._review_messages(context),
+                        AutonomousProjectReviewProposal,
+                        idempotency_key=idempotency_key,
+                        max_output_tokens=min(3_000, self.settings.max_output_tokens),
+                        temperature=self.settings.temperature,
+                    )
+                assert_current_lease()
             except BudgetExhaustedError:
-                self._budget_fatigue("autonomous project review budget exhausted")
-                return "autonomous_project_budget_exhausted"
-            except (ProviderCallError, StructuredOutputError, ModelCallStateError):
-                return "autonomous_project_model_failed"
+                self._review_defer(project, "waiting_budget")
+                return None
+            except ProviderCallError as error:
+                if error.outcome_unknown:
+                    self.review_control.record(project, "awaiting_reconciliation")
+                else:
+                    self._review_model_failure(project, purpose)
+                return None
+            except ModelCallConflictError:
+                self.review_control.record(project, "awaiting_reconciliation")
+                return None
+            except (StructuredOutputError, ModelCallStateError):
+                self._review_model_failure(project, purpose)
+                return None
+            finally:
+                if session_id is not None:
+                    try:
+                        assert_current_lease()
+                        self.finish_execution(project.project_id, session_id)
+                    except OperationInvalidated:
+                        self.abort_execution(project.project_id, session_id)
+                        raise
             proposal, call_id = result.output, result.call_id
         else:
             proposal, call_id = recovered
@@ -289,7 +585,20 @@ class AutonomousProjectManager:
             self._validate_review(proposal, context)
             record = self._commit_review(proposal, call_id, idempotency_key, context)
         except AutonomousProjectValidationError:
-            return "autonomous_project_rejected"
+            self._review_defer(project, "review_backoff", retry=True)
+            return None
+        self.review_control.record(project, "review_committed")
+        if record.disposition == "request_help":
+            self._help_wait(self.get(project.project_id))
+        elif record.disposition == "wait":
+            self.review_control.record(
+                self.get(project.project_id),
+                "subject_wait",
+                next_due_at=(
+                    self._parse_time(self.clock())
+                    + timedelta(seconds=self.settings.project_review_interval_seconds)
+                ).isoformat(),
+            )
         return f"autonomous_project_{record.disposition}"
 
     def projects(self, *, statuses: tuple[str, ...] | None = None) -> list[AutonomousProjectRecord]:
@@ -607,6 +916,14 @@ class AutonomousProjectManager:
             self._verify_assistance_requests(assistance_requests)
             self._verify_sleep_reflections(sleep_reflections)
             self._verify_execution_clocks(clock_events)
+            from noyra.autonomy.workflow import DurableWorkflowStore
+            from noyra.core.recovery_budget import read_recovery
+
+            DurableWorkflowStore._verify_integrity_connection(connection, self.subject_id)
+            read_recovery(connection, self.subject_id)
+            controller = ProjectReviewControl(self.database, self.subject_id)
+            for project_row in projects:
+                controller.read(self._project_from_row(project_row))
             return {
                 "autonomous_projects": len(projects),
                 "autonomous_project_phases": len(phases),
@@ -1866,6 +2183,9 @@ class AutonomousProjectManager:
             affect_rows = self._affect_rows_connection(
                 connection, project.goal_id, project.project_id
             )
+        usage["model_call"] = max(
+            usage["model_call"], self._project_model_calls(project.project_id)
+        )
         exhausted = self._exhausted_resources(project, usage)
         if exhausted and project.status not in {"paused", "blocked"}:
             return self._apply_local_transition(
@@ -2494,8 +2814,9 @@ class AutonomousProjectManager:
         with self.database.connection() as connection:
             return int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM model_calls WHERE subject_id = ? "
-                    "AND purpose LIKE ? AND substr(created_at, 1, 10) = ?",
+                    "SELECT COUNT(*) FROM model_calls c WHERE subject_id = ? "
+                    "AND purpose LIKE ? AND substr(created_at, 1, 10) = ? "
+                    "AND EXISTS(SELECT 1 FROM model_attempts a WHERE a.call_id=c.call_id)",
                     (self.subject_id, f"{prefix}%", day),
                 ).fetchone()[0]
             )
@@ -2512,7 +2833,23 @@ class AutonomousProjectManager:
 
     def _project_model_calls(self, project_id: str) -> int:
         with self.database.connection() as connection:
-            return self._usage_connection(connection, project_id)["model_call"]
+            recorded = self._usage_connection(connection, project_id)["model_call"]
+            # Resource-use history records accepted work. Failed paid review attempts
+            # still consume this project's envelope without rewriting that evidence.
+            unrecorded = connection.execute(
+                "SELECT COUNT(*) FROM model_calls c WHERE c.subject_id=? AND "
+                "(c.purpose LIKE ? OR c.purpose LIKE ?) AND "
+                "EXISTS(SELECT 1 FROM model_attempts a WHERE a.call_id=c.call_id) AND NOT EXISTS("
+                "SELECT 1 FROM autonomous_project_resource_uses u WHERE u.project_id=? "
+                "AND u.source_type='model_call' AND u.source_id=c.call_id)",
+                (
+                    self.subject_id,
+                    f"autonomous_project_review:{project_id}:%",
+                    f"autonomous_project_artifact:{project_id}:%",
+                    project_id,
+                ),
+            ).fetchone()[0]
+            return recorded + int(unrecorded)
 
     def _review_count(self, project_id: str) -> int:
         with self.database.connection() as connection:
