@@ -46,3 +46,41 @@ invalidated runtime lease cannot publish a successful service checkpoint.
 In-process cooldowns use monotonic elapsed time; UTC remains the explicit recovery and
 observation clock. Model-attempt admission cannot reopen a budget day older than the
 subject's existing attempt history. This is not a budget reset or rewritten timestamp.
+
+## Runtime integration and recovery
+
+After genesis completes, independent serial service slots cover local maintenance,
+project execution and review, interaction handling, metacognitive selection, world
+acquisition, world interpretation and optional embedding maintenance. Embedding refresh
+is not an unconditional paid prelude to every post-genesis scheduler turn. The existing genesis state machine retains its
+ordering. Metacognition still owns whether research, thought, social contact or sleep
+is worthwhile; the scheduler does not replace that choice with mandatory activity.
+
+Projects rotate independently within execution and review service. A particular
+project's deferred review does not impose its deadline on every other project.
+Formation still receives a review-service opportunity when no project exists.
+
+Acquisition runs independently of a pending observation's interpretation. Interpretation
+skips unresolved provider rounds using the existing business-call ambiguity fence,
+without resolving, rejecting or replaying them; other runnable observations can proceed. A permanent
+fetch failure advances only its own failure/check heartbeat and yields to other sources.
+Successful unchanged reads update heartbeat evidence without a new model call. Ordered
+poll history remains unchanged on wall-clock rollback: a source whose history is in
+the future yields until UTC catches up, while other work keeps receiving service. An
+in-flight rollback becomes an explicit waiting outcome instead of a repeating failure.
+
+Agenda discovery is considered independently of project completion. Discovery uses
+bounded candidate probes rather than one lookup per candidate, coalesces duplicate
+source identities, and does not rewrite unchanged agenda history. A restarted process
+does not write agenda revisions behind their existing timestamp high-water mark.
+
+The authenticated runtime summary reports the clock status and each workflow's most
+recent consideration, finished attempt, new progress, wait reason and next consideration.
+The service bound is expressed in completed scheduler turns, not an unconditional wall
+clock promise: existing network deadlines, budgets, real sleep, permission changes and
+unresolved prerequisites remain authoritative. No in-flight paid call is preempted.
+
+Local acceptance covers restart/cursor persistence, malformed control state, schema 111
+upgrade, exact export ownership, UTC rollback, multiple projects, a permanently failing
+source, 72-hour virtual operation, and low-cost unchanged-feed polls. Real deployment,
+platform interaction and sustained server observation remain separate acceptance steps.

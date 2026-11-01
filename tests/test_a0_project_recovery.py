@@ -305,7 +305,20 @@ def make_cycle(
     cycle.subject_id = case.subject_id
     cycle.settings = manager.settings
     cycle.embedding_index = None
+    cycle.gateway = manager.gateway
+    cycle._runnable_observation = Mock(return_value=None)  # type: ignore[method-assign]
     cycle.recovery = Mock()
+    from noyra.core.fair_scheduling import FairScheduler
+    from noyra.core.scheduling_clock import CooldownClock
+
+    cycle.scheduler = FairScheduler(
+        case.kernel.database,
+        case.subject_id,
+        clock=lambda: case.clock_value,
+        monotonic_clock=lambda: datetime.fromisoformat(case.clock_value).timestamp(),
+    )
+    cycle._poll_clock = CooldownClock(lambda: datetime.fromisoformat(case.clock_value).timestamp())
+    cycle.intrinsic_thought = Mock()
     cycle.genesis = Mock()
     cycle.genesis.start.return_value = SimpleNamespace(status="complete")
     cycle._handle_genesis_ready_for_sleep = Mock(return_value=None)  # type: ignore[method-assign]

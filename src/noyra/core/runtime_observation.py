@@ -14,6 +14,7 @@ from typing import Any
 
 from .cognitive_waits import terminal_wait_reason
 from .errors import IntegrityError
+from .fair_scheduling import ScheduleState
 from .recovery_budget import (
     RECOVERY_DAILY_ATTEMPTS,
     RECOVERY_DAILY_INPUT_TOKENS,
@@ -169,12 +170,19 @@ class RuntimeObserver:
                 (self.subject_id,),
             ).fetchone()
             recovery = None
+            schedule: dict[str, Any] | None = None
             project_rows: list[Any] = []
             project_waits: list[dict[str, Any]] = []
             polls: list[Any] = []
             autonomy_observation = "ok"
             try:
                 recovery = read_recovery(connection, self.subject_id)
+                try:
+                    schedule = ScheduleState.read_connection(connection, self.subject_id)
+                except sqlite3.OperationalError:
+                    # A pre-upgrade observation can still show valid A0 data;
+                    # missing scheduling evidence is explicitly unknown.
+                    schedule = None
                 project_rows = connection.execute(
                     "SELECT p.project_id,p.status,p.current_revision,p.current_phase_id,"
                     "p.updated_at,"
@@ -235,6 +243,7 @@ class RuntimeObserver:
                     else "unavailable"
                 )
                 recovery, project_rows, project_waits, polls = None, [], [], []
+                schedule = None
             calls = connection.execute(
                 "SELECT call_id,status,usage_estimated,created_at,completed_at,resource_group_id,"
                 "resource_pool,model,purpose,error_code FROM model_calls "
@@ -367,6 +376,7 @@ class RuntimeObserver:
                 {
                     "database_observation": "ok",
                     "autonomy_observation": autonomy_observation,
+                    "workflow_schedule": schedule,
                     "autonomy_recovery": None
                     if recovery is None
                     else {

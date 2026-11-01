@@ -871,3 +871,17 @@ test("missing recovery evidence never implies normal autonomy", () => {
   assert.ok(html.includes("不按正常处理"));
   assert.ok(!html.includes("未触发，按正常资源预算运行"));
 });
+
+
+test("workflow service metadata distinguishes consideration from activity and escapes identifiers", () => {
+  const {sandbox,nodes}=observationContext();
+  vm.runInContext(functionsBetween("function summaryRows(", "const integerFormatter"),sandbox);
+  sandbox.renderRuntimeObservation({database_observation:"ok",autonomy_observation:"ok",
+    resources:{},cognition:{enabled:true},workflow_schedule:{turn:12,
+      clock_status:"wall_clock_behind_history",workflows:{"<img>":{reason:"waiting_budget",
+        last_considered_at:null,last_progress_at:null,next_due_at:null}}}},null);
+  const html=nodes.get("#cognition-summary").innerHTML;
+  assert.ok(html.includes("被考虑不代表发送请求或产生新进展"));
+  assert.ok(html.includes("时钟落后于历史"));
+  assert.ok(html.includes("&lt;img") && !html.includes("<img>"));
+});

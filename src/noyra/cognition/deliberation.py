@@ -456,6 +456,12 @@ class ActionDeliberation:
                     result.document,
                     max_content_chars=self.settings.max_observation_chars,
                 )
+            except IntegrityError as error:
+                if str(error) != "world poll completion is out of order":
+                    raise
+                observation = None
+                created = False
+                status = "outcome_unavailable"
             except ObservationBudgetError:
                 SourcePollStore(self.database).failed(
                     self.subject_id, source.source_id, self.clock()

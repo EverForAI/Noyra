@@ -29,6 +29,7 @@ WORKFLOWS = (
     "interaction",
     "world_acquisition",
     "world_cognition",
+    "embedding_maintenance",
 )
 MAX_TURN_SECONDS = 3.0
 _SAFE_REASON = re.compile(r"[a-z][a-z0-9_]{0,127}\Z")
@@ -221,7 +222,8 @@ class FairScheduler:
             return int(
                 c.execute(
                     "SELECT COALESCE(SUM(row_count),0) FROM evidence_row_counts "
-                    "WHERE subject_id=? AND table_name IN ('actions','model_attempts')",
+                    "WHERE subject_id=? AND table_name IN "
+                    "('actions','model_attempts','embedding_usage_entries')",
                     (self.subject_id,),
                 ).fetchone()[0]
             )

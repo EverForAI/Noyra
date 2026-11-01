@@ -218,10 +218,12 @@ class AutonomousProjectManager:
                 ),
             )
 
-    async def run_due(self) -> str | None:
+    async def run_due(self, *, project_id: str | None = None) -> str | None:
         if self._expire_overdue_projects():
             return "autonomous_project_deadline_expired"
-        project = self._selected_project()
+        project = self._selected_project() if project_id is None else self.get(project_id)
+        if project is not None and project.status in TERMINAL_PROJECT_STATUSES:
+            return None
         if project is None:
             return await self._form_due()
         return await self._run_selected_project(project)
@@ -461,6 +463,7 @@ class AutonomousProjectManager:
                 "cost_only_pricing_unknown",
                 "autonomy_recovery_budget_exhausted",
                 "recovery_clock_wait",
+                "model_budget_clock_wait",
             }
             for row in rows
         )
@@ -507,6 +510,7 @@ class AutonomousProjectManager:
                         "cost_only_pricing_unknown",
                         "autonomy_recovery_budget_exhausted",
                         "recovery_clock_wait",
+                        "model_budget_clock_wait",
                     }
                     for row in calls
                 )
@@ -921,6 +925,15 @@ class AutonomousProjectManager:
 
             DurableWorkflowStore._verify_integrity_connection(connection, self.subject_id)
             read_recovery(connection, self.subject_id)
+            from noyra.core.fair_scheduling import ScheduleState
+
+            version = int(
+                connection.execute(
+                    "SELECT value FROM schema_meta WHERE key='schema_version'"
+                ).fetchone()[0]
+            )
+            if version >= 112:
+                ScheduleState.read_connection(connection, self.subject_id)
             controller = ProjectReviewControl(self.database, self.subject_id)
             for project_row in projects:
                 controller.read(self._project_from_row(project_row))

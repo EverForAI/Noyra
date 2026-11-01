@@ -804,6 +804,7 @@ tests/support/relationship_provenance.py
 tests/support/synthetic.py
 tests/test_a0_project_recovery.py
 tests/test_a0_recovery_budget.py
+tests/test_a1_clock_recovery.py
 tests/test_a1_fair_scheduling.py
 tests/test_a1_read_boundaries.py
 tests/test_action_deliberation.py

@@ -204,13 +204,44 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
             pricing=ModelPricing(),
             retry_policy=RetryPolicy(max_attempts=1),
         )
-        return CognitionCycle(
+        cycle = CognitionCycle(
             self.kernel,
             gateway,
             settings or self.settings(),
             reader=self.reader,
             clock=lambda: self.clock_value,
         )
+
+        from noyra.core.scheduling_clock import CooldownClock
+
+        cycle._poll_clock = CooldownClock(
+            lambda: datetime.fromisoformat(self.clock_value).timestamp()
+        )
+        return cycle
+
+    async def test_empty_source_configuration_waits_without_model_or_bootstrap_failure(
+        self: Self,
+    ) -> None:
+        provider = FakeProvider([])
+        settings = self.settings().model_copy(update={"sources": ()})
+        cycle = self.cycle(provider, settings=settings)
+        self.assertEqual(await cycle.run_once(), "world_sources_waiting")
+        self.assertEqual(provider.requests, [])
+        self.assertEqual(cycle.sources.active(self.subject_id), [])
+        grants = [g for g in cycle.capabilities.list(self.subject_id) if g.status == "active"]
+        self.assertEqual([g.scope for g in grants], [{"public_https": True}])
+
+    async def test_empty_explicit_host_policy_does_not_enable_public_access(self: Self) -> None:
+        provider = FakeProvider([])
+        settings = self.settings().model_copy(
+            update={"sources": (), "web_read_public_by_default": False}
+        )
+        cycle = self.cycle(provider, settings=settings)
+        self.assertEqual(await cycle.run_once(), "world_sources_waiting")
+        self.assertFalse(
+            any(g.status == "active" for g in cycle.capabilities.list(self.subject_id))
+        )
+        self.assertEqual(provider.requests, [])
 
     async def test_successful_unchanged_poll_respects_source_refresh(self: Self) -> None:
         from noyra.world import FetchedDocument
@@ -830,7 +861,11 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value="action_deliberation_waited"),
             ),
         ):
-            self.assertEqual(await cycle.run_once(), "action_deliberation_waited")
+            # Waiting is yielding under fair scheduling; test the strategy adapter
+            # directly rather than assuming it monopolizes the next whole tick.
+            self.assertEqual(
+                await cycle._dispatch_workflow("metacognition"), "action_deliberation_waited"
+            )
         with (
             patch.object(cycle.outcome_evaluator, "run_due", return_value=None),
             patch.object(cycle.memory_consolidator, "run_due", return_value=None),
@@ -845,7 +880,7 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value="self_model_committed"),
             ),
         ):
-            self.assertEqual(await cycle.run_once(), "self_model_committed")
+            self.assertEqual(await cycle._dispatch_workflow("self_model"), "self_model_committed")
         with (
             patch.object(cycle.outcome_evaluator, "run_due", return_value=None),
             patch.object(cycle.memory_consolidator, "run_due", return_value=None),
@@ -861,7 +896,9 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value="autonomous_project_planned"),
             ),
         ):
-            self.assertEqual(await cycle.run_once(), "autonomous_project_planned")
+            self.assertEqual(
+                await cycle._dispatch_workflow("project_review"), "autonomous_project_planned"
+            )
         with (
             patch.object(cycle.outcome_evaluator, "run_due", return_value=None),
             patch.object(cycle.memory_consolidator, "run_due", return_value=None),
@@ -897,7 +934,9 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value="intrinsic_thought_reflect"),
             ) as run_thought,
         ):
-            self.assertEqual(await cycle.run_once(), "intrinsic_thought_reflect")
+            self.assertEqual(
+                await cycle._dispatch_workflow("metacognition"), "intrinsic_thought_reflect"
+            )
         run_thought.assert_awaited_once_with(agenda_id="test-agenda")
 
     async def test_supervisor_rejects_forged_causal_targets(self: Self) -> None:

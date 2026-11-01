@@ -15,6 +15,7 @@ from noyra.core.events import EventStore
 from noyra.core.locking import ProcessLock
 from noyra.core.payload_codec import decompress_text
 from noyra.core.relationship_identity import context_rows
+from noyra.core.scheduling_clock import CooldownClock
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.mind import GoalCandidate, GoalStore, MindEngine
 from noyra.model import ModelGateway, ModelLedger, ModelMessage
@@ -163,6 +164,7 @@ class IntrinsicThought:
         self.mind = MindEngine(database, clock=clock)
         self.fatigue = FatigueTracker(database)
         self._last_agenda_discovery: datetime | None = None
+        self._discovery_clock = CooldownClock(capacity=1)
         self.rounds = ThoughtRounds(database, subject_id)
         self._processing_lock = ProcessLock(
             database.path.with_name(
@@ -180,12 +182,31 @@ class IntrinsicThought:
         if not self.settings.enabled:
             return False
         now = self._parse_time(self.clock())
+        if self._last_agenda_discovery is None:
+            with self.database.connection() as connection:
+                high = connection.execute(
+                    "SELECT MAX(updated_at) FROM thought_agenda_items WHERE subject_id=?",
+                    (self.subject_id,),
+                ).fetchone()[0]
+            if high is not None and now < self._parse_time(str(high)):
+                # Restart during UTC recovery must not write agenda revisions
+                # older than the immutable evidence they would revise.
+                return False
         if self._last_agenda_discovery is not None:
             elapsed = (now - self._last_agenda_discovery).total_seconds()
-            if elapsed < 300:
+            token = self._last_agenda_discovery.isoformat()
+            if 0 <= elapsed < 300 and not self._discovery_clock.ready(
+                "agenda", token, 300 - elapsed
+            ):
+                return False
+            if elapsed < 0 and not self._discovery_clock.ready("agenda", token, 300):
+                return False
+            if elapsed < 0:
+                # Leave ordered agenda history untouched until its UTC catches up.
                 return False
         self._refresh_agenda()
         self._last_agenda_discovery = now
+        self._discovery_clock.defer("agenda", now.isoformat(), 300)
         return True
 
     async def run_due(self, *, agenda_id: str | None = None) -> str | None:
@@ -486,15 +507,30 @@ class IntrinsicThought:
             # snapshot. No provider/model/advisory calls occur in discovery.
             self._retire_terminal_goal_agendas(connection, now)
             candidates = self._agenda_candidates(connection=connection)
+            unique: dict[tuple[str, str], dict[str, Any]] = {}
+            for candidate in candidates:
+                unique.setdefault((candidate["source_type"], candidate["source_id"]), candidate)
+            candidates = list(unique.values())
             absence_key = self._absence_source_id()
             if not any(candidate["source_id"] == absence_key for candidate in candidates):
                 self._resolve_absence_agenda(connection, absence_key, now)
+            existing_agendas: dict[tuple[str, str], Any] = {}
+            identities = [(str(c["source_type"]), str(c["source_id"])) for c in candidates]
+            for offset in range(0, len(identities), 128):
+                batch = identities[offset : offset + 128]
+                placeholders = ",".join("(?,?)" for _ in batch)
+                rows = connection.execute(
+                    f"WITH wanted(source_type,source_id) AS (VALUES {placeholders}) "
+                    "SELECT a.* FROM wanted w JOIN thought_agenda_items a "
+                    "ON a.source_type=w.source_type AND a.source_id=w.source_id "
+                    "WHERE a.subject_id=?",
+                    (*[x for pair in batch for x in pair], self.subject_id),
+                ).fetchall()
+                existing_agendas.update(
+                    {(str(r["source_type"]), str(r["source_id"])): r for r in rows}
+                )
             for candidate in candidates:
-                existing = connection.execute(
-                    "SELECT * FROM thought_agenda_items WHERE subject_id = ? "
-                    "AND source_type = ? AND source_id = ?",
-                    (self.subject_id, candidate["source_type"], candidate["source_id"]),
-                ).fetchone()
+                existing = existing_agendas.get((candidate["source_type"], candidate["source_id"]))
                 if existing is None:
                     agenda_id = new_id("agenda")
                     state_hash = self._agenda_hash(
