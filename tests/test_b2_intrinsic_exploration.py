@@ -31,12 +31,13 @@ class Reflector:
 
     def __init__(self) -> None:
         self.requests: list[CompletionRequest] = []
+        self.disposition = "reflect"
 
     async def complete(self, request: CompletionRequest) -> ProviderResponse:
         self.requests.append(request)
         context = json.loads(request.messages[1].content)["context"]
         proposal = {
-            "disposition": "reflect",
+            "disposition": self.disposition,
             "summary": "Considered this internal question.",
             "insight": f"A distinct perspective on {context['agenda']['topic']}.",
             "next_question": None,
@@ -100,6 +101,33 @@ class Harness:
                 reason="fixture question",
                 created_at=now,
             )
+
+    def unknown_call(self, agenda_id: str) -> None:
+        ledger = ModelLedger(self.database)
+        call, _ = ledger.prepare_call(
+            self.subject,
+            "fixture",
+            "fixture",
+            f"intrinsic_thought:{agenda_id}:0",
+            content_hash("request"),
+            f"intrinsic-thought:{agenda_id}:0",
+        )
+        attempt = ledger.authorize_attempt(
+            call.call_id,
+            BudgetLimits(100, 500_000, 100_000, 5_000_000),
+            reserved_input_tokens=1,
+            reserved_output_tokens=1,
+            reserved_cost_microusd=0,
+        )
+        ledger.start_attempt(attempt.attempt_id)
+        ledger.finish_attempt(
+            attempt.attempt_id,
+            "unknown",
+            usage=None,
+            cost_microusd=None,
+            error_code="synthetic_unknown",
+        )
+        ledger.finish_call(call.call_id, "unknown", error_code="synthetic_unknown")
 
     def batch(self) -> list[Any]:
         return attention_batch(
@@ -211,20 +239,7 @@ async def test_selection_survives_worker_restart_and_matches_metacognition(
 def test_unknown_round_quarantines_equivalent_questions_without_retry(harness: Harness) -> None:
     harness.agenda("agenda-unknown", "Shared uncertainty")
     harness.agenda("agenda-sibling", "Shared uncertainty")
-    ledger = ModelLedger(harness.database)
-    call, _ = ledger.prepare_call(
-        harness.subject,
-        "fixture",
-        "fixture",
-        "intrinsic_thought:agenda-unknown:0",
-        content_hash("request"),
-        "intrinsic-thought:agenda-unknown:0",
-    )
-    # Use the existing interruption recovery contract rather than manufacturing a thought.
-    with harness.database.transaction() as connection:
-        connection.execute(
-            "UPDATE model_calls SET status='unknown' WHERE call_id=?", (call.call_id,)
-        )
+    harness.unknown_call("agenda-unknown")
     assert harness.batch() == []
     assert harness.provider.requests == []
 
@@ -243,3 +258,62 @@ def test_candidate_batch_is_bounded_and_read_only(harness: Harness) -> None:
         )
     assert harness.provider.requests == []
     ActionLedger(harness.database).verify_integrity(harness.subject)
+
+
+def test_later_discovery_is_not_quarantined_by_an_older_equivalent_unknown(
+    harness: Harness,
+) -> None:
+    harness.agenda("agenda-old-unknown", "Recurring question")
+    harness.unknown_call("agenda-old-unknown")
+    harness.now += timedelta(hours=1)
+    harness.agenda("agenda-new-evidence", "Recurring question")
+    assert [row["agenda_id"] for row in harness.batch()] == ["agenda-new-evidence"]
+    assert harness.provider.requests == []
+
+
+def test_clock_rollback_does_not_admit_future_unserved_questions(harness: Harness) -> None:
+    harness.agenda("agenda-future", "A question from the future")
+    assert len(harness.batch()) == 1
+    harness.now -= timedelta(days=1)
+    assert harness.batch() == []
+    assert harness.provider.requests == []
+
+
+def test_unrunnable_prepared_rounds_cannot_fill_the_entire_candidate_batch(
+    harness: Harness,
+) -> None:
+    ledger = ModelLedger(harness.database)
+    for index in range(ATTENTION_BATCH_SIZE):
+        agenda_id = f"agenda-prepared-{index}"
+        harness.agenda(agenda_id, f"Prepared question {index}")
+        ledger.prepare_call(
+            harness.subject,
+            "fixture",
+            "fixture",
+            f"intrinsic_thought:{agenda_id}:0",
+            content_hash(["prepared", index]),
+            f"intrinsic-thought:{agenda_id}:0",
+        )
+    harness.agenda("agenda-eligible", "Available question")
+    assert [row["agenda_id"] for row in harness.batch()] == ["agenda-eligible"]
+    assert harness.provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_resolved_equivalent_question_is_not_reopened_by_its_duplicate(
+    harness: Harness,
+) -> None:
+    harness.agenda("agenda-completed", "One shared issue")
+    harness.agenda("agenda-sibling", "One shared issue")
+    harness.provider.disposition = "resolve"
+    assert (
+        await harness.thought.run_due(agenda_id="agenda-completed") == "intrinsic_thought_resolve"
+    )
+    assert not any(row["topic"] == "One shared issue" for row in harness.batch())
+    with harness.database.connection() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM thought_agenda_items WHERE topic=?", ("One shared issue",)
+            ).fetchone()[0]
+            == 2
+        )

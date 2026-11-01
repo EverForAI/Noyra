@@ -16,7 +16,7 @@ import httpx
 from noyra.capability import CapabilityGrant
 from noyra.cognition import CognitionCycle, CognitionSettings, WorldSourceConfig
 from noyra.cognition.interaction import InteractionCognition
-from noyra.core import SubjectKernel
+from noyra.core import EventStore, SubjectKernel
 from noyra.core.types import content_hash, utc_now
 from noyra.interaction import InteractionStore
 from noyra.model import (
@@ -29,7 +29,6 @@ from noyra.model import (
     ProviderResponse,
     RetryPolicy,
 )
-from noyra.model.errors import ConfigurationError
 from noyra.sleep import SleepReflectionPlan
 from noyra.world import SafeWebReader
 
@@ -219,29 +218,55 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
         )
         return cycle
 
-    async def test_empty_source_configuration_waits_without_model_or_bootstrap_failure(
+    def idle_thought_provider(self: Self) -> FakeProvider:
+        event = EventStore(self.kernel.database).append(
+            self.subject_id, "experience", "self", {"question": "Consider waiting"}
+        )
+        return FakeProvider(
+            [
+                ProviderResponse(
+                    json.dumps(
+                        {
+                            "disposition": "defer",
+                            "summary": "No outside source is ready.",
+                            "insight": "I can wait for useful evidence.",
+                            "next_question": None,
+                            "source_event_ids": [event.event_id],
+                            "source_memory_ids": [],
+                            "source_belief_ids": [],
+                            "source_goal_ids": [],
+                            "source_relationship_ids": [],
+                            "goal_candidate": None,
+                        }
+                    ),
+                    ModelUsage(100, 80),
+                )
+            ]
+        )
+
+    async def test_empty_source_configuration_allows_internal_thought_without_web_bootstrap(
         self: Self,
     ) -> None:
-        provider = FakeProvider([])
+        provider = self.idle_thought_provider()
         settings = self.settings().model_copy(update={"sources": ()})
         cycle = self.cycle(provider, settings=settings)
-        self.assertEqual(await cycle.run_once(), "world_sources_waiting")
-        self.assertEqual(provider.requests, [])
+        self.assertEqual(await cycle.run_once(), "intrinsic_thought_defer")
+        self.assertEqual(len(provider.requests), 1)
         self.assertEqual(cycle.sources.active(self.subject_id), [])
         grants = [g for g in cycle.capabilities.list(self.subject_id) if g.status == "active"]
         self.assertEqual([g.scope for g in grants], [{"public_https": True}])
 
     async def test_empty_explicit_host_policy_does_not_enable_public_access(self: Self) -> None:
-        provider = FakeProvider([])
+        provider = self.idle_thought_provider()
         settings = self.settings().model_copy(
             update={"sources": (), "web_read_public_by_default": False}
         )
         cycle = self.cycle(provider, settings=settings)
-        self.assertEqual(await cycle.run_once(), "world_sources_waiting")
+        self.assertEqual(await cycle.run_once(), "intrinsic_thought_defer")
         self.assertFalse(
             any(g.status == "active" for g in cycle.capabilities.list(self.subject_id))
         )
-        self.assertEqual(provider.requests, [])
+        self.assertEqual(len(provider.requests), 1)
 
     async def test_successful_unchanged_poll_respects_source_refresh(self: Self) -> None:
         from noyra.world import FetchedDocument
@@ -329,7 +354,11 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
         self.clock_value = (
             datetime.fromisoformat(self.clock_value) + timedelta(minutes=1)
         ).isoformat(timespec="milliseconds")
-        self.assertEqual(await cycle.run_once(), "observation_unchanged")
+        # The unchanged world payload is not analyzed again. A separate
+        # internal-attention opportunity is allowed while orientation waits.
+        with patch.object(cycle, "_run_metacognitive_strategy", return_value=None) as internal:
+            self.assertEqual(await cycle.run_once(), "observation_unchanged")
+        internal.assert_awaited_once()
         self.assertEqual(len(provider.requests), 1)
 
     async def test_oversized_structured_feed_stays_pending_without_model_call(
@@ -339,7 +368,7 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
         from noyra.world.feed import feed_content, parse_feed
 
         settings = self.settings().model_copy(update={"max_observation_chars": 1_024})
-        provider = FakeProvider([])
+        provider = self.idle_thought_provider()
         cycle = self.cycle(provider, settings=settings)
         cycle.bootstrap()
         source = cycle.sources.active(self.subject_id)[0]

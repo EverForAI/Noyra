@@ -416,6 +416,16 @@ class CognitionCycle:
 
         result = await self._run_world(genesis)
         assert result is not None
+        if result in {"world_sources_waiting", "observation_unchanged", "world_fetch_failed"}:
+            # Orientation is still incomplete, but a missing/unchanged source
+            # is not a reason to suppress internal questions or their lawful
+            # governance/search path. Keep genesis evidence and lifecycle intact.
+            evaluated = self.outcome_evaluator.run_due()
+            if evaluated is not None:
+                return evaluated
+            alternative = await self._run_metacognitive_strategy()
+            if alternative is not None and alternative != "metacognitive_wait":
+                return alternative
         return result
 
     async def _run_world(self, genesis: GenesisRunRecord, *, mode: str = "combined") -> str | None:

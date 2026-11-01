@@ -308,7 +308,9 @@ class MetacognitiveControl:
                     LEFT JOIN outcome_evaluations o
                       ON o.subject_id = r.subject_id AND o.source_type = 'research'
                      AND o.source_id = r.research_id
-                    WHERE r.subject_id = ? AND o.evaluation_id IS NULL
+                    WHERE r.subject_id = ? AND r.goal_id IS NOT NULL
+                      AND r.status IN ('accepted','no_results','failed')
+                      AND o.evaluation_id IS NULL
                 ) LIMIT 1""",
                 (self.subject_id, self.subject_id),
             ).fetchone()
