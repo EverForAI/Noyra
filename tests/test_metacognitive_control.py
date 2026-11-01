@@ -129,7 +129,7 @@ class MetacognitiveControlTestCase(unittest.TestCase):
         agenda_id = new_id("agenda")
         state_hash = content_hash(
             {
-                "source_type": "goal",
+                "source_type": "question",
                 "source_id": source_id,
                 "topic": "An unresolved identity question",
                 "urgency": 0.9,
@@ -147,7 +147,7 @@ class MetacognitiveControlTestCase(unittest.TestCase):
                     agenda_id, subject_id, source_type, source_id, topic, urgency, novelty,
                     emotional_weight, recurrence_count, consecutive_no_change, status,
                     cooldown_until, state_hash, created_at, updated_at
-                ) VALUES (?, ?, 'goal', ?, ?, 0.9, 0.9, 0.8, 1, ?,
+                ) VALUES (?, ?, 'question', ?, ?, 0.9, 0.9, 0.8, 1, ?,
                     'open', NULL, ?, ?, ?)""",
                 (
                     agenda_id,

@@ -13,6 +13,7 @@ from noyra.core.relationship_identity import context_rows
 from noyra.core.types import content_hash, new_id, utc_now
 
 from ._integrity import durable_boundary, durable_float, durable_int
+from .attention import attention_batch
 from .settings import CognitionSettings
 
 CognitiveStrategy = Literal[
@@ -283,7 +284,6 @@ class MetacognitiveControl:
             }
 
     def _candidates(self) -> tuple[list[_Candidate], float]:
-        now = self._parse_time(self.clock())
         with self.database.connection() as connection:
             fatigue = connection.execute(
                 "SELECT fatigue, resource_pressure, cognitive_load, frustration, "
@@ -334,13 +334,6 @@ class MetacognitiveControl:
                 "ORDER BY priority DESC, commitment DESC LIMIT 1",
                 (self.subject_id,),
             ).fetchone()
-            agenda = connection.execute(
-                "SELECT agenda_id, urgency, novelty, emotional_weight, recurrence_count, "
-                "consecutive_no_change, status, cooldown_until FROM thought_agenda_items "
-                "WHERE subject_id = ? AND status IN ('open', 'cooling') "
-                "ORDER BY updated_at DESC LIMIT 100",
-                (self.subject_id,),
-            ).fetchall()
             trigger_observation = connection.execute(
                 """SELECT o.observation_id FROM observations o
                    LEFT JOIN epistemic_review_runs r
@@ -386,14 +379,9 @@ class MetacognitiveControl:
                 break
             repeat_streak += 1
         candidates: list[_Candidate] = []
-        available_agenda = [
-            row
-            for row in agenda
-            if row["status"] == "open"
-            or (
-                row["cooldown_until"] is not None and self._parse_time(row["cooldown_until"]) <= now
-            )
-        ]
+        available_agenda = attention_batch(
+            self.database, self.subject_id, self.clock(), self.settings.thought_interval_seconds
+        )
         if self.agenda_inspector is not None:
             available_agenda = [
                 row
@@ -401,16 +389,7 @@ class MetacognitiveControl:
                 if self.agenda_inspector(str(row["agenda_id"])).eligible
             ]
         if available_agenda:
-            selected_agenda = max(
-                available_agenda,
-                key=lambda row: (
-                    float(row["urgency"]) * 0.4
-                    + float(row["novelty"]) * 0.25
-                    + float(row["emotional_weight"]) * 0.25
-                    - min(0.45, int(row["consecutive_no_change"]) * 0.15),
-                    row["agenda_id"],
-                ),
-            )
+            selected_agenda = available_agenda[0]
             candidates.append(
                 _Candidate(
                     "think",

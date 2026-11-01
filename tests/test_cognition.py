@@ -1147,19 +1147,20 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
             "environment world-source scope changed",
         )
 
-    def test_cognition_environment_requires_explicit_enablement_and_sources(self: Self) -> None:
-        with (
-            patch.dict(
-                os.environ,
-                {
-                    "NOYRA_COGNITION_ENABLED": "true",
-                    "NOYRA_WORLD_SOURCES_JSON": "[]",
-                },
-                clear=False,
-            ),
-            self.assertRaises(ConfigurationError),
+    def test_cognition_environment_allows_internal_attention_without_seed_sources(
+        self: Self,
+    ) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "NOYRA_COGNITION_ENABLED": "true",
+                "NOYRA_WORLD_SOURCES_JSON": "[]",
+            },
+            clear=False,
         ):
-            CognitionSettings.from_env()
+            cold_start = CognitionSettings.from_env()
+        self.assertTrue(cold_start.enabled)
+        self.assertEqual(cold_start.sources, ())
         with patch.dict(
             os.environ,
             {

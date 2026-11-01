@@ -36,6 +36,7 @@ from ._integrity import (
     durable_json,
     durable_string_list,
 )
+from .attention import attention_batch
 from .settings import CognitionSettings
 from .thought_rounds import ThoughtRounds
 from .types import IntrinsicThoughtProposal
@@ -941,16 +942,13 @@ class IntrinsicThought:
 
     def _select_agenda(self) -> ThoughtAgendaRecord | None:
         allow_new_calls = self._calls_today() < self.settings.max_thought_model_calls_per_day
-        available = []
-        for item in self.agenda(limit=200):
+        for row in attention_batch(
+            self.database, self.subject_id, self.clock(), self.settings.thought_interval_seconds
+        ):
+            item = self._agenda_from_row(row)
             if self.inspect_agenda(item.agenda_id, allow_new_calls=allow_new_calls).eligible:
-                available.append(item)
-        if not available:
-            return None
-        return max(
-            available,
-            key=lambda item: (item.attention_score, item.updated_at, item.agenda_id),
-        )
+                return item
+        return None
 
     def _is_due(self, agenda: ThoughtAgendaRecord, *, allow_new_calls: bool | None = None) -> bool:
         return self.inspect_agenda(agenda.agenda_id, allow_new_calls=allow_new_calls).eligible

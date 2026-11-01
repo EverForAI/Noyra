@@ -119,8 +119,8 @@ class CognitionSettings(BaseModel):
 
     @model_validator(mode="after")
     def validate_enabled_sources(self) -> CognitionSettings:
-        if self.enabled and not self.sources:
-            raise ValueError("enabled cognition requires at least one configured world source")
+        # Internal attention and autonomous discovery can run before a source
+        # is configured. Network grants still decide whether a read is allowed.
         urls = [source.url for source in self.sources]
         if len(set(urls)) != len(urls):
             raise ValueError("world source URLs must be unique")

@@ -471,6 +471,7 @@ src/noyra/capability/tools.py
 src/noyra/capability/types.py
 src/noyra/cognition/__init__.py
 src/noyra/cognition/_integrity.py
+src/noyra/cognition/attention.py
 src/noyra/cognition/consciousness.py
 src/noyra/cognition/cycle.py
 src/noyra/cognition/deliberation.py
@@ -837,6 +838,7 @@ tests/test_audit_r04_subject_contract.py
 tests/test_audit_r05_embedding_shutdown.py
 tests/test_authentication_input_contract.py
 tests/test_autonomous_projects.py
+tests/test_b2_intrinsic_exploration.py
 tests/test_boundary_remediation.py
 tests/test_browser_dispatch_fencing.py
 tests/test_capability.py
