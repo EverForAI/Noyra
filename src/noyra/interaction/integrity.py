@@ -432,6 +432,11 @@ class InteractionIntegrity:
                 ):
                     raise IntegrityError("public post controls integrity mismatch")
             counts["public_post_controls"] = len(controls)
+        from .expression import ExpressionStore
+
+        counts["autonomous_expression_actions"] = ExpressionStore(
+            self.database, subject_id
+        ).verify_integrity()
         return counts
 
     @staticmethod

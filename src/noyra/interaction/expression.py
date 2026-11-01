@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from noyra.capability import CapabilityGrant, CapabilityStore
 from noyra.capability.types import CapabilityType
@@ -66,6 +66,13 @@ class ExpressionReview(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     approved: bool
     reason: str = Field(min_length=1, max_length=2_000)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_is_nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("self-review reason is blank")
+        return value
 
 
 class ExpressionStore:
@@ -338,17 +345,88 @@ class ExpressionStore:
                 )
                 return receipt
         except Exception:
-            # This executor performs local SQLite effects only. Rollback is
-            # certain, so a known failure is not left as a phantom sending job.
+            # A fresh read distinguishes rollback from a commit whose response
+            # was lost. The effect and receipt are atomic, so an executing
+            # action here proves that neither was committed. If storage cannot
+            # be read, leave the intent for ordinary unknown recovery.
             with accounting_scope():
-                self.actions.finish(
-                    action_id,
-                    "failed",
-                    {"error": "expression_commit_failed"},
-                    public_target="[private]",
-                    public_explanation="Expression stopped before publication.",
-                )
+                with self.database.connection() as connection:
+                    current = ActionLedger._load_connection(connection, action_id)
+                if current.status == "succeeded":
+                    return current.result or {}
+                if current.status == "executing":
+                    self.actions.finish(
+                        action_id,
+                        "failed",
+                        {"error": "expression_commit_failed"},
+                        public_target="[private]",
+                        public_explanation="Expression stopped before publication.",
+                    )
             raise
+
+    def verify_integrity(self) -> int:
+        """Bind historical effects to self-review and charged consent, even after revocation."""
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM actions WHERE subject_id=? "
+                "AND tool='autonomous_expression' AND status='succeeded'",
+                (self.subject_id,),
+            ).fetchall()
+            for row in rows:
+                action = ActionLedger._from_row(row)
+                reviews = connection.execute(
+                    "SELECT call_id FROM model_calls WHERE subject_id=? "
+                    "AND purpose=? AND status='succeeded'",
+                    (self.subject_id, "expression_review:" + action.action_id),
+                ).fetchall()
+                if len(reviews) != 1:
+                    raise IntegrityError("expression effect lacks one successful self-review")
+                call = ModelLedger(self.database).get_call(str(reviews[0][0]))
+                approved = ExpressionReview.model_validate_json(
+                    str((call.response or {}).get("content", ""))
+                )
+                if not approved.approved:
+                    raise IntegrityError("expression effect contradicts its self-review")
+                consent = connection.execute(
+                    "SELECT 1 FROM capability_uses u JOIN capability_grants g "
+                    "ON g.grant_id=u.grant_id AND g.subject_id=u.subject_id "
+                    "WHERE u.subject_id=? AND u.action_id=? AND u.resource=? AND g.side_effect=1 "
+                    "AND g.capability_type=? LIMIT 1",
+                    (
+                        self.subject_id,
+                        action.action_id,
+                        action.target,
+                        "message" if action.target.startswith("transport:") else "publish",
+                    ),
+                ).fetchone()
+                if consent is None:
+                    raise IntegrityError("expression effect lacks charged capability evidence")
+                receipt = action.result or {}
+                if receipt.get("action_id") != action.action_id:
+                    raise IntegrityError("expression action receipt mismatch")
+                if action.target.startswith("transport:"):
+                    message = connection.execute(
+                        "SELECT subject_id FROM interactions WHERE interaction_id=?",
+                        (receipt.get("interaction_id"),),
+                    ).fetchone()
+                    if (
+                        message is None
+                        or message[0] != self.subject_id
+                        or receipt.get("status") != "queued"
+                    ):
+                        raise IntegrityError("expression outbox message ownership mismatch")
+                else:
+                    self.archive._subject_owned(
+                        connection, self.subject_id, str(receipt.get("publication_id"))
+                    )
+                    item = connection.execute(
+                        "SELECT * FROM public_publications WHERE subject_id=? AND publication_id=?",
+                        (self.subject_id, receipt.get("publication_id")),
+                    ).fetchone()
+                    if item is None:
+                        raise IntegrityError("expression publication is missing")
+                    self.archive._verify(item)
+        return len(rows)
 
     def _transport(self, connection: Any, proposal: ExpressionProposal) -> Any:
         from .transport import TransportStore

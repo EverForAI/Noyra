@@ -92,6 +92,9 @@ class ParticipantCollaboration:
         for item in page["items"]:
             item.pop("created_at")
             self._reward_display(item)
+        from .assistance import AssistanceStore
+
+        page["help_requests"] = AssistanceStore(self.db, self.subject).public()
         return page
 
     def _reward_display(self, item: dict[str, Any]) -> None:
@@ -299,7 +302,7 @@ class ParticipantCollaboration:
     ) -> dict[str, Any]:
         view = path.removeprefix("/api/participants/")
         allowed = {
-            "messages": {"content", "idempotency_key"},
+            "messages": {"content", "idempotency_key", "help_request_id"},
             "posts": {
                 "kind",
                 "title",
@@ -377,6 +380,15 @@ class ParticipantCollaboration:
                         who,
                         "participant:" + who.entity_id,
                         private=True,
+                    )
+                request_id = payload.get("help_request_id")
+                if request_id is not None:
+                    if not isinstance(request_id, str) or not 1 <= len(request_id) <= 256:
+                        raise ValueError("invalid help request")
+                    from .assistance import AssistanceStore
+
+                    AssistanceStore(self.db, self.subject).link_reply(
+                        c, request_id, record.interaction_id, who.entity_id
                     )
             return {"interaction_id": record.interaction_id, "status": record.status}
         if view == "posts":

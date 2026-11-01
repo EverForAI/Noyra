@@ -20,7 +20,7 @@ import time
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from email import policy
 from email.parser import BytesParser
 from email.utils import getaddresses
@@ -1323,7 +1323,8 @@ class InboundStore:
         provider_duplicate = False
         with self.database.transaction() as connection:
             transport = connection.execute(
-                "SELECT subject_id FROM interaction_transports WHERE transport_id=? "
+                "SELECT subject_id,transport_id,config_json FROM interaction_transports "
+                "WHERE transport_id=? "
                 "AND channel=? AND status='active'",
                 (envelope.transport_id, envelope.channel),
             ).fetchone()
@@ -1342,8 +1343,40 @@ class InboundStore:
                 ),
             ).fetchone()
             subject_id = self._subject_for_transport(connection, envelope.transport_id)
+            if binding is None:
+                from .transport import TransportStore
+
+                config = TransportStore._config(transport)
+                if config.get("require_known_senders", False) is True:
+                    raise PermissionError("inbound account requires optional operator binding")
+                # The adapter already authenticated the platform envelope.
+                # A new source receives participant status only, never creator
+                # authority or access to the operator's private conversation.
+                count = connection.execute(
+                    "SELECT COUNT(*) FROM interaction_bindings WHERE subject_id=?", (subject_id,)
+                ).fetchone()[0]
+                recent = connection.execute(
+                    "SELECT COUNT(*) FROM interaction_bindings WHERE subject_id=? "
+                    "AND created_at>=?",
+                    (subject_id, (datetime.now(UTC) - timedelta(hours=1)).isoformat()),
+                ).fetchone()[0]
+                if count >= 10_000 or recent >= 100:
+                    raise PermissionError("new inbound identities are cooling down")
+                binding_id = self._bind_connection(
+                    connection,
+                    subject_id,
+                    envelope.transport_id,
+                    external_account_id=envelope.external_account_id,
+                    external_sender_id=envelope.external_sender_id,
+                    role="participant",
+                    label=envelope.sender_label,
+                )
+                binding = connection.execute(
+                    "SELECT binding_id,role,status FROM interaction_bindings WHERE binding_id=?",
+                    (binding_id,),
+                ).fetchone()
             if binding is None or binding["status"] != "active":
-                raise PermissionError("inbound account is not bound")
+                raise PermissionError("inbound account is disabled or revoked")
             priority = 100 if binding["role"] == "creator" else 0
             route = (
                 connection.execute(

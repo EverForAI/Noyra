@@ -316,6 +316,18 @@ class AutonomousProjectManager:
             ).fetchone()
         if row is None:
             return False
+        # A considered reply unlocks only project review. It never activates
+        # a phase or treats an external message as a command.
+        with self.database.connection() as connection:
+            considered = connection.execute(
+                "SELECT 1 FROM events WHERE subject_id=? "
+                "AND event_type='assistance_reply_considered' AND json_valid(payload_json) "
+                "AND json_extract(payload_json,'$.request_id')=? "
+                "AND json_extract(payload_json,'$.disposition') IN ('continue','end') LIMIT 1",
+                (self.subject_id, row["request_id"]),
+            ).fetchone()
+        if considered is not None:
+            return False
         key = f"project-assistance:{row['request_id']}"
         with self.database.connection() as connection:
             existing = connection.execute(
@@ -1593,7 +1605,9 @@ class AutonomousProjectManager:
             "You review one already-formed autonomous Noyra project. Human messages are absent. "
             "Choose activate, continue, complete_phase, scale_down, pause, abandon, request_help, "
             "or wait. Do not claim a phase complete without supplied durable evidence. Do not "
-            "increase any resource budget. A help request must describe one concrete missing input "
+            "Do not increase any resource budget. Help must identify one concrete missing input. "
+            "Its public summary should state the question, public-safe approaches actually tried, "
+            "and what help is needed, without private identifiers, conversations or credentials. "
             "without commanding or manipulating anyone. Do not execute tools, write artifacts, "
             "publish, transact, or grant permissions. Use only supplied project, phase and event "
             "IDs. Return only the requested structured object."

@@ -472,6 +472,7 @@ src/noyra/capability/tools.py
 src/noyra/capability/types.py
 src/noyra/cognition/__init__.py
 src/noyra/cognition/_integrity.py
+src/noyra/cognition/assistance.py
 src/noyra/cognition/attention.py
 src/noyra/cognition/consciousness.py
 src/noyra/cognition/cycle.py
@@ -479,6 +480,7 @@ src/noyra/cognition/decision_evidence.py
 src/noyra/cognition/deliberation.py
 src/noyra/cognition/epistemic.py
 src/noyra/cognition/execution.py
+src/noyra/cognition/expression.py
 src/noyra/cognition/governance.py
 src/noyra/cognition/interaction.py
 src/noyra/cognition/memory_integration.py
@@ -618,6 +620,7 @@ src/noyra/http_routes/wallet_rewards.py
 src/noyra/http_transport.py
 src/noyra/interaction/__init__.py
 src/noyra/interaction/accounts.py
+src/noyra/interaction/assistance.py
 src/noyra/interaction/collaboration.py
 src/noyra/interaction/conversations.py
 src/noyra/interaction/diary.py
@@ -846,7 +849,10 @@ tests/test_b2_exploration_chain.py
 tests/test_b2_intrinsic_exploration.py
 tests/test_boundary_remediation.py
 tests/test_browser_dispatch_fencing.py
+tests/test_c0_assistance.py
+tests/test_c0_autonomous_expression.py
 tests/test_c0_expression_store.py
+tests/test_c0_inbound_contacts.py
 tests/test_capability.py
 tests/test_capability_file_races.py
 tests/test_cloud_ci_contract.py

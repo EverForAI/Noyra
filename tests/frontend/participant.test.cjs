@@ -223,3 +223,20 @@ test("all backend payment states have readable Chinese and English explanations"
         }
     }
 });
+
+test("free public help renders separately from rewards and accepts a private linked reply", async () => {
+    const h = harness(async (path) => {
+        if (path.endsWith("session")) return response({ participant: person, csrf_token: "csrf" });
+        if (path.endsWith("opportunities")) return response({ items: [], help_requests: [{
+            request_id: "projecthelp-one", title: "A question", body: "<script>untrusted</script>",
+        }] });
+        return response({ items: [] });
+    });
+    await h.api.ready;
+    await h.api.show("collaborate");
+    const html = h.node("#participant-panel").innerHTML;
+    assert.match(html, /免费求助/);
+    assert.match(html, /name="help_request_id" value="projecthelp-one"/);
+    assert.match(html, /&lt;script&gt;untrusted&lt;\/script&gt;/);
+    assert.doesNotMatch(html, /<script>untrusted/);
+});

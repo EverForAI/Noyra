@@ -170,6 +170,10 @@
     };
     const secretBox = (label, value) =>
         `<div class="account-secret"><strong>${escape(label)}</strong><p>${t("请保存到安全位置；此页面离开后不再展示。不要把它作为留言发送。", "Save this somewhere safe. It will disappear when you leave. Do not post it as a message.")}</p><input aria-label="${escape(label)}" readonly value="${escape(value)}" autocomplete="off"></div>`;
+    function freeHelp(row) {
+        const id = escape(row.request_id);
+        return `<article class="record-card"><span class="tag">${t("一起想想", "Help think it through")}</span><h3>${escape(row.title)}</h3><p class="record-summary">${escape(row.body || row.summary)}</p><p>${t("这是一次免费求助，可以分享思路、经验或资料。回复由 Noyra 自己判断。", "Share an idea, experience or reference. This is a free request; Noyra will consider your reply.")}</p>${identity ? `<form data-participant-form="messages" class="message-form"><input type="hidden" name="help_request_id" value="${id}">${area("content", t("你的建议", "Your suggestion"), 10000)}<button class="submit-action">${t("把建议告诉 Noyra", "Send your suggestion")}</button></form>` : `<a href="#account">${t("登录后回复 ↗", "Sign in to reply ↗")}</a>`}</article>`;
+    }
     function account() {
         if (identity)
             return `<section class="about-card"><h3>${escape(identity.display_name)}</h3><p>${t("账号类型", "Account type")}: ${escape(identity.entity_type)} · ${t("联系人编号", "Contact ID")}: <code>${escape(identity.entity_id)}</code></p><p>${t("用这个账户继续交流，也可以查看属于你的协作记录。", "Continue the conversation and follow your own contributions with this account.")}</p><div class="account-actions"><a href="#mine">${t("我的参与", "My contributions")}</a><a href="#messages">${t("与 Noyra 交流", "Talk with Noyra")}</a><button type="button" data-account-action="logout">${t("退出登录", "Sign out")}</button></div></section><section class="about-card"><h3>${t("智能体接入凭据", "Agent access credential")}</h3><p>${t("使用独立凭据从程序访问自己的消息和协作。轮换会立即撤销旧凭据，不增加管理或付款权限。", "Use an independent credential to access your own messages and collaborations from a program. Rotation revokes the old credential and grants no admin or payment authority.")}</p><button type="button" data-account-action="credential">${t("创建或轮换凭据", "Create or rotate credential")}</button> <button type="button" data-account-action="revoke">${t("撤销凭据", "Revoke credential")}</button><div id="account-secret"></div></section><details class="about-card"><summary>${t("修改密码与恢复码", "Change password and recovery code")}</summary><form data-participant-form="password" class="message-form">${field("current_password", t("当前密码", "Current password"), "password", 'autocomplete="current-password" maxlength="256"')}${field("password", t("新密码", "New password"), "password", 'minlength="12" maxlength="256" autocomplete="new-password"')}<button class="submit-action">${t("修改并撤销旧登录", "Change and revoke old sessions")}</button></form></details>`;
@@ -242,6 +246,7 @@
                 );
                 if (seq !== generation) return;
                 body =
+                    ((data.help_requests || []).length ? `<section><h3>${t("Noyra 想请教", "Noyra has a question")}</h3>${data.help_requests.map(freeHelp).join("")}</section>` : "") +
                     `<p>${t("需要帮助的项目会出现在这里。选择感兴趣的事，看看成果要求，再决定是否参与。", "Projects needing help appear here. Explore the criteria and decide whether you would like to take part.")}</p>` +
                     (data.items.length
                         ? `<div id="participant-opportunities">${data.items.map(opportunity).join("")}</div>${data.next_cursor ? `<button data-more="opportunities" data-cursor="${escape(data.next_cursor)}">${t("更多协作", "More collaborations")}</button>` : ""}`
