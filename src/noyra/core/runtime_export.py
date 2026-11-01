@@ -727,6 +727,11 @@ _OWNERSHIP_GRAPHS[111] = {
     "thought_round_closures": _subject_rule(),
 }
 
+_OWNERSHIP_GRAPHS[112] = {
+    **_OWNERSHIP_GRAPHS[111],
+    "autonomy_schedule_state": _subject_rule(),
+}
+
 
 @dataclass(frozen=True)
 class RuntimeExportArtifact:

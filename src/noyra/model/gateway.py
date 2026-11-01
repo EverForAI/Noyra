@@ -188,8 +188,8 @@ class ModelGateway:
                     call.call_id,
                     "failed",
                     error_code=(
-                        "cost_only_pricing_unknown"
-                        if str(error) == "cost_only_pricing_unknown"
+                        str(error)
+                        if str(error) in {"cost_only_pricing_unknown", "model_budget_clock_wait"}
                         else "budget_exhausted"
                     )
                     if isinstance(error, BudgetExhaustedError)

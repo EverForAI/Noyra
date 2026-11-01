@@ -190,6 +190,14 @@ RETENTION_REGISTRY: tuple[RetentionTableSpec, ...] = (
         "cognitive_route_outcomes", "core_evidence", "preserve", "created_at", ("outcome_id",), None
     ),
     RetentionTableSpec(
+        "autonomy_schedule_state",
+        "rebuildable_aggregate",
+        "preserve",
+        "updated_at",
+        ("subject_id",),
+        None,
+    ),
+    RetentionTableSpec(
         "thought_round_closures",
         "core_evidence",
         "preserve",

@@ -513,6 +513,7 @@ src/noyra/core/evidence_capacity.py
 src/noyra/core/evidence_schema.py
 src/noyra/core/export_jobs.py
 src/noyra/core/external_gates.py
+src/noyra/core/fair_scheduling.py
 src/noyra/core/http.py
 src/noyra/core/identity.py
 src/noyra/core/integrity.py
@@ -545,6 +546,7 @@ src/noyra/core/runtime.py
 src/noyra/core/runtime_export.py
 src/noyra/core/runtime_logging.py
 src/noyra/core/runtime_observation.py
+src/noyra/core/scheduling_clock.py
 src/noyra/core/schema/__init__.py
 src/noyra/core/schema/base.py
 src/noyra/core/schema/contracts.py
@@ -802,6 +804,7 @@ tests/support/relationship_provenance.py
 tests/support/synthetic.py
 tests/test_a0_project_recovery.py
 tests/test_a0_recovery_budget.py
+tests/test_a1_fair_scheduling.py
 tests/test_a1_read_boundaries.py
 tests/test_action_deliberation.py
 tests/test_action_integrity_diagnostic.py

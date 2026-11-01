@@ -61,4 +61,17 @@ CREATE TRIGGER IF NOT EXISTS prevent_thought_round_closure_delete
 BEFORE DELETE ON thought_round_closures
 BEGIN SELECT RAISE(ABORT,'thought round closures are append-only'); END;
 """,
+    112: """
+CREATE TABLE IF NOT EXISTS autonomy_schedule_state (
+    subject_id TEXT PRIMARY KEY REFERENCES subject_identity(subject_id),
+    revision INTEGER NOT NULL CHECK(revision >= 1),
+    state_json TEXT NOT NULL CHECK(length(state_json) <= 64000),
+    state_hash TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS preserve_autonomy_schedule_subject
+BEFORE UPDATE OF subject_id ON autonomy_schedule_state
+WHEN NEW.subject_id IS NOT OLD.subject_id
+BEGIN SELECT RAISE(ABORT,'autonomy schedule subject is immutable'); END;
+""",
 }

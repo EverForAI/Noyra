@@ -154,6 +154,12 @@ class ModelLedger:
         budget_day = budget_day or utc_now()[:10]
         with self.database.transaction() as connection:
             call = self._get_call_row(connection, call_id)
+            high_day = connection.execute(
+                "SELECT MAX(budget_day) FROM model_attempts WHERE subject_id=?",
+                (call["subject_id"],),
+            ).fetchone()[0]
+            if high_day is not None and budget_day < str(high_day):
+                raise BudgetExhaustedError("model_budget_clock_wait")
             if call["status"] == "executing" and continuation:
                 previous = connection.execute(
                     "SELECT status FROM model_attempts WHERE call_id = ? "
