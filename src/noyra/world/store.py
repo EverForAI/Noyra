@@ -15,7 +15,7 @@ from .errors import ObservationBudgetError, WorldStateConflictError
 from .feed import FEED_FINGERPRINT_VERSION, FeedItem, feed_content
 from .injection import INJECTION_CLASSIFIER_VERSION, classify_external_text
 from .observation_archive import ObservationContentArchive
-from .poll import MAX_SEEN_VERSIONS, SourcePollStore
+from .poll import SourcePollStore
 from .source import canonical_public_url
 from .types import ClaimProposal, ClaimRecord, FetchedDocument, ObservationRecord
 
@@ -187,15 +187,10 @@ class ObservationStore:
                 is not None
             )
             state = SourcePollStore._read(connection, subject_id, source_id)
-            # One bounded indexed query, independent of feed entry count.
-            seen_times = {
-                (str(row[0]), str(row[1])): str(row[2])
-                for row in connection.execute(
-                    "SELECT item_key,fingerprint,first_seen_at FROM world_feed_seen "
-                    "WHERE source_id=? AND subject_id=? AND fingerprint_version=? LIMIT ?",
-                    (source_id, subject_id, FEED_FINGERPRINT_VERSION, MAX_SEEN_VERSIONS),
-                )
-            }
+            # Probe only current complete/fragment identities using the full PK.
+            # A ten-entry unchanged feed should not load a 16K-entry cache.
+            wanted = set(origins) | {(item.item_key, item.fingerprint) for item in origins.values()}
+            seen_times = self._seen_times(connection, subject_id, source_id, wanted)
             seen = set(seen_times)
             unseen = tuple(
                 item
@@ -290,8 +285,37 @@ class ObservationStore:
             )
             if state is None and not had_legacy:
                 self._fresh_baseline(connection, subject_id, source_id)
-            SourcePollStore.prune(connection, source_id)
+            if written:
+                SourcePollStore.prune(connection, source_id)
             return selected if selected is not None else (None, False)
+
+    @staticmethod
+    def _seen_times(
+        connection: sqlite3.Connection,
+        subject_id: str,
+        source_id: str,
+        wanted: set[tuple[str, str]],
+    ) -> dict[tuple[str, str], str]:
+        result: dict[tuple[str, str], str] = {}
+        identities = sorted(wanted)
+        # Stay well below legacy SQLite's parameter limit, even for large fragments.
+        for offset in range(0, len(identities), 128):
+            batch = identities[offset : offset + 128]
+            placeholders = ",".join("(?,?)" for _ in batch)
+            rows = connection.execute(
+                f"WITH wanted(item_key,fingerprint) AS (VALUES {placeholders}) "
+                "SELECT f.item_key,f.fingerprint,f.first_seen_at FROM wanted w "
+                "JOIN world_feed_seen f ON f.source_id=? AND f.fingerprint_version=? "
+                "AND f.item_key=w.item_key AND f.fingerprint=w.fingerprint WHERE f.subject_id=?",
+                (
+                    *[value for key in batch for value in key],
+                    source_id,
+                    FEED_FINGERPRINT_VERSION,
+                    subject_id,
+                ),
+            )
+            result.update({(str(row[0]), str(row[1])): str(row[2]) for row in rows})
+        return result
 
     @staticmethod
     def _fresh_baseline(connection: sqlite3.Connection, subject_id: str, source_id: str) -> None:

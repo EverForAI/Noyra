@@ -81,6 +81,43 @@ class _TextExtractor(HTMLParser):
             self.title_parts.append(text)
 
 
+# Match credential names and delimited words, not arbitrary substrings such as
+# author/keyword/monkey. parse_qsl decodes names before this check.
+_CREDENTIAL_WORDS = frozenset(
+    {
+        "token",
+        "key",
+        "secret",
+        "password",
+        "passwd",
+        "signature",
+        "auth",
+        "authorization",
+        "authentication",
+        "credential",
+        "credentials",
+        "apikey",
+        "accesstoken",
+        "authtoken",
+        "refreshtoken",
+        "clientsecret",
+        "accesskey",
+        "secretkey",
+        "session",
+        "sessionid",
+        "sig",
+    }
+)
+
+
+def _credential_parameter(name: str) -> bool:
+    # Retain camel-case token boundaries (apiKey, accessToken), including prefixed names.
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+    words = set(filter(None, re.split(r"[^a-z0-9]+", separated.casefold())))
+    compact = "".join(re.findall(r"[a-z0-9]+", name.casefold()))
+    return bool(words & _CREDENTIAL_WORDS) or compact in _CREDENTIAL_WORDS
+
+
 def canonical_public_url(url: str) -> str:
     if not url.strip() or len(url) > 2_048:
         raise UnsafeSourceError("source URL is missing or too long")
@@ -105,9 +142,8 @@ def canonical_public_url(url: str) -> str:
         address = None
     if address is not None and not is_public_address(address):
         raise UnsafeSourceError("source address is not globally routable")
-    sensitive_query = re.compile(r"(token|key|secret|password|signature|auth)", re.I)
     if any(
-        sensitive_query.search(key) for key, _ in parse_qsl(parsed.query, keep_blank_values=True)
+        _credential_parameter(key) for key, _ in parse_qsl(parsed.query, keep_blank_values=True)
     ):
         raise UnsafeSourceError("source URL query cannot contain credential-like parameters")
     netloc = f"[{host}]" if ":" in host else host
@@ -339,7 +375,9 @@ class SafeWebReader:
             trust_env=False,
             transport=PublicDNSAsyncHTTPTransport(
                 max_connections=8,
-                resolver=self._resolver,
+                # The transport's default resolver propagates its actual connect
+                # budget to the killable DNS helper, without an extra 30s wrapper.
+                resolver=resolver,
             ),
         )
         self._verify_peer_address = verify_peer_address
@@ -504,11 +542,15 @@ class SafeWebReader:
             return peer
         return None
 
-    @staticmethod
-    async def _default_resolver(host: str, port: int) -> Sequence[str]:
+    async def _default_resolver(self, host: str, port: int) -> Sequence[str]:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.total_timeout_seconds
         return cast(
             Sequence[str],
-            await _call_sync_resolver_async(public_addresses, host, port, timeout=30.0),
+            await _call_sync_resolver_async(
+                lambda: public_addresses(host, port, timeout=max(0.0, deadline - loop.time())),
+                timeout=self.total_timeout_seconds,
+            ),
         )
 
     @staticmethod

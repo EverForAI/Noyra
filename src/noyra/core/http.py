@@ -597,11 +597,15 @@ class _PublicDNSAsyncBackend(httpcore.AsyncNetworkBackend):
                     addresses = validate_public_addresses(await self._resolver(host, port))
                 deadline = None
             else:
-                deadline = asyncio.get_running_loop().time() + max(0.0, timeout)
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + max(0.0, timeout)
+                dns_deadline = deadline
                 async with asyncio.timeout(max(0.0, timeout)):
                     if self._resolver is None:
                         addresses = await _call_sync_resolver_async(
-                            lambda: public_addresses(host, port, timeout=max(0.0, timeout)),
+                            lambda: public_addresses(
+                                host, port, timeout=max(0.0, dns_deadline - loop.time())
+                            ),
                             timeout=max(0.0, timeout),
                         )
                     else:
