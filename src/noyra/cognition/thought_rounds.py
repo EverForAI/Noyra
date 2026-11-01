@@ -19,6 +19,8 @@ from noyra.model.ledger import ModelLedger
 from noyra.model.request_identity import UNRUNNABLE_BUSINESS_CALL_SQL, logical_key_from_route
 from noyra.model.types import CallRecord
 
+from .decision_evidence import append_rejection
+
 
 class ThoughtRounds:
     def __init__(self, database: Database, subject_id: str):
@@ -173,7 +175,14 @@ class ThoughtRounds:
         )
 
     def close(
-        self, agenda_id: str, number: int, reason: str, closed_at: str, retry_after: str
+        self,
+        agenda_id: str,
+        number: int,
+        reason: str,
+        closed_at: str,
+        retry_after: str,
+        *,
+        receipt: dict[str, Any] | None = None,
     ) -> bool:
         with self.database.transaction() as connection:
             current, _ = self._current(connection, agenda_id)
@@ -201,6 +210,8 @@ class ThoughtRounds:
                 (*payload.values(), content_hash(payload)),
             )
             self.cancel_waits(connection, agenda_id, number, closed_at)
+            if receipt is not None:
+                append_rejection(connection, self.database, self.subject_id, receipt, closed_at)
             return True
 
     def cancel_waits(self, connection: Any, agenda_id: str, number: int, now: str) -> None:
