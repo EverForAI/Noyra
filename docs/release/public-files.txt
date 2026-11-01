@@ -486,6 +486,7 @@ src/noyra/cognition/projects.py
 src/noyra/cognition/recovery.py
 src/noyra/cognition/reflection.py
 src/noyra/cognition/research.py
+src/noyra/cognition/research_reading.py
 src/noyra/cognition/self_model.py
 src/noyra/cognition/self_modification.py
 src/noyra/cognition/settings.py
@@ -706,6 +707,7 @@ src/noyra/monitoring.py
 src/noyra/py.typed
 src/noyra/research/__init__.py
 src/noyra/research/browser.py
+src/noyra/research/exploration.py
 src/noyra/research/provider.py
 src/noyra/research/routing.py
 src/noyra/research/search.py

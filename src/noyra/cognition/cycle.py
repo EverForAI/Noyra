@@ -214,6 +214,7 @@ class CognitionCycle:
             gateway,
             self.settings,
             secret_dir=kernel.database.path.parent / "secrets" / "search",
+            reader=self.reader,
             clock=clock,
         )
         self.outcome_evaluator = OutcomeEvaluator(

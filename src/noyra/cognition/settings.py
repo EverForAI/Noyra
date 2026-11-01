@@ -68,6 +68,7 @@ class CognitionSettings(BaseModel):
     max_search_results_per_round: int = Field(default=8, ge=1, le=20)
     max_discovered_sources_per_run: int = Field(default=4, ge=1, le=12)
     max_browser_searches_per_hour: int = Field(default=12, ge=1, le=100)
+    max_research_reads_per_run: int = Field(default=4, ge=1, le=12)
     outcome_evaluation_interval_seconds: float = Field(default=60, ge=0, le=86_400)
     max_goal_progress_delta_per_outcome: float = Field(default=0.05, ge=0.001, le=0.1)
     max_epistemic_review_model_calls_per_day: int = Field(default=4, ge=1, le=24)
@@ -205,6 +206,9 @@ class CognitionSettings(BaseModel):
                     ),
                     "max_browser_searches_per_hour": os.getenv(
                         "NOYRA_MAX_BROWSER_SEARCHES_PER_HOUR", "12"
+                    ),
+                    "max_research_reads_per_run": os.getenv(
+                        "NOYRA_MAX_RESEARCH_READS_PER_RUN", "4"
                     ),
                     "outcome_evaluation_interval_seconds": os.getenv(
                         "NOYRA_OUTCOME_EVALUATION_INTERVAL_SECONDS", "60"

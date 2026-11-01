@@ -241,6 +241,7 @@ class ToolRunner:
                 document = await reader.fetch(source, before_send=authorize)
             authorize()
             observation = None
+            observation_created = False
             if candidate_trial:
                 if not document.content.strip():
                     raise ValueError("candidate trial returned no readable content")
@@ -248,7 +249,7 @@ class ToolRunner:
                     raise ValueError("candidate trial exceeds the observation budget")
                 # Commit evidence before settling the read. A restart can reuse
                 # this observation; search snippets never enter this path.
-                observation, _ = ObservationStore(self.database).ingest(
+                observation, observation_created = ObservationStore(self.database).ingest(
                     subject_id,
                     source.source_id,
                     document,
@@ -285,6 +286,7 @@ class ToolRunner:
         result_payload: dict[str, object] = dict(evidence)
         if candidate_trial:
             result_payload["links"] = list(document.links)
+            result_payload["observation_created"] = observation_created
         byte_count = len(document.content.encode("utf-8"))
         with accounting_scope():
             finished = self.actions.finish(

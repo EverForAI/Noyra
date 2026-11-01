@@ -451,8 +451,7 @@ class MetacognitiveControl:
                     ),
                     uncertainty,
                     self._recent_failure_risk("research"),
-                    authorized_source is not None
-                    and self._interval_due(
+                    self._interval_due(
                         last_times["research"], self.settings.research_interval_seconds
                     ),
                 )

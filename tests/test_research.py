@@ -14,6 +14,7 @@ from unittest.mock import patch
 import httpx
 from pydantic import SecretStr
 
+from noyra.capability import CapabilityGrant, CapabilityStore
 from noyra.cognition import AutonomousResearch, CognitionSettings
 from noyra.core import EventStore, RuntimeLogExporter, SubjectKernel
 from noyra.core.errors import IntegrityError
@@ -29,6 +30,7 @@ from noyra.model import (
     ProviderResponse,
     RetryPolicy,
 )
+from noyra.model.types import CompletionRequest
 from noyra.research import (
     BrowserSearchExecutor,
     ResearchPlanProposal,
@@ -37,7 +39,19 @@ from noyra.research import (
     SearchProviderStore,
     set_search_routing_mode,
 )
-from noyra.world import SourceRegistry
+from noyra.world import SafeWebReader, SourceRegistry
+
+
+class SearchFixtureProvider(FakeProvider):
+    """Search scenarios deliberately retain all read pages as one-off evidence."""
+
+    async def complete(self, request: CompletionRequest) -> ProviderResponse:
+        if request.schema_name == "ReadingChoice":
+            self.requests.append(request)
+            return ProviderResponse(
+                content='{"sources":[],"follow_links":[]}', usage=ModelUsage(100, 30)
+            )
+        return await super().complete(request)
 
 
 class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
@@ -94,8 +108,36 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
             self.kernel.database,
             client=self.browser_client,
         )
+        CapabilityStore(self.kernel.database).grant(
+            self.subject_id,
+            CapabilityGrant(
+                capability_type="web_read",
+                scope={"public_https": True},
+                issuer="fixture",
+                rate_limit_per_hour=100,
+                side_effect=False,
+            ),
+            actor="operator",
+        )
+        self.read_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "text/plain"},
+                    text=f"Actual fixture evidence from {request.url}",
+                )
+            )
+        )
+
+        async def resolver(host: str, port: int) -> list[str]:
+            return ["8.8.8.8"]
+
+        self.reader = SafeWebReader(
+            client=self.read_client, resolver=resolver, verify_peer_address=False
+        )
 
     async def asyncTearDown(self: Self) -> None:
+        await self.read_client.aclose()
         await self.browser_client.aclose()
         await self.client.aclose()
         self.kernel.close()
@@ -193,6 +235,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
             secret_dir=self.root / "secrets" / "search",
             search_executor=self.executor,
             browser_search_executor=self.browser_executor,
+            reader=self.reader,
         )
 
     def plan(
@@ -216,7 +259,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_search_routing_mode_selects_configured_preference(self: Self) -> None:
-        research = self.research(FakeProvider([]))
+        research = self.research(SearchFixtureProvider([]))
         set_search_routing_mode(
             self.kernel.database,
             self.subject_id,
@@ -226,7 +269,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(research._routing_mode(), "api_first")
 
     def test_search_routing_rejects_tampered_persistent_mode(self: Self) -> None:
-        research = self.research(FakeProvider([]))
+        research = self.research(SearchFixtureProvider([]))
         with self.kernel.database.transaction() as connection:
             connection.execute(
                 "INSERT INTO search_routing_settings(subject_id, mode, state_hash, updated_at) "
@@ -242,7 +285,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
             SearchProviderInput(provider_type="brave", label="routing", api_key="routing-secret"),
             actor="operator",
         )
-        research = self.research(FakeProvider([]))
+        research = self.research(SearchFixtureProvider([]))
         for mode, expected_method, expected_provider in (
             ("model_first", "model", None),
             ("api_first", "api", config.config_id),
@@ -294,7 +337,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
             ),
             actor="operator",
         )
-        provider = FakeProvider(
+        provider = SearchFixtureProvider(
             [
                 ProviderResponse(
                     content=self.plan(config_id=config.config_id), usage=ModelUsage(700, 220)
@@ -373,7 +416,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
                 ]
             }
         )
-        provider = FakeProvider(
+        provider = SearchFixtureProvider(
             [
                 ProviderResponse(content=self.plan(method="model"), usage=ModelUsage(700, 220)),
                 ProviderResponse(content=model_results, usage=ModelUsage(650, 200)),
@@ -390,17 +433,22 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
                 connection.execute("SELECT COUNT(*) FROM search_provider_configs").fetchone()[0],
                 0,
             )
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM actions").fetchone()[0], 0)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM actions WHERE action_type = 'search'"
+                ).fetchone()[0],
+                0,
+            )
 
     async def test_browser_search_uses_public_search_surface_without_model_fallback(
         self: Self,
     ) -> None:
-        provider = FakeProvider(
+        provider = SearchFixtureProvider(
             [ProviderResponse(content=self.plan(method="browser"), usage=ModelUsage(700, 220))]
         )
         research = self.research(provider)
         self.assertEqual(await research.run_due(), "research_accepted")
-        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(len(provider.requests), 2)
         record = research.latest()
         assert record is not None
         self.assertEqual(record.initial_method, "browser")
@@ -497,7 +545,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
                 ]
             }
         )
-        provider = FakeProvider(
+        provider = SearchFixtureProvider(
             [
                 ProviderResponse(
                     content=self.plan(config_id=config.config_id), usage=ModelUsage(700, 220)
@@ -512,7 +560,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         assert record is not None
         self.assertEqual(record.initial_method, "api")
         self.assertEqual(record.final_method, "model")
-        self.assertEqual(len(provider.requests), 3)
+        self.assertEqual(len(provider.requests), 5)
 
     async def test_operator_can_revoke_search_resource_and_secret(self: Self) -> None:
         config = self.provider_store.configure(
@@ -557,7 +605,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
                 "search_provider_secrets": 1,
             },
         )
-        self.assertEqual(self.research(FakeProvider([])).verify_integrity(), 0)
+        self.assertEqual(self.research(SearchFixtureProvider([])).verify_integrity(), 0)
 
         with self.kernel.database.transaction() as connection:
             row = connection.execute(
@@ -569,7 +617,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
                 (row["extras_json"].encode("utf-8"), config.config_id),
             )
         with self.assertRaises(IntegrityError):
-            self.research(FakeProvider([])).verify_integrity()
+            self.research(SearchFixtureProvider([])).verify_integrity()
 
     async def test_search_provider_integrity_rejects_secret_fingerprint_mismatch(
         self: Self,
@@ -893,7 +941,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_forged_goal_provider_or_evidence_is_rejected(self: Self) -> None:
         research = self.research(
-            FakeProvider(
+            SearchFixtureProvider(
                 [
                     ProviderResponse(
                         content=self.plan(method="model").replace(self.goal.goal_id, "goal_forged"),
@@ -942,33 +990,33 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
             reason="human proposal",
         )
         self.assertEqual(candidate.status, "proposed")
-        provider = FakeProvider(
+        provider = SearchFixtureProvider(
             [
                 ProviderResponse(content=self.plan(method="model"), usage=ModelUsage(500, 150)),
                 ProviderResponse(content='{"results":[]}', usage=ModelUsage(300, 80)),
             ]
         )
         research = self.research(provider)
-        self.assertEqual(await research.run_due(), "research_no_results")
+        self.assertEqual(await research.run_due(), "research_accepted")
         context = provider.requests[0].messages[1].content
         self.assertNotIn(candidate.goal_id, context)
 
     async def test_duplicate_query_for_same_goal_and_day_is_rejected(self: Self) -> None:
         first = self.research(
-            FakeProvider(
+            SearchFixtureProvider(
                 [
                     ProviderResponse(content=self.plan(method="model"), usage=ModelUsage(500, 150)),
                     ProviderResponse(content='{"results":[]}', usage=ModelUsage(300, 80)),
                 ]
             )
         )
-        self.assertEqual(await first.run_due(), "research_no_results")
+        self.assertEqual(await first.run_due(), "research_accepted")
         current = datetime.fromisoformat(first.latest().created_at) + timedelta(seconds=61)  # type: ignore[union-attr]
         second = AutonomousResearch(
             self.kernel.database,
             self.subject_id,
             self.gateway(
-                FakeProvider(
+                SearchFixtureProvider(
                     [
                         ProviderResponse(
                             content=self.plan(method="model"), usage=ModelUsage(500, 150)
@@ -980,6 +1028,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
             secret_dir=self.root / "secrets" / "search",
             search_executor=self.executor,
             browser_search_executor=self.browser_executor,
+            reader=self.reader,
             clock=lambda: current.isoformat(timespec="milliseconds"),
         )
         self.assertEqual(await second.run_due(), "research_rejected")
@@ -1003,7 +1052,9 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
                 "evidence_event_ids": [self.evidence.event_id],
             }
         )
-        provider = FakeProvider([ProviderResponse(content=wait_plan, usage=ModelUsage(400, 120))])
+        provider = SearchFixtureProvider(
+            [ProviderResponse(content=wait_plan, usage=ModelUsage(400, 120))]
+        )
         first = self.research(provider)
         with (
             patch.object(first, "_commit", side_effect=RuntimeError("simulated crash")),
@@ -1025,7 +1076,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
             status="active",
             reason="pre-existing source",
         )
-        provider = FakeProvider(
+        provider = SearchFixtureProvider(
             [
                 ProviderResponse(content=self.plan(method="model"), usage=ModelUsage(500, 150)),
                 ProviderResponse(
@@ -1051,7 +1102,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
         )
         research = self.research(provider)
         self.assertEqual(await research.run_due(), "research_accepted")
-        self.assertEqual(len(research.latest().accepted_source_ids), 1)  # type: ignore[union-attr]
+        self.assertEqual(len(research.latest().accepted_source_ids), 2)  # type: ignore[union-attr]
 
     async def test_research_records_and_provider_uses_are_append_only(self: Self) -> None:
         config = self.provider_store.configure(
@@ -1065,7 +1116,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
             actor="operator",
         )
         research = self.research(
-            FakeProvider(
+            SearchFixtureProvider(
                 [
                     ProviderResponse(
                         content=self.plan(config_id=config.config_id), usage=ModelUsage(500, 150)
@@ -1095,7 +1146,7 @@ class ResearchTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_hard_model_budget_becomes_fatigue(self: Self) -> None:
         research = self.research(
-            FakeProvider([]),
+            SearchFixtureProvider([]),
             limits=BudgetLimits(0, 500_000, 100_000, 5_000_000),
         )
         self.assertEqual(await research.run_due(), "research_budget_exhausted")

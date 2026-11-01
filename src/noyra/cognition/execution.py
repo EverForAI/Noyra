@@ -30,6 +30,7 @@ from noyra.core.types import canonical_json, content_hash, new_id, strict_json_l
 from noyra.interaction import InteractionStore
 from noyra.model import ModelLedger, ModelMessage
 from noyra.model.errors import BudgetExhaustedError, ModelCallStateError, ProviderCallError
+from noyra.research.exploration import verify_reading_evidence
 from noyra.world import PredictionStore
 from noyra.world.types import PredictionProposal
 
@@ -976,6 +977,15 @@ class ProjectExecutionLedger:
         }
         if evidence != expected_evidence:
             raise ProjectExecutionValidationError("research acceptance evidence was forged")
+        verify_reading_evidence(
+            connection,
+            execution.subject_id,
+            rounds,
+            accepted,
+            goal_id=row["goal_id"],
+            project_id=execution.project_id,
+            phase_id=execution.phase_id,
+        )
         return ["research_state", "research_sources", "research_model_call"]
 
     def _validate_software_connection(
