@@ -135,7 +135,18 @@ class AutonomousAssistance:
                     choice.disposition,
                 )
                 return "assistance_reply_considered"
-            action, proposal = self.store.action(request)
+            try:
+                action, proposal = self.store.action(request)
+            except ValueError:
+                worker.events.append(
+                    worker.subject_id,
+                    "assistance_publication_rejected",
+                    "subject",
+                    {"request_id": request["request_id"], "reason": "unsafe_public_draft"},
+                    privacy_level="private",
+                    event_id="evt_help_invalid_" + str(request["request_id"]),
+                )
+                continue
             if action.status == "succeeded":
                 continue
             if action.status != "prepared":

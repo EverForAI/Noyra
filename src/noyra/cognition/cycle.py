@@ -67,10 +67,12 @@ from noyra.world.errors import ObservationBudgetError
 from noyra.world.poll import SourcePollStore
 from noyra.world.types import GenesisRunRecord, ObservationRecord
 
+from .assistance import AutonomousAssistance
 from .consciousness import ConsciousnessFrameStore
 from .deliberation import ActionDeliberation
 from .epistemic import EpistemicReview
 from .execution import ProjectPhaseExecutor
+from .expression import AutonomousExpression
 from .governance import GoalGovernance
 from .interaction import InteractionCognition
 from .memory_integration import SemanticMemoryIntegrator
@@ -271,6 +273,10 @@ class CognitionCycle:
             ),
             clock=clock,
         )
+        self.autonomous_expression = AutonomousExpression(
+            kernel.database, self.subject_id, gateway, self.settings, clock=clock
+        )
+        self.autonomous_assistance = AutonomousAssistance(self.autonomous_expression)
         self.metacognitive_control = MetacognitiveControl(
             kernel.database,
             self.subject_id,
@@ -333,6 +339,10 @@ class CognitionCycle:
         self.consciousness.ensure_initial()
         self._sync_configured_sources()
         self._ensure_world_grant()
+        self.autonomous_expression.store.ensure_grants(
+            enabled=self.settings.autonomous_expression_enabled,
+            rate=self.settings.expression_actions_per_hour,
+        )
         self.genesis.start(
             self.subject_id,
             minimum_cycles=self.settings.minimum_genesis_cycles,
@@ -423,10 +433,29 @@ class CognitionCycle:
             evaluated = self.outcome_evaluator.run_due()
             if evaluated is not None:
                 return evaluated
-            alternative = await self._run_metacognitive_strategy()
-            if alternative is not None and alternative != "metacognitive_wait":
+            alternative: str | None
+            if self.settings.autonomous_expression_enabled:
+                self.intrinsic_thought.discover_agenda()
+                alternative = await self.scheduler.run(
+                    self._dispatch_orientation_internal,
+                    active=lambda: self.kernel.lifecycle.current().state == "active",
+                )
+            else:
+                alternative = await self._run_metacognitive_strategy()
+            if alternative is not None and alternative not in {
+                "metacognitive_wait",
+                "world_sources_waiting",
+            }:
                 return alternative
         return result
+
+    async def _dispatch_orientation_internal(self, name: str) -> str | WorkflowOutcome | None:
+        # World orientation still owns its acquisition/evidence path. Only the
+        # shared internal lane is considered here, with the same durable cursor
+        # as normal operation; publishing cannot mark genesis complete.
+        if name == "metacognition":
+            return await self._dispatch_workflow(name)
+        return None
 
     async def _run_world(self, genesis: GenesisRunRecord, *, mode: str = "combined") -> str | None:
         if mode == "acquisition":
@@ -632,7 +661,47 @@ class CognitionCycle:
                 outcome.reason, made_progress=outcome.made_progress, target_id=target
             )
         if name == "metacognition":
-            return await self._run_metacognitive_strategy()
+            target = self.scheduler.next_target(name, ["attention", "expression", "help"])
+            if target == "help":
+                result = await self.autonomous_assistance.run_due()
+                if result is not None:
+                    return WorkflowOutcome(
+                        result,
+                        target_id="help",
+                        made_progress=result
+                        in {"assistance_published", "assistance_reply_considered"},
+                    )
+            if target == "expression":
+                calls_before = self.autonomous_expression._calls_today()
+                result = await self.autonomous_expression.run_due()
+                executed = self.autonomous_expression._calls_today() > calls_before
+                if result is not None and (
+                    executed
+                    or result
+                    not in {
+                        "expression_wait",
+                        "expression_model_wait",
+                        "expression_review_wait",
+                        "expression_authorization_wait",
+                        "expression_waiting_reconciliation",
+                        "expression_budget_exhausted",
+                        "expression_failed",
+                        "expression_review_failed",
+                    }
+                ):
+                    return WorkflowOutcome(
+                        result,
+                        did_execute=executed,
+                        made_progress=result
+                        in {"expression_published", "expression_queued", "expression_withdrawn"},
+                        target_id="expression",
+                    )
+            result = await self._run_metacognitive_strategy()
+            return WorkflowOutcome(
+                result or "metacognitive_wait",
+                target_id=target,
+                made_progress=WorkflowOutcome.legacy(result).made_progress,
+            )
         if name == "interaction":
             return await self.interaction_cognition.run_due()
         if name in {"world_acquisition", "world_cognition"}:

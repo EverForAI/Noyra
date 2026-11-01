@@ -127,6 +127,10 @@ class AutonomousExpressionTestCase(unittest.IsolatedAsyncioTestCase):
         self.now += timedelta(days=1)
         self.assertEqual(await self.worker.run_due(), "expression_published")
         self.assertEqual(len(self.provider.requests), 2)
+        self.assertIsNone(await self.worker.run_due())
+        self.now -= timedelta(hours=1)
+        self.assertIsNone(await self.worker.run_due())
+        self.assertEqual(len(self.provider.requests), 2)
 
     async def test_terminal_receipt_recovers_without_duplicate_publication(self) -> None:
         with (
@@ -236,3 +240,47 @@ class AutonomousExpressionTestCase(unittest.IsolatedAsyncioTestCase):
         self.now += timedelta(seconds=301)
         self.assertEqual(await self.worker.run_due(), "expression_published")
         self.assertEqual(len(self.provider.requests), 2)
+
+    def test_unusually_long_public_metadata_cannot_expand_expression_context(self) -> None:
+        from noyra.core.types import canonical_json
+        from noyra.interaction import TransportInput, TransportStore
+
+        transports = TransportStore(self.db, self.root / "secrets")
+        for index in range(16):
+            transports.configure(
+                self.subject,
+                TransportInput(
+                    channel="webhook",
+                    label=str(index),
+                    endpoint="https://context.example/send",
+                    settings={"recipient": "x" * 10_000},
+                ),
+                actor="operator",
+            )
+        self.worker.settings = self.settings.model_copy(
+            update={"max_expression_context_chars": 8_000}
+        )
+        self.assertLessEqual(len(canonical_json(self.worker._context())), 8_000)
+        self.assertEqual(self.provider.requests, [])
+
+    async def test_no_seed_source_can_publish_via_real_tick_without_skipping_genesis(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from noyra.cognition import CognitionCycle
+
+        cycle = CognitionCycle(
+            self.kernel, self.gateway, self.settings, clock=lambda: self.now.isoformat()
+        )
+        try:
+            with patch.object(
+                cycle,
+                "_run_metacognitive_strategy",
+                new=AsyncMock(return_value="metacognitive_wait"),
+            ):
+                self.assertEqual(await cycle.run_once(), "world_sources_waiting")
+                self.assertEqual(await cycle.run_once(), "expression_published")
+            self.assertEqual(len(PublicArchive(self.db).admin(self.subject)), 1)
+            self.assertEqual(cycle.genesis.start(self.subject).status, "observing")
+            self.assertEqual(cycle.genesis.start(self.subject).completed_cycles, 0)
+        finally:
+            await cycle.aclose()

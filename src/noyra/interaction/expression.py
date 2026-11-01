@@ -313,11 +313,7 @@ class ExpressionStore:
                             "title": proposal.title,
                             "summary": proposal.summary,
                             "body": proposal.body,
-                            "details": {
-                                "status": "subject_help"
-                                if action.idempotency_key.startswith("expression:help:")
-                                else "subject_article"
-                            },
+                            "details": {},
                             "expected_revision": proposal.expected_revision,
                             "confirm_public": True,
                         },

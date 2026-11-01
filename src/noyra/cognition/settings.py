@@ -83,6 +83,7 @@ class CognitionSettings(BaseModel):
     autonomous_expression_enabled: bool = True
     expression_interval_seconds: float = Field(default=21_600, ge=300, le=2_592_000)
     max_expression_model_calls_per_day: int = Field(default=6, ge=1, le=48)
+    max_expression_context_chars: int = Field(default=32_000, ge=8_000, le=150_000)
     expression_actions_per_hour: int = Field(default=4, ge=1, le=100)
     social_review_interval_seconds: float = Field(default=21_600, ge=300, le=2_592_000)
     max_social_model_calls_per_day: int = Field(default=4, ge=1, le=24)
@@ -251,6 +252,9 @@ class CognitionSettings(BaseModel):
                     ),
                     "max_expression_model_calls_per_day": os.getenv(
                         "NOYRA_MAX_EXPRESSION_MODEL_CALLS_PER_DAY", "6"
+                    ),
+                    "max_expression_context_chars": os.getenv(
+                        "NOYRA_MAX_EXPRESSION_CONTEXT_CHARS", "32000"
                     ),
                     "expression_actions_per_hour": os.getenv(
                         "NOYRA_EXPRESSION_ACTIONS_PER_HOUR", "4"

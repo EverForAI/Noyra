@@ -79,7 +79,7 @@ class AssistanceStore:
     def public(self) -> list[dict[str, Any]]:
         with self.database.connection() as connection:
             rows = connection.execute(
-                "SELECT r.request_id,p.publication_id,p.title,p.summary,p.body,p.published_at "
+                "SELECT r.request_id,p.* "
                 "FROM autonomous_project_assistance_requests r JOIN actions a ON "
                 "a.subject_id=r.subject_id "
                 "AND a.idempotency_key='expression:help:'||r.request_id AND a.status='succeeded' "
@@ -89,7 +89,26 @@ class AssistanceStore:
                 "ORDER BY r.created_at,r.request_id LIMIT 50",
                 (self.subject,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        from .public_archive import PublicArchive
+
+        result = []
+        for row in rows:
+            with self.database.connection() as connection:
+                publication = {
+                    key: value for key, value in dict(row).items() if key != "request_id"
+                }
+                item = PublicArchive._publication(publication, connection=connection)
+            result.append(
+                {
+                    "request_id": row["request_id"],
+                    "publication_id": item["id"],
+                    "title": item["title"],
+                    "summary": item["summary"],
+                    "body": item["body"],
+                    "published_at": item["occurred_at"],
+                }
+            )
+        return result
 
     def link_reply(
         self, connection: Any, request_id: str, interaction_id: str, entity_id: str
@@ -106,6 +125,15 @@ class AssistanceStore:
         ).fetchone()
         if row is None:
             raise PermissionError("public assistance request unavailable")
+        source = connection.execute(
+            "SELECT 1 FROM participant_message_links p JOIN interactions i "
+            "ON i.interaction_id=p.interaction_id AND i.subject_id=p.subject_id "
+            "WHERE p.subject_id=? AND p.interaction_id=? AND p.entity_id=? "
+            "AND p.visibility='private' AND i.direction='incoming'",
+            (self.subject, interaction_id, entity_id),
+        ).fetchone()
+        if source is None:
+            raise PermissionError("help reply participant ownership mismatch")
         payload = {
             "request_id": request_id,
             "interaction_id": interaction_id,
@@ -159,7 +187,7 @@ class AssistanceStore:
                 (self.subject, request_id),
             ).fetchone()
             message = connection.execute(
-                "SELECT i.status,p.visibility FROM interactions i "
+                "SELECT i.status,p.visibility,p.entity_id FROM interactions i "
                 "JOIN participant_message_links p ON p.subject_id=i.subject_id "
                 "AND p.interaction_id=i.interaction_id WHERE i.subject_id=? AND i.interaction_id=?",
                 (self.subject, interaction_id),
@@ -175,6 +203,7 @@ class AssistanceStore:
             payload = EventStore(self.database).payload_from_row(link, connection=connection)
             if (
                 payload.get("request_id") != request_id
+                or payload.get("entity_id") != message["entity_id"]
                 or payload.get("interaction_id") != interaction_id
                 or content_hash(payload) != link["payload_hash"]
             ):

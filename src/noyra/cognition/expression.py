@@ -132,7 +132,7 @@ class AutonomousExpression:
                 {
                     "observation_id": observation.observation_id,
                     "url": observation.canonical_url,
-                    "title": observation.title,
+                    "title": None if observation.title is None else observation.title[:512],
                     "excerpt": observation.content[:2_000],
                 }
             )
@@ -147,7 +147,14 @@ class AutonomousExpression:
                         "transport_id": row["transport_id"],
                         "channel": row["channel"],
                         "label": row["label"],
-                        "configured_recipient": config.get("recipient") or config.get("to"),
+                        "configured_recipient": next(
+                            (
+                                config[key]
+                                for key in ("recipient", "chat_id", "target", "to")
+                                if config.get(key)
+                            ),
+                            None,
+                        ),
                         "optional_allowed_recipients": config.get("allowed_recipients"),
                     }
                 )
@@ -161,6 +168,14 @@ class AutonomousExpression:
         # revision precondition still binds the actual durable document.
         for item in context["own_publications"]:
             item["body"] = item["body"][:1_000]
+        while len(canonical_json(context)) > self.settings.max_expression_context_chars:
+            longest = max(
+                ("public_observations", "own_publications", "available_transports"),
+                key=lambda key: len(canonical_json(context[key])),
+            )
+            if not context[longest]:
+                raise ValueError("expression context cannot fit its budget")
+            context[longest].pop()
         return context
 
     def _valid(self, proposal: ExpressionProposal, context: dict[str, Any]) -> None:
@@ -185,6 +200,7 @@ class AutonomousExpression:
             {"planner_call_id": planner_id, "status": status, "action_id": action_id},
             privacy_level="private",
             event_id="evt_expression_done_" + content_hash(planner_id),
+            occurred_at=self.clock(),
         )
 
     async def run_due(self) -> str | None:
@@ -315,6 +331,7 @@ class AutonomousExpression:
                 },
                 privacy_level="private",
                 event_id="evt_expression_draft_" + content_hash(action.action_id),
+                occurred_at=self.clock(),
             )
         assert proposal is not None and planner_id is not None and action is not None
         purpose = "expression_review:" + action.action_id

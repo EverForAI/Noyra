@@ -146,7 +146,10 @@ class ExplorationChainTestCase(unittest.IsolatedAsyncioTestCase):
         self.kernel.activate()
         self.database = self.kernel.database
         self.settings = CognitionSettings(
-            enabled=True, max_search_rounds_per_run=1, max_research_model_calls_per_day=8
+            enabled=True,
+            autonomous_expression_enabled=False,
+            max_search_rounds_per_run=1,
+            max_research_model_calls_per_day=8,
         )
         self.provider = ChainProvider()
         self.gateway = ModelGateway(

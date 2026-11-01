@@ -347,7 +347,8 @@ class MetacognitiveControl:
             ).fetchone()
             relationship = connection.execute(
                 "SELECT relationship_id, trust, affinity, conflict, familiarity "
-                "FROM relationships WHERE subject_id = ? AND entity_type = 'human' "
+                "FROM relationships WHERE subject_id = ? "
+                "AND entity_type IN ('human','agent','entity') "
                 "ORDER BY MAX(affinity, conflict) DESC, familiarity DESC LIMIT 1",
                 (self.subject_id,),
             ).fetchone()

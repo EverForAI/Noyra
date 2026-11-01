@@ -33,7 +33,7 @@ from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.core.xml import parse_untrusted_xml
 
-from .participants import source_namespace
+from .participants import ParticipantStore, source_namespace
 from .store import InteractionStore
 
 InboundChannel = Literal["telegram", "qq", "feishu", "wechat", "email", "webhook"]
@@ -1470,6 +1470,42 @@ class InboundStore:
                 envelope,
                 now,
             )
+        parent_id = None
+        from .transport import TransportStore
+
+        inbound_settings = TransportStore._config(transport)
+        if (
+            envelope.thread_id is not None
+            and envelope.channel in {"email", "webhook"}
+            and inbound_settings.get("account_id") == envelope.external_account_id
+            and (
+                envelope.channel == "email"
+                or envelope.external_sender_id == envelope.conversation_id
+            )
+        ):
+            recipient = (
+                envelope.external_sender_id
+                if envelope.channel == "email"
+                else envelope.conversation_id
+            )
+            with self.database.connection() as connection:
+                parents = connection.execute(
+                    "SELECT i.interaction_id FROM interaction_deliveries d "
+                    "JOIN interactions i ON i.interaction_id=d.interaction_id "
+                    "AND i.subject_id=d.subject_id "
+                    "WHERE d.subject_id=? AND d.transport_id=? AND d.provider_message_id=? "
+                    "AND d.status IN ('delivered','unknown') AND i.channel=? AND i.counterparty=? "
+                    "AND i.idempotency_key LIKE 'expression-message:%' LIMIT 2",
+                    (
+                        subject_id,
+                        envelope.transport_id,
+                        envelope.thread_id,
+                        envelope.channel,
+                        recipient,
+                    ),
+                ).fetchall()
+            if len(parents) == 1:
+                parent_id = str(parents[0][0])
         try:
             interaction = self.interactions.receive(
                 subject_id,
@@ -1480,6 +1516,8 @@ class InboundStore:
                     else envelope.conversation_id
                 ),
                 envelope.content,
+                related_interaction_id=parent_id,
+                participant_private=parent_id is not None,
                 participant_source=(
                     source_namespace(
                         envelope.channel, envelope.transport_id, envelope.external_account_id
@@ -1534,6 +1572,19 @@ class InboundStore:
                         )
             raise
         with self.database.transaction() as connection:
+            if parent_id is not None:
+                who = ParticipantStore.for_message_connection(
+                    connection, subject_id, interaction.interaction_id
+                )
+                link = connection.execute(
+                    "SELECT conversation_key FROM participant_message_links "
+                    "WHERE subject_id=? AND interaction_id=?",
+                    (subject_id, interaction.interaction_id),
+                ).fetchone()
+                if who is not None and link is not None:
+                    ParticipantStore.link(
+                        connection, subject_id, parent_id, who, str(link[0]), private=True
+                    )
             processed = connection.execute(
                 "UPDATE interaction_inbound_events SET status = 'processed', "
                 "processed_at = ?, interaction_id = ? "

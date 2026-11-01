@@ -1297,11 +1297,26 @@ class DeliveryDispatcher:
                     and interaction["channel"] == "web"
                     and interaction["kind"] == "help_request"
                 ):
-                    transport = connection.execute(
-                        "SELECT * FROM interaction_transports WHERE subject_id = ? "
-                        "AND status = 'active' ORDER BY channel, label LIMIT 1",
+                    choices = connection.execute(
+                        "SELECT * FROM interaction_transports WHERE subject_id=? "
+                        "AND status='active' ORDER BY channel,label LIMIT 100",
                         (subject_id,),
-                    ).fetchone()
+                    ).fetchall()
+                    # A configured sending identity alone does not identify
+                    # the founder/help recipient. Keep the request available
+                    # on-site until a destination has actually been configured.
+                    transport = next(
+                        (
+                            candidate
+                            for candidate in choices
+                            if any(
+                                isinstance(TransportStore._config(candidate).get(key), (str, int))
+                                and str(TransportStore._config(candidate)[key]).strip()
+                                for key in ("recipient", "chat_id", "target", "to")
+                            )
+                        ),
+                        None,
+                    )
                 elif transport is None:
                     transport = connection.execute(
                         "SELECT * FROM interaction_transports WHERE subject_id = ? AND channel = ? "

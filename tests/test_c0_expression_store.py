@@ -406,3 +406,202 @@ class ExpressionStoreTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(PublicArchive(self.db).admin(self.subject)), 1)
         self.assertEqual(self.store.execute(action, proposal, review_call_id=review), receipt)
         self.assertEqual(self.store.verify_integrity(), 1)
+
+    async def test_authenticated_reply_returns_to_exact_proactive_message(self) -> None:
+        from noyra.interaction import InboundEnvelope, InboundStore
+        from noyra.interaction.participants import ParticipantStore
+
+        transport = self.transports.configure(
+            self.subject,
+            TransportInput(
+                channel="webhook",
+                label="conversation",
+                endpoint="https://conversation.example/send",
+                settings={"account_id": "dedicated-account"},
+            ),
+            actor="operator",
+        )
+        self.store.ensure_grants(enabled=True, rate=20)
+        proposal = ExpressionProposal(
+            operation="message",
+            body="A public question for you.",
+            recipient="correspondent",
+            transport_id=transport.transport_id,
+            reason="Discussion",
+        )
+        action = self.prepare(proposal)
+        sent = self.store.execute(action, proposal, review_call_id=await self.review(action))
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json={"ok": True, "message_id": "remote-c0"})
+            )
+        ) as client:
+            dispatcher = DeliveryDispatcher(self.db, self.transports, client=client)
+            self.assertEqual(
+                (await dispatcher.deliver_pending(self.subject))[0].status, "delivered"
+            )
+            await dispatcher.aclose()
+        inbound = InboundStore(self.db)
+        reply = inbound.ingest(
+            InboundEnvelope(
+                channel="webhook",
+                transport_id=transport.transport_id,
+                provider_event_id="response-one",
+                external_account_id="dedicated-account",
+                external_sender_id="correspondent",
+                conversation_id="correspondent",
+                thread_id="remote-c0",
+                content="Here is a suggestion for your question.",
+            )
+        )
+        with self.db.connection() as connection:
+            linked = connection.execute(
+                "SELECT related_interaction_id FROM interactions WHERE interaction_id=?",
+                (reply.interaction_id,),
+            ).fetchone()[0]
+        self.assertEqual(linked, sent["interaction_id"])
+        history = ParticipantStore(self.db).history(self.subject, reply.interaction_id)
+        self.assertEqual([item["content"] for item in history], [proposal.body])
+        wrong = inbound.ingest(
+            InboundEnvelope(
+                channel="webhook",
+                transport_id=transport.transport_id,
+                provider_event_id="wrong-recipient",
+                external_account_id="dedicated-account",
+                external_sender_id="someone-else",
+                conversation_id="someone-else",
+                thread_id="remote-c0",
+                content="Guessing another thread should reveal nothing.",
+            )
+        )
+        with self.db.connection() as connection:
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT related_interaction_id FROM interactions WHERE interaction_id=?",
+                    (wrong.interaction_id,),
+                ).fetchone()[0]
+            )
+        self.assertEqual(ParticipantStore(self.db).history(self.subject, wrong.interaction_id), [])
+
+    async def test_help_is_not_sent_to_an_arbitrary_configured_account(self) -> None:
+        from noyra.interaction import InteractionStore
+
+        unrelated = self.transports.configure(
+            self.subject,
+            TransportInput(
+                channel="webhook", label="unrelated", endpoint="https://unrelated.example/send"
+            ),
+            actor="operator",
+        )
+        InteractionStore(self.db).send(
+            self.subject,
+            "web",
+            "web-user",
+            "Please help with a public question.",
+            kind="help_request",
+            idempotency_key="no-help-recipient",
+        )
+        calls: list[str] = []
+
+        async def response(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            return httpx.Response(200, json={"ok": True})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
+            dispatcher = DeliveryDispatcher(self.db, self.transports, client=client)
+            self.assertEqual(await dispatcher.deliver_pending(self.subject), [])
+            self.assertEqual(calls, [])
+            configured = self.transports.configure(
+                self.subject,
+                TransportInput(
+                    channel="webhook",
+                    label="creator",
+                    endpoint="https://creator.example/send",
+                    settings={"recipient": "creator"},
+                ),
+                actor="operator",
+            )
+            results = await dispatcher.deliver_pending(self.subject)
+            self.assertEqual(results[0].transport_id, configured.transport_id)
+            self.assertNotEqual(results[0].transport_id, unrelated.transport_id)
+            self.assertEqual(calls, ["https://creator.example/send"])
+            await dispatcher.aclose()
+
+    async def test_operator_revision_preserves_original_subject_author_on_response_and_read(
+        self,
+    ) -> None:
+        proposal = self.article()
+        action = self.prepare(proposal)
+        receipt = self.store.execute(action, proposal, review_call_id=await self.review(action))
+        archive = PublicArchive(self.db)
+        edited = archive.publish(
+            self.subject,
+            {
+                "publication_id": receipt["publication_id"],
+                "kind": "update",
+                "title": proposal.title,
+                "summary": proposal.summary,
+                "body": "An operator revision.",
+                "details": {},
+                "expected_revision": 1,
+                "confirm_public": True,
+            },
+            actor="operator",
+        )
+        self.assertEqual(edited["provenance"], "subject")
+        reread = archive.admin_item(self.subject, receipt["publication_id"])
+        assert reread is not None
+        self.assertEqual(edited["provenance"], reread["provenance"])
+
+    async def test_runtime_lease_invalidation_prevents_local_publication(self) -> None:
+        from noyra.core.admission import OperationInvalidated, bind_lease
+
+        proposal = self.article()
+        action = self.prepare(proposal)
+        review = await self.review(action)
+        lease = self.kernel.admission.begin("expression-test")
+
+        def invalidate() -> None:
+            self.kernel.admission.invalidate()
+
+        try:
+            with bind_lease(lease), self.assertRaises(OperationInvalidated):
+                self.store.execute(
+                    action,
+                    proposal,
+                    review_call_id=review,
+                    before_commit=invalidate,
+                )
+        finally:
+            self.kernel.admission.finish(lease)
+        self.assertEqual(PublicArchive(self.db).admin(self.subject), [])
+
+    async def test_subject_publication_and_self_review_survive_reopen_and_private_export(
+        self,
+    ) -> None:
+        from io import BytesIO
+        from zipfile import ZipFile
+
+        from noyra.core import Database, RuntimeLogExporter
+
+        proposal = self.article()
+        action = self.prepare(proposal)
+        self.store.execute(action, proposal, review_call_id=await self.review(action))
+        reopened = Database(self.db.path, initialize=False)
+        self.assertEqual(ExpressionStore(reopened, self.subject).verify_integrity(), 1)
+        artifact = RuntimeLogExporter(reopened).export(self.subject, actor="operator")
+        with ZipFile(BytesIO(artifact.content)) as archive:
+            publications = [
+                json.loads(line)
+                for line in archive.read("tables/public_publications.jsonl").splitlines()
+            ]
+            revisions = [
+                json.loads(line)
+                for line in archive.read("tables/public_publication_revisions.jsonl").splitlines()
+            ]
+            actions = [
+                json.loads(line) for line in archive.read("tables/actions.jsonl").splitlines()
+            ]
+        self.assertEqual(len(publications), 1)
+        self.assertEqual(revisions[0]["actor"], "subject")
+        self.assertEqual(actions[0]["action_id"], action)

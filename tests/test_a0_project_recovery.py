@@ -335,6 +335,10 @@ def make_cycle(
         "interaction_cognition",
     ):
         setattr(cycle, name, Mock(run_due=AsyncMock(return_value=None)))
+    cycle.autonomous_expression = Mock(
+        run_due=AsyncMock(return_value=None), _calls_today=Mock(return_value=0)
+    )
+    cycle.autonomous_assistance = Mock(run_due=AsyncMock(return_value=None))
     cycle.autonomous_projects = manager
     cycle.project_executor = executor
     cycle.clock = lambda: case.clock_value

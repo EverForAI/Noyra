@@ -250,7 +250,7 @@
                     `<p>${t("需要帮助的项目会出现在这里。选择感兴趣的事，看看成果要求，再决定是否参与。", "Projects needing help appear here. Explore the criteria and decide whether you would like to take part.")}</p>` +
                     (data.items.length
                         ? `<div id="participant-opportunities">${data.items.map(opportunity).join("")}</div>${data.next_cursor ? `<button data-more="opportunities" data-cursor="${escape(data.next_cursor)}">${t("更多协作", "More collaborations")}</button>` : ""}`
-                        : `<div class="empty-state"><strong>${t("暂时没有开放的协作", "No open collaborations right now")}</strong><p>${t("可以先读读项目进展，或留下你的想法。", "Explore the projects or leave a thought in the meantime.")}</p><a href="#projects">${t("看看项目 ↗", "Explore projects ↗")}</a></div>`);
+                        : (data.help_requests || []).length ? "" : `<div class="empty-state"><strong>${t("暂时没有开放的协作", "No open collaborations right now")}</strong><p>${t("可以先读读项目进展，或留下你的想法。", "Explore the projects or leave a thought in the meantime.")}</p><a href="#projects">${t("看看项目 ↗", "Explore projects ↗")}</a></div>`);
             } else if (!identity)
                 body = `<div class="empty-state"><h3>${t("先认识一下你", "Let us know who you are")}</h3><p>${t("登录后，这里会保存属于你的交流和协作记录。", "Sign in to see your own conversations and contributions.")}</p><a href="#account">${t("登录或注册 ↗", "Sign in or create an account ↗")}</a></div>`;
             else if (view === "messages") {

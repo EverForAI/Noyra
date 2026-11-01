@@ -168,6 +168,7 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
     def settings(self: Self) -> CognitionSettings:
         return CognitionSettings(
             enabled=True,
+            autonomous_expression_enabled=False,
             sources=(
                 WorldSourceConfig(
                     name="Example World Report",
@@ -253,7 +254,11 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await cycle.run_once(), "intrinsic_thought_defer")
         self.assertEqual(len(provider.requests), 1)
         self.assertEqual(cycle.sources.active(self.subject_id), [])
-        grants = [g for g in cycle.capabilities.list(self.subject_id) if g.status == "active"]
+        grants = [
+            g
+            for g in cycle.capabilities.list(self.subject_id)
+            if g.status == "active" and g.capability_type == "web_read"
+        ]
         self.assertEqual([g.scope for g in grants], [{"public_https": True}])
 
     async def test_empty_explicit_host_policy_does_not_enable_public_access(self: Self) -> None:
@@ -264,7 +269,10 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
         cycle = self.cycle(provider, settings=settings)
         self.assertEqual(await cycle.run_once(), "intrinsic_thought_defer")
         self.assertFalse(
-            any(g.status == "active" for g in cycle.capabilities.list(self.subject_id))
+            any(
+                g.status == "active" and g.capability_type == "web_read"
+                for g in cycle.capabilities.list(self.subject_id)
+            )
         )
         self.assertEqual(len(provider.requests), 1)
 
@@ -335,7 +343,8 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
             goal = connection.execute("SELECT * FROM goals").fetchone()
             grant_count = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM capability_grants WHERE status = 'active'"
+                    "SELECT COUNT(*) FROM capability_grants WHERE status = 'active' "
+                    "AND capability_type='web_read'"
                 ).fetchone()[0]
             )
             cycle_count = int(
@@ -892,9 +901,11 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
         ):
             # Waiting is yielding under fair scheduling; test the strategy adapter
             # directly rather than assuming it monopolizes the next whole tick.
-            self.assertEqual(
-                await cycle._dispatch_workflow("metacognition"), "action_deliberation_waited"
-            )
+            from noyra.core.fair_scheduling import WorkflowOutcome
+
+            strategy_result = await cycle._dispatch_workflow("metacognition")
+            assert isinstance(strategy_result, WorkflowOutcome)
+            self.assertEqual(strategy_result.reason, "action_deliberation_waited")
         with (
             patch.object(cycle.outcome_evaluator, "run_due", return_value=None),
             patch.object(cycle.memory_consolidator, "run_due", return_value=None),
@@ -963,9 +974,9 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value="intrinsic_thought_reflect"),
             ) as run_thought,
         ):
-            self.assertEqual(
-                await cycle._dispatch_workflow("metacognition"), "intrinsic_thought_reflect"
-            )
+            thought_result = await cycle._dispatch_workflow("metacognition")
+            assert isinstance(thought_result, WorkflowOutcome)
+            self.assertEqual(thought_result.reason, "intrinsic_thought_reflect")
         run_thought.assert_awaited_once_with(agenda_id="test-agenda")
 
     async def test_supervisor_rejects_forged_causal_targets(self: Self) -> None:
@@ -1024,7 +1035,8 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
                 "SELECT url, status FROM world_sources ORDER BY url"
             ).fetchall()
             grants = connection.execute(
-                "SELECT scope_json, status FROM capability_grants ORDER BY created_at"
+                "SELECT scope_json, status FROM capability_grants WHERE capability_type='web_read' "
+                "ORDER BY created_at"
             ).fetchall()
         self.assertEqual(
             [(row["url"], row["status"]) for row in sources],

@@ -236,6 +236,7 @@ test("free public help renders separately from rewards and accepts a private lin
     await h.api.show("collaborate");
     const html = h.node("#participant-panel").innerHTML;
     assert.match(html, /免费求助/);
+    assert.doesNotMatch(html, /暂时没有开放的协作/);
     assert.match(html, /name="help_request_id" value="projecthelp-one"/);
     assert.match(html, /&lt;script&gt;untrusted&lt;\/script&gt;/);
     assert.doesNotMatch(html, /<script>untrusted/);

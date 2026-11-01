@@ -425,6 +425,10 @@ class PublicArchive:
             if actor == "subject":
                 assert _subject_action is not None and _authorize is not None
                 self._subject_authorize(connection, subject_id, _subject_action, identifier)
+                if kind != "update" or source is not None or bool(details):
+                    raise PermissionError(
+                        "subject expression cannot publish private source summaries"
+                    )
                 _authorize()
             elif details.get("status") in {"subject_article", "subject_help"}:
                 raise ValueError("reserved subject publication status")
@@ -454,7 +458,9 @@ class PublicArchive:
             if old is not None:
                 self._verify(old)
                 if old["status"] == "published" and all(old[k] == v for k, v in content.items()):
-                    return self._publication(old)  # An identical network retry creates no revision.
+                    return self._publication(
+                        old, connection=connection
+                    )  # An identical network retry creates no revision.
                 if old["kind"] != kind or old["source_id"] != source:
                     raise PublicationConflict("publication source cannot change")
             if actor == "subject" and old is not None:
@@ -518,7 +524,14 @@ class PublicArchive:
                 "INSERT INTO public_publication_revisions VALUES(?,?,?,?,?,?)",
                 (identifier, revision + 1, actor, "published", digest, now),
             )
-        return self._publication({**state, "state_hash": digest})
+            origin = connection.execute(
+                "SELECT actor FROM public_publication_revisions "
+                "WHERE publication_id=? AND revision=1",
+                (identifier,),
+            ).fetchone()
+            if origin is None:
+                raise IntegrityError("publication author revision is missing")
+        return self._publication({**state, "state_hash": digest}, author=str(origin[0]))
 
     def withdraw(
         self,
@@ -646,8 +659,20 @@ class PublicArchive:
             raise IntegrityError("public summary integrity mismatch")
 
     @classmethod
-    def _publication(cls, row: Any) -> dict[str, Any]:
+    def _publication(
+        cls, row: Any, *, connection: Any | None = None, author: str | None = None
+    ) -> dict[str, Any]:
         cls._verify(row)
+        if connection is not None:
+            origin = connection.execute(
+                "SELECT actor FROM public_publication_revisions "
+                "WHERE publication_id=? AND revision=1",
+                (row["publication_id"],),
+            ).fetchone()
+            # Legacy public summaries predate subject authorship. A missing
+            # author row never upgrades that content to a subject identity.
+            if origin is not None:
+                author = str(origin[0])
         return {
             "id": row["publication_id"],
             "kind": row["kind"],
@@ -659,12 +684,7 @@ class PublicArchive:
             "revision": row["revision"],
             "occurred_at": row["published_at"],
             "updated_at": row["updated_at"],
-            "provenance": (
-                "subject"
-                if json.loads(row["details_json"]).get("status")
-                in {"subject_article", "subject_help"}
-                else "operator_summary"
-            ),
+            "provenance": "subject" if author == "subject" else "operator_summary",
         }
 
     def admin(self, subject_id: str) -> list[dict[str, Any]]:
@@ -674,7 +694,10 @@ class PublicArchive:
                 "ORDER BY updated_at DESC,publication_id DESC LIMIT 100",
                 (subject_id,),
             )
-            return [{**self._publication(r), "source_id": r["source_id"]} for r in rows]
+            return [
+                {**self._publication(r, connection=connection), "source_id": r["source_id"]}
+                for r in rows
+            ]
 
     def admin_item(self, subject_id: str, identifier: str) -> dict[str, Any] | None:
         identifier = _text(identifier, 100, required=True)
@@ -683,7 +706,14 @@ class PublicArchive:
                 "SELECT * FROM public_publications WHERE subject_id=? AND publication_id=?",
                 (subject_id, identifier),
             ).fetchone()
-        return None if row is None else {**self._publication(row), "source_id": row["source_id"]}
+            return (
+                None
+                if row is None
+                else {
+                    **self._publication(row, connection=connection),
+                    "source_id": row["source_id"],
+                }
+            )
 
     def admin_page(
         self, subject_id: str, *, limit: int = 20, cursor: str | None = None
@@ -710,6 +740,10 @@ class PublicArchive:
                 "ORDER BY updated_at DESC,publication_id DESC LIMIT ?",
                 (*values, limit + 1),
             ).fetchall()
+            items = [
+                {**self._publication(r, connection=connection), "source_id": r["source_id"]}
+                for r in rows[:limit]
+            ]
         page = rows[:limit]
         next_cursor = None
         if len(rows) > limit:
@@ -724,7 +758,7 @@ class PublicArchive:
                 ).encode()
             ).decode()
         return {
-            "items": [{**self._publication(r), "source_id": r["source_id"]} for r in page],
+            "items": items,
             "next_cursor": next_cursor,
         }
 
@@ -1127,7 +1161,7 @@ class PublicArchive:
     @classmethod
     def _item(cls, kind: str, row: Any, *, connection: Any) -> dict[str, Any]:
         if kind in PUBLIC_KINDS:
-            return cls._publication(row)
+            return cls._publication(row, connection=connection)
         details: dict[str, Any] = {}
         status, provenance, title = "published", "subject", ""
         if kind == "diary":

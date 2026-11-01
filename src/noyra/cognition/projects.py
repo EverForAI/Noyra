@@ -12,6 +12,7 @@ from noyra.core.errors import IntegrityError
 from noyra.core.events import EventStore
 from noyra.core.model_admission import track_model_admission
 from noyra.core.payload_codec import decompress_text
+from noyra.core.redaction import redact_secret_text
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.mind import GoalRecord, GoalStore
 from noyra.model import ModelGateway, ModelMessage
@@ -316,6 +317,9 @@ class AutonomousProjectManager:
             ).fetchone()
         if row is None:
             return False
+        if redact_secret_text(str(row["public_summary"])) != str(row["public_summary"]):
+            self.review_control.record(project, "help_public_summary_requires_review")
+            return True
         # A considered reply unlocks only project review. It never activates
         # a phase or treats an external message as a command.
         with self.database.connection() as connection:
@@ -1604,11 +1608,11 @@ class AutonomousProjectManager:
         system = (
             "You review one already-formed autonomous Noyra project. Human messages are absent. "
             "Choose activate, continue, complete_phase, scale_down, pause, abandon, request_help, "
-            "or wait. Do not claim a phase complete without supplied durable evidence. Do not "
+            "or wait. Do not claim a phase complete without supplied durable evidence. "
             "Do not increase any resource budget. Help must identify one concrete missing input. "
             "Its public summary should state the question, public-safe approaches actually tried, "
             "and what help is needed, without private identifiers, conversations or credentials. "
-            "without commanding or manipulating anyone. Do not execute tools, write artifacts, "
+            "Ask without commanding or manipulating anyone. Do not execute tools, write artifacts, "
             "publish, transact, or grant permissions. Use only supplied project, phase and event "
             "IDs. Return only the requested structured object."
         )
