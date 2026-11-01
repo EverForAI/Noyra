@@ -623,6 +623,7 @@ src/noyra/interaction/conversations.py
 src/noyra/interaction/diary.py
 src/noyra/interaction/erasure.py
 src/noyra/interaction/errors.py
+src/noyra/interaction/expression.py
 src/noyra/interaction/inbound.py
 src/noyra/interaction/integrity.py
 src/noyra/interaction/outbound.py
@@ -845,6 +846,7 @@ tests/test_b2_exploration_chain.py
 tests/test_b2_intrinsic_exploration.py
 tests/test_boundary_remediation.py
 tests/test_browser_dispatch_fencing.py
+tests/test_c0_expression_store.py
 tests/test_capability.py
 tests/test_capability_file_races.py
 tests/test_cloud_ci_contract.py

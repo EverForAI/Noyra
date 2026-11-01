@@ -9,8 +9,8 @@ import math
 import re
 import sqlite3
 import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -370,7 +370,16 @@ class PublicArchive:
             raise IntegrityError("invalid sitemap routing metadata")
         return token
 
-    def publish(self, subject_id: str, payload: dict[str, Any], *, actor: str) -> dict[str, Any]:
+    def publish(
+        self,
+        subject_id: str,
+        payload: dict[str, Any],
+        *,
+        actor: str,
+        _connection: Any | None = None,
+        _subject_action: str | None = None,
+        _authorize: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         allowed = {
             "publication_id",
             "kind",
@@ -389,8 +398,8 @@ class PublicArchive:
         ):
             raise ValueError("explicit public confirmation required")
         actor = _text(actor, 512, required=True)
-        if actor == "subject":
-            raise PermissionError("operator public summary required")
+        if actor == "subject" and (_subject_action is None or _authorize is None):
+            raise PermissionError("subject publication requires an authorized expression action")
         identifier = _text(payload.get("publication_id"), 100, required=True)
         if not re.fullmatch(r"[a-zA-Z0-9_-]{8,100}", identifier):
             raise ValueError("invalid publication identifier")
@@ -410,7 +419,15 @@ class PublicArchive:
         body = _text(payload.get("body", ""), 20_000)
         details = _details(kind, payload.get("details", {}))
         now = utc_now()
-        with self.database.transaction() as connection:
+        with (
+            self.database.transaction() if _connection is None else nullcontext(_connection)
+        ) as connection:
+            if actor == "subject":
+                assert _subject_action is not None and _authorize is not None
+                self._subject_authorize(connection, subject_id, _subject_action, identifier)
+                _authorize()
+            elif details.get("status") in {"subject_article", "subject_help"}:
+                raise ValueError("reserved subject publication status")
             old = connection.execute(
                 "SELECT * FROM public_publications WHERE publication_id=?", (identifier,)
             ).fetchone()
@@ -440,6 +457,8 @@ class PublicArchive:
                     return self._publication(old)  # An identical network retry creates no revision.
                 if old["kind"] != kind or old["source_id"] != source:
                     raise PublicationConflict("publication source cannot change")
+            if actor == "subject" and old is not None:
+                self._subject_owned(connection, subject_id, identifier)
             revision = 0 if old is None else int(old["revision"])
             if revision != expected:
                 raise PublicationConflict("publication revision changed")
@@ -501,11 +520,32 @@ class PublicArchive:
             )
         return self._publication({**state, "state_hash": digest})
 
-    def withdraw(self, subject_id: str, identifier: str, expected: int, *, actor: str) -> None:
+    def withdraw(
+        self,
+        subject_id: str,
+        identifier: str,
+        expected: int,
+        *,
+        actor: str,
+        _connection: Any | None = None,
+        _subject_action: str | None = None,
+        _authorize: Callable[[], None] | None = None,
+    ) -> None:
         actor = _text(actor, 512, required=True)
-        if type(expected) is not int or not actor or actor == "subject":
+        if (
+            type(expected) is not int
+            or not actor
+            or (actor == "subject" and (_subject_action is None or _authorize is None))
+        ):
             raise ValueError("operator revision required")
-        with self.database.transaction() as connection:
+        with (
+            self.database.transaction() if _connection is None else nullcontext(_connection)
+        ) as connection:
+            if actor == "subject":
+                assert _subject_action is not None and _authorize is not None
+                self._subject_authorize(connection, subject_id, _subject_action, identifier)
+                self._subject_owned(connection, subject_id, identifier)
+                _authorize()
             row = connection.execute(
                 "SELECT * FROM public_publications WHERE publication_id=? AND subject_id=?",
                 (identifier, subject_id),
@@ -531,6 +571,32 @@ class PublicArchive:
                 "INSERT INTO public_publication_revisions VALUES(?,?,?,?,?,?)",
                 (identifier, expected + 1, actor, "withdrawn", digest, state["updated_at"]),
             )
+
+    @staticmethod
+    def _subject_authorize(connection: Any, subject: str, action_id: str, identifier: str) -> None:
+        action = connection.execute(
+            "SELECT * FROM actions WHERE action_id=? AND subject_id=?", (action_id, subject)
+        ).fetchone()
+        if (
+            action is None
+            or action["status"] != "executing"
+            or not action["side_effect"]
+            or action["tool"] != "autonomous_expression"
+            or action["target"] != "instance:" + subject
+            or not identifier.startswith("expression_")
+        ):
+            raise PermissionError("subject publication action is unavailable")
+
+    @staticmethod
+    def _subject_owned(connection: Any, subject: str, identifier: str) -> None:
+        row = connection.execute(
+            "SELECT r.actor FROM public_publications p "
+            "JOIN public_publication_revisions r ON r.publication_id=p.publication_id "
+            "WHERE p.subject_id=? AND p.publication_id=? AND r.revision=1",
+            (subject, identifier),
+        ).fetchone()
+        if row is None or row[0] != "subject":
+            raise PermissionError("publication is not subject authored")
 
     @staticmethod
     def _revision_capacity(
@@ -593,7 +659,12 @@ class PublicArchive:
             "revision": row["revision"],
             "occurred_at": row["published_at"],
             "updated_at": row["updated_at"],
-            "provenance": "operator_summary",
+            "provenance": (
+                "subject"
+                if json.loads(row["details_json"]).get("status")
+                in {"subject_article", "subject_help"}
+                else "operator_summary"
+            ),
         }
 
     def admin(self, subject_id: str) -> list[dict[str, Any]]:

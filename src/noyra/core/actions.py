@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any
 
 from .database import Database, action_state_hash, behavior_log_state_hash
@@ -188,10 +189,13 @@ class ActionLedger:
         resource_summary: str = "none",
         public_explanation: str = "",
         redaction_reason: str | None = None,
+        _connection: Any | None = None,
     ) -> ActionRecord:
         if status not in EXECUTOR_COMPLETION_STATES:
             raise ValueError(f"invalid action completion status: {status}")
-        with self.database.transaction() as connection:
+        with (
+            self.database.transaction() if _connection is None else nullcontext(_connection)
+        ) as connection:
             row = self._get_row(connection, action_id)
             if row["status"] != "executing":
                 raise InvalidTransitionError(f"cannot finish action in state {row['status']}")

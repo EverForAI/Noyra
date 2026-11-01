@@ -152,6 +152,14 @@ class TransportInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_channel_endpoint(self) -> TransportInput:
+        for key in ("autonomous_send", "require_known_senders"):
+            if key in self.settings and type(self.settings[key]) is not bool:
+                raise ValueError(key + " must be boolean")
+        recipient_scope = self.settings.get("allowed_recipients")
+        if recipient_scope is not None and (
+            not isinstance(recipient_scope, str) or len(recipient_scope) > 8_192
+        ):
+            raise ValueError("allowed_recipients must be a bounded comma-separated string")
         parsed = urlsplit(self.endpoint)
         scheme = parsed.scheme
         if self.channel == "email" and scheme not in {"smtp", "smtps"}:
@@ -1244,7 +1252,18 @@ class DeliveryDispatcher:
                 (subject_id, max(1, min(limit, 200))),
             ).fetchall()
             for interaction in interactions:
+                expression = self._expression_route(
+                    connection, subject_id, str(interaction["interaction_id"])
+                )
                 transport = None
+                if expression is not None:
+                    transport = connection.execute(
+                        "SELECT * FROM interaction_transports "
+                        "WHERE subject_id=? AND transport_id=? AND status='active'",
+                        (subject_id, expression["transport_id"]),
+                    ).fetchone()
+                    if transport is None:
+                        continue
                 related_id = interaction["related_interaction_id"]
                 if related_id is not None and interaction["channel"] != "web":
                     # A reply must leave through the same bot/app account that
@@ -1357,6 +1376,38 @@ class DeliveryDispatcher:
                 )
                 created += 1
         return created
+
+    def _expression_route(
+        self, connection: Any, subject: str, interaction_id: str
+    ) -> dict[str, Any] | None:
+        from noyra.core.events import EventStore
+
+        row = connection.execute(
+            "SELECT * FROM events WHERE subject_id=? AND event_id=?",
+            (subject, "evt_outbox_" + content_hash(interaction_id)),
+        ).fetchone()
+        if row is None:
+            return None
+        payload = EventStore(self.database).payload_from_row(row, connection=connection)
+        if (
+            content_hash(payload) != row["payload_hash"]
+            or payload.get("interaction_id") != interaction_id
+            or set(payload)
+            != {"interaction_id", "transport_id", "recipient", "grant_id", "action_id"}
+        ):
+            raise IntegrityError("expression outbox route is invalid")
+        action = connection.execute(
+            "SELECT subject_id,status,result_json FROM actions WHERE action_id=?",
+            (payload["action_id"],),
+        ).fetchone()
+        if (
+            action is None
+            or action["subject_id"] != subject
+            or action["status"] != "succeeded"
+            or strict_json_loads(action["result_json"]).get("interaction_id") != interaction_id
+        ):
+            raise IntegrityError("expression outbox lacks its action receipt")
+        return payload
 
     @staticmethod
     def _web_push_recipient(connection: Any, delivery_id: str) -> str | None:
@@ -1698,6 +1749,34 @@ class DeliveryDispatcher:
                 or current["content"] != interaction.get("content")
             ):
                 raise PermissionError("delivery authorization withdrawn")
+            expression = self._expression_route(
+                connection, transport.subject_id, str(current["interaction_id"])
+            )
+            if expression is not None:
+                from noyra.capability import CapabilityStore
+                from noyra.interaction.expression import ExpressionProposal, ExpressionStore
+
+                if expression["transport_id"] != transport.transport_id or expression[
+                    "recipient"
+                ] != interaction.get("counterparty"):
+                    raise PermissionError("expression recipient or transport changed")
+                CapabilityStore(self.database).revalidate_use(
+                    expression["grant_id"],
+                    transport.subject_id,
+                    "message",
+                    "transport:" + transport.transport_id,
+                    side_effect=True,
+                )
+                ExpressionStore(self.database, transport.subject_id)._transport(
+                    connection,
+                    ExpressionProposal(
+                        operation="message",
+                        body=str(current["content"]),
+                        transport_id=transport.transport_id,
+                        recipient=str(expression["recipient"]),
+                        reason="dispatch revalidation",
+                    ),
+                )
             withdrawn = connection.execute(
                 "SELECT 1 FROM private_conversation_messages m JOIN private_conversations c "
                 "ON c.conversation_id=m.conversation_id WHERE m.interaction_id IN (?,?) "
