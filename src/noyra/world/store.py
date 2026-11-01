@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
@@ -129,6 +130,8 @@ class ObservationStore:
         document: FetchedDocument,
         *,
         max_content_chars: int | None = None,
+        candidate_trial: bool = False,
+        before_record: Callable[[], None] | None = None,
     ) -> tuple[ObservationRecord | None, bool]:
         """Commit bounded unseen entry batches and the poll heartbeat atomically.
 
@@ -153,7 +156,11 @@ class ObservationStore:
             prepared, origins = self._bounded_feed_parts(document.feed_items, budget)
             max_content_chars = budget
         with self.database.transaction() as connection:
-            self._validate_source(connection, subject_id, source_id, document)
+            if before_record is not None:
+                before_record()
+            self._validate_source(
+                connection, subject_id, source_id, document, candidate_trial=candidate_trial
+            )
             observation: ObservationRecord | None
             if document.feed_items is None:
                 previous = SourcePollStore._read(connection, subject_id, source_id)
@@ -165,7 +172,7 @@ class ObservationStore:
                     is not None
                 )
                 observation, created = self._record_connection(
-                    connection, subject_id, source_id, document
+                    connection, subject_id, source_id, document, candidate_trial=candidate_trial
                 )
                 # Mark a fresh baseline before insertion can look like legacy.
                 SourcePollStore.complete(
@@ -229,6 +236,7 @@ class ObservationStore:
                             injection_signals=signals,
                             feed_items=batch,
                         ),
+                        candidate_trial=candidate_trial,
                     )
                     if selected is None and candidate.status == "new":
                         selected = (candidate, created)
@@ -329,7 +337,12 @@ class ObservationStore:
 
     @staticmethod
     def _validate_source(
-        connection: sqlite3.Connection, subject_id: str, source_id: str, document: FetchedDocument
+        connection: sqlite3.Connection,
+        subject_id: str,
+        source_id: str,
+        document: FetchedDocument,
+        *,
+        candidate_trial: bool = False,
     ) -> None:
         source = connection.execute(
             "SELECT * FROM world_sources WHERE source_id=? AND subject_id=?",
@@ -337,7 +350,9 @@ class ObservationStore:
         ).fetchone()
         if source is None:
             raise NotFoundError("world source is missing or belongs to another subject")
-        if source["status"] != "active":
+        if source["status"] != "active" and not (
+            candidate_trial and source["status"] == "candidate"
+        ):
             raise WorldStateConflictError("observation source is not active")
         url = canonical_public_url(document.url)
         if url != document.url or url != source["url"]:
@@ -351,10 +366,14 @@ class ObservationStore:
         subject_id: str,
         source_id: str,
         document: FetchedDocument,
+        *,
+        candidate_trial: bool = False,
     ) -> tuple[ObservationRecord, bool]:
         if len(document.content) > 500_000:
             raise ValueError("observation content exceeds the storage limit")
-        self._validate_source(connection, subject_id, source_id, document)
+        self._validate_source(
+            connection, subject_id, source_id, document, candidate_trial=candidate_trial
+        )
         if content_hash(document.content) != document.content_hash:
             raise IntegrityError("fetched document content hash mismatch")
         existing = connection.execute(
