@@ -225,6 +225,7 @@ docs/evaluation.md
 docs/genesis-experience.md
 docs/goal-origin-evidence.md
 docs/implementation/2026-10-04-migration-binding-proofs.md
+docs/implementation/c0-autonomous-expression.md
 docs/implementation/m10-autonomous-cognition.md
 docs/implementation/m11-equal-interaction-cognition.md
 docs/implementation/m12-autonomous-reflective-sleep.md
