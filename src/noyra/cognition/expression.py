@@ -90,6 +90,34 @@ class AutonomousExpression:
             else None
         )
 
+    def _model_call_retry(self, purpose: str) -> tuple[str | None, str]:
+        """Select a safe model-call identity for an explicitly failed decision."""
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                "SELECT idempotency_key,status,created_at FROM model_calls "
+                "WHERE subject_id=? AND purpose=? ORDER BY created_at,idempotency_key",
+                (self.subject_id, purpose),
+            ).fetchall()
+        if any(row["status"] in {"unknown", "executing"} for row in rows):
+            return None, "waiting_reconciliation"
+        prepared = [row for row in rows if row["status"] == "prepared"]
+        if len(prepared) > 1:
+            raise IntegrityError("decision has multiple prepared model calls")
+        if prepared:
+            return str(prepared[0]["idempotency_key"]), "resume_prepared"
+        if any(row["status"] == "succeeded" for row in rows):
+            raise IntegrityError("successful decision is missing its structured cache")
+        if any(row["status"] != "failed" for row in rows):
+            raise IntegrityError("decision has an unsupported model call state")
+
+        today = self.clock()[:10]
+        calls_today = sum(str(row["created_at"])[:10] == today for row in rows)
+        if calls_today >= 2:
+            return None, "daily_retry_limit"
+        if not rows:
+            return purpose, "new"
+        return f"{purpose}:retry:{len(rows)}", "retry_failed"
+
     def _calls_today(self) -> int:
         with self.database.connection() as connection:
             return int(

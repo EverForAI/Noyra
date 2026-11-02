@@ -9,7 +9,7 @@ import sqlite3
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Self, cast
+from typing import Any, Self, cast
 from urllib.request import Request, urlopen
 
 import pytest
@@ -134,6 +134,7 @@ def test_rejected_inbound_event_can_retry_without_creating_a_ghost_interaction(
             participant_conversation: str | None = None,
             participant: Participant | None = None,
             participant_private: bool = False,
+            _connection: Any | None = None,
         ) -> InteractionRecord:
             self.calls += 1
             if self.calls == 1:
@@ -152,6 +153,7 @@ def test_rejected_inbound_event_can_retry_without_creating_a_ghost_interaction(
                 participant_conversation=participant_conversation,
                 participant=participant,
                 participant_private=participant_private,
+                _connection=_connection,
             )
 
     store = InboundStore(kernel.database, FailOnce(kernel.database))
@@ -205,6 +207,7 @@ def test_successful_inbound_recovers_rejected_state_from_concurrent_failure(
             participant_conversation: str | None = None,
             participant: Participant | None = None,
             participant_private: bool = False,
+            _connection: Any | None = None,
         ) -> InteractionRecord:
             interaction = super().receive(
                 subject_id,
@@ -220,6 +223,7 @@ def test_successful_inbound_recovers_rejected_state_from_concurrent_failure(
                 participant_conversation=participant_conversation,
                 participant=participant,
                 participant_private=participant_private,
+                _connection=_connection,
             )
             with kernel.database.transaction() as connection:
                 changed = connection.execute(

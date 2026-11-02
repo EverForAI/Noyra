@@ -3,18 +3,33 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from email.message import EmailMessage
 from pathlib import Path
+from typing import Any, Literal, cast
+from unittest.mock import patch
 
 import httpx
+from pydantic import SecretStr
 
 from noyra.capability import CapabilityStore
 from noyra.capability.errors import CapabilityDeniedError
-from noyra.core import SubjectKernel
+from noyra.core import Database, EventStore, SubjectKernel
 from noyra.core.actions import ActionLedger
 from noyra.core.types import content_hash
-from noyra.interaction import DeliveryDispatcher, TransportInput, TransportStore
+from noyra.interaction import (
+    DeliveryDispatcher,
+    InboundEnvelope,
+    InboundStore,
+    InteractionStore,
+    TransportInput,
+    TransportRecord,
+    TransportStore,
+)
 from noyra.interaction.expression import ExpressionProposal, ExpressionReview, ExpressionStore
+from noyra.interaction.participants import ParticipantStore
 from noyra.interaction.public_archive import PublicArchive
+from noyra.interaction.types import InteractionDecision
 from noyra.model import (
     BudgetLimits,
     FakeProvider,
@@ -380,7 +395,6 @@ class ExpressionStoreTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_lost_commit_response_recovers_atomic_publication_receipt(self) -> None:
         from collections.abc import Iterator
         from contextlib import contextmanager
-        from typing import Any
         from unittest.mock import patch
 
         proposal = self.article()
@@ -408,8 +422,9 @@ class ExpressionStoreTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.verify_integrity(), 1)
 
     async def test_authenticated_reply_returns_to_exact_proactive_message(self) -> None:
-        from noyra.interaction import InboundEnvelope, InboundStore
+        from noyra.interaction import InboundEnvelope, InboundStore, InteractionStore
         from noyra.interaction.participants import ParticipantStore
+        from noyra.interaction.types import InteractionDecision
 
         transport = self.transports.configure(
             self.subject,
@@ -431,37 +446,82 @@ class ExpressionStoreTestCase(unittest.IsolatedAsyncioTestCase):
         )
         action = self.prepare(proposal)
         sent = self.store.execute(action, proposal, review_call_id=await self.review(action))
+        provider_message_ids = iter(("remote-c0", "remote-c1"))
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(
-                lambda request: httpx.Response(200, json={"ok": True, "message_id": "remote-c0"})
+                lambda request: httpx.Response(
+                    200, json={"ok": True, "message_id": next(provider_message_ids)}
+                )
             )
         ) as client:
             dispatcher = DeliveryDispatcher(self.db, self.transports, client=client)
             self.assertEqual(
                 (await dispatcher.deliver_pending(self.subject))[0].status, "delivered"
             )
-            await dispatcher.aclose()
-        inbound = InboundStore(self.db)
-        reply = inbound.ingest(
-            InboundEnvelope(
-                channel="webhook",
-                transport_id=transport.transport_id,
-                provider_event_id="response-one",
-                external_account_id="dedicated-account",
-                external_sender_id="correspondent",
-                conversation_id="correspondent",
-                thread_id="remote-c0",
-                content="Here is a suggestion for your question.",
+            inbound = InboundStore(self.db)
+            reply = inbound.ingest(
+                InboundEnvelope(
+                    channel="webhook",
+                    transport_id=transport.transport_id,
+                    provider_event_id="response-one",
+                    external_account_id="dedicated-account",
+                    external_sender_id="correspondent",
+                    conversation_id="correspondent",
+                    thread_id="remote-c0",
+                    content="Here is a suggestion for your question.",
+                )
             )
-        )
-        with self.db.connection() as connection:
-            linked = connection.execute(
-                "SELECT related_interaction_id FROM interactions WHERE interaction_id=?",
-                (reply.interaction_id,),
-            ).fetchone()[0]
-        self.assertEqual(linked, sent["interaction_id"])
-        history = ParticipantStore(self.db).history(self.subject, reply.interaction_id)
-        self.assertEqual([item["content"] for item in history], [proposal.body])
+            with self.db.connection() as connection:
+                linked = connection.execute(
+                    "SELECT related_interaction_id FROM interactions WHERE interaction_id=?",
+                    (reply.interaction_id,),
+                ).fetchone()[0]
+            self.assertEqual(linked, sent["interaction_id"])
+            history = ParticipantStore(self.db).history(self.subject, reply.interaction_id)
+            self.assertEqual([item["content"] for item in history], [proposal.body])
+            InteractionStore(self.db).decide(
+                reply.interaction_id,
+                InteractionDecision(disposition="accepted", rationale="Continue the discussion"),
+            )
+            followup = InteractionStore(self.db).send(
+                self.subject,
+                "webhook",
+                "correspondent",
+                "I compared the source. What do you think of this follow-up?",
+                related_interaction_id=reply.interaction_id,
+                idempotency_key="ordinary-reply-two",
+            )
+            deliveries = await dispatcher.deliver_pending(self.subject)
+            self.assertEqual(len(deliveries), 1)
+            self.assertEqual(deliveries[0].status, "delivered")
+            second = inbound.ingest(
+                InboundEnvelope(
+                    channel="webhook",
+                    transport_id=transport.transport_id,
+                    provider_event_id="response-two",
+                    external_account_id="dedicated-account",
+                    external_sender_id="correspondent",
+                    conversation_id="correspondent",
+                    thread_id="remote-c1",
+                    content="The follow-up supports comparing independent reports.",
+                )
+            )
+            with self.db.connection() as connection:
+                second_parent = connection.execute(
+                    "SELECT related_interaction_id FROM interactions WHERE interaction_id=?",
+                    (second.interaction_id,),
+                ).fetchone()[0]
+            self.assertEqual(second_parent, followup.interaction_id)
+            second_history = ParticipantStore(self.db).history(self.subject, second.interaction_id)
+            self.assertEqual(
+                [item["content"] for item in second_history],
+                [
+                    proposal.body,
+                    "Here is a suggestion for your question.",
+                    "I compared the source. What do you think of this follow-up?",
+                ],
+            )
+            await dispatcher.aclose()
         wrong = inbound.ingest(
             InboundEnvelope(
                 channel="webhook",
@@ -526,6 +586,420 @@ class ExpressionStoreTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertNotEqual(results[0].transport_id, unrelated.transport_id)
             self.assertEqual(calls, ["https://creator.example/send"])
             await dispatcher.aclose()
+
+    async def _direct_contact(
+        self, channel: Literal["email", "webhook"] = "webhook"
+    ) -> tuple[TransportRecord, dict[str, Any]]:
+        transport = self.transports.configure(
+            self.subject,
+            TransportInput(
+                channel=channel,
+                label="AR03 direct contact",
+                endpoint="smtp://mail.example:587"
+                if channel == "email"
+                else "https://contact.example/send",
+                settings={"account_id": "noyra@example.com"},
+                credentials={"from_address": SecretStr("noyra@example.com")}
+                if channel == "email"
+                else {},
+            ),
+            actor="operator",
+        )
+        self.store.ensure_grants(enabled=True, rate=20)
+        proposal = ExpressionProposal(
+            operation="message",
+            body="An initial public question.",
+            transport_id=transport.transport_id,
+            recipient="helper@example.com",
+            reason="A subject-chosen discussion",
+        )
+        action = self.prepare(proposal)
+        receipt = self.store.execute(action, proposal, review_call_id=await self.review(action))
+        return transport, receipt
+
+    @staticmethod
+    def _direct_reply(transport: TransportRecord, reference: str, number: int) -> InboundEnvelope:
+        assert transport.channel in {"email", "webhook"}
+        return InboundEnvelope(
+            channel=cast(Literal["email", "webhook"], transport.channel),
+            transport_id=transport.transport_id,
+            provider_event_id=f"<incoming-{number}@helper.example>",
+            external_account_id="noyra@example.com",
+            external_sender_id="helper@example.com",
+            conversation_id=reference if transport.channel == "email" else "helper@example.com",
+            thread_id=reference,
+            content=f"Public answer number {number}.",
+        )
+
+    async def test_email_three_rounds_keep_private_history_and_reply_headers_after_reopen(
+        self,
+    ) -> None:
+        messages: list[EmailMessage] = []
+
+        class SMTP:
+            sock = None
+
+            def __init__(self, **kwargs: Any) -> None:
+                pass
+
+            def connect(self, host: str, port: int) -> tuple[int, bytes]:
+                return 220, b"ready"
+
+            def starttls(self, **kwargs: Any) -> None:
+                pass
+
+            def send_message(self, message: EmailMessage) -> dict[str, Any]:
+                messages.append(message)
+                return {}
+
+            def close(self) -> None:
+                pass
+
+        transport, receipt = await self._direct_contact("email")
+        expected = ["An initial public question."]
+        parent = receipt["interaction_id"]
+        with (
+            patch("noyra.interaction.transport.smtplib.SMTP", SMTP),
+            patch("noyra.interaction.transport.public_addresses", return_value=["8.8.8.8"]),
+            patch.object(DeliveryDispatcher, "_verify_smtp_peer"),
+        ):
+            dispatcher = DeliveryDispatcher(self.db, self.transports)
+            try:
+                for number in range(1, 4):
+                    delivered = await dispatcher.deliver_pending(self.subject)
+                    self.assertEqual(len(delivered), 1)
+                    self.assertEqual(delivered[0].status, "delivered")
+                    reference = str(messages[-1]["Message-ID"])
+                    self.assertEqual(reference, delivered[0].provider_message_id)
+                    if number == 1:
+                        self.assertIsNone(messages[-1]["In-Reply-To"])
+                    else:
+                        incoming_reference = f"<incoming-{number - 1}@helper.example>"
+                        self.assertEqual(str(messages[-1]["In-Reply-To"]), incoming_reference)
+                        self.assertEqual(str(messages[-1]["References"]), incoming_reference)
+                    reopened = Database(self.db.path, initialize=False)
+                    inbound = InboundStore(reopened)
+                    envelope = self._direct_reply(transport, reference, number)
+                    reply = inbound.ingest(envelope)
+                    duplicate = InboundStore(reopened).ingest(envelope)
+                    self.assertEqual(reply.interaction_id, duplicate.interaction_id)
+                    self.assertTrue(duplicate.duplicate)
+                    item = InteractionStore(reopened).get(reply.interaction_id)
+                    self.assertEqual(item.related_interaction_id, parent)
+                    self.assertEqual(item.status, "offered")
+                    history = ParticipantStore(reopened).history(self.subject, reply.interaction_id)
+                    self.assertEqual([row["content"] for row in history], expected)
+                    expected.append(envelope.content)
+                    if number < 3:
+                        InteractionStore(reopened).decide(
+                            reply.interaction_id,
+                            InteractionDecision(disposition="accepted", rationale="Keep talking"),
+                        )
+                        response = f"Follow-up number {number}."
+                        sent = InteractionStore(reopened).send(
+                            self.subject,
+                            "email",
+                            "helper@example.com",
+                            response,
+                            related_interaction_id=reply.interaction_id,
+                            idempotency_key=f"ar03-email-followup:{number}",
+                        )
+                        parent = sent.interaction_id
+                        expected.append(response)
+                self.assertEqual(await dispatcher.deliver_pending(self.subject), [])
+            finally:
+                await dispatcher.aclose()
+        with self.db.connection() as connection:
+            keys = connection.execute(
+                "SELECT DISTINCT conversation_key,visibility FROM participant_message_links "
+                "WHERE subject_id=?",
+                (self.subject,),
+            ).fetchall()
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(keys[0]["visibility"], "private")
+        from noyra.interaction.integrity import InteractionIntegrity
+
+        InteractionIntegrity(self.db).verify(self.subject)
+        EventStore(self.db).verify_chain(self.subject)
+
+    async def test_followup_references_do_not_share_history_across_identity_boundaries(
+        self,
+    ) -> None:
+        transport, _ = await self._direct_contact()
+        references = iter(("ar03-root", "ar03-followup", "ar03-followup"))
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json={"message_id": next(references)})
+            )
+        ) as client:
+            dispatcher = DeliveryDispatcher(self.db, self.transports, client=client)
+            await dispatcher.deliver_pending(self.subject)
+            inbound = InboundStore(self.db)
+            first = inbound.ingest(self._direct_reply(transport, "ar03-root", 1))
+            followup = InteractionStore(self.db).send(
+                self.subject,
+                "webhook",
+                "helper@example.com",
+                "This belongs to the established private thread.",
+                related_interaction_id=first.interaction_id,
+                idempotency_key="ar03-private-followup",
+            )
+            await dispatcher.deliver_pending(self.subject)
+            alternate = self.transports.configure(
+                self.subject,
+                TransportInput(
+                    channel="webhook",
+                    label="Different sending account",
+                    endpoint="https://other-contact.example/send",
+                    settings={"account_id": "noyra@example.com"},
+                ),
+                actor="operator",
+            )
+            variants: tuple[dict[str, Any], ...] = (
+                {"external_account_id": "other-account@example.com"},
+                {
+                    "external_sender_id": "stranger@example.com",
+                    "conversation_id": "stranger@example.com",
+                },
+                {"transport_id": alternate.transport_id},
+                {"thread_id": "unrelated-reference"},
+                {"thread_id": None},
+            )
+            for number, changes in enumerate(variants, 10):
+                with self.subTest(changes=changes):
+                    envelope = self._direct_reply(transport, "ar03-followup", number).model_copy(
+                        update=changes
+                    )
+                    received = inbound.ingest(envelope)
+                    record = InteractionStore(self.db).get(received.interaction_id)
+                    self.assertIsNone(record.related_interaction_id)
+                    self.assertEqual(
+                        ParticipantStore(self.db).history(self.subject, record.interaction_id), []
+                    )
+            # Ambiguity is a separate guard: the identity checks above used a
+            # unique receipt so they cannot pass just because of this duplicate.
+            InteractionStore(self.db).send(
+                self.subject,
+                "webhook",
+                "helper@example.com",
+                "Another message in this private thread.",
+                related_interaction_id=first.interaction_id,
+                idempotency_key="ar03-ambiguous-followup",
+            )
+            await dispatcher.deliver_pending(self.subject)
+            ambiguous = inbound.ingest(self._direct_reply(transport, "ar03-followup", 20))
+            ambiguous_record = InteractionStore(self.db).get(ambiguous.interaction_id)
+            self.assertIsNone(ambiguous_record.related_interaction_id)
+            self.assertEqual(
+                ParticipantStore(self.db).history(self.subject, ambiguous.interaction_id), []
+            )
+            self.assertEqual(
+                InteractionStore(self.db).get(followup.interaction_id).related_interaction_id,
+                first.interaction_id,
+            )
+            await dispatcher.aclose()
+
+    async def test_first_reply_participant_links_rollback_together_and_retry_cleanly(self) -> None:
+        transport, receipt = await self._direct_contact()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json={"message_id": "ar03-atomic-root"})
+            )
+        ) as client:
+            dispatcher = DeliveryDispatcher(self.db, self.transports, client=client)
+            await dispatcher.deliver_pending(self.subject)
+            await dispatcher.aclose()
+        original_link = ParticipantStore.link
+
+        def fail_root_link(
+            connection: Any,
+            subject: str,
+            interaction: str,
+            who: Any,
+            conversation: str,
+            *,
+            private: bool = False,
+        ) -> None:
+            if interaction == receipt["interaction_id"]:
+                raise RuntimeError("injected root link failure")
+            original_link(connection, subject, interaction, who, conversation, private=private)
+
+        envelope = self._direct_reply(transport, "ar03-atomic-root", 1)
+        with (
+            patch.object(ParticipantStore, "link", side_effect=fail_root_link),
+            self.assertRaisesRegex(RuntimeError, "root link failure"),
+        ):
+            InboundStore(self.db).ingest(envelope)
+        with self.db.connection() as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM interactions").fetchone()[0], 1
+            )
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM participant_message_links").fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute("SELECT status FROM interaction_inbound_events").fetchone()[0],
+                "rejected",
+            )
+        accepted = InboundStore(self.db).ingest(envelope)
+        self.assertTrue(accepted.duplicate)
+        self.assertEqual(
+            [
+                row["content"]
+                for row in ParticipantStore(self.db).history(self.subject, accepted.interaction_id)
+            ],
+            ["An initial public question."],
+        )
+
+    async def test_parallel_first_replies_bind_one_private_conversation(self) -> None:
+        transport, receipt = await self._direct_contact()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json={"message_id": "ar03-parallel-root"})
+            )
+        ) as client:
+            dispatcher = DeliveryDispatcher(self.db, self.transports, client=client)
+            await dispatcher.deliver_pending(self.subject)
+            await dispatcher.aclose()
+        envelopes = [self._direct_reply(transport, "ar03-parallel-root", n) for n in (1, 2)]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            replies = list(pool.map(InboundStore(self.db).ingest, envelopes))
+        self.assertEqual(len({reply.interaction_id for reply in replies}), 2)
+        with self.db.connection() as connection:
+            links = connection.execute(
+                "SELECT entity_id,source_id,conversation_key,visibility "
+                "FROM participant_message_links WHERE subject_id=?",
+                (self.subject,),
+            ).fetchall()
+            roots = connection.execute(
+                "SELECT related_interaction_id FROM interactions WHERE direction='incoming'"
+            ).fetchall()
+        self.assertEqual(len(links), 3)
+        self.assertEqual(len({tuple(row) for row in links}), 1)
+        self.assertEqual({row[0] for row in roots}, {receipt["interaction_id"]})
+
+    async def test_two_proactive_threads_with_one_correspondent_remain_separate(self) -> None:
+        transport, first_receipt = await self._direct_contact()
+        references = iter(("separate-root-1", "separate-root-2"))
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json={"message_id": next(references)})
+            )
+        ) as client:
+            dispatcher = DeliveryDispatcher(self.db, self.transports, client=client)
+            await dispatcher.deliver_pending(self.subject)
+            first = InboundStore(self.db).ingest(
+                self._direct_reply(transport, "separate-root-1", 1)
+            )
+            proposal = ExpressionProposal(
+                operation="message",
+                body="A separate public question for the same correspondent.",
+                transport_id=transport.transport_id,
+                recipient="helper@example.com",
+                reason="A different discussion",
+            )
+            action = self.prepare(proposal)
+            second_receipt = self.store.execute(
+                action, proposal, review_call_id=await self.review(action)
+            )
+            await dispatcher.deliver_pending(self.subject)
+            second = InboundStore(self.db).ingest(
+                self._direct_reply(transport, "separate-root-2", 2)
+            )
+            self.assertEqual(
+                [
+                    item["content"]
+                    for item in ParticipantStore(self.db).history(
+                        self.subject, first.interaction_id
+                    )
+                ],
+                ["An initial public question."],
+            )
+            self.assertEqual(
+                [
+                    item["content"]
+                    for item in ParticipantStore(self.db).history(
+                        self.subject, second.interaction_id
+                    )
+                ],
+                [proposal.body],
+            )
+            with self.db.connection() as connection:
+                links = connection.execute(
+                    "SELECT entity_id,source_id,conversation_key FROM participant_message_links "
+                    "WHERE interaction_id IN (?,?) ORDER BY interaction_id",
+                    (first_receipt["interaction_id"], second_receipt["interaction_id"]),
+                ).fetchall()
+            self.assertEqual(links[0]["entity_id"], links[1]["entity_id"])
+            self.assertEqual(links[0]["source_id"], links[1]["source_id"])
+            self.assertNotEqual(links[0]["conversation_key"], links[1]["conversation_key"])
+            await dispatcher.aclose()
+
+    async def test_matching_reply_does_not_resend_or_settle_an_unknown_delivery(self) -> None:
+        from noyra.interaction.transport import DeliveryOutcomeUnknown
+
+        transport, receipt = await self._direct_contact()
+
+        async def uncertain(*args: Any) -> str:
+            raise DeliveryOutcomeUnknown(
+                "synthetic lost receipt", provider_message_id="unknown-ref"
+            )
+
+        dispatcher = DeliveryDispatcher(self.db, self.transports)
+        try:
+            with patch.object(dispatcher, "_send", side_effect=uncertain) as sender:
+                delivery = (await dispatcher.deliver_pending(self.subject))[0]
+                self.assertEqual(delivery.status, "unknown")
+                received = InboundStore(self.db).ingest(
+                    self._direct_reply(transport, "unknown-ref", 1)
+                )
+                self.assertEqual(
+                    InteractionStore(self.db).get(received.interaction_id).related_interaction_id,
+                    receipt["interaction_id"],
+                )
+                self.assertEqual(await dispatcher.deliver_pending(self.subject), [])
+                self.assertEqual(dispatcher.get_delivery(delivery.delivery_id).status, "unknown")
+                self.assertEqual(sender.call_count, 1)
+        finally:
+            await dispatcher.aclose()
+
+    async def test_direct_reply_rechecks_source_revocation_before_private_linking(self) -> None:
+        transport, _ = await self._direct_contact()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json={"message_id": "revocation-root"})
+            )
+        ) as client:
+            dispatcher = DeliveryDispatcher(self.db, self.transports, client=client)
+            await dispatcher.deliver_pending(self.subject)
+            await dispatcher.aclose()
+        inbound = InboundStore(self.db)
+        original_upsert = inbound._upsert_thread
+
+        def revoke_after_initial_admission(
+            connection: Any, subject: str, envelope: InboundEnvelope, now: str
+        ) -> None:
+            original_upsert(connection, subject, envelope, now)
+            connection.execute(
+                "UPDATE interaction_bindings SET status='revoked' WHERE subject_id=? "
+                "AND transport_id=? AND external_sender_id=?",
+                (subject, transport.transport_id, "helper@example.com"),
+            )
+
+        with (
+            patch.object(inbound, "_upsert_thread", side_effect=revoke_after_initial_admission),
+            self.assertRaisesRegex(PermissionError, "no longer available"),
+        ):
+            inbound.ingest(self._direct_reply(transport, "revocation-root", 1))
+        with self.db.connection() as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM participant_message_links").fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM interactions").fetchone()[0], 1
+            )
 
     async def test_operator_revision_preserves_original_subject_author_on_response_and_read(
         self,

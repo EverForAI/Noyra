@@ -622,6 +622,7 @@ src/noyra/http_transport.py
 src/noyra/interaction/__init__.py
 src/noyra/interaction/accounts.py
 src/noyra/interaction/assistance.py
+src/noyra/interaction/assistance_routes.py
 src/noyra/interaction/collaboration.py
 src/noyra/interaction/conversations.py
 src/noyra/interaction/diary.py
@@ -853,6 +854,7 @@ tests/test_browser_dispatch_fencing.py
 tests/test_c0_assistance.py
 tests/test_c0_autonomous_expression.py
 tests/test_c0_expression_store.py
+tests/test_c0_external_assistance.py
 tests/test_c0_inbound_contacts.py
 tests/test_capability.py
 tests/test_capability_file_races.py
@@ -1019,6 +1021,7 @@ tests/test_release_source_and_rotation.py
 tests/test_release_workflow_contract.py
 tests/test_remote_acceptance.py
 tests/test_research.py
+tests/test_research_planning_recovery.py
 tests/test_resilience.py
 tests/test_resource_groups_env.py
 tests/test_retention.py

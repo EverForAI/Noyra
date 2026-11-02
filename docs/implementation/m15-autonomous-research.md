@@ -83,8 +83,24 @@ removes secret access while retaining the immutable resource history.
 - API and browser search actions are idempotent. Successful replays restore stored normalized
   results without repeating the network request.
 - Interrupted executing actions are quarantined by the existing action-ledger recovery path.
-- A successful planner call that was not committed after a process failure is reused instead of
-  spending another model call.
+- Planner identity belongs to the independent research lane or one exact project phase, not to
+  the budget date. Existing dated keys remain readable. Unknown/executing calls and unresolved
+  explicit-retry fences keep that lane waiting across day, context, resource and restart changes;
+  another lane advancing the global run counter does not release them.
+- A successful planner call that was not committed after a process failure is reused before the
+  new-call quota check, instead of spending another model call. A matching prepared request keeps
+  its old logical identity; changed request context or routing cannot be escaped by generating a
+  new key. Routed prepared retries retain the existing explicit authorization requirement.
+- Known-failed or locally rejected planning can create another identity after the configured
+  research interval. No new identity is admitted once that purpose has two physical planning-call
+  rows for the budget day; one gateway invocation can still use its existing bounded failover.
+  Daily research and gateway cost/token limits still apply. Rejection receipts are idempotent;
+  unknown outcomes are never converted to known failures by this scheduling policy.
+- Context construction measures the final JSON character count. It removes optional history,
+  compacts long goal/provider text and, when needed, reduces ranked candidates while retaining a
+  real goal and evidence. The resource directory is bounded to 16 entries. Only IDs present in the
+  final JSON are accepted as goal, provider and evidence candidates; bound project research keeps
+  its own goal. Saved goal/provider text and the configured budget are not rewritten.
 - Provider uses, provider revisions, and research runs are append-only. Unique planner-call and
   action-use indexes prevent duplicate durable commits.
 - Human messages and human-proposed goals are excluded from research planning context.

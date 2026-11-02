@@ -57,6 +57,11 @@ repeated automatically. Disabling a transport or revoking its capability stops a
 For direct email/webhook replies carrying an exact provider message reference, configured
 `settings.account_id` identifies the Noyra receiving account. Matching transport, account and
 recipient can link the reply to the original proactive message and provide that thread's history.
+Later replies to Noyra's ordinary follow-up messages inherit the same private conversation only
+when the authenticated source and delivery reference match. Separate discussions with the same
+correspondent retain separate histories. The incoming message and both sides of the initial
+participant link commit together. Email follow-ups include a bounded, validated `In-Reply-To`
+and `References` pointing to the incoming email's Message-ID.
 An ambiguous/missing reference or different account stays an ordinary incoming invitation; it
 never borrows another account's conversation history.
 
@@ -94,7 +99,15 @@ A considered reply can close the open help request and unlock the project's norm
 not directly activate a phase, complete the project, grant capabilities or authorize payment.
 Unanswered help does not block unrelated work. Existing configured help delivery remains available;
 actual outbound delivery still depends on usable identities, credentials, recipients and provider
-availability. External forum registration and platform-specific lifecycles belong to C1/C2.
+availability. Before a project question leaves through an external channel, a private immutable
+receipt binds its request, delivery, transport, receiving account and actual recipient. Known-failed
+retries preserve that destination. Authenticated email/webhook replies with one exact delivery
+reference can enter the same help-consideration flow, including ordinary private follow-ups.
+The public question's operator web window is never inherited by the external reply. Linking leaves
+the invitation offered: Noyra must accept it and then choose continue/wait/end before project review
+can resume. Missing historical route evidence is not guessed from current settings or replayed;
+channels without a verifiable reply reference retain ordinary invitations and explicit on-site help
+replies. External forum registration and platform-specific lifecycles belong to C1/C2.
 
 ## Scheduling and verification boundary
 

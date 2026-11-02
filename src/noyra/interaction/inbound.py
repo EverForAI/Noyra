@@ -19,6 +19,7 @@ import sqlite3
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email import policy
@@ -1470,11 +1471,10 @@ class InboundStore:
                 envelope,
                 now,
             )
-        parent_id = None
         from .transport import TransportStore
 
         inbound_settings = TransportStore._config(transport)
-        if (
+        direct_reply = (
             envelope.thread_id is not None
             and envelope.channel in {"email", "webhook"}
             and inbound_settings.get("account_id") == envelope.external_account_id
@@ -1482,70 +1482,192 @@ class InboundStore:
                 envelope.channel == "email"
                 or envelope.external_sender_id == envelope.conversation_id
             )
-        ):
-            recipient = (
-                envelope.external_sender_id
-                if envelope.channel == "email"
-                else envelope.conversation_id
-            )
-            with self.database.connection() as connection:
-                parents = connection.execute(
-                    "SELECT i.interaction_id FROM interaction_deliveries d "
-                    "JOIN interactions i ON i.interaction_id=d.interaction_id "
-                    "AND i.subject_id=d.subject_id "
-                    "WHERE d.subject_id=? AND d.transport_id=? AND d.provider_message_id=? "
-                    "AND d.status IN ('delivered','unknown') AND i.channel=? AND i.counterparty=? "
-                    "AND i.idempotency_key LIKE 'expression-message:%' LIMIT 2",
-                    (
-                        subject_id,
-                        envelope.transport_id,
-                        envelope.thread_id,
-                        envelope.channel,
-                        recipient,
-                    ),
-                ).fetchall()
-            if len(parents) == 1:
-                parent_id = str(parents[0][0])
+        )
+        parent_id = None
+        participant_conversation = None
+        help_request_id = None
+        help_root = False
+        receive_options: dict[str, Any] = {}
         try:
-            interaction = self.interactions.receive(
-                subject_id,
-                envelope.channel,
-                (
-                    envelope.external_sender_id
-                    if envelope.channel == "email"
-                    else envelope.conversation_id
-                ),
-                envelope.content,
-                related_interaction_id=parent_id,
-                participant_private=parent_id is not None,
-                participant_source=(
-                    source_namespace(
-                        envelope.channel, envelope.transport_id, envelope.external_account_id
+            # Only direct reply linking borrows receive's transaction. The
+            # invitation, both private links and initial thread binding commit
+            # together, so parallel/retried first replies use one stable key.
+            with self.database.transaction() if direct_reply else nullcontext(None) as connection:
+                if direct_reply:
+                    assert connection is not None
+                    receive_options["_connection"] = connection
+                    current_transport = connection.execute(
+                        "SELECT transport_id,config_json FROM interaction_transports "
+                        "WHERE subject_id=? "
+                        "AND transport_id=? AND channel=? AND status='active'",
+                        (subject_id, envelope.transport_id, envelope.channel),
+                    ).fetchone()
+                    permitted = connection.execute(
+                        "SELECT 1 FROM interaction_bindings WHERE subject_id=? AND binding_id=? "
+                        "AND transport_id=? AND channel=? AND external_account_id=? "
+                        "AND external_sender_id=? AND status='active'",
+                        (
+                            subject_id,
+                            binding["binding_id"],
+                            envelope.transport_id,
+                            envelope.channel,
+                            envelope.external_account_id,
+                            envelope.external_sender_id,
+                        ),
+                    ).fetchone()
+                    if (
+                        current_transport is None
+                        or permitted is None
+                        or TransportStore._config(current_transport).get("account_id")
+                        != envelope.external_account_id
+                    ):
+                        raise PermissionError("direct reply source is no longer available")
+                    recipient = (
+                        envelope.external_sender_id
+                        if envelope.channel == "email"
+                        else envelope.conversation_id
+                    )
+                    # An unlinked proactive message can establish the first
+                    # private thread. A linked follow-up must match the exact
+                    # authenticated source, including its receiving account.
+                    parents = connection.execute(
+                        "SELECT i.interaction_id,p.conversation_key "
+                        "FROM interaction_deliveries d JOIN interactions i "
+                        "ON i.interaction_id=d.interaction_id AND i.subject_id=d.subject_id "
+                        "LEFT JOIN participant_message_links p ON p.subject_id=i.subject_id "
+                        "AND p.interaction_id=i.interaction_id "
+                        "LEFT JOIN participant_sources s ON s.source_id=p.source_id "
+                        "AND s.subject_id=p.subject_id AND s.entity_id=p.entity_id "
+                        "WHERE d.subject_id=? AND d.transport_id=? AND d.provider_message_id=? "
+                        "AND d.status IN ('delivered','unknown') AND i.direction='outgoing' "
+                        "AND i.channel=? AND i.counterparty=? AND ("
+                        "(p.interaction_id IS NULL AND "
+                        "i.idempotency_key LIKE 'expression-message:%') OR "
+                        "(p.visibility='private' AND s.channel=? AND s.namespace=? "
+                        "AND s.sender_id=?)) LIMIT 2",
+                        (
+                            subject_id,
+                            envelope.transport_id,
+                            envelope.thread_id,
+                            envelope.channel,
+                            recipient,
+                            envelope.channel,
+                            source_namespace(
+                                envelope.channel,
+                                envelope.transport_id,
+                                envelope.external_account_id,
+                            ),
+                            envelope.external_sender_id,
+                        ),
+                    ).fetchall()
+                    if len(parents) == 1:
+                        parent_id = str(parents[0]["interaction_id"])
+                        participant_conversation = parents[0]["conversation_key"]
+                    # Provider references must identify exactly one delivery,
+                    # including across proactive and public help message kinds.
+                    references = connection.execute(
+                        "SELECT delivery_id FROM interaction_deliveries WHERE subject_id=? "
+                        "AND transport_id=? AND provider_message_id=? "
+                        "AND status IN ('delivered','unknown') LIMIT 2",
+                        (subject_id, envelope.transport_id, envelope.thread_id),
+                    ).fetchall()
+                    if len(references) != 1:
+                        parent_id = None
+                        participant_conversation = None
+                    else:
+                        from .assistance_routes import AssistanceRoutes
+
+                        routes = AssistanceRoutes(self.database, subject_id)
+                        if parent_id is not None:
+                            help_request_id = routes.inherited_request(connection, parent_id)
+                        else:
+                            assert envelope.thread_id is not None
+                            help = routes.reply_parent(
+                                connection,
+                                envelope.transport_id,
+                                envelope.channel,
+                                envelope.external_account_id,
+                                envelope.external_sender_id,
+                                envelope.thread_id,
+                            )
+                            if help is not None:
+                                parent_id, help_request_id, participant_conversation = help
+                                help_root = True
+                interaction = self.interactions.receive(
+                    subject_id,
+                    envelope.channel,
+                    (
+                        envelope.external_sender_id
+                        if envelope.channel == "email"
+                        else envelope.conversation_id
                     ),
-                    envelope.external_sender_id,
-                    envelope.sender_label,
-                ),
-                participant_conversation=content_hash(
-                    [
-                        envelope.channel,
-                        envelope.transport_id,
-                        envelope.external_account_id,
-                        envelope.conversation_id,
-                        envelope.thread_id,
-                    ]
-                ),
-                **(
-                    {"conversation_id": route[0], "verified_binding_id": binding["binding_id"]}
-                    if route is not None
-                    else {}
-                ),
-                idempotency_key=(
-                    "inbound:"
-                    f"{envelope.transport_id}:"
-                    f"{content_hash(envelope.external_account_id)[:32]}:"
-                    f"{envelope.provider_event_id}"
-                ),
-            )
+                    envelope.content,
+                    # A web help outbox belongs to the operator's web window.
+                    # Keep external help linked through assistance evidence,
+                    # never inherit that window via related_interaction_id.
+                    related_interaction_id=None if help_root else parent_id,
+                    participant_private=parent_id is not None,
+                    participant_source=(
+                        source_namespace(
+                            envelope.channel, envelope.transport_id, envelope.external_account_id
+                        ),
+                        envelope.external_sender_id,
+                        envelope.sender_label,
+                    ),
+                    participant_conversation=participant_conversation
+                    or content_hash(
+                        [
+                            envelope.channel,
+                            envelope.transport_id,
+                            envelope.external_account_id,
+                            envelope.conversation_id,
+                            envelope.thread_id,
+                        ]
+                    ),
+                    **receive_options,
+                    **(
+                        {"conversation_id": route[0], "verified_binding_id": binding["binding_id"]}
+                        if route is not None
+                        else {}
+                    ),
+                    idempotency_key=(
+                        "inbound:"
+                        f"{envelope.transport_id}:"
+                        f"{content_hash(envelope.external_account_id)[:32]}:"
+                        f"{envelope.provider_event_id}"
+                    ),
+                )
+                if parent_id is not None:
+                    assert connection is not None
+                    who = ParticipantStore.for_message_connection(
+                        connection, subject_id, interaction.interaction_id
+                    )
+                    link = connection.execute(
+                        "SELECT conversation_key FROM participant_message_links "
+                        "WHERE subject_id=? AND interaction_id=?",
+                        (subject_id, interaction.interaction_id),
+                    ).fetchone()
+                    if who is None or link is None:
+                        raise IntegrityError("direct reply lacks its private participant link")
+                    if not help_root:
+                        ParticipantStore.link(
+                            connection, subject_id, parent_id, who, str(link[0]), private=True
+                        )
+                    if help_request_id is not None:
+                        request_open = connection.execute(
+                            "SELECT 1 FROM autonomous_project_assistance_requests "
+                            "WHERE subject_id=? AND request_id=? AND status='open'",
+                            (subject_id, help_request_id),
+                        ).fetchone()
+                        if request_open is not None:
+                            from .assistance import AssistanceStore
+
+                            AssistanceStore(self.database, subject_id)._link_reply_connection(
+                                connection,
+                                help_request_id,
+                                interaction.interaction_id,
+                                who.entity_id,
+                            )
         except Exception:
             with self.database.transaction() as connection:
                 rejected = connection.execute(
@@ -1572,19 +1694,6 @@ class InboundStore:
                         )
             raise
         with self.database.transaction() as connection:
-            if parent_id is not None:
-                who = ParticipantStore.for_message_connection(
-                    connection, subject_id, interaction.interaction_id
-                )
-                link = connection.execute(
-                    "SELECT conversation_key FROM participant_message_links "
-                    "WHERE subject_id=? AND interaction_id=?",
-                    (subject_id, interaction.interaction_id),
-                ).fetchone()
-                if who is not None and link is not None:
-                    ParticipantStore.link(
-                        connection, subject_id, parent_id, who, str(link[0]), private=True
-                    )
             processed = connection.execute(
                 "UPDATE interaction_inbound_events SET status = 'processed', "
                 "processed_at = ?, interaction_id = ? "

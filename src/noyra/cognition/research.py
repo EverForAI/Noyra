@@ -18,10 +18,12 @@ from noyra.mind import GoalRecord, GoalStore
 from noyra.model import ModelGateway, ModelMessage
 from noyra.model.errors import (
     BudgetExhaustedError,
+    ModelCallConflictError,
     ModelCallStateError,
     ProviderCallError,
     StructuredOutputError,
 )
+from noyra.model.request_identity import UNRUNNABLE_BUSINESS_CALL_SQL, logical_key_from_route
 from noyra.research import (
     BrowserSearchExecutor,
     ResearchAssessmentProposal,
@@ -134,15 +136,26 @@ class AutonomousResearch:
             return None
         providers = self.providers.active(self.subject_id)
         context = self._context(goals, providers)
+        providers = [provider for provider in providers if provider.config_id in context.providers]
         budget_day = self.clock()[:10]
         round_number = self._committed_count()
         binding_suffix = "" if binding is None else f":{binding[0]}:{binding[1]}"
         purpose = f"research_plan:{round_number}{binding_suffix}"
+        pending, uncertain = self._pending_planner(binding_suffix)
+        if uncertain:
+            return "research_waiting_reconciliation"
+        if pending is not None:
+            purpose = pending
         recovered = self._successful_plan(purpose, context)
         if recovered is not None:
             plan, planner_call_id = recovered
             return await self._execute_plan(plan, planner_call_id, context, providers, binding)
-        if self._calls_today(budget_day) >= self.settings.max_research_model_calls_per_day:
+        planner_key, resume_prepared = self._planner_key(purpose)
+        if planner_key is None:
+            return "research_planner_wait"
+        if not resume_prepared and (
+            self._calls_today(budget_day) >= self.settings.max_research_model_calls_per_day
+        ):
             return None
         try:
             result = await self.gateway.complete_structured(
@@ -150,13 +163,17 @@ class AutonomousResearch:
                 purpose,
                 self._planning_messages(context),
                 ResearchPlanProposal,
-                idempotency_key=f"research-plan:{round_number}:{budget_day}{binding_suffix}",
+                idempotency_key=planner_key,
                 max_output_tokens=min(2_000, self.settings.max_output_tokens),
                 temperature=self.settings.temperature,
             )
         except BudgetExhaustedError:
             self._budget_fatigue()
             return "research_budget_exhausted"
+        except ModelCallConflictError:
+            # A prepared old request may have a different context or resource.
+            # Keep that identity for explicit recovery; never escape by rekeying.
+            return "research_planner_context_wait"
         except (ProviderCallError, StructuredOutputError, ModelCallStateError):
             return "research_model_failed"
         return await self._execute_plan(result.output, result.call_id, context, providers, binding)
@@ -435,6 +452,7 @@ class AutonomousResearch:
             goal
             for goal in self.goals.ranked(self.subject_id, statuses=("active",))
             if goal.origin != "human_proposal"
+            and (self._project_binding is None or goal.goal_id == self._project_binding[2])
         ][:8]
 
     def _context(
@@ -498,7 +516,7 @@ class AutonomousResearch:
                     "label": provider.label,
                     "rate_limit_per_hour": provider.rate_limit_per_hour,
                 }
-                for provider in providers
+                for provider in providers[:16]
             ],
             "fallback_methods": ["model", "browser"],
             "known_sources": [dict(row) for row in source_rows],
@@ -507,6 +525,7 @@ class AutonomousResearch:
             "autonomous_projects": [dict(row) for row in project_rows],
             "recent_events": [dict(row) for row in event_rows],
         }
+        compacted = False
         while len(canonical_json(payload)) > self.settings.max_research_context_chars:
             if len(payload["recent_events"]) > 1:
                 payload["recent_events"].pop()
@@ -518,14 +537,40 @@ class AutonomousResearch:
                 payload["autonomous_projects"].pop()
             elif len(payload["known_sources"]) > 1:
                 payload["known_sources"].pop()
+            elif not compacted:
+                # Individual legal fields can exceed the aggregate envelope.
+                # Keep real IDs and trim text before dropping ranked candidates.
+                for item in payload["goals"]:
+                    item["title"] = item["title"][:64]
+                    item["description"] = item["description"][:128]
+                for item in payload["configured_search_resources"]:
+                    item["label"] = item["label"][:64]
+                compacted = True
+            elif len(payload["configured_search_resources"]) > 1:
+                payload["configured_search_resources"].pop()
+            elif payload["known_sources"]:
+                payload["known_sources"].pop()
+            elif len(payload["goals"]) > 1:
+                payload["goals"].pop()
+            elif payload["configured_search_resources"]:
+                payload["configured_search_resources"].pop()
             else:
                 raise AutonomousResearchValidationError(
                     "research context cannot fit configured limit"
                 )
         return ResearchContext(
             canonical_json(payload),
-            {goal.goal_id: goal for goal in goals},
-            {provider.config_id: provider for provider in providers},
+            {
+                goal.goal_id: goal
+                for goal in goals
+                if goal.goal_id in {item["goal_id"] for item in payload["goals"]}
+            },
+            {
+                provider.config_id: provider
+                for provider in providers
+                if provider.config_id
+                in {item["config_id"] for item in payload["configured_search_resources"]}
+            },
             frozenset(str(row["event_id"]) for row in payload["recent_events"]),
         )
 
@@ -859,6 +904,87 @@ class AutonomousResearch:
             raise IntegrityError("research record is missing")
         return record
 
+    def _pending_planner(self, binding_suffix: str) -> tuple[str | None, bool]:
+        # Scope is one independent planner or one exact project phase. A
+        # different lane advancing the global committed counter cannot release
+        # this lane's unfinished pre-upgrade dated request.
+        scope = (
+            "c.purpose LIKE 'research_plan:%' AND c.purpose NOT LIKE 'research_plan:%:%'"
+            if not binding_suffix
+            else "c.purpose LIKE 'research_plan:%' AND substr(c.purpose,-length(:suffix))=:suffix"
+        )
+        params = {
+            "subject": self.subject_id,
+            "suffix": binding_suffix,
+            "require_prepared_authorization": self.gateway.requires_explicit_prepared_retry,
+        }
+        with self.database.connection() as connection:
+            uncertain = connection.execute(
+                "SELECT 1 FROM model_calls c WHERE c.subject_id=:subject AND "
+                + scope
+                + " AND "
+                + UNRUNNABLE_BUSINESS_CALL_SQL
+                + " LIMIT 1",
+                params,
+            ).fetchone()
+            if uncertain is not None:
+                return None, True
+            prepared = connection.execute(
+                "SELECT c.purpose FROM model_calls c WHERE c.subject_id=:subject AND "
+                + scope
+                + " AND c.status='prepared' ORDER BY c.created_at,c.call_id LIMIT 2",
+                params,
+            ).fetchall()
+            if len(prepared) > 1:
+                return None, True
+            if prepared:
+                return str(prepared[0][0]), False
+            success = connection.execute(
+                "SELECT c.purpose FROM model_calls c WHERE c.subject_id=:subject AND "
+                + scope
+                + " AND c.status='succeeded' AND NOT EXISTS (SELECT 1 FROM research_search_runs r "
+                "WHERE r.subject_id=c.subject_id AND r.planner_call_id=c.call_id) "
+                "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.subject_id=c.subject_id "
+                "AND e.event_type='research_rejected' "
+                "AND e.event_id='evt_research_rejected_'||c.call_id) "
+                "ORDER BY c.created_at,c.call_id LIMIT 1",
+                params,
+            ).fetchone()
+        return (None if success is None else str(success[0])), False
+
+    def _planner_key(self, purpose: str) -> tuple[str | None, bool]:
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                "SELECT idempotency_key,resource_pool,status,created_at,completed_at "
+                "FROM model_calls "
+                "WHERE subject_id=? AND purpose=? ORDER BY created_at,call_id",
+                (self.subject_id, purpose),
+            ).fetchall()
+        if any(row["status"] in {"unknown", "executing"} for row in rows):
+            return None, False
+        prepared = [row for row in rows if row["status"] == "prepared"]
+        if len(prepared) > 1:
+            return None, False
+        if prepared:
+            return (
+                logical_key_from_route(
+                    str(prepared[0]["idempotency_key"]), str(prepared[0]["resource_pool"])
+                ),
+                True,
+            )
+        # Physical attempts still use the gateway's ordinary budgets. Limit
+        # new planning identities as well, including rejected successful plans.
+        if sum(str(row["created_at"])[:10] == self.clock()[:10] for row in rows) >= 2:
+            return None, False
+        if rows:
+            latest = max(self._parse_time(str(row["completed_at"])) for row in rows)
+            if (self._parse_time(self.clock()) - latest).total_seconds() < (
+                self.settings.research_interval_seconds
+            ):
+                return None, False
+        logical_key = "research-plan:" + purpose[len("research_plan:") :]
+        return (logical_key if not rows else f"{logical_key}:retry:{len(rows)}"), False
+
     def _successful_plan(
         self,
         purpose: str,
@@ -867,7 +993,10 @@ class AutonomousResearch:
         with self.database.connection() as connection:
             rows = connection.execute(
                 "SELECT call_id, response_json FROM model_calls WHERE subject_id = ? "
-                "AND purpose = ? AND status = 'succeeded' ORDER BY created_at DESC",
+                "AND purpose = ? AND status = 'succeeded' AND NOT EXISTS (SELECT 1 FROM events e "
+                "WHERE e.subject_id=model_calls.subject_id AND e.event_type='research_rejected' "
+                "AND e.event_id='evt_research_rejected_'||model_calls.call_id) "
+                "ORDER BY created_at,call_id",
                 (self.subject_id, purpose),
             ).fetchall()
         for row in rows:
@@ -904,6 +1033,7 @@ class AutonomousResearch:
             "research_supervisor",
             {"model_call_id": call_id, "reason": reason},
             privacy_level="private",
+            event_id="evt_research_rejected_" + call_id,
         )
 
     def _record_fatigue(self, call_id: str, result_count: int, status: str) -> None:

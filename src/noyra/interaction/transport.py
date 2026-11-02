@@ -1592,7 +1592,8 @@ class DeliveryDispatcher:
             if interaction["related_interaction_id"] is not None:
                 with self.database.connection() as connection:
                     contexts = connection.execute(
-                        "SELECT external_thread_id, reply_selector, reply_context_version, "
+                        "SELECT external_thread_id, provider_event_id, reply_selector, "
+                        "reply_context_version, "
                         "conversation_id, transport_id, subject_id, external_account_id, "
                         "external_sender_id, channel "
                         "FROM interaction_inbound_events WHERE interaction_id = ? "
@@ -1663,16 +1664,38 @@ class DeliveryDispatcher:
                             ),
                         ).fetchone()
                 if context is not None:
-                    thread_id = context["external_thread_id"]
+                    thread_id = (
+                        context["provider_event_id"]
+                        if record.channel == "email"
+                        else context["external_thread_id"]
+                    )
                     if thread_id is None and legacy_thread is not None:
                         thread_id = legacy_thread["external_thread_id"]
                     if thread_id is not None:
                         send_interaction["thread_id"] = thread_id
                     if context["reply_selector"] is not None:
                         send_interaction["reply_selector"] = context["reply_selector"]
-            send_interaction["counterparty"] = self.transports.delivery_counterparty(
-                record.transport_id, interaction, subject_id=delivery.subject_id
+            from .assistance_routes import AssistanceRoutes
+
+            help_route = None
+            help_routes = AssistanceRoutes(self.database, delivery.subject_id)
+            is_help = interaction["channel"] == "web" and interaction["kind"] == "help_request"
+            if is_help:
+                with self.database.connection() as connection:
+                    help_route = help_routes.read(connection, delivery.delivery_id)
+            send_interaction["counterparty"] = (
+                help_route["recipient"]
+                if help_route is not None
+                else self.transports.delivery_counterparty(
+                    record.transport_id, interaction, subject_id=delivery.subject_id
+                )
             )
+            if is_help and help_route is None:
+                help_route = help_routes.freeze(
+                    delivery.delivery_id, str(send_interaction["counterparty"])
+                )
+            if help_route is not None:
+                send_interaction["counterparty"] = help_route["recipient"]
             with self.database.connection() as connection:
                 push_recipient = self._web_push_recipient(connection, delivery.delivery_id)
             if push_recipient is not None:
@@ -1804,6 +1827,41 @@ class DeliveryDispatcher:
                 "SELECT delivery_id FROM interaction_deliveries WHERE idempotency_key=?",
                 (idempotency_key,),
             ).fetchone()
+            from .assistance_routes import AssistanceRoutes
+
+            help_route = AssistanceRoutes(self.database, transport.subject_id).read(
+                connection, str(delivery[0])
+            )
+            if (
+                current["channel"] == "web"
+                and current["kind"] == "help_request"
+                and str(current["idempotency_key"]).startswith("project-assistance:")
+                and help_route is None
+            ):
+                raise PermissionError("help delivery lacks its destination evidence")
+            if help_route is not None:
+                target = connection.execute(
+                    "SELECT transport_id,config_json FROM interaction_transports "
+                    "WHERE subject_id=? AND transport_id=?",
+                    (transport.subject_id, transport.transport_id),
+                ).fetchone()
+                request = connection.execute(
+                    "SELECT 1 FROM autonomous_project_assistance_requests "
+                    "WHERE subject_id=? AND request_id=? AND status='open'",
+                    (transport.subject_id, help_route["request_id"]),
+                ).fetchone()
+                account = (
+                    None if target is None else TransportStore._config(target).get("account_id")
+                )
+                account = account if isinstance(account, str) and account.strip() else None
+                if (
+                    help_route["transport_id"] != transport.transport_id
+                    or help_route["recipient"] != interaction.get("counterparty")
+                    or target is None
+                    or request is None
+                    or account != help_route["account_id"]
+                ):
+                    raise PermissionError("help delivery authorization withdrawn")
             push_recipient = self._web_push_recipient(connection, delivery[0])
             if push_recipient is not None and (
                 interaction.get("counterparty") != push_recipient
@@ -1908,6 +1966,11 @@ class DeliveryDispatcher:
                         idempotency_key,
                         before_send,
                         operation=operation,
+                        thread_id=(
+                            interaction.get("thread_id")
+                            if isinstance(interaction.get("thread_id"), str)
+                            else None
+                        ),
                     )
                 )
             except TimeoutError as error:
@@ -2129,6 +2192,7 @@ class DeliveryDispatcher:
         authorize_send: Callable[[], None] | None = None,
         *,
         operation: SMTPOperation | None = None,
+        thread_id: str | None = None,
     ) -> str:
         operation = operation or SMTPOperation(SMTP_TIMEOUT_SECONDS)
         parsed = urlsplit(endpoint)
@@ -2145,6 +2209,19 @@ class DeliveryDispatcher:
         message["Subject"] = "Noyra message"
         message_id = DeliveryDispatcher._smtp_message_id(idempotency_key)
         message["Message-ID"] = message_id
+        if (
+            isinstance(thread_id, str)
+            and 3 <= len(thread_id) <= 512
+            and thread_id.startswith("<")
+            and thread_id.endswith(">")
+            and thread_id.count("@") == 1
+            and thread_id.isascii()
+            and all(33 <= ord(character) <= 126 for character in thread_id)
+            and "<" not in thread_id[1:-1]
+            and ">" not in thread_id[1:-1]
+        ):
+            message["In-Reply-To"] = thread_id
+            message["References"] = thread_id
         message.set_content(content)
         addresses = public_addresses(host, port, timeout=operation.remaining())
         address = addresses[0]

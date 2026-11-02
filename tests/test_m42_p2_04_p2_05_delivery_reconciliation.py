@@ -218,6 +218,45 @@ def test_smtp_rejects_dns_change_to_private_and_peer_rebinding(
         )
 
 
+@pytest.mark.parametrize(
+    ("reference", "expected"),
+    [
+        ("<incoming-message@helper.example>", "<incoming-message@helper.example>"),
+        (None, None),
+        ("opaque-provider-reference", None),
+        ("<incoming@helper.example>\r\nBcc: stranger@example.com", None),
+        ("<one@helper.example> <two@helper.example>", None),
+        ("<a" + "x" * 512 + "@helper.example>", None),
+    ],
+)
+def test_smtp_reply_headers_use_one_bounded_message_reference(
+    monkeypatch: pytest.MonkeyPatch, reference: str | None, expected: str | None
+) -> None:
+    _FakeSMTP.reset()
+    captured: list[EmailMessage] = []
+    original_send = _FakeSMTP.send_message
+
+    def capture(self: _FakeSMTP, message: EmailMessage) -> dict[str, tuple[int, bytes]]:
+        captured.append(message)
+        return original_send(self, message)
+
+    monkeypatch.setattr("noyra.core.http._system_address_lookup", lambda *a, **k: ["8.8.8.8"])
+    monkeypatch.setattr(smtplib, "SMTP", _FakeSMTP)
+    monkeypatch.setattr(_FakeSMTP, "send_message", capture)
+    message_id = DeliveryDispatcher._send_email(
+        "smtp://mail.example:587",
+        {"from_address": "noyra@example.com"},
+        "helper@example.com",
+        "A bounded reply.",
+        "ar03-header-test",
+        thread_id=reference,
+    )
+    assert str(captured[0]["Message-ID"]) == message_id
+    assert captured[0]["In-Reply-To"] == expected
+    assert captured[0]["References"] == expected
+    assert captured[0]["Bcc"] is None
+
+
 def test_successful_smtp_send_ignores_quit_disconnect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
