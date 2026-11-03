@@ -30,15 +30,19 @@ const tag = (text) => `<p class="eyebrow">${esc(text)}</p>`;
 const lines = (parts) =>
     parts.map((part) => `<span>${esc(part)}</span>`).join("");
 
-function render(locale, research = false) {
+function render(locale, page = "home") {
     const c = content[locale];
     const isEn = locale === "en";
-    const path = `${isEn ? "en/" : ""}${research ? "research/" : ""}`;
-    const root = "../".repeat((isEn ? 1 : 0) + (research ? 1 : 0));
+    const research = page === "research";
+    const sponsor = page === "sponsor";
+    const section = page === "home" ? "" : `${page}/`;
+    const path = `${isEn ? "en/" : ""}${section}`;
+    const root = "../".repeat((isEn ? 1 : 0) + (page === "home" ? 0 : 1));
     const home = `${root}${isEn ? "en/" : ""}index.html`;
     const study = `${root}${isEn ? "en/" : ""}research/index.html`;
-    const chinese = `${root}${research ? "research/" : ""}index.html`;
-    const english = `${root}en/${research ? "research/" : ""}index.html`;
+    const support = `${root}${isEn ? "en/" : ""}sponsor/index.html`;
+    const chinese = `${root}${section}index.html`;
+    const english = `${root}en/${section}index.html`;
     const asset = (name) => {
         const version = createHash("sha256")
             .update(readFileSync(join(site, "assets", name)))
@@ -49,7 +53,7 @@ function render(locale, research = false) {
     const nav = c.nav
         .map(
             (item, i) =>
-                `<a href="${i === 3 ? study : `${research ? home : ""}#${["philosophy", "architecture", "vision"][i]}`}"${research && i === 3 ? ' aria-current="page"' : ""}>${esc(item)}</a>`,
+                `<a href="${i === 3 ? study : i === 4 ? support : `${page !== "home" ? home : ""}#${["philosophy", "architecture", "vision"][i]}`}"${(research && i === 3) || (sponsor && i === 4) ? ' aria-current="page"' : ""}>${esc(item)}</a>`,
         )
         .join("");
     const header = `<a class="skip-link" href="#main">${esc(c.skip)}</a>
@@ -66,7 +70,7 @@ function render(locale, research = false) {
     const art = (name, eager = false) => picture(name, "section-art", eager);
     const cta = `<section class="closing scenic">${art("memory")}<div class="wrap">${tag(c.ctaTag)}<h2>${esc(c.ctaTitle)}</h2><p>${esc(c.ctaBody)}</p><div class="button-row">${link(c.source, shared.repo, "button button-primary")}${link(c.download, shared.release, "button button-outline")}</div></div></section>`;
     let main;
-    if (!research) {
+    if (page === "home") {
         main = `<section class="hero">
       ${picture("continuity", "hero-image", true)}
       <div class="wrap hero-content"><p class="hero-status"><span class="status-dot" aria-hidden="true"></span>${esc(c.releaseLabel)}<span class="mono">NCAS</span></p>
@@ -83,33 +87,38 @@ function render(locale, research = false) {
     <section id="vision" class="section vision"><div class="wrap">${tag(c.visionTag)}<div class="section-heading"><h2>${lines(c.visionTitle)}</h2><p>${esc(c.visionBody)}</p></div><figure class="vision-image">${picture("horizon", "horizon-image")}</figure><div class="vision-list">${c.visions.map(([title, body, meta], i) => `<article><span class="vision-number">0${i + 1}</span><h3>${esc(title)}<small>${esc(meta)}</small></h3><p>${esc(body)}</p><span class="vision-arrow" aria-hidden="true">${icon("arrow-up-right")}</span></article>`).join("")}</div></div></section>
     <section class="section roadmap scenic">${art("pathway")}<div class="wrap">${tag(c.roadmapTag)}<h2>${esc(c.roadmapTitle)}</h2><ol class="roadmap-grid">${c.roadmap.map(([state, title, body], i) => `<li><div class="roadmap-marker"><span>${i + 1}</span><p>${esc(state)}</p></div><h3>${esc(title)}</h3><p>${esc(body)}</p></li>`).join("")}</ol></div></section>
     <section class="section faq scenic">${art("memory")}<div class="wrap split"><h2>${esc(c.faqTitle)}</h2><div>${c.faqs.map(([q, a]) => `<details><summary>${esc(q)}${icon("plus")}</summary><p>${esc(a)}</p></details>`).join("")}</div></div></section>${cta}`;
-    } else {
+    } else if (research) {
         main = `<section class="research-hero scenic">${art("memory", true)}<div class="wrap">${tag("NOYRA / RESEARCH")}<h1>${esc(c.researchTitle)}</h1><p class="research-intro">${esc(c.researchIntro)}</p><p>${esc(c.researchBody)}</p>${link(c.positioningLink, `${shared.docs}research/2026-10-23-positioning.md`)}<div class="research-tabs"><a href="#architecture-topics">${esc(c.researchTopicLink)}${icon("arrow-down")}</a><a href="#evidence">L1 / L2 / L3${icon("arrow-down")}</a></div></div></section>
     <section id="architecture-topics" class="section criteria-section scenic">${art("memory")}<div class="wrap">${tag(c.criteriaTag)}<h2>${esc(c.criteriaTitle)}</h2><div class="criteria-grid">${c.criteria.map(([title, body], i) => `<article><span class="criterion-id">0${i + 1}</span><h3>${esc(title)}</h3><p>${esc(body)}</p></article>`).join("")}</div>${link(c.definitionLink, `${shared.docs}research/non-command-oriented-subject.md`)}</div></section>
     <section id="evidence" class="section evidence-section scenic">${art("substrate")}<div class="wrap">${tag("02 / EVIDENCE")}<h2>${esc(c.evidenceTitle)}</h2><div class="evidence-grid">${c.evidence.map(([id, title, body]) => `<article><span>${id}</span><h3>${esc(title)}</h3><p>${esc(body)}</p></article>`).join("")}</div>${evidence}</div></section>
     <section id="collaboration" class="section collaboration-section scenic">${art("memory")}<div class="wrap split"><h2>${esc(c.collaborationTitle)}</h2><div><p class="lead">${esc(c.collaborationBody)}</p><p>${esc(c.collaborationBody2)}</p>${link(c.contributeResearch, `${shared.repo}/issues`)}</div></div></section>${cta}`;
     }
-    const title = research ? `${c.researchTitle} · ${c.title}` : c.title;
+    else {
+        main = `<section class="sponsor-hero scenic">${art("memory", true)}<div class="wrap sponsor-content">${tag("NOYRA / SUPPORT")}<h1>${esc(c.sponsorTitle)}</h1><p class="sponsor-intro">${esc(c.sponsorIntro)}</p>${link(c.sponsorButton, shared.sponsor, "button button-primary")}<p class="sponsor-notice">${esc(c.sponsorNotice)}<a href="${esc(shared.sponsor)}">${esc(shared.sponsor)}</a></p></div></section>
+    <section class="section sponsor-thanks"><div class="wrap sponsor-content">${tag("ACKNOWLEDGMENTS")}<h2>${esc(c.sponsorThanks)}</h2><p>${esc(c.sponsorEmpty)}</p></div></section>
+    <section class="sponsor-context"><div class="wrap sponsor-content"><p>${esc(c.researchBody)}</p>${link(c.download, shared.release)}</div></section>`;
+    }
+    const title = page === "home" ? c.title : `${sponsor ? c.sponsorTitle : c.researchTitle} · ${c.title}`;
     return `<!doctype html>
 <html lang="${c.lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="strict-origin-when-cross-origin"><meta name="theme-color" content="#11151b">
 <title>${esc(title)}</title><meta name="description" content="${esc(c.description)}"><link rel="canonical" href="${base}${path}">
-<link rel="alternate" hreflang="zh-CN" href="${base}${research ? "research/" : ""}"><link rel="alternate" hreflang="en" href="${base}en/${research ? "research/" : ""}"><link rel="alternate" hreflang="x-default" href="${base}${research ? "research/" : ""}">
+<link rel="alternate" hreflang="zh-CN" href="${base}${section}"><link rel="alternate" hreflang="en" href="${base}en/${section}"><link rel="alternate" hreflang="x-default" href="${base}${section}">
 <meta property="og:type" content="website"><meta property="og:title" content="${esc(title)}"><meta property="og:description" content="${esc(c.description)}"><meta property="og:url" content="${base}${path}"><meta property="og:image" content="${base}assets/social.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="${esc(title)}"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:image" content="${base}assets/social.png"><meta name="twitter:image:alt" content="${esc(title)}">
 <link rel="icon" type="image/png" href="${asset("favicon.png")}"><link rel="stylesheet" href="${asset("site.css")}"><script src="${asset("site.js")}" defer></script>
 </head><body${research ? ' class="research-page"' : ""}>${header}<main id="main">${main}</main>${footer}</body></html>\n`;
 }
 
 for (const locale of ["zh", "en"]) {
-    for (const research of [false, true]) {
+    for (const page of ["home", "research", "sponsor"]) {
         const folder = join(
             site,
             locale === "en" ? "en" : "",
-            research ? "research" : "",
+            page === "home" ? "" : page,
         );
         mkdirSync(folder, { recursive: true });
-        writeFileSync(join(folder, "index.html"), render(locale, research));
+        writeFileSync(join(folder, "index.html"), render(locale, page));
     }
 }
 writeFileSync(join(site, ".nojekyll"), "");
@@ -119,6 +128,6 @@ writeFileSync(
 );
 writeFileSync(
     join(site, "sitemap.xml"),
-    `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${["", "en/", "research/", "en/research/"].map((path) => `<url><loc>${base}${path}</loc></url>`).join("")}</urlset>\n`,
+    `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${["", "en/", "research/", "en/research/", "sponsor/", "en/sponsor/"].map((path) => `<url><loc>${base}${path}</loc></url>`).join("")}</urlset>\n`,
 );
-console.log("Built four bilingual static pages.");
+console.log("Built six bilingual static pages.");

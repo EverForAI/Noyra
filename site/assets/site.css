@@ -878,6 +878,54 @@ tbody tr:hover {
 .footer-bottom p {
     color: inherit;
 }
+.sponsor-hero {
+    padding: 112px 0 88px;
+    border-bottom: 1px solid var(--line);
+}
+.sponsor-content {
+    position: relative;
+}
+.sponsor-hero h1 {
+    margin-bottom: 20px;
+    font-size: 54px;
+}
+.sponsor-intro {
+    margin-bottom: 30px;
+    font-size: 20px;
+}
+.sponsor-notice {
+    max-width: 640px;
+    margin-top: 26px;
+    color: #bdcfe5;
+    overflow-wrap: anywhere;
+}
+.sponsor-notice a {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 4px;
+}
+.sponsor-thanks p:not(.eyebrow),
+.sponsor-context p {
+    max-width: 720px;
+    color: #bdcfe5;
+}
+.sponsor-context {
+    padding: 0 0 72px;
+}
+.sponsor-context .text-link {
+    margin-top: 20px;
+}
+@media (max-width: 640px) {
+    .sponsor-hero {
+        padding: 74px 0 64px;
+    }
+    .sponsor-hero h1 {
+        font-size: 40px;
+    }
+    .sponsor-intro {
+        font-size: 17px;
+    }
+}
 .research-hero {
     padding: 112px 0 108px;
     background: #11151a;
