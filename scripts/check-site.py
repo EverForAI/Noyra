@@ -12,6 +12,8 @@ EXPECTED = {
     "en/index.html": "en",
     "research/index.html": "zh-CN",
     "en/research/index.html": "en",
+    "sponsor/index.html": "zh-CN",
+    "en/sponsor/index.html": "en",
 }
 POSITIONING = {
     "zh-CN": (
@@ -109,6 +111,11 @@ def validate():
             if marker not in source:
                 errors.append(f"{name}: missing {marker}")
         errors.extend(f"{name}: {error}" for error in page.errors)
+        if name in {"sponsor/index.html", "en/sponsor/index.html"}:
+            if page.links.count("https://afdian.com/a/Noyra") != 2:
+                errors.append(f"{name}: expected official sponsor button and link")
+            if ("鸣谢" if lang == "zh-CN" else "Acknowledgments") not in source:
+                errors.append(f"{name}: missing acknowledgments")
     for name, lang in (("README.md", "zh-CN"), ("README.en.md", "en")):
         source = (ROOT.parent / name).read_text(encoding="utf-8")
         if POSITIONING[lang] not in source.splitlines()[0].lower():

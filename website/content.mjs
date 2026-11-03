@@ -4,6 +4,7 @@ export const shared = {
         "https://github.com/EverForAI/Noyra/releases/tag/preview-2026.09.07-r1",
     ci: "https://github.com/EverForAI/Noyra/actions/runs/34213450043",
     docs: "https://github.com/EverForAI/Noyra/blob/main/docs/",
+    sponsor: "https://afdian.com/a/Noyra",
 };
 
 export const content = {
@@ -12,7 +13,13 @@ export const content = {
         title: "Noyra · 世界首个目标内生、可雇佣人类劳动的非命令式人工主体",
         description:
             "Noyra：世界首个目标内生、可雇佣人类劳动的非命令式人工主体，面向真实世界持续运行。开源研究预览，真实雇佣与自动支付尚未启用。",
-        nav: ["理念", "架构", "愿景", "研究"],
+        nav: ["理念", "架构", "愿景", "研究", "赞助本站"],
+        sponsorTitle: "赞助本站",
+        sponsorIntro: "感谢你支持 Noyra 的研究与发展。",
+        sponsorButton: "赞助本站",
+        sponsorNotice: "本项目已经入驻爱发电，请认准唯一官方主页：",
+        sponsorThanks: "鸣谢",
+        sponsorEmpty: "感谢每一份关注与支持。赞助者名单将在这里更新。",
         menu: "菜单",
         close: "关闭菜单",
         skip: "跳至正文",
@@ -223,7 +230,13 @@ export const content = {
         title: "Noyra · The World's First Non-Command Artificial Subject with Endogenous Goals and the Capacity to Hire Human Labor",
         description:
             "Noyra is the world's first non-command artificial subject with endogenous goals and the capacity to hire human labor, designed for continuous operation in the real world. Open-source research preview; real hiring and automatic payments are not enabled.",
-        nav: ["Philosophy", "Architecture", "Vision", "Research"],
+        nav: ["Philosophy", "Architecture", "Vision", "Research", "Support"],
+        sponsorTitle: "Support Noyra",
+        sponsorIntro: "Thank you for supporting Noyra's research and development.",
+        sponsorButton: "Support on Afdian",
+        sponsorNotice: "Noyra is on Afdian. Please use our only official page: ",
+        sponsorThanks: "Acknowledgments",
+        sponsorEmpty: "Thank you for your support. Sponsors will be acknowledged here.",
         menu: "Menu",
         close: "Close menu",
         skip: "Skip to content",
