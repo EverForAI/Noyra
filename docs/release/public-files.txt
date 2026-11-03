@@ -450,10 +450,12 @@ site/assets/substrate-mobile.webp
 site/assets/substrate.webp
 site/en/index.html
 site/en/research/index.html
+site/en/sponsor/index.html
 site/index.html
 site/research/index.html
 site/robots.txt
 site/sitemap.xml
+site/sponsor/index.html
 src/noyra/__init__.py
 src/noyra/__main__.py
 src/noyra/autonomy/__init__.py
