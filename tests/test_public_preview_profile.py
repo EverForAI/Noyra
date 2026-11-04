@@ -142,3 +142,35 @@ def test_historical_fixtures_have_only_generated_content(tmp_path: Path, version
                 continue
             quoted = '"' + table.replace('"', '""') + '"'
             assert db.execute("SELECT COUNT(*) FROM " + quoted).fetchone()[0] == 0, table
+
+
+@pytest.mark.parametrize("relative", [".env.example", "deploy/noyra.env.example"])
+def test_profile_explicitly_preserves_opt_in_cognition_and_open_autonomy_defaults(
+    relative: str,
+) -> None:
+    from noyra.cognition.settings import CognitionSettings
+
+    defaults = CognitionSettings()
+    assert defaults.enabled is False
+    assert defaults.autonomous_expression_enabled is True
+    assert defaults.web_read_public_by_default is True
+    example = read_env(relative)
+    assert example["NOYRA_COGNITION_ENABLED"] == "false"
+    assert example["NOYRA_AUTONOMOUS_EXPRESSION_ENABLED"] == "true"
+    assert example["NOYRA_WEB_READ_PUBLIC_BY_DEFAULT"] == "true"
+    with patch.dict(os.environ, example, clear=True):
+        settings = CognitionSettings.from_env()
+        assert settings.enabled is False
+        assert settings.autonomous_expression_enabled is True
+        assert settings.web_read_public_by_default is True
+        with patch.dict(
+            os.environ,
+            {
+                "NOYRA_COGNITION_ENABLED": "true",
+                "NOYRA_AUTONOMOUS_EXPRESSION_ENABLED": "false",
+            },
+        ):
+            disabled = CognitionSettings.from_env()
+            assert disabled.enabled is True
+            assert disabled.autonomous_expression_enabled is False
+            assert disabled.web_read_public_by_default is True

@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Added bounded recovery and persisted fair scheduling for autonomous workflows,
+  with separate source-check heartbeats and explanation of waits and clock status.
+- Connected open research to bounded source trials and reading evidence, and linked
+  intrinsic questions to goal governance and autonomous exploration without seed sources.
+- Added self-reviewed autonomous writing, fixed-route contact and free help with
+  participant-bound replies. With cognition enabled, autonomous expression defaults
+  on without per-item human approval; public HTTPS reading stays open by default.
+  Cognition itself remains opt-in, and economic automation has separate gates.
+- Added validation of new public help summaries and durable, visible safety waits for
+  existing requests; malformed inbound authentication values are rejected consistently.
+- Applied the storage-readiness boundary to authenticated wallet-list reads and
+  corrected communication classification in new consciousness frames without rewriting history.
+- Wallet-automation summaries now include `execution_observation`. Failed execution
+  reads return unknown (`null`) counts, and the management console distinguishes
+  unread records from a verified empty result. Consumers should check observation
+  status before using the counters. Healthy-response counter values are unchanged.
+- Added bilingual sponsorship and acknowledgments pages linking to the official
+  Noyra Afdian profile. Local regressions do not establish production rollout or
+  external-platform acceptance.
+
 - Unified the world-first positioning across Chinese/English introductions,
   research pages, citation/package metadata and related-work records.
   The claim concerns the combination of endogenous goals, non-command

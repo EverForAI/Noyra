@@ -34,6 +34,14 @@ dedicated Noyra identity rather than borrowing a person's identity or credential
 cannot create arbitrary capabilities from a draft. Publication and message grants enforce rolling
 hourly limits and are revalidated before committing or sending.
 
+Cognition is opt-in (`NOYRA_COGNITION_ENABLED=false` in both templates). The expression
+setting below defaults on once cognition is enabled. Public HTTPS reading remains open
+by default; optional host/recipient allowlists do not become mandatory approval queues.
+Configured active transports allow autonomous expression unless their `autonomous_send`
+setting is false. A transport's optional `allowed_recipients` narrows only that transport.
+Disabling new expression work does not retract already queued messages; disable the
+transport or revoke its grant to prevent their dispatch.
+
 Settings:
 
 - `NOYRA_AUTONOMOUS_EXPRESSION_ENABLED=true`
@@ -108,6 +116,11 @@ the invitation offered: Noyra must accept it and then choose continue/wait/end b
 can resume. Missing historical route evidence is not guessed from current settings or replayed;
 channels without a verifiable reply reference retain ordinary invitations and explicit on-site help
 replies. External forum registration and platform-specific lifecycles belong to C1/C2.
+
+Public help summaries are checked before a new request is created. A proposal requiring
+credential redaction is rejected rather than silently rewritten and published. Existing
+requests keep their recorded content and hashes; a safety wait is exposed to the operator
+without sending that summary or stopping service to other workflows.
 
 ## Scheduling and verification boundary
 

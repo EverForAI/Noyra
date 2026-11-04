@@ -80,6 +80,13 @@ The service bound is expressed in completed scheduler turns, not an unconditiona
 clock promise: existing network deadlines, budgets, real sleep, permission changes and
 unresolved prerequisites remain authoritative. No in-flight paid call is preempted.
 
+Wallet automation reports configuration separately from execution observation.
+`execution_observation.status` is `ok` only when the pending counts, latest failure and
+active execution count were read successfully in one snapshot. Otherwise the observation
+is `unavailable`, its reason is a stable code, and those measures are `null`. The console
+shows an unread state rather than zero pending work or an absence of failures. This is a
+read-side diagnostic; it does not settle unknown payments or change automation policy.
+
 Local acceptance covers restart/cursor persistence, malformed control state, schema 111
 upgrade, exact export ownership, UTC rollback, multiple projects, a permanently failing
 source, 72-hour virtual operation, and low-cost unchanged-feed polls. Real deployment,

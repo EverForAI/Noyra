@@ -32,21 +32,43 @@ not remove older public history or previously downloaded copies.
 
 ## Research-preview limitations
 
-This source preview is not a production-stable release. Revision
-`preview-2026.09.07-r1` addresses the confirmed AUD-12 file-tool and AUD-05
-native-fee admission findings, including retry reservation, cross-asset
-settlement, exact-grant revocation and compatible-root regressions. See the
-[revision boundaries](docs/release/2026-09-07-preview-r1.md) and
-[repair contract](docs/audit/2026-09-07-second-freeze-remediation.md).
+The current source is an experimental research preview, not a production-stable release.
+The historical tag `preview-2026.09.07-r1` addressed the AUD-12 file-tool and AUD-05
+native-fee admission findings. Its [revision boundaries](docs/release/2026-09-07-preview-r1.md)
+and [repair contract](docs/audit/2026-09-07-second-freeze-remediation.md) describe that
+revision; they are not acceptance evidence for later source or a running deployment.
 POSIX writes require trusted directory ownership/permissions and a dedicated
 service account; hostile same-UID or privileged actors are not isolated.
 Legacy ambiguous payment histories require reviewed reconciliation, not
 automatic release of funds or rewriting historical journals.
-For the preview, use a new disposable data directory, loopback binding, no wallet
-signer, no automatic payments or publishing, no file read/write grants, and no
-real funds. Local fixes do not establish real-chain safety. Signing, bounded file operations,
-autonomous task bounties, payments and tips remain in the project roadmap;
-enable them only after the relevant fixes and deployment acceptance.
+
+### Cognition, expression and public reading
+
+Both environment templates set `NOYRA_COGNITION_ENABLED=false`. Enabling cognition
+spends configured model quota and enables Noyra's autonomous workflow. Within that
+workflow, `NOYRA_AUTONOMOUS_EXPRESSION_ENABLED=true` is the default: Noyra may draft,
+self-review and publish its own writing or send messages through configured active
+transports using sustained authorization, without per-item human approval. A transport
+must have usable credentials and routing; a new template does not supply them.
+`NOYRA_WEB_READ_PUBLIC_BY_DEFAULT=true` permits public HTTPS reading through the
+validated reader. Host and recipient allowlists are optional and off by default;
+SSRF checks, untrusted-data handling, budgets and capability/lease checks still apply.
+
+For an isolated evaluation, use a new disposable data directory, loopback binding,
+no signer or real funds, and no file read/write grants. Keep cognition off, or set
+`NOYRA_AUTONOMOUS_EXPRESSION_ENABLED=false` and restart to disable new autonomous
+expression work while retaining cognition. To stop already queued external messages,
+disable the relevant transport or revoke its sending grant; lifecycle pause is also
+available. Disabling a feature does not undo a completed external effect. Dedicated
+Noyra sending identities should be used for enabled channels.
+See [autonomous expression and help](docs/implementation/c0-autonomous-expression.md)
+for configuration and delivery semantics.
+
+Economic capabilities have separate configuration and acceptance gates. The templates
+keep wallet automation and automatic bounty publication off; enabling expression does
+not enable payments or grant a signer. Source checks do not establish real-chain safety
+or sustained real-world acceptance. Reusing a data directory retains its durable grants,
+orders and history, so environment defaults alone do not revoke existing authority.
 
 Never upload private runtime data, model transcripts, raw logs, exports, keys,
 backups or unreviewed screenshots with the source. A secret scan cannot certify
