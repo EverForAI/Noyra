@@ -57,7 +57,7 @@ def is_business_round(purpose: str) -> bool:
         )
         or (
             len(parts) == 2
-            and parts[0] in {"world_cognition", "sleep_reflection"}
+            and parts[0] in {"world_cognition", "sleep_reflection", "epistemic_review"}
             and bool(parts[1])
         )
         or (

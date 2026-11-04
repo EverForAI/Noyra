@@ -192,7 +192,9 @@ class MetacognitiveControl:
             ).fetchall()
             from .epistemic import EpistemicReview
 
-            epistemic_review_count = EpistemicReview._verify_connection(connection, self.subject_id)
+            epistemic_review_count = EpistemicReview._verify_connection(
+                connection, self.subject_id, database=self.database
+            )
             for row in decisions:
                 self._decision_from_row(row)
             for row in outcomes:

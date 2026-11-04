@@ -222,6 +222,7 @@ docs/development/action-deliberation-recovery.md
 docs/development/architecture-boundaries.md
 docs/development/autonomy-scheduling.md
 docs/development/checkpoint-clock-and-recovery.md
+docs/development/epistemic-review-recovery.md
 docs/development/model-invalidation-boundaries.md
 docs/development/model-pre-send-settlement.md
 docs/development/project-coordination.md
@@ -490,6 +491,7 @@ src/noyra/cognition/decision_evidence.py
 src/noyra/cognition/deliberation.py
 src/noyra/cognition/deliberation_recovery.py
 src/noyra/cognition/epistemic.py
+src/noyra/cognition/epistemic_recovery.py
 src/noyra/cognition/execution.py
 src/noyra/cognition/execution_recovery.py
 src/noyra/cognition/expression.py
@@ -894,6 +896,7 @@ tests/test_deployment_setup.py
 tests/test_desktop.py
 tests/test_embedding_resources.py
 tests/test_entities.py
+tests/test_epistemic_recovery.py
 tests/test_epistemic_review.py
 tests/test_epistemic_terminal_selection.py
 tests/test_events_anomalies.py
