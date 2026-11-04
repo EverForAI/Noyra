@@ -6,6 +6,7 @@ from noyra.core.admission import accounting_scope
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.evidence_capacity import require_evidence_capacity
+from noyra.core.model_admission import notify_model_preparation
 from noyra.core.payload_codec import compress_text, decompress_text
 from noyra.core.private_sources import (
     InvitationWithdrawnError,
@@ -101,7 +102,9 @@ class ModelLedger:
                         "idempotency key already identifies a different model call"
                     )
                 record_private_sources(connection, subject_id, existing["call_id"])
-                return self._call_from_row(existing), False
+                call = self._call_from_row(existing)
+                notify_model_preparation(connection, call)
+                return call, False
             require_evidence_capacity(connection, subject_id, "model_calls")
             call_id = new_id("mcall")
             connection.execute(
@@ -129,7 +132,9 @@ class ModelLedger:
                 ),
             )
             record_private_sources(connection, subject_id, call_id)
-            return self._load_call_connection(connection, call_id), True
+            call = self._load_call_connection(connection, call_id)
+            notify_model_preparation(connection, call)
+            return call, True
 
     def authorize_attempt(
         self,
