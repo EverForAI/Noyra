@@ -177,7 +177,11 @@ def dispatch(h: Any, owner: Any, method: str) -> bool:
             username = payload.get("username", "")
             if not isinstance(username, str):
                 raise AccountError("invalid_account_details")
-            store.throttle(username.strip().lower(), public + ":name", 10)
+            if public == "register":
+                # Login uses failed-password state; recovery codes already have
+                # high entropy and use the durable client-attempt limit above.
+                # Do not let failures for a username lock its owner out of recovery.
+                store.throttle(username.strip().lower(), "register:name", 10)
             if public == "register":
                 allowed = {
                     "username",
@@ -203,9 +207,23 @@ def dispatch(h: Any, owner: Any, method: str) -> bool:
                 )
                 _reply(h, 201, data)
             elif public == "login":
-                if set(payload) - {"username", "password"}:
+                if set(payload) - {"username", "password", "captcha_id", "captcha_answer"}:
                     raise AccountError("invalid_account_details")
-                token, csrf, data = store.login(username, payload.get("password", ""))
+                challenge_fields = {"captcha_id", "captcha_answer"} & set(payload)
+                if challenge_fields and challenge_fields != {"captcha_id", "captcha_answer"}:
+                    raise AccountError("invalid_account_details")
+                captcha_verified = False
+                if challenge_fields:
+                    owner.public_posts.verify_captcha(
+                        owner.kernel.subject_id,
+                        client_ip=client,
+                        challenge_id=payload.get("captcha_id"),
+                        answer=payload.get("captcha_answer"),
+                    )
+                    captcha_verified = True
+                token, csrf, data = store.login(
+                    username, payload.get("password", ""), captcha_verified=captcha_verified
+                )
                 _reply(
                     h, 200, {"participant": data, "csrf_token": csrf}, cookie=_cookie(owner, token)
                 )

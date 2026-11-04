@@ -829,7 +829,7 @@ API_ROUTE_CONTRACTS += (
     _get("/api/v1/participants/messages", "participant", 200, 400, 401, 403, 404, 413),
     _get("/api/v1/participants/notifications", "participant", 200, 400, 401, 403, 404, 413),
     _post("/api/v1/participants/register", "none", 201, 200, 400, 401, 403, 404, 409, 415),
-    _post("/api/v1/participants/login", "none", 200, 400, 401, 403, 404, 409, 415),
+    _post("/api/v1/participants/login", "none", 200, 400, 401, 403, 404, 409, 415, 429),
     _post("/api/v1/participants/recover", "none", 200, 400, 401, 403, 404, 409, 415),
     _post("/api/v1/participants/logout", "participant", 200, 400, 401, 403, 404, 409, 415),
     _post("/api/v1/participants/credential", "participant", 200, 400, 401, 403, 404, 409, 415),

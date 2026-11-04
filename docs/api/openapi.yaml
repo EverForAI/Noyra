@@ -2761,7 +2761,7 @@ paths:
     post:
       tags: [participants]
       operationId: participantLoginPost
-      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      description: Login accepts username/password and, after repeated failures, captcha_id/captcha_answer from the same-origin public-post image challenge. The public invalid-credentials response is uniform whether or not the account currently requires a challenge. A valid challenge plus correct password allows sign-in and clears only that account's failure window; this is not a permanent account lock. Recovery-code attempts use the client limit, not the login account-failure bucket. See participants.md for the full contract.
       requestBody:
         required: true
         content:
@@ -2784,7 +2784,7 @@ paths:
       tags: [participants]
       operationId: participantLogoutPost
       security: [{ ParticipantSession: [] }, { ParticipantBearer: [] }]
-      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      description: See participants.md for exact ownership, source, cursor and CSRF contracts.
       requestBody:
         required: true
         content:

@@ -18,6 +18,10 @@ from .participants import Participant, ParticipantStore
 
 _KDF_SLOTS = threading.BoundedSemaphore(2)
 _USERNAME = re.compile(r"[a-z0-9][a-z0-9_.-]{2,63}\Z")
+_AUTH_BUCKET_CAP_PER_SUBJECT = 10_000
+_LOGIN_FAILURE_THRESHOLD = 10
+_LOGIN_FAILURE_WINDOW_SECONDS = 3_600.0
+_DUMMY_PASSWORD_HASH = "00" * 16 + ":" + "00" * 64
 
 
 class AccountError(ValueError):
@@ -65,7 +69,10 @@ class AccountStore:
         now = time.time()
         bucket = digest(operation + ":" + client)
         with self.database.transaction() as c:
-            c.execute("DELETE FROM participant_auth_limits WHERE window_start<?", (now - 3600,))
+            c.execute(
+                "DELETE FROM participant_auth_limits WHERE subject_id=? AND window_start<?",
+                (self.subject, now - 3600),
+            )
             row = c.execute(
                 "SELECT * FROM participant_auth_limits WHERE subject_id=? AND bucket=?",
                 (self.subject, bucket),
@@ -74,7 +81,11 @@ class AccountStore:
                 raise AccountRateLimited("account_rate_limited")
             if (
                 not row
-                and c.execute("SELECT COUNT(*) FROM participant_auth_limits").fetchone()[0] >= 10000
+                and c.execute(
+                    "SELECT COUNT(*) FROM participant_auth_limits WHERE subject_id=?",
+                    (self.subject,),
+                ).fetchone()[0]
+                >= _AUTH_BUCKET_CAP_PER_SUBJECT
             ):
                 raise AccountRateLimited("account_rate_limited")
             c.execute(
@@ -82,6 +93,88 @@ class AccountStore:
                 "CONFLICT(subject_id,bucket) DO UPDATE SET attempts=attempts+1",
                 (self.subject, bucket, now),
             )
+
+    def login_captcha_required(self, username: str) -> bool:
+        """Require proof after failures for this account, without locking it out."""
+        now = time.time()
+        with self.database.connection() as connection:
+            bucket = self._login_failure_bucket(connection, username)
+            row = connection.execute(
+                "SELECT attempts,window_start FROM participant_auth_limits "
+                "WHERE subject_id=? AND bucket=?",
+                (self.subject, bucket),
+            ).fetchone()
+        return bool(
+            row
+            and float(row["window_start"]) > now - _LOGIN_FAILURE_WINDOW_SECONDS
+            and int(row["attempts"]) >= _LOGIN_FAILURE_THRESHOLD
+        )
+
+    def _login_failure_bucket(self, connection: Any, username: str) -> str:
+        normalized = (
+            username.strip().lower() if isinstance(username, str) and len(username) <= 64 else ""
+        )
+        row = connection.execute(
+            "SELECT account_id FROM participant_accounts WHERE subject_id=? AND username=?",
+            (self.subject, normalized),
+        ).fetchone()
+        # Unknown names share one bounded bucket rather than allowing arbitrary
+        # login strings to create unbounded durable rows.
+        identity = "account:" + str(row[0]) if row is not None else "unknown"
+        return digest("login-failure:" + identity)
+
+    @staticmethod
+    def _login_username(username: str) -> str:
+        return username.strip().lower() if isinstance(username, str) and len(username) <= 64 else ""
+
+    def _record_login_failure(self, username: str) -> None:
+        now = time.time()
+        with self.database.transaction() as connection:
+            connection.execute(
+                "DELETE FROM participant_auth_limits WHERE subject_id=? AND window_start<?",
+                (self.subject, now - _LOGIN_FAILURE_WINDOW_SECONDS),
+            )
+            bucket = self._login_failure_bucket(connection, username)
+            row = connection.execute(
+                "SELECT attempts,window_start FROM participant_auth_limits "
+                "WHERE subject_id=? AND bucket=?",
+                (self.subject, bucket),
+            ).fetchone()
+            if (
+                row is None
+                and connection.execute(
+                    "SELECT COUNT(*) FROM participant_auth_limits WHERE subject_id=?",
+                    (self.subject,),
+                ).fetchone()[0]
+                >= _AUTH_BUCKET_CAP_PER_SUBJECT
+            ):
+                raise AccountRateLimited("account_rate_limited")
+            if row is None:
+                connection.execute(
+                    "INSERT INTO participant_auth_limits(subject_id,bucket,window_start,attempts) "
+                    "VALUES(?,?,?,1)",
+                    (self.subject, bucket, now),
+                )
+            elif float(row["window_start"]) <= now - _LOGIN_FAILURE_WINDOW_SECONDS:
+                connection.execute(
+                    "UPDATE participant_auth_limits SET window_start=?,attempts=1 "
+                    "WHERE subject_id=? AND bucket=?",
+                    (now, self.subject, bucket),
+                )
+            else:
+                connection.execute(
+                    "UPDATE participant_auth_limits SET attempts=attempts+1 "
+                    "WHERE subject_id=? AND bucket=?",
+                    (self.subject, bucket),
+                )
+
+    @staticmethod
+    def _clear_login_failures(connection: Any, subject: str, account_id: str) -> None:
+        bucket = digest("login-failure:account:" + account_id)
+        connection.execute(
+            "DELETE FROM participant_auth_limits WHERE subject_id=? AND bucket=?",
+            (subject, bucket),
+        )
 
     def register(
         self, username: str, password: str, name: str, *, kind: str = "human"
@@ -122,39 +215,79 @@ class AccountStore:
             )
         return {"username": username, "entity_id": who.entity_id, "recovery_code": recovery}
 
-    def login(self, username: str, password: str) -> tuple[str, str, dict[str, Any]]:
-        with self.database.connection() as c:
-            row = c.execute(
+    def login(
+        self,
+        username: str,
+        password: str,
+        *,
+        captcha_verified: bool = False,
+    ) -> tuple[str, str, dict[str, Any]]:
+        normalized = self._login_username(username)
+        with self.database.connection() as connection:
+            row = connection.execute(
                 "SELECT a.account_id,p.password_digest FROM participant_accounts a JOIN "
                 "participant_credentials p ON p.account_id=a.account_id AND "
                 "p.subject_id=a.subject_id JOIN participant_entities e ON "
                 "e.entity_id=a.entity_id AND e.subject_id=a.subject_id WHERE a.subject_id=? "
                 "AND a.username=? AND e.status='active'",
-                (self.subject, username.strip().lower()),
+                (self.subject, normalized),
             ).fetchone()
-        encoded = row["password_digest"] if row else ("00" * 16 + ":" + "00" * 64)
-        if not password_matches(password, encoded) or row is None:
+            bucket = self._login_failure_bucket(connection, normalized)
+            failures = connection.execute(
+                "SELECT attempts,window_start FROM participant_auth_limits "
+                "WHERE subject_id=? AND bucket=?",
+                (self.subject, bucket),
+            ).fetchone()
+        now = time.time()
+        challenge = bool(
+            failures
+            and float(failures["window_start"]) > now - _LOGIN_FAILURE_WINDOW_SECONDS
+            and int(failures["attempts"]) >= _LOGIN_FAILURE_THRESHOLD
+        )
+        if challenge and not captcha_verified:
+            # Keep the public credential error uniform: the browser proactively
+            # offers CAPTCHA after any failed login, so account failure state is
+            # not distinguishable from an unknown username by response status.
+            try:
+                password_matches(password, _DUMMY_PASSWORD_HASH)
+            except AccountRateLimited:
+                raise
+            except AccountError:
+                pass
+            raise AccountError("invalid_credentials")
+        encoded = row["password_digest"] if row else _DUMMY_PASSWORD_HASH
+        try:
+            valid = password_matches(password, encoded)
+        except AccountRateLimited:
+            raise
+        except AccountError:
+            valid = False
+        if not valid or row is None:
+            self._record_login_failure(normalized)
             raise AccountError("invalid_credentials")
         token = secrets.token_urlsafe(32)
         csrf = digest("csrf:" + token)
         now = time.time()
-        with self.database.transaction() as c:
-            current = c.execute(
+        with self.database.transaction() as connection:
+            current = connection.execute(
                 "SELECT password_digest FROM participant_credentials WHERE account_id=? "
                 "AND subject_id=?",
                 (row["account_id"], self.subject),
             ).fetchone()
             if current is None or not hmac.compare_digest(current[0], encoded):
                 raise AccountError("invalid_credentials")
-            c.execute("DELETE FROM participant_sessions WHERE expires_at<=?", (now,))
-            sessions = c.execute(
+            self._clear_login_failures(connection, self.subject, str(row["account_id"]))
+            connection.execute("DELETE FROM participant_sessions WHERE expires_at<=?", (now,))
+            sessions = connection.execute(
                 "SELECT session_digest FROM participant_sessions WHERE subject_id=? AND "
                 "account_id=? ORDER BY created_at DESC",
                 (self.subject, row["account_id"]),
             ).fetchall()
             for entry in sessions[7:]:
-                c.execute("DELETE FROM participant_sessions WHERE session_digest=?", (entry[0],))
-            c.execute(
+                connection.execute(
+                    "DELETE FROM participant_sessions WHERE session_digest=?", (entry[0],)
+                )
+            connection.execute(
                 "INSERT INTO participant_sessions VALUES(?,?,?,?,?,?)",
                 (digest(token), self.subject, row["account_id"], digest(csrf), now + 604800, now),
             )

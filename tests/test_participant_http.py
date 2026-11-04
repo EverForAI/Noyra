@@ -416,3 +416,205 @@ def test_kdf_backpressure_is_retryable_not_bad_credentials(
         slots.release()
         slots.release()
     assert visitor.request("/api/participants/" + operation, payload)[0] == 200
+
+
+def test_targeted_login_failures_require_captcha_not_an_account_lockout(
+    http: tuple[NoyraHTTPServer, str],
+) -> None:
+    from unittest.mock import patch
+
+    owner, base = http
+    store = AccountStore(owner.kernel.database, owner.kernel.subject_id)
+    store.register("alice", "correct horse battery", "Alice")
+    client = Client(base)
+    for _ in range(10):
+        status, payload = client.request(
+            "/api/participants/login",
+            {"username": "alice", "password": "incorrect password"},
+        )
+        assert status == 401 and payload == {"error": "invalid_credentials"}
+
+    status, challenge = client.request(
+        "/api/participants/login",
+        {"username": "alice", "password": "correct horse battery"},
+    )
+    assert status == 401 and challenge == {"error": "invalid_credentials"}
+    # Existing-account challenge state, an ordinary wrong password and an
+    # unknown username all expose the same public response.
+    store.register("bob", "another correct password", "Bob")
+    existing_wrong = client.request(
+        "/api/participants/login", {"username": "bob", "password": "wrong password"}
+    )
+    unknown_wrong = client.request(
+        "/api/participants/login", {"username": "unregistered", "password": "wrong password"}
+    )
+    assert existing_wrong == unknown_wrong == (401, {"error": "invalid_credentials"})
+
+    controls = owner.public_post_controls()
+    alphabets = {
+        "letters": "ABCDEFGHJKLMNPQRSTUVWXYZ",
+        "digits": "23456789",
+        "alphanumeric": "ABCDEFGHJKLMNPQRSTUVWXYZ23456789",
+    }
+    answer = alphabets[controls["captcha_mode"]][0] * 6
+    with patch("noyra.interaction.posts.secrets.choice", side_effect=lambda values: values[0]):
+        status, image = client.request("/api/public-posts/captcha", {"presentation": "image"})
+    assert status == 200 and image["challenge_id"]
+    status, result = client.request(
+        "/api/participants/login",
+        {
+            "username": "alice",
+            "password": "correct horse battery",
+            "captcha_id": image["challenge_id"],
+            "captcha_answer": answer,
+        },
+    )
+    assert status == 200 and result["participant"]["entity_id"]
+    # The same challenge is one-use, even after the account failure window clears.
+    status, consumed = client.request(
+        "/api/participants/login",
+        {
+            "username": "alice",
+            "password": "correct horse battery",
+            "captcha_id": image["challenge_id"],
+            "captcha_answer": answer,
+        },
+    )
+    assert status == 400 and consumed == {"error": "invalid_captcha"}
+    assert not store.login_captcha_required("alice")
+    # The successful authentication recovers the account bucket; later access
+    # requires ordinary credentials, but no longer needs a CAPTCHA.
+    token, _csrf, _ = store.login("alice", "correct horse battery")
+    assert token and not store.login_captcha_required("alice")
+
+
+def test_bad_or_partial_login_captcha_never_reaches_password_verification(
+    http: tuple[NoyraHTTPServer, str],
+) -> None:
+    from unittest.mock import patch
+
+    from noyra.interaction.posts import PublicPostCaptchaError
+
+    owner, base = http
+    store = AccountStore(owner.kernel.database, owner.kernel.subject_id)
+    store.register("alice", "correct horse battery", "Alice")
+    client = Client(base)
+    for _ in range(10):
+        client.request(
+            "/api/participants/login", {"username": "alice", "password": "incorrect password"}
+        )
+    with patch.object(
+        store, "login", side_effect=AssertionError("password verification must not run")
+    ):
+        status, payload = client.request(
+            "/api/participants/login",
+            {"username": "alice", "password": "correct horse battery", "captcha_id": "partial"},
+        )
+        assert status == 400 and payload == {"error": "invalid_account_details"}
+        with patch.object(
+            owner.public_posts, "verify_captcha", side_effect=PublicPostCaptchaError("invalid")
+        ):
+            status, payload = client.request(
+                "/api/participants/login",
+                {
+                    "username": "alice",
+                    "password": "correct horse battery",
+                    "captcha_id": "bad",
+                    "captcha_answer": "wrong",
+                },
+            )
+        assert status == 400 and payload == {"error": "invalid_captcha"}
+
+
+def test_shared_client_failures_trigger_captcha_only_for_target_account(
+    http: tuple[NoyraHTTPServer, str],
+) -> None:
+    owner, base = http
+    store = AccountStore(owner.kernel.database, owner.kernel.subject_id)
+    store.register("alice", "correct horse battery", "Alice")
+    store.register("bob", "another correct password", "Bob")
+    shared = Client(base)
+    for _ in range(10):
+        status, payload = shared.request(
+            "/api/participants/login", {"username": "alice", "password": "wrong password"}
+        )
+        assert status == 401 and payload == {"error": "invalid_credentials"}
+    # A correct second account behind the same NAT remains usable before the
+    # independent client-IP attempt budget is reached.
+    status, bob = shared.request(
+        "/api/participants/login", {"username": "bob", "password": "another correct password"}
+    )
+    assert status == 200 and bob["participant"]["display_name"] == "Bob"
+    status, challenge = shared.request(
+        "/api/participants/login", {"username": "alice", "password": "correct horse battery"}
+    )
+    assert status == 401 and challenge == {"error": "invalid_credentials"}
+
+
+def test_wrong_recovery_codes_do_not_lock_the_owner_out_by_username(
+    http: tuple[NoyraHTTPServer, str],
+) -> None:
+    owner, base = http
+    registration = AccountStore(owner.kernel.database, owner.kernel.subject_id).register(
+        "alice", "correct horse battery", "Alice"
+    )
+    client = Client(base)
+    for _ in range(10):
+        status, payload = client.request(
+            "/api/participants/recover",
+            {
+                "username": "alice",
+                "recovery_code": "incorrect-recovery-code",
+                "password": "new correct horse battery",
+            },
+        )
+        assert status == 401 and payload == {"error": "invalid_credentials"}
+    # Recovery secrets are high-entropy; the client attempt budget bounds
+    # guessing without a username-global lockout after failed proofs.
+    status, recovery = client.request(
+        "/api/participants/recover",
+        {
+            "username": "alice",
+            "recovery_code": registration["recovery_code"],
+            "password": "new correct horse battery",
+        },
+    )
+    assert status == 200 and recovery["recovery_code"]
+    assert AccountStore(owner.kernel.database, owner.kernel.subject_id).login(
+        "alice", "new correct horse battery"
+    )[0]
+
+
+def test_unknown_name_and_challenged_account_keep_same_public_credential_error(
+    http: tuple[NoyraHTTPServer, str],
+) -> None:
+    owner, base = http
+    store = AccountStore(owner.kernel.database, owner.kernel.subject_id)
+    store.register("alice", "correct horse battery", "Alice")
+    client = Client(base)
+    for index in range(10):
+        client.request(
+            "/api/participants/login",
+            {
+                "username": f"not-registered-{index}",
+                "password": "incorrect password",
+            },
+        )
+    assert store.login_captcha_required("not-registered-other")
+    status, unknown = client.request(
+        "/api/participants/login",
+        {
+            "username": "not-registered-other",
+            "password": "incorrect password",
+        },
+    )
+    for _ in range(2):
+        status, known = client.request(
+            "/api/participants/login",
+            {
+                "username": "alice",
+                "password": "incorrect password",
+            },
+        )
+    assert (status, known) == (401, {"error": "invalid_credentials"})
+    assert (status, unknown) == (401, {"error": "invalid_credentials"})

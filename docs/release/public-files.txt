@@ -227,6 +227,7 @@ docs/development/http-failure-boundary.md
 docs/development/memory-literal-search.md
 docs/development/model-invalidation-boundaries.md
 docs/development/model-pre-send-settlement.md
+docs/development/participant-login-throttling.md
 docs/development/project-coordination.md
 docs/development/semantic-memory-recovery.md
 docs/development/social-proposal-recovery.md
