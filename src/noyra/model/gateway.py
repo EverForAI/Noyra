@@ -212,32 +212,45 @@ class ModelGateway:
                 raise
             except InvalidTransitionError as error:
                 if str(error) != "evidence_capacity_reached":
+                    self.ledger.fail_before_attempt(
+                        call.call_id,
+                        error_code=self._pre_send_error_code(error),
+                        settled_attempt_id=settled_attempt_id,
+                    )
                     raise
                 # No new attempt was admitted; preserve all earlier settled usage.
                 self.ledger.finish_call(
                     call.call_id, "failed", error_code="evidence_capacity_reached"
                 )
                 raise
+            except (Exception, asyncio.CancelledError) as error:
+                # A failed authorization transaction has not yielded an owned
+                # attempt. Close only the original safe phase; if an active row
+                # did commit, retain it for conservative recovery.
+                self.ledger.fail_before_attempt(
+                    call.call_id,
+                    error_code=self._pre_send_error_code(error),
+                    settled_attempt_id=settled_attempt_id,
+                )
+                raise
 
-            send_denied = False
+            guard_error: BaseException | None = None
 
             def before_send() -> None:
-                nonlocal send_denied
+                nonlocal guard_error
                 try:
                     assert_current_lease()
-                except OperationInvalidated:
-                    send_denied = True
-                    raise
-                self.ledger.check_request_authorization(
-                    call.call_id,
-                    resource_key_id=self.resource_key_id,
-                    resource_key_fingerprint=self.resource_key_fingerprint,
-                    expected_resource_revision=self.resource_revision,
-                )
-                try:
+                    self.ledger.check_request_authorization(
+                        call.call_id,
+                        resource_key_id=self.resource_key_id,
+                        resource_key_fingerprint=self.resource_key_fingerprint,
+                        expected_resource_revision=self.resource_revision,
+                    )
                     assert_current_lease()
-                except OperationInvalidated:
-                    send_denied = True
+                except (Exception, asyncio.CancelledError) as error:
+                    # Keep evidence of a failed final guard separately from a
+                    # provider failure; HTTP adapters may wrap its exception.
+                    guard_error = error
                     raise
 
             try:
@@ -249,27 +262,15 @@ class ModelGateway:
                     expected_resource_revision=self.resource_revision,
                 )
                 before_send()
-            except (
-                InvitationWithdrawnError,
-                ModelAuthorizationError,
-                ModelLifecycleBlockedError,
-                OperationInvalidated,
-            ) as error:
-                code = (
-                    "runtime_epoch_invalidated"
-                    if isinstance(error, OperationInvalidated)
-                    else "model_lifecycle_blocked"
-                    if isinstance(error, ModelLifecycleBlockedError)
-                    else "model_authorization_denied"
+                from .openai_compatible import OpenAICompatibleProvider
+
+                if isinstance(self.provider, OpenAICompatibleProvider):
+                    self.provider.before_send = before_send
+            except (Exception, asyncio.CancelledError) as error:
+                self.ledger.fail_unsent_attempt(
+                    call.call_id, attempt.attempt_id, error_code=self._pre_send_error_code(error)
                 )
-                self.ledger.cancel_unsent_attempt(attempt.attempt_id, error_code=code)
-                self.ledger.finish_call(call.call_id, "failed", error_code=code)
                 raise
-
-            from .openai_compatible import OpenAICompatibleProvider
-
-            if isinstance(self.provider, OpenAICompatibleProvider):
-                self.provider.before_send = before_send
 
             stale_operation = False
             try:
@@ -279,85 +280,66 @@ class ModelGateway:
                     assert_current_lease()
                 except OperationInvalidated:
                     stale_operation = True
-            except (ModelAuthorizationError, ModelLifecycleBlockedError) as error:
-                code = (
-                    "model_lifecycle_blocked"
-                    if isinstance(error, ModelLifecycleBlockedError)
-                    else "model_authorization_denied"
-                )
-                self.ledger.cancel_unsent_attempt(attempt.attempt_id, error_code=code)
-                self.ledger.finish_call(call.call_id, "failed", error_code=code)
-                raise
-            except OperationInvalidated:
-                if send_denied:
-                    self.ledger.cancel_unsent_attempt(
-                        attempt.attempt_id, error_code="runtime_epoch_invalidated"
+            except (Exception, asyncio.CancelledError) as error:
+                if guard_error is not None:
+                    self.ledger.fail_unsent_attempt(
+                        call.call_id,
+                        attempt.attempt_id,
+                        error_code=self._pre_send_error_code(guard_error),
                     )
-                    self.ledger.finish_call(
-                        call.call_id, "failed", error_code="runtime_epoch_invalidated"
-                    )
+                    if error is not guard_error:
+                        raise guard_error from error
                     raise
-                self.ledger.finish_attempt(
-                    attempt.attempt_id,
-                    "unknown",
-                    usage=None,
-                    cost_microusd=None,
-                    error_code="runtime_epoch_invalidated",
-                )
-                self.ledger.finish_call(
-                    call.call_id,
-                    "unknown",
-                    error_code="runtime_epoch_invalidated",
-                )
-                raise
-            except asyncio.CancelledError:
-                self.ledger.finish_attempt(
-                    attempt.attempt_id,
-                    "unknown",
-                    usage=None,
-                    cost_microusd=None,
-                    error_code="model_call_cancelled",
-                )
-                self.ledger.finish_call(
-                    call.call_id,
-                    "unknown",
-                    error_code="model_call_cancelled",
-                )
-                raise
-            except ProviderCallError as error:
-                if error.outcome_unknown:
+                # Without a guard refusal, provider execution may have begun.
+                # Never infer "unsent" from an exception class alone.
+                if isinstance(error, (OperationInvalidated, asyncio.CancelledError)):
+                    code = (
+                        "runtime_epoch_invalidated"
+                        if isinstance(error, OperationInvalidated)
+                        else "model_call_cancelled"
+                    )
                     self.ledger.finish_attempt(
                         attempt.attempt_id,
                         "unknown",
                         usage=None,
                         cost_microusd=None,
+                        error_code=code,
+                    )
+                    self.ledger.finish_call(call.call_id, "unknown", error_code=code)
+                    raise
+                if isinstance(error, ProviderCallError):
+                    if error.outcome_unknown:
+                        self.ledger.finish_attempt(
+                            attempt.attempt_id,
+                            "unknown",
+                            usage=None,
+                            cost_microusd=None,
+                            error_code=error.code,
+                        )
+                        self.ledger.finish_call(call.call_id, "unknown", error_code=error.code)
+                        raise
+                    self.ledger.finish_attempt(
+                        attempt.attempt_id,
+                        "failed",
+                        usage=None if error.usage_unknown else ModelUsage(0, 0),
+                        cost_microusd=None if error.usage_unknown else 0,
                         error_code=error.code,
                     )
-                    self.ledger.finish_call(call.call_id, "unknown", error_code=error.code)
+                    settled_attempt_id = attempt.attempt_id
+                    if error.retryable and attempt_index < self.retry_policy.max_attempts:
+                        try:
+                            assert_current_lease()
+                        except OperationInvalidated:
+                            self.ledger.fail_before_attempt(
+                                call.call_id,
+                                error_code="runtime_epoch_invalidated",
+                                settled_attempt_id=settled_attempt_id,
+                            )
+                            raise
+                        await self._retry_after_settlement(call.call_id, attempt_index)
+                        continue
+                    self.ledger.finish_call(call.call_id, "failed", error_code=error.code)
                     raise
-                self.ledger.finish_attempt(
-                    attempt.attempt_id,
-                    "failed",
-                    usage=None if error.usage_unknown else ModelUsage(0, 0),
-                    cost_microusd=None if error.usage_unknown else 0,
-                    error_code=error.code,
-                )
-                settled_attempt_id = attempt.attempt_id
-                if error.retryable and attempt_index < self.retry_policy.max_attempts:
-                    try:
-                        assert_current_lease()
-                    except OperationInvalidated:
-                        self.ledger.fail_before_attempt(
-                            call.call_id,
-                            error_code="runtime_epoch_invalidated",
-                            settled_attempt_id=settled_attempt_id,
-                        )
-                        raise
-                    await self._retry_after_settlement(call.call_id, attempt_index)
-                    continue
-                self.ledger.finish_call(call.call_id, "failed", error_code=error.code)
-                raise
-            except Exception as error:
                 self.ledger.finish_attempt(
                     attempt.attempt_id,
                     "unknown",
@@ -477,6 +459,18 @@ class ModelGateway:
             )
 
         raise AssertionError("retry loop ended without a terminal model-call result")
+
+    @staticmethod
+    def _pre_send_error_code(error: BaseException) -> str:
+        if isinstance(error, OperationInvalidated):
+            return "runtime_epoch_invalidated"
+        if isinstance(error, ModelLifecycleBlockedError):
+            return "model_lifecycle_blocked"
+        if isinstance(error, (InvitationWithdrawnError, ModelAuthorizationError)):
+            return "model_authorization_denied"
+        if isinstance(error, asyncio.CancelledError):
+            return "model_call_cancelled_before_send"
+        return "model_pre_send_failure"
 
     async def _retry_after_settlement(self, call_id: str, completed_attempts: int) -> None:
         """Wait only after an attempt is settled and before admitting another.

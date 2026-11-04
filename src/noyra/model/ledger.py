@@ -562,6 +562,48 @@ class ModelLedger:
             )
             return self._load_attempt_connection(connection, attempt_id)
 
+    def fail_unsent_attempt(self, call_id: str, attempt_id: str, *, error_code: str) -> bool:
+        """Atomically close this worker's confirmed-unsent attempt and call.
+
+        Only a gateway that has not dispatched, or whose final send guard
+        explicitly failed, may use this operation. It is not a recovery rule
+        for arbitrary executing rows. Validate before writing; preserve other
+        workers' progress and all earlier paid/unknown usage unchanged.
+        """
+        with accounting_scope(), self.database.transaction() as connection:
+            call = self._load_call_connection(connection, call_id)
+            attempt = self._load_attempt_connection(connection, attempt_id)
+            if attempt.call_id != call.call_id or attempt.subject_id != call.subject_id:
+                raise ModelCallStateError("unsent attempt does not belong to this call")
+            if call.status != "executing" or attempt.status not in {"authorized", "executing"}:
+                return False
+            latest = connection.execute(
+                "SELECT attempt_id FROM model_attempts WHERE call_id=? "
+                "ORDER BY attempt_number DESC LIMIT 1",
+                (call_id,),
+            ).fetchone()
+            if latest is None or latest["attempt_id"] != attempt_id:
+                return False
+            if connection.execute(
+                "SELECT 1 FROM model_attempts WHERE call_id=? AND attempt_id!=? "
+                "AND status IN ('authorized','executing') LIMIT 1",
+                (call_id, attempt_id),
+            ).fetchone():
+                return False
+            now = utc_now()
+            connection.execute(
+                "UPDATE model_attempts SET status='cancelled',error_code=?,completed_at=? "
+                "WHERE attempt_id=?",
+                (error_code, now, attempt_id),
+            )
+            connection.execute(
+                "UPDATE model_calls SET status='failed',completed_at=?,error_code="
+                "CASE WHEN error_code='private_content_erased' THEN error_code ELSE ? END "
+                "WHERE call_id=?",
+                (now, error_code, call_id),
+            )
+            return True
+
     def fail_before_attempt(
         self,
         call_id: str,

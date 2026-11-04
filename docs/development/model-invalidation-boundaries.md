@@ -61,3 +61,6 @@ rollback, paid and unknown-usage retry history, competing worker state changes,
 explicit unknown retries, restart, accounting failure, normal retries and
 caching, and the existing final HTTP dispatch checks. Detailed test output and
 audit evidence are retained outside the public repository.
+
+Related protocol: [Model failures before dispatch](model-pre-send-settlement.md)
+describes unexpected local exceptions and atomic unsent-attempt settlement.

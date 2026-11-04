@@ -223,6 +223,7 @@ docs/development/architecture-boundaries.md
 docs/development/autonomy-scheduling.md
 docs/development/checkpoint-clock-and-recovery.md
 docs/development/model-invalidation-boundaries.md
+docs/development/model-pre-send-settlement.md
 docs/development/project-coordination.md
 docs/development/semantic-memory-recovery.md
 docs/development/social-proposal-recovery.md
@@ -1001,6 +1002,7 @@ tests/test_mind.py
 tests/test_model_authorization.py
 tests/test_model_gateway.py
 tests/test_model_invalidation_before_attempt.py
+tests/test_model_pre_send_settlement.py
 tests/test_model_preparation_binding.py
 tests/test_model_retry_cancellation.py
 tests/test_model_wire_contract.py
