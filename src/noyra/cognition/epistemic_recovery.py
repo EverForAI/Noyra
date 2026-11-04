@@ -211,6 +211,11 @@ class EpistemicRecovery:
             raise IntegrityError("epistemic preparation belongs to another round")
         if self.blocked(connection, call.purpose, routed=routed, own_call=call.call_id):
             raise EpistemicContextUnavailable("epistemic request still needs reconciliation")
+        if any(
+            previous.call_id != call.call_id and previous.status == "succeeded"
+            for previous in self.calls(connection, call.purpose)
+        ):
+            raise EpistemicContextUnavailable("a paid epistemic result appeared before preparation")
         if not self.request_matches(call, context, settings):
             raise IntegrityError("epistemic request differs from original input")
         payload = self.capture(connection, call, context)

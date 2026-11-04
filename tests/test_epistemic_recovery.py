@@ -342,3 +342,92 @@ async def test_registry_verifies_context_binding_without_constructing_gateway(ca
         )
     report = registry()
     assert report.p0 or report.p1
+
+
+@pytest.mark.asyncio
+async def test_concurrently_resolved_prediction_is_not_resolved_again_by_old_proposal(
+    case: Any,
+) -> None:
+    from noyra.world import PredictionProposal, PredictionStore
+
+    evidence = case.observation("prediction evidence")
+    store = PredictionStore(case.kernel.database, clock=lambda: "2026-08-10T00:00:00+00:00")
+    prediction = store.create(
+        case.subject_id,
+        PredictionProposal(
+            statement="A bounded forecast",
+            probability=0.6,
+            target_at="2026-08-12T00:00:00+00:00",
+            resolution_criteria="Synthetic public evidence",
+        ),
+        evidence_observation_ids=(evidence.observation_id,),
+    )
+    proposal = no_change()
+    proposal["prediction_resolutions"] = [
+        {
+            "prediction_id": prediction.prediction_id,
+            "disposition": "resolve_false",
+            "evidence_observation_ids": [evidence.observation_id],
+            "rationale": "Synthetic proposal",
+        }
+    ]
+    review, provider = setup_review(case, [proposal])
+    commit = review._commit
+
+    def competing(*args: Any, **kwargs: Any) -> Any:
+        with case.kernel.database.transaction() as connection:
+            store._resolve_connection(
+                connection,
+                prediction.prediction_id,
+                outcome=True,
+                evidence_observation_ids=(evidence.observation_id,),
+                rationale="Independent earlier result",
+            )
+        return commit(*args, **kwargs)
+
+    with patch.object(review, "_commit", side_effect=competing):
+        assert await review.run_due() == "epistemic_review_rejected"
+    assert store.get(prediction.prediction_id).outcome is True
+    assert len(provider.requests) == 1 and review.verify_integrity() == 1
+
+
+@pytest.mark.asyncio
+async def test_paid_result_appearing_at_prepare_rolls_back_replacement_request(case: Any) -> None:
+    case.observation("original")
+    review, provider = setup_review(case, [no_change()])
+    prepare = review.gateway.ledger.prepare_call
+    saved = []
+
+    def competing(*args: Any, **kwargs: Any) -> Any:
+        # A separate legacy writer does not inherit this invocation's tracker.
+        with patch("noyra.model.ledger.notify_model_preparation"):
+            legacy_args = (*args[:5], "legacy-concurrent-success", *args[6:])
+            call, _ = prepare(*legacy_args, **kwargs)
+        attempt = review.gateway.ledger.authorize_attempt(
+            call.call_id,
+            review.gateway.limits,
+            reserved_input_tokens=1,
+            reserved_output_tokens=1,
+            reserved_cost_microusd=1,
+        )
+        review.gateway.ledger.start_attempt(attempt.attempt_id)
+        from noyra.model import ModelUsage
+
+        review.gateway.ledger.finish_attempt(
+            attempt.attempt_id, "succeeded", usage=ModelUsage(1, 1), cost_microusd=1
+        )
+        import json
+
+        review.gateway.ledger.finish_call(
+            call.call_id, "succeeded", response={"content": json.dumps(no_change())}
+        )
+        saved.append(call.call_id)
+        return prepare(*args, **kwargs)
+
+    with patch.object(review.gateway.ledger, "prepare_call", side_effect=competing):
+        assert await review.run_due() == "epistemic_review_context_unavailable"
+    assert not provider.requests
+    rows = snapshot(case, "model_calls")
+    assert len(rows) == 1 and rows[0]["call_id"] == saved[0]
+    assert await review.run_due() == "epistemic_review_no_change"
+    assert not provider.requests and review.verify_integrity() == 1

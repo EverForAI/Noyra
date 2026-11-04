@@ -339,7 +339,9 @@ class MetacognitiveControl:
                 "ORDER BY priority DESC, commitment DESC LIMIT 1",
                 (self.subject_id,),
             ).fetchone()
-            trigger_observation = pending_epistemic_trigger(connection, self.subject_id)
+            trigger_observation = pending_epistemic_trigger(
+                connection, self.subject_id, database=self.database
+            )
             relationship = connection.execute(
                 "SELECT relationship_id, trust, affinity, conflict, familiarity "
                 "FROM relationships WHERE subject_id = ? "

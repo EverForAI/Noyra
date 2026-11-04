@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -23,11 +23,13 @@ from noyra.model.errors import (
     ProviderCallError,
     StructuredOutputError,
 )
+from noyra.model.request_identity import business_request_key
 from noyra.world import PredictionStore
 from noyra.world.errors import WorldStateConflictError
 
 from ._integrity import durable_boundary, durable_json, durable_string_list
 from .epistemic_recovery import EpistemicContextUnavailable, EpistemicRecovery
+from .epistemic_rounds import EpistemicRoundExit
 from .settings import CognitionSettings
 
 
@@ -123,21 +125,26 @@ class _ReviewContext:
     binding: dict[str, Any] | None = None
 
 
-def pending_epistemic_trigger(connection: Any, subject_id: str) -> str | None:
+def pending_epistemic_trigger(
+    connection: Any, subject_id: str, *, database: Database
+) -> str | None:
     """One selector for scheduling and review of analyzed observation rounds.
 
     A rejected proposal is terminal for its round, just like committed/no_change.
     Its observation remains analyzed evidence; unknown provider outcomes have no
     terminal review record and retain the model ledger's existing dispatch fence.
     """
+    EpistemicRoundExit(database, subject_id).verify_connection(connection)
     row = connection.execute(
         """SELECT o.observation_id FROM observations o
            LEFT JOIN epistemic_review_runs r
              ON r.subject_id = o.subject_id AND r.trigger_observation_id = o.observation_id
             AND r.status IN ('committed', 'no_change', 'rejected')
            WHERE o.subject_id = ? AND o.status = 'analyzed' AND r.review_id IS NULL
+             AND NOT EXISTS (SELECT 1 FROM events e WHERE e.event_id=?||o.observation_id
+               AND e.subject_id=o.subject_id AND e.event_type='epistemic_round_closed')
            ORDER BY o.fetched_at, o.observation_id LIMIT 1""",
-        (subject_id,),
+        (subject_id, EpistemicRoundExit(database, subject_id).prefix),
     ).fetchone()
     return None if row is None else str(row["observation_id"])
 
@@ -205,6 +212,15 @@ class EpistemicReview:
             successes = [call for call in calls if call.status == "succeeded"]
             if len(successes) > 1:
                 raise IntegrityError("epistemic round has multiple successful responses")
+        if not successes and calls and all(call.status == "failed" for call in calls):
+            if self._temporary_failure(calls[-1]):
+                finished = datetime.fromisoformat(calls[-1].completed_at).astimezone(UTC)
+                if datetime.fromisoformat(self.clock()).astimezone(UTC) < finished + timedelta(
+                    seconds=60
+                ):
+                    return "epistemic_review_budget_exhausted"
+            else:
+                return self._exit_round(context, "model_failed")
         if successes:
             call_id = successes[0].call_id
             content = (successes[0].response or {}).get("content")
@@ -228,7 +244,9 @@ class EpistemicReview:
                         purpose,
                         self._messages(context),
                         EpistemicReviewProposal,
-                        idempotency_key=idempotency_key,
+                        idempotency_key=business_request_key(
+                            self.database, self.subject_id, purpose
+                        ),
                         max_output_tokens=min(4000, self.settings.max_output_tokens),
                         temperature=self.settings.temperature,
                     )
@@ -241,7 +259,18 @@ class EpistemicReview:
             except EpistemicContextUnavailable:
                 return "epistemic_review_context_unavailable"
             except (ProviderCallError, StructuredOutputError, ModelCallStateError):
-                return "epistemic_review_model_failed"
+                with self.database.read_transaction() as connection:
+                    failed = recovery.calls(connection, purpose)
+                    settled = (
+                        failed
+                        and all(call.status == "failed" for call in failed)
+                        and not self._temporary_failure(failed[-1])
+                    )
+                return (
+                    self._exit_round(context, "model_failed")
+                    if settled
+                    else "epistemic_review_model_failed"
+                )
         try:
             with self.database.read_transaction() as connection:
                 call = ModelLedger._load_call_connection(connection, call_id)
@@ -250,7 +279,8 @@ class EpistemicReview:
             validated = self._validate(proposal, context)
             return self._commit(call_id, idempotency_key, context, validated)
         except EpistemicContextUnavailable:
-            return "epistemic_review_context_unavailable"
+            reason = "context_unavailable" if self._has_binding(call_id) else "legacy_result_held"
+            return self._exit_round(context, reason)
         except EpistemicReviewValidationError as error:
             self._record_run(
                 call_id,
@@ -263,6 +293,34 @@ class EpistemicReview:
                 summary=type(error).__name__,
             )
             return "epistemic_review_rejected"
+
+    @staticmethod
+    def _temporary_failure(call: Any) -> bool:
+        return call.error_code in {
+            "budget_exhausted",
+            "cost_only_pricing_unknown",
+            "model_budget_clock_wait",
+            "model_lifecycle_blocked",
+            "model_authorization_denied",
+            "evidence_capacity_reached",
+        }
+
+    def _has_binding(self, call_id: str) -> bool:
+        with self.database.read_transaction() as connection:
+            call = ModelLedger._load_call_connection(connection, call_id)
+            return self._recovery().read(connection, call) is not None
+
+    def _exit_round(self, context: _ReviewContext, reason: str) -> str:
+        closed = EpistemicRoundExit(self.database, self.subject_id, self.clock).close(
+            context.trigger_observation_id, reason
+        )
+        if not closed:
+            return "epistemic_review_waiting_reconciliation"
+        return {
+            "model_failed": "epistemic_review_model_failed",
+            "legacy_result_held": "epistemic_review_legacy_result_held",
+            "context_unavailable": "epistemic_review_context_unavailable",
+        }[reason]
 
     def latest(self) -> EpistemicReviewRecord | None:
         with self.database.connection() as connection:
@@ -283,6 +341,7 @@ class EpistemicReview:
     ) -> int:
         if database is not None:
             EpistemicRecovery(database, subject_id).verify_connection(connection)
+            EpistemicRoundExit(database, subject_id).verify_connection(connection, full=True)
         rows = connection.execute(
             "SELECT r.* FROM epistemic_review_runs r "
             "LEFT JOIN model_calls c ON c.call_id = r.model_call_id "
@@ -380,7 +439,7 @@ class EpistemicReview:
 
     def _context(self) -> _ReviewContext | None:
         with self.database.connection() as connection:
-            trigger = pending_epistemic_trigger(connection, self.subject_id)
+            trigger = pending_epistemic_trigger(connection, self.subject_id, database=self.database)
             if trigger is None:
                 return None
             observation_rows = connection.execute(
