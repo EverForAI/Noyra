@@ -102,11 +102,14 @@ class ControlledSelfModification:
         if setting_key not in self.RULES:
             raise SelfModificationError("setting is not self-modifiable")
         with self.database.connection() as connection:
-            row = connection.execute(
-                "SELECT value_json FROM self_modification_settings "
-                "WHERE subject_id = ? AND setting_key = ?",
-                (self.subject_id, setting_key),
-            ).fetchone()
+            return self._effective_connection(connection, setting_key)
+
+    def _effective_connection(self, connection: Any, setting_key: str) -> int | float:
+        row = connection.execute(
+            "SELECT value_json FROM self_modification_settings "
+            "WHERE subject_id=? AND setting_key=?",
+            (self.subject_id, setting_key),
+        ).fetchone()
         if row is None:
             return self._baseline(setting_key)
         return self._validate_value(setting_key, json.loads(row["value_json"]))
@@ -133,16 +136,30 @@ class ControlledSelfModification:
                     result = self.observe(pending.proposal_id, **counts)
                     return f"self_modification_{result.status}"
             return None
-        candidate = self._stagnant_strategy_candidate()
-        if candidate is None:
-            return None
-        setting_key, proposed_value, reason, evidence_ids = candidate
-        result = self.propose(
-            setting_key,
-            proposed_value,
-            reason=reason,
-            evidence_ids=evidence_ids,
-        )
+        with self.database.transaction() as connection:
+            # Recheck under the writer lock: another worker may have created a
+            # pending proposal after this tick's read-only pending lookup.
+            if connection.execute(
+                "SELECT 1 FROM self_modification_proposals WHERE subject_id=? "
+                "AND status IN ('simulated','applied') LIMIT 1",
+                (self.subject_id,),
+            ).fetchone():
+                return None
+            evaluation = self._automatic_evaluation(connection)
+            if evaluation is None:
+                return None
+            candidate, fingerprint = evaluation
+            setting_key, proposed_value, reason, evidence_ids = candidate
+            if self._automatic_rejected(connection, candidate, fingerprint):
+                return None
+            result = self._propose_connection(
+                connection,
+                setting_key,
+                proposed_value,
+                reason=reason,
+                evidence_ids=evidence_ids,
+                automatic_fingerprint=fingerprint,
+            )
         return f"self_modification_{result.status}"
 
     def propose(
@@ -153,16 +170,32 @@ class ControlledSelfModification:
         reason: str,
         evidence_ids: tuple[str, ...],
     ) -> SelfModificationRecord:
+        with self.database.transaction() as connection:
+            return self._propose_connection(
+                connection, setting_key, proposed_value, reason=reason, evidence_ids=evidence_ids
+            )
+
+    def _propose_connection(
+        self,
+        connection: Any,
+        setting_key: str,
+        proposed_value: int | float,
+        *,
+        reason: str,
+        evidence_ids: tuple[str, ...],
+        automatic_fingerprint: str | None = None,
+    ) -> SelfModificationRecord:
         if setting_key not in self.RULES:
             raise SelfModificationError("setting is not self-modifiable")
         if not reason.strip() or not evidence_ids or len(set(evidence_ids)) != len(evidence_ids):
             raise SelfModificationError("reason and distinct evidence are required")
-        old_value = self.effective(setting_key)
+        old_value = self._effective_connection(connection, setting_key)
+        reason = reason.strip()
         value = self._validate_value(setting_key, proposed_value)
         rule = self.RULES[setting_key]
         relative = abs(float(value) - float(old_value)) / max(abs(float(old_value)), 1.0)
         risk = min(1.0, relative / max(rule.max_relative_change, 0.01) * rule.risk_weight)
-        validation = {
+        validation: dict[str, Any] = {
             "allowlisted": True,
             "in_range": True,
             "relative_change": round(relative, 8),
@@ -173,7 +206,12 @@ class ControlledSelfModification:
             if relative <= rule.max_relative_change and value != old_value
             else "rejected"
         )
-        simulation = self._simulate(setting_key, old_value, value)
+        if automatic_fingerprint is not None:
+            validation["automatic_evaluation"] = {
+                "version": "self-modification-auto/v1",
+                "fingerprint": automatic_fingerprint,
+            }
+        simulation = self._simulate_connection(connection, setting_key, old_value, value)
         if status == "validated" and not simulation["passed"]:
             status = "rejected"
         elif status == "validated":
@@ -191,52 +229,55 @@ class ControlledSelfModification:
             validation,
             simulation,
         )
-        with self.database.transaction() as connection:
-            evidence_rows = [
-                connection.execute(
-                    "SELECT event_type FROM events WHERE subject_id = ? AND event_id = ?",
-                    (self.subject_id, evidence_id),
-                ).fetchone()
-                for evidence_id in evidence_ids
-            ]
-            if any(row is None for row in evidence_rows):
-                raise SelfModificationError("self-modification evidence is unavailable")
-            event_types = {str(row["event_type"]) for row in evidence_rows if row is not None}
-            if "metacognitive_outcome" not in event_types or event_types & {
-                "human_message",
-                "interaction_received",
-            }:
-                raise SelfModificationError("self-modification lacks autonomous evidence")
-            if connection.execute(
-                "SELECT 1 FROM self_modification_proposals WHERE subject_id = ? "
-                "AND setting_key = ? AND status IN ('proposed','validated','simulated','applied')",
-                (self.subject_id, setting_key),
-            ).fetchone():
-                raise SelfModificationError("setting already has a pending proposal")
+        evidence_rows = [
             connection.execute(
-                """INSERT INTO self_modification_proposals(
-                    proposal_id, subject_id, setting_key, old_value_json, proposed_value_json,
-                    reason, evidence_ids_json, risk_score, status, validation_json,
-                    simulation_json, state_hash, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    proposal_id,
-                    self.subject_id,
-                    setting_key,
-                    canonical_json(old_value),
-                    canonical_json(value),
-                    reason.strip(),
-                    canonical_json(list(evidence_ids)),
-                    risk,
-                    status,
-                    canonical_json(validation),
-                    canonical_json(simulation),
-                    state_hash,
-                    now,
-                    now,
-                ),
-            )
-        return self.get(proposal_id)
+                "SELECT event_type FROM events WHERE subject_id = ? AND event_id = ?",
+                (self.subject_id, evidence_id),
+            ).fetchone()
+            for evidence_id in evidence_ids
+        ]
+        if any(row is None for row in evidence_rows):
+            raise SelfModificationError("self-modification evidence is unavailable")
+        event_types = {str(row["event_type"]) for row in evidence_rows if row is not None}
+        if "metacognitive_outcome" not in event_types or event_types & {
+            "human_message",
+            "interaction_received",
+        }:
+            raise SelfModificationError("self-modification lacks autonomous evidence")
+        if connection.execute(
+            "SELECT 1 FROM self_modification_proposals WHERE subject_id = ? "
+            "AND setting_key = ? AND status IN ('proposed','validated','simulated','applied')",
+            (self.subject_id, setting_key),
+        ).fetchone():
+            raise SelfModificationError("setting already has a pending proposal")
+        connection.execute(
+            """INSERT INTO self_modification_proposals(
+                proposal_id, subject_id, setting_key, old_value_json, proposed_value_json,
+                reason, evidence_ids_json, risk_score, status, validation_json,
+                simulation_json, state_hash, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                proposal_id,
+                self.subject_id,
+                setting_key,
+                canonical_json(old_value),
+                canonical_json(value),
+                reason.strip(),
+                canonical_json(list(evidence_ids)),
+                risk,
+                status,
+                canonical_json(validation),
+                canonical_json(simulation),
+                state_hash,
+                now,
+                now,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM self_modification_proposals WHERE proposal_id=? AND subject_id=?",
+            (proposal_id, self.subject_id),
+        ).fetchone()
+        return self._validated_record(row)
 
     def apply(self, proposal_id: str) -> SelfModificationRecord:
         proposal = self.get(proposal_id)
@@ -375,6 +416,10 @@ class ControlledSelfModification:
             ).fetchone()
         if row is None:
             raise SelfModificationError("self-modification proposal is unavailable")
+        return self._validated_record(row)
+
+    def _validated_record(self, row: Any) -> SelfModificationRecord:
+        proposal_id = row["proposal_id"]
         with durable_boundary("self-modification proposal", proposal_id):
             record = self._record(row)
             expected = self._proposal_hash(
@@ -501,36 +546,121 @@ class ControlledSelfModification:
     def _stagnant_strategy_candidate(
         self,
     ) -> tuple[str, int | float, str, tuple[str, ...]] | None:
-        with self.database.connection() as connection:
-            profile = connection.execute(
-                "SELECT strategy, attempts, stagnant, failed FROM cognitive_strategy_profiles "
-                "WHERE subject_id = ? AND attempts >= 4 "
-                "AND (stagnant + failed) * 1.0 / attempts >= 0.6 "
-                "ORDER BY (stagnant + failed) * 1.0 / attempts DESC LIMIT 1",
-                (self.subject_id,),
-            ).fetchone()
-            events = connection.execute(
-                "SELECT event_id FROM events WHERE subject_id = ? "
-                "AND event_type = 'metacognitive_outcome' "
-                "ORDER BY occurred_at DESC, event_id DESC LIMIT 4",
-                (self.subject_id,),
-            ).fetchall()
+        with self.database.read_transaction() as connection:
+            evaluation = self._automatic_evaluation(connection)
+        return None if evaluation is None else evaluation[0]
+
+    def _automatic_evaluation(
+        self, connection: Any
+    ) -> tuple[tuple[str, int | float, str, tuple[str, ...]], str] | None:
+        profile = connection.execute(
+            "SELECT * FROM cognitive_strategy_profiles WHERE subject_id=? AND attempts>=4 "
+            "AND (stagnant+failed)*1.0/attempts>=0.6 "
+            "ORDER BY (stagnant+failed)*1.0/attempts DESC LIMIT 1",
+            (self.subject_id,),
+        ).fetchone()
+        events = connection.execute(
+            "SELECT event_id,event_type,source,payload_hash FROM events WHERE subject_id=? "
+            "AND event_type='metacognitive_outcome' "
+            "ORDER BY occurred_at DESC,event_id DESC LIMIT 4",
+            (self.subject_id,),
+        ).fetchall()
         if profile is None or not events:
             return None
         strategy = str(profile["strategy"])
         setting_key = self.STRATEGY_TO_SETTING.get(strategy)
         if setting_key is None:
             return None
-        old = self.effective(setting_key)
+        old = self._effective_connection(connection, setting_key)
         proposed = self._automatic_value(setting_key, old)
         if proposed is None:
             return None
-        return (
+        candidate = (
             setting_key,
             proposed,
             f"adapt after repeated {strategy} stagnation",
             tuple(str(row["event_id"]) for row in events),
         )
+        settings = connection.execute(
+            "SELECT setting_key,revision,state_hash FROM self_modification_settings "
+            "WHERE subject_id=? ORDER BY setting_key",
+            (self.subject_id,),
+        ).fetchall()
+        context = {
+            "version": "self-modification-auto/v1",
+            "setting_key": setting_key,
+            "old_value": old,
+            "proposed_value": proposed,
+            "profile": dict(profile),
+            "events": [dict(row) for row in events],
+            "settings_revisions": [dict(row) for row in settings],
+            "effective_settings": {
+                key: self._effective_connection(connection, key) for key in self.RULES
+            },
+            "rules": {
+                key: {
+                    "schema": rule.adapter.json_schema(),
+                    "minimum": rule.minimum,
+                    "maximum": rule.maximum,
+                    "max_relative_change": rule.max_relative_change,
+                    "risk_weight": rule.risk_weight,
+                }
+                for key, rule in self.RULES.items()
+            },
+            "strategy_mapping": self.STRATEGY_TO_SETTING,
+            "simulation_version": "self-modification-replay/v1",
+            "simulation_rows": [
+                dict(row) for row in self._simulation_rows(connection, self.subject_id)
+            ],
+        }
+        return candidate, content_hash(context)
+
+    def _automatic_rejected(
+        self,
+        connection: Any,
+        candidate: tuple[str, int | float, str, tuple[str, ...]],
+        fingerprint: str,
+    ) -> bool:
+        setting_key, value, reason, evidence = candidate
+        old = self._effective_connection(connection, setting_key)
+        records = connection.execute(
+            "SELECT * FROM self_modification_proposals WHERE subject_id=? AND setting_key=? "
+            "AND status='rejected' AND old_value_json=? AND proposed_value_json=? "
+            "AND evidence_ids_json=? "
+            "ORDER BY updated_at DESC,proposal_id",
+            (
+                self.subject_id,
+                setting_key,
+                canonical_json(old),
+                canonical_json(value),
+                canonical_json(list(evidence)),
+            ),
+        )
+        legacy_simulation = None
+        relative = abs(float(value) - float(old)) / max(abs(float(old)), 1.0)
+        validation = {
+            "allowlisted": True,
+            "in_range": True,
+            "relative_change": round(relative, 8),
+            "max_relative_change": self.RULES[setting_key].max_relative_change,
+        }
+        for row in records:
+            record = self._validated_record(row)
+            previous = record.validation.get("automatic_evaluation")
+            if previous is not None:
+                if previous["fingerprint"] == fingerprint:
+                    return True
+                continue
+            # Legacy proposals have no full input fingerprint. Reuse only an
+            # exact deterministic rejection, verified against current rules and
+            # replay. New-format rejections skip this replay entirely.
+            if record.reason != reason or record.validation != validation:
+                continue
+            if legacy_simulation is None:
+                legacy_simulation = self._simulate_connection(connection, setting_key, old, value)
+            if record.simulation == legacy_simulation:
+                return True
+        return False
 
     @classmethod
     def _automatic_value(cls, setting_key: str, old_value: int | float) -> int | float | None:
@@ -567,15 +697,26 @@ class ControlledSelfModification:
     def _simulate(
         self, setting_key: str, old_value: int | float, value: int | float
     ) -> dict[str, Any]:
-        with self.database.connection() as connection:
-            rows = connection.execute(
+        with self.database.read_transaction() as connection:
+            return self._simulate_connection(connection, setting_key, old_value, value)
+
+    @staticmethod
+    def _simulation_rows(connection: Any, subject_id: str) -> list[Any]:
+        return list(
+            connection.execute(
                 "SELECT strategy, outcome, token_cost, created_at FROM ("
                 "SELECT strategy, outcome, token_cost, created_at, outcome_id "
                 "FROM metacognitive_outcomes WHERE subject_id = ? "
                 "ORDER BY created_at DESC, outcome_id DESC LIMIT 64"
                 ") ORDER BY created_at, outcome_id",
-                (self.subject_id,),
+                (subject_id,),
             ).fetchall()
+        )
+
+    def _simulate_connection(
+        self, connection: Any, setting_key: str, old_value: int | float, value: int | float
+    ) -> dict[str, Any]:
+        rows = self._simulation_rows(connection, self.subject_id)
         if rows:
             history = [
                 {
@@ -613,7 +754,9 @@ class ControlledSelfModification:
             ]
             history_source = "deterministic_safety_fixture"
 
-        effective_settings = {key: self.effective(key) for key in self.RULES}
+        effective_settings = {
+            key: self._effective_connection(connection, key) for key in self.RULES
+        }
         baseline_settings = {**effective_settings, setting_key: old_value}
         candidate_settings = {**effective_settings, setting_key: value}
         baseline = self._replay_simulation(history, baseline_settings)
@@ -786,6 +929,16 @@ class ControlledSelfModification:
             )
             if not isinstance(validation, dict) or not isinstance(simulation, dict):
                 raise IntegrityError("self-modification validation state is invalid")
+            marker = validation.get("automatic_evaluation")
+            if marker is not None and (
+                not isinstance(marker, dict)
+                or set(marker) != {"version", "fingerprint"}
+                or marker.get("version") != "self-modification-auto/v1"
+                or not isinstance(marker.get("fingerprint"), str)
+                or len(marker["fingerprint"]) != 64
+                or set(marker["fingerprint"]) - set("0123456789abcdef")
+            ):
+                raise IntegrityError("self-modification automatic evaluation evidence is invalid")
             return SelfModificationRecord(
                 proposal_id,
                 row["subject_id"],

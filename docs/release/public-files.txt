@@ -1058,6 +1058,7 @@ tests/test_secret_cleanup.py
 tests/test_self_model.py
 tests/test_self_modification.py
 tests/test_self_modification_automatic.py
+tests/test_self_modification_rejection.py
 tests/test_semantic_memory_integration.py
 tests/test_semantic_memory_recovery.py
 tests/test_service.py

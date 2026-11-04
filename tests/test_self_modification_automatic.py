@@ -22,7 +22,9 @@ def case() -> Iterator[helpers.ControlledSelfModificationTestCase]:
 
 
 def stagnation(
-    case: helpers.ControlledSelfModificationTestCase, strategy: CognitiveStrategy = "research", count: int = 4
+    case: helpers.ControlledSelfModificationTestCase,
+    strategy: CognitiveStrategy = "research",
+    count: int = 4,
 ) -> MetacognitiveControl:
     control = MetacognitiveControl(
         case.kernel.database, case.kernel.subject_id, case.manager.settings, clock=lambda: case.now
