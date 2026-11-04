@@ -152,14 +152,17 @@ class ModelGateway:
         )
         reserved_cost = self.pricing.cost_microusd(reserved_usage)
 
+        # Evidence of the last attempt settled by THIS invocation. A stale
+        # worker cannot close another worker's active call at a retry boundary.
+        settled_attempt_id: str | None = None
         for attempt_index in range(1, self.retry_policy.max_attempts + 1):
             try:
                 assert_current_lease()
             except OperationInvalidated:
-                self.ledger.finish_call(
+                self.ledger.fail_before_attempt(
                     call.call_id,
-                    "unknown",
                     error_code="runtime_epoch_invalidated",
+                    settled_attempt_id=settled_attempt_id,
                 )
                 raise
             try:
@@ -178,6 +181,15 @@ class ModelGateway:
                     resource_key_fingerprint=self.resource_key_fingerprint,
                     pricing=self.pricing,
                 )
+            except OperationInvalidated:
+                # Authorization's fenced transaction did not commit a new
+                # attempt. Its rollback is distinct from an in-flight request.
+                self.ledger.fail_before_attempt(
+                    call.call_id,
+                    error_code="runtime_epoch_invalidated",
+                    settled_attempt_id=settled_attempt_id,
+                )
+                raise
             except (
                 BudgetExhaustedError,
                 InvitationWithdrawnError,
@@ -330,14 +342,15 @@ class ModelGateway:
                     cost_microusd=None if error.usage_unknown else 0,
                     error_code=error.code,
                 )
+                settled_attempt_id = attempt.attempt_id
                 if error.retryable and attempt_index < self.retry_policy.max_attempts:
                     try:
                         assert_current_lease()
                     except OperationInvalidated:
-                        self.ledger.finish_call(
+                        self.ledger.fail_before_attempt(
                             call.call_id,
-                            "unknown",
                             error_code="runtime_epoch_invalidated",
+                            settled_attempt_id=settled_attempt_id,
                         )
                         raise
                     await self._retry_after_settlement(call.call_id, attempt_index)
@@ -374,6 +387,7 @@ class ModelGateway:
                 provider_request_id=provider_response.provider_request_id,
                 usage_estimated=usage_estimated,
             )
+            settled_attempt_id = attempt.attempt_id
             if stale_operation:
                 # The provider side effect is already complete, so preserve
                 # its accounting before fencing the result out of cognition.
@@ -419,10 +433,10 @@ class ModelGateway:
                     try:
                         assert_current_lease()
                     except OperationInvalidated:
-                        self.ledger.finish_call(
+                        self.ledger.fail_before_attempt(
                             call.call_id,
-                            "unknown",
                             error_code="runtime_epoch_invalidated",
+                            settled_attempt_id=settled_attempt_id,
                         )
                         raise
                     await self._retry_after_settlement(call.call_id, attempt_index)

@@ -562,6 +562,56 @@ class ModelLedger:
             )
             return self._load_attempt_connection(connection, attempt_id)
 
+    def fail_before_attempt(
+        self,
+        call_id: str,
+        *,
+        error_code: str,
+        settled_attempt_id: str | None = None,
+    ) -> bool:
+        """Close only a prepared call or this worker's settled retry boundary.
+
+        The caller has not authorized its next attempt. Recheck under the
+        writer lock: another worker may already have advanced the shared call.
+        Never rewrite an in-flight/unknown attempt or its fee reservation.
+        False means the phase changed, not that an uncertain request failed.
+        """
+        with accounting_scope(), self.database.transaction() as connection:
+            call = self._load_call_connection(connection, call_id)
+            if call.status not in {"prepared", "executing"}:
+                return False
+            if connection.execute(
+                "SELECT 1 FROM model_attempts WHERE call_id=? "
+                "AND status IN ('authorized','executing') LIMIT 1",
+                (call_id,),
+            ).fetchone():
+                return False
+            if call.status == "prepared":
+                if settled_attempt_id is not None:
+                    return False
+            else:
+                latest = connection.execute(
+                    "SELECT attempt_id,status FROM model_attempts WHERE call_id=? "
+                    "ORDER BY attempt_number DESC LIMIT 1",
+                    (call_id,),
+                ).fetchone()
+                if (
+                    settled_attempt_id is None
+                    or latest is None
+                    or latest["attempt_id"] != settled_attempt_id
+                    or latest["status"] not in {"succeeded", "failed"}
+                ):
+                    return False
+            # Preserve all response/usage evidence, including any privacy-erasure
+            # marker. Known or unknown fees live in attempts and are untouched.
+            connection.execute(
+                "UPDATE model_calls SET status='failed',completed_at=?,error_code="
+                "CASE WHEN error_code='private_content_erased' THEN error_code ELSE ? END "
+                "WHERE call_id=?",
+                (utc_now(), error_code, call_id),
+            )
+            return True
+
     def finish_call(
         self,
         call_id: str,
