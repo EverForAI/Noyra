@@ -20,6 +20,7 @@ from noyra.sleep import SleepEngine
 from .actions import ActionLedger
 from .archive import ArchiveKeyring
 from .database import CURRENT_SCHEMA_VERSION, Database
+from .delivery_state import UNRESOLVED_DELIVERY_SQL, delivery_status_counts
 from .errors import (
     ArchiveKeyUnavailableError,
     IntegrityError,
@@ -149,8 +150,13 @@ class OperatorControlService:
                     "lifecycle_wake_unavailable",
                     detail=f"wake requires deep_sleep lifecycle, got {current.state}",
                 )
-            with self.database.connection() as connection:
-                work = self._work_counts_connection(connection)
+            try:
+                with self.database.read_transaction() as connection:
+                    work = self._work_counts_connection(connection)
+            except (IntegrityError, sqlite3.Error) as error:
+                raise OperatorControlConflict(
+                    "wake_work_state_unavailable", detail=type(error).__name__
+                ) from error
             if work["blocking"]:
                 raise OperatorControlConflict(
                     "wake_blocked_by_recoverable_work",
@@ -465,7 +471,10 @@ class OperatorControlService:
 
     def recoverable_work(self, *, limit: int = 100) -> dict[str, Any]:
         bounded = max(1, min(int(limit), 1_000))
-        with self.database.connection() as connection:
+        with self.database.read_transaction() as connection:
+            # Validate effective delivery outcomes before filtering the list.
+            # Both totals and rows must describe this same WAL snapshot.
+            totals = self._work_counts_connection(connection)
             actions = connection.execute(
                 "SELECT action_id, status FROM actions WHERE subject_id = ? "
                 "AND status IN ('prepared', 'executing', 'unknown') "
@@ -479,12 +488,12 @@ class OperatorControlService:
                 (self.subject_id, bounded),
             ).fetchall()
             deliveries = connection.execute(
-                "SELECT delivery_id, status FROM interaction_deliveries WHERE subject_id = ? "
-                "AND status IN ('queued', 'sending', 'unknown') "
-                "ORDER BY created_at, delivery_id LIMIT ?",
+                "SELECT d.delivery_id, d.status FROM interaction_deliveries d "
+                "WHERE d.subject_id=? AND "
+                + UNRESOLVED_DELIVERY_SQL
+                + " ORDER BY d.created_at,d.delivery_id LIMIT ?",
                 (self.subject_id, bounded),
             ).fetchall()
-            totals = self._work_counts_connection(connection)
         return {
             "actions": [dict(row) for row in actions],
             "model_calls": [dict(row) for row in calls],
@@ -541,7 +550,7 @@ class OperatorControlService:
 
     def _work_health(self) -> dict[str, Any]:
         try:
-            with self.database.connection() as connection:
+            with self.database.read_transaction() as connection:
                 counts = self._work_counts_connection(connection)
             state = "attention" if counts["blocking"] else "ok"
             return {
@@ -551,7 +560,7 @@ class OperatorControlService:
                 "model_attempts": counts["model_attempts"],
                 "deliveries": counts["deliveries"],
             }
-        except (OSError, sqlite3.Error, TypeError, ValueError):
+        except (OSError, sqlite3.Error, IntegrityError, TypeError, ValueError):
             return {"state": "degraded", "reason": "unavailable"}
 
     def _integrity_health(self) -> dict[str, Any]:
@@ -737,7 +746,10 @@ class OperatorControlService:
         actions = count("actions", ("prepared", "executing", "unknown"))
         calls = count("model_calls", ("prepared", "executing", "unknown"))
         attempts = count("model_attempts", ("authorized", "executing", "unknown"))
-        deliveries = count("interaction_deliveries", ("queued", "sending", "unknown"))
+        delivery_counts = delivery_status_counts(connection, self.subject_id)
+        deliveries = sum(
+            delivery_counts.get(status, 0) for status in ("queued", "sending", "unknown")
+        )
         return {
             "actions": actions,
             "model_calls": calls,

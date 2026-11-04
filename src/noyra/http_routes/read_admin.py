@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import json
+import sqlite3
 from datetime import datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
@@ -198,10 +199,12 @@ def admin_recoverable_work(self: RequestHandler, owner: NoyraHTTPServer, limit: 
             {"error": "operator_controls_unavailable"},
         )
         return True
-    self._json(
-        HTTPStatus.OK,
-        owner.operator_controls.recoverable_work(limit=limit),
-    )
+    try:
+        work = owner.operator_controls.recoverable_work(limit=limit)
+    except (IntegrityError, sqlite3.Error):
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "recoverable_work_unavailable"})
+        return True
+    self._json(HTTPStatus.OK, work)
     return False
 
 

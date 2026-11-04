@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Literal, cast
 
 import pytest
 
@@ -9,7 +10,9 @@ from noyra.core import SubjectKernel
 from noyra.core.errors import IntegrityError
 from noyra.core.types import content_hash
 from noyra.interaction import DeliveryDispatcher, InteractionStore, TransportInput, TransportStore
+from noyra.service import NoyraService
 from test_m42_p3_06_operator_controls import _kernel
+from test_m42_p3_06_operator_controls import service as service
 
 
 @pytest.fixture
@@ -123,8 +126,6 @@ def test_verified_effective_statuses_preserve_raw_rows_and_old_reconciliation_ap
     delivery_case: tuple[SubjectKernel, TransportStore, DeliveryDispatcher],
     outcome: str,
 ) -> None:
-    from typing import Literal, cast
-
     from noyra.core.delivery_state import delivery_status_counts
 
     kernel, transports, dispatcher = delivery_case
@@ -238,3 +239,204 @@ def test_invalid_receipts_never_settle_effective_counts(
         delivery_status_counts(connection, kernel.subject_id)
     with pytest.raises(IntegrityError):
         dispatcher.get_delivery(identifier)
+
+
+@pytest.mark.parametrize("operation", ["wake", "reset"])
+def test_reconciled_terminal_deliveries_no_longer_block_lifecycle_controls(
+    delivery_case: tuple[SubjectKernel, TransportStore, DeliveryDispatcher],
+    operation: str,
+) -> None:
+    from noyra.core.operator_controls import OperatorControlConflict, OperatorControlService
+    from test_m42_p3_06_operator_controls import _put_kernel_to_deep_sleep
+
+    kernel, transports, dispatcher = delivery_case
+    controls = OperatorControlService(kernel)
+    identifiers = [
+        seed_delivery(kernel, dispatcher, "settle-" + outcome)
+        for outcome in ("delivered", "failed", "cancelled")
+    ]
+    if operation == "wake":
+        _put_kernel_to_deep_sleep(kernel)
+    else:
+        controls.pause(actor="operator", reason="Synthetic maintenance")
+    method = controls.wake if operation == "wake" else controls.reset
+    with pytest.raises(OperatorControlConflict, match=operation + "_blocked_by_recoverable_work"):
+        method(actor="operator", reason="Still unresolved")
+    for identifier, outcome in zip(identifiers, ("delivered", "failed", "cancelled"), strict=True):
+        dispatcher.reconcile_unknown(
+            identifier,
+            cast(Literal["delivered", "failed", "cancelled"], outcome),
+            actor="operator",
+            reason="Synthetic evidence verified",
+        )
+    assert controls.recoverable_work()["counts"]["deliveries"] == 0
+    assert controls.recoverable_work()["deliveries"] == []
+    assert controls._work_health()["state"] == "ok"
+    result = method(actor="operator", reason="All deliveries resolved")
+    assert result.lifecycle["state"] == "active"
+    with kernel.database.connection() as connection:
+        assert {
+            row[0] for row in connection.execute("SELECT status FROM interaction_deliveries")
+        } == {"unknown"}
+    assert (
+        transports.verify_integrity(kernel.subject_id)["interaction_delivery_reconciliations"] == 3
+    )
+
+
+def test_pending_inventory_matches_effective_counts_and_does_not_hide_other_work(
+    delivery_case: tuple[SubjectKernel, TransportStore, DeliveryDispatcher],
+) -> None:
+    from noyra.core.operator_controls import OperatorControlService
+
+    kernel, _, dispatcher = delivery_case
+    settled = seed_delivery(kernel, dispatcher, "old-settled")
+    dispatcher.reconcile_unknown(settled, "delivered", actor="operator", reason="Verified")
+    expected = {
+        seed_delivery(kernel, dispatcher, status, status)
+        for status in ("queued", "sending", "unknown")
+    }
+    action = kernel.action_ledger.prepare(
+        kernel.subject_id, "synthetic", "test", "private-target", {}
+    )
+    controls = OperatorControlService(kernel)
+    full = controls.recoverable_work(limit=10)
+    assert full["counts"]["deliveries"] == 3
+    assert {row["delivery_id"] for row in full["deliveries"]} == expected
+    assert full["actions"] == [{"action_id": action.action_id, "status": "prepared"}]
+    assert "private-target" not in str(full)
+    small = controls.recoverable_work(limit=1)
+    assert len(small["deliveries"]) == 1 and small["truncated"] is True
+    assert small["counts"] == full["counts"]
+    assert controls._work_health()["state"] == "attention"
+
+
+def test_damaged_receipt_never_appears_as_healthy_or_unblocks_wake(
+    delivery_case: tuple[SubjectKernel, TransportStore, DeliveryDispatcher],
+) -> None:
+    from noyra.core.operator_controls import OperatorControlConflict, OperatorControlService
+    from test_m42_p3_06_operator_controls import _put_kernel_to_deep_sleep
+
+    kernel, _, dispatcher = delivery_case
+    identifier = seed_delivery(kernel, dispatcher, "damaged-control")
+    dispatcher.reconcile_unknown(identifier, "delivered", actor="operator", reason="Verified")
+    _put_kernel_to_deep_sleep(kernel)
+    with kernel.database.transaction() as connection:
+        connection.execute("DROP TRIGGER prevent_delivery_reconciliation_update")
+        connection.execute(
+            "UPDATE interaction_delivery_reconciliations SET evidence_hash=?", ("0" * 64,)
+        )
+    controls = OperatorControlService(kernel)
+    assert controls._work_health() == {"state": "degraded", "reason": "unavailable"}
+    with pytest.raises(IntegrityError):
+        controls.recoverable_work()
+    with pytest.raises(OperatorControlConflict, match="wake_work_state_unavailable"):
+        controls.wake(actor="operator", reason="Corrupt receipt must not wake")
+    assert kernel.lifecycle.current().state == "deep_sleep"
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_does_not_authorize_resend_or_release_other_unknowns(
+    delivery_case: tuple[SubjectKernel, TransportStore, DeliveryDispatcher],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from noyra.core.operator_controls import OperatorControlService
+
+    kernel, _, dispatcher = delivery_case
+    identifiers = [
+        seed_delivery(kernel, dispatcher, "no-resend-" + outcome)
+        for outcome in ("failed", "cancelled")
+    ]
+    for identifier, outcome in zip(identifiers, ("failed", "cancelled"), strict=True):
+        dispatcher.reconcile_unknown(
+            identifier,
+            cast(Literal["delivered", "failed", "cancelled"], outcome),
+            actor="operator",
+            reason="Verified",
+        )
+    unsettled = seed_delivery(kernel, dispatcher, "still-unknown")
+    send = AsyncMock(side_effect=AssertionError("M1 must not resend any message"))
+    monkeypatch.setattr(dispatcher, "_send", send)
+    assert await dispatcher.deliver_pending(kernel.subject_id) == []
+    send.assert_not_called()
+    work = OperatorControlService(kernel).recoverable_work()
+    assert work["deliveries"] == [{"delivery_id": unsettled, "status": "unknown"}]
+    assert work["counts"]["deliveries"] == 1
+
+
+def test_effective_counts_and_pending_list_share_a_read_snapshot(
+    delivery_case: tuple[SubjectKernel, TransportStore, DeliveryDispatcher],
+) -> None:
+    from noyra.core.delivery_state import UNRESOLVED_DELIVERY_SQL, delivery_status_counts
+
+    kernel, _, dispatcher = delivery_case
+    identifier = seed_delivery(kernel, dispatcher, "snapshot")
+    with kernel.database.read_transaction() as connection:
+        assert delivery_status_counts(connection, kernel.subject_id) == {"unknown": 1}
+        dispatcher.reconcile_unknown(
+            identifier, "delivered", actor="operator", reason="Arrived during read"
+        )
+        rows = connection.execute(
+            "SELECT d.delivery_id FROM interaction_deliveries d WHERE d.subject_id=? AND "
+            + UNRESOLVED_DELIVERY_SQL,
+            (kernel.subject_id,),
+        ).fetchall()
+        assert [row[0] for row in rows] == [identifier]
+        assert delivery_status_counts(connection, kernel.subject_id) == {"unknown": 1}
+    with kernel.database.read_transaction() as connection:
+        assert delivery_status_counts(connection, kernel.subject_id) == {"delivered": 1}
+
+
+def test_operator_http_inventory_and_wake_use_verified_delivery_state(
+    service: tuple[NoyraService, str, str],
+) -> None:
+    from test_m42_p3_06_operator_controls import _put_kernel_to_deep_sleep, _request
+
+    instance, operator, read = service
+    http = instance.http
+    http.transports.configure(
+        instance.kernel.subject_id,
+        TransportInput(channel="webhook", label="Synthetic", endpoint="https://example.com/send"),
+        actor="operator",
+    )
+    identifier = seed_delivery(instance.kernel, http.deliveries, "http-settled")
+    for prefix in ("/api", "/api/v1"):
+        assert _request(instance, prefix + "/admin/recoverable-work", token=read)[0] == 401
+    status, result = _request(
+        instance,
+        "/api/v1/deliveries/" + identifier + "/reconcile",
+        token=operator,
+        payload={"status": "delivered", "reason": "Synthetic provider evidence"},
+    )
+    assert status == 200 and result["status"] == "delivered"
+    for prefix in ("/api", "/api/v1"):
+        status, inventory = _request(instance, prefix + "/admin/recoverable-work", token=operator)
+        assert status == 200
+        assert inventory["deliveries"] == []
+        assert cast(dict[str, int], inventory["counts"])["deliveries"] == 0
+    _put_kernel_to_deep_sleep(instance.kernel)
+    for prefix in ("/api", "/api/v1"):
+        assert (
+            _request(
+                instance,
+                prefix + "/admin/lifecycle/wake",
+                token=read,
+                payload={"reason": "Not allowed"},
+            )[0]
+            == 401
+        )
+    status, result = _request(
+        instance, "/api/v1/admin/lifecycle/wake", token=operator, payload={"reason": "Settled work"}
+    )
+    assert status == 200 and cast(dict[str, object], result["lifecycle"])["state"] == "active"
+    with instance.kernel.database.transaction() as connection:
+        connection.execute("DROP TRIGGER prevent_delivery_reconciliation_update")
+        connection.execute(
+            "UPDATE interaction_delivery_reconciliations SET state_hash=?", ("0" * 64,)
+        )
+    for prefix in ("/api", "/api/v1"):
+        assert _request(instance, prefix + "/admin/recoverable-work", token=operator) == (
+            503,
+            {"error": "recoverable_work_unavailable"},
+        )
