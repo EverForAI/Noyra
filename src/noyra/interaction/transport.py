@@ -28,6 +28,13 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, m
 from noyra.core.admission import OperationInvalidated, accounting_scope, assert_current_lease
 from noyra.core.at_rest import validate_private_file, validate_private_root
 from noyra.core.database import Database
+from noyra.core.delivery_state import (
+    DELIVERY_EVIDENCE_MAX_BYTES as DELIVERY_EVIDENCE_MAX_BYTES,
+)
+from noyra.core.delivery_state import (
+    DeliveryReconciliationRecord as DeliveryReconciliationRecord,
+)
+from noyra.core.delivery_state import reconciliation_record, terminal_delivery_reconciliation
 from noyra.core.errors import IntegrityError, InvalidTransitionError, NotFoundError
 from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
@@ -44,7 +51,6 @@ from noyra.core.types import (
     canonical_json,
     content_hash,
     new_id,
-    strict_int,
     strict_json_loads,
     utc_now,
 )
@@ -59,7 +65,6 @@ DeliveryReconciliationOutcome = Literal[
 TRANSPORT_MAX_RESPONSE_BYTES = DEFAULT_MAX_RESPONSE_BYTES
 TRANSPORT_TOTAL_TIMEOUT_SECONDS = 20.0
 TRANSPORT_SECRET_MAX_BYTES = 16_000_000
-DELIVERY_EVIDENCE_MAX_BYTES = 16_384
 SMTP_TIMEOUT_SECONDS = 20.0
 PROVIDER_TOKEN_SKEW_SECONDS = 60.0
 LOGGER = logging.getLogger("noyra.interaction.transport")
@@ -218,24 +223,6 @@ class ProviderStatusEvidence:
     provider_status: str
     provider_message_id: str | None = None
     details: Mapping[str, Any] | None = None
-
-
-@dataclass(frozen=True)
-class DeliveryReconciliationRecord:
-    reconciliation_id: str
-    delivery_id: str
-    subject_id: str
-    sequence: int
-    source: str
-    outcome: str
-    provider_message_id: str | None
-    provider_status: str | None
-    evidence: Mapping[str, Any]
-    evidence_hash: str
-    actor: str
-    reason: str
-    state_hash: str
-    created_at: str
 
 
 DeliveryStatusLookup = Callable[
@@ -2713,100 +2700,16 @@ class DeliveryDispatcher:
         if not reason.strip() or len(reason) > 2_000:
             raise ValueError("delivery reconciliation reason is required and bounded")
 
-    @staticmethod
-    def _reconciliation_record(row: Any) -> DeliveryReconciliationRecord:
-        reconciliation_id = row["reconciliation_id"]
-        raw_evidence = row["evidence_json"]
-        if not isinstance(raw_evidence, str):
-            raise IntegrityError(
-                f"delivery reconciliation evidence is invalid: {reconciliation_id}"
-            )
-        if len(raw_evidence.encode("utf-8")) > DELIVERY_EVIDENCE_MAX_BYTES:
-            raise IntegrityError(
-                f"delivery reconciliation evidence is too large: {reconciliation_id}"
-            )
-        try:
-            evidence = strict_json_loads(raw_evidence)
-            sequence = strict_int(row["sequence"])
-        except (TypeError, ValueError) as error:
-            raise IntegrityError(
-                f"delivery reconciliation evidence is invalid: {reconciliation_id}"
-            ) from error
-        if not isinstance(evidence, dict) or sequence <= 0:
-            raise IntegrityError(f"delivery reconciliation is invalid: {reconciliation_id}")
-        source = row["source"]
-        outcome = row["outcome"]
-        provider_message_id = row["provider_message_id"]
-        provider_status = row["provider_status"]
-        if (
-            source not in {"provider", "operator"}
-            or outcome
-            not in {"delivered", "failed", "cancelled", "unknown", "unsupported", "error"}
-            or (source == "operator" and outcome not in {"delivered", "failed", "cancelled"})
-            or (source == "provider" and outcome == "cancelled")
-            or not isinstance(row["actor"], str)
-            or not row["actor"].strip()
-            or not isinstance(row["reason"], str)
-            or not row["reason"].strip()
-            or not isinstance(row["created_at"], str)
-            or not row["created_at"]
-            or (
-                provider_message_id is not None
-                and (not isinstance(provider_message_id, str) or len(provider_message_id) > 512)
-            )
-            or (
-                provider_status is not None
-                and (not isinstance(provider_status, str) or len(provider_status) > 256)
-            )
-        ):
-            raise IntegrityError(f"delivery reconciliation is invalid: {reconciliation_id}")
-        evidence_hash = content_hash(evidence)
-        state = {
-            "reconciliation_id": reconciliation_id,
-            "delivery_id": row["delivery_id"],
-            "subject_id": row["subject_id"],
-            "sequence": sequence,
-            "source": source,
-            "outcome": outcome,
-            "provider_message_id": provider_message_id,
-            "provider_status": provider_status,
-            "evidence_hash": evidence_hash,
-            "actor": row["actor"],
-            "reason": row["reason"],
-            "created_at": row["created_at"],
-        }
-        if row["evidence_hash"] != evidence_hash or row["state_hash"] != content_hash(state):
-            raise IntegrityError(f"delivery reconciliation hash mismatch: {reconciliation_id}")
-        return DeliveryReconciliationRecord(
-            str(reconciliation_id),
-            str(row["delivery_id"]),
-            str(row["subject_id"]),
-            sequence,
-            str(row["source"]),
-            str(row["outcome"]),
-            row["provider_message_id"],
-            row["provider_status"],
-            evidence,
-            str(row["evidence_hash"]),
-            str(row["actor"]),
-            str(row["reason"]),
-            str(row["state_hash"]),
-            str(row["created_at"]),
-        )
+    _reconciliation_record = staticmethod(reconciliation_record)
 
     def get_delivery(self, delivery_id: str) -> DeliveryRecord:
-        with self.database.connection() as connection:
+        with self.database.read_transaction() as connection:
             row = connection.execute(
                 "SELECT * FROM interaction_deliveries WHERE delivery_id = ?", (delivery_id,)
             ).fetchone()
-            reconciliation = connection.execute(
-                "SELECT * FROM interaction_delivery_reconciliations "
-                "WHERE delivery_id = ? AND outcome IN ('delivered', 'failed', 'cancelled')",
-                (delivery_id,),
-            ).fetchone()
-        if row is None:
-            raise NotFoundError(f"delivery not found: {delivery_id}")
-        resolved = None if reconciliation is None else self._reconciliation_record(reconciliation)
+            if row is None:
+                raise NotFoundError(f"delivery not found: {delivery_id}")
+            resolved = terminal_delivery_reconciliation(connection, row)
         return DeliveryRecord(
             delivery_id=str(row["delivery_id"]),
             interaction_id=str(row["interaction_id"]),

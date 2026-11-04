@@ -515,6 +515,7 @@ src/noyra/core/conversation_schema.py
 src/noyra/core/credentials.py
 src/noyra/core/database.py
 src/noyra/core/deadline.py
+src/noyra/core/delivery_state.py
 src/noyra/core/errors.py
 src/noyra/core/event_archive.py
 src/noyra/core/events.py
@@ -871,6 +872,7 @@ tests/test_common_sync_fencing.py
 tests/test_consciousness_routing.py
 tests/test_credentials.py
 tests/test_deadline_clock.py
+tests/test_delivery_effective_state.py
 tests/test_deployment_contract.py
 tests/test_deployment_maintenance.py
 tests/test_deployment_setup.py
