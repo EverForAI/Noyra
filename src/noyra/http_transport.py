@@ -203,6 +203,19 @@ def handler_type(
                     {"error": "integrity_quarantine"},
                 )
                 return
+            if self.path == "/api/admin/project-execution-recovery/release-review":
+                # The authenticated operator method owns the lock order and
+                # paused/drained transaction. Do not nest a gate scope around
+                # its service lock or count this request as in-flight work.
+                try:
+                    self._dispatch_post()
+                except (OperationInvalidated, RuntimeOwnershipError):
+                    self.close_connection = True
+                    self._json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "project_recovery_unavailable"},
+                    )
+                return
             # Lifecycle controls intentionally invalidate/reopen the gate
             # as part of their own transaction.  They must not run under
             # a lease that they invalidate themselves.

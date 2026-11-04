@@ -16,6 +16,7 @@ function context(extra = {}) {
   const sandbox = {
     csrfToken: "synthetic-session", overviewLoadVersion: 0, latestDiagnostics: null,
     adminSessionGeneration: 0, adminReadVersions: new Map(), activeLoginAttempt: null,
+    projectRecoveryRecords: new Map(), projectRecoveryPending: new Set(),
     $: selector => {
       if (!nodes.has(selector)) nodes.set(selector, { innerHTML: "", textContent: "", value:"", dataset:{},
         options:[], querySelector:()=>null, replaceChildren(){this.innerHTML="";this.textContent="";} });
@@ -608,7 +609,7 @@ test("logout clears every private panel, loaded option, cache and open dialog",a
   vm.runInContext(functionsBetween("async function logout(","async function loadOverview("),sandbox);
   for(const id of ["search-provider-list","capability-list","channel-list","binding-list",
     "migration-policy-summary","migration-target-list","migration-proposal-list","migration-task-list",
-    "runtime-summary","public-post-usage","setup-guide-list","model-observability-summary","retention-summary"])
+    "runtime-summary","project-recovery-list","public-post-usage","setup-guide-list","model-observability-summary","retention-summary"])
     sandbox.$("#"+id).innerHTML="private data";
   await sandbox.logout();
   assert.equal(sandbox.csrfToken,"");
@@ -934,4 +935,89 @@ test("failed wallet refresh clears a stale healthy failure message", async () =>
   await sandbox.loadWalletPolicy();
   assert.ok(nodes.get("#wallet-automation-failure").textContent.includes("未读取"));
   assert.ok(!nodes.get("#wallet-automation-failure").textContent.includes("暂无"));
+});
+
+
+function recoveryContext(extra = {}) {
+  const value = context({window:{prompt:()=>"Verified incomplete local attempt",confirm:()=>true}, ...extra});
+  vm.runInContext(functionsBetween("const projectRecoveryRecords =", "async function loadRuntime("), value.sandbox);
+  return value;
+}
+const recoveryRow = {execution_id:"interrupted",project_id:"project",phase_id:"phase",
+  status:"unknown",execution_type:"research_note",reason_code:"review_release_available",
+  expected_fingerprint:"b".repeat(64),can_release:true};
+const recoveryEvent = button => ({target:{closest:()=>button}});
+const recoveryResult = (row = recoveryRow) => ({records:[row],runtime_paused:true,
+  operations_drained:true,runtime_owned:true,migration_fenced:false,external_blockers:{}});
+
+test("project recovery renders bounded metadata escaped and never invents success",()=>{
+  const {sandbox,nodes}=recoveryContext();
+  sandbox.renderProjectExecutionRecovery(recoveryResult({...recoveryRow,
+    execution_id:'<unsafe>',can_release:false,reason:'private operator reason'}));
+  const html=nodes.get("#project-recovery-list").innerHTML;
+  assert.ok(html.includes("&lt;unsafe>"));
+  assert.ok(!html.includes("<unsafe>"));
+  assert.ok(!html.includes("private operator reason"));
+  assert.ok(html.includes("原始状态 unknown"));
+  assert.ok(html.includes("disabled"));
+  const page=readFileSync(join(__dirname,"../../src/noyra/web/admin.html"),"utf8");
+  assert.ok(page.includes('id="project-recovery-list"'));
+  assert.ok(page.includes("不会重发未知请求或释放费用预留"));
+});
+
+test("project recovery submits exact snapshot once and cannot auto resume or retry",async()=>{
+  const posts=[];
+  const write=deferred();
+  const {sandbox,nodes}=recoveryContext({request:async(path,options)=>{
+    if(options?.method==="POST"){posts.push({path,body:JSON.parse(options.body)});return write.promise;}
+    return recoveryResult({...recoveryRow,can_release:false,review_released:true,reason_code:"review_released"});
+  }});
+  sandbox.renderProjectExecutionRecovery(recoveryResult());
+  const button={dataset:{projectRecovery:"interrupted"},disabled:false};
+  const first=sandbox.releaseProjectExecutionReview(recoveryEvent(button));
+  await sandbox.releaseProjectExecutionReview(recoveryEvent(button));
+  assert.equal(posts.length,1);
+  assert.equal(posts[0].path,"/api/admin/project-execution-recovery/release-review");
+  assert.deepEqual(posts[0].body,{execution_id:"interrupted",expected_fingerprint:"b".repeat(64),reason:"Verified incomplete local attempt"});
+  assert.equal(button.disabled,true);
+  write.resolve({review_released:true});await first;
+  assert.match(nodes.get("#project-recovery-action-status").textContent,/已交还自主审查/);
+  assert.match(nodes.get("#project-recovery-list").innerHTML,/已放行自主审查/);
+});
+
+test("project recovery refuses cached rows from an old login",async()=>{
+  let prompted=0,writes=0;
+  const {sandbox}=recoveryContext({window:{prompt:()=>{prompted++;return "reason";},confirm:()=>true},request:async()=>{writes++;}});
+  sandbox.renderProjectExecutionRecovery(recoveryResult());sandbox.adminSessionGeneration++;
+  await sandbox.releaseProjectExecutionReview(recoveryEvent({dataset:{projectRecovery:"interrupted"}}));
+  assert.equal(prompted,0);assert.equal(writes,0);
+});
+
+for(const failure of [false,true])test(`project recovery ignores old-session read (${failure})`,async()=>{
+  const wait=deferred();const {sandbox,nodes}=recoveryContext({request:()=>wait.promise});
+  const pending=sandbox.loadProjectExecutionRecovery();sandbox.adminSessionGeneration++;
+  sandbox.$("#project-recovery-list").innerHTML="new-session";
+  if(failure)wait.reject({status:401});else wait.resolve(recoveryResult());
+  await pending;assert.equal(nodes.get("#project-recovery-list").innerHTML,"new-session");
+});
+
+test("project recovery old-session write cannot repaint the new session",async()=>{
+  const wait=deferred();let calls=0;
+  const {sandbox,nodes}=recoveryContext({request:()=>{calls++;return wait.promise;}});
+  sandbox.renderProjectExecutionRecovery(recoveryResult());
+  const pending=sandbox.releaseProjectExecutionReview(recoveryEvent({dataset:{projectRecovery:"interrupted"}}));
+  sandbox.adminSessionGeneration++;sandbox.$("#project-recovery-action-status").textContent="new-session";
+  wait.resolve({review_released:true});await pending;
+  assert.equal(nodes.get("#project-recovery-action-status").textContent,"new-session");assert.equal(calls,1);
+});
+
+test("project recovery explains committed release when refresh fails and disables stale actions",async()=>{
+  let calls=0;
+  const {sandbox,nodes}=recoveryContext({request:async()=>{if(++calls>1)throw new Error("offline");return {};}});
+  sandbox.renderProjectExecutionRecovery(recoveryResult());
+  const event=recoveryEvent({dataset:{projectRecovery:"interrupted"}});
+  await sandbox.releaseProjectExecutionReview(event);
+  assert.match(nodes.get("#project-recovery-action-status").textContent,/已放行；读取更新失败/);
+  assert.equal(nodes.get("#project-recovery-list").innerHTML,"");
+  await sandbox.releaseProjectExecutionReview(event);assert.equal(calls,2);
 });

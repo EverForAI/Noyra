@@ -48,6 +48,7 @@ docs/adr/0001-runtime-ownership.md
 docs/adr/0002-wallet-economic-execution.md
 docs/api/openapi.yaml
 docs/api/participants.md
+docs/api/project-execution-recovery.md
 docs/api/public-contract-v1.md
 docs/api/public-contract-v2.md
 docs/audit/2026-08-14-current-audit.md
@@ -999,6 +1000,7 @@ tests/test_private_erasure_disabled.py
 tests/test_private_sources.py
 tests/test_production_secret_sources.py
 tests/test_project_execution_recovery.py
+tests/test_project_execution_recovery_http.py
 tests/test_project_workspace.py
 tests/test_provider_health.py
 tests/test_public_archive.py

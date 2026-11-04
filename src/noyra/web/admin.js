@@ -609,11 +609,11 @@ async function logout() {
   adminSessionGeneration++; adminReadVersions.clear();
   const previousToken=csrfToken;csrfToken="";
   stopUpgradePolling();stopRuntimeLogPolling();clearChat();clearWallet();clearPublicPublications();overviewLoadVersion++;modelLoadVersion++;
-  renderedModels.clear();
+  renderedModels.clear();projectRecoveryRecords.clear();projectRecoveryPending.clear();
   runtimeLogCursor=null;runtimeLogBrowsingHistory=false;upgradeTaskId=null;upgradeStatusAvailable=false;upgradeCheckResult=null;
   publicPostCursor="";publicPostRows=[];publicPostActionKeys.clear();publicPostLoadVersion++;
   channelBindings=[]; modelPageOffset=0; usageResourcePage=0; usageLoadVersion++; usageResourceVersion++; healthLoadVersion++; healthPages.model=0; healthPages.search=0; renderedModelQuery=null;
-  for(const id of ["world-acquisition-summary","world-acquisition-status","model-list","runtime-log-list","lifecycle-summary","lifecycle-timeline","public-post-review-list","overview-attention","overview-observation","overview-events","overview-lifecycle","overview-metrics","cognition-summary","storage-summary","search-provider-list","capability-list","channel-list","binding-list","migration-policy-summary","migration-target-list","migration-proposal-list","migration-task-list","runtime-summary","public-post-usage","setup-guide-list","model-observability-summary","model-provider-health-list","search-provider-health-list","retention-summary","upgrade-log-summary","upgrade-confirmation-sha"])$("#"+id).replaceChildren();
+  for(const id of ["world-acquisition-summary","world-acquisition-status","model-list","runtime-log-list","lifecycle-summary","lifecycle-timeline","public-post-review-list","overview-attention","overview-observation","overview-events","overview-lifecycle","overview-metrics","cognition-summary","storage-summary","search-provider-list","capability-list","channel-list","binding-list","migration-policy-summary","migration-target-list","migration-proposal-list","migration-task-list","runtime-summary","project-recovery-list","public-post-usage","setup-guide-list","model-observability-summary","model-provider-health-list","search-provider-health-list","retention-summary","upgrade-log-summary","upgrade-confirmation-sha"])$("#"+id).replaceChildren();
   for(const node of document.querySelectorAll("#admin-shell .form-status, #admin-shell .card-state, #admin-shell dd, #subject-name, #subject-meta, #overview-updated, #upgrade-commit-title"))node.textContent="";
   for(const form of document.querySelectorAll("#admin-shell form")){form.reset();for(const name of ["dirty","revision","lengthRevision"])delete form.dataset[name];}
   for(const control of document.querySelectorAll("#admin-shell button, #migration-policy-form input, #migration-policy-form select")) control.disabled=false;
@@ -1960,6 +1960,72 @@ async function checkQQIdentity() {
   setStatus("#qq-identity-status", `${labels[state.status] || "未知状态"}${state.external_sender_id ? " · 账号 " + state.external_sender_id : ""}`);
   if (state.binding_id) qqIdentity.binding_id = state.binding_id;
 }
+const projectRecoveryRecords = new Map();
+const projectRecoveryPending = new Set();
+function renderProjectExecutionRecovery(result) {
+  projectRecoveryRecords.clear();
+  const rows = result.records || [];
+  const reasons = {
+    review_released: "已放行自主审查；恢复运行后由 Noyra 决定下一步",
+    unsupported_or_stale_attempt: "已非当前阶段，或此类型需要专用恢复流程",
+    unresolved_external_work: "仍有模型调用、行为或投递等待核实，请先处理这些记录",
+    review_release_available: "可放行审查",
+  };
+  for (const row of rows) projectRecoveryRecords.set(row.execution_id, { ...row, session: adminSessionGeneration });
+  const ready = result.runtime_paused && result.operations_drained && result.runtime_owned && !result.migration_fenced;
+  const blockers = result.external_blockers || {};
+  setStatus("#project-recovery-status", `${ready ? "运行已暂停，操作已结束" : "需要已持有运行权、暂停并等待操作结束；迁移期间不可恢复"}。待核实：模型调用 ${blockers.model_calls || 0}、模型尝试 ${blockers.model_attempts || 0}、行为 ${blockers.actions || 0}、投递 ${blockers.deliveries || 0}（各类仅标记有无）。${result.truncated ? "当前只展示前 50 条。" : ""}`);
+  $("#project-recovery-list").innerHTML = rows.length ? rows.map(row => {
+    const pending = projectRecoveryPending.has(`${adminSessionGeneration}:${row.execution_id}`);
+    const explanation = row.reason_code === "review_release_available" && !row.can_release ? "先暂停、等待操作结束并确认运行边界，再刷新此记录" : reasons[row.reason_code] || "状态需要核对";
+    const resultHint = row.has_recorded_result ? "存在结果引用，请核对已有产物" : "未记录结果引用；这不证明外部调用未发生";
+    return `<article class="resource-item"><div class="project-recovery-copy"><h3>${esc(row.execution_id)}</h3><p>项目 ${esc(row.project_id)} · 阶段 ${esc(row.phase_id)} · ${esc(row.execution_type)} · 原始状态 ${esc(row.status)}</p><p>${esc(explanation)}。${esc(resultHint)}</p></div><div class="resource-actions"><button type="button" data-project-recovery="${esc(row.execution_id)}" ${row.can_release && !pending ? "" : "disabled"}>交还 Noyra 自主审查</button></div></article>`;
+  }).join("") : '<p class="empty-state">没有待恢复的中断项目执行。</p>';
+}
+async function loadProjectExecutionRecovery() {
+  const current = beginAdminRead("project-recovery");
+  try {
+    const result = await adminRead(current, "/api/admin/project-execution-recovery?limit=50");
+    if (!current()) return;
+    renderProjectExecutionRecovery(result);
+  } catch (error) {
+    if (!current()) return;
+    projectRecoveryRecords.clear();
+    $("#project-recovery-list").replaceChildren();
+    setStatus("#project-recovery-status", `恢复信息读取失败，请刷新。${errorText(error)}`, true);
+    throw error;
+  }
+}
+async function releaseProjectExecutionReview(event) {
+  const button = event.target.closest("[data-project-recovery]");
+  if (!button) return;
+  const row = projectRecoveryRecords.get(button.dataset.projectRecovery);
+  const key = `${adminSessionGeneration}:${row?.execution_id}`;
+  if (!csrfToken || !row?.can_release || row.session !== adminSessionGeneration || projectRecoveryPending.has(key)) return;
+  const reason = window.prompt("请说明如何核实外部调用和费用，以及为何将这次不完整的本地执行交还 Noyra 审查：");
+  if (!reason?.trim()) return;
+  if (reason.trim().length > 2000) { setStatus("#project-recovery-action-status", "说明不能超过 2000 字符。", true); return; }
+  if (!window.confirm("确认已核实未知调用、行为与投递？这只会交还 Noyra 自主审查，不会认定成功，也不会重发原请求或改变费用。")) return;
+  const current = beginAdminAction();
+  beginAdminRead("project-recovery");
+  projectRecoveryPending.add(key);
+  button.disabled = true;
+  let written = false;
+  try {
+    await request("/api/admin/project-execution-recovery/release-review", { method: "POST", body: JSON.stringify({ execution_id: row.execution_id, expected_fingerprint: row.expected_fingerprint, reason: reason.trim() }) });
+    if (!current()) return;
+    written = true;
+    setStatus("#project-recovery-action-status", "已交还自主审查。恢复正常运行后，Noyra 将自行决定继续、等待、暂停或求助。");
+    await loadProjectExecutionRecovery();
+  } catch (error) {
+    if (!current()) return;
+    projectRecoveryRecords.clear();
+    $("#project-recovery-list").replaceChildren();
+    setStatus("#project-recovery-action-status", written ? `已放行；读取更新失败，请刷新核对。${errorText(error)}` : `未确认放行，请刷新核对后再操作。${errorText(error)}`, true);
+  } finally {
+    projectRecoveryPending.delete(key);
+  }
+}
 async function loadRuntime() {
   const current = beginAdminRead("runtime");
   const results = await Promise.allSettled([request("/api/diagnostics"), request("/api/admin/public-post-controls")]);
@@ -1992,7 +2058,7 @@ async function loadAll() {
   if(!csrfToken)return;
   const current = beginAdminRead("all");
   const section=activeSection;
-  const tasks = {overview:[["总览",loadOverview]],logs:[["活动日志",loadRuntimeLogs]],conversation:[["私密交流",loadMailbox]],"public-posts":[["内容审核",loadPublicPosts]],publications:[["公开摘要",loadPublicPublications]],models:[["认知资源",loadModels]],search:[["搜索配置",loadSearchProviders]],capabilities:[["能力授权",loadCapabilities]],channels:[["通讯渠道",loadChannels]],wallet:[["钱包与付款",loadWallet]],migration:[["迁移与庇护所",loadMigration]],runtime:[["运行防护",loadRuntime]]}[section] || [];
+  const tasks = {overview:[["总览",loadOverview]],logs:[["活动日志",loadRuntimeLogs]],conversation:[["私密交流",loadMailbox]],"public-posts":[["内容审核",loadPublicPosts]],publications:[["公开摘要",loadPublicPublications]],models:[["认知资源",loadModels]],search:[["搜索配置",loadSearchProviders]],capabilities:[["能力授权",loadCapabilities]],channels:[["通讯渠道",loadChannels]],wallet:[["钱包与付款",loadWallet]],migration:[["迁移与庇护所",loadMigration]],runtime:[["运行防护",loadRuntime],["项目执行恢复",loadProjectExecutionRecovery]]}[section] || [];
   if(section==="overview")for(const [id,label,load] of [["overview-setup","配置检查",loadSetupGuide],["overview-version","本地版本",loadUpgradePanel],["overview-usage","用量",async()=>{await Promise.all([loadUsage(),loadUsageResources()]);}],["overview-providers","供应商健康",loadProviderHealth],["overview-retention","数据保留",loadRetention]])if($("#"+id).open)tasks.push([label,load]);
   const results = await Promise.allSettled(tasks.map(([, load]) => load()));
   if(section!==activeSection || !current())return;
@@ -2023,6 +2089,8 @@ $("#runtime-log-auto").addEventListener("change", () => { clearTimeout(runtimeLo
 $("#logout").addEventListener("click", stopRuntimeLogPolling);
 document.addEventListener("visibilitychange", () => { if (document.hidden) stopRuntimeLogPolling(); else if (activeSection === "logs") { runtimeLogCursor = null; void loadRuntimeLogs(); } });
 
+$("#refresh-project-recovery").addEventListener("click", () => { void loadProjectExecutionRecovery().catch(() => {}); });
+$("#project-recovery-list").addEventListener("click", releaseProjectExecutionReview);
 $("#login-form").addEventListener("submit", login); $("#logout").addEventListener("click", logout); $("#refresh-admin").addEventListener("click", loadAll); $("#check-upgrade-version").addEventListener("click", checkUpgradeVersion); $("#start-upgrade").addEventListener("click", requestUpgradeConfirmation); $("#confirm-upgrade").addEventListener("click", confirmUpgrade); $("#refresh-observability").addEventListener("click", () => { void loadOverview().catch((error) => setStatus("#global-status", errorText(error), true)); }); $("#refresh-provider-health").addEventListener("click", () => { void loadProviderHealth().catch((error) => setStatus("#provider-health-status", errorText(error), true)); }); $("#refresh-retention").addEventListener("click", () => { void loadRetention().catch((error) => setStatus("#retention-status", errorText(error), true)); }); $("#run-retention").addEventListener("click", () => { void runRetention(); }); $("#refresh-mailbox").addEventListener("click", loadMailbox); $("#refresh-models").addEventListener("click", loadModels); $("#refresh-search-providers").addEventListener("click", loadSearchProviders); $("#refresh-capabilities").addEventListener("click", loadCapabilities); $("#refresh-runtime").addEventListener("click", loadRuntime); document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => showSection(button.dataset.section)));
 $("[data-section-panel=overview]").addEventListener("click", (event) => { const button = event.target.closest("[data-setup-go]"); if (button) showSection(button.dataset.setupGo); });
 $("#refresh-wallet-audits").addEventListener("click", () => { void loadWalletAudits().catch(() => {}); });

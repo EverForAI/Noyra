@@ -1006,6 +1006,43 @@ paths:
         '200': { $ref: '#/components/responses/JsonObject' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/project-execution-recovery:
+    get:
+      tags: [observation]
+      operationId: projectExecutionRecovery
+      security: [{ operatorBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/Limit' }]
+      description: Bounded review-only recovery candidates, fingerprints and unresolved-work flags. No model content or operator reasons.
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/project-execution-recovery/release-review:
+    post:
+      tags: [configuration]
+      operationId: releaseProjectExecutionReview
+      security: [{ operatorBearer: [] }]
+      description: Requires paused, drained, owned runtime and resolved lower-layer effects. Appends a private review-only receipt; never rewrites execution, accepts success or resends unknown work.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [execution_id, expected_fingerprint, reason]
+              properties:
+                execution_id: { type: string, minLength: 1, maxLength: 256 }
+                expected_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+                reason: { type: string, minLength: 1, maxLength: 2000 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/v1/admin/lifecycle:
     get:
       tags: [observation]

@@ -244,6 +244,8 @@ textarea { min-height: 112px; resize: vertical; }
 @media (max-width: 640px) { .upgrade-panel .card-heading { flex-direction: column; }.upgrade-version-grid { grid-template-columns: 1fr 1fr; }.upgrade-actions { align-items: stretch; flex-direction: column; }.upgrade-actions button { width: 100%; }.upgrade-confirmation { padding: 20px; } }
 .log-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 0 0 12px; }
 .log-toolbar label { display: grid; gap: 6px; min-width: 140px; font-size: 13px; }
+.project-recovery-copy { min-width: 0; overflow-wrap: anywhere; }
+.project-recovery-copy p + p { margin-top: 6px; }
 .activity-list { display: grid; }
 .activity-item { display: grid; grid-template-columns: 155px 110px minmax(0, 1fr) 90px; gap: 12px; padding: 14px 0; border-bottom: 1px solid #dce4de; font-size: 14px; }
 .activity-item > * { min-width: 0; overflow-wrap: anywhere; }

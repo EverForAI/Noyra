@@ -194,6 +194,24 @@ def admin_upgrade_check_admin_upgrade_status_admin_upgrade_installed(
     return False
 
 
+def project_execution_recovery(self: RequestHandler, owner: NoyraHTTPServer, limit: int) -> bool:
+    if not self._authorized("operator"):
+        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+        return True
+    if owner.operator_controls is None:
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "operator_controls_unavailable"})
+        return True
+    try:
+        result = owner.operator_controls.project_execution_recovery(limit=min(limit, 100))
+    except (IntegrityError, sqlite3.Error, ValueError):
+        self._json(
+            HTTPStatus.SERVICE_UNAVAILABLE, {"error": "project_recovery_evidence_unavailable"}
+        )
+        return True
+    self._json(HTTPStatus.OK, result)
+    return True
+
+
 def admin_recoverable_work(self: RequestHandler, owner: NoyraHTTPServer, limit: int) -> bool:
     if not self._authorized():
         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})

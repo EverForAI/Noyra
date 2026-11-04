@@ -151,6 +151,9 @@ def dispatch(self: RequestHandler, owner: NoyraHTTPServer) -> None:
     elif parsed.path.startswith("/api/public/"):
         if read_public.public_item(self, owner, parsed):
             return
+    elif parsed.path == "/api/admin/project-execution-recovery":
+        if read_admin.project_execution_recovery(self, owner, limit):
+            return
     elif parsed.path == "/api/admin/monitoring/soak":
         if read_admin.monitoring_soak(self, owner, parsed):
             return

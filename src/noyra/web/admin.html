@@ -338,6 +338,13 @@
       <section class="admin-section" data-section-panel="runtime" hidden>
         <div class="section-intro"><div><p class="eyebrow">RUNTIME GUARDRAILS</p><h2>运行防护</h2><p>这里展示认知是否被暂停、等待或模型错误阻断，不显示私密模型上下文。</p></div></div>
         <article class="surface-card"><div class="card-heading"><h2>诊断摘要</h2><button class="text-button" id="refresh-runtime" type="button">更新</button></div><div id="runtime-summary" class="runtime-grid"></div></article>
+        <article class="surface-card">
+          <div class="card-heading"><h2>项目执行恢复</h2><button class="text-button" id="refresh-project-recovery" type="button">刷新</button></div>
+          <p class="muted">中断的本地研究或软件阶段可在核对后交还 Noyra 自主审查。先暂停运行、等待操作结束，并核实所有未知的模型调用、行为和投递。此操作只放行审查；不会把中断记录改成成功，也不会重发未知请求或释放费用预留。恢复正常运行后，由 Noyra 决定后续安排。</p>
+          <p id="project-recovery-status" class="form-status" role="status"></p>
+          <div id="project-recovery-list" class="resource-list"></div>
+          <p id="project-recovery-action-status" class="form-status" role="status"></p>
+        </article>
         <article class="surface-card"><div class="card-heading"><h2>公共发帖防护</h2><span class="muted">修改后立即生效</span></div>
           <form id="public-post-controls-form" class="model-grid labeled-form">
             <label>同一来源每小时帖子数<input id="public-post-rate-limit" name="post_rate" type="number" min="1" max="100000" required></label>

@@ -17,6 +17,44 @@ if TYPE_CHECKING:
     from .contracts import RequestHandler
 
 
+def release_project_execution(self: RequestHandler, owner: NoyraHTTPServer) -> None:
+    if not self._authorized("operator"):
+        self._discard_small_request_body()
+        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+        return
+    if self.headers.get_content_type() != "application/json":
+        self._discard_small_request_body()
+        self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+        return
+    payload = self._request_json()
+    if payload is None:
+        return
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"execution_id", "expected_fingerprint", "reason"}
+        or any(not isinstance(value, str) for value in payload.values())
+    ):
+        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_project_recovery_request"})
+        return
+    if owner.operator_controls is None:
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "operator_controls_unavailable"})
+        return
+    try:
+        result = owner.operator_controls.release_project_execution_review(
+            payload["execution_id"],
+            expected_fingerprint=payload["expected_fingerprint"],
+            actor=self._actor(),
+            reason=payload["reason"],
+        )
+    except OperatorControlNotFound:
+        self._json(HTTPStatus.NOT_FOUND, {"error": "project_execution_not_found"})
+        return
+    except OperatorControlConflict as error:
+        self._json(self._operator_error_status(error), {"error": error.code})
+        return
+    self._json(HTTPStatus.OK, result)
+
+
 def lifecycle_control(self: RequestHandler, owner: NoyraHTTPServer) -> None:
     if not self._authorized():
         self._discard_small_request_body()
