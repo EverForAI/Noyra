@@ -915,6 +915,7 @@ tests/test_legacy_schema71_upgrade.py
 tests/test_locking.py
 tests/test_m2_checkpoint_clock.py
 tests/test_m2_clock_http.py
+tests/test_m2_recovery_exit.py
 tests/test_m41_verification_foundation.py
 tests/test_m42_p1_01_sleep_deadlock.py
 tests/test_m42_p1_02_integrity_runtime.py
