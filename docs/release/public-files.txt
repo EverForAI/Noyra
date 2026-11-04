@@ -224,6 +224,7 @@ docs/development/autonomy-scheduling.md
 docs/development/checkpoint-clock-and-recovery.md
 docs/development/project-coordination.md
 docs/development/semantic-memory-recovery.md
+docs/development/social-proposal-recovery.md
 docs/development/world-acquisition-design.md
 docs/evaluation.md
 docs/genesis-experience.md
@@ -506,6 +507,7 @@ src/noyra/cognition/self_model.py
 src/noyra/cognition/self_modification.py
 src/noyra/cognition/settings.py
 src/noyra/cognition/social.py
+src/noyra/cognition/social_rounds.py
 src/noyra/cognition/supervisor.py
 src/noyra/cognition/thought.py
 src/noyra/cognition/thought_rounds.py
@@ -1075,6 +1077,7 @@ tests/test_smoke.py
 tests/test_smtp_deadline_fencing.py
 tests/test_snapshot_compaction.py
 tests/test_soak_collector.py
+tests/test_social_rejection_recovery.py
 tests/test_storage.py
 tests/test_storage_lifecycle.py
 tests/test_storage_mode.py

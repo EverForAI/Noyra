@@ -42,6 +42,14 @@ def is_business_round(purpose: str) -> bool:
     return (
         (len(parts) == 2 and parts[0] == "action_deliberation" and parts[1].isdigit())
         or (
+            len(parts) == 4
+            and parts[0] == "relationship_social"
+            and bool(parts[1])
+            and parts[2] == "route"
+            and len(parts[3]) == 64
+            and all(char in "0123456789abcdef" for char in parts[3])
+        )
+        or (
             len(parts) == 3
             and parts[0] == "semantic_memory_integration"
             and parts[1] == "round"
