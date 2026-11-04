@@ -1714,6 +1714,12 @@ class AutonomousProjectManager:
                 )
             ):
                 raise AutonomousProjectValidationError("project scale down cannot raise a budget")
+        if proposal.disposition == "request_help":
+            assert proposal.help_public_summary is not None
+            # Reject before creating public help state; never rewrite the model's
+            # proposal or release a redacted substitute without its own review.
+            if redact_secret_text(proposal.help_public_summary) != proposal.help_public_summary:
+                raise AutonomousProjectValidationError("project help summary contains credentials")
         if proposal.disposition == "request_help" and context.usage["external_action"] >= (
             context.project.budget.max_external_actions
         ):

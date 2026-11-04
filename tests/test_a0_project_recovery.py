@@ -706,3 +706,113 @@ async def test_phase_dispatch_rechecks_existing_project_budget_before_clock_or_s
     assert count(case, "autonomous_project_executions") == 0
     assert count(case, "autonomous_project_execution_clock_events") == before
     assert count(case, "interactions") == 0
+
+
+@pytest.mark.asyncio
+async def test_sensitive_new_help_summary_is_rejected_before_public_request(
+    case: helpers.AutonomousProjectsTestCase,
+) -> None:
+    manager = await active(case)
+    case.clock_value = "2026-08-14T13:00:00.000+00:00"
+    proposal = review(case, manager, "request_help")
+    proposal.update(
+        help_title="Need evidence",
+        help_description="Private working context.",
+        help_public_summary="token: synthetic-private-credential",
+    )
+    manager.gateway = case.gateway([proposal])[0]
+    phase = manager.phases(manager.projects()[0].project_id)[0]
+    assert await manager.run_due() is None
+    project = manager.projects()[0]
+    assert manager.review_control.read(project)["reason"] == "review_backoff"
+    assert count(case, "autonomous_project_assistance_requests") == 0
+    assert count(case, "interactions") == 0
+    assert manager.phases(project.project_id)[0].attempt_count == phase.attempt_count
+    manager.verify_integrity()
+
+
+@pytest.mark.asyncio
+async def test_legacy_sensitive_help_wait_is_durable_and_yields_without_publication(
+    case: helpers.AutonomousProjectsTestCase,
+) -> None:
+    from noyra.cognition.types import AutonomousProjectReviewProposal
+    from noyra.core.fair_scheduling import FairScheduler
+
+    manager = await active(case)
+    project = manager.projects()[0]
+    proposal = review(case, manager, "request_help")
+    proposal.update(
+        help_title="Legacy public summary",
+        help_description="Private working context.",
+        help_public_summary="token: synthetic-private-credential",
+    )
+    # Seed the existing pre-upgrade request contract without rewriting its hash.
+    with case.kernel.database.transaction() as connection:
+        manager._create_assistance_request_connection(
+            connection,
+            project,
+            manager.phases(project.project_id)[0],
+            AutonomousProjectReviewProposal.model_validate(
+                {**proposal, "evidence_event_ids": tuple(proposal["evidence_event_ids"])}
+            ),
+            case.clock_value,
+        )
+    before_calls = count(case, "model_calls")
+    served: list[str] = []
+
+    async def dispatch(name: str) -> str | None:
+        if name == "project_review":
+            return await manager.run_due()
+        served.append(name)
+        return None
+
+    scheduler = FairScheduler(case.kernel.database, case.subject_id, clock=lambda: case.clock_value)
+    assert await scheduler.run(dispatch, active=lambda: True) == "world_sources_waiting"
+    state = manager.review_control.read(project)
+    assert state["reason"] == "help_public_summary_requires_review"
+    assert "world_acquisition" in served and "interaction" in served
+    checkpoints = count(case, "workflow_checkpoints")
+    # A restarted reader accepts the new reason; repeated waits do not grow history.
+    from noyra.cognition.project_control import ProjectReviewControl
+
+    assert ProjectReviewControl(case.kernel.database, case.subject_id).read(project) == state
+    for _ in range(3):
+        assert manager._help_wait(project)
+    assert count(case, "workflow_checkpoints") == checkpoints
+    assert count(case, "interactions") == 0
+    assert count(case, "model_calls") == before_calls
+    with case.kernel.database.connection() as connection:
+        row = connection.execute(
+            "SELECT public_summary FROM autonomous_project_assistance_requests"
+        ).fetchone()
+    assert row[0] == proposal["help_public_summary"]
+
+
+def test_project_review_reason_literals_are_registered() -> None:
+    import ast
+    import inspect
+    from pathlib import Path
+
+    from noyra.cognition.project_control import REVIEW_WAIT_REASONS
+
+    tree = ast.parse(inspect.getsource(AutonomousProjectManager))
+    reasons = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if (
+            (
+                (
+                    node.func.attr == "record"
+                    and isinstance(node.func.value, ast.Attribute)
+                    and node.func.value.attr == "review_control"
+                )
+                or node.func.attr == "_review_defer"
+            )
+            and len(node.args) > 1
+            and isinstance(node.args[1], ast.Constant)
+        ):
+            reasons.add(node.args[1].value)
+    assert reasons and reasons <= REVIEW_WAIT_REASONS
+    admin = (Path(__file__).parents[1] / "src/noyra/web/admin.js").read_text(encoding="utf-8")
+    assert all(reason + ":" in admin for reason in REVIEW_WAIT_REASONS)

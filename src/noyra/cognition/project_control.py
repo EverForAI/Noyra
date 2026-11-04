@@ -28,6 +28,7 @@ REVIEW_WAIT_REASONS = frozenset(
         "help_waiting_reply",
         "help_delivery_pending",
         "help_delivery_unknown",
+        "help_public_summary_requires_review",
     }
 )
 MAX_REVIEW_RETRIES = 3
