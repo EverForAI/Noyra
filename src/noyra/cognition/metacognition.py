@@ -14,6 +14,7 @@ from noyra.core.types import content_hash, new_id, utc_now
 
 from ._integrity import durable_boundary, durable_float, durable_int
 from .attention import attention_batch
+from .epistemic import pending_epistemic_trigger
 from .settings import CognitionSettings
 
 CognitiveStrategy = Literal[
@@ -336,15 +337,7 @@ class MetacognitiveControl:
                 "ORDER BY priority DESC, commitment DESC LIMIT 1",
                 (self.subject_id,),
             ).fetchone()
-            trigger_observation = connection.execute(
-                """SELECT o.observation_id FROM observations o
-                   LEFT JOIN epistemic_review_runs r
-                     ON r.subject_id = o.subject_id AND r.trigger_observation_id = o.observation_id
-                    AND r.status IN ('committed', 'no_change')
-                   WHERE o.subject_id = ? AND o.status = 'analyzed' AND r.review_id IS NULL
-                   ORDER BY o.fetched_at, o.observation_id LIMIT 1""",
-                (self.subject_id,),
-            ).fetchone()
+            trigger_observation = pending_epistemic_trigger(connection, self.subject_id)
             relationship = connection.execute(
                 "SELECT relationship_id, trust, affinity, conflict, familiarity "
                 "FROM relationships WHERE subject_id = ? "
@@ -464,7 +457,7 @@ class MetacognitiveControl:
                 _Candidate(
                     "epistemic_review",
                     "observation",
-                    str(trigger_observation["observation_id"]),
+                    trigger_observation,
                     "analyzed_evidence_awaits_belief_review",
                     0.78,
                     0.7,

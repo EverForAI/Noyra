@@ -885,6 +885,7 @@ tests/test_desktop.py
 tests/test_embedding_resources.py
 tests/test_entities.py
 tests/test_epistemic_review.py
+tests/test_epistemic_terminal_selection.py
 tests/test_events_anomalies.py
 tests/test_evidence_capacity.py
 tests/test_export_jobs.py

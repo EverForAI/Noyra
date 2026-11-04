@@ -118,6 +118,25 @@ class _ReviewContext:
     prediction_rows: dict[str, dict[str, Any]]
 
 
+def pending_epistemic_trigger(connection: Any, subject_id: str) -> str | None:
+    """One selector for scheduling and review of analyzed observation rounds.
+
+    A rejected proposal is terminal for its round, just like committed/no_change.
+    Its observation remains analyzed evidence; unknown provider outcomes have no
+    terminal review record and retain the model ledger's existing dispatch fence.
+    """
+    row = connection.execute(
+        """SELECT o.observation_id FROM observations o
+           LEFT JOIN epistemic_review_runs r
+             ON r.subject_id = o.subject_id AND r.trigger_observation_id = o.observation_id
+            AND r.status IN ('committed', 'no_change', 'rejected')
+           WHERE o.subject_id = ? AND o.status = 'analyzed' AND r.review_id IS NULL
+           ORDER BY o.fetched_at, o.observation_id LIMIT 1""",
+        (subject_id,),
+    ).fetchone()
+    return None if row is None else str(row["observation_id"])
+
+
 class EpistemicReview:
     """Revises beliefs and settles due predictions from analyzed evidence only."""
 
@@ -292,15 +311,7 @@ class EpistemicReview:
 
     def _context(self) -> _ReviewContext | None:
         with self.database.connection() as connection:
-            trigger = connection.execute(
-                """SELECT o.observation_id FROM observations o
-                   LEFT JOIN epistemic_review_runs r
-                     ON r.subject_id = o.subject_id AND r.trigger_observation_id = o.observation_id
-                    AND r.status IN ('committed', 'no_change')
-                   WHERE o.subject_id = ? AND o.status = 'analyzed' AND r.review_id IS NULL
-                   ORDER BY o.fetched_at, o.observation_id LIMIT 1""",
-                (self.subject_id,),
-            ).fetchone()
+            trigger = pending_epistemic_trigger(connection, self.subject_id)
             if trigger is None:
                 return None
             observation_rows = connection.execute(
@@ -338,7 +349,7 @@ class EpistemicReview:
         beliefs = {str(row["belief_id"]): dict(row) for row in belief_rows}
         predictions = {str(row["prediction_id"]): dict(row) for row in prediction_rows}
         payload = {
-            "trigger_observation_id": trigger["observation_id"],
+            "trigger_observation_id": trigger,
             "analyzed_observations": [
                 {
                     "observation_id": row["observation_id"],
@@ -355,7 +366,7 @@ class EpistemicReview:
         }
         return _ReviewContext(
             canonical_json(payload),
-            str(trigger["observation_id"]),
+            trigger,
             eligible,
             beliefs,
             predictions,
