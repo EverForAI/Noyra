@@ -69,10 +69,7 @@ class AccountStore:
         now = time.time()
         bucket = digest(operation + ":" + client)
         with self.database.transaction() as c:
-            c.execute(
-                "DELETE FROM participant_auth_limits WHERE subject_id=? AND window_start<?",
-                (self.subject, now - 3600),
-            )
+            self._cleanup_expired_auth_limits(c, now)
             row = c.execute(
                 "SELECT * FROM participant_auth_limits WHERE subject_id=? AND bucket=?",
                 (self.subject, bucket),
@@ -93,6 +90,12 @@ class AccountStore:
                 "CONFLICT(subject_id,bucket) DO UPDATE SET attempts=attempts+1",
                 (self.subject, bucket, now),
             )
+
+    def _cleanup_expired_auth_limits(self, connection: Any, now: float) -> None:
+        connection.execute(
+            "DELETE FROM participant_auth_limits WHERE subject_id=? AND window_start<?",
+            (self.subject, now - 3600),
+        )
 
     def login_captcha_required(self, username: str) -> bool:
         """Require proof after failures for this account, without locking it out."""
@@ -130,10 +133,7 @@ class AccountStore:
     def _record_login_failure(self, username: str) -> None:
         now = time.time()
         with self.database.transaction() as connection:
-            connection.execute(
-                "DELETE FROM participant_auth_limits WHERE subject_id=? AND window_start<?",
-                (self.subject, now - _LOGIN_FAILURE_WINDOW_SECONDS),
-            )
+            self._cleanup_expired_auth_limits(connection, now)
             bucket = self._login_failure_bucket(connection, username)
             row = connection.execute(
                 "SELECT attempts,window_start FROM participant_auth_limits "
@@ -269,6 +269,9 @@ class AccountStore:
         csrf = digest("csrf:" + token)
         now = time.time()
         with self.database.transaction() as connection:
+            # Also retire expired source-limit rows written by older versions,
+            # now that ordinary sign-ins no longer create hourly IP buckets.
+            self._cleanup_expired_auth_limits(connection, now)
             current = connection.execute(
                 "SELECT password_digest FROM participant_credentials WHERE account_id=? "
                 "AND subject_id=?",

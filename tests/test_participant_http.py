@@ -585,6 +585,49 @@ def test_wrong_recovery_codes_do_not_lock_the_owner_out_by_username(
     )[0]
 
 
+def test_successful_logins_do_not_consume_a_durable_hourly_ip_quota(
+    http: tuple[NoyraHTTPServer, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner, base = http
+    AccountStore(owner.kernel.database, owner.kernel.subject_id).register(
+        "alice", "correct horse battery", "Alice"
+    )
+    monkeypatch.setattr("noyra.interaction.accounts.password_matches", lambda *_: True)
+    client = Client(base)
+
+    for _ in range(21):
+        status, result = client.request(
+            "/api/participants/login",
+            {"username": "alice", "password": "correct horse battery"},
+        )
+        assert status == 200, result
+
+
+def test_recovery_keeps_its_durable_hourly_client_budget(
+    http: tuple[NoyraHTTPServer, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner, base = http
+    AccountStore(owner.kernel.database, owner.kernel.subject_id).register(
+        "alice", "correct horse battery", "Alice"
+    )
+    monkeypatch.setattr(
+        "noyra.interaction.accounts.password_hash",
+        lambda _password: "00" * 16 + ":" + "00" * 64,
+    )
+    client = Client(base)
+    payload = {
+        "username": "alice",
+        "recovery_code": "incorrect-recovery-code",
+        "password": "new correct horse battery",
+    }
+
+    for _ in range(20):
+        status, result = client.request("/api/participants/recover", payload)
+        assert status == 401 and result == {"error": "invalid_credentials"}
+    status, result = client.request("/api/participants/recover", payload)
+    assert status == 429 and result == {"error": "account_rate_limited"}
+
+
 def test_unknown_name_and_challenged_account_keep_same_public_credential_error(
     http: tuple[NoyraHTTPServer, str],
 ) -> None:

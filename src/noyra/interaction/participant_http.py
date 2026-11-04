@@ -173,7 +173,12 @@ def dispatch(h: Any, owner: Any, method: str) -> bool:
         if path != "/api/participants/" + public:
             raise LookupError("unknown_participant_route")
         if public in {"register", "login", "recover"}:
-            store.throttle(client, public, 5 if public == "register" else 20)
+            if public == "register":
+                store.throttle(client, public, 5)
+            elif public == "recover":
+                store.throttle(client, public, 20)
+            # Login has a shared transport-level minute budget and per-account
+            # failed-password challenge, but no durable hourly IP lockout.
             username = payload.get("username", "")
             if not isinstance(username, str):
                 raise AccountError("invalid_account_details")

@@ -1,16 +1,20 @@
 # Participant login throttling and recovery
 
-Login admission uses two separate limits with different purposes.
+Login admission uses transport, account and credential-work controls.
 
-- The existing client-IP bucket limits total login attempts in its durable
-  hourly window. Successful attempts still count toward this source-level
-  abuse budget.
+- The shared HTTP transport applies its configured per-client request budget
+  to every route (120 requests per minute by default). There is no additional
+  durable hourly IP bucket for login, so successful sign-ins behind a NAT do
+  not consume a quota that can block other people sharing that address.
 - A hashed account bucket counts only failed password checks for that local
   account. Successful logins clear only that account's failure window in the
   same transaction that creates its session. Unknown usernames share one
   subject-scoped bucket, avoiding a durable row for every attacker-chosen
   string and avoiding a username-existence response difference in ordinary
   credential failures.
+- Registration retains a five-per-hour client-IP limit and recovery retains a
+  twenty-per-hour client-IP limit. These operation-specific limits remain
+  separate from interactive sign-in.
 
 After ten account failures in one hour, the existing same-origin, one-use image
 challenge is required before further credentials are checked. To avoid making
@@ -36,8 +40,10 @@ lock the legitimate owner out of account recovery.
 capacity checks are scoped to the current subject, so one Noyra instance cannot
 purge or consume another subject's quota. The existing 10,000-bucket ceiling
 per subject remains fail-closed. Network IP accounting and IPv6 normalization
-are unchanged; a shared NAT can still exhaust its existing per-IP attempt
-budget, and proxy trust configuration is a separate deployment concern.
+are unchanged. Successful sign-in also prunes expired legacy source-limit rows.
+A shared NAT can still exhaust the transport's per-minute request budget or
+the registration, recovery and CAPTCHA issuance budgets; trusted-proxy
+configuration remains important for resolving visitor identities.
 
 This mechanism raises the cost of credential stuffing but does not claim to
 prove a human solved a challenge or defeat a distributed CAPTCHA-solving

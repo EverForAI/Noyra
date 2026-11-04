@@ -106,6 +106,24 @@ def test_successful_logins_do_not_increment_account_failure_window(
     assert count == 0
 
 
+def test_successful_login_cleans_expired_legacy_source_buckets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = accounts(tmp_path)
+    store.register("alice", "correct horse battery", "Alice")
+    now = [100_000.0]
+    monkeypatch.setattr("noyra.interaction.accounts.time.time", lambda: now[0])
+    store.throttle("legacy-client", "login")
+    now[0] += 3_600.001
+
+    assert store.login("alice", "correct horse battery")[0]
+    with store.database.connection() as connection:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM participant_auth_limits WHERE subject_id=?", (store.subject,)
+        ).fetchone()[0]
+    assert count == 0
+
+
 def test_repeated_failures_require_captcha_but_success_is_not_locked_out(tmp_path: Path) -> None:
     store = accounts(tmp_path)
     store.register("alice", "correct horse battery", "Alice")

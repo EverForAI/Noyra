@@ -2762,7 +2762,7 @@ paths:
     post:
       tags: [participants]
       operationId: participantLoginPost
-      description: Login accepts username/password and, after repeated failures, captcha_id/captcha_answer from the same-origin public-post image challenge. The public invalid-credentials response is uniform whether or not the account currently requires a challenge. A valid challenge plus correct password allows sign-in and clears only that account's failure window; this is not a permanent account lock. Recovery-code attempts use the client limit, not the login account-failure bucket. See participants.md for the full contract.
+      description: Login accepts username/password and, after repeated failures, captcha_id/captcha_answer from the same-origin public-post image challenge. There is no additional durable hourly login-IP cap; login remains subject to the shared transport per-client request budget, per-account failed-password challenge and global KDF concurrency bound. The public invalid-credentials response is uniform whether or not the account currently requires a challenge. A valid challenge plus correct password allows sign-in and clears only that account's failure window; this is not a permanent account lock. Registration and recovery keep their separate client-IP hourly limits. See participants.md for the full contract.
       requestBody:
         required: true
         content:
