@@ -823,3 +823,46 @@ async def test_runtime_integrity_registry_checks_new_round_receipts(kernel: Subj
         check_ids=("mind.memory_lifecycle",),
     )
     assert report.p0 or report.p1
+
+
+@pytest.mark.asyncio
+async def test_old_failed_one_shot_authorization_remains_a_legacy_reconciliation_object(
+    kernel: SubjectKernel,
+) -> None:
+    from noyra.cognition.types import SemanticMemoryIntegrationProposal
+    from noyra.core.operator_controls import OperatorControlService
+    from noyra.model.errors import ProviderCallError
+
+    worker, provider, _ = setup(kernel)
+    provider._outcomes.clear()
+    provider._outcomes.extend(
+        [
+            ProviderCallError("provider_outcome_unknown", retryable=False, outcome_unknown=True),
+            ProviderCallError("provider_auth_failed", retryable=False, outcome_unknown=False),
+        ]
+    )
+
+    async def old_request() -> None:
+        await worker.gateway.complete_structured(
+            kernel.subject_id,
+            "semantic_memory_integration:0",
+            worker._messages("legacy-context"),
+            SemanticMemoryIntegrationProposal,
+            idempotency_key="old-memory-request",
+        )
+
+    with pytest.raises(ProviderCallError):
+        await old_request()
+    identifier = raw(kernel, "model_calls")[0]["call_id"]
+    worker.gateway.ledger.prepare_unknown_retry(
+        identifier, actor="operator", reason="Allow exactly one old-format retry"
+    )
+    with pytest.raises(ProviderCallError):
+        await old_request()
+    calls, attempts = raw(kernel, "model_calls"), raw(kernel, "model_attempts")
+    assert calls[0]["status"] == "failed"
+    assert await worker.run_due() == "memory_integration_legacy_recovery_required"
+    items = OperatorControlService(kernel).memory_integration_recovery()["records"]
+    assert len(items) == 1 and items[0]["call_id"] == identifier and not items[0]["can_discard"]
+    assert raw(kernel, "model_calls") == calls and raw(kernel, "model_attempts") == attempts
+    assert len(provider.requests) == 2

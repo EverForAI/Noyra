@@ -23,6 +23,11 @@ from noyra.model.request_identity import UNRUNNABLE_BUSINESS_CALL_SQL, logical_k
 from .types import SemanticMemoryIntegrationProposal
 
 FORMAT = "semantic-memory-round/v1"
+LEGACY_PENDING_CALL_SQL = (
+    "(c.status IN ('prepared','executing','unknown','succeeded') OR "
+    + UNRUNNABLE_BUSINESS_CALL_SQL.replace(":require_prepared_authorization", "1")
+    + ")"
+)
 EVENT_FIELDS = ("event_id", "event_type", "source", "occurred_at", "payload_hash")
 
 
@@ -563,7 +568,7 @@ class MemoryIntegrationRounds:
             connection.execute(
                 "SELECT c.* FROM model_calls c WHERE subject_id=? "
                 "AND substr(purpose,1,?)=? AND substr(purpose,1,?)!=? "
-                "AND status IN ('prepared','executing','unknown','succeeded') "
+                "AND " + LEGACY_PENDING_CALL_SQL + " "
                 "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.event_id=?||c.call_id) "
                 "ORDER BY c.rowid LIMIT ?",
                 (
@@ -585,7 +590,7 @@ class MemoryIntegrationRounds:
         rows = connection.execute(
             "SELECT c.* FROM model_calls c WHERE subject_id=? "
             "AND substr(purpose,1,?)=? AND substr(purpose,1,?)!=? "
-            "AND status IN ('prepared','executing','unknown','succeeded') "
+            "AND " + LEGACY_PENDING_CALL_SQL + " "
             "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.event_id=?||c.call_id) LIMIT 1",
             (
                 self.subject_id,
