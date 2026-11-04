@@ -223,6 +223,7 @@ docs/development/architecture-boundaries.md
 docs/development/autonomy-scheduling.md
 docs/development/checkpoint-clock-and-recovery.md
 docs/development/epistemic-review-recovery.md
+docs/development/http-failure-boundary.md
 docs/development/memory-literal-search.md
 docs/development/model-invalidation-boundaries.md
 docs/development/model-pre-send-settlement.md
@@ -605,6 +606,7 @@ src/noyra/core/xml.py
 src/noyra/deployment_setup.py
 src/noyra/desktop.py
 src/noyra/http_access_logging.py
+src/noyra/http_failures.py
 src/noyra/http_routes/__init__.py
 src/noyra/http_routes/assets.py
 src/noyra/http_routes/auth.py
@@ -920,6 +922,7 @@ tests/test_gate2_subject_boundaries.py
 tests/test_gate3_contract_ops.py
 tests/test_goal_governance.py
 tests/test_http_access_logging.py
+tests/test_http_failure_boundary.py
 tests/test_identity_challenges.py
 tests/test_inbound.py
 tests/test_independent_audit_profiles.py

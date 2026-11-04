@@ -28,6 +28,7 @@ from noyra.core.operator_controls import OperatorControlConflict
 from noyra.core.request_io import DeadlineRequestReader, RequestHeadLimitError
 from noyra.core.types import strict_json_loads
 from noyra.http_access_logging import http_log_fields
+from noyra.http_failures import failure_status, log_http_failure, request_id
 from noyra.http_routes import (
     cognition,
     exports,
@@ -108,6 +109,10 @@ def handler_type(
             )
 
         def handle_one_request(self) -> None:
+            self._http_request_id = request_id()
+            self._http_response_started = False
+            self._http_response_status: int | None = None
+            self._headers_buffer: list[bytes] = []
             self._log_request_parsed = False
             # A bounded read may reject the head before stdlib initializes the
             # fields send_error uses. Never use raw input to fill that gap.
@@ -130,8 +135,102 @@ def handler_type(
                         if error.request_line
                         else HTTPStatus.REQUEST_HEADER_FIELDS_TOO_LARGE
                     )
-            except OSError:
+            except (ConnectionError, TimeoutError):
                 self.close_connection = True
+            except Exception as error:
+                self._unexpected_http_failure(error)
+
+        def send_response_only(self, code: int, message: str | None = None) -> None:
+            self._http_response_status = int(code)
+            super().send_response_only(code, message)
+
+        def end_headers(self) -> None:
+            correlation = getattr(self, "_http_request_id", None)
+            if correlation is not None:
+                self.send_header("X-Request-ID", correlation)
+            if self.request_version == "HTTP/0.9":
+                # No header bytes exist for legacy responses; the following
+                # body write must not be followed by another error document.
+                self._http_response_started = True
+            super().end_headers()
+
+        def flush_headers(self) -> None:
+            was_started = getattr(self, "_http_response_started", False)
+            if getattr(self, "_headers_buffer", None):
+                # Set before I/O: even a partially written header block cannot
+                # safely be replaced by a second HTTP response.
+                self._http_response_started = True
+            super().flush_headers()
+            status = getattr(self, "_http_response_status", None)
+            if not was_started and status is not None and 100 <= status < 200 and status != 101:
+                # A fully written informational response still permits a final
+                # response. A partial interim write stays conservatively started.
+                self._http_response_started = False
+
+        def _runtime_http_failure(
+            self, error: Exception, code: str, *, discard_body: bool = False
+        ) -> None:
+            self.close_connection = True
+            if self._http_response_started:
+                self._unexpected_http_failure(error)
+                return
+            self._headers_buffer = []
+            if discard_body:
+                self._discard_small_request_body()
+            self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": code})
+
+        def _unexpected_http_failure(self, error: Exception) -> None:
+            self.close_connection = True
+            started = self._http_response_started
+            log_http_failure(
+                error,
+                self._http_request_id,
+                method=getattr(self, "command", None),
+                target=getattr(self, "path", None) if self._log_request_parsed else None,
+                started=started,
+            )
+            if started:
+                return
+            # Discard headers buffered by the failed response, including its
+            # cookies and success status. Do not re-enter _json/_headers: either
+            # may be the source of the original serialization/storage failure.
+            self._headers_buffer = []
+            if not self._log_request_parsed:
+                self.request_version = "HTTP/1.0"
+            status = failure_status(error)
+            body = json.dumps(
+                {
+                    "error": "service_unavailable"
+                    if status == HTTPStatus.SERVICE_UNAVAILABLE
+                    else "internal_error",
+                    "request_id": self._http_request_id,
+                },
+                separators=(",", ":"),
+            ).encode("utf-8")
+            try:
+                self.send_response(status)
+                self.send_header("Connection", "close")
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("X-Frame-Options", "DENY")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header(
+                    "Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"
+                )
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(body)
+            except (ConnectionError, TimeoutError):
+                return
+            except Exception as response_error:
+                log_http_failure(
+                    response_error,
+                    self._http_request_id,
+                    started=self._http_response_started,
+                    event="error_response_failure",
+                )
 
         def parse_request(self) -> bool:
             self._log_request_parsed = super().parse_request()
@@ -213,12 +312,8 @@ def handler_type(
                 # its service lock or count this request as in-flight work.
                 try:
                     self._dispatch_post()
-                except (OperationInvalidated, RuntimeOwnershipError):
-                    self.close_connection = True
-                    self._json(
-                        HTTPStatus.SERVICE_UNAVAILABLE,
-                        {"error": "project_recovery_unavailable"},
-                    )
+                except (OperationInvalidated, RuntimeOwnershipError) as error:
+                    self._runtime_http_failure(error, "project_recovery_unavailable")
                 return
             # Lifecycle controls intentionally invalidate/reopen the gate
             # as part of their own transaction.  They must not run under
@@ -236,13 +331,8 @@ def handler_type(
                                 "lifecycle control crossed integrity quarantine"
                             )
                         self._dispatch_post()
-                except OperationInvalidated:
-                    self.close_connection = True
-                    self._discard_small_request_body()
-                    self._json(
-                        HTTPStatus.SERVICE_UNAVAILABLE,
-                        {"error": "integrity_quarantine"},
-                    )
+                except OperationInvalidated as error:
+                    self._runtime_http_failure(error, "integrity_quarantine", discard_body=True)
                 return
             # Migration cutover and rollback are privileged controls that
             # must remain usable while the durable migration epoch fences
@@ -256,12 +346,9 @@ def handler_type(
                 # second scope around its durable epoch transition.
                 try:
                     self._dispatch_post()
-                except (OperationInvalidated, RuntimeOwnershipError):
-                    self.close_connection = True
-                    self._discard_small_request_body()
-                    self._json(
-                        HTTPStatus.SERVICE_UNAVAILABLE,
-                        {"error": "migration_control_unavailable"},
+                except (OperationInvalidated, RuntimeOwnershipError) as error:
+                    self._runtime_http_failure(
+                        error, "migration_control_unavailable", discard_body=True
                     )
                 return
             # Only explicit recovery endpoints may bypass a paused or
@@ -285,13 +372,8 @@ def handler_type(
             try:
                 with bind_lease(lease):
                     self._dispatch_post()
-            except OperationInvalidated:
-                self.close_connection = True
-                with suppress(Exception):
-                    self._json(
-                        HTTPStatus.SERVICE_UNAVAILABLE,
-                        {"error": "runtime_epoch_invalidated"},
-                    )
+            except OperationInvalidated as error:
+                self._runtime_http_failure(error, "runtime_epoch_invalidated")
             finally:
                 owner.admission.finish(lease)
 
@@ -1530,7 +1612,13 @@ def handler_type(
                 getattr(self, "path", "") if getattr(self, "_log_request_parsed", False) else "",
                 code,
             )
-            LOGGER.info("http event=%s method=%s route=%s status=%s", event, method, route, status)
+            try:
+                LOGGER.info(
+                    "http event=%s method=%s route=%s status=%s", event, method, route, status
+                )
+            except Exception:
+                # A diagnostic sink must not abort or retry an HTTP operation.
+                return
 
         def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
             # Never delegate to the stdlib request-line formatter. Neither

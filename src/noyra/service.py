@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import signal
+import sys
 import threading
 import time
 from collections import defaultdict, deque
@@ -88,6 +89,7 @@ from noyra.core.upgrade import (
     UPGRADE_STATUS_PATH,
     UpgradeManager,
 )
+from noyra.http_failures import log_http_failure, request_id
 from noyra.http_routes.auth import _AdminSession as _AdminSession
 from noyra.http_routes.auth import _ascii_token_equal as _ascii_token_equal
 from noyra.http_routes.auth import (
@@ -446,6 +448,12 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         except Exception:
             self._worker_slots.release()
             raise
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # setup/finish failures can occur outside handle_one_request. The
+        # stdlib fallback prints exception text and client addresses to stderr.
+        # Keep this final server boundary source-safe without global hooks.
+        log_http_failure(sys.exception(), request_id(), event="server_failure")
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
         with self._handler_condition:
