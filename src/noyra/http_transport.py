@@ -205,6 +205,7 @@ def handler_type(
                 return
             if self.path in {
                 "/api/admin/project-execution-recovery/release-review",
+                "/api/admin/memory-integration-recovery/discard-legacy",
                 "/api/admin/workflow-clock/acknowledge",
             }:
                 # The authenticated operator method owns the lock order and

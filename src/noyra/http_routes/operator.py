@@ -17,6 +17,42 @@ if TYPE_CHECKING:
     from .contracts import RequestHandler
 
 
+def discard_memory_integration(self: RequestHandler, owner: NoyraHTTPServer) -> None:
+    if not self._authorized("operator"):
+        self._discard_small_request_body()
+        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+        return
+    if self.headers.get_content_type() != "application/json":
+        self._discard_small_request_body()
+        self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
+        return
+    payload = self._request_json()
+    if payload is None:
+        return
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"call_id", "expected_fingerprint", "evidence_sha256", "reason"}
+        or any(not isinstance(v, str) for v in payload.values())
+    ):
+        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_memory_recovery_request"})
+        return
+    if owner.operator_controls is None:
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "operator_controls_unavailable"})
+        return
+    try:
+        result = owner.operator_controls.discard_legacy_memory_result(
+            payload["call_id"],
+            expected_fingerprint=payload["expected_fingerprint"],
+            evidence_sha256=payload["evidence_sha256"],
+            actor=self._actor(),
+            reason=payload["reason"],
+        )
+    except OperatorControlConflict as error:
+        self._json(self._operator_error_status(error), {"error": error.code})
+        return
+    self._json(HTTPStatus.OK, result)
+
+
 def acknowledge_workflow_clock(self: RequestHandler, owner: NoyraHTTPServer) -> None:
     if not self._authorized("operator"):
         self._discard_small_request_body()

@@ -1047,6 +1047,41 @@ paths:
         '409': { $ref: '#/components/responses/Conflict' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/memory-integration-recovery:
+    get:
+      tags: [observation]
+      operationId: memoryIntegrationRecovery
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/memory-integration-recovery/discard-legacy:
+    post:
+      tags: [configuration]
+      operationId: discardLegacyMemoryIntegrationResult
+      security: [{ operatorBearer: [] }]
+      description: Paused drained operator recovery; discard only an unbound old local success result after evidence review. The successful call and all costs remain unchanged. Unknown calls cannot be discarded here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [call_id, expected_fingerprint, evidence_sha256, reason]
+              properties:
+                call_id: { type: string, minLength: 1, maxLength: 256 }
+                expected_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+                evidence_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+                reason: { type: string, minLength: 1, maxLength: 2000 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/v1/admin/project-execution-recovery:
     get:
       tags: [observation]

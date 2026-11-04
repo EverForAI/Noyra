@@ -1082,6 +1082,7 @@ class NoyraHTTPServer:
             "/api/admin/lifecycle/reset",
             "/api/admin/lifecycle/wake",
             "/api/admin/project-execution-recovery/release-review",
+            "/api/admin/memory-integration-recovery/discard-legacy",
         } or self._is_recovery_mutation(path)
 
     def _run_export(

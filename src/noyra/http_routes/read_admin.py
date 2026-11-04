@@ -202,6 +202,24 @@ def admin_upgrade_check_admin_upgrade_status_admin_upgrade_installed(
     return False
 
 
+def memory_integration_recovery(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
+    if not self._authorized("operator"):
+        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+        return True
+    if owner.operator_controls is None:
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "operator_controls_unavailable"})
+        return True
+    try:
+        result = owner.operator_controls.memory_integration_recovery()
+    except (IntegrityError, sqlite3.Error):
+        self._json(
+            HTTPStatus.SERVICE_UNAVAILABLE, {"error": "memory_recovery_evidence_unavailable"}
+        )
+        return True
+    self._json(HTTPStatus.OK, result)
+    return True
+
+
 def workflow_clock_history(
     self: RequestHandler, owner: NoyraHTTPServer, parsed: SplitResult
 ) -> bool:

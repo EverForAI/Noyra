@@ -222,6 +222,7 @@ docs/development/architecture-boundaries.md
 docs/development/autonomy-scheduling.md
 docs/development/checkpoint-clock-and-recovery.md
 docs/development/project-coordination.md
+docs/development/semantic-memory-recovery.md
 docs/development/world-acquisition-design.md
 docs/evaluation.md
 docs/genesis-experience.md
@@ -956,6 +957,7 @@ tests/test_management_integrity_audits.py
 tests/test_memory_blocks.py
 tests/test_memory_integration.py
 tests/test_memory_lifecycle.py
+tests/test_memory_recovery_http.py
 tests/test_metacognitive_control.py
 tests/test_migration_activation.py
 tests/test_migration_admin_ui.py
