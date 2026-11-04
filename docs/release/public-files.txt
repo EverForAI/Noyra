@@ -223,6 +223,7 @@ docs/development/architecture-boundaries.md
 docs/development/autonomy-scheduling.md
 docs/development/checkpoint-clock-and-recovery.md
 docs/development/epistemic-review-recovery.md
+docs/development/memory-literal-search.md
 docs/development/model-invalidation-boundaries.md
 docs/development/model-pre-send-settlement.md
 docs/development/project-coordination.md
@@ -970,6 +971,7 @@ tests/test_management_integrity_audits.py
 tests/test_memory_blocks.py
 tests/test_memory_integration.py
 tests/test_memory_lifecycle.py
+tests/test_memory_literal_search.py
 tests/test_memory_recovery_http.py
 tests/test_metacognitive_control.py
 tests/test_migration_activation.py

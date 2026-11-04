@@ -236,29 +236,28 @@ class MemoryStore:
         limit: int = 20,
     ) -> list[MemoryRecord]:
         bounded_limit = max(1, min(limit, 200))
-        with self.database.connection() as connection:
-            if memory_type is None:
-                rows = connection.execute(
-                    "SELECT * FROM memories WHERE subject_id = ? AND status = 'active' "
-                    "ORDER BY salience DESC, confidence DESC, updated_at DESC LIMIT 1000",
-                    (subject_id,),
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    "SELECT * FROM memories WHERE subject_id = ? AND memory_type = ? "
-                    "AND status = 'active' "
-                    "ORDER BY salience DESC, confidence DESC, updated_at DESC LIMIT 1000",
-                    (subject_id, memory_type),
-                ).fetchall()
-        records = [self._from_row(row) for row in rows]
         normalized_query = query.strip().casefold()
         if len(normalized_query) > 1_000:
             raise ValueError("memory search query is too long")
-        if normalized_query:
-            records = [
-                record for record in records if normalized_query in record.content.casefold()
-            ]
-        return records[:bounded_limit]
+        sql = "SELECT * FROM memories WHERE subject_id = ? AND status = 'active'"
+        parameters: list[Any] = [subject_id]
+        if memory_type is not None:
+            sql += " AND memory_type = ?"
+            parameters.append(memory_type)
+        with self.database.connection() as connection:
+            if normalized_query:
+                # SQLite lower()/LIKE do not implement Python's Unicode
+                # casefold semantics. Keep literal matching before LIMIT and
+                # materialize only bounded results, not a truncated candidate set.
+                connection.create_function(
+                    "noyra_memory_casefold", 1, str.casefold, deterministic=True
+                )
+                sql += " AND instr(noyra_memory_casefold(content), ?) > 0"
+                parameters.append(normalized_query)
+            sql += " ORDER BY salience DESC, confidence DESC, updated_at DESC LIMIT ?"
+            parameters.append(bounded_limit)
+            rows = connection.execute(sql, parameters).fetchall()
+        return [self._from_row(row) for row in rows]
 
     def recall(
         self,
