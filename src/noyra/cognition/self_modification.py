@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -521,11 +522,8 @@ class ControlledSelfModification:
         if setting_key is None:
             return None
         old = self.effective(setting_key)
-        if isinstance(old, int):
-            proposed: int | float = max(1, round(old * 0.8))
-        else:
-            proposed = float(old) * 1.2
-        if proposed == old:
+        proposed = self._automatic_value(setting_key, old)
+        if proposed is None:
             return None
         return (
             setting_key,
@@ -533,6 +531,20 @@ class ControlledSelfModification:
             f"adapt after repeated {strategy} stagnation",
             tuple(str(row["event_id"]) for row in events),
         )
+
+    @classmethod
+    def _automatic_value(cls, setting_key: str, old_value: int | float) -> int | float | None:
+        """Project generated values only; explicit proposals keep strict validation."""
+        old = cls._validate_value(setting_key, old_value)
+        rule = cls.RULES[setting_key]
+        if type(old) is int:
+            candidate: int | float = min(
+                math.floor(rule.maximum), max(math.ceil(rule.minimum), round(old * 0.8))
+            )
+        else:
+            candidate = float(min(rule.maximum, max(rule.minimum, float(old) * 1.2)))
+        candidate = cls._validate_value(setting_key, candidate)
+        return None if candidate == old else candidate
 
     def _baseline(self, setting_key: str) -> int | float:
         if setting_key == "retrieval_semantic_weight":
