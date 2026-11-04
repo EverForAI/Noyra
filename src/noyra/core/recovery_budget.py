@@ -11,13 +11,30 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .errors import IntegrityError
-from .types import canonical_json, content_hash
+from .types import content_hash
 
 RECOVERY_HOURLY_ATTEMPTS = 6
 RECOVERY_DAILY_ATTEMPTS = 24
 RECOVERY_DAILY_INPUT_TOKENS = 400_000
 RECOVERY_DAILY_OUTPUT_TOKENS = 80_000
 RECOVERY_MAX_RESERVATIONS = 128
+EXIT_CONDITIONS = frozenset(
+    {
+        "project_coordination",
+        "source_polling",
+        "observation_backlog",
+        "recent_model_failures",
+        "wall_clock",
+        "continuous_health",
+    }
+)
+
+
+def recovery_high_water(state: dict[str, Any]) -> datetime:
+    values = [state["checked_at"], *(r["reserved_at"] for r in state["reservations"])]
+    if state.get("clock_high_water_at") is not None:
+        values.append(state["clock_high_water_at"])
+    return max(parse_time(value) for value in values)
 
 
 def workflow_key(subject_id: str) -> str:
@@ -75,6 +92,32 @@ def read_recovery(connection: sqlite3.Connection, subject_id: str) -> dict[str, 
         ):
             raise IntegrityError("autonomy recovery reservation is invalid")
         parse_time(item.get("reserved_at"))
+    if state.get("clock_high_water_at") is not None:
+        parse_time(state["clock_high_water_at"])
+    if state.get("observed_at") is not None:
+        parse_time(state["observed_at"])
+    if state.get("clock_status", "normal") not in {"normal", "wall_clock_behind_history"}:
+        raise IntegrityError("autonomy recovery clock status is invalid")
+    conditions = state.get("exit_conditions", [])
+    if not isinstance(conditions, list) or len(conditions) > len(EXIT_CONDITIONS):
+        raise IntegrityError("autonomy recovery exit conditions are invalid")
+    seen = set()
+    for condition in conditions:
+        if (
+            not isinstance(condition, dict)
+            or set(condition) != {"code", "satisfied", "observed_at", "unmet_since"}
+            or not isinstance(condition.get("code"), str)
+            or condition["code"] not in EXIT_CONDITIONS
+            or condition["code"] in seen
+            or type(condition.get("satisfied")) is not bool
+        ):
+            raise IntegrityError("autonomy recovery exit condition is invalid")
+        seen.add(condition["code"])
+        parse_time(condition["observed_at"])
+        if condition["unmet_since"] is not None:
+            parse_time(condition["unmet_since"])
+    if state.get("last_health_evaluated_at") is not None:
+        parse_time(state["last_health_evaluated_at"])
     return dict(state)
 
 
@@ -91,27 +134,56 @@ def parse_time(value: Any) -> datetime:
 def write_recovery(
     connection: sqlite3.Connection, subject_id: str, state: dict[str, Any], now: str
 ) -> None:
+    from noyra.autonomy.workflow import DurableWorkflowStore
+
+    from .checkpoint_clock import append_checkpoint
+
     key = workflow_key(subject_id)
     previous = connection.execute(
-        "SELECT checkpoint_version FROM workflow_checkpoints WHERE workflow_id=? "
+        "SELECT * FROM workflow_checkpoints WHERE workflow_id=? "
         "ORDER BY checkpoint_version DESC LIMIT 1",
         (key,),
     ).fetchone()
-    version = 1 if previous is None else int(previous[0]) + 1
-    connection.execute(
-        "INSERT INTO workflow_checkpoints(workflow_id,subject_id,workflow_type,"
-        "checkpoint_version,status,state_json,state_hash,reason,created_at) "
-        "VALUES (?,?,'autonomy_recovery',?,'running',?,?,?,?)",
-        (
-            key,
-            subject_id,
-            version,
-            canonical_json(state),
-            content_hash(state),
-            state["reason"],
-            now,
-        ),
+    if previous is not None:
+        record = DurableWorkflowStore._from_row(previous)
+        if (
+            record.subject_id != subject_id
+            or record.workflow_type != "autonomy_recovery"
+            or record.status != "running"
+        ):
+            raise IntegrityError("autonomy recovery checkpoint owner is invalid")
+    watermark = max(parse_time(now), recovery_high_water(state))
+    if previous is not None:
+        watermark = max(watermark, parse_time(record.created_at), recovery_high_water(record.state))
+    state["clock_high_water_at"] = watermark.isoformat()
+    append_checkpoint(
+        connection,
+        database_for_connection(connection),
+        subject_id=subject_id,
+        workflow_id=key,
+        workflow_type="autonomy_recovery",
+        version=1 if previous is None else int(previous["checkpoint_version"]) + 1,
+        status="running",
+        state=state,
+        reason=state["reason"],
+        observed_at=now,
+        previous=previous,
     )
+
+
+def database_for_connection(connection: sqlite3.Connection) -> Any:
+    # Database is needed only for archive-aware clock receipts; use the already
+    # open database identity without opening a connection or initializing schema.
+    from pathlib import Path
+
+    from .database import Database
+
+    location = next(
+        (row[2] for row in connection.execute("PRAGMA database_list") if row[1] == "main"), ""
+    )
+    if not location:
+        raise IntegrityError("persistent recovery database identity is unavailable")
+    return Database(Path(location), initialize=False)
 
 
 def admit_recovery_attempt(
@@ -130,7 +202,7 @@ def admit_recovery_attempt(
     if state is None or not state["active"]:
         return
     instant = parse_time(now)
-    if instant < parse_time(state["checked_at"]):
+    if instant < recovery_high_water(state):
         raise BudgetExhaustedError("recovery_clock_wait")
     reservations = [
         r
@@ -157,5 +229,5 @@ def admit_recovery_attempt(
             "output_tokens": output_tokens,
         }
     )
-    state.update(reservations=reservations, checked_at=now)
+    state.update(reservations=reservations, checked_at=now, clock_high_water_at=now)
     write_recovery(connection, subject_id, state, now)

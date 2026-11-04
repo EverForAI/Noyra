@@ -194,6 +194,30 @@ def admin_upgrade_check_admin_upgrade_status_admin_upgrade_installed(
     return False
 
 
+def workflow_clock_history(
+    self: RequestHandler, owner: NoyraHTTPServer, parsed: SplitResult
+) -> bool:
+    if not self._authorized("operator"):
+        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+        return True
+    if owner.operator_controls is None:
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "operator_controls_unavailable"})
+        return True
+    try:
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        if set(query) != {"workflow_id"} or len(query["workflow_id"]) != 1:
+            raise ValueError("invalid workflow ID")
+        result = owner.operator_controls.workflow_clock_history(query["workflow_id"][0])
+    except (ValueError, PermissionError):
+        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_workflow_clock_request"})
+        return True
+    except (IntegrityError, sqlite3.Error):
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "workflow_clock_evidence_invalid"})
+        return True
+    self._json(HTTPStatus.OK, result)
+    return True
+
+
 def project_execution_recovery(self: RequestHandler, owner: NoyraHTTPServer, limit: int) -> bool:
     if not self._authorized("operator"):
         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})

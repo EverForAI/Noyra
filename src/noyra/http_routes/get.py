@@ -151,6 +151,9 @@ def dispatch(self: RequestHandler, owner: NoyraHTTPServer) -> None:
     elif parsed.path.startswith("/api/public/"):
         if read_public.public_item(self, owner, parsed):
             return
+    elif parsed.path == "/api/admin/workflow-clock":
+        if read_admin.workflow_clock_history(self, owner, parsed):
+            return
     elif parsed.path == "/api/admin/project-execution-recovery":
         if read_admin.project_execution_recovery(self, owner, limit):
             return

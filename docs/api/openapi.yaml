@@ -1006,6 +1006,47 @@ paths:
         '200': { $ref: '#/components/responses/JsonObject' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/workflow-clock:
+    get:
+      tags: [observation]
+      operationId: workflowClockHistory
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - name: workflow_id
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 256 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/workflow-clock/acknowledge:
+    post:
+      tags: [configuration]
+      operationId: acknowledgeWorkflowClockHistory
+      security: [{ operatorBearer: [] }]
+      description: Owned paused drained recovery only. Appends evidence explaining exact legacy timestamp inversions; never edits history, resumes runtime, changes costs or waives non-time corruption.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [workflow_id, expected_fingerprint, evidence_sha256, reason]
+              properties:
+                workflow_id: { type: string, minLength: 1, maxLength: 256 }
+                expected_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+                evidence_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+                reason: { type: string, minLength: 1, maxLength: 2000 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/v1/admin/project-execution-recovery:
     get:
       tags: [observation]

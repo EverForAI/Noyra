@@ -1055,6 +1055,7 @@ class NoyraHTTPServer:
                 and (path.endswith("/retry") or path.endswith("/cancel"))
             )
             or path == "/api/admin/wallet-executions/recover"
+            or path == "/api/admin/workflow-clock/acknowledge"
         )
 
     @staticmethod

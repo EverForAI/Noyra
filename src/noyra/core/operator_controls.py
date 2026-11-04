@@ -469,6 +469,95 @@ class OperatorControlService:
             )
             return {"call_id": call_id, "status": record.status, "idempotent": False}
 
+    def workflow_clock_history(self, workflow_id: str) -> dict[str, Any]:
+        from noyra.autonomy.workflow import DurableWorkflowStore
+
+        if not isinstance(workflow_id, str) or not 1 <= len(workflow_id) <= 256:
+            raise OperatorControlConflict("invalid_workflow_clock_request")
+        result = DurableWorkflowStore(self.database).clock_history(self.subject_id, workflow_id)
+        result["unexplained_count"] = len(result["unexplained_versions"])
+        result["truncated"] = result["unexplained_count"] > 100
+        result["unexplained_versions"] = result["unexplained_versions"][:100]
+        return result
+
+    def acknowledge_workflow_clock(
+        self,
+        workflow_id: str,
+        *,
+        expected_fingerprint: str,
+        evidence_sha256: str,
+        actor: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        from noyra.autonomy.workflow import DurableWorkflowStore
+
+        from .admission import bind_lease
+
+        actor, reason = self._validate_actor_reason(actor, reason)
+        if (
+            not isinstance(workflow_id, str)
+            or not 1 <= len(workflow_id) <= 256
+            or not isinstance(expected_fingerprint, str)
+            or len(expected_fingerprint) != 64
+            or set(expected_fingerprint) - set("0123456789abcdef")
+            or not isinstance(evidence_sha256, str)
+            or len(evidence_sha256) != 64
+            or set(evidence_sha256) - set("0123456789abcdef")
+        ):
+            raise OperatorControlConflict("invalid_workflow_clock_request")
+        with (
+            self._lock,
+            self.kernel.admission.operation(
+                "workflow-clock-recovery", allow_quarantine=True
+            ) as lease,
+        ):
+            self.kernel.admission.require_owned(self.kernel.process_lock)
+            with bind_lease(lease), self.kernel.admission.commit_scope(lease):
+                if self.kernel.admission.active_operations != 1:
+                    raise OperatorControlConflict("workflow_clock_operations_not_drained")
+                if self.at_rest is not None and getattr(self.at_rest, "required", False):
+                    try:
+                        self.at_rest.require_ready()
+                    except Exception as error:
+                        raise OperatorControlConflict("at_rest_boundary_unavailable") from error
+                try:
+                    with self.database.transaction() as connection:
+                        lifecycle = connection.execute(
+                            "SELECT state FROM runtime_state WHERE subject_id=?", (self.subject_id,)
+                        ).fetchone()
+                        if lifecycle is None or lifecycle[0] != "paused":
+                            raise OperatorControlConflict("workflow_clock_requires_paused")
+                        result = DurableWorkflowStore(self.database).acknowledge_clock_history(
+                            connection,
+                            self.subject_id,
+                            workflow_id,
+                            expected_fingerprint,
+                            actor=actor,
+                            reason=reason,
+                            evidence_sha256=evidence_sha256,
+                        )
+                        if not result["idempotent"]:
+                            self._audit_connection(
+                                connection,
+                                "workflow_clock_acknowledged",
+                                actor,
+                                reason,
+                                {
+                                    "workflow_id": workflow_id,
+                                    "evidence_sha256": evidence_sha256,
+                                    "acknowledged_versions": result["acknowledged_versions"],
+                                },
+                            )
+                        return result
+                except (ValueError, PermissionError) as error:
+                    raise OperatorControlConflict(
+                        "workflow_clock_snapshot_or_evidence_conflict"
+                    ) from error
+                except IntegrityError as error:
+                    raise OperatorControlConflict(
+                        "workflow_clock_non_time_evidence_invalid"
+                    ) from error
+
     def project_execution_recovery(self, *, limit: int = 50) -> dict[str, Any]:
         from noyra.cognition.execution_recovery import ProjectExecutionRecovery
 

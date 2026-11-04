@@ -203,7 +203,10 @@ def handler_type(
                     {"error": "integrity_quarantine"},
                 )
                 return
-            if self.path == "/api/admin/project-execution-recovery/release-review":
+            if self.path in {
+                "/api/admin/project-execution-recovery/release-review",
+                "/api/admin/workflow-clock/acknowledge",
+            }:
                 # The authenticated operator method owns the lock order and
                 # paused/drained transaction. Do not nest a gate scope around
                 # its service lock or count this request as in-flight work.

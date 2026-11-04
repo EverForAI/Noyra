@@ -277,6 +277,8 @@ API_ROUTE_CONTRACTS: tuple[APIRouteContract, ...] = (
     _post("/api/v1/admin/retention/settings", "operator", 200, 400, 401, 409, 415, 503),
     _get("/api/v1/admin/recoverable-work", "operator", 200, 401, 503),
     _get("/api/v1/admin/project-execution-recovery", "operator", 200, 401, 503),
+    _get("/api/v1/admin/workflow-clock", "operator", 200, 400, 401, 503),
+    _post("/api/v1/admin/workflow-clock/acknowledge", "operator", 200, 400, 401, 409, 415, 503),
     _post(
         "/api/v1/admin/project-execution-recovery/release-review",
         "operator",

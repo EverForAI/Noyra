@@ -76,6 +76,9 @@ def dispatch(self: RequestHandler, owner: NoyraHTTPServer) -> None:
     if self.path == "/api/admin/upgrade":
         if post_admin.admin_upgrade(self, owner):
             return
+    if self.path == "/api/admin/workflow-clock/acknowledge":
+        operator.acknowledge_workflow_clock(self, owner)
+        return
     if self.path == "/api/admin/project-execution-recovery/release-review":
         operator.release_project_execution(self, owner)
         return

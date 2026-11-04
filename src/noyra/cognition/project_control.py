@@ -137,3 +137,33 @@ class ProjectReviewControl:
             state,
             reason=reason,
         )
+
+
+def project_dependencies_pending(connection: Any, subject_id: str, project: Any) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 WHERE EXISTS(SELECT 1 FROM research_search_runs r "
+            "WHERE r.subject_id=? AND r.status IN ('accepted','no_results','failed') "
+            "AND (r.project_id=? OR "
+            "(r.project_id IS NULL AND r.goal_id=? AND r.created_at>=?)) AND NOT EXISTS("
+            "SELECT 1 FROM outcome_evaluations e WHERE e.subject_id=r.subject_id "
+            "AND e.source_type='research' AND e.source_id=r.research_id)) OR EXISTS("
+            "SELECT 1 FROM action_deliberation_runs a WHERE a.subject_id=? "
+            "AND (a.project_id=? OR "
+            "(a.project_id IS NULL AND a.goal_id=? AND a.created_at>=?)) "
+            "AND a.action_id IS NOT NULL AND NOT EXISTS("
+            "SELECT 1 FROM outcome_evaluations e WHERE e.subject_id=a.subject_id "
+            "AND e.source_type='action' AND e.source_id=a.deliberation_id))",
+            (
+                subject_id,
+                project["project_id"],
+                project["goal_id"],
+                project["created_at"],
+                subject_id,
+                project["project_id"],
+                project["goal_id"],
+                project["created_at"],
+            ),
+        ).fetchone()
+        is not None
+    )

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, ClassVar
 
+from noyra.core import checkpoint_clock
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.types import (
@@ -75,28 +76,121 @@ class DurableWorkflowStore:
             if status not in self._ALLOWED[previous_status]:
                 raise ValueError(f"invalid workflow transition: {previous_status} -> {status}")
             version = 1 if previous_record is None else previous_record.checkpoint_version + 1
-            connection.execute(
-                "INSERT INTO workflow_checkpoints(workflow_id, subject_id, workflow_type, "
-                "checkpoint_version, status, state_json, state_hash, reason, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    workflow_id,
-                    subject_id,
-                    workflow_type,
-                    version,
-                    status,
-                    encoded,
-                    content_hash(state),
-                    reason,
-                    now,
-                ),
+            row = checkpoint_clock.append_checkpoint(
+                connection,
+                self.database,
+                subject_id=subject_id,
+                workflow_id=workflow_id,
+                workflow_type=workflow_type,
+                version=version,
+                status=status,
+                state=state,
+                reason=reason,
+                observed_at=now,
+                previous=previous,
             )
-            row = connection.execute(
-                "SELECT * FROM workflow_checkpoints WHERE workflow_id = ? "
-                "AND checkpoint_version = ?",
-                (workflow_id, version),
-            ).fetchone()
         return self._from_row(row)
+
+    def clock_history(self, subject_id: str, workflow_id: str) -> dict[str, Any]:
+        with self.database.read_transaction() as connection:
+            return self._clock_history(connection, subject_id, workflow_id)
+
+    def _clock_history(self, connection: Any, subject_id: str, workflow_id: str) -> dict[str, Any]:
+        rows = connection.execute(
+            "SELECT * FROM workflow_checkpoints WHERE workflow_id=? "
+            "ORDER BY checkpoint_version LIMIT 50001",
+            (workflow_id,),
+        ).fetchall()
+        if not rows or len(rows) > 50000:
+            raise ValueError("checkpoint clock history missing or exceeds recovery bound")
+        if any(row["subject_id"] != subject_id for row in rows):
+            raise PermissionError("workflow belongs to another subject")
+        self._verify_integrity_connection(
+            connection, subject_id, database=self.database, allow_unexplained_clock=True
+        )
+        high: str | None = None
+        inversions = []
+        previous = None
+        for row in rows:
+            if (
+                high is not None
+                and self._parse_time(row["created_at"]) < self._parse_time(high)
+                and checkpoint_clock.receipt(connection, row, self.database) is None
+            ):
+                inversions.append(int(row["checkpoint_version"]))
+            else:
+                high = checkpoint_clock.verify(connection, row, previous, high, self.database)
+            previous = row
+        return {
+            "workflow_id": workflow_id,
+            "checkpoint_count": len(rows),
+            "expected_fingerprint": content_hash([dict(r) for r in rows]),
+            "unexplained_versions": inversions,
+            "high_water_at": high,
+        }
+
+    def acknowledge_clock_history(
+        self,
+        connection: Any,
+        subject_id: str,
+        workflow_id: str,
+        expected_fingerprint: str,
+        *,
+        actor: str,
+        reason: str,
+        evidence_sha256: str,
+    ) -> dict[str, Any]:
+        # The operator wrapper holds ownership, paused/drained admission and an
+        # atomic audit transaction. Only timestamp inversions may be explained.
+        if (
+            not actor.strip()
+            or actor.strip().casefold() in {"subject", "runtime"}
+            or len(actor) > 256
+            or not reason.strip()
+            or len(reason) > 2000
+            or not self._valid_hash(evidence_sha256)
+        ):
+            raise ValueError("invalid checkpoint clock acknowledgement")
+        catalog = self._clock_history(connection, subject_id, workflow_id)
+        if catalog["expected_fingerprint"] != expected_fingerprint:
+            raise ValueError("checkpoint clock snapshot conflict")
+        rows = connection.execute(
+            "SELECT * FROM workflow_checkpoints WHERE workflow_id=? ORDER BY checkpoint_version",
+            (workflow_id,),
+        ).fetchall()
+        high: str | None = None
+        previous = None
+        unexplained = set(catalog["unexplained_versions"])
+        for row in rows:
+            if row["checkpoint_version"] in unexplained:
+                assert high is not None
+                checkpoint_clock.append_receipt(
+                    connection,
+                    self.database,
+                    row,
+                    previous,
+                    row["created_at"],
+                    high,
+                    mode="legacy_acknowledged",
+                    actor=actor,
+                    reason=reason,
+                    evidence_sha256=evidence_sha256,
+                )
+            else:
+                high = checkpoint_clock.verify(connection, row, previous, high, self.database)
+            previous = row
+        # Other workflows may need separate acknowledgements. Keep their
+        # unexplained clocks fail-closed while checking all non-time structure.
+        self._verify_integrity_connection(
+            connection, subject_id, database=self.database, allow_unexplained_clock=True
+        )
+        if self._clock_history(connection, subject_id, workflow_id)["unexplained_versions"]:
+            raise IntegrityError("workflow clock acknowledgement is incomplete")
+        return {
+            "workflow_id": workflow_id,
+            "acknowledged_versions": catalog["unexplained_versions"],
+            "idempotent": not catalog["unexplained_versions"],
+        }
 
     def latest(self, workflow_id: str) -> WorkflowCheckpoint:
         with self.database.connection() as connection:
@@ -124,10 +218,17 @@ class DurableWorkflowStore:
 
     def verify_integrity(self, subject_id: str) -> int:
         with self.database.read_transaction() as connection:
-            return self._verify_integrity_connection(connection, subject_id)
+            return self._verify_integrity_connection(connection, subject_id, database=self.database)
 
     @classmethod
-    def _verify_integrity_connection(cls, connection: Any, subject_id: str) -> int:
+    def _verify_integrity_connection(
+        cls,
+        connection: Any,
+        subject_id: str,
+        *,
+        database: Database | None = None,
+        allow_unexplained_clock: bool = False,
+    ) -> int:
         if not isinstance(subject_id, str) or not subject_id.strip():
             raise IntegrityError("workflow checkpoint subject is invalid")
         crossing = connection.execute(
@@ -147,6 +248,8 @@ class DurableWorkflowStore:
             (subject_id,),
         ).fetchall()
         previous: dict[str, WorkflowCheckpoint] = {}
+        previous_rows: dict[str, Any] = {}
+        watermarks: dict[str, str] = {}
         for row in rows:
             record = cls._from_row(row)
             if record.subject_id != subject_id:
@@ -159,17 +262,25 @@ class DurableWorkflowStore:
             if (
                 record.checkpoint_version != expected_version
                 or record.status not in cls._ALLOWED[expected_previous_status]
-                or (
-                    prior is not None
-                    and (
-                        record.workflow_type != prior.workflow_type
-                        or cls._parse_time(record.created_at) < cls._parse_time(prior.created_at)
-                    )
-                )
+                or (prior is not None and (record.workflow_type != prior.workflow_type))
             ):
                 raise IntegrityError(
                     f"workflow checkpoint history is invalid: {record.workflow_id}"
                 )
+            watermark = watermarks.get(record.workflow_id)
+            if (
+                allow_unexplained_clock
+                and watermark is not None
+                and cls._parse_time(record.created_at) < cls._parse_time(watermark)
+                and checkpoint_clock.receipt(connection, row, database) is None
+            ):
+                pass
+            else:
+                watermark = checkpoint_clock.verify(
+                    connection, row, previous_rows.get(record.workflow_id), watermark, database
+                )
+            watermarks[record.workflow_id] = watermark or record.created_at
+            previous_rows[record.workflow_id] = row
             previous[record.workflow_id] = record
         return len(rows)
 

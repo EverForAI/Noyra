@@ -512,6 +512,7 @@ src/noyra/core/admission.py
 src/noyra/core/archive.py
 src/noyra/core/at_rest.py
 src/noyra/core/backup_retention.py
+src/noyra/core/checkpoint_clock.py
 src/noyra/core/cognitive_waits.py
 src/noyra/core/conversation_schema.py
 src/noyra/core/credentials.py
@@ -912,6 +913,8 @@ tests/test_intrinsic_thought_rounds.py
 tests/test_kernel.py
 tests/test_legacy_schema71_upgrade.py
 tests/test_locking.py
+tests/test_m2_checkpoint_clock.py
+tests/test_m2_clock_http.py
 tests/test_m41_verification_foundation.py
 tests/test_m42_p1_01_sleep_deadlock.py
 tests/test_m42_p1_02_integrity_runtime.py

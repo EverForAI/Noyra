@@ -556,7 +556,9 @@ class ProjectExecutionLedger:
                 ).fetchone()
                 if succeeded is None:
                     raise IntegrityError("completed project phase has no validated execution")
-            DurableWorkflowStore._verify_integrity_connection(connection, self.subject_id)
+            DurableWorkflowStore._verify_integrity_connection(
+                connection, self.subject_id, database=self.database
+            )
         return len(rows)
 
     def _verify_execution_connection(self, connection: Any, row: Any) -> None:
