@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Delivery read-side status derives from verified immutable receipts; settled outcomes
+  no longer block lifecycle recovery, while ambiguous deliveries remain unretried and
+  damaged receipts fail closed.
+
 - Added bounded recovery and persisted fair scheduling for autonomous workflows,
   with separate source-check heartbeats and explanation of waits and clock status.
 - Connected open research to bounded source trials and reading evidence, and linked

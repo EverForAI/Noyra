@@ -34,7 +34,11 @@ from noyra.core.delivery_state import (
 from noyra.core.delivery_state import (
     DeliveryReconciliationRecord as DeliveryReconciliationRecord,
 )
-from noyra.core.delivery_state import reconciliation_record, terminal_delivery_reconciliation
+from noyra.core.delivery_state import (
+    reconciliation_record,
+    terminal_delivery_reconciliation,
+    verified_reconciliations,
+)
 from noyra.core.errors import IntegrityError, InvalidTransitionError, NotFoundError
 from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
@@ -2432,21 +2436,21 @@ class DeliveryDispatcher:
         *,
         subject_id: str | None = None,
     ) -> list[DeliveryReconciliationRecord]:
-        with self.database.connection() as connection:
+        with self.database.read_transaction() as connection:
             delivery = connection.execute(
-                "SELECT delivery_id, subject_id FROM interaction_deliveries WHERE delivery_id = ?",
+                "SELECT delivery_id,subject_id,status FROM interaction_deliveries "
+                "WHERE delivery_id = ?",
                 (delivery_id,),
             ).fetchone()
             if delivery is None or (
                 subject_id is not None and delivery["subject_id"] != subject_id
             ):
                 raise NotFoundError(f"delivery not found: {delivery_id}")
-            rows = connection.execute(
-                "SELECT * FROM interaction_delivery_reconciliations "
-                "WHERE delivery_id = ? ORDER BY sequence",
-                (delivery_id,),
-            ).fetchall()
-        return [self._reconciliation_record(row) for row in rows]
+            return list(
+                verified_reconciliations(
+                    connection, str(delivery["subject_id"]), delivery_id=delivery_id
+                )
+            )
 
     async def _lookup_status_endpoint(
         self,
@@ -2702,14 +2706,16 @@ class DeliveryDispatcher:
 
     _reconciliation_record = staticmethod(reconciliation_record)
 
-    def get_delivery(self, delivery_id: str) -> DeliveryRecord:
-        with self.database.read_transaction() as connection:
-            row = connection.execute(
-                "SELECT * FROM interaction_deliveries WHERE delivery_id = ?", (delivery_id,)
-            ).fetchone()
-            if row is None:
-                raise NotFoundError(f"delivery not found: {delivery_id}")
-            resolved = terminal_delivery_reconciliation(connection, row)
+    def _get_delivery_connection(
+        self, connection: Any, delivery_id: str, *, subject_id: str | None = None
+    ) -> DeliveryRecord:
+        row = connection.execute(
+            "SELECT * FROM interaction_deliveries WHERE delivery_id = ?",
+            (delivery_id,),
+        ).fetchone()
+        if row is None or (subject_id is not None and row["subject_id"] != subject_id):
+            raise NotFoundError(f"delivery not found: {delivery_id}")
+        resolved = terminal_delivery_reconciliation(connection, row)
         return DeliveryRecord(
             delivery_id=str(row["delivery_id"]),
             interaction_id=str(row["interaction_id"]),
@@ -2733,3 +2739,7 @@ class DeliveryDispatcher:
             reconciliation_reason=None if resolved is None else resolved.reason,
             reconciled_at=None if resolved is None else resolved.created_at,
         )
+
+    def get_delivery(self, delivery_id: str) -> DeliveryRecord:
+        with self.database.read_transaction() as connection:
+            return self._get_delivery_connection(connection, delivery_id)

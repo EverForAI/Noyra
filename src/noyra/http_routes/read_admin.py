@@ -158,7 +158,12 @@ def diagnostics(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
     if not self._authorized("read"):
         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
         return True
-    self._json(HTTPStatus.OK, owner.diagnostics())
+    try:
+        result = owner.diagnostics()
+    except (IntegrityError, sqlite3.Error):
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "diagnostics_unavailable"})
+        return True
+    self._json(HTTPStatus.OK, result)
     return False
 
 

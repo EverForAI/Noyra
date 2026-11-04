@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import pytest
 
@@ -73,6 +73,8 @@ def test_projection_rejects_reconciliation_on_wrong_original_state(
         )
     with pytest.raises(IntegrityError):
         dispatcher.get_delivery(identifier)
+    with pytest.raises(IntegrityError):
+        dispatcher.reconciliation_history(identifier, subject_id=kernel.subject_id)
 
 
 def test_projection_rejects_cross_subject_receipt_even_when_rehashed(
@@ -410,6 +412,16 @@ def test_operator_http_inventory_and_wake_use_verified_delivery_state(
         payload={"status": "delivered", "reason": "Synthetic provider evidence"},
     )
     assert status == 200 and result["status"] == "delivered"
+    status, records = _request(instance, "/api/deliveries", token=read)
+    assert (
+        status == 200
+        and len(records) == 1
+        and cast(list[dict[str, Any]], records)[0]["status"] == "delivered"
+    )
+    status, history = _request(
+        instance, "/api/deliveries/" + identifier + "/reconciliations", token=read
+    )
+    assert status == 200 and cast(list[dict[str, Any]], history)[0]["outcome"] == "delivered"
     for prefix in ("/api", "/api/v1"):
         status, inventory = _request(instance, prefix + "/admin/recoverable-work", token=operator)
         assert status == 200
@@ -440,3 +452,47 @@ def test_operator_http_inventory_and_wake_use_verified_delivery_state(
             503,
             {"error": "recoverable_work_unavailable"},
         )
+        assert _request(instance, prefix + "/deliveries", token=read) == (
+            503,
+            {"error": "delivery_state_unavailable"},
+        )
+        assert _request(
+            instance, prefix + "/deliveries/" + identifier + "/reconciliations", token=read
+        ) == (503, {"error": "delivery_state_unavailable"})
+
+
+def test_http_diagnostics_never_trust_corrupt_delivery_outcomes(
+    service: tuple[NoyraService, str, str],
+) -> None:
+    from test_m42_p3_06_operator_controls import _request
+
+    instance, _, read = service
+    instance.http.transports.configure(
+        instance.kernel.subject_id,
+        TransportInput(channel="webhook", label="Synthetic", endpoint="https://example.com/send"),
+        actor="operator",
+    )
+    identifier = seed_delivery(instance.kernel, instance.http.deliveries, "diagnostics")
+    instance.http.deliveries.reconcile_unknown(
+        identifier, "delivered", actor="operator", reason="Verified"
+    )
+    status, body = _request(instance, "/api/v1/diagnostics", token=read)
+    assert status == 200 and body["deliveries"] == {"delivered": 1}
+    with instance.kernel.database.transaction() as connection:
+        connection.execute("DROP TRIGGER prevent_delivery_reconciliation_update")
+        connection.execute(
+            "UPDATE interaction_delivery_reconciliations SET evidence_json='{}',evidence_hash=?",
+            ("0" * 64,),
+        )
+    for prefix in ("/api", "/api/v1"):
+        assert _request(instance, prefix + "/diagnostics", token=read) == (
+            503,
+            {"error": "diagnostics_unavailable"},
+        )
+        assert _request(instance, prefix + "/deliveries", token=read) == (
+            503,
+            {"error": "delivery_state_unavailable"},
+        )
+        assert _request(
+            instance, prefix + "/deliveries/" + identifier + "/reconciliations", token=read
+        ) == (503, {"error": "delivery_state_unavailable"})

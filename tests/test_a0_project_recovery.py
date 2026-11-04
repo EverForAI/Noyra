@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
@@ -816,3 +817,50 @@ def test_project_review_reason_literals_are_registered() -> None:
     assert reasons and reasons <= REVIEW_WAIT_REASONS
     admin = (Path(__file__).parents[1] / "src/noyra/web/admin.js").read_text(encoding="utf-8")
     assert all(reason + ":" in admin for reason in REVIEW_WAIT_REASONS)
+
+
+@pytest.mark.asyncio
+async def test_help_wait_observes_verified_delivery_reconciliation(
+    case: helpers.AutonomousProjectsTestCase,
+) -> None:
+    from noyra.interaction import DeliveryDispatcher, TransportInput, TransportStore
+
+    manager = await active(case)
+    await case.request_help(manager)
+    transports = TransportStore(case.kernel.database, Path(case.temp_dir.name) / "secrets")
+    transports.configure(
+        case.subject_id,
+        TransportInput(
+            channel="webhook",
+            label="Help destination",
+            endpoint="https://example.com/help",
+            settings={"recipient": "synthetic-founder"},
+        ),
+        actor="operator",
+    )
+    dispatcher = DeliveryDispatcher(case.kernel.database, transports)
+    dispatcher.enqueue_pending(case.subject_id)
+    with case.kernel.database.transaction() as connection:
+        identifier = str(
+            connection.execute("SELECT delivery_id FROM interaction_deliveries").fetchone()[0]
+        )
+        connection.execute(
+            "UPDATE interaction_deliveries SET status='unknown',attempts=1 WHERE delivery_id=?",
+            (identifier,),
+        )
+    project = manager.projects()[0]
+    assert manager._help_wait(project)
+    assert manager.review_control.read(project)["reason"] == "help_delivery_unknown"
+    dispatcher.reconcile_unknown(
+        identifier, "delivered", actor="operator", reason="Verified receipt"
+    )
+    calls = count(case, "model_calls")
+    assert manager._help_wait(project)
+    assert manager.review_control.read(project)["reason"] == "help_waiting_reply"
+    assert count(case, "model_calls") == calls
+    with case.kernel.database.connection() as connection:
+        assert (
+            connection.execute("SELECT status FROM interaction_deliveries").fetchone()[0]
+            == "unknown"
+        )
+    manager.verify_integrity()

@@ -745,3 +745,42 @@ async def test_same_correspondent_new_help_request_keeps_independent_private_his
     )
     InteractionIntegrity(database).verify(case.subject_id)
     contact.manager.verify_integrity()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["failed", "cancelled"])
+async def test_reconciled_failed_help_delivery_cannot_parent_a_late_reply(
+    case: projects_base.AutonomousProjectsTestCase,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: Literal["failed", "cancelled"],
+) -> None:
+    contact = await external_help(case, monkeypatch, "webhook", unknown=True)
+    dispatcher = DeliveryDispatcher(case.kernel.database, contact.transports)
+    dispatcher.reconcile_unknown(
+        contact.delivery.delivery_id,
+        outcome,
+        actor="operator",
+        reason="Provider confirmed no delivery",
+    )
+    incoming = InboundStore(case.kernel.database).ingest(reply(contact))
+    record = InteractionStore(case.kernel.database).get(incoming.interaction_id)
+    assert record.status == "offered"
+    assert record.related_interaction_id is None
+    assert contact.store.replies(contact.request_id) == []
+    with case.kernel.database.connection() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM events WHERE event_type='assistance_reply'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT status FROM autonomous_project_assistance_requests WHERE request_id=?",
+                (contact.request_id,),
+            ).fetchone()[0]
+            == "open"
+        )
+    assert contact.manager._help_wait(contact.manager.projects()[0]) is True
+    contact.manager.verify_integrity()
+    InteractionIntegrity(case.kernel.database).verify(case.subject_id)

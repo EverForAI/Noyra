@@ -42,6 +42,7 @@ from noyra.core.at_rest import AtRestConfig, AtRestError, AtRestGuard
 from noyra.core.credentials import CredentialError, read_secret_file
 from noyra.core.database import Database
 from noyra.core.deadline import remaining_seconds
+from noyra.core.delivery_state import delivery_status_counts
 from noyra.core.errors import (
     IntegrityError,
     InvalidTransitionError,
@@ -1408,7 +1409,7 @@ class NoyraHTTPServer:
             "runs": 0,
             "by_method": {method: {} for method in ("api", "model", "browser", "wait")},
         }
-        with self.kernel.database.connection() as connection:
+        with self.kernel.database.read_transaction() as connection:
             loop = connection.execute(
                 "SELECT circuit_status, consecutive_failures, next_retry_at, "
                 "last_successful_tick_at, last_error_type FROM autonomy_loop_state "
@@ -1423,17 +1424,7 @@ class NoyraHTTPServer:
                 "SELECT COUNT(*) FROM model_calls WHERE subject_id = ? AND status = 'unknown'",
                 (self.kernel.subject_id,),
             ).fetchone()[0]
-            for row in connection.execute(
-                "SELECT COALESCE(r.outcome, d.status) AS status, COUNT(*) AS count "
-                "FROM interaction_deliveries d "
-                "LEFT JOIN interaction_delivery_reconciliations r ON r.delivery_id = d.delivery_id "
-                "AND r.outcome IN ('delivered', 'failed', 'cancelled') "
-                "WHERE d.subject_id = ? GROUP BY COALESCE(r.outcome, d.status)",
-                (self.kernel.subject_id,),
-            ):
-                if len(delivery_counts) >= DIAGNOSTICS_MAX_STATUS_BUCKETS:
-                    break
-                delivery_counts[str(row["status"])] = int(row["count"])
+            delivery_counts = delivery_status_counts(connection, self.kernel.subject_id)
             for row in connection.execute(
                 "SELECT status, COUNT(*) AS count FROM interaction_inbound_events "
                 "WHERE subject_id = ? GROUP BY status",

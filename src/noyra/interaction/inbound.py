@@ -30,6 +30,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from noyra.core.database import Database
+from noyra.core.delivery_state import effective_delivery_status
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.core.xml import parse_untrusted_xml
@@ -1536,7 +1537,8 @@ class InboundStore:
                     # private thread. A linked follow-up must match the exact
                     # authenticated source, including its receiving account.
                     parents = connection.execute(
-                        "SELECT i.interaction_id,p.conversation_key "
+                        "SELECT d.delivery_id,d.subject_id,d.status,i.interaction_id,"
+                        "p.conversation_key "
                         "FROM interaction_deliveries d JOIN interactions i "
                         "ON i.interaction_id=d.interaction_id AND i.subject_id=d.subject_id "
                         "LEFT JOIN participant_message_links p ON p.subject_id=i.subject_id "
@@ -1565,17 +1567,29 @@ class InboundStore:
                             envelope.external_sender_id,
                         ),
                     ).fetchall()
+                    parents = [
+                        parent
+                        for parent in parents
+                        if effective_delivery_status(connection, parent) in {"delivered", "unknown"}
+                    ]
                     if len(parents) == 1:
                         parent_id = str(parents[0]["interaction_id"])
                         participant_conversation = parents[0]["conversation_key"]
                     # Provider references must identify exactly one delivery,
                     # including across proactive and public help message kinds.
                     references = connection.execute(
-                        "SELECT delivery_id FROM interaction_deliveries WHERE subject_id=? "
+                        "SELECT delivery_id,subject_id,status FROM interaction_deliveries "
+                        "WHERE subject_id=? "
                         "AND transport_id=? AND provider_message_id=? "
                         "AND status IN ('delivered','unknown') LIMIT 2",
                         (subject_id, envelope.transport_id, envelope.thread_id),
                     ).fetchall()
+                    references = [
+                        reference
+                        for reference in references
+                        if effective_delivery_status(connection, reference)
+                        in {"delivered", "unknown"}
+                    ]
                     if len(references) != 1:
                         parent_id = None
                         participant_conversation = None

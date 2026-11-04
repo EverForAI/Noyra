@@ -80,6 +80,22 @@ The service bound is expressed in completed scheduler turns, not an unconditiona
 clock promise: existing network deadlines, budgets, real sleep, permission changes and
 unresolved prerequisites remain authoritative. No in-flight paid call is preempted.
 
+## Effective delivery outcomes
+
+`interaction_deliveries.status` remains the immutable dispatch ledger. A verified terminal
+reconciliation (`delivered`, `failed` or `cancelled`) is authoritative for read-side effective
+status, lifecycle recovery counts, help waits and authenticated projections; non-terminal lookup
+results do not settle a delivery. Consumers validate subject ownership, original `unknown`
+baseline, the terminal receipt hash, final sequence position and single-terminal constraint in the
+same SQLite read snapshot. Full history reads validate each receipt hash and the complete
+contiguous sequence. The original `unknown` row is not rewritten.
+
+This projection does not grant a retry. The delivery worker continues to select only its original
+eligible raw states, and an unknown or reconciled-unknown is never resent automatically. A verified
+failed/cancelled outcome can stop blocking operator wake/reset because the ambiguous external side
+effect has been explicitly reconciled. Invalid or damaged receipt history fails closed and is
+reported as unavailable, not as an empty/settled result.
+
 Wallet automation reports configuration separately from execution observation.
 `execution_observation.status` is `ok` only when the pending counts, latest failure and
 active execution count were read successfully in one snapshot. Otherwise the observation

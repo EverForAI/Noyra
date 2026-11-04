@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from noyra.core.admission import OperationInvalidated, accounting_scope, assert_current_lease
 from noyra.core.database import Database
+from noyra.core.delivery_state import effective_delivery_status
 from noyra.core.errors import IntegrityError
 from noyra.core.events import EventStore
 from noyra.core.model_admission import track_model_admission
@@ -348,22 +349,26 @@ class AutonomousProjectManager:
                 kind="help_request",
                 idempotency_key=key,
             )
-        with self.database.connection() as connection:
+        with self.database.read_transaction() as connection:
             routed = connection.execute(
                 "SELECT 1 FROM interaction_transports WHERE subject_id=? AND status='active' "
                 "LIMIT 1",
                 (self.subject_id,),
             ).fetchone()
             delivery = connection.execute(
-                "SELECT d.status FROM interaction_deliveries d JOIN interactions i "
+                "SELECT d.delivery_id,d.subject_id,d.status FROM interaction_deliveries d "
+                "JOIN interactions i "
                 "ON i.interaction_id=d.interaction_id AND i.subject_id=d.subject_id "
                 "WHERE i.subject_id=? AND i.idempotency_key=? ORDER BY d.updated_at DESC LIMIT 1",
                 (self.subject_id, key),
             ).fetchone()
+            delivery_status = (
+                None if delivery is None else effective_delivery_status(connection, delivery)
+            )
         reason = "help_pending_route" if routed is None else "help_delivery_pending"
-        if delivery is not None and delivery[0] == "delivered":
+        if delivery_status == "delivered":
             reason = "help_waiting_reply"
-        elif delivery is not None and delivery[0] == "unknown":
+        elif delivery_status == "unknown":
             reason = "help_delivery_unknown"
         self.review_control.record(project, reason)
         return True

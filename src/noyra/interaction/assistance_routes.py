@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from noyra.core.database import Database
+from noyra.core.delivery_state import effective_delivery_status
 from noyra.core.errors import IntegrityError
 from noyra.core.events import EventStore
 from noyra.core.types import content_hash, utc_now
@@ -158,7 +159,8 @@ class AssistanceRoutes:
     ) -> tuple[str, str, str] | None:
         # Candidate lookup is bounded and reference-based, not an event-history scan.
         candidates = connection.execute(
-            "SELECT d.delivery_id,d.interaction_id FROM interaction_deliveries d "
+            "SELECT d.delivery_id,d.interaction_id,d.subject_id,d.status "
+            "FROM interaction_deliveries d "
             "JOIN interactions i ON i.interaction_id=d.interaction_id "
             "AND i.subject_id=d.subject_id "
             "WHERE d.subject_id=? AND d.transport_id=? AND d.provider_message_id=? "
@@ -167,6 +169,8 @@ class AssistanceRoutes:
             (self.subject, transport_id, reference),
         ).fetchall()
         if len(candidates) != 1:
+            return None
+        if effective_delivery_status(connection, candidates[0]) not in {"delivered", "unknown"}:
             return None
         route = self.read(connection, str(candidates[0]["delivery_id"]))
         if (

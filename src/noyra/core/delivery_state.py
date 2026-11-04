@@ -122,7 +122,7 @@ def reconciliation_record(row: Any) -> DeliveryReconciliationRecord:
     )
 
 
-def _verified_reconciliations(
+def verified_reconciliations(
     connection: Any, subject_id: str, *, delivery_id: str | None = None
 ) -> Iterator[DeliveryReconciliationRecord]:
     # The subject-indexed orphan probe also catches receipts forged to name
@@ -167,18 +167,73 @@ def _verified_reconciliations(
         yield record
 
 
+def _terminal_record_from_joined_row(
+    row: Any, *, subject_id: str, delivery_id: str
+) -> DeliveryReconciliationRecord:
+    record = reconciliation_record(row)
+    if (
+        record.subject_id != subject_id
+        or record.delivery_id != delivery_id
+        or row["delivery_subject_id"] != subject_id
+        or row["delivery_status"] != "unknown"
+        or record.sequence != row["reconciliation_count"]
+        or record.outcome not in TERMINAL_DELIVERY_OUTCOMES
+    ):
+        raise IntegrityError("terminal delivery reconciliation ownership or baseline is invalid")
+    return record
+
+
 def terminal_delivery_reconciliation(
     connection: Any, delivery: Any
 ) -> DeliveryReconciliationRecord | None:
     if delivery["status"] not in DELIVERY_STATUSES:
         raise IntegrityError("delivery status is invalid")
-    resolved = None
-    for record in _verified_reconciliations(
-        connection, str(delivery["subject_id"]), delivery_id=str(delivery["delivery_id"])
-    ):
-        if record.outcome in TERMINAL_DELIVERY_OUTCOMES:
-            resolved = record
-    return resolved
+    rows = connection.execute(
+        "SELECT r.*,d.status AS delivery_status,d.subject_id AS delivery_subject_id, "
+        "(SELECT COUNT(*) FROM interaction_delivery_reconciliations h "
+        " WHERE h.delivery_id=r.delivery_id) AS reconciliation_count "
+        "FROM interaction_delivery_reconciliations r "
+        "JOIN interaction_deliveries d ON d.delivery_id=r.delivery_id "
+        "WHERE r.delivery_id=? AND r.outcome IN ('delivered','failed','cancelled') "
+        "ORDER BY r.sequence",
+        (delivery["delivery_id"],),
+    ).fetchall()
+    if len(rows) > 1:
+        raise IntegrityError("delivery has multiple terminal reconciliations")
+    if not rows:
+        return None
+    return _terminal_record_from_joined_row(
+        rows[0], subject_id=str(delivery["subject_id"]), delivery_id=str(delivery["delivery_id"])
+    )
+
+
+def terminal_delivery_reconciliations(
+    connection: Any, subject_id: str
+) -> Iterator[DeliveryReconciliationRecord]:
+    """Yield hash-checked terminal receipts for raw unknown rows.
+
+    The correlated count verifies that the terminal is the final contiguous
+    sequence. Full earlier row hashes are checked by history/integrity reads.
+    """
+    rows = connection.execute(
+        "SELECT r.*,d.status AS delivery_status,d.subject_id AS delivery_subject_id, "
+        "(SELECT COUNT(*) FROM interaction_delivery_reconciliations h "
+        " WHERE h.delivery_id=r.delivery_id) AS reconciliation_count "
+        "FROM interaction_delivery_reconciliations r "
+        "JOIN interaction_deliveries d ON d.delivery_id=r.delivery_id "
+        "WHERE d.subject_id=? AND d.status='unknown' "
+        "AND r.outcome IN ('delivered','failed','cancelled') ORDER BY d.delivery_id",
+        (subject_id,),
+    )
+    prior_delivery: str | None = None
+    for row in rows:
+        record = _terminal_record_from_joined_row(
+            row, subject_id=subject_id, delivery_id=str(row["delivery_id"])
+        )
+        if record.delivery_id == prior_delivery:
+            raise IntegrityError("delivery has multiple terminal reconciliations")
+        prior_delivery = record.delivery_id
+        yield record
 
 
 def effective_delivery_status(connection: Any, delivery: Any) -> str:
@@ -201,10 +256,9 @@ def delivery_status_counts(connection: Any, subject_id: str) -> dict[str, int]:
         if row["status"] not in DELIVERY_STATUSES:
             raise IntegrityError("delivery status is invalid")
         counts[str(row["status"])] = int(row["n"])
-    for record in _verified_reconciliations(connection, subject_id):
-        if record.outcome in TERMINAL_DELIVERY_OUTCOMES:
-            counts["unknown"] = counts.get("unknown", 0) - 1
-            if counts["unknown"] < 0:
-                raise IntegrityError("delivery reconciliation count is invalid")
-            counts[record.outcome] = counts.get(record.outcome, 0) + 1
+    for record in terminal_delivery_reconciliations(connection, subject_id):
+        counts["unknown"] = counts.get("unknown", 0) - 1
+        if counts["unknown"] < 0:
+            raise IntegrityError("delivery reconciliation count is invalid")
+        counts[record.outcome] = counts.get(record.outcome, 0) + 1
     return {status: count for status, count in counts.items() if count}
