@@ -3652,8 +3652,12 @@ def _check_entities(context: IntegrityContext) -> object:
 
 
 def _check_memory_lifecycle(context: IntegrityContext) -> object:
+    from noyra.cognition.memory_rounds import MemoryIntegrationRounds
     from noyra.mind.memory import MemoryStore
 
+    rounds = MemoryIntegrationRounds(context.database, context.subject_id)
+    with context.database.read_transaction() as connection:
+        rounds.verify_connection(connection)
     return MemoryStore(context.database).verify_lifecycle_integrity(context.subject_id)
 
 

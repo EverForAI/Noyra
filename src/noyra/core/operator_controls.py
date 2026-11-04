@@ -469,6 +469,106 @@ class OperatorControlService:
             )
             return {"call_id": call_id, "status": record.status, "idempotent": False}
 
+    def memory_integration_recovery(self) -> dict[str, Any]:
+        from dataclasses import asdict
+
+        from noyra.cognition.execution_recovery import pending_effects
+        from noyra.cognition.memory_rounds import MemoryIntegrationRounds
+        from noyra.model import ModelLedger
+
+        rounds = MemoryIntegrationRounds(self.database, self.subject_id)
+        with self.database.read_transaction() as c:
+            # Validate existing acknowledgements before omitting them from the
+            # pending page; a corrupt old receipt must not disappear via SQL.
+            rounds.legacy_blocked(c)
+            rows = rounds.legacy_records(c, limit=101)
+            lifecycle = c.execute(
+                "SELECT state FROM runtime_state WHERE subject_id=?", (self.subject_id,)
+            ).fetchone()
+            blocked = pending_effects(c, self.subject_id)
+            ready = (
+                lifecycle is not None
+                and lifecycle[0] == "paused"
+                and self.kernel.admission.active_operations == 0
+                and self.kernel.process_lock.held
+                and not self.kernel.admission.quarantined
+                and not self.kernel.admission.migration_fenced
+                and not any(blocked.values())
+            )
+            items = []
+            for row in rows[:100]:
+                call = ModelLedger._call_from_row(row)
+                discarded = rounds.legacy_receipt(c, call)
+                items.append(
+                    {
+                        "call_id": call.call_id,
+                        "purpose": call.purpose,
+                        "status": call.status,
+                        "expected_fingerprint": content_hash(asdict(call)),
+                        "discarded": discarded,
+                        "can_discard": ready and call.status == "succeeded" and not discarded,
+                    }
+                )
+        return {"records": items, "truncated": len(rows) > 100, "external_blockers": blocked}
+
+    def discard_legacy_memory_result(
+        self,
+        call_id: str,
+        *,
+        expected_fingerprint: str,
+        evidence_sha256: str,
+        actor: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        from noyra.cognition.execution_recovery import pending_effects
+        from noyra.cognition.memory_rounds import MemoryIntegrationRounds
+
+        actor, reason = self._validate_actor_reason(actor, reason)
+        if (
+            not isinstance(call_id, str)
+            or not 1 <= len(call_id) <= 256
+            or not MemoryIntegrationRounds.digest(expected_fingerprint)
+            or not MemoryIntegrationRounds.digest(evidence_sha256)
+        ):
+            raise OperatorControlConflict("invalid_memory_recovery_request")
+        with self._lock, self.kernel.admission.lifecycle_control_scope():
+            self.kernel.admission.require_owned(self.kernel.process_lock)
+            self._require_resume_health()
+            if self.kernel.admission.migration_fenced or self.kernel.admission.active_operations:
+                raise OperatorControlConflict("memory_recovery_not_drained_or_migration_fenced")
+            try:
+                with self.database.transaction() as c:
+                    lifecycle = c.execute(
+                        "SELECT state FROM runtime_state WHERE subject_id=?", (self.subject_id,)
+                    ).fetchone()
+                    if lifecycle is None or lifecycle[0] != "paused":
+                        raise OperatorControlConflict("memory_recovery_requires_paused")
+                    if any(pending_effects(c, self.subject_id).values()):
+                        raise OperatorControlConflict("memory_recovery_external_work_unresolved")
+                    result = MemoryIntegrationRounds(self.database, self.subject_id).discard_legacy(
+                        c,
+                        call_id,
+                        expected_fingerprint,
+                        actor=actor,
+                        reason=reason,
+                        evidence_sha256=evidence_sha256,
+                    )
+                    if not result["idempotent"]:
+                        self._audit_connection(
+                            c,
+                            "semantic_memory_legacy_discarded",
+                            actor,
+                            reason,
+                            {"call_id": call_id, "evidence_sha256": evidence_sha256},
+                        )
+                    return result
+            except ValueError as error:
+                raise OperatorControlConflict(
+                    "memory_recovery_snapshot_or_status_conflict"
+                ) from error
+            except (IntegrityError, sqlite3.Error) as error:
+                raise OperatorControlConflict("memory_recovery_evidence_unavailable") from error
+
     def workflow_clock_history(self, workflow_id: str) -> dict[str, Any]:
         from noyra.autonomy.workflow import DurableWorkflowStore
 
