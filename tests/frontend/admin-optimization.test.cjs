@@ -885,3 +885,53 @@ test("workflow service metadata distinguishes consideration from activity and es
   assert.ok(html.includes("时钟落后于历史"));
   assert.ok(html.includes("&lt;img") && !html.includes("<img>"));
 });
+
+
+function walletAutomationContext(automation, rejected = false) {
+  const { sandbox, nodes } = context({
+    walletPolicyLoadVersion: 0, renderWalletPolicy() {},
+    request: async (path) => {
+      if (path === "/api/admin/wallet-policy") return {};
+      if (rejected) throw new Error("synthetic unavailable");
+      return automation;
+    },
+  });
+  vm.runInContext(functionsBetween("const walletFailureReasonLabels =", "const providerHealthStateLabels ="), sandbox);
+  return { sandbox, nodes };
+}
+
+test("wallet observation errors never render zero pending or no failures", async () => {
+  for (const execution_observation of [undefined, { status: "unavailable" }]) {
+    const { sandbox, nodes } = walletAutomationContext({
+      status: "disabled", execution_observation, pending_reason_counts: null, latest_failure: null,
+    });
+    await sandbox.loadWalletPolicy();
+    assert.ok(nodes.get("#wallet-automation-status").textContent.includes("未知"));
+    assert.ok(!nodes.get("#wallet-automation-status").textContent.includes("待处理 0"));
+    assert.ok(nodes.get("#wallet-automation-failure").textContent.includes("未读取"));
+    assert.ok(!nodes.get("#wallet-automation-failure").textContent.includes("暂无"));
+  }
+});
+
+test("wallet observations distinguish a verified empty result and a real unknown delivery", async () => {
+  const automation = { status: "disabled", execution_observation: { status: "ok" },
+    pending_reason_counts: {}, latest_failure: null, emergency_paused: false };
+  const { sandbox, nodes } = walletAutomationContext(automation);
+  await sandbox.loadWalletPolicy();
+  assert.ok(nodes.get("#wallet-automation-status").textContent.includes("待处理 0"));
+  assert.ok(nodes.get("#wallet-automation-failure").textContent.includes("暂无"));
+  automation.pending_reason_counts = { broadcast_unknown: 2 };
+  automation.latest_failure = { reason_code: "broadcast_unknown", status: "unknown",
+    requires_reconciliation: true, updated_at: "2026-08-15T00:00:00Z" };
+  await sandbox.loadWalletPolicy();
+  assert.ok(nodes.get("#wallet-automation-status").textContent.includes("待处理 2"));
+  assert.ok(nodes.get("#wallet-automation-failure").textContent.includes("需人工对账"));
+});
+
+test("failed wallet refresh clears a stale healthy failure message", async () => {
+  const { sandbox, nodes } = walletAutomationContext({}, true);
+  sandbox.$("#wallet-automation-failure").textContent = "暂无待处理的付款失败或未知结果。";
+  await sandbox.loadWalletPolicy();
+  assert.ok(nodes.get("#wallet-automation-failure").textContent.includes("未读取"));
+  assert.ok(!nodes.get("#wallet-automation-failure").textContent.includes("暂无"));
+});

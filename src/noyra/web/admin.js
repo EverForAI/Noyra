@@ -1299,14 +1299,26 @@ async function loadWalletPolicy() {
     const automation = await request("/api/v1/admin/wallet-automation");
     if(version!==walletPolicyLoadVersion || !csrfToken)return;
     const label = automation.status === "paused" ? "紧急暂停中" : automation.status === "evidence_required" ? "自动付款受验收门禁阻断" : automation.status === "enabled" ? "自动付款已开启" : "自动付款已关闭";
-    $("#wallet-automation-status").textContent = `${label} · 待处理 ${Object.values(automation.pending_reason_counts || {}).reduce((a, b) => a + Number(b || 0), 0)} 项`;
+    const observed = automation.execution_observation?.status === "ok"
+      && automation.pending_reason_counts !== null
+      && typeof automation.pending_reason_counts === "object"
+      && !Array.isArray(automation.pending_reason_counts);
+    $("#wallet-automation-status").textContent = observed
+      ? `${label} · 待处理 ${Object.values(automation.pending_reason_counts).reduce((a, b) => a + Number(b || 0), 0)} 项`
+      : `${label} · 付款执行记录读取异常，待处理数量未知`;
     const failure = automation.latest_failure;
-    $("#wallet-automation-failure").textContent = failure
-      ? `${failure.requires_reconciliation ? "需人工对账" : "最近付款失败"}：${walletFailureReasonLabels[failure.reason_code] || "原因未知"} · ${failure.status} · ${failure.updated_at}`
-      : "暂无待处理的付款失败或未知结果。";
+    $("#wallet-automation-failure").textContent = !observed
+      ? "付款执行记录未读取，不按无失败处理。请稍后刷新。"
+      : failure
+        ? `${failure.requires_reconciliation ? "需人工对账" : "最近付款失败"}：${walletFailureReasonLabels[failure.reason_code] || "原因未知"} · ${failure.status} · ${formatTimestamp(failure.updated_at)}`
+        : "暂无待处理的付款失败或未知结果。";
     $("#wallet-automation-pause").disabled = automation.emergency_paused === true;
     $("#wallet-automation-resume").disabled = automation.emergency_paused !== true;
-  } catch (error) { setStatus("#wallet-automation-status", errorText(error), true); }
+  } catch (error) {
+    if(version!==walletPolicyLoadVersion || !csrfToken)return;
+    setStatus("#wallet-automation-status", errorText(error), true);
+    $("#wallet-automation-failure").textContent = "付款执行记录未读取，不按无失败处理。请稍后刷新。";
+  }
   setStatus("#wallet-policy-status", "策略已加载");
 }
 
