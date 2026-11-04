@@ -737,7 +737,11 @@ class MetacognitiveControl:
             outcome = "stagnant"
         elif any(token in result for token in ("failed", "rejected", "budget_exhausted")):
             outcome = "failed"
-        elif result.endswith("_waiting") or result.endswith("_waited"):
+        elif (
+            result == "action_deliberation_waiting_reconciliation"
+            or result.endswith("_waiting")
+            or result.endswith("_waited")
+        ):
             outcome = "stagnant"
         else:
             outcome = "unknown"

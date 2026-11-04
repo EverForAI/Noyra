@@ -218,6 +218,7 @@ docs/deployment/runtime-observation.md
 docs/deployment/setup-modes.md
 docs/deployment/ubuntu.md
 docs/deployment/windows-data-root-migration.md
+docs/development/action-deliberation-recovery.md
 docs/development/architecture-boundaries.md
 docs/development/autonomy-scheduling.md
 docs/development/checkpoint-clock-and-recovery.md
@@ -484,6 +485,7 @@ src/noyra/cognition/consciousness.py
 src/noyra/cognition/cycle.py
 src/noyra/cognition/decision_evidence.py
 src/noyra/cognition/deliberation.py
+src/noyra/cognition/deliberation_recovery.py
 src/noyra/cognition/epistemic.py
 src/noyra/cognition/execution.py
 src/noyra/cognition/execution_recovery.py
@@ -829,6 +831,7 @@ tests/test_a1_clock_recovery.py
 tests/test_a1_fair_scheduling.py
 tests/test_a1_read_boundaries.py
 tests/test_action_deliberation.py
+tests/test_action_deliberation_admission.py
 tests/test_action_integrity_diagnostic.py
 tests/test_action_prepare_admission.py
 tests/test_admin_optimization_logs.py

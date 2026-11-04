@@ -40,7 +40,8 @@ UNRUNNABLE_BUSINESS_CALL_SQL = """(
 def is_business_round(purpose: str) -> bool:
     parts = purpose.split(":")
     return (
-        (
+        (len(parts) == 2 and parts[0] == "action_deliberation" and parts[1].isdigit())
+        or (
             len(parts) == 3
             and parts[0] == "semantic_memory_integration"
             and parts[1] == "round"
