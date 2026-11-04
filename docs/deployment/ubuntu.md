@@ -131,8 +131,12 @@ that contains only that proxy (for a same-host proxy, normally `127.0.0.1/32` an
 Noyra ignores `X-Forwarded-For` from every other peer. Leaving this setting empty is safe for an
 SSH tunnel, but behind a reverse proxy it intentionally places all visitors in the proxy's shared
 rate-limit bucket. Never enter a broad client or internet CIDR: that would let clients spoof the
-source identity used by public-post and CAPTCHA abuse controls. Forwarded chains are bounded and
-parsed from the trusted proxy backwards.
+source identity used by public-post and CAPTCHA abuse controls. Default routes (`0.0.0.0/0` and
+`::/0`) are rejected. Forwarded chains, including repeated list-valued header fields, are bounded
+and parsed from the trusted proxy backwards; malformed or oversized chains fall back to the socket
+peer. The operator-authenticated `/api/v1/admin/readiness` response reports the loaded proxy CIDRs
+and forwarding mode under `client_ip_resolution`; it describes configuration, not a live proxy
+connection. The public `/health/ready` response does not expose this information.
 
 Strict migration review is separate from the default self-attested workflow. If
 `NOYRA_MIGRATION_REQUIRE_INDEPENDENT_REVIEW=true`, Noyra requires a proxy HMAC

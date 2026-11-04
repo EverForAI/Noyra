@@ -261,7 +261,9 @@ def handler_type(
 
         def do_POST(self) -> None:
             if not owner.allow_request(
-                owner.client_ip(str(self.client_address[0]), self.headers.get("X-Forwarded-For"))
+                owner.client_ip(
+                    str(self.client_address[0]), self.headers.get_all("X-Forwarded-For")
+                )
             ):
                 self._discard_small_request_body()
                 self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "rate_limited"})
@@ -724,7 +726,7 @@ def handler_type(
                 self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "json_required"})
                 return
             client_ip = owner.client_ip(
-                str(self.client_address[0]), self.headers.get("X-Forwarded-For")
+                str(self.client_address[0]), self.headers.get_all("X-Forwarded-For")
             )
             if not owner.allow_admin_login(client_ip):
                 self._discard_small_request_body()

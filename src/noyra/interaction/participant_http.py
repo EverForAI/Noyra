@@ -168,7 +168,7 @@ def dispatch(h: Any, owner: Any, method: str) -> bool:
         payload = h._request_json()
         if payload is None:
             return True
-        client = owner.client_ip(str(h.client_address[0]), h.headers.get("X-Forwarded-For"))
+        client = owner.client_ip(str(h.client_address[0]), h.headers.get_all("X-Forwarded-For"))
         public = path.rsplit("/", 1)[-1]
         if path != "/api/participants/" + public:
             raise LookupError("unknown_participant_route")

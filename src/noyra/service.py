@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future as ConcurrentFuture
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
@@ -1241,31 +1241,59 @@ class NoyraHTTPServer:
             }
         )
 
-    def client_ip(self, peer: str, forwarded_for: str | None = None) -> str:
+    def client_ip(self, peer: str, forwarded_for: str | Sequence[str] | None = None) -> str:
         """Resolve a rate-limit identity without trusting spoofable headers.
 
         X-Forwarded-For is considered only when the direct peer belongs to an
         explicitly configured trusted proxy network.  Walk the chain from the
         direct peer backwards and select the first address outside the trusted
         networks; this ignores attacker-supplied entries placed before a
-        trusted proxy's appended chain.  Without that configuration, the
-        socket peer remains authoritative.
+        trusted proxy's appended chain. Repeated header fields are combined in
+        arrival order because HTTP permits equivalent list-valued fields.
+        Without trusted proxy configuration, the socket peer remains
+        authoritative.
         """
         try:
             peer_address = ipaddress.ip_address(peer)
         except ValueError:
             return peer
-        trusted = any(
-            peer_address in ipaddress.ip_network(cidr, strict=False)
-            for cidr in self.settings.trusted_proxy_cidrs
+        trusted_networks = tuple(
+            ipaddress.ip_network(cidr, strict=False) for cidr in self.settings.trusted_proxy_cidrs
         )
-        if not trusted or not forwarded_for:
+
+        def is_trusted(address: Any) -> bool:
+            return any(
+                address.version == network.version and address in network
+                for network in trusted_networks
+            )
+
+        if not is_trusted(peer_address) or not forwarded_for:
             return str(peer_address)
-        if len(forwarded_for) > 4_096:
+
+        header_values: tuple[str, ...]
+        if isinstance(forwarded_for, str):
+            header_values = (forwarded_for,)
+        elif isinstance(forwarded_for, Sequence) and not isinstance(
+            forwarded_for, (bytes, bytearray)
+        ):
+            if any(not isinstance(value, str) for value in forwarded_for):
+                return str(peer_address)
+            header_values = tuple(forwarded_for)
+        else:
             return str(peer_address)
-        parts = forwarded_for.split(",")
-        if len(parts) > 32:
+
+        if not header_values or len(header_values) > 32:
             return str(peer_address)
+        total_chars = 0
+        parts: list[str] = []
+        for value in header_values:
+            total_chars += len(value) + 1
+            if total_chars > 4_096:
+                return str(peer_address)
+            parts.extend(value.split(","))
+            if len(parts) > 32:
+                return str(peer_address)
+
         parsed_chain: list[Any] = []
         for candidate in (part.strip() for part in parts):
             try:
@@ -1276,10 +1304,7 @@ class NoyraHTTPServer:
             except ValueError:
                 return str(peer_address)
         for candidate in reversed(parsed_chain):
-            if not any(
-                candidate in ipaddress.ip_network(cidr, strict=False)
-                for cidr in self.settings.trusted_proxy_cidrs
-            ):
+            if not is_trusted(candidate):
                 return str(candidate)
         return str(peer_address)
 

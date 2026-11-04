@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 def dispatch(self: RequestHandler, owner: NoyraHTTPServer) -> None:
     if not owner.allow_request(
-        owner.client_ip(str(self.client_address[0]), self.headers.get("X-Forwarded-For"))
+        owner.client_ip(str(self.client_address[0]), self.headers.get_all("X-Forwarded-For"))
     ):
         self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "rate_limited"})
         return

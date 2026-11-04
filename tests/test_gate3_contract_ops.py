@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from pathlib import Path
 from typing import Any, cast
 from urllib.error import HTTPError
@@ -60,6 +61,58 @@ def test_liveness_and_readiness_are_separate(tmp_path: Path) -> None:
         with urlopen(f"http://127.0.0.1:{port}/health/ready", timeout=5) as response:
             assert response.status == 200
             assert json.loads(response.read())["service"] == "noyra"
+    finally:
+        service.http.close()
+        service.kernel.close()
+
+
+def test_proxy_identity_diagnostic_is_private_and_repeated_headers_keep_chain_order(
+    tmp_path: Path,
+) -> None:
+    token = "proxy-readiness-token-with-enough-entropy-12345"
+    service = NoyraService(
+        _settings(
+            tmp_path,
+            operator_token=SecretStr(token),
+            trusted_proxy_cidrs=("127.0.0.1/32",),
+        )
+    )
+    service.boot()
+    service.http.start()
+    try:
+        _, port = service.http.address
+        resolved: list[str] = []
+        service.http.allow_request = cast(Any, lambda client: resolved.append(client) or True)
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as connection:
+            connection.sendall(
+                b"GET /health/live HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"X-Forwarded-For: 203.0.113.99\r\n"
+                b"X-Forwarded-For: 198.51.100.7, 127.0.0.1\r\n"
+                b"Connection: close\r\n\r\n"
+            )
+            response = bytearray()
+            while chunk := connection.recv(4096):
+                response.extend(chunk)
+        assert response.startswith(b"HTTP/1.0 200")
+        assert resolved == ["198.51.100.7"]
+
+        with urlopen(f"http://127.0.0.1:{port}/health/ready", timeout=5) as response:
+            public = json.loads(response.read())
+        assert public == {"status": "ok", "service": "noyra"}
+
+        request = Request(
+            f"http://127.0.0.1:{port}/api/v1/admin/readiness",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urlopen(request, timeout=5) as response:
+            detail = json.loads(response.read())
+        assert detail["client_ip_resolution"] == {
+            "scope": "configuration_only",
+            "mode": "trusted_proxy_chain",
+            "forwarded_for_policy": "trusted_peers_only",
+            "trusted_proxy_cidrs": ["127.0.0.1/32"],
+        }
     finally:
         service.http.close()
         service.kernel.close()

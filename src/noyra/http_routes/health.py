@@ -95,6 +95,18 @@ def health_ready_admin_readiness(
             "at_rest": at_rest,
             "cloud_archive": owner.cloud_archive_status,
             "components": components,
+            "client_ip_resolution": {
+                "scope": "configuration_only",
+                "mode": (
+                    "trusted_proxy_chain"
+                    if owner.settings.trusted_proxy_cidrs
+                    else "socket_peer_only"
+                ),
+                "forwarded_for_policy": (
+                    "trusted_peers_only" if owner.settings.trusted_proxy_cidrs else "ignored"
+                ),
+                "trusted_proxy_cidrs": list(owner.settings.trusted_proxy_cidrs),
+            },
         }
         reason_code = next(
             (

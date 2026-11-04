@@ -683,6 +683,7 @@ paths:
       tags: [operator]
       operationId: adminReadiness
       security: [{ operatorBearer: [] }]
+      description: Authenticated readiness includes client_ip_resolution, which reports the configured trusted proxy CIDRs and forwarding policy. It describes configuration only, not an observed request path. Public /health/ready remains limited to status and service.
       responses:
         '200': { description: Authenticated startup readiness and runtime identity }
         '401': { $ref: '#/components/responses/Unauthorized' }

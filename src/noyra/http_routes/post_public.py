@@ -63,7 +63,7 @@ def public_posts(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
             post_input,
             idempotency_key=idempotency_key,
             client_ip=owner.client_ip(
-                str(self.client_address[0]), self.headers.get("X-Forwarded-For")
+                str(self.client_address[0]), self.headers.get_all("X-Forwarded-For")
             ),
             captcha_id=payload.get("captcha_id"),
             captcha_answer=payload.get("captcha_answer"),

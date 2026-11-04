@@ -7,14 +7,16 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from noyra.core.types import content_hash
 from noyra.service import (
+    NoyraHTTPServer,
     ServiceSettings,
     _load_public_post_hash_key,
     _verify_trusted_proxy_principal,
@@ -33,6 +35,52 @@ def _settings(**changes: object) -> ServiceSettings:
         values["backup_keyring_path"] = Path(".runtime/test-security-profile/backup.keys")
     values.update(changes)
     return ServiceSettings(**values)
+
+
+def _resolved_client_ip(peer: str, forwarded_for: object, cidrs: tuple[str, ...]) -> str:
+    owner = cast(Any, SimpleNamespace(settings=SimpleNamespace(trusted_proxy_cidrs=cidrs)))
+    return NoyraHTTPServer.client_ip(owner, peer, cast(Any, forwarded_for))
+
+
+@pytest.mark.parametrize("cidr", ["0.0.0.0/0", "::/0"])
+def test_trusted_proxy_configuration_rejects_default_routes(cidr: str) -> None:
+    with pytest.raises(ValidationError, match="default routes cannot be trusted"):
+        _settings(trusted_proxy_cidrs=(cidr,))
+
+
+def test_client_ip_ignores_forwarded_headers_without_trusted_peer() -> None:
+    assert _resolved_client_ip("198.51.100.7", "203.0.113.99", ()) == "198.51.100.7"
+    assert _resolved_client_ip("198.51.100.7", "203.0.113.99", ("127.0.0.1/32",)) == "198.51.100.7"
+
+
+def test_client_ip_walks_repeated_forwarded_headers_from_proxy_side() -> None:
+    assert (
+        _resolved_client_ip(
+            "127.0.0.1",
+            ["203.0.113.99", "198.51.100.7, 127.0.0.1"],
+            ("127.0.0.1/32", "::1/128"),
+        )
+        == "198.51.100.7"
+    )
+
+
+def test_client_ip_resolves_ipv6_proxy_chain() -> None:
+    assert _resolved_client_ip("::1", "2001:db8::7, ::1", ("::1/128",)) == "2001:db8::7"
+
+
+@pytest.mark.parametrize(
+    "forwarded_for",
+    [
+        ["198.51.100.7", "malformed"],
+        ["x" * 4_097],
+        ["198.51.100.7"] * 33,
+        [", ".join(["198.51.100.7"] * 33)],
+    ],
+)
+def test_client_ip_fails_closed_on_malformed_or_over_budget_chains(
+    forwarded_for: list[str],
+) -> None:
+    assert _resolved_client_ip("127.0.0.1", forwarded_for, ("127.0.0.1/32",)) == "127.0.0.1"
 
 
 def test_production_profile_defaults_admin_session_cookie_to_secure() -> None:
