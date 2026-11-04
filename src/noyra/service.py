@@ -671,6 +671,7 @@ class NoyraHTTPServer:
         self._storage_observation_lock = threading.Lock()
         self._storage_observation_at = 0.0
         self._storage_observation: tuple[StorageContract, str] | None = None
+        self.integrity_watchdog_health: Callable[[], dict[str, Any]] | None = None
         self.runtime_observer = RuntimeObserver(
             self.kernel.database.path, self.settings.data_dir, self.kernel.subject_id
         )
@@ -1956,6 +1957,7 @@ class NoyraService:
             pre_tick_hook=self._integrity_pre_tick,
             next_wakeup_hook=self.integrity.seconds_until_due,
         )
+        self.http.integrity_watchdog_health = self.loop.integrity_watchdog.snapshot
         self._event_loop: asyncio.AbstractEventLoop | None = None
         self._stop_event: asyncio.Event | None = None
         self._integrity_worker: asyncio.Task[Any] | None = None

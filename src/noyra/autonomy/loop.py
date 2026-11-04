@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
 from noyra.core.events import EventStore
+from noyra.core.integrity_watchdog import IntegrityWatchdog
 from noyra.core.runtime import SubjectKernel
 from noyra.core.types import utc_now
 from noyra.sleep import FatigueTracker, SleepEngine, SleepReflectionPlan, SleepRunRecord
@@ -50,27 +51,38 @@ class AutonomyLoop:
         self._tick_lock = asyncio.Lock()
         self._clock = clock
         self._sleep_conflict_started_at: datetime | None = None
+        self.integrity_watchdog = IntegrityWatchdog(
+            kernel.database,
+            kernel.subject_id,
+            base_seconds=self.config.error_backoff_seconds,
+            maximum_seconds=self.config.max_error_backoff_seconds,
+            threshold=self.config.max_consecutive_failures,
+            clock=lambda: self._clock().isoformat(timespec="milliseconds"),
+        )
 
     async def tick(self) -> TickResult:
         async with self._tick_lock:
             if self.pre_tick_hook is not None:
+                remaining = self.integrity_watchdog.remaining()
+                if remaining > 0:
+                    return TickResult(
+                        self.kernel.lifecycle.current().state,
+                        "integrity_check_backoff",
+                        None,
+                        remaining,
+                    )
                 try:
                     guarded = await self.pre_tick_hook()
+                    self.integrity_watchdog.succeeded()
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
-                    event = self.events.append(
-                        self.kernel.subject_id,
-                        "integrity_watchdog_error",
-                        "runtime",
-                        {"error_type": type(error).__name__},
-                        privacy_level="private",
-                    )
+                    state, event_id = self.integrity_watchdog.failed(type(error).__name__)
                     return TickResult(
                         self.kernel.lifecycle.current().state,
                         "integrity_check_deferred",
-                        event.event_id,
-                        self.config.error_backoff_seconds,
+                        event_id,
+                        float(state["retry_seconds"]),
                     )
                 if guarded is not None:
                     return guarded
@@ -230,9 +242,14 @@ class AutonomyLoop:
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:
         while not stop_event.is_set():
+            watchdog_deferred = False
             try:
                 result = await self.tick()
                 interval = result.next_interval_seconds
+                watchdog_deferred = result.action in {
+                    "integrity_check_backoff",
+                    "integrity_check_deferred",
+                }
             except Exception as error:
                 self.events.append(
                     self.kernel.subject_id,
@@ -249,7 +266,7 @@ class AutonomyLoop:
                 saturation = max(0, math.ceil(math.log2(maximum / base)))
                 exponent = min(max(0, failures - 1), saturation)
                 interval = min(maximum, base * 2**exponent)
-            if self.next_wakeup_hook is not None:
+            if self.next_wakeup_hook is not None and not watchdog_deferred:
                 next_wakeup = self.next_wakeup_hook()
                 if next_wakeup is not None:
                     interval = min(interval, max(0.1, next_wakeup))
@@ -265,7 +282,7 @@ class AutonomyLoop:
                 "SELECT * FROM autonomy_loop_state WHERE subject_id = ?",
                 (self.kernel.subject_id,),
             ).fetchone()
-        return dict(row)
+        return {**dict(row), "integrity_watchdog": self.integrity_watchdog.health()}
 
     def _ensure_loop_state(self) -> None:
         now = utc_now()

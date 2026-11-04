@@ -22,6 +22,7 @@ from .recovery_budget import (
     RECOVERY_HOURLY_ATTEMPTS,
     parse_time,
     read_recovery,
+    recovery_high_water,
 )
 
 CALL_LIMIT = 100
@@ -176,6 +177,9 @@ class RuntimeObserver:
             polls: list[Any] = []
             autonomy_observation = "ok"
             try:
+                from .integrity_watchdog import read_watchdog
+
+                watchdog = read_watchdog(connection, self.subject_id)
                 recovery = read_recovery(connection, self.subject_id)
                 try:
                     schedule = ScheduleState.read_connection(connection, self.subject_id)
@@ -243,6 +247,7 @@ class RuntimeObserver:
                     else "unavailable"
                 )
                 recovery, project_rows, project_waits, polls = None, [], [], []
+                watchdog = None
                 schedule = None
             calls = connection.execute(
                 "SELECT call_id,status,usage_estimated,created_at,completed_at,resource_group_id,"
@@ -372,10 +377,26 @@ class RuntimeObserver:
                     durations.append(round((finish - begin).total_seconds() * 1000, 3))
             durations.sort()
             lifecycle = None if state is None else str(state["state"])
+            recovery_window_end = (
+                now if recovery is None else max(now, recovery_high_water(recovery))
+            )
             result.update(
                 {
                     "database_observation": "ok",
                     "autonomy_observation": autonomy_observation,
+                    "integrity_watchdog": {"status": "unavailable"}
+                    if autonomy_observation != "ok"
+                    else {"status": "not_triggered"}
+                    if watchdog is None
+                    else {
+                        **watchdog,
+                        "persisted": True,
+                        "status": "ok"
+                        if not watchdog["consecutive_failures"]
+                        else "escalated"
+                        if watchdog["escalated"]
+                        else "backoff",
+                    },
                     "workflow_schedule": schedule,
                     "autonomy_recovery": None
                     if recovery is None
@@ -384,8 +405,15 @@ class RuntimeObserver:
                         "reason": recovery["reason"],
                         "started_at": recovery["started_at"],
                         "stable_since": recovery.get("stable_since"),
+                        "last_health_evaluated_at": recovery.get("last_health_evaluated_at"),
+                        "clock_status": recovery.get("clock_status", "normal"),
+                        "clock_high_water_at": recovery_high_water(recovery).isoformat(),
+                        "observed_at": recovery.get("observed_at"),
+                        "exit_conditions": recovery.get("exit_conditions", []),
                         "reserved_attempts_rolling_day": sum(
-                            now - timedelta(days=1) < parse_time(r["reserved_at"]) <= now
+                            recovery_window_end - timedelta(days=1)
+                            < parse_time(r["reserved_at"])
+                            <= recovery_window_end
                             for r in recovery["reservations"]
                         ),
                         "temporary_limits": {

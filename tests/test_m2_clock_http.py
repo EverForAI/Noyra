@@ -81,3 +81,20 @@ def test_clock_recovery_is_operator_csrf_snapshot_bound_and_never_resumes(
             == 1
         )
         assert c.execute("SELECT COUNT(*) FROM model_calls").fetchone()[0] == 0
+
+
+def test_runtime_summary_prefers_actual_service_watchdog_without_mutating_cached_snapshot(
+    http: NoyraHTTPServer,
+) -> None:
+    headers = {"Authorization": "Bearer " + TOKENS["operator"]}
+    http.integrity_watchdog_health = lambda: {
+        "status": "backoff",
+        "persisted": False,
+        "consecutive_failures": 3,
+    }
+    status, summary, _ = call(http, "/api/admin/runtime-summary", headers=headers)
+    assert status == 200 and summary["integrity_watchdog"]["persisted"] is False
+    assert summary["integrity_watchdog"]["consecutive_failures"] == 3
+    http.integrity_watchdog_health = None
+    status, summary, _ = call(http, "/api/admin/runtime-summary", headers=headers)
+    assert status == 200 and summary["integrity_watchdog"] == {"status": "not_triggered"}

@@ -1021,3 +1021,21 @@ test("project recovery explains committed release when refresh fails and disable
   assert.equal(nodes.get("#project-recovery-list").innerHTML,"");
   await sandbox.releaseProjectExecutionReview(event);assert.equal(calls,2);
 });
+
+
+test("recovery exit explains fixed conditions and checker failures without trusting injected labels",()=>{
+  const {sandbox,nodes}=observationContext();
+  const observation={format:"noyra-runtime-observation/v1",autonomy_observation:"ok",lifecycle:"active",
+    cognition:{enabled:true},resources:{},autonomy_recovery:{active:true,reserved_attempts_rolling_day:6,
+      last_health_evaluated_at:"2026-11-04T12:00:00+00:00",clock_status:"wall_clock_behind_history",
+      exit_conditions:[{code:"wall_clock",satisfied:false,unmet_since:"2026-11-04T11:59:59+00:00",observed_at:"2026-11-04T11:59:59+00:00"},
+        {code:"<unsafe>",label:"private injected label",satisfied:false,observed_at:"2026-11-04T12:00:00+00:00"}]},
+    integrity_watchdog:{status:"escalated",consecutive_failures:5,escalated:true,next_retry_at:"2026-11-04T12:30:00+00:00"}};
+  sandbox.renderRuntimeObservation(observation,{lifecycle:{state:"active"}});
+  const html=nodes.get("#cognition-summary").innerHTML;
+  assert.match(html,/墙钟追平历史：未满足/);
+  assert.match(html,/不重开预算/);
+  assert.match(html,/已升级告警/);
+  assert.match(html,/尚无|未识别条件/);
+  assert.ok(!html.includes("<unsafe>")&&!html.includes("private injected label"));
+});

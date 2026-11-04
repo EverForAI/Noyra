@@ -213,3 +213,28 @@ async def test_recovery_exit_uses_the_same_real_project_dependency_wait_as_revie
     assert next(c for c in state["exit_conditions"] if c["code"] == "project_coordination")[
         "satisfied"
     ]
+
+
+@pytest.mark.asyncio
+async def test_stale_dependency_label_cannot_hide_an_uncoordinated_interrupted_attempt(
+    case: helpers.AutonomousProjectsTestCase,
+) -> None:
+    from test_project_execution_recovery import interrupted
+
+    manager, _ = await interrupted(case)
+    project = manager.projects()[0]
+    assert not manager.pending_dependencies(project)
+    manager.review_control.record(project, "waiting_dependencies")
+    arm(case)
+    with case.kernel.database.transaction() as c:
+        state = read_recovery(c, case.subject_id)
+        assert state is not None
+        state["project_ids"] = [project.project_id]
+        write_recovery(c, case.subject_id, state, case.clock_value)
+    result = AutonomyRecovery(
+        case.kernel.database, case.subject_id, clock=lambda: case.clock_value
+    ).refresh()
+    assert result is not None
+    assert not next(c for c in result["exit_conditions"] if c["code"] == "project_coordination")[
+        "satisfied"
+    ]

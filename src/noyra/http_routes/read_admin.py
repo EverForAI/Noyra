@@ -150,6 +150,14 @@ def admin_runtime_summary(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
             {"error": "runtime_observation_busy"},
         )
         return True
+    if owner.integrity_watchdog_health is not None:
+        try:
+            watchdog = owner.integrity_watchdog_health()
+        except Exception:
+            watchdog = {"status": "unavailable"}
+        # Do not mutate the observer's cached database snapshot. The service
+        # supplies current in-memory fallback health when writes are unavailable.
+        observation = {**observation, "integrity_watchdog": watchdog}
     self._json(HTTPStatus.OK, observation)
     return False
 

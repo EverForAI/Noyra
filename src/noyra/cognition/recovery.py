@@ -110,7 +110,6 @@ class AutonomyRecovery:
                     "help_public_summary_requires_review",
                     "subject_wait",
                     "review_backoff",
-                    "waiting_dependencies",
                 }
                 for project_id in state["project_ids"]:
                     row = connection.execute(

@@ -220,6 +220,7 @@ docs/deployment/ubuntu.md
 docs/deployment/windows-data-root-migration.md
 docs/development/architecture-boundaries.md
 docs/development/autonomy-scheduling.md
+docs/development/checkpoint-clock-and-recovery.md
 docs/development/project-coordination.md
 docs/development/world-acquisition-design.md
 docs/evaluation.md
@@ -530,6 +531,7 @@ src/noyra/core/fair_scheduling.py
 src/noyra/core/http.py
 src/noyra/core/identity.py
 src/noyra/core/integrity.py
+src/noyra/core/integrity_watchdog.py
 src/noyra/core/lifecycle.py
 src/noyra/core/locking.py
 src/noyra/core/maintenance_evidence.py
@@ -915,6 +917,7 @@ tests/test_legacy_schema71_upgrade.py
 tests/test_locking.py
 tests/test_m2_checkpoint_clock.py
 tests/test_m2_clock_http.py
+tests/test_m2_integrity_watchdog.py
 tests/test_m2_recovery_exit.py
 tests/test_m41_verification_foundation.py
 tests/test_m42_p1_01_sleep_deadlock.py
