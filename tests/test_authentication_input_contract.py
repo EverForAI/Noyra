@@ -195,3 +195,60 @@ def test_non_ascii_login_consumes_the_same_durable_failure_budget(
         429,
         {"error": "admin_login_rate_limited"},
     )
+
+
+def test_non_ascii_webhook_authentication_returns_401_without_worker_error(
+    server: NoyraHTTPServer,
+) -> None:
+    from noyra.interaction import TransportInput
+    from noyra.interaction.transport import TransportChannel
+
+    channels: tuple[tuple[TransportChannel, str], ...] = (
+        ("webhook", "X-Noyra-Signature"),
+        ("feishu", "X-Lark-Signature"),
+        ("telegram", "X-Telegram-Bot-Api-Secret-Token"),
+        ("wechat", "X-Wechat-Signature"),
+    )
+
+    for channel, signature_header in channels:
+        transport = server.transports.configure(
+            server.kernel.subject_id,
+            TransportInput(
+                channel=channel,
+                label="Synthetic " + channel,
+                endpoint={
+                    "webhook": "https://example.com/inbound",
+                    "feishu": "https://open.feishu.cn",
+                    "telegram": "https://api.telegram.org",
+                    "wechat": "https://api.weixin.qq.com",
+                }[channel],
+                credentials={
+                    "webhook_secret": SecretStr("synthetic-secret"),
+                    "verification_token": SecretStr("synthetic-secret"),
+                    "encrypt_key": SecretStr("synthetic-secret"),
+                },
+            ),
+            actor="operator",
+        )
+        import time
+
+        now = str(int(time.time()))
+        for prefix in ("/webhooks/", "/api/v1/webhooks/"):
+            status, payload, _ = call(
+                server,
+                prefix + channel + "/" + transport.transport_id,
+                payload={},
+                headers={
+                    signature_header: "café",
+                    "X-Noyra-Timestamp": now,
+                    "X-Noyra-Nonce": "n",
+                    "X-Lark-Request-Timestamp": now,
+                    "X-Lark-Request-Nonce": "n",
+                    "X-Wechat-Timestamp": now,
+                    "X-Wechat-Nonce": "n",
+                },
+            )
+            assert (status, payload) == (401, {"error": "inbound_unauthorized"})
+    with server.kernel.database.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM interactions").fetchone()[0] == 0
+    assert call(server, "/health/live")[0] == 200

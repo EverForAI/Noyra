@@ -1134,3 +1134,82 @@ def test_native_http_callbacks_use_platform_handshakes_and_acknowledgements(
     finally:
         service.http.close()
         service.kernel.close()
+
+
+@pytest.mark.parametrize("signature", ["café", "签名", "\ud800"])
+@pytest.mark.parametrize(
+    "channel", ["hmac", "feishu", "wechat", "wechat-encrypted", "telegram", "feishu-token"]
+)
+def test_external_authentication_rejects_non_ascii_as_authentication_failure(
+    channel: str,
+    signature: str,
+) -> None:
+    from noyra.interaction import TelegramInboundAdapter, WeChatInboundAdapter
+    from noyra.interaction.inbound import (
+        _verify_feishu_signature,
+        _verify_hmac,
+        _verify_wechat_signature,
+    )
+
+    now = str(int(time.time()))
+    with pytest.raises(InboundAuthenticationError):
+        if channel == "hmac":
+            _verify_hmac(
+                b"{}",
+                {
+                    "X-Noyra-Timestamp": now,
+                    "X-Noyra-Nonce": "n",
+                    "X-Noyra-Signature": signature,
+                },
+                "secret",
+                header="X-Noyra-Signature",
+            )
+        elif channel == "feishu":
+            _verify_feishu_signature(
+                b"{}",
+                {
+                    "X-Lark-Request-Timestamp": now,
+                    "X-Lark-Request-Nonce": "n",
+                    "X-Lark-Signature": signature,
+                },
+                "secret",
+                required=True,
+            )
+        elif channel == "wechat":
+            _verify_wechat_signature(
+                {
+                    "X-Wechat-Timestamp": now,
+                    "X-Wechat-Nonce": "n",
+                    "X-Wechat-Signature": signature,
+                },
+                "secret",
+            )
+        elif channel == "wechat-encrypted":
+            WeChatInboundAdapter().parse(
+                b"<xml><Encrypt>synthetic-not-decrypted</Encrypt></xml>",
+                {
+                    "X-Wechat-Timestamp": now,
+                    "X-Wechat-Nonce": "n",
+                    "X-Wechat-MsgSignature": signature,
+                },
+                transport_id="transport",
+                secret="secret",
+                encryption_key="synthetic-key",
+                account_id="wx-app",
+            )
+        elif channel == "telegram":
+            TelegramInboundAdapter().parse(
+                b"{}",
+                {"X-Telegram-Bot-Api-Secret-Token": signature},
+                transport_id="transport",
+                secret="secret",
+            )
+        else:
+            FeishuInboundAdapter().parse(
+                json.dumps(
+                    {"type": "url_verification", "token": signature, "challenge": "synthetic"}
+                ).encode(),
+                {},
+                transport_id="transport",
+                secret="secret",
+            )

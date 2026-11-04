@@ -191,6 +191,11 @@ def _text(value: Any, field: str, *, required: bool = True, limit: int = 512) ->
     return result
 
 
+def _matches_ascii(supplied: str, expected: str) -> bool:
+    """Reject malformed wire tokens without normalizing them or raising TypeError."""
+    return supplied.isascii() and expected.isascii() and hmac.compare_digest(supplied, expected)
+
+
 def _verify_hmac(body: bytes, headers: Mapping[str, str], secret: str, *, header: str) -> None:
     if not secret:
         raise InboundAuthenticationError("inbound signature secret is not configured")
@@ -210,7 +215,7 @@ def _verify_hmac(body: bytes, headers: Mapping[str, str], secret: str, *, header
     message = f"{timestamp_value}.{nonce}.".encode() + body
     digest = hmac.new(secret.encode(), message, hashlib.sha256).digest()
     candidate = signature.removeprefix("sha256=")
-    valid = hmac.compare_digest(candidate.casefold(), digest.hex())
+    valid = _matches_ascii(candidate.casefold(), digest.hex())
     if not valid:
         try:
             valid = hmac.compare_digest(base64.b64decode(candidate, validate=True), digest)
@@ -252,7 +257,7 @@ def _verify_feishu_signature(
     if abs(time.time() - timestamp_value) > REPLAY_WINDOW_SECONDS:
         raise InboundAuthenticationError("feishu signature is stale")
     expected = hashlib.sha256(f"{timestamp}{nonce}{secret}".encode() + body).hexdigest()
-    if not hmac.compare_digest(signature, expected):
+    if not _matches_ascii(signature, expected):
         raise InboundAuthenticationError("feishu signature is invalid")
 
 
@@ -271,7 +276,7 @@ def _verify_wechat_signature(headers: Mapping[str, str], secret: str) -> None:
     if abs(time.time() - timestamp_value) > REPLAY_WINDOW_SECONDS:
         raise InboundAuthenticationError("wechat signature is stale")
     expected = hashlib.sha1("".join(sorted((secret, timestamp, nonce))).encode()).hexdigest()
-    if not hmac.compare_digest(signature, expected):
+    if not _matches_ascii(signature, expected):
         raise InboundAuthenticationError("wechat signature is invalid")
 
 
@@ -376,7 +381,7 @@ class TelegramInboundAdapter:
         account_id: str | None = None,
     ) -> InboundEnvelope:
         expected = _header(headers, "X-Telegram-Bot-Api-Secret-Token")
-        if not secret or not expected or not hmac.compare_digest(expected, secret):
+        if not secret or not expected or not _matches_ascii(expected, secret):
             raise InboundAuthenticationError("telegram webhook secret is invalid")
         payload = _json(body)
         message = payload.get("message") or payload.get("edited_message")
@@ -441,7 +446,7 @@ class FeishuInboundAdapter:
         if token is None:
             raise InboundAuthenticationError("feishu verification token is missing")
         token_text = _text(token, "feishu verification token")
-        if not hmac.compare_digest(token_text, secret):
+        if not _matches_ascii(token_text, secret):
             raise InboundAuthenticationError("feishu verification token is invalid")
         if payload.get("type") == "url_verification":
             return InboundChallenge(_text(payload.get("challenge"), "challenge"))
@@ -684,7 +689,7 @@ class WeChatInboundAdapter:
                 expected = hashlib.sha1(
                     "".join(sorted((secret, timestamp, nonce, encrypted))).encode()
                 ).hexdigest()
-                if not hmac.compare_digest(signature, expected):
+                if not _matches_ascii(signature, expected):
                     raise InboundAuthenticationError("wechat encrypted signature is invalid")
                 raw = self._decrypt_xml(
                     encrypted,
@@ -785,7 +790,7 @@ class WeChatInboundAdapter:
                 raise ValueError("wechat AES plaintext is invalid")
         except (ValueError, UnicodeDecodeError, binascii.Error, ImportError) as error:
             raise ValueError("wechat encrypted callback cannot be decrypted") from error
-        if not expected_account_id.strip() or not hmac.compare_digest(
+        if not expected_account_id.strip() or not _matches_ascii(
             app_id, expected_account_id.strip()
         ):
             raise InboundAuthenticationError("wechat AES account identity is invalid")
