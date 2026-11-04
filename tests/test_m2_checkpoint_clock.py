@@ -240,7 +240,8 @@ def test_clock_receipt_survives_real_encrypted_event_archiving(
     monkeypatch.setattr("noyra.autonomy.workflow.utc_now", lambda: "2026-08-04T12:00:00+00:00")
     write(store, 1)
     monkeypatch.setattr("noyra.autonomy.workflow.utc_now", lambda: "2026-08-04T11:59:59+00:00")
-    write(store, 2)
+    for version in range(2, 7):
+        write(store, version)
     monkeypatch.setenv(
         "NOYRA_ARCHIVE_ENCRYPTION_KEY", base64.urlsafe_b64encode(bytes(range(32))).decode()
     )
@@ -256,12 +257,21 @@ def test_clock_receipt_survives_real_encrypted_event_archiving(
     )
     with patch("noyra.core.event_archive.datetime", Future):
         assert archive.archive_cold("one", older_than_days=90) > 0
-    assert (
-        DurableWorkflowStore(Database(store.database.path, initialize=False)).verify_integrity(
-            "one"
+    loads = []
+    original = EventPayloadArchive.load_segment
+
+    def tracked(self: Any, *args: Any, **kwargs: Any) -> Any:
+        loads.append(1)
+        return original(self, *args, **kwargs)
+
+    with patch.object(EventPayloadArchive, "load_segment", tracked):
+        assert (
+            DurableWorkflowStore(Database(store.database.path, initialize=False)).verify_integrity(
+                "one"
+            )
+            == 6
         )
-        == 2
-    )
+    assert len(loads) == 1
     EventStore(store.database).verify_chain("one")
 
 

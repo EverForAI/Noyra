@@ -7,6 +7,7 @@ from typing import Any, ClassVar
 from noyra.core import checkpoint_clock
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
+from noyra.core.events import EventStore
 from noyra.core.types import (
     canonical_json,
     content_hash,
@@ -96,6 +97,13 @@ class DurableWorkflowStore:
             return self._clock_history(connection, subject_id, workflow_id)
 
     def _clock_history(self, connection: Any, subject_id: str, workflow_id: str) -> dict[str, Any]:
+        size = connection.execute(
+            "SELECT COUNT(*),COALESCE(SUM(length(CAST(state_json AS BLOB))),0) "
+            "FROM workflow_checkpoints WHERE workflow_id=?",
+            (workflow_id,),
+        ).fetchone()
+        if size[0] > 50000 or size[1] > 16 * 1024 * 1024:
+            raise ValueError("checkpoint clock history exceeds recovery bound")
         rows = connection.execute(
             "SELECT * FROM workflow_checkpoints WHERE workflow_id=? "
             "ORDER BY checkpoint_version LIMIT 50001",
@@ -247,6 +255,7 @@ class DurableWorkflowStore:
             "ORDER BY workflow_id, checkpoint_version",
             (subject_id,),
         ).fetchall()
+        events = None if database is None else EventStore(database)
         previous: dict[str, WorkflowCheckpoint] = {}
         previous_rows: dict[str, Any] = {}
         watermarks: dict[str, str] = {}
@@ -272,12 +281,17 @@ class DurableWorkflowStore:
                 allow_unexplained_clock
                 and watermark is not None
                 and cls._parse_time(record.created_at) < cls._parse_time(watermark)
-                and checkpoint_clock.receipt(connection, row, database) is None
+                and checkpoint_clock.receipt(connection, row, database, events=events) is None
             ):
                 pass
             else:
                 watermark = checkpoint_clock.verify(
-                    connection, row, previous_rows.get(record.workflow_id), watermark, database
+                    connection,
+                    row,
+                    previous_rows.get(record.workflow_id),
+                    watermark,
+                    database,
+                    events=events,
                 )
             watermarks[record.workflow_id] = watermark or record.created_at
             previous_rows[record.workflow_id] = row

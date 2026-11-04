@@ -18,7 +18,13 @@ def receipt_id(subject: str, workflow: str, version: int) -> str:
     return "evt_workflow_clock_" + content_hash([subject, workflow, version])
 
 
-def receipt(connection: Any, row: Any, database: Database | None = None) -> dict[str, Any] | None:
+def receipt(
+    connection: Any,
+    row: Any,
+    database: Database | None = None,
+    *,
+    events: EventStore | None = None,
+) -> dict[str, Any] | None:
     event = connection.execute(
         "SELECT * FROM events WHERE event_id=?",
         (receipt_id(row["subject_id"], row["workflow_id"], row["checkpoint_version"]),),
@@ -26,7 +32,7 @@ def receipt(connection: Any, row: Any, database: Database | None = None) -> dict
     if event is None:
         return None
     if database is not None:
-        payload = EventStore(database).payload_from_row(event, connection=connection)
+        payload = (events or EventStore(database)).payload_from_row(event, connection=connection)
     else:
         if event["payload_archive_key"] is not None:
             raise IntegrityError("archived checkpoint clock evidence needs its database")
@@ -133,10 +139,12 @@ def verify(
     previous: Any,
     watermark: str | None,
     database: Database | None = None,
+    *,
+    events: EventStore | None = None,
 ) -> str:
     current = aware_time(row["created_at"])
     before = None if watermark is None else aware_time(watermark)
-    saved = receipt(connection, row, database)
+    saved = receipt(connection, row, database, events=events)
     if saved is not None:
         observed = aware_time(saved["observed_at"])
         high = aware_time(saved["high_water_at"])
