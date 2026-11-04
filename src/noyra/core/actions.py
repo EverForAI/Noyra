@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import nullcontext
 from typing import Any
 
@@ -45,6 +46,7 @@ class ActionLedger:
         side_effect: bool = False,
         resource_cost: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        before_prepare: Callable[[Any], None] | None = None,
     ) -> ActionRecord:
         if not action_type.strip() or not tool.strip() or not target.strip():
             raise ValueError("action_type, tool and target are required")
@@ -111,6 +113,10 @@ class ActionLedger:
                 raise InvalidTransitionError(
                     "this strategy is blocked until genuinely new evidence is recorded"
                 )
+            if before_prepare is not None:
+                # Caller admission is checked in the same writer transaction as
+                # the intent. Never run external work in this callback.
+                before_prepare(connection)
             existing = connection.execute(
                 "SELECT * FROM actions WHERE subject_id = ? AND idempotency_key = ?",
                 (subject_id, idempotency_key),

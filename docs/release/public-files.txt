@@ -830,6 +830,7 @@ tests/test_a1_fair_scheduling.py
 tests/test_a1_read_boundaries.py
 tests/test_action_deliberation.py
 tests/test_action_integrity_diagnostic.py
+tests/test_action_prepare_admission.py
 tests/test_admin_optimization_logs.py
 tests/test_admin_session_durable.py
 tests/test_affect_policy.py

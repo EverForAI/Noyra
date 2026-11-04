@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from noyra.core.actions import ActionLedger
 from noyra.core.admission import OperationInvalidated, accounting_scope, assert_current_lease
@@ -146,6 +148,7 @@ class ToolRunner:
         public_goal_reference: str | None = None,
         candidate_trial: bool = False,
         max_observation_chars: int = 50_000,
+        before_prepare: Callable[[Any], None] | None = None,
     ) -> WebToolResult:
         if candidate_trial:
             if not 1_024 <= max_observation_chars <= 500_000:
@@ -180,6 +183,7 @@ class ToolRunner:
             expected_outcome=expected_outcome,
             side_effect=False,
             idempotency_key=idempotency_key,
+            before_prepare=before_prepare,
         )
         if candidate_trial and action.status == "executing":
             # A prior process may have sent this read. Preserve uncertainty;
