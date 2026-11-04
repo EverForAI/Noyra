@@ -420,6 +420,10 @@ class ProjectExecutionLedger:
                     raise ProjectExecutionError("terminal execution cannot transition")
                 self._verify_execution_connection(connection, row)
                 return current
+            from .execution_recovery import read_release
+
+            if read_release(connection, self.database, row) is not None:
+                raise ProjectExecutionError("review-released execution cannot transition")
             if current.status == "prepared" and status != "executing":
                 raise ProjectExecutionError("prepared execution must enter executing state")
             acceptance = dict(current.acceptance)
@@ -686,6 +690,9 @@ class ProjectExecutionLedger:
         elif isinstance(validator, dict) and validator.get("status") == "passed":
             raise IntegrityError("non-successful project execution has a passed validator")
 
+        from .execution_recovery import read_release
+
+        read_release(connection, self.database, row)
         if project_phase["phase_status"] == "completed" and record.status == "succeeded":
             return
         if project_phase["project_status"] == "completed" and project_phase["phase_status"] != (

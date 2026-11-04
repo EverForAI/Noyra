@@ -398,12 +398,20 @@ class AutonomousProjectManager:
             )
             return None
         execution = self.phase_execution(project)
-        if execution is not None and execution.status == "unknown":
+        released = False
+        if execution is not None and execution.status in {"executing", "unknown"}:
+            from .execution_recovery import ProjectExecutionRecovery
+
+            released = ProjectExecutionRecovery(self.database, self.subject_id).released_for_review(
+                execution.execution_id
+            )
+        if execution is not None and execution.status == "unknown" and not released:
             self.review_control.record(project, "awaiting_reconciliation")
             return None
         if (
             execution is not None
             and execution.status == "executing"
+            and not released
             and execution.execution_type != "prediction_record"
             and not self.phase_needs_work(project, execution)
         ):
@@ -425,11 +433,15 @@ class AutonomousProjectManager:
         due_at = control["next_due_at"]
         if due_at is not None and self._parse_time(self.clock()) < self._parse_time(due_at):
             return None
-        result_due = execution is not None and execution.status in {
-            "succeeded",
-            "failed",
-            "blocked",
-        }
+        result_due = released or (
+            execution is not None
+            and execution.status
+            in {
+                "succeeded",
+                "failed",
+                "blocked",
+            }
+        )
         if project.status == "active" and not result_due and not self._review_due(project):
             return None
         return await self._execute_review(project)
@@ -1559,7 +1571,26 @@ class AutonomousProjectManager:
                 item["execution_id"],
             )
             executions.append(item)
+        from .execution_recovery import read_release
+
+        review_recovery = []
+        with self.database.read_transaction() as connection:
+            for item in executions:
+                row = connection.execute(
+                    "SELECT * FROM autonomous_project_executions WHERE execution_id=? "
+                    "AND subject_id=?",
+                    (item["execution_id"], self.subject_id),
+                ).fetchone()
+                release = None if row is None else read_release(connection, self.database, row)
+                if release is not None:
+                    review_recovery.append(
+                        {
+                            "execution_id": item["execution_id"],
+                            "disposition": "review_only_not_success",
+                        }
+                    )
         payload: dict[str, Any] = {
+            "review_recovery": review_recovery,
             "project": self._project_public_context(project),
             "phases": [self._phase_context(phase) for phase in phases],
             "resource_usage": usage,
@@ -1612,6 +1643,8 @@ class AutonomousProjectManager:
     def _review_messages(context: _ReviewContext) -> tuple[ModelMessage, ...]:
         system = (
             "You review one already-formed autonomous Noyra project. Human messages are absent. "
+            "Review-only recovery metadata permits consideration, "
+            "never proves success or orders a retry. "
             "Choose activate, continue, complete_phase, scale_down, pause, abandon, request_help, "
             "or wait. Do not claim a phase complete without supplied durable evidence. "
             "Do not increase any resource budget. Help must identify one concrete missing input. "
@@ -1925,6 +1958,38 @@ class AutonomousProjectManager:
                 project.current_revision
             ):
                 raise AutonomousProjectValidationError("project changed before review commit")
+            if proposal.disposition in {"activate", "continue", "wait"}:
+                from .execution_recovery import (
+                    ProjectExecutionRecovery,
+                    pending_effects,
+                    read_release,
+                )
+
+                prior = connection.execute(
+                    "SELECT * FROM autonomous_project_executions WHERE subject_id=? "
+                    "AND execution_key=?",
+                    (
+                        self.subject_id,
+                        f"{project.project_id}:{phase.phase_id}:{phase.attempt_count}",
+                    ),
+                ).fetchone()
+                if (
+                    prior is not None
+                    and prior["status"] in {"unknown", "executing"}
+                    and prior["execution_type"]
+                    in {"research_note", "knowledge_collection", "software_prototype"}
+                ):
+                    recovery = ProjectExecutionRecovery(self.database, self.subject_id)
+                    _, _, current_phase = recovery.load(connection, prior["execution_id"])
+                    if (
+                        read_release(connection, self.database, prior) is None
+                        or current_phase["current_revision"] != phase.current_revision
+                        or not recovery.current(prior, current_row, current_phase)
+                        or any(pending_effects(connection, self.subject_id).values())
+                    ):
+                        raise AutonomousProjectValidationError(
+                            "execution recovery no longer permits review"
+                        )
             resulting_status = project.status
             progress = project.progress
             current_phase_id = project.current_phase_id

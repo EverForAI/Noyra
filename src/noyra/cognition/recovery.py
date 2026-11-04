@@ -105,7 +105,8 @@ class AutonomyRecovery:
                     if (
                         row is not None
                         and row["status"] == "active"
-                        and row["result_status"] in {"succeeded", "failed", "blocked", "unknown"}
+                        and row["result_status"]
+                        in {"executing", "succeeded", "failed", "blocked", "unknown"}
                     ):
                         control_key = "project-review-control:" + content_hash(
                             {

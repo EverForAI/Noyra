@@ -469,6 +469,77 @@ class OperatorControlService:
             )
             return {"call_id": call_id, "status": record.status, "idempotent": False}
 
+    def project_execution_recovery(self, *, limit: int = 50) -> dict[str, Any]:
+        from noyra.cognition.execution_recovery import ProjectExecutionRecovery
+
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("invalid recovery limit")
+        with self.database.read_transaction() as connection:
+            result = ProjectExecutionRecovery(self.database, self.subject_id).catalog(
+                connection, limit=limit
+            )
+            lifecycle = connection.execute(
+                "SELECT state FROM runtime_state WHERE subject_id=?", (self.subject_id,)
+            ).fetchone()
+            paused = lifecycle is not None and lifecycle[0] == "paused"
+            result["runtime_paused"] = paused
+            result["migration_fenced"] = self.kernel.admission.migration_fenced
+            result["runtime_owned"] = self.kernel.process_lock.held
+            result["operations_drained"] = self.kernel.admission.active_operations == 0
+            for item in result["records"]:
+                item["can_release"] = bool(
+                    item.pop("eligible")
+                    and paused
+                    and result["operations_drained"]
+                    and result["runtime_owned"]
+                    and not result["migration_fenced"]
+                    and not self.kernel.admission.quarantined
+                    and not self.kernel.admission.closed
+                )
+        return result
+
+    def release_project_execution_review(
+        self, execution_id: str, *, expected_fingerprint: str, actor: str, reason: str
+    ) -> dict[str, Any]:
+        from noyra.cognition.execution_recovery import ProjectExecutionRecovery
+
+        actor, reason = self._validate_actor_reason(actor, reason)
+        if (
+            not isinstance(execution_id, str)
+            or not 1 <= len(execution_id) <= 256
+            or not isinstance(expected_fingerprint, str)
+            or len(expected_fingerprint) != 64
+            or set(expected_fingerprint) - set("0123456789abcdef")
+        ):
+            raise OperatorControlConflict("invalid_project_recovery_request")
+        with self._lock, self.kernel.admission.lifecycle_control_scope():
+            self.kernel.admission.require_owned(self.kernel.process_lock)
+            if self.kernel.admission.migration_fenced:
+                raise OperatorControlConflict("project_recovery_migration_fenced")
+            self._require_resume_health()
+            if self.kernel.admission.active_operations:
+                raise OperatorControlConflict("project_recovery_operations_not_drained")
+            try:
+                with self.database.transaction() as connection:
+                    result = ProjectExecutionRecovery(self.database, self.subject_id).release(
+                        connection, execution_id, expected_fingerprint, actor=actor, reason=reason
+                    )
+                    if not result["idempotent"]:
+                        self._audit_connection(
+                            connection,
+                            "project_execution_review_released",
+                            actor,
+                            reason,
+                            {"execution_id": execution_id, "disposition": "review_only"},
+                        )
+                    return result
+            except NotFoundError as error:
+                raise OperatorControlNotFound("project execution not found") from error
+            except ValueError as error:
+                raise OperatorControlConflict(str(error)) from error
+            except (IntegrityError, sqlite3.Error) as error:
+                raise OperatorControlConflict("project_recovery_evidence_unavailable") from error
+
     def recoverable_work(self, *, limit: int = 100) -> dict[str, Any]:
         bounded = max(1, min(int(limit), 1_000))
         with self.database.read_transaction() as connection:

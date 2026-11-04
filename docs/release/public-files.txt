@@ -483,6 +483,7 @@ src/noyra/cognition/decision_evidence.py
 src/noyra/cognition/deliberation.py
 src/noyra/cognition/epistemic.py
 src/noyra/cognition/execution.py
+src/noyra/cognition/execution_recovery.py
 src/noyra/cognition/expression.py
 src/noyra/cognition/governance.py
 src/noyra/cognition/interaction.py
@@ -997,6 +998,7 @@ tests/test_private_erasure_assessment.py
 tests/test_private_erasure_disabled.py
 tests/test_private_sources.py
 tests/test_production_secret_sources.py
+tests/test_project_execution_recovery.py
 tests/test_project_workspace.py
 tests/test_provider_health.py
 tests/test_public_archive.py
