@@ -844,6 +844,7 @@ tests/test_a1_read_boundaries.py
 tests/test_a2_recovery_sampling.py
 tests/test_a3_reset_ownership.py
 tests/test_a3_watchdog_ownership.py
+tests/test_a4_backup_lock_cleanup.py
 tests/test_action_deliberation.py
 tests/test_action_deliberation_admission.py
 tests/test_action_integrity_diagnostic.py

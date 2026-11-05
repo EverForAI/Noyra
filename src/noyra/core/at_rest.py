@@ -817,11 +817,15 @@ class EncryptedBackupManager:
             lock.acquire()
         except RuntimeOwnershipError as error:
             raise RuntimeOwnershipError("stop Noyra before creating an at-rest backup") from error
-        work_root = Path(tempfile.mkdtemp(prefix=".noyra-backup-", dir=self.data_root))
-        payload_root = work_root / "payload"
-        tar_path = work_root / "payload.tar"
-        created_at = utc_now()
+        work_root: Path | None = None
         try:
+            # Everything after lock acquisition, including staging creation and
+            # the clock read, must release ownership even if an error traceback
+            # retains this frame. Cleanup itself must not prevent release.
+            work_root = Path(tempfile.mkdtemp(prefix=".noyra-backup-", dir=self.data_root))
+            payload_root = work_root / "payload"
+            tar_path = work_root / "payload.tar"
+            created_at = utc_now()
             payload_root.mkdir(mode=0o700)
             self._snapshot_database(database_path, payload_root / "noyra.sqlite3")
             self._copy_persistent_tree(payload_root, work_root)
@@ -846,8 +850,11 @@ class EncryptedBackupManager:
                 created_at=created_at,
             )
         finally:
-            shutil.rmtree(work_root, ignore_errors=True)
-            lock.release()
+            try:
+                if work_root is not None:
+                    shutil.rmtree(work_root, ignore_errors=True)
+            finally:
+                lock.release()
 
     def restore(self, backup_path: Path | str, target_root: Path | str) -> Path:
         configured_source = Path(backup_path).expanduser()
