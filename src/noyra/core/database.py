@@ -57,7 +57,12 @@ from .wallet_schema import (
 
 
 class Database:
-    """Small SQLite boundary with WAL and explicit transactions."""
+    """SQLite boundary with explicit live-read and sealed-snapshot roles.
+
+    read_only uses SQLite's WAL-aware mode=ro. immutable_snapshot additionally
+    asserts an externally sealed, journal-free input; it is never inferred from
+    the absence of a WAL file on a database that may still have a writer.
+    """
 
     _SNAPSHOT_STALE_AFTER_SECONDS = 60 * 60
 
@@ -68,7 +73,13 @@ class Database:
         initialize: bool = True,
         read_only: bool = False,
         strict_schema_contract: bool = False,
+        immutable_snapshot: bool = False,
     ):
+        if read_only and initialize:
+            raise ValueError("read-only databases require initialize=False")
+        if immutable_snapshot and not read_only:
+            raise ValueError("immutable snapshots require read_only=True")
+        self.immutable_snapshot = immutable_snapshot
         self.path = Path(path).resolve()
         self.read_only = read_only
         self.strict_schema_contract = strict_schema_contract
@@ -82,8 +93,19 @@ class Database:
 
     def _connect(self) -> sqlite3.Connection:
         if self.read_only:
+            options = "mode=ro"
+            if self.immutable_snapshot:
+                # The caller owns sealing. Refuse visible SQLite coordination
+                # files rather than silently ignoring uncheckpointed changes.
+                for suffix in ("-wal", "-shm", "-journal"):
+                    try:
+                        self.path.with_name(self.path.name + suffix).lstat()
+                    except FileNotFoundError:
+                        continue
+                    raise RuntimeOwnershipError("immutable snapshot has SQLite journal state")
+                options += "&immutable=1"
             connection = sqlite3.connect(
-                f"{self.path.as_uri()}?mode=ro&immutable=1",
+                f"{self.path.as_uri()}?{options}",
                 timeout=30,
                 check_same_thread=False,
                 uri=True,
@@ -103,7 +125,9 @@ class Database:
         return connection
 
     def promote_to_writable(self) -> None:
-        """Switch a preflight read-only facade to the owned database boundary."""
+        """Switch a live preflight facade to the owned database boundary."""
+        if self.immutable_snapshot:
+            raise RuntimeOwnershipError("immutable snapshots cannot become writable")
         self.read_only = False
 
     @contextmanager

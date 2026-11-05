@@ -392,7 +392,11 @@ async def test_archived_rejection_diagnostic_uses_local_read_only_archive(
         subject_id=fixture.subject_id,
     )
     assert archive.archive_cold(fixture.subject_id, older_than_days=30) > 0
-    readonly = Database(fixture.kernel.database.path, initialize=False, read_only=True)
+    # No writers run after archive publication in this fixed fixture. Explicit
+    # sealed mode preserves the archive diagnostic's no-new-files contract.
+    readonly = Database(
+        fixture.kernel.database.path, initialize=False, read_only=True, immutable_snapshot=True
+    )
     before = {
         str(path.relative_to(readonly.path.parent)) for path in readonly.path.parent.rglob("*")
     }

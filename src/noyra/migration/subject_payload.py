@@ -342,7 +342,10 @@ def verify_payload(root: Path, subject_id: str) -> dict[str, Any]:
 
 
 def verify_archives(root: Path, subject_id: str) -> None:
-    database = Database(root / "noyra.sqlite3", initialize=False, read_only=True)
+    # Payload inventory has already verified this sealed, journal-free copy.
+    database = Database(
+        root / "noyra.sqlite3", initialize=False, read_only=True, immutable_snapshot=True
+    )
     result = EventPayloadArchive.verify_subject_integrity(
         database, root / "subject" / "cold", subject_id
     )
@@ -370,7 +373,9 @@ def verify_runtime_credentials(database_path: Path, secret_root: Path, subject_i
     Secret bytes never travel in the subject payload. Inactive historical
     references remain readable without requiring revoked credentials.
     """
-    database = Database(database_path, initialize=False, read_only=True)
+    # The activation coordinator provides an offline staged payload, never the
+    # running source database. Verification must not add WAL/SHM sidecars.
+    database = Database(database_path, initialize=False, read_only=True, immutable_snapshot=True)
     contracts = (
         ("search_provider_configs", "search", "key_reference", "status='active'"),
         ("cognitive_resource_keys", "models", "key_reference", "status!='revoked'"),
