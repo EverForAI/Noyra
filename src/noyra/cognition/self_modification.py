@@ -298,7 +298,7 @@ class ControlledSelfModification:
                 return proposal
             if proposal.status != "simulated" or proposal.risk_score > 0.7:
                 raise SelfModificationError("proposal is not safe to apply")
-            now = self.clock()
+            now = self._time(self.clock()).isoformat(timespec="milliseconds")
             deadline = (self._time(now) + timedelta(seconds=self.observation_seconds)).isoformat(
                 timespec="milliseconds"
             )
@@ -414,6 +414,7 @@ class ControlledSelfModification:
             or proposal.applied_at is not None
             or proposal.observation_deadline is not None
             or not isinstance(payload, dict)
+            or content_hash(payload) != row["payload_hash"]
             or set(payload)
             != {
                 "format",

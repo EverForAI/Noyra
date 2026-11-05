@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -231,3 +233,43 @@ def test_stored_effective_setting_keeps_precedence_over_configuration_baseline(
             ).fetchone()[0]
             == 0
         )
+
+
+def test_expiry_with_offset_and_submillisecond_clock_keeps_matching_event_evidence(
+    fixture: tuple[SubjectKernel, ControlledSelfModification, str],
+) -> None:
+    kernel, manager, identifier = fixture
+    worker = ControlledSelfModification(
+        manager.database,
+        manager.subject_id,
+        CognitionSettings(thought_interval_seconds=2400),
+        clock=lambda: "2026-11-06T16:00:00.123456+08:00",
+    )
+    result = worker.apply(identifier)
+    assert result.updated_at == "2026-11-06T08:00:00.123+00:00"
+    assert worker.apply(identifier) == result
+    worker.verify_integrity()
+    assert kernel.lifecycle.current().state == "booting"
+
+
+def test_expiry_receipt_must_match_its_recorded_payload_hash(
+    fixture: tuple[SubjectKernel, ControlledSelfModification, str],
+) -> None:
+    kernel, manager, identifier = fixture
+    worker = changed(manager)
+    assert worker.apply(identifier).status == "rejected"
+    # Deliberate damaged-file fixture; normal event writes remain append-only.
+    with closing(sqlite3.connect(kernel.database.path)) as c:
+        for (name,) in c.execute(
+            "SELECT name FROM sqlite_schema WHERE type='trigger' AND tbl_name='events'"
+        ).fetchall():
+            c.execute('DROP TRIGGER "' + name + '"')
+        c.execute(
+            "UPDATE events SET payload_hash=? WHERE event_id=?",
+            ("0" * 64, "evt_selfmod_expired_" + identifier),
+        )
+        c.commit()
+    with pytest.raises(IntegrityError, match="expiry evidence"):
+        worker.apply(identifier)
+    with pytest.raises(IntegrityError, match="expiry evidence"):
+        worker.verify_integrity()

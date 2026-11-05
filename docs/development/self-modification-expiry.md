@@ -29,3 +29,8 @@ Expiry is represented by an explained terminal rejection rather than an extra
 schema state. Integrity verification validates expiry evidence when present.
 No model request, provider retry, setting rollback or operator approval is
 introduced by this local lifecycle change.
+
+Completion and event timestamps share the UTC millisecond representation,
+including when an injected clock supplies another offset or submillisecond
+precision. Receipt reads check the stored payload digest as well as its semantic
+binding to the proposal.
