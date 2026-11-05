@@ -60,3 +60,39 @@ Source authorization is a checked boundary before material access, not remote
 cancellation of bytes already exported. Revoking a permit cannot retract an
 already delivered encrypted artifact. A failure after export or target receipt
 still requires the existing explicit reconciliation/rollback protocol.
+
+## Root runner and encrypted restore
+
+The installed root wrapper runs only its adjacent root-owned helper with
+`/usr/bin/python3 -I`. It does not honor `NOYRA_PYTHON` or
+`NOYRA_MIGRATION_RUNNER_PY`, load the application's package, or inherit the
+application virtual environment as its interpreter. The installer snapshots,
+installs and rolls back that helper together with the wrapper and units.
+
+The root runner owns fencing, fixed-path SQLite restore and read-only health
+checks. `ProtectSystem=strict` remains enabled; only source, fences, requests,
+status and restored directories are writable. The restored directory is
+created as root-owned rather than granting write access to the entire volume.
+A retry after publishing the identical database can finish its receipt without
+overwriting the database; different existing contents remain an error.
+
+`noyra-encrypted-backup` requests to the root restore entry now fail explicitly
+with `encrypted_backup_requires_unprivileged_agent`, before fencing or restore.
+There is no automatic root fallback. Encrypted restore uses the existing
+`noyra-migration-agent.service` under `User=noyra`, its fixed application Python
+and dedicated migration environment/backup credential. This preserves the
+application dependency boundary and does not give the root runner access to
+the main service's environment. Existing root encrypted requests must be routed
+through that agent workflow by the operator, not replayed blindly.
+
+The encrypted backup manager returns a restored directory. The agent converts
+that result to its database file before producing the restore-path/hash receipt.
+A repeated encrypted restore into a nonempty task directory is rejected without
+overwriting it; an ambiguous prior result requires reconciliation. This is not
+an automatic restart of a completed target activation.
+
+Local validation includes actual encrypted backup restore through the agent,
+non-root Linux execution, interrupted root receipt publication and a transient
+systemd `ProtectSystem=strict` restore. Encryption-volume probes in synthetic
+agent fixtures are test evidence only; deployment still needs real encrypted
+storage, identities, credentials and two-host cutover/rollback validation.

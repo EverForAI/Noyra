@@ -50,3 +50,16 @@ bearer 和该凭据创建的 cookie 会话共享同一绑定，多开浏览器�
 一次明确的新格式确认。有效期内重试返回同一批准，可用当前 approval_id
 撤销；取消任务、变更策略/目标/钱包或过期后不能继续读取本地密钥。
 具体协议见开发文档 migration-approval-boundaries.md。
+
+## 恢复执行环境
+
+root runner 仅使用相邻安装的 root 所有标准库 helper 与 /usr/bin/python3 -I，
+不再从 NOYRA_PYTHON/NOYRA_MIGRATION_RUNNER_PY 或普通应用包选择执行代码。
+加密备份恢复通过现有 noyra-migration-agent.service 的无特权账户及专用运行环境
+完成；旧 root 恢复请求会明确返回 encrypted_backup_requires_unprivileged_agent，
+不会自动转发，也不会先写源围栏。请按 agent 协议核对之前结果后再操作。
+
+升级会将 Python helper 和 wrapper、unit 一起备份/回退，并预建最小 restored
+写目录，保留 ProtectSystem=strict。健康检查只读已恢复数据库。相同 SQLite
+数据库已落盘而回执中断时可以重试完成回执；不同内容和非空加密恢复目录不会
+被覆盖。真实双机、加密卷和服务切换验收仍需在部署环境执行。

@@ -220,3 +220,103 @@ def test_strict_setting_reaches_the_execution_coordinator(tmp_path: Path) -> Non
     finally:
         server.close()
         kernel.close()
+
+
+def test_independent_review_http_requires_two_request_authenticated_principals(
+    tmp_path: Path,
+) -> None:
+    import hashlib
+    import hmac
+    import time
+
+    from noyra.core import SubjectKernel
+    from noyra.core.types import content_hash
+    from noyra.service import NoyraHTTPServer, ServiceSettings
+    from test_migration_service import ADMIN_TOKEN, _add_attested_target
+
+    key = "b2-proxy-proof-key-sufficient-entropy"
+    settings = ServiceSettings(
+        data_dir=tmp_path,
+        subject_id="Noyra-migration-test",
+        genesis_hash=content_hash("b2-http-principals"),
+        host="127.0.0.1",
+        port=0,
+        admin_token=SecretStr(ADMIN_TOKEN),
+        migration_require_independent_review=True,
+        migration_proxy_principal_hmac_key=SecretStr(key),
+        trusted_proxy_cidrs=("127.0.0.1/32",),
+    )
+    kernel = SubjectKernel(tmp_path / "noyra.sqlite3", settings.subject_id, settings.genesis_hash)
+    kernel.boot()
+    kernel.orient()
+    kernel.activate()
+    server = NoyraHTTPServer(kernel, settings)
+    server.start()
+    try:
+        _add_attested_target(server)
+        policy = server.migration_store.read_policy(kernel.subject_id)
+        policy = server.migration_store.update_policy(
+            kernel.subject_id,
+            policy.revision,
+            {"enabled": True, "approval_mode": "dual_review"},
+            "operator",
+        )
+        proposal = server.migration_manager.create_proposal(
+            subject_id=kernel.subject_id,
+            target_id="migration-target-1",
+            policy_revision=policy.revision,
+            reason_code="maintenance",
+            reason="Authenticated principals",
+            expires_at="2099-01-01T00:00:00+00:00",
+        )
+        path = f"/api/admin/migration/proposals/{proposal.proposal_id}/approve"
+
+        def post(
+            principal: str | None, *, signed_as: str | None = None
+        ) -> tuple[int, dict[str, Any]]:
+            headers = {"Content-Type": "application/json", "Authorization": "Bearer " + ADMIN_TOKEN}
+            if principal is not None:
+                stamp = str(int(time.time()))
+                payload = "\n".join(
+                    (
+                        "noyra-authenticated-principal/v1",
+                        signed_as or principal,
+                        stamp,
+                        "POST",
+                        path,
+                    )
+                ).encode()
+                headers.update(
+                    {
+                        "X-Noyra-Authenticated-Principal": principal,
+                        "X-Noyra-Principal-Timestamp": stamp,
+                        "X-Noyra-Principal-Signature": hmac.new(
+                            key.encode(), payload, hashlib.sha256
+                        ).hexdigest(),
+                    }
+                )
+            request = Request(
+                f"http://127.0.0.1:{server.address[1]}" + path, data=b"{}", headers=headers
+            )
+            try:
+                response = urlopen(request, timeout=10)
+            except HTTPError as error:
+                response = error
+            with response:
+                value = json.loads(response.read())
+                assert isinstance(value, dict)
+                return response.status, value
+
+        assert post(None)[0] == 409
+        assert post("mallory", signed_as="alice")[0] == 409
+        assert post("alice")[1]["approval_count"] == 1
+        assert post("alice")[1]["status"] == "awaiting_approval"
+        code, result = post("bob")
+        assert code == 202 and result["approval_count"] == 2
+        assert (
+            result["review_semantics"] == "independent_principals"
+            and result["status"] == "approved"
+        )
+    finally:
+        server.close()
+        kernel.close()

@@ -18,7 +18,9 @@ from typing import Any
 MAX_REQUEST_BYTES = 1_000_000
 DATA_ROOT = Path(os.environ.get("NOYRA_MIGRATION_DATA_ROOT", "/var/lib/noyra/migration"))
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}\Z")
-# Keep this root-owned runner stdlib-only for plain SQLite recovery. Its subject
+# Keep this root-owned runner stdlib-only. Encrypted recovery belongs to the
+# existing unprivileged migration agent, never to an application import as root.
+# Its subject
 # contract mirrors core.identity and is guarded by cross-boundary parity tests.
 SUBJECT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{2,127}\Z")
 _RESERVED_SUBJECT_IDS = {
@@ -192,7 +194,10 @@ class MigrationExecutor:
         root = self.data_root / "restored" / str(request["target_id"])
         if root.exists() and root.is_symlink():
             raise RunnerError("restore_root_invalid")
-        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError as error:
+            raise RunnerError("restore_directory_unavailable") from error
         _private_directory(root, "restore")
         return root
 
@@ -306,13 +311,19 @@ class MigrationExecutor:
         }
 
     def restore(self, request: dict[str, Any]) -> dict[str, Any]:
-        path, payload = self._artifact(request)
+        _path, payload = self._artifact(request)
         root = self._restore_root(request)
         artifact_format = request["artifact_format"]
         database = root / "noyra.sqlite3"
-        if database.exists() or database.is_symlink():
+        if database.is_symlink():
             raise RunnerError("restore_target_not_empty")
-        if artifact_format == "sqlite":
+        if database.exists():
+            _private_regular(database, "restored_database")
+            if artifact_format != "sqlite" or database.read_bytes() != payload:
+                raise RunnerError("restore_target_not_empty")
+            # A crash after database publication but before receipt publication
+            # may repeat the same operation. Validate it, never overwrite it.
+        elif artifact_format == "sqlite":
             temporary = root / ".noyra.sqlite3.restore"
             try:
                 temporary.write_bytes(payload)
@@ -332,21 +343,18 @@ class MigrationExecutor:
                 temporary.unlink(missing_ok=True)
                 raise RunnerError("restore_database_failed") from error
         elif artifact_format == "noyra-encrypted-backup":
-            keyring = os.environ.get("NOYRA_MIGRATION_BACKUP_KEYRING")
-            if not keyring:
-                raise RunnerError("backup_keyring_unavailable")
-            try:
-                from noyra.core.at_rest import EncryptedBackupManager
-
-                EncryptedBackupManager(root, keyring).restore(path, root)
-            except Exception as error:
-                raise RunnerError("encrypted_backup_restore_failed") from error
+            raise RunnerError("encrypted_backup_requires_unprivileged_agent")
         else:
             raise RunnerError("artifact_format_unsupported")
         try:
-            with sqlite3.connect(database) as connection:
-                row = connection.execute("SELECT subject_id FROM runtime_state LIMIT 1").fetchone()
-            if row is None or row[0] != request["subject_id"]:
+            connection = sqlite3.connect(
+                f"{database.resolve().as_uri()}?mode=ro&immutable=1", uri=True
+            )
+            try:
+                rows = connection.execute("SELECT subject_id FROM runtime_state LIMIT 2").fetchall()
+            finally:
+                connection.close()
+            if len(rows) != 1 or rows[0][0] != request["subject_id"]:
                 raise RunnerError("restore_subject_mismatch")
         except RunnerError:
             raise
@@ -369,7 +377,9 @@ class MigrationExecutor:
         database = root / "noyra.sqlite3"
         _private_regular(database, "restored_database")
         try:
-            connection = sqlite3.connect(database)
+            connection = sqlite3.connect(
+                f"{database.resolve().as_uri()}?mode=ro&immutable=1", uri=True
+            )
             try:
                 quick_check = connection.execute("PRAGMA quick_check").fetchone()
                 subject = connection.execute(
@@ -426,6 +436,8 @@ def _validate_request(request: dict[str, Any], action: str) -> dict[str, Any]:
         raise RunnerError("invalid_artifact_byte_size")
     if request.get("artifact_format") not in {"sqlite", "noyra-encrypted-backup"}:
         raise RunnerError("invalid_artifact_format")
+    if action == "restore" and request["artifact_format"] == "noyra-encrypted-backup":
+        raise RunnerError("encrypted_backup_requires_unprivileged_agent")
     executor = MigrationExecutor(DATA_ROOT)
     if action == "restore":
         _report(request, "restore_report", "restored")
