@@ -158,6 +158,12 @@ def admin_runtime_summary(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
         # Do not mutate the observer's cached database snapshot. The service
         # supplies current in-memory fallback health when writes are unavailable.
         observation = {**observation, "integrity_watchdog": watchdog}
+    if owner.integrity is not None:
+        try:
+            integrity = owner.integrity.summary()
+        except Exception:
+            integrity = {"status": "evidence_unavailable"}
+        observation = {**observation, "integrity": integrity}
     self._json(HTTPStatus.OK, observation)
     return False
 

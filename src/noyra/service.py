@@ -2010,7 +2010,12 @@ class NoyraService:
             return True
         return bool(
             self.integrity.policy_mode == "pause"
-            and (summary.get("pause_pending") or summary.get("p0") or summary.get("p1"))
+            and (
+                summary.get("pause_pending")
+                or summary.get("p0")
+                or summary.get("p1")
+                or summary.get("evidence", {}).get("recheck_pending")
+            )
         )
 
     def __del__(self) -> None:
@@ -2328,7 +2333,10 @@ class NoyraService:
             if (
                 integrity is not None
                 and self.integrity.policy_mode == "pause"
-                and integrity.findings
+                and (
+                    integrity.findings
+                    or self.integrity.summary().get("evidence", {}).get("recheck_pending")
+                )
             ):
                 self.kernel.admission.quarantine()
                 return
@@ -2572,6 +2580,16 @@ class NoyraService:
                 self.settings.sleep_interval_seconds,
             )
         summary = self.integrity.summary()
+        if self.integrity.policy_mode == "pause" and summary.get("evidence", {}).get(
+            "recheck_pending"
+        ):
+            self.kernel.admission.quarantine()
+            return TickResult(
+                self.kernel.lifecycle.current().state,
+                "integrity_evidence_recheck_pending",
+                None,
+                self.settings.integrity_retry_seconds,
+            )
         if self._boot_recovery_pending:
             if self.integrity.policy_mode == "pause" and (summary["p0"] or summary["p1"]):
                 self.kernel.admission.quarantine()

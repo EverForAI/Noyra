@@ -226,6 +226,7 @@ docs/development/email-identity-continuity.md
 docs/development/epistemic-review-recovery.md
 docs/development/http-failure-boundary.md
 docs/development/integrity-evidence.md
+docs/development/integrity-health.md
 docs/development/memory-literal-search.md
 docs/development/migration-approval-boundaries.md
 docs/development/model-invalidation-boundaries.md
@@ -423,6 +424,7 @@ scripts/check-publication-boundary.py
 scripts/check-site.py
 scripts/deployment-maintenance.py
 scripts/diagnose-action-integrity.py
+scripts/diagnose-integrity-evidence.py
 scripts/diagnose-motivation-review.py
 scripts/env.ps1
 scripts/env.sh
@@ -895,6 +897,7 @@ tests/test_b2_intrinsic_exploration.py
 tests/test_b2_local_wallet_approval.py
 tests/test_b2_runner_boundaries.py
 tests/test_b3_integrity_evidence.py
+tests/test_b3_integrity_health.py
 tests/test_boundary_remediation.py
 tests/test_browser_dispatch_fencing.py
 tests/test_c0_assistance.py

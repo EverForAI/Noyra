@@ -834,6 +834,8 @@ class OperatorControlService:
             blocking_policy = summary.get("policy_mode") == "pause"
             if blocking_policy and (int(summary.get("p0", 0)) or int(summary.get("p1", 0))):
                 raise OperatorControlConflict("integrity_findings_block_resume")
+            if blocking_policy and summary.get("evidence", {}).get("recheck_pending"):
+                raise OperatorControlConflict("integrity_health_unavailable")
 
     def _work_health(self) -> dict[str, Any]:
         try:
@@ -856,7 +858,13 @@ class OperatorControlService:
         try:
             summary = self.integrity.summary()
             status = str(summary.get("status", "unknown"))
-            state = "ok" if status == "ok" else "degraded"
+            state = (
+                "disabled"
+                if summary.get("policy_mode") == "off"
+                else "ok"
+                if status == "ok"
+                else "degraded"
+            )
             return {
                 "state": state,
                 "status": status,
@@ -865,6 +873,8 @@ class OperatorControlService:
                 "p1": int(summary.get("p1", 0)),
                 "last_completed_at": summary.get("last_completed_at"),
                 "next_due_at": summary.get("next_due_at"),
+                "evidence": summary.get("evidence"),
+                "coverage": summary.get("coverage"),
             }
         except Exception:
             return {"state": "degraded", "status": "unavailable"}
