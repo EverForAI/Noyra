@@ -92,6 +92,20 @@ class SQLiteArtifactProvider:
             raise MigrationExecutionError("recipient_key_fingerprint_mismatch")
         if proof.get("target_id") not in {None, task.target_id}:
             raise MigrationExecutionError("target_registration_mismatch")
+        wallet = proof.get("wallet_binding")
+        if isinstance(wallet, Mapping) and wallet.get("mode") == "local_wallet_transfer":
+            from .local_wallet_approval import authorize_material
+
+            # Persist the one-artifact authority before taking the subject
+            # snapshot so the target receives this evidence too. Material
+            # access below rechecks the same authority immediately before use.
+            authorize_material(
+                Database(self.database_path, initialize=False),
+                task,
+                wallet,
+                artifact_id,
+                recipient_key_fingerprint=recipient_fingerprint,
+            )
         self.output_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         destination = self.output_root / f"{artifact_id}.bundle"
         if destination.exists() and destination.is_symlink():

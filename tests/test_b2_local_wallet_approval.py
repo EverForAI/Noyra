@@ -330,6 +330,19 @@ def test_real_synthetic_keystore_is_exported_only_in_recipient_encrypted_payload
         tmp_path / "restored" / "migration-wallet" / "wallet.json", "synthetic-password"
     )
     assert restored.address == account.address
+    with Database(
+        tmp_path / "restored" / "noyra.sqlite3",
+        initialize=False,
+        read_only=True,
+        immutable_snapshot=True,
+    ).read_transaction() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM migration_audit_events "
+                "WHERE action='migration_local_wallet_material_authorized'"
+            ).fetchone()[0]
+            == 1
+        )
     assert not list((tmp_path / "outgoing").glob("*.rpc.json"))
     assert not list((tmp_path / "outgoing").glob(".*.tar"))
 
