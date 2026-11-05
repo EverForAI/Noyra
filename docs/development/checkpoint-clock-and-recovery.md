@@ -77,6 +77,18 @@ is not presented as a health evaluation. Health checkpoints are written on
 condition changes, clock transitions or at most once per ten-minute heartbeat,
 rather than on every normal tick.
 
+## Reset ownership boundary
+
+An operator reset requires the current process lock, a manually paused and
+fully drained runtime, and no in-memory or durable migration fence. The control
+holds admission and process ownership through the transaction and reopening of
+admission. It rechecks the original paused lifecycle version and the existing
+migration mutation guard inside the SQLite write transaction, before any reset
+edge or audit record. A target that legitimately owns its configured migration
+epoch retains the normal target ownership exception. A rejected reset never
+changes subject history or reopens source admission; it cannot repair missing
+ownership by acquiring the process lock itself.
+
 ## Integrity checker failures
 
 The pre-tick integrity checker has its own durable failure count and retry

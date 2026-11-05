@@ -18,6 +18,7 @@ from typing import Any
 from noyra.sleep import SleepEngine
 
 from .actions import ActionLedger
+from .admission import OperationInvalidated
 from .archive import ArchiveKeyring
 from .database import CURRENT_SCHEMA_VERSION, Database
 from .delivery_state import UNRESOLVED_DELIVERY_SQL, delivery_status_counts
@@ -26,6 +27,7 @@ from .errors import (
     IntegrityError,
     InvalidTransitionError,
     NotFoundError,
+    RuntimeOwnershipError,
 )
 from .storage import StorageUsageScanner
 from .types import canonical_json, content_hash, new_id, utc_now
@@ -194,88 +196,113 @@ class OperatorControlService:
         """
 
         actor, reason = self._validate_actor_reason(actor, reason)
-        with self._lock:
-            self._require_resume_health()
-            current = self.kernel.lifecycle.current()
-            if current.state != "paused":
-                raise OperatorControlConflict(
-                    "reset_requires_paused",
-                    detail=f"reset requires paused lifecycle, got {current.state}",
-                )
-            if self.kernel.admission.active_operations:
-                raise OperatorControlConflict(
-                    "reset_blocked_by_active_operations",
-                    detail="runtime operations are still draining after pause",
-                )
-            self.kernel.admission.invalidate()
-            try:
-                with self.database.transaction() as connection:
-                    work = self._work_counts_connection(connection)
-                    if work["blocking"]:
-                        raise OperatorControlConflict(
-                            "reset_blocked_by_recoverable_work",
-                            detail="prepared, unknown, executing, or in-flight work remains",
-                        )
-                    open_sleep = int(
-                        connection.execute(
-                            "SELECT COUNT(*) FROM sleep_runs WHERE subject_id = ? "
-                            "AND status NOT IN ('complete', 'failed')",
-                            (self.subject_id,),
-                        ).fetchone()[0]
+        try:
+            # Match the HTTP control lock order. Keep process ownership until
+            # both the durable reset and reopening admission have completed.
+            with (
+                self.kernel.admission.lifecycle_control_scope(),
+                self._lock,
+                self.kernel.process_lock.ownership_scope(),
+            ):
+                return self._reset_owned(actor=actor, reason=reason)
+        except (OperationInvalidated, RuntimeOwnershipError) as error:
+            raise OperatorControlConflict(
+                "reset_runtime_unavailable", detail=type(error).__name__
+            ) from error
+
+    def _reset_owned(self, *, actor: str, reason: str) -> OperatorMutation:
+        if self.kernel.admission.migration_fenced:
+            raise OperatorControlConflict("reset_migration_fenced")
+        self._require_resume_health()
+        current = self.kernel.lifecycle.current()
+        if current.state != "paused":
+            raise OperatorControlConflict(
+                "reset_requires_paused",
+                detail=f"reset requires paused lifecycle, got {current.state}",
+            )
+        if self.kernel.admission.active_operations:
+            raise OperatorControlConflict(
+                "reset_blocked_by_active_operations",
+                detail="runtime operations are still draining after pause",
+            )
+        self.kernel.admission.invalidate()
+        try:
+            with self.database.transaction() as connection:
+                lifecycle = self.kernel.lifecycle
+                if lifecycle.mutation_guard is not None:
+                    lifecycle.mutation_guard(connection)
+                durable = connection.execute(
+                    "SELECT * FROM runtime_state WHERE subject_id=?", (self.subject_id,)
+                ).fetchone()
+                if (
+                    durable is None
+                    or durable["state"] != "paused"
+                    or durable["version"] != current.version
+                ):
+                    raise OperatorControlConflict("reset_lifecycle_changed")
+                work = self._work_counts_connection(connection)
+                if work["blocking"]:
+                    raise OperatorControlConflict(
+                        "reset_blocked_by_recoverable_work",
+                        detail="prepared, unknown, executing, or in-flight work remains",
                     )
-                    if open_sleep:
-                        raise OperatorControlConflict(
-                            "reset_blocked_by_sleep", detail="an open sleep run remains"
-                        )
-                    active_exports = int(
-                        connection.execute(
-                            "SELECT COUNT(*) FROM export_jobs WHERE subject_id = ? "
-                            "AND status IN ('queued', 'running')",
-                            (self.subject_id,),
-                        ).fetchone()[0]
-                    )
-                    if active_exports:
-                        raise OperatorControlConflict(
-                            "reset_blocked_by_export", detail="an export is still active"
-                        )
-                    # Keep identity, memories, events, and durable work history.
-                    lifecycle = self.kernel.lifecycle
-                    for state in ("stopped", "resetting", "booting", "orienting", "active"):
-                        lifecycle._transition_connection(
-                            connection,
-                            state,
-                            self._public_reason("reset"),
-                            actor=actor,
-                        )
-                    now = utc_now()
+                open_sleep = int(
                     connection.execute(
-                        "INSERT OR IGNORE INTO autonomy_loop_state(subject_id, updated_at) "
-                        "VALUES (?, ?)",
-                        (self.subject_id, now),
+                        "SELECT COUNT(*) FROM sleep_runs WHERE subject_id = ? "
+                        "AND status NOT IN ('complete', 'failed')",
+                        (self.subject_id,),
+                    ).fetchone()[0]
+                )
+                if open_sleep:
+                    raise OperatorControlConflict(
+                        "reset_blocked_by_sleep", detail="an open sleep run remains"
                     )
+                active_exports = int(
                     connection.execute(
-                        "UPDATE autonomy_loop_state SET consecutive_failures = 0, "
-                        "circuit_status = 'closed', next_retry_at = NULL, "
-                        "last_tick_started_at = NULL, last_error_type = NULL, updated_at = ? "
-                        "WHERE subject_id = ?",
-                        (now, self.subject_id),
+                        "SELECT COUNT(*) FROM export_jobs WHERE subject_id = ? "
+                        "AND status IN ('queued', 'running')",
+                        (self.subject_id,),
+                    ).fetchone()[0]
+                )
+                if active_exports:
+                    raise OperatorControlConflict(
+                        "reset_blocked_by_export", detail="an export is still active"
                     )
-                    self._audit_connection(
+                # Keep identity, memories, events, and durable work history.
+                for state in ("stopped", "resetting", "booting", "orienting", "active"):
+                    lifecycle._transition_connection(
                         connection,
-                        "operator_reset",
-                        actor,
-                        reason,
-                        {"idempotent": False, "preserved_subject_data": True},
+                        state,
+                        self._public_reason("reset"),
+                        actor=actor,
                     )
-                state = self.kernel.lifecycle.current()
-            except OperatorControlConflict:
-                raise
-            except (InvalidTransitionError, IntegrityError, sqlite3.Error, RuntimeError) as error:
-                raise OperatorControlConflict(
-                    "reset_failed", detail=type(error).__name__
-                ) from error
-            self.kernel.admission.open(epoch=state.version)
-            return OperatorMutation("reset", state.__dict__, False)
+                now = utc_now()
+                connection.execute(
+                    "INSERT OR IGNORE INTO autonomy_loop_state(subject_id, updated_at) "
+                    "VALUES (?, ?)",
+                    (self.subject_id, now),
+                )
+                connection.execute(
+                    "UPDATE autonomy_loop_state SET consecutive_failures = 0, "
+                    "circuit_status = 'closed', next_retry_at = NULL, "
+                    "last_tick_started_at = NULL, last_error_type = NULL, updated_at = ? "
+                    "WHERE subject_id = ?",
+                    (now, self.subject_id),
+                )
+                self._audit_connection(
+                    connection,
+                    "operator_reset",
+                    actor,
+                    reason,
+                    {"idempotent": False, "preserved_subject_data": True},
+                )
+            state = self.kernel.lifecycle.current()
+        except OperatorControlConflict:
+            raise
+        except (InvalidTransitionError, IntegrityError, sqlite3.Error, RuntimeError) as error:
+            raise OperatorControlConflict("reset_failed", detail=type(error).__name__) from error
+        self.kernel.admission.open(epoch=state.version)
+        return OperatorMutation("reset", state.__dict__, False)
 
     def reconcile_action(
         self,
