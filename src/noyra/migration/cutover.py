@@ -85,6 +85,9 @@ class CutoverCoordinator:
         wallet = binding.get("wallet_binding")
         if not isinstance(wallet, dict) or wallet.get("mode") != policy.wallet_mode:
             raise ValueError("wallet migration policy binding mismatch")
+        from .local_wallet_approval import assert_local_wallet_binding
+
+        assert_local_wallet_binding(self.database, task, wallet)
         minute = datetime.now(UTC).hour * 60 + datetime.now(UTC).minute
         if (
             minute - policy.maintenance_window_start_minute
@@ -180,6 +183,11 @@ class CutoverCoordinator:
         if self.executor is None:
             raise ValueError("migration executor unavailable")
         verified = self._verify_target_proof(task, proof)
+        from .local_wallet_approval import assert_local_wallet_binding
+
+        wallet = proof.get("wallet_binding")
+        if isinstance(wallet, Mapping):
+            assert_local_wallet_binding(self.database, task, wallet)
         if task.status == "approved":
             task = self.manager.transition_task(
                 task_id,
@@ -283,6 +291,11 @@ class CutoverCoordinator:
                     # leases, and wait for them to drain before any side effect.
                     admission.fence_for_migration()
                 proof = self._proof_for_task(task_id)
+                from .local_wallet_approval import assert_local_wallet_binding
+
+                wallet = proof.get("wallet_binding")
+                if isinstance(wallet, Mapping):
+                    assert_local_wallet_binding(self.database, task, wallet)
                 with self.database.transaction() as connection:
                     MigrationStore._append_audit(
                         connection,

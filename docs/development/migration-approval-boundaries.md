@@ -29,3 +29,34 @@ Tests cover mixed legacy/principal reviews, repeat approvals, different labels,
 bearer/cookie equivalence, strict configuration propagation and the existing
 fresh principal signature contract. Production identity-provider integration
 remains a deployment validation step.
+
+## Local wallet export authority
+
+A local wallet export requires the source database's explicit task approval;
+`local_wallet_approval` in a private target configuration is no longer authority.
+The approval audit binds subject, task/proposal, source epoch, policy revision,
+wallet address, target enrollment generation, target signing-key fingerprint,
+recipient encryption-key fingerprint and a bounded expiry. Legacy approval
+payloads are retained but require an explicit new confirmation before export.
+
+The existing authenticated `/api/admin/migration/tasks/{taskId}/wallet-approval`
+endpoint issues the permit with `{"authorize_local_wallet": true}`. An identical
+live retry returns the same permit. It also accepts
+`{"revoke_local_wallet": true, "approval_id": "CURRENT_ID"}`; repeated revocation
+is idempotent and a stale ID cannot revoke a newly issued permit. The permit ID
+is returned to the operator, while secret keys and passwords remain private.
+Task cancellation, policy disable/revision change, target re-enrollment/revocation,
+wallet mismatch and expiry all invalidate its use.
+
+Before reading the keystore/password, artifact generation revalidates the
+source authority and the actual encryption recipient. One permit is bound to
+one task/artifact identity; an identical retry is permitted, another artifact
+is rejected. The target's existing signed binding, one-time approval marker,
+same-task retry and activation expiry checks remain in place. Source checks
+are repeated on managed/manual execution paths before proceeding with the
+wallet binding. No historical permit is auto-replayed or inferred from config.
+
+Source authorization is a checked boundary before material access, not remote
+cancellation of bytes already exported. Revoking a permit cannot retract an
+already delivered encrypted artifact. A failure after export or target receipt
+still requires the existing explicit reconciliation/rollback protocol.

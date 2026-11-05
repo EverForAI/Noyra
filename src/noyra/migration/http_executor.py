@@ -34,7 +34,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
 
-from noyra.core.database import CURRENT_SCHEMA_VERSION
+from noyra.core.database import CURRENT_SCHEMA_VERSION, Database
 from noyra.core.deadline import operation_deadline, remaining_seconds
 from noyra.core.http import SyncHTTPTimeoutHook, call_sync_http_with_deadline
 from noyra.core.types import canonical_json, content_hash
@@ -119,7 +119,14 @@ class SQLiteArtifactProvider:
             if isinstance(wallet, Mapping) and wallet.get("mode") == "local_wallet_transfer":
                 from .wallet_material import source_wallet_files
 
-                local_wallet = source_wallet_files(task, wallet, wallet_rpc)
+                local_wallet = source_wallet_files(
+                    task,
+                    wallet,
+                    wallet_rpc,
+                    database=Database(self.database_path, initialize=False),
+                    artifact_id=artifact_id,
+                    recipient_key_fingerprint=recipient_fingerprint,
+                )
             inventory = create_payload(
                 raw_snapshot,
                 self.database_path.parent,

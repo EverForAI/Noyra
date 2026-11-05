@@ -693,6 +693,7 @@ src/noyra/migration/discovery.py
 src/noyra/migration/executor.py
 src/noyra/migration/fencing.py
 src/noyra/migration/http_executor.py
+src/noyra/migration/local_wallet_approval.py
 src/noyra/migration/manager.py
 src/noyra/migration/policy.py
 src/noyra/migration/proposals.py
@@ -889,6 +890,7 @@ tests/test_b2_approval_identity.py
 tests/test_b2_decision_evidence.py
 tests/test_b2_exploration_chain.py
 tests/test_b2_intrinsic_exploration.py
+tests/test_b2_local_wallet_approval.py
 tests/test_boundary_remediation.py
 tests/test_browser_dispatch_fencing.py
 tests/test_c0_assistance.py
