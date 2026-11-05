@@ -42,6 +42,7 @@ from .errors import (
 )
 from .event_archive import EventArchiveVerificationLimits
 from .events import EventStore
+from .integrity_evidence import EvidenceRead, atomic_json, read_evidence
 from .payload_codec import payload_read_budget
 from .resilience import LongRunResilience
 from .secret_cleanup import SecretCleanupQueue
@@ -4869,8 +4870,29 @@ class IntegrityRuntimeController:
         self._directory.mkdir(parents=True, exist_ok=True)
         self._state_path = self._directory / "watchdog-state.json"
         self._latest_path = self._directory / "latest-report.json"
+        self._evidence_read = read_evidence(self._state_path)
+        self._evidence_recheck_pending = False
+        self._projection_status = "ok"
+        self._state_has_report = False
         self._state = self._load_state()
+        self._evidence_recheck_pending = self._evidence_recheck_pending or bool(
+            self._state.get("registry_upgrade_pending", False)
+        )
+        self._committed_report = self._state.get("last_report")
         self._last_report = self._load_latest_report()
+        if self._evidence_recheck_pending:
+            self._state["registry_upgrade_pending"] = True
+            self._state["next_due_at"] = None
+        if (
+            not self._state_has_report
+            and self._state.get("last_run_id") is not None
+            and (
+                self._last_report is None or self._last_report.run_id != self._state["last_run_id"]
+            )
+        ):
+            self._evidence_recheck_pending = True
+            self._state["registry_upgrade_pending"] = True
+            self._state["next_due_at"] = None
         if self._last_report is not None:
             if not self._active_entries() and self._last_report.findings:
                 self._seed_active_findings(self._last_report)
@@ -4885,37 +4907,50 @@ class IntegrityRuntimeController:
             return None
         with self._lock:
             self._require_ownership()
-            upgrade_pending = bool(self._state.get("registry_upgrade_pending", False))
-            profile: IntegrityProfile = "manual" if upgrade_pending else "startup_light"
-            checks = self.registry.profile_checks(profile)
-            report = self._run_registry(
-                self.kernel.database,
-                self.kernel.subject_id,
-                self.layout.root,
-                profile=profile,
-                policy_mode=self.policy_mode,
-                deadline_seconds=self.startup_deadline_seconds,
-                limits=self.limits,
-                selection={
-                    "shard_index": 0,
-                    "shard_count": 1,
-                    "check_ids": [check.check_id for check in checks],
-                    "next_cursor": int(self._state["next_cursor"]),
-                },
-                checkpoint=self._checkpoint,
-                monotonic=self._monotonic,
+            return self._startup_locked()
+
+    def _startup_locked(self) -> IntegrityReport | None:
+        upgrade_pending = bool(self._state.get("registry_upgrade_pending", False))
+        profile: IntegrityProfile = (
+            "manual"
+            if upgrade_pending and self.registry.profile_checks("manual")
+            else "startup_light"
+        )
+        checks = self.registry.profile_checks(profile)
+        if upgrade_pending:
+            self._state["recheck_started"] = True
+        report = self._run_registry(
+            self.kernel.database,
+            self.kernel.subject_id,
+            self.layout.root,
+            profile=profile,
+            policy_mode=self.policy_mode,
+            deadline_seconds=self.startup_deadline_seconds,
+            limits=self.limits,
+            selection={
+                "shard_index": 0,
+                "shard_count": 1,
+                "check_ids": [check.check_id for check in checks],
+                "next_cursor": int(self._state["next_cursor"]),
+            },
+            checkpoint=self._checkpoint,
+            monotonic=self._monotonic,
+        )
+        if (
+            upgrade_pending
+            and bool(checks)
+            and {check.check_id for check in self.registry.checks}.issubset(
+                result.id for result in report.checks if result.status != "incomplete"
             )
-            if (
-                upgrade_pending
-                and len(report.checks) == len(checks)
-                and all(result.status != "incomplete" for result in report.checks)
-            ):
-                self._state["active_findings"] = {}
-                self._state["registry_upgrade_pending"] = False
-            incomplete = any(result.status == "incomplete" for result in report.checks)
-            delay = self.retry_seconds if incomplete else self.interval_seconds
-            self._state["next_due_at"] = self._format_time(self._now() + timedelta(seconds=delay))
-            return self._commit_report(report)
+            and all(result.status != "incomplete" for result in report.checks)
+        ):
+            self._state["active_findings"] = {}
+            self._state["registry_upgrade_pending"] = False
+            self._evidence_recheck_pending = False
+        incomplete = any(result.status == "incomplete" for result in report.checks)
+        delay = self.retry_seconds if incomplete else self.interval_seconds
+        self._state["next_due_at"] = self._format_time(self._now() + timedelta(seconds=delay))
+        return self._commit_report(report)
 
     def run_periodic_if_due(self, *, force: bool = False) -> IntegrityReport | None:
         if self.policy_mode == "off":
@@ -4927,17 +4962,41 @@ class IntegrityRuntimeController:
                 return pending
             if not force and self.seconds_until_due() > 0:
                 return None
-            checks = self.registry.profile_checks("periodic_deep")
+            rechecking = bool(self._state.get("registry_upgrade_pending", False))
+            if rechecking and not self._state.get("recheck_started", False):
+                return self._startup_locked()
+            checks = (
+                self.registry.checks
+                if rechecking
+                else self.registry.profile_checks("periodic_deep")
+            )
             if not checks:
                 raise RuntimeError("periodic integrity registry is empty")
             cursor = int(self._state["next_cursor"]) % len(checks)
+            if rechecking:
+                remaining = set(self._coverage_summary()["remaining"])
+                cursor = next(
+                    (
+                        (cursor + offset) % len(checks)
+                        for offset in range(len(checks))
+                        if checks[(cursor + offset) % len(checks)].check_id in remaining
+                    ),
+                    cursor,
+                )
             selected = checks[cursor]
+            profile = (
+                "manual"
+                if rechecking and "manual" in selected.profiles
+                else "periodic_deep"
+                if "periodic_deep" in selected.profiles
+                else "startup_light"
+            )
             next_cursor = (cursor + 1) % len(checks)
             report = self._run_registry(
                 self.kernel.database,
                 self.kernel.subject_id,
                 self.layout.root,
-                profile="periodic_deep",
+                profile=profile,
                 policy_mode=self.policy_mode,
                 deadline_seconds=self.periodic_deadline_seconds,
                 limits=self.limits,
@@ -5002,7 +5061,23 @@ class IntegrityRuntimeController:
         return {
             "registry_version": self.registry.version,
             "policy_mode": self.policy_mode,
-            "status": self._active_status(active),
+            "status": (
+                self._active_status(active)
+                if findings
+                else "evidence_unavailable"
+                if self._evidence_recheck_pending
+                else "not_checked"
+                if not self._state.get("last_completed_at")
+                else "ok"
+            ),
+            "evidence": {
+                "status": self._evidence_read.status,
+                "source": self._evidence_read.source,
+                "reason_code": self._evidence_read.reason_code,
+                "recheck_pending": self._evidence_recheck_pending,
+                "projection_status": self._projection_status,
+            },
+            "coverage": self._coverage_summary(),
             "last_completed_at": self._state.get("last_completed_at"),
             "next_due_at": self._state.get("next_due_at"),
             "next_cursor": int(self._state.get("next_cursor", 0)),
@@ -5062,6 +5137,27 @@ class IntegrityRuntimeController:
                 "completed_at": report.completed_at,
             }
         self._state["active_findings"] = active
+        coverage = dict(self._state.get("coverage", {}))
+        for result in report.checks:
+            if result.id not in _INTEGRITY_META_CHECK_IDS:
+                coverage[result.id] = {
+                    "version": result.version,
+                    "status": result.status,
+                    "completed_at": report.completed_at,
+                }
+        self._state["coverage"] = coverage
+        if (
+            self._state.get("registry_upgrade_pending", False)
+            and self._coverage_summary()["status"] == "complete"
+        ):
+            allowed = {check.check_id for check in self.registry.checks} | set(
+                _INTEGRITY_META_CHECK_IDS
+            )
+            self._state["active_findings"] = {
+                key: value for key, value in active.items() if key in allowed
+            }
+            self._state["registry_upgrade_pending"] = False
+            self._evidence_recheck_pending = False
         return self._with_active_findings(report)
 
     def _seed_active_findings(self, report: IntegrityReport) -> None:
@@ -5150,6 +5246,30 @@ class IntegrityRuntimeController:
                     )
                 )
         return tuple(findings)
+
+    def _coverage_summary(self) -> dict[str, Any]:
+        raw = self._state.get("coverage", {})
+        observed = raw if isinstance(raw, dict) else {}
+        checked = []
+        for check in self.registry.checks:
+            value = observed.get(check.check_id)
+            if (
+                isinstance(value, dict)
+                and value.get("version") == check.version
+                and value.get("status") in _INTEGRITY_STATUSES
+                and value.get("status") != "incomplete"
+            ):
+                checked.append(check.check_id)
+        remaining = [
+            check.check_id for check in self.registry.checks if check.check_id not in checked
+        ]
+        return {
+            "scope": "registered_checks",
+            "status": "complete" if not remaining else "partial" if checked else "not_checked",
+            "checked": len(checked),
+            "total": len(self.registry.checks),
+            "remaining": remaining,
+        }
 
     def _active_status(
         self, entries: Mapping[str, Mapping[str, Any]] | None = None
@@ -5297,10 +5417,6 @@ class IntegrityRuntimeController:
 
     def _persist(self, report: IntegrityReport) -> None:
         payload = report.to_dict()
-        report_path = self._directory / f"{report.run_id}.json"
-        _atomic_json(report_path, payload)
-        _atomic_json(self._latest_path, payload)
-        self._prune_report_history()
         self._state.update(
             {
                 "format_version": INTEGRITY_WATCHDOG_STATE_VERSION,
@@ -5310,12 +5426,36 @@ class IntegrityRuntimeController:
                 "last_status": report.status,
                 "last_completed_at": report.completed_at,
                 "last_summary": dict(report.summary),
+                "last_report": payload,
             }
         )
+        self._committed_report = payload
         self._persist_state()
+        # These files are derived views. Failure after the authoritative state
+        # commit cannot restore an older green report or discard a finding.
+        try:
+            _atomic_json(self._directory / f"{report.run_id}.json", payload)
+            _atomic_json(self._latest_path, payload)
+            self._prune_report_history()
+            self._projection_status = "ok"
+        except OSError:
+            self._projection_status = "evidence_unavailable"
 
     def _persist_state(self) -> None:
-        _atomic_json(self._state_path, self._state)
+        self._state["last_report"] = self._committed_report
+        try:
+            _atomic_json(self._state_path, self._state)
+            current = read_evidence(self._state_path)
+            if current.status != "ok":
+                raise OSError("integrity commit could not be verified")
+            self._evidence_read = current
+            self._state_has_report = True
+        except (OSError, ValueError):
+            self._evidence_read = EvidenceRead("evidence_unavailable", reason_code="commit_failed")
+            self._evidence_recheck_pending = True
+            self._state["registry_upgrade_pending"] = True
+            self._state["next_due_at"] = None
+            raise
 
     def _prune_report_history(self) -> None:
         retained: list[tuple[int, str, Path]] = []
@@ -5353,40 +5493,64 @@ class IntegrityRuntimeController:
             "last_completed_at": None,
             "last_summary": {"p0": 0, "p1": 0},
             "active_findings": {},
+            "coverage": {},
+            "recheck_started": False,
         }
-        payload = _read_hashed_json(self._state_path)
+
+        def invalid() -> dict[str, Any]:
+            self._evidence_recheck_pending = True
+            self._state_has_report = False
+            return dict(default)
+
+        payload = self._evidence_read.payload
+        if self._evidence_read.status not in {"ok", "missing"}:
+            return invalid()
+        if self._evidence_read.status == "missing":
+            # A leftover report/digest means evidence was lost, not a first boot.
+            if self._latest_path.exists() or self._state_path.with_suffix(".json.sha256").exists():
+                return invalid()
+            return default
         if (
             not isinstance(payload, dict)
             or payload.get("format_version") != INTEGRITY_WATCHDOG_STATE_VERSION
             or payload.get("subject_id") != self.kernel.subject_id
         ):
-            return default
+            return invalid()
         registry_mismatch = payload.get("registry_version") != self.registry.version
         try:
             payload["next_cursor"] = max(0, int(payload.get("next_cursor", 0)))
             payload["incomplete_retries"] = max(0, int(payload.get("incomplete_retries", 0)))
         except (TypeError, ValueError):
-            return default
+            return invalid()
         active = self._validate_active_entries(
             payload.get("active_findings"), allow_unknown=registry_mismatch
         )
         if active is None:
-            return default
+            return invalid()
         payload["active_findings"] = active
+        self._state_has_report = "last_report" in payload
+        coverage = payload.get("coverage", {})
+        if not isinstance(coverage, dict) or len(coverage) > 256:
+            return invalid()
+        payload["coverage"] = coverage
         if not isinstance(payload.get("pause_pending"), bool):
-            return default
-        if not isinstance(payload.get("registry_upgrade_pending", False), bool):
-            return default
+            return invalid()
+        if not isinstance(payload.get("registry_upgrade_pending", False), bool) or not isinstance(
+            payload.get("recheck_started", False), bool
+        ):
+            return invalid()
         last_status = payload.get("last_status", "unknown")
         if last_status not in {*_INTEGRITY_STATUSES, "unknown"}:
-            return default
+            return invalid()
         next_due_at = payload.get("next_due_at")
         if next_due_at is not None and not isinstance(next_due_at, str):
-            return default
+            return invalid()
         if self.policy_mode != "pause":
             payload["pause_pending"] = False
         if registry_mismatch:
             payload["registry_version"] = self.registry.version
+            payload["coverage"] = {}
+            payload["recheck_started"] = False
             payload["registry_upgrade_pending"] = True
             payload["next_cursor"] = 0
             payload["incomplete_retries"] = 0
@@ -5395,7 +5559,27 @@ class IntegrityRuntimeController:
         return {**default, **payload}
 
     def _load_latest_report(self) -> IntegrityReport | None:
-        payload = _read_hashed_json(self._latest_path)
+        payload = (
+            self._committed_report
+            if self._state_has_report
+            else _read_hashed_json(self._latest_path)
+        )
+
+        def invalid_report() -> IntegrityReport | None:
+            if (
+                self._state_has_report
+                and isinstance(payload, dict)
+                and payload.get("registry_version") == self.registry.version
+            ):
+                self._evidence_recheck_pending = True
+            return None
+
+        if self._state_has_report and (
+            not isinstance(payload, dict) or payload.get("run_id") != self._state.get("last_run_id")
+        ):
+            if self._state.get("last_run_id") is not None:
+                self._evidence_recheck_pending = True
+            return invalid_report()
         if (
             not isinstance(payload, dict)
             or payload.get("format_version") != INTEGRITY_REPORT_FORMAT_VERSION
@@ -5405,20 +5589,20 @@ class IntegrityRuntimeController:
             or payload.get("policy_mode") not in _INTEGRITY_POLICY_MODES
             or payload.get("status") not in _INTEGRITY_STATUSES
         ):
-            return None
+            return invalid_report()
         try:
             raw_checks = payload["checks"]
             raw_findings = payload["findings"]
             raw_deferred = payload["deferred_coverage"]
             if not isinstance(raw_checks, list) or not isinstance(raw_findings, list):
-                return None
+                return invalid_report()
             if not isinstance(raw_deferred, list):
-                return None
+                return invalid_report()
             if (
                 len(raw_checks) > len(self.registry.checks) + len(_INTEGRITY_META_CHECK_IDS)
                 or len(raw_findings) > 4_096
             ):
-                return None
+                return invalid_report()
             checks = tuple(self._check_result_from_payload(item) for item in raw_checks)
             findings = tuple(self._finding_from_payload(item) for item in raw_findings)
             summary = dict(cast(Mapping[str, Any], payload["summary"]))
@@ -5428,16 +5612,16 @@ class IntegrityRuntimeController:
                 or int(summary["p0"]) != sum(finding.severity == "p0" for finding in findings)
                 or int(summary["p1"]) != sum(finding.severity == "p1" for finding in findings)
             ):
-                return None
+                return invalid_report()
             status = cast(IntegrityStatus, payload["status"])
             if findings and any(finding.severity == "p0" for finding in findings):
                 if status != "corrupt":
-                    return None
+                    return invalid_report()
             elif findings:
                 if status not in {"degraded", "incomplete"}:
-                    return None
+                    return invalid_report()
             elif status != "ok":
-                return None
+                return invalid_report()
             report = IntegrityReport(
                 format_version=INTEGRITY_REPORT_FORMAT_VERSION,
                 registry_version=self.registry.version,
@@ -5459,10 +5643,10 @@ class IntegrityRuntimeController:
                 ),
             )
             if not report.run_id or not report.started_at or not report.completed_at:
-                return None
+                return invalid_report()
             return report
         except (KeyError, TypeError, ValueError):
-            return None
+            return invalid_report()
 
     def _validate_active_entries(
         self, value: object, *, allow_unknown: bool = False
@@ -5584,51 +5768,8 @@ class IntegrityRuntimeController:
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
-    temporary = path.with_name(f".{new_id('integrity-write')}.tmp")
-    digest_path = path.with_suffix(path.suffix + ".sha256")
-    digest_temporary = digest_path.with_name(f".{new_id('integrity-digest')}.tmp")
-    try:
-        with temporary.open("xb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        with digest_temporary.open("x", encoding="ascii") as stream:
-            stream.write(content_hash(dict(payload)))
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        os.replace(digest_temporary, digest_path)
-    finally:
-        temporary.unlink(missing_ok=True)
-        digest_temporary.unlink(missing_ok=True)
+    atomic_json(path, payload)
 
 
 def _read_hashed_json(path: Path) -> object | None:
-    digest_path = path.with_suffix(path.suffix + ".sha256")
-    try:
-        raw = _read_bounded_bytes(path, 4_000_000)
-        digest_raw = _read_bounded_bytes(digest_path, 128)
-        payload = strict_json_loads(raw)
-        expected = digest_raw.decode("ascii").strip()
-        if len(expected) != 64:
-            return None
-        int(expected, 16)
-    except (OSError, RecursionError, UnicodeError, ValueError, TypeError):
-        return None
-    try:
-        matches = isinstance(payload, dict) and content_hash(payload) == expected
-    except (RecursionError, TypeError, ValueError):
-        return None
-    if not matches:
-        return None
-    return cast(object, payload)
-
-
-def _read_bounded_bytes(path: Path, maximum: int) -> bytes:
-    with path.open("rb") as stream:
-        raw = stream.read(maximum + 1)
-    if len(raw) > maximum:
-        raise ValueError("bounded integrity file exceeds its size limit")
-    return raw
+    return read_evidence(path).payload

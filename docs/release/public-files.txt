@@ -225,6 +225,7 @@ docs/development/checkpoint-clock-and-recovery.md
 docs/development/email-identity-continuity.md
 docs/development/epistemic-review-recovery.md
 docs/development/http-failure-boundary.md
+docs/development/integrity-evidence.md
 docs/development/memory-literal-search.md
 docs/development/migration-approval-boundaries.md
 docs/development/model-invalidation-boundaries.md
@@ -548,6 +549,7 @@ src/noyra/core/fair_scheduling.py
 src/noyra/core/http.py
 src/noyra/core/identity.py
 src/noyra/core/integrity.py
+src/noyra/core/integrity_evidence.py
 src/noyra/core/integrity_watchdog.py
 src/noyra/core/lifecycle.py
 src/noyra/core/locking.py
@@ -892,6 +894,7 @@ tests/test_b2_exploration_chain.py
 tests/test_b2_intrinsic_exploration.py
 tests/test_b2_local_wallet_approval.py
 tests/test_b2_runner_boundaries.py
+tests/test_b3_integrity_evidence.py
 tests/test_boundary_remediation.py
 tests/test_browser_dispatch_fencing.py
 tests/test_c0_assistance.py

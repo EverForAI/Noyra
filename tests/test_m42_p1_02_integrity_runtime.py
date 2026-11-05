@@ -2238,7 +2238,7 @@ def test_integrity_state_does_not_cross_subjects_in_one_data_root(tmp_path: Path
     try:
         second = _controller(second_kernel, tmp_path, registry=registry)
         assert second.latest_report is None
-        assert second.summary()["status"] == "ok"
+        assert second.summary()["status"] == "not_checked"
         assert second.summary()["p0"] == 0
         second_report = second.run_startup()
         assert second_report is not None and second_report.status == "corrupt"
