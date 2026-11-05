@@ -58,8 +58,20 @@ coordination and unacknowledged dependencies still block exit; recognized,
 validated waits remain observable waits.
 
 Exit requires an hour of continuous sampled health, with no sample gap greater
-than ten minutes. Clock regression clears continuous-health evidence while
-retaining cost reservations. The management summary shows each condition,
+than ten minutes. The gap is measured between successful evaluations, not between
+persisted heartbeats. Process-local sample evidence is bound to the durable
+incident and health fields, so normal five-minute scheduling jitter does not
+reset the window when a ten-minute checkpoint is written slightly late. A
+restart, a changed health record or a failed clock/database evaluation discards
+that local continuity and begins a new sampled window. Checkpoint writes caused
+only by model-budget reservations neither count as health samples nor discard
+valid observations in the current process. Samples become usable only after
+their database transaction commits.
+
+Clock regression, including a regression behind an unpersisted local sample,
+clears continuous-health evidence while retaining cost reservations. Forward
+jumps beyond the sample-gap bound also begin a new window rather than claiming
+unobserved healthy time. The management summary shows each condition,
 when it was checked and when an unmet condition began. Model admission time
 is not presented as a health evaluation. Health checkpoints are written on
 condition changes, clock transitions or at most once per ten-minute heartbeat,

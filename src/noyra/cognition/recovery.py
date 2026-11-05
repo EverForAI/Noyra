@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
@@ -16,6 +17,13 @@ from noyra.core.recovery_budget import (
 from noyra.core.types import content_hash, utc_now
 
 from .project_control import ProjectReviewControl, project_dependencies_pending
+
+
+@dataclass(frozen=True)
+class _HealthSample:
+    evidence_hash: str
+    evaluated_at: str
+    stable_since: str | None
 
 
 class AutonomyRecovery:
@@ -32,13 +40,21 @@ class AutonomyRecovery:
         self.clock = clock
         self.source_refresh_seconds = source_refresh_seconds
         self._last_check: str | None = None
+        self._health_sample: _HealthSample | None = None
 
     def refresh(self) -> dict[str, Any] | None:
+        # Only successfully completed evaluations can extend continuity. Clear
+        # the cache before reading the clock or SQL so any failure cannot leave
+        # an earlier healthy window eligible for a later exit.
+        previous_sample = self._health_sample
+        self._health_sample = None
         now = self.clock()
         if self._last_check is not None:
             elapsed = (parse_time(now) - parse_time(self._last_check)).total_seconds()
             if 0 <= elapsed < 300:
+                self._health_sample = previous_sample
                 return None
+        next_sample = None
         with self.database.transaction() as connection:
             state = read_recovery(connection, self.subject_id)
             if state is None or not state["active"]:
@@ -77,7 +93,15 @@ class AutonomyRecovery:
                 write_recovery(connection, self.subject_id, state, now)
             else:
                 instant = parse_time(now)
+                sample = (
+                    previous_sample
+                    if previous_sample is not None
+                    and previous_sample.evidence_hash == self._health_evidence_hash(state)
+                    else None
+                )
                 watermark = recovery_high_water(state)
+                if sample is not None:
+                    watermark = max(watermark, parse_time(sample.evaluated_at))
                 if instant < watermark:
                     if (
                         state.get("clock_status") != "wall_clock_behind_history"
@@ -195,9 +219,12 @@ class AutonomyRecovery:
                     "wall_clock": True,
                 }
                 healthy = all(checks.values())
-                stable = state.get("stable_since") if healthy else None
-                last_healthy = state.get("last_healthy_at")
-                if last_healthy is None or instant - parse_time(last_healthy) > timedelta(
+                # A persisted heartbeat may be older than the most recent
+                # successful sample. Use process-local sample evidence, bound
+                # to the health checkpoint, rather than its write timestamp.
+                # A new instance or changed health evidence starts a new window.
+                stable = sample.stable_since if healthy and sample is not None else None
+                if sample is None or instant - parse_time(sample.evaluated_at) > timedelta(
                     minutes=10
                 ):
                     stable = None
@@ -233,8 +260,36 @@ class AutonomyRecovery:
                         exit_conditions=conditions,
                     )
                     write_recovery(connection, self.subject_id, state, now)
+                next_sample = _HealthSample(self._health_evidence_hash(state), now, stable)
+        # Publish in-memory evidence only after the transaction committed. Budget
+        # reservations can append checkpoints between samples without counting
+        # as health observations or discarding this process's real observations.
+        self._health_sample = next_sample
         self._last_check = now
         return state
+
+    @staticmethod
+    def _health_evidence_hash(state: dict[str, Any]) -> str:
+        # Budget admission changes checked_at, high-water and reservations, but
+        # cannot manufacture continuity. Any change to the actual health/incident
+        # evidence invalidates the cached sample; old or other-instance writes
+        # are never silently overwritten with our unpersisted stable window.
+        return content_hash(
+            {
+                field: state.get(field)
+                for field in (
+                    "incident",
+                    "started_at",
+                    "project_ids",
+                    "active",
+                    "stable_since",
+                    "last_healthy_at",
+                    "last_health_evaluated_at",
+                    "clock_status",
+                    "exit_conditions",
+                )
+            }
+        )
 
     @staticmethod
     def _conditions(
