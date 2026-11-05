@@ -120,8 +120,12 @@ The email adapter is an authenticated HTTP ingress for a trusted mail gateway;
 the `smtp://` / `smtps://` transport endpoint is outbound-only. Noyra does not
 listen on an SMTP/MX port or accept unauthenticated Internet mail directly.
 The gateway must forward the bounded original RFC 5322 message to
-`/webhooks/email/{transport_id}` with the configured HMAC headers, after which
-the normal account binding and replay checks apply.
+`/webhooks/email/{transport_id}` with the configured HMAC headers. Raw mail is
+accepted as an unverified invitation. Mailbox identity and private conversation
+continuity require the signed gateway assertion described in
+[Email identity and private conversation continuity](../development/email-identity-continuity.md).
+The signature proves gateway delivery, not arbitrary `From` ownership. Existing
+account binding and replay checks continue to apply.
 
 Before production exposure, configure a platform-specific webhook secret,
 bind at least one external account in `/admin`, and complete provider sandbox

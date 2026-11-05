@@ -130,9 +130,10 @@ def test_public_schema_has_fixed_reviewed_fingerprints(
     archive: tuple[PublicArchive, SubjectKernel],
 ) -> None:
     _, kernel = archive
-    # Reviewed whole-database schema 112, not only archive tables. Versions
+    # Reviewed whole-database schema 113, not only archive tables. Versions
     # 108-112 add acquisition state, its immutable-cache guard, an agenda
     # revision index, append-only thought-round closures and bounded scheduling state.
+    # v113 adds explicit email identity versions and per-event mailbox evidence.
     # Archive tables
     # retain their contract. Keep independent literal values, never derive the
     # expectation from the implementation's fingerprint registry.
@@ -142,15 +143,15 @@ def test_public_schema_has_fixed_reviewed_fingerprints(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()[0]
             == str(CURRENT_SCHEMA_VERSION)
-            == "112"
+            == "113"
         )
         assert (
             kernel.database.schema_ddl_fingerprint(connection)
-            == "3ef82d3fbc0dddb1550e1548c5f7d99bcaae7c9260a247c2978e57d1e2706a42"
+            == "e070d0be4362c38381c8491e20f9d46805c60651d9c80a03160f05ecc90d9994"
         )
         assert (
             kernel.database.schema_structure_fingerprint(connection)
-            == "b19e54f9fbfe50fd9d9224c64ba9b280b36674eff5e3480eef9d3ddbca3272fc"
+            == "800ecf6f66a188e66f86dbfacdb1fffb452636b591a09d2950b2361e4a9f5608"
         )
 
 

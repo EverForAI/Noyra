@@ -1583,8 +1583,9 @@ class DeliveryDispatcher:
             if interaction["related_interaction_id"] is not None:
                 with self.database.connection() as connection:
                     contexts = connection.execute(
-                        "SELECT external_thread_id, provider_event_id, reply_selector, "
-                        "reply_context_version, "
+                        "SELECT event_id, content_hash, external_thread_id, provider_event_id, "
+                        "reply_selector, "
+                        "reply_context_version, email_identity_version, "
                         "conversation_id, transport_id, subject_id, external_account_id, "
                         "external_sender_id, channel "
                         "FROM interaction_inbound_events WHERE interaction_id = ? "
@@ -1600,6 +1601,19 @@ class DeliveryDispatcher:
                     legacy_thread = None
                     if context is not None and context["transport_id"] != record.transport_id:
                         raise IntegrityError("reply delivery uses a different source transport")
+                    email_identity = None
+                    if context is not None and record.channel == "email":
+                        from .email_identity import read_evidence
+
+                        email_identity = read_evidence(connection, context)
+                        if email_identity is None:
+                            private = connection.execute(
+                                "SELECT 1 FROM participant_message_links WHERE subject_id=? "
+                                "AND interaction_id=? AND visibility='private'",
+                                (delivery.subject_id, interaction["related_interaction_id"]),
+                            ).fetchone()
+                            if private is not None:
+                                raise PermissionError("legacy email private identity is unverified")
                     if context is not None:
                         permitted = connection.execute(
                             "SELECT 1 FROM interaction_bindings b WHERE b.subject_id=? "
@@ -1656,7 +1670,11 @@ class DeliveryDispatcher:
                         ).fetchone()
                 if context is not None:
                     thread_id = (
-                        context["provider_event_id"]
+                        (
+                            email_identity.message_id
+                            if email_identity is not None
+                            else context["provider_event_id"]
+                        )
                         if record.channel == "email"
                         else context["external_thread_id"]
                     )
@@ -1865,6 +1883,22 @@ class DeliveryDispatcher:
                 (current["related_interaction_id"], transport.subject_id),
             ).fetchone()
             if context is not None:
+                if context["channel"] == "email":
+                    from .email_identity import read_evidence
+
+                    identity = read_evidence(connection, context)
+                    if identity is not None and interaction.get("thread_id") != identity.message_id:
+                        raise PermissionError("email reply evidence changed before send")
+                    if (
+                        identity is None
+                        and connection.execute(
+                            "SELECT 1 FROM participant_message_links WHERE subject_id=? "
+                            "AND interaction_id=? AND visibility='private'",
+                            (transport.subject_id, current["related_interaction_id"]),
+                        ).fetchone()
+                        is not None
+                    ):
+                        raise PermissionError("legacy email private identity is unverified")
                 permitted = connection.execute(
                     "SELECT 1 FROM interaction_bindings WHERE subject_id=? AND transport_id=? "
                     "AND channel=? AND external_account_id=? AND external_sender_id=? "

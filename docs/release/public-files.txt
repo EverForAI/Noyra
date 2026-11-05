@@ -222,6 +222,7 @@ docs/development/action-deliberation-recovery.md
 docs/development/architecture-boundaries.md
 docs/development/autonomy-scheduling.md
 docs/development/checkpoint-clock-and-recovery.md
+docs/development/email-identity-continuity.md
 docs/development/epistemic-review-recovery.md
 docs/development/http-failure-boundary.md
 docs/development/memory-literal-search.md
@@ -580,6 +581,7 @@ src/noyra/core/scheduling_clock.py
 src/noyra/core/schema/__init__.py
 src/noyra/core/schema/base.py
 src/noyra/core/schema/contracts.py
+src/noyra/core/schema/email_identity.py
 src/noyra/core/schema/evidence.py
 src/noyra/core/schema/migrations.py
 src/noyra/core/schema/migrations_v002_v005.py
@@ -650,6 +652,7 @@ src/noyra/interaction/assistance_routes.py
 src/noyra/interaction/collaboration.py
 src/noyra/interaction/conversations.py
 src/noyra/interaction/diary.py
+src/noyra/interaction/email_identity.py
 src/noyra/interaction/erasure.py
 src/noyra/interaction/errors.py
 src/noyra/interaction/expression.py
@@ -877,6 +880,9 @@ tests/test_audit_r04_subject_contract.py
 tests/test_audit_r05_embedding_shutdown.py
 tests/test_authentication_input_contract.py
 tests/test_autonomous_projects.py
+tests/test_b1_email_continuity.py
+tests/test_b1_email_gateway.py
+tests/test_b1_email_identity.py
 tests/test_b2_decision_evidence.py
 tests/test_b2_exploration_chain.py
 tests/test_b2_intrinsic_exploration.py

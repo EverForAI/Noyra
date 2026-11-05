@@ -24,7 +24,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email import policy
 from email.parser import BytesParser
-from email.utils import getaddresses
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -35,6 +34,17 @@ from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.core.xml import parse_untrusted_xml
 
+from .email_identity import (
+    MAILBOX_AUTHENTICATION,
+    EmailIdentity,
+    MailVerification,
+    decode_gateway,
+    mailbox,
+    message_ids,
+    persist_evidence,
+    read_evidence,
+    single_header,
+)
 from .participants import ParticipantStore, source_namespace
 from .store import InteractionStore
 
@@ -71,6 +81,7 @@ class InboundEnvelope(BaseModel):
     reply_selector: InboundReplySelector | None = None
     received_at: str = Field(default_factory=utc_now)
     sender_role: InboundRole = "participant"
+    email_identity: EmailIdentity | None = None
 
     @field_validator(
         "transport_id",
@@ -96,6 +107,8 @@ class InboundEnvelope(BaseModel):
     def validate_identity(self) -> InboundEnvelope:
         if not self.content:
             raise ValueError("inbound content cannot be blank")
+        if self.channel != "email" and self.email_identity is not None:
+            raise ValueError("email identity evidence requires email channel")
         if self.channel == "email" and not self.conversation_id:
             raise ValueError("email conversation id is required")
         if self.channel in {"qq", "feishu"} and self.reply_selector is None:
@@ -813,47 +826,54 @@ class EmailInboundAdapter:
         account_id: str | None = None,
     ) -> InboundEnvelope:
         _verify_hmac(body, headers, secret, header="X-Noyra-Signature")
-        message = BytesParser(policy=policy.default).parsebytes(_bounded_body(body))
+        raw, gateway = decode_gateway(_bounded_body(body))
+        message = BytesParser(policy=policy.default).parsebytes(raw)
         self._validate_mime_structure(message)
-        sender = self._mailbox(message.get("From"), "sender")
-        recipient = self._mailbox(message.get("To"), "recipient")
-        message_id = str(message.get("Message-ID") or content_hash(body)).strip()
+        sender = self._mailbox(single_header(message, "From"), "sender")
+        # A gateway knows the actual delivery account, including Bcc/aliases.
+        # To/Authentication-Results inside MIME cannot make that assertion.
+        recipient = self._mailbox(
+            gateway.account if gateway is not None else single_header(message, "To"),
+            "recipient",
+        )
+        if account_id is not None and recipient != self._mailbox(account_id, "account"):
+            raise InboundAuthenticationError("email receiving account does not match transport")
+        verification: MailVerification = "unverified"
+        if gateway is not None and gateway.sender_assertion is not None:
+            assertion = gateway.sender_assertion
+            if self._mailbox(assertion.mailbox, "assertion") != sender:
+                raise InboundAuthenticationError("email mailbox assertion does not match From")
+            verification = assertion.method
+        ids = message_ids(single_header(message, "Message-ID"), "Message-ID")
+        reply_ids = message_ids(single_header(message, "In-Reply-To"), "In-Reply-To")
+        references = message_ids(single_header(message, "References"), "References", multiple=True)
+        identity = EmailIdentity(
+            message_id=ids[0] if ids else None,
+            gateway_event_id=gateway.event_id if gateway is not None else None,
+            verification=verification,
+            raw_message_hash=hashlib.sha256(raw).hexdigest(),
+        )
         content = message.get_body(preferencelist=("plain", "html"))
         if content is None:
             raise ValueError("email text body is missing")
         text = content.get_content() if hasattr(content, "get_content") else str(content)
-        in_reply_to = str(message.get("In-Reply-To") or "").strip()
-        references = str(message.get("References") or "").split()
-        conversation_id = in_reply_to or (references[0] if references else message_id)
-        thread_id = in_reply_to or (references[-1] if references else None)
-        return _common_envelope(
+        thread_id = reply_ids[0] if reply_ids else references[-1] if references else None
+        result = _common_envelope(
             channel=self.channel,
             transport_id=transport_id,
-            event_id=message_id,
+            event_id=identity.event_key(sender),
             account=recipient,
             sender=sender,
-            conversation=conversation_id,
+            conversation=thread_id or identity.message_id or identity.event_key(sender),
             content=text,
             label=sender,
             thread=thread_id,
         )
+        return result.model_copy(update={"email_identity": identity})
 
     @staticmethod
     def _mailbox(value: Any, field: str) -> str:
-        """Return one canonical mailbox, rejecting ambiguous address headers."""
-        raw = _text(value, field, limit=MAX_INBOUND_ID_CHARS)
-        addresses = [address.strip() for _, address in getaddresses([raw]) if address.strip()]
-        if len(addresses) != 1:
-            raise ValueError(f"email {field} address is invalid")
-        address = addresses[0]
-        if any(ord(character) < 32 or character in "\r\n" for character in address):
-            raise ValueError(f"email {field} address is invalid")
-        local, separator, domain = address.rpartition("@")
-        if not separator or not local or not domain or len(address) > MAX_INBOUND_ID_CHARS:
-            raise ValueError(f"email {field} address is invalid")
-        # Domains are case-insensitive; preserve the local part because some
-        # installations intentionally distinguish it.
-        return f"{local}@{domain.casefold()}"
+        return mailbox(value, field)
 
     @staticmethod
     def _validate_mime_structure(message: Any) -> None:
@@ -1259,6 +1279,18 @@ class InboundStore:
             # Only code-shaped control messages count as guesses; ordinary chat is unaffected.
             if not re.fullmatch(r"[A-Z2-7]{10}", code):
                 return None
+            # Known control codes belong to one transport. A delivery through
+            # another bot neither consumes a challenge nor becomes ordinary
+            # conversation content containing that private verification code.
+            if (
+                connection.execute(
+                    "SELECT 1 FROM inbound_identity_challenges WHERE subject_id=? "
+                    "AND transport_id<>? AND code_hash=? LIMIT 1",
+                    (subject_id, envelope.transport_id, content_hash(code)),
+                ).fetchone()
+                is not None
+            ):
+                raise PermissionError("identity challenge belongs to another transport")
             if envelope.reply_selector != "qq:user":
                 if connection.execute(
                     "SELECT 1 FROM inbound_identity_challenges WHERE subject_id=? "
@@ -1323,6 +1355,41 @@ class InboundStore:
         return result
 
     def ingest(self, envelope: InboundEnvelope) -> InboundAccepted | InboundIdentityObserved:
+        if envelope.channel == "email":
+            identity = envelope.email_identity
+            if identity is None:
+                # Internal/legacy typed callers carry no mailbox attestation.
+                is_message_id = envelope.provider_event_id.startswith("<")
+                ids = message_ids(envelope.provider_event_id, "Message-ID") if is_message_id else []
+                identity = EmailIdentity(
+                    message_id=ids[0] if ids else None,
+                    gateway_event_id=None if is_message_id else envelope.provider_event_id,
+                    raw_message_hash=content_hash(
+                        {
+                            "sender": envelope.external_sender_id,
+                            "account": envelope.external_account_id,
+                            "conversation": envelope.conversation_id,
+                            "thread": envelope.thread_id,
+                            "content": envelope.content,
+                        }
+                    ),
+                )
+            envelope = envelope.model_copy(
+                update={
+                    "provider_event_id": identity.event_key(envelope.external_sender_id),
+                    "email_identity": identity,
+                }
+            )
+        email = envelope.email_identity
+        namespace = (
+            email.namespace(
+                envelope.transport_id, envelope.external_account_id, envelope.external_sender_id
+            )
+            if email is not None
+            else source_namespace(
+                envelope.channel, envelope.transport_id, envelope.external_account_id
+            )
+        )
         observed = self._observe_identity(envelope)
         if observed is not None:
             return observed
@@ -1350,6 +1417,18 @@ class InboundStore:
                 ),
             ).fetchone()
             subject_id = self._subject_for_transport(connection, envelope.transport_id)
+            if email is not None:
+                from .transport import TransportStore
+
+                config = TransportStore._config(transport)
+                account = config.get("account_id")
+                if (
+                    account is not None
+                    and mailbox(account, "account") != envelope.external_account_id
+                ):
+                    raise PermissionError("email receiving account does not match transport")
+                if config.get("require_known_senders", False) is True and not email.verified:
+                    raise PermissionError("restricted email ingress requires a verified sender")
             if binding is None:
                 from .transport import TransportStore
 
@@ -1384,7 +1463,9 @@ class InboundStore:
                 ).fetchone()
             if binding is None or binding["status"] != "active":
                 raise PermissionError("inbound account is disabled or revoked")
-            priority = 100 if binding["role"] == "creator" else 0
+            priority = (
+                100 if binding["role"] == "creator" and (email is None or email.verified) else 0
+            )
             route = (
                 connection.execute(
                     "SELECT conversation_id FROM private_channel_routes WHERE binding_id=? "
@@ -1402,8 +1483,9 @@ class InboundStore:
                     "event_id, subject_id, transport_id, channel, provider_event_id, "
                     "external_account_id, external_sender_id, conversation_id, content_hash, "
                     "scheduling_priority, status, received_at, processed_at, interaction_id, "
-                    "external_thread_id, reply_selector, reply_context_version) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, NULL, NULL, ?, ?, 1)",
+                    "external_thread_id, reply_selector, reply_context_version, "
+                    "email_identity_version) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, NULL, NULL, ?, ?, ?, ?)",
                     (
                         event_id,
                         subject_id,
@@ -1418,14 +1500,14 @@ class InboundStore:
                         now,
                         envelope.thread_id,
                         envelope.reply_selector,
+                        1,
+                        1 if email is not None else 0,
                     ),
                 )
             except sqlite3.IntegrityError:
                 provider_duplicate = True
                 row = connection.execute(
-                    "SELECT event_id, interaction_id, scheduling_priority, content_hash, status, "
-                    "external_account_id, external_sender_id, conversation_id, channel, "
-                    "external_thread_id, reply_selector, reply_context_version "
+                    "SELECT * "
                     "FROM interaction_inbound_events WHERE subject_id = ? "
                     "AND transport_id = ? AND external_account_id = ? "
                     "AND provider_event_id = ?",
@@ -1447,8 +1529,13 @@ class InboundStore:
                     or row["external_thread_id"] != envelope.thread_id
                     or row["reply_selector"] != envelope.reply_selector
                     or int(row["reply_context_version"]) != 1
+                    or int(row["email_identity_version"]) != (1 if email is not None else 0)
                 ):
                     raise ValueError("inbound event id identifies different content") from None
+                if email is not None and read_evidence(connection, row) != email:
+                    raise ValueError(
+                        "inbound email event id identifies different evidence"
+                    ) from None
                 if row["interaction_id"] is not None:
                     if row["status"] != "processed":
                         raise IntegrityError("inbound event linkage state is invalid") from None
@@ -1471,6 +1558,11 @@ class InboundStore:
                     raise IntegrityError("inbound event status is invalid") from None
                 event_id = str(row["event_id"])
                 priority = int(row["scheduling_priority"])
+            if email is not None:
+                event = connection.execute(
+                    "SELECT * FROM interaction_inbound_events WHERE event_id=?", (event_id,)
+                ).fetchone()
+                persist_evidence(connection, event, email)
             self._upsert_thread(
                 connection,
                 subject_id,
@@ -1480,10 +1572,14 @@ class InboundStore:
         from .transport import TransportStore
 
         inbound_settings = TransportStore._config(transport)
+        direct_account = inbound_settings.get("account_id")
+        if email is not None and isinstance(direct_account, str):
+            direct_account = mailbox(direct_account, "account")
         direct_reply = (
             envelope.thread_id is not None
             and envelope.channel in {"email", "webhook"}
-            and inbound_settings.get("account_id") == envelope.external_account_id
+            and (email is None or email.verified)
+            and direct_account == envelope.external_account_id
             and (
                 envelope.channel == "email"
                 or envelope.external_sender_id == envelope.conversation_id
@@ -1498,7 +1594,39 @@ class InboundStore:
             # Only direct reply linking borrows receive's transaction. The
             # invitation, both private links and initial thread binding commit
             # together, so parallel/retried first replies use one stable key.
-            with self.database.transaction() if direct_reply else nullcontext(None) as connection:
+            with (
+                self.database.transaction()
+                if direct_reply or email is not None
+                else nullcontext(None)
+            ) as connection:
+                if connection is not None:
+                    receive_options["_connection"] = connection
+                if email is not None:
+                    assert connection is not None
+                    if not email.verified:
+                        existing_source = connection.execute(
+                            "SELECT 1 FROM participant_sources WHERE subject_id=? "
+                            "AND channel='email' "
+                            "AND namespace=? AND sender_id=?",
+                            (subject_id, namespace, envelope.external_sender_id),
+                        ).fetchone()
+                        recent_sources = connection.execute(
+                            "SELECT COUNT(*) FROM participant_sources WHERE subject_id=? "
+                            "AND channel='email' AND authentication='channel' "
+                            "AND created_at>=?",
+                            (subject_id, (datetime.now(UTC) - timedelta(hours=1)).isoformat()),
+                        ).fetchone()[0]
+                        if existing_source is None and recent_sources >= 100:
+                            raise PermissionError("unverified email identities are cooling down")
+                    receive_options["participant"] = ParticipantStore.source(
+                        connection,
+                        subject_id,
+                        "email",
+                        namespace,
+                        envelope.external_sender_id,
+                        label=envelope.sender_label,
+                        authentication=MAILBOX_AUTHENTICATION if email.verified else "channel",
+                    )
                 if direct_reply:
                     assert connection is not None
                     receive_options["_connection"] = connection
@@ -1524,7 +1652,14 @@ class InboundStore:
                     if (
                         current_transport is None
                         or permitted is None
-                        or TransportStore._config(current_transport).get("account_id")
+                        or (
+                            mailbox(
+                                TransportStore._config(current_transport).get("account_id"),
+                                "account",
+                            )
+                            if email is not None
+                            else TransportStore._config(current_transport).get("account_id")
+                        )
                         != envelope.external_account_id
                     ):
                         raise PermissionError("direct reply source is no longer available")
@@ -1559,11 +1694,7 @@ class InboundStore:
                             envelope.channel,
                             recipient,
                             envelope.channel,
-                            source_namespace(
-                                envelope.channel,
-                                envelope.transport_id,
-                                envelope.external_account_id,
-                            ),
+                            namespace,
                             envelope.external_sender_id,
                         ),
                     ).fetchall()
@@ -1627,12 +1758,12 @@ class InboundStore:
                     related_interaction_id=None if help_root else parent_id,
                     participant_private=parent_id is not None,
                     participant_source=(
-                        source_namespace(
-                            envelope.channel, envelope.transport_id, envelope.external_account_id
-                        ),
+                        namespace,
                         envelope.external_sender_id,
                         envelope.sender_label,
-                    ),
+                    )
+                    if email is None
+                    else None,
                     participant_conversation=participant_conversation
                     or content_hash(
                         [

@@ -732,6 +732,11 @@ _OWNERSHIP_GRAPHS[112] = {
     "autonomy_schedule_state": _subject_rule(),
 }
 
+_OWNERSHIP_GRAPHS[113] = {
+    **_OWNERSHIP_GRAPHS[112],
+    "email_ingress_evidence": _subject_rule(),
+}
+
 
 @dataclass(frozen=True)
 class RuntimeExportArtifact:

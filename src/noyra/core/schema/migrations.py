@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .email_identity import EMAIL_IDENTITY_SCHEMA
 from .migrations_v002_v005 import MIGRATIONS_V002_V005
 from .migrations_v006_v017 import MIGRATIONS_V006_V017
 from .migrations_v018_v021 import MIGRATIONS_V018_V021
@@ -74,4 +75,5 @@ BEFORE UPDATE OF subject_id ON autonomy_schedule_state
 WHEN NEW.subject_id IS NOT OLD.subject_id
 BEGIN SELECT RAISE(ABORT,'autonomy schedule subject is immutable'); END;
 """,
+    113: EMAIL_IDENTITY_SCHEMA,
 }

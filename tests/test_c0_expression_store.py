@@ -26,6 +26,7 @@ from noyra.interaction import (
     TransportRecord,
     TransportStore,
 )
+from noyra.interaction.email_identity import EmailIdentity
 from noyra.interaction.expression import ExpressionProposal, ExpressionReview, ExpressionStore
 from noyra.interaction.participants import ParticipantStore
 from noyra.interaction.public_archive import PublicArchive
@@ -629,6 +630,14 @@ class ExpressionStoreTestCase(unittest.IsolatedAsyncioTestCase):
             conversation_id=reference if transport.channel == "email" else "helper@example.com",
             thread_id=reference,
             content=f"Public answer number {number}.",
+            email_identity=EmailIdentity(
+                message_id=f"<incoming-{number}@helper.example>",
+                gateway_event_id=f"fixture-incoming-{number}",
+                verification="provider_mailbox",
+                raw_message_hash=content_hash([reference, number]),
+            )
+            if transport.channel == "email"
+            else None,
         )
 
     async def test_email_three_rounds_keep_private_history_and_reply_headers_after_reopen(

@@ -27,6 +27,7 @@ from noyra.interaction import (
 from noyra.interaction.assistance import AssistanceStore
 from noyra.interaction.assistance_routes import AssistanceRoutes
 from noyra.interaction.conversations import ConversationStore
+from noyra.interaction.email_identity import EmailIdentity
 from noyra.interaction.integrity import InteractionIntegrity
 from noyra.interaction.participants import ParticipantStore
 from noyra.interaction.types import InteractionDecision
@@ -140,6 +141,13 @@ def reply(contact: Any, number: int = 1, **changes: Any) -> InboundEnvelope:
         "content": "Use the public results index.",
         "thread_id": contact.delivery.provider_message_id,
     }
+    if contact.transport.channel == "email":
+        values["email_identity"] = EmailIdentity(
+            message_id=str(values["provider_event_id"]),
+            gateway_event_id=f"fixture-help-{number}",
+            verification="provider_mailbox",
+            raw_message_hash=content_hash([values["content"], values["thread_id"]]),
+        )
     values.update(changes)
     return InboundEnvelope.model_validate(values)
 

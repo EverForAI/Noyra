@@ -3630,6 +3630,29 @@ END;
                         connection.rollback()
                         raise
                     continue
+                if target_version == 113:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        email_columns = {
+                            str(row[1])
+                            for row in connection.execute(
+                                "PRAGMA table_info(interaction_inbound_events)"
+                            )
+                        }
+                        if "email_identity_version" not in email_columns:
+                            connection.execute(
+                                "ALTER TABLE interaction_inbound_events ADD COLUMN "
+                                "email_identity_version INTEGER NOT NULL DEFAULT 0 CHECK("
+                                "email_identity_version IN (0,1) AND "
+                                "(email_identity_version=0 OR channel='email'))"
+                            )
+                        self._execute_sql_script(connection, migration)
+                        self._set_schema_version(connection, target_version)
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    continue
                 if target_version in {33, 48, 50, 51, 52}:
                     try:
                         connection.execute("BEGIN IMMEDIATE")

@@ -184,13 +184,46 @@ class ParticipantStore:
             return self.for_message_connection(c, subject, interaction)
 
     def history(self, subject: str, interaction: str, limit: int = 16) -> list[dict[str, Any]]:
-        with self.database.connection() as c:
+        with self.database.read_transaction() as c:
             link = c.execute(
                 "SELECT * FROM participant_message_links WHERE subject_id=? AND interaction_id=?",
                 (subject, interaction),
             ).fetchone()
             if link is None or link["visibility"] != "private":
                 return []
+            who = self.for_message_connection(c, subject, interaction)
+            if who is not None and who.channel == "email":
+                from .email_identity import MAILBOX_AUTHENTICATION, read_evidence
+
+                if who.authentication != MAILBOX_AUTHENTICATION:
+                    # Retain legacy history but never infer mailbox ownership
+                    # from a pre-upgrade From/thread binding.
+                    return []
+                events = c.execute(
+                    "SELECT * FROM interaction_inbound_events WHERE subject_id=? "
+                    "AND interaction_id=? LIMIT 2",
+                    (subject, interaction),
+                ).fetchall()
+                if len(events) != 1:
+                    return []
+                identity = read_evidence(c, events[0])
+                source = c.execute(
+                    "SELECT namespace,sender_id FROM participant_sources WHERE source_id=?",
+                    (who.source_id,),
+                ).fetchone()
+                if (
+                    identity is None
+                    or not identity.verified
+                    or source is None
+                    or source["sender_id"] != events[0]["external_sender_id"]
+                    or source["namespace"]
+                    != identity.namespace(
+                        events[0]["transport_id"],
+                        events[0]["external_account_id"],
+                        events[0]["external_sender_id"],
+                    )
+                ):
+                    return []
             rows = c.execute(
                 "SELECT "
                 "i.interaction_id,i.direction,i.content,i.created_at,m.conversation_key AS "
@@ -198,10 +231,18 @@ class ParticipantStore:
                 "FROM participant_message_links m JOIN interactions i ON "
                 "i.interaction_id=m.interaction_id AND i.subject_id=m.subject_id "
                 "WHERE m.subject_id=? AND m.entity_id=? AND m.conversation_key=? AND "
-                "m.visibility='private' "
+                "m.visibility='private' AND (? IS NULL OR m.source_id=?) "
                 "AND i.rowid < (SELECT rowid FROM interactions WHERE interaction_id=?) "
                 "ORDER BY i.rowid DESC LIMIT ?",
-                (subject, link["entity_id"], link["conversation_key"], interaction, min(limit, 16)),
+                (
+                    subject,
+                    link["entity_id"],
+                    link["conversation_key"],
+                    who.source_id if who is not None and who.channel == "email" else None,
+                    who.source_id if who is not None and who.channel == "email" else None,
+                    interaction,
+                    min(limit, 16),
+                ),
             ).fetchall()
         return [dict(r) for r in reversed(rows)]
 

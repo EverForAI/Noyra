@@ -990,6 +990,18 @@ def handler_type(
                             str(credentials.get("app_id")) if credentials.get("app_id") else None
                         ),
                     )
+                elif channel == "email":
+                    envelope = adapter.parse(
+                        body,
+                        callback_headers,
+                        transport_id=transport_id,
+                        secret=secret_value,
+                        account_id=(
+                            str(transport_settings["account_id"])
+                            if transport_settings.get("account_id")
+                            else None
+                        ),
+                    )
                 elif channel == "feishu":
                     envelope = adapter.parse(
                         body,
