@@ -5,15 +5,18 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from .admission import bind_lease
 from .checkpoint_clock import append_checkpoint
-from .database import Database
 from .deadline import monotonic_time
 from .errors import IntegrityError
 from .events import EventStore
 from .scheduling_clock import aware_time
 from .types import content_hash
+
+if TYPE_CHECKING:
+    from .runtime import SubjectKernel
 
 
 def workflow_key(subject_id: str) -> str:
@@ -92,8 +95,7 @@ def read_watchdog(connection: Any, subject_id: str) -> dict[str, Any] | None:
 class IntegrityWatchdog:
     def __init__(
         self,
-        database: Database,
-        subject_id: str,
+        kernel: SubjectKernel,
         *,
         base_seconds: float,
         maximum_seconds: float,
@@ -101,7 +103,8 @@ class IntegrityWatchdog:
         clock: Callable[[], str],
         monotonic: Callable[[], float] = monotonic_time,
     ):
-        self.database, self.subject_id = database, subject_id
+        self.kernel = kernel
+        self.database, self.subject_id = kernel.database, kernel.subject_id
         self.base, self.maximum, self.threshold = base_seconds, maximum_seconds, threshold
         self.clock, self.monotonic = clock, monotonic
         self._deadline: float | None = None
@@ -240,7 +243,21 @@ class IntegrityWatchdog:
         self._token = None
 
     def _persist(self, state: dict[str, Any], event_type: str | None) -> str | None:
-        with self.database.transaction() as c:
+        # This is control-plane diagnostic evidence, not permission to execute
+        # cognition while paused/quarantined. It still requires current process
+        # and migration ownership, and must drain before that ownership ends.
+        with (
+            self.kernel.admission.operation(
+                "integrity-watchdog-state", allow_quarantine=True
+            ) as lease,
+            bind_lease(lease),
+            self.kernel.admission.commit_scope(lease),
+            self.kernel.process_lock.ownership_scope(),
+            self.database.transaction() as c,
+        ):
+            guard = self.kernel.lifecycle.mutation_guard
+            if guard is not None:
+                guard(c)
             read_watchdog(c, self.subject_id)
             prior = c.execute(
                 "SELECT * FROM workflow_checkpoints WHERE workflow_id=? "

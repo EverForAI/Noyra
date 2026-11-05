@@ -52,8 +52,7 @@ class AutonomyLoop:
         self._clock = clock
         self._sleep_conflict_started_at: datetime | None = None
         self.integrity_watchdog = IntegrityWatchdog(
-            kernel.database,
-            kernel.subject_id,
+            kernel,
             base_seconds=self.config.error_backoff_seconds,
             maximum_seconds=self.config.max_error_backoff_seconds,
             threshold=self.config.max_consecutive_failures,

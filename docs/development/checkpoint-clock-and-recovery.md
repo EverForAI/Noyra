@@ -108,6 +108,16 @@ summary overlays the main service's current memory snapshot, without an extra
 HTTP-side disk read, so a failed watchdog write is not mistaken for a clean
 stored history. The database observation cache is not modified by that overlay.
 
+Error, escalation and recovery checkpoints require a fresh diagnostic control
+lease, the already-held process lock and the existing migration mutation guard
+inside the write transaction. Ownership remains pinned until commit, and the
+lease participates in shutdown draining. A lost owner, a migration-fenced source
+or a closing runtime keeps only unpersisted in-process diagnostics; it cannot
+append to another owner's history. An owner that is merely manually paused or
+in integrity quarantine can still record checker health, without reopening
+ordinary cognition admission. A legitimate target retains the existing
+exception for its own configured migration epoch.
+
 ## World polling uses ordered observed evidence
 
 World poll times continue to mean actual observed checks, not checkpoint logical
