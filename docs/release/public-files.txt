@@ -1117,6 +1117,7 @@ tests/test_wallet_keystore.py
 tests/test_wallet_local.py
 tests/test_wallet_observation_breakdown.py
 tests/test_wallet_observation_health.py
+tests/test_wallet_reconfirmation.py
 tests/test_wallet_release_gates.py
 tests/test_wallet_reward_workflow.py
 tests/test_wallet_rpc.py

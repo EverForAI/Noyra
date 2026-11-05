@@ -2438,9 +2438,11 @@ class WalletPaymentExecutionEngine:
                     "confirmations": receipt.confirmations,
                 },
             )
-            self.economy._transition_order(c, order, "confirmed", actor, "chain receipt confirmed")
-            self.economy._post_order_journal(
-                c, order, "settlement", ("reserved", "debit"), ("paid", "credit")
+            self.economy._settle_order(
+                c,
+                order,
+                actor,
+                reconfirmation=self._verified_reconfirmation(c, execution, order),
             )
             now = utc_now()
             state = self._execution_hash_values_from_row(
@@ -2479,6 +2481,69 @@ class WalletPaymentExecutionEngine:
                     "SELECT * FROM wallet_payment_executions WHERE execution_id=?", (execution_id,)
                 ).fetchone()
             )
+
+    def _verified_reconfirmation(self, c: Any, execution: Any, order: Any) -> bool:
+        """Only a verified prior confirmed-to-unknown transition permits reuse.
+
+        Attempts retain all known transaction hashes for the immutable transfer;
+        an explicit retry may have replaced the most recent hash. This check
+        never authorizes a send, a refund, or another reservation.
+        """
+        event = c.execute(
+            "SELECT * FROM wallet_payment_reconciliation_events WHERE execution_id=? "
+            "ORDER BY rowid DESC LIMIT 1",
+            (execution["execution_id"],),
+        ).fetchone()
+        if event is None:
+            if execution["receipt_status"] == 1:
+                raise IntegrityError("wallet reconfirmation transition evidence is missing")
+            return False
+        try:
+            valid = (
+                execution["state_hash"] == self._execution_hash(execution)
+                and execution["status"] == order["status"]
+                and all(
+                    execution[key] == order[key]
+                    for key in (
+                        "subject_id",
+                        "order_id",
+                        "network_id",
+                        "asset_id",
+                        "amount",
+                        "recipient_address",
+                    )
+                )
+                and all(
+                    event[key] == execution[key]
+                    for key in ("subject_id", "order_id", "execution_id")
+                )
+                and event["previous_status"] == "confirmed"
+                and isinstance(event["reason"], str)
+                and 1 <= len(event["reason"].strip()) <= 2000
+                and datetime.fromisoformat(event["created_at"]).tzinfo is not None
+                and isinstance(event["tx_hash"], str)
+                and _HASH.fullmatch(event["tx_hash"]) is not None
+                and event["state_hash"]
+                == content_hash(
+                    {key: value for key, value in dict(event).items() if key != "state_hash"}
+                )
+            )
+        except (TypeError, ValueError, OverflowError) as error:
+            raise IntegrityError("wallet reconfirmation evidence is malformed") from error
+        if not valid:
+            raise IntegrityError("wallet reconfirmation evidence does not match its execution")
+        attempt = c.execute(
+            "SELECT * FROM wallet_payment_execution_attempts WHERE execution_id=? "
+            "AND tx_hash=? ORDER BY attempt_number DESC LIMIT 1",
+            (execution["execution_id"], event["tx_hash"]),
+        ).fetchone()
+        if (
+            attempt is None
+            or attempt["subject_id"] != execution["subject_id"]
+            or attempt["state_hash"] != self._attempt_hash(attempt)
+        ):
+            raise IntegrityError("wallet reconfirmation transaction evidence is unavailable")
+        return True
 
     def _finish_attempt(
         self,

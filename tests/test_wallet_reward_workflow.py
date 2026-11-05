@@ -794,6 +794,54 @@ def test_confirmed_receipt_reorganization_opens_incident_before_completion(
         ).fetchone()
     assert reconciliation is not None
     assert reconciliation["previous_status"] == "confirmed"
+    with fixture.database.connection() as connection:
+        original_journals = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM wallet_ledger_journals ORDER BY journal_id"
+            )
+        ]
+        original_entries = [
+            dict(row)
+            for row in connection.execute("SELECT * FROM wallet_ledger_entries ORDER BY entry_id")
+        ]
+    fixture.signer.set_receipt(execution.tx_hash, chain_id=1, status=1, block_number=21)
+    fixture.workflow.resolve_incident(
+        reorganized.incident.incident_id,
+        fixture.subject_id,
+        RewardIncidentResolutionInput(
+            resolution="New canonical receipt is available", idempotency_key="reorg-reconcile"
+        ),
+        actor="operator",
+    )
+    fixture.workflow.resume(
+        opened.workflow_id,
+        fixture.subject_id,
+        actor="operator",
+        reason="Reconcile canonical receipt",
+    )
+    recovered = fixture.workflow.execute_ready(fixture.subject_id, actor="operator")[0]
+    assert recovered.workflow.status == "open" and recovered.incident is None
+    completed = fixture.workflow.execute_ready(fixture.subject_id, actor="operator")[0]
+    assert completed.workflow.status == "closed"
+    assert (
+        engine.get_execution(execution.execution_id, fixture.subject_id).receipt_block_number == 21
+    )
+    assert len(fixture.signer.requests) == 1
+    with fixture.database.connection() as connection:
+        assert [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM wallet_ledger_journals ORDER BY journal_id"
+            )
+        ] == original_journals
+        assert [
+            dict(row)
+            for row in connection.execute("SELECT * FROM wallet_ledger_entries ORDER BY entry_id")
+        ] == original_entries
+    engine.verify_integrity(fixture.subject_id)
+    fixture.workflow.economy.verify_integrity(fixture.subject_id)
+    fixture.workflow.verify_integrity(fixture.subject_id)
 
 
 def test_native_inbound_submission_preserves_verified_event_provenance(tmp_path: Path) -> None:
