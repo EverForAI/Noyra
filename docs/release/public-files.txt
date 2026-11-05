@@ -226,6 +226,7 @@ docs/development/email-identity-continuity.md
 docs/development/epistemic-review-recovery.md
 docs/development/http-failure-boundary.md
 docs/development/memory-literal-search.md
+docs/development/migration-approval-boundaries.md
 docs/development/model-invalidation-boundaries.md
 docs/development/model-pre-send-settlement.md
 docs/development/participant-login-throttling.md
@@ -684,6 +685,7 @@ src/noyra/migration/__init__.py
 src/noyra/migration/activation.py
 src/noyra/migration/activation_contract.py
 src/noyra/migration/agent.py
+src/noyra/migration/approval_evidence.py
 src/noyra/migration/bundle.py
 src/noyra/migration/credentials.py
 src/noyra/migration/cutover.py
@@ -883,6 +885,7 @@ tests/test_autonomous_projects.py
 tests/test_b1_email_continuity.py
 tests/test_b1_email_gateway.py
 tests/test_b1_email_identity.py
+tests/test_b2_approval_identity.py
 tests/test_b2_decision_evidence.py
 tests/test_b2_exploration_chain.py
 tests/test_b2_intrinsic_exploration.py

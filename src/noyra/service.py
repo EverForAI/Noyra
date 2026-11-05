@@ -656,6 +656,7 @@ class NoyraHTTPServer:
             production=settings.profile == "production",
             admission=kernel.admission,
             executor=self.migration_http_executor,
+            require_principal_identity=settings.migration_require_independent_review,
         )
         self.migration_recovery = RecoveryCoordinator(kernel.database)
         observation_provider = TargetObservationProvider(

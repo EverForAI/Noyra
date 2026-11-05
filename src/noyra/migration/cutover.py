@@ -47,9 +47,14 @@ class CutoverCoordinator:
         admission: RuntimeAdmissionGate | None = None,
         executor: MigrationExecutor | None = None,
         production: bool | None = None,
+        require_principal_identity: bool = False,
     ):
         self.database = database
-        self.manager = MigrationManager(database, MigrationStore(database, production=production))
+        self.manager = MigrationManager(
+            database,
+            MigrationStore(database, production=production),
+            require_principal_identity=require_principal_identity,
+        )
         self.admission = admission
         self.executor = executor
 
@@ -65,6 +70,8 @@ class CutoverCoordinator:
         task = self.manager.get_task(task_id)
         if task.status == "committed":
             return {"task_id": task_id, "status": "committed"}
+        with self.database.read_transaction() as connection:
+            self.manager.assert_review_authority(connection, task)
         policy = self.manager.policy_store.read_policy(task.subject_id)
         self.manager.policy_store.assert_automation_allowed(policy)
         if not policy.enabled or policy.revision != task.policy_revision:
@@ -93,6 +100,7 @@ class CutoverCoordinator:
                     )
                     if current_policy != policy:
                         raise ValueError("migration policy changed before fencing")
+                    self.manager.assert_review_authority(connection, task)
                     if payment_in_flight(connection, task.subject_id):
                         raise ValueError("migration blocked by unresolved wallet payments")
                     self.manager._ensure_target(connection, task.subject_id, task.target_id)
@@ -162,6 +170,8 @@ class CutoverCoordinator:
         proof: dict[str, object] | None = None,
     ) -> CutoverPlan:
         task = self.manager.get_task(task_id)
+        with self.database.read_transaction() as connection:
+            self.manager.assert_review_authority(connection, task)
         self.manager.policy_store.assert_automation_allowed(
             self.manager.policy_store.read_policy(task.subject_id)
         )
@@ -249,6 +259,8 @@ class CutoverCoordinator:
         task = self.manager.get_task(task_id)
         if task.status == "committed":
             return {"task_id": task_id, "status": "committed"}
+        with self.database.read_transaction() as connection:
+            self.manager.assert_review_authority(connection, task)
         self.manager.policy_store.assert_automation_allowed(
             self.manager.policy_store.read_policy(task.subject_id)
         )

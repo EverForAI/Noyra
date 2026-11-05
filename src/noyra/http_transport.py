@@ -690,12 +690,17 @@ def handler_type(
                     if owner.settings.migration_require_independent_review:
                         return actor, None, self._trusted_reviewer_principal()
                     return actor, binding, None
-            session_id, session = self._session_from_cookie()
+            _session_id, session = self._session_from_cookie()
             if session is None:
                 return self._actor(), None, self._trusted_reviewer_principal()
             if owner.settings.migration_require_independent_review:
                 return session.actor, None, self._trusted_reviewer_principal()
-            return session.actor, owner._admin_session_hash(session_id), None
+            # Cookies inherit their issuing credential, not a new identity
+            # for each browser session. Bearer and cookie must count alike.
+            binding = hashlib.sha256(
+                f"noyra-admin-principal:{owner.kernel.subject_id}:{session.role}".encode()
+            ).hexdigest()
+            return session.actor, binding, None
 
         def _trusted_reviewer_principal(self) -> str | None:
             principal = self.headers.get("X-Noyra-Authenticated-Principal", "").strip()
