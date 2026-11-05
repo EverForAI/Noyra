@@ -508,6 +508,7 @@ src/noyra/cognition/execution_recovery.py
 src/noyra/cognition/expression.py
 src/noyra/cognition/governance.py
 src/noyra/cognition/interaction.py
+src/noyra/cognition/memory_conflicts.py
 src/noyra/cognition/memory_integration.py
 src/noyra/cognition/memory_rounds.py
 src/noyra/cognition/metacognition.py
@@ -906,6 +907,7 @@ tests/test_c0_autonomous_expression.py
 tests/test_c0_expression_store.py
 tests/test_c0_external_assistance.py
 tests/test_c0_inbound_contacts.py
+tests/test_c1_memory_conflicts.py
 tests/test_c1_self_modification_expiry.py
 tests/test_capability.py
 tests/test_capability_file_races.py

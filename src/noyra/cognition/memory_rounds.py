@@ -377,6 +377,9 @@ class MemoryIntegrationRounds:
                 != self.logical_key(state)
             ):
                 raise IntegrityError("memory call context binding is invalid")
+            from .memory_conflicts import verify_retirement
+
+            verify_retirement(connection, self, state, call)
             calls.append(call)
         return calls
 

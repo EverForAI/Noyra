@@ -13,12 +13,14 @@ from noyra.mind import MemoryIntegrationError, MemoryIntegrationSupervisor, Memo
 from noyra.model import ModelGateway, ModelLedger, ModelMessage
 from noyra.model.errors import (
     BudgetExhaustedError,
+    ModelCallConflictError,
     ModelCallStateError,
     ProviderCallError,
     StructuredOutputError,
 )
 from noyra.model.request_identity import UNRUNNABLE_BUSINESS_CALL_SQL
 
+from .memory_conflicts import configured_request, retire_unsent
 from .memory_rounds import MemoryIntegrationRounds
 from .settings import CognitionSettings
 from .types import SemanticMemoryIntegrationProposal
@@ -156,6 +158,8 @@ class SemanticMemoryIntegrator:
                         temperature=state["options"]["temperature"],
                     )
                 call_id = result.call_id
+            except ModelCallConflictError:
+                return self._close_model_conflict(state, calls, payload)
             except BudgetExhaustedError:
                 return "memory_integration_budget_exhausted"
             except (ProviderCallError, StructuredOutputError, ModelCallStateError):
@@ -187,13 +191,65 @@ class SemanticMemoryIntegrator:
                 return True
         return False
 
+    def _close_model_conflict(
+        self, state: dict[str, Any], original_calls: list[Any], payload: dict[str, Any]
+    ) -> str:
+        configured = configured_request(self.gateway, state, payload)
+        with self.database.transaction() as connection:
+            current = self.rounds.read(connection)
+            if current is not None and self.rounds.state(current)["phase"] == "closed":
+                return "memory_integration_replayed"
+            try:
+                self.rounds.current(connection, state)
+            except ModelCallStateError:
+                return "memory_integration_waiting_reconciliation"
+            calls = self.rounds.calls(connection, state)
+            if {(call.call_id, call.request_hash) for call in calls} != {
+                (call.call_id, call.request_hash) for call in original_calls
+            } or configured is None:
+                return "memory_integration_waiting_reconciliation"
+            if not retire_unsent(
+                connection,
+                self.rounds,
+                state,
+                calls,
+                requires_explicit_retry=getattr(
+                    self.gateway, "requires_explicit_prepared_retry", False
+                ),
+                reason="configuration_changed",
+                now=self.clock(),
+                configured=configured,
+            ):
+                return "memory_integration_waiting_reconciliation"
+            self.rounds.close(connection, state, "context_changed", self.clock())
+        return "memory_integration_context_changed"
+
     def _close_context_changed(self, state: dict[str, Any]) -> str:
         with self.database.transaction() as connection:
             current = self.rounds.read(connection)
             if current is not None and self.rounds.state(current)["phase"] == "closed":
                 return "memory_integration_replayed"
+            try:
+                self.rounds.current(connection, state)
+            except ModelCallStateError:
+                return "memory_integration_waiting_reconciliation"
             calls = self.rounds.calls(connection, state)
-            if self._unresolved(connection, calls) or any(c.status == "prepared" for c in calls):
+            if any(call.status == "prepared" for call in calls):
+                if not retire_unsent(
+                    connection,
+                    self.rounds,
+                    state,
+                    calls,
+                    requires_explicit_retry=(
+                        type(self.gateway) is not ModelGateway
+                        or getattr(self.gateway, "requires_explicit_prepared_retry", False)
+                    ),
+                    reason="context_changed",
+                    now=self.clock(),
+                ):
+                    return "memory_integration_waiting_reconciliation"
+                calls = self.rounds.calls(connection, state)
+            if self._unresolved(connection, calls):
                 return "memory_integration_waiting_reconciliation"
             self.rounds.close(
                 connection,

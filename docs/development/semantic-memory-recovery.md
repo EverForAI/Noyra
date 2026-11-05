@@ -44,6 +44,41 @@ same constraints. A nonblocking per-subject process lock prevents concurrent
 workers from dispatching or applying a second copy. Existing permanent budgets
 and temporary recovery reservations remain authoritative.
 
+## Obsolete requests that never reached an attempt
+
+An interrupted direct gateway may have prepared and bound a logical call before
+it admitted any provider attempt. If the configured request identity then changes,
+the same idempotency key cannot describe the new request. The integrator catches
+that specific conflict and rechecks the original round and calls in a writer
+transaction. An obsolete source revision or frozen prompt has the same local
+retirement boundary.
+
+Automatic retirement requires all calls in that round to be prepared, without
+any attempt history, response, completion, estimated usage or prior explicit
+retry/context-quarantine audit. The current round, lifecycle and original request
+bindings must still match. Configuration conflicts additionally require an exact
+direct `ModelGateway` identity that demonstrably differs from the prepared call.
+Custom gateways and routed prepared work retain explicit reconciliation; an
+unattributed idempotency conflict cannot close a round or quarantine another call.
+
+A proven unsent call receives the local terminal error
+`memory_prepared_context_obsolete`. Its private deterministic
+`semantic_memory_unsent_retired` receipt binds the frozen prepared hash, call,
+purpose, idempotency key and request hash, plus the invalidation reason and a
+configuration-identity digest when relevant. The call terminal state, receipt and
+`context_changed` round closure commit together or roll back together. The
+completion and event timestamps use the same UTC millisecond representation.
+Receipt validation checks its payload digest and original context binding,
+including after supported encrypted event archiving and restart.
+
+No provider response is fabricated, no cost is released, and no model request is
+sent during retirement. A concurrent attempt admission or arriving successful
+response prevents retirement. Executing, unknown, previously attempted, explicitly
+authorized and quarantined calls keep their existing reconciliation boundaries.
+A later round uses a separate identity under the normal interval and quotas;
+it never retries the retired request. Ineligible conflicts return
+`memory_integration_waiting_reconciliation` while retaining their original work.
+
 ## Pre-upgrade calls without an original-context binding
 
 Old calls did not record this business-round context. The code cannot determine
