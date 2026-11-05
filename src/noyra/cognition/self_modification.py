@@ -11,6 +11,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError
+from noyra.core.events import EventStore
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 
 from ._integrity import (
@@ -122,8 +123,12 @@ class ControlledSelfModification:
         pending = self._pending()
         if pending is not None:
             if pending.status == "simulated":
-                self.apply(pending.proposal_id)
-                return "self_modification_applied"
+                result = self.apply(pending.proposal_id)
+                return (
+                    "self_modification_expired"
+                    if result.status == "rejected"
+                    else "self_modification_applied"
+                )
             if pending.status == "applied":
                 counts = self._outcomes_since(
                     pending.applied_at or pending.created_at, pending.setting_key
@@ -280,64 +285,179 @@ class ControlledSelfModification:
         return self._validated_record(row)
 
     def apply(self, proposal_id: str) -> SelfModificationRecord:
-        proposal = self.get(proposal_id)
-        if proposal.status != "simulated" or proposal.risk_score > 0.7:
-            raise SelfModificationError("proposal is not safe to apply")
-        now = self.clock()
-        deadline = (self._time(now) + timedelta(seconds=self.observation_seconds)).isoformat(
-            timespec="milliseconds"
-        )
         with self.database.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM self_modification_proposals WHERE subject_id=? AND proposal_id=?",
+                (self.subject_id, proposal_id),
+            ).fetchone()
+            if row is None:
+                raise SelfModificationError("self-modification proposal is unavailable")
+            proposal = self._validated_record(row)
+            expired = self._expiry_event(connection, proposal)
+            if proposal.status == "applied" or expired is not None:
+                return proposal
+            if proposal.status != "simulated" or proposal.risk_score > 0.7:
+                raise SelfModificationError("proposal is not safe to apply")
+            now = self.clock()
+            deadline = (self._time(now) + timedelta(seconds=self.observation_seconds)).isoformat(
+                timespec="milliseconds"
+            )
             current = connection.execute(
-                "SELECT value_json, revision FROM self_modification_settings "
-                "WHERE subject_id = ? AND setting_key = ?",
+                "SELECT * FROM self_modification_settings WHERE subject_id=? AND setting_key=?",
                 (self.subject_id, proposal.setting_key),
             ).fetchone()
-            effective = (
-                self._baseline(proposal.setting_key)
-                if current is None
-                else json.loads(current["value_json"])
-            )
+            if current is None:
+                effective = self._baseline(proposal.setting_key)
+            else:
+                with durable_boundary("self-modification setting", proposal.setting_key):
+                    effective = self._validate_value(
+                        proposal.setting_key,
+                        durable_json(
+                            current["value_json"],
+                            "self-modification setting value",
+                            proposal.setting_key,
+                        ),
+                    )
+                    current_revision = durable_int(
+                        current["revision"], "self-modification setting", proposal.setting_key
+                    )
+                    if current_revision < 1 or current["state_hash"] != content_hash(
+                        {
+                            "setting_key": proposal.setting_key,
+                            "value": effective,
+                            "revision": current_revision,
+                        }
+                    ):
+                        raise IntegrityError("self-modification setting hash mismatch")
             if effective != proposal.old_value:
-                raise SelfModificationError("effective setting changed since proposal")
-            revision = 1 if current is None else int(current["revision"]) + 1
-            setting_hash = content_hash(
-                {
+                # A changed valid baseline is an obsolete proposal, not an
+                # instruction to restore the old value or rerun the simulation.
+                event = {
+                    "format": "self-modification-expiry/v1",
+                    "proposal_id": proposal.proposal_id,
                     "setting_key": proposal.setting_key,
-                    "value": proposal.proposed_value,
-                    "revision": revision,
+                    "expected_value": proposal.old_value,
+                    "observed_value": effective,
+                    "observed_revision": None if current is None else int(current["revision"]),
+                    "original_state_hash": row["state_hash"],
+                    "reason_code": "baseline_changed",
+                    "expired_at": now,
                 }
-            )
-            connection.execute(
-                """INSERT INTO self_modification_settings(
-                    subject_id, setting_key, value_json, proposal_id, revision,
-                    state_hash, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(subject_id, setting_key) DO UPDATE SET
-                    value_json=excluded.value_json, proposal_id=excluded.proposal_id,
-                    revision=excluded.revision, state_hash=excluded.state_hash,
-                    updated_at=excluded.updated_at""",
-                (
+                EventStore(self.database)._append_connection(
+                    connection,
                     self.subject_id,
-                    proposal.setting_key,
-                    canonical_json(proposal.proposed_value),
-                    proposal_id,
-                    revision,
-                    setting_hash,
+                    "self_modification_expired",
+                    "self_modification",
+                    event,
+                    privacy_level="private",
+                    causal_parent_ids=proposal.evidence_ids,
+                    occurred_at=now,
+                    event_id="evt_selfmod_expired_" + proposal.proposal_id,
+                )
+                self._set_status(connection, proposal, "rejected", now, None, None)
+            else:
+                revision = 1 if current is None else int(current["revision"]) + 1
+                setting_hash = content_hash(
+                    {
+                        "setting_key": proposal.setting_key,
+                        "value": proposal.proposed_value,
+                        "revision": revision,
+                    }
+                )
+                connection.execute(
+                    """INSERT INTO self_modification_settings(
+                        subject_id, setting_key, value_json, proposal_id, revision,
+                        state_hash, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(subject_id, setting_key) DO UPDATE SET
+                        value_json=excluded.value_json, proposal_id=excluded.proposal_id,
+                        revision=excluded.revision, state_hash=excluded.state_hash,
+                        updated_at=excluded.updated_at""",
+                    (
+                        self.subject_id,
+                        proposal.setting_key,
+                        canonical_json(proposal.proposed_value),
+                        proposal_id,
+                        revision,
+                        setting_hash,
+                        now,
+                    ),
+                )
+                self._revision(
+                    connection,
+                    proposal,
+                    "apply",
+                    proposal.old_value,
+                    proposal.proposed_value,
+                    "validated local simulation",
                     now,
-                ),
-            )
-            self._revision(
-                connection,
-                proposal,
-                "apply",
+                )
+                self._set_status(connection, proposal, "applied", now, now, deadline)
+        return self.get(proposal_id)
+
+    def _expiry_event(
+        self, connection: Any, proposal: SelfModificationRecord
+    ) -> dict[str, Any] | None:
+        row = connection.execute(
+            "SELECT * FROM events WHERE event_id=?",
+            ("evt_selfmod_expired_" + proposal.proposal_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        payload = EventStore(self.database).payload_from_row(row, connection=connection)
+        if (
+            row["subject_id"] != self.subject_id
+            or row["event_type"] != "self_modification_expired"
+            or row["source"] != "self_modification"
+            or row["privacy_level"] != "private"
+            or proposal.status != "rejected"
+            or proposal.applied_at is not None
+            or proposal.observation_deadline is not None
+            or not isinstance(payload, dict)
+            or set(payload)
+            != {
+                "format",
+                "proposal_id",
+                "setting_key",
+                "expected_value",
+                "observed_value",
+                "observed_revision",
+                "original_state_hash",
+                "reason_code",
+                "expired_at",
+            }
+            or payload["format"] != "self-modification-expiry/v1"
+            or payload["proposal_id"] != proposal.proposal_id
+            or payload["setting_key"] != proposal.setting_key
+            or payload["expected_value"] != proposal.old_value
+            or payload["reason_code"] != "baseline_changed"
+            or payload["expired_at"] != proposal.updated_at
+            or row["occurred_at"] != proposal.updated_at
+            or payload["original_state_hash"]
+            != self._proposal_hash(
+                proposal.setting_key,
                 proposal.old_value,
                 proposal.proposed_value,
-                "validated local simulation",
-                now,
+                proposal.reason,
+                proposal.evidence_ids,
+                proposal.risk_score,
+                "simulated",
+                proposal.validation,
+                proposal.simulation,
             )
-            self._set_status(connection, proposal, "applied", now, now, deadline)
-        return self.get(proposal_id)
+        ):
+            raise IntegrityError("self-modification expiry evidence mismatch")
+        with durable_boundary("self-modification expiry", proposal.proposal_id):
+            observed = self._validate_value(proposal.setting_key, payload["observed_value"])
+            if observed == proposal.old_value or (
+                payload["observed_revision"] is not None
+                and (
+                    type(payload["observed_revision"]) is not int
+                    or payload["observed_revision"] < 1
+                )
+            ):
+                raise IntegrityError("self-modification expiry observation is invalid")
+        return payload
 
     def observe(
         self,
@@ -450,7 +570,7 @@ class ControlledSelfModification:
                 "SELECT * FROM self_modification_revisions WHERE subject_id = ?", (self.subject_id,)
             ).fetchall()
             for row in proposals:
-                self.get(row["proposal_id"])
+                self._expiry_event(connection, self.get(row["proposal_id"]))
             for row in settings:
                 setting_key = row["setting_key"]
                 with durable_boundary("self-modification setting", setting_key):

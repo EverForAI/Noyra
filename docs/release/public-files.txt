@@ -234,6 +234,7 @@ docs/development/model-pre-send-settlement.md
 docs/development/participant-login-throttling.md
 docs/development/project-coordination.md
 docs/development/readonly-database.md
+docs/development/self-modification-expiry.md
 docs/development/semantic-memory-recovery.md
 docs/development/social-proposal-recovery.md
 docs/development/world-acquisition-design.md
@@ -905,6 +906,7 @@ tests/test_c0_autonomous_expression.py
 tests/test_c0_expression_store.py
 tests/test_c0_external_assistance.py
 tests/test_c0_inbound_contacts.py
+tests/test_c1_self_modification_expiry.py
 tests/test_capability.py
 tests/test_capability_file_races.py
 tests/test_cloud_ci_contract.py
