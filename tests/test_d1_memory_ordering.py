@@ -56,3 +56,51 @@ def test_index_keeps_full_ranking_subject_filters_and_bad_hash_detection(
         c.execute("UPDATE memories SET state_hash=? WHERE memory_id=?", ("0" * 64, top.memory_id))
     with pytest.raises(IntegrityError):
         store.search("one", limit=1)
+
+
+def test_index_reduces_sql_work_without_changing_ranked_records(memories: SearchFixture) -> None:
+    with memories.database.transaction() as c:
+        for index in range(1024):
+            memories.store._create_connection(
+                c,
+                "one",
+                "semantic",
+                f"Unique confidence rank {index}",
+                salience=0.8,
+                confidence=index / 1024,
+                source_event_ids=(memories.event_id,),
+            )
+    query = (
+        "SELECT * FROM memories WHERE subject_id=? AND status='active' "
+        "ORDER BY salience DESC,confidence DESC,updated_at DESC LIMIT 20"
+    )
+
+    def measured(c: Any) -> tuple[list[str], int]:
+        ticks = 0
+
+        def progress() -> int:
+            nonlocal ticks
+            ticks += 1
+            return 0
+
+        # Load the schema and plan both variants before measuring query VM
+        # work; otherwise the first query includes connection schema setup.
+        c.execute("EXPLAIN QUERY PLAN " + query, ("one",)).fetchall()
+        c.set_progress_handler(progress, 100)
+        try:
+            rows = c.execute(query, ("one",)).fetchall()
+        finally:
+            c.set_progress_handler(None, 0)
+        return [row["memory_id"] for row in rows], ticks * 100
+
+    with memories.database.connection() as c:
+        c.execute("BEGIN")
+        try:
+            indexed_ids, indexed_steps = measured(c)
+            c.execute("DROP INDEX idx_memories_subject_rank")
+            c.execute("DROP INDEX idx_memories_subject_type_rank")
+            baseline_ids, baseline_steps = measured(c)
+        finally:
+            c.rollback()
+    assert indexed_ids == baseline_ids and len(indexed_ids) == 20
+    assert baseline_steps > max(1, indexed_steps) * 8

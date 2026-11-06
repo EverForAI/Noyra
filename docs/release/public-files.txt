@@ -942,6 +942,7 @@ tests/test_consciousness_routing.py
 tests/test_credentials.py
 tests/test_d1_memory_ordering.py
 tests/test_d1_schema114.py
+tests/test_d1_workflow_queries.py
 tests/test_deadline_clock.py
 tests/test_delivery_effective_state.py
 tests/test_deployment_contract.py

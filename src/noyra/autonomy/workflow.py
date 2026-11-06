@@ -16,6 +16,18 @@ from noyra.core.types import (
     utc_now,
 )
 
+# Distinct owned keys make each foreign-owner probe run once per workflow,
+# rather than once per checkpoint against every row of that same history.
+CHECKPOINT_OWNERSHIP_SQL = """
+SELECT own.workflow_id
+FROM (SELECT DISTINCT workflow_id FROM workflow_checkpoints WHERE subject_id=?) own
+WHERE EXISTS (
+    SELECT 1 FROM workflow_checkpoints other
+    WHERE other.workflow_id=own.workflow_id AND other.subject_id!=?
+)
+LIMIT 1
+"""
+
 
 @dataclass(frozen=True)
 class WorkflowCheckpoint:
@@ -240,11 +252,7 @@ class DurableWorkflowStore:
         if not isinstance(subject_id, str) or not subject_id.strip():
             raise IntegrityError("workflow checkpoint subject is invalid")
         crossing = connection.execute(
-            "SELECT own.workflow_id FROM workflow_checkpoints own "
-            "JOIN workflow_checkpoints other ON other.workflow_id = own.workflow_id "
-            "AND other.subject_id != own.subject_id "
-            "WHERE own.subject_id = ? LIMIT 1",
-            (subject_id,),
+            CHECKPOINT_OWNERSHIP_SQL, (subject_id, subject_id)
         ).fetchone()
         if crossing is not None:
             raise IntegrityError(
@@ -254,11 +262,12 @@ class DurableWorkflowStore:
             "SELECT * FROM workflow_checkpoints WHERE subject_id = ? "
             "ORDER BY workflow_id, checkpoint_version",
             (subject_id,),
-        ).fetchall()
+        )
         events = None if database is None else EventStore(database)
         previous: dict[str, WorkflowCheckpoint] = {}
         previous_rows: dict[str, Any] = {}
         watermarks: dict[str, str] = {}
+        count = 0
         for row in rows:
             record = cls._from_row(row)
             if record.subject_id != subject_id:
@@ -296,7 +305,8 @@ class DurableWorkflowStore:
             watermarks[record.workflow_id] = watermark or record.created_at
             previous_rows[record.workflow_id] = row
             previous[record.workflow_id] = record
-        return len(rows)
+            count += 1
+        return count
 
     @classmethod
     def _from_row(cls, row: Any) -> WorkflowCheckpoint:
