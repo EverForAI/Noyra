@@ -1161,6 +1161,7 @@ tests/test_public_sitemap_capacity.py
 tests/test_public_visual_contract.py
 tests/test_public_web_contract.py
 tests/test_publication_boundary.py
+tests/test_publication_range.py
 tests/test_reasoning_profile.py
 tests/test_recovery_manifest.py
 tests/test_reflection_cognition.py
