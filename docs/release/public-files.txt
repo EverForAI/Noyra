@@ -249,6 +249,7 @@ docs/development/sleep-failure-recovery.md
 docs/development/social-proposal-recovery.md
 docs/development/workflow-export-format.md
 docs/development/workflow-export-publications.md
+docs/development/workflow-isolated-evidence.md
 docs/development/world-acquisition-design.md
 docs/evaluation.md
 docs/genesis-experience.md
@@ -635,6 +636,7 @@ src/noyra/core/workflow_bundle.py
 src/noyra/core/workflow_export_catalog.py
 src/noyra/core/workflow_export_control.py
 src/noyra/core/workflow_export_files.py
+src/noyra/core/workflow_reconstruction.py
 src/noyra/core/xml.py
 src/noyra/deployment_setup.py
 src/noyra/desktop.py
@@ -968,6 +970,7 @@ tests/test_d2b_workflow_export_control.py
 tests/test_d2b_workflow_export_http.py
 tests/test_d2b_workflow_export_process.py
 tests/test_d2b_workflow_export_schema.py
+tests/test_d2c_workflow_reconstruction.py
 tests/test_deadline_clock.py
 tests/test_delivery_effective_state.py
 tests/test_deployment_contract.py

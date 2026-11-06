@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
 from contextlib import closing
 from typing import Any, Protocol
 
@@ -48,9 +48,12 @@ EVENT_FIELDS = (
 )
 
 
-class BundleStore(Protocol):
-    def put(self, name: str, value: bytes) -> dict[str, Any]: ...
+class BundleReader(Protocol):
     def get(self, entry: dict[str, Any], *, maximum: int) -> bytes: ...
+
+
+class BundleStore(BundleReader, Protocol):
+    def put(self, name: str, value: bytes) -> dict[str, Any]: ...
 
 
 class ArrayDigest:
@@ -355,16 +358,15 @@ def write_bundle(
     return store.put("manifest.enc", manifest)
 
 
-def verify_bundle(
-    store: BundleStore,
+def _bundle_records(
+    store: BundleReader,
     descriptor: dict[str, Any],
     expected: dict[str, Any],
     checkpoint: Callable[[], None],
-) -> None:
-    """Read back all bounded chunks and clock receipts; never trusts self-declared source."""
-    from noyra.autonomy.workflow import DurableWorkflowStore
-
+) -> Generator[Any, None, None]:
+    """Untrusted records: callers must exhaust _verified_records before exposing data."""
     validate_source(expected)
+    checkpoint()
     manifest = strict_json_loads(store.get(descriptor, maximum=MAX_MANIFEST_BYTES))
     require(
         isinstance(manifest, dict)
@@ -377,6 +379,42 @@ def verify_bundle(
     require(
         isinstance(segments, list) and 0 < len(segments) <= MAX_SEGMENTS, "invalid segment list"
     )
+    offset = 0
+    for index, segment in enumerate(segments):
+        checkpoint()
+        require(
+            isinstance(segment, dict) and segment.get("name") == f"segment-{index:06d}.enc",
+            "segment name or sequence mismatch",
+        )
+        body = strict_json_loads(store.get(segment, maximum=MAX_CHUNK_BYTES))
+        require(
+            isinstance(body, dict)
+            and set(body) == {"format", "records"}
+            and body["format"] == FORMAT
+            and isinstance(body["records"], list)
+            and 0 < len(body["records"]) <= CHUNK_ROWS,
+            "invalid chunk format",
+        )
+        require(
+            type(segment.get("records")) is int
+            and segment["records"] == len(body["records"])
+            and type(segment.get("first")) is int
+            and type(segment.get("last")) is int
+            and segment["first"] == offset + 1
+            and segment["last"] == offset + len(body["records"]),
+            "invalid segment range",
+        )
+        offset += len(body["records"])
+        yield from body["records"]
+
+
+def _verified_records(
+    records: Iterable[Any], expected: dict[str, Any], checkpoint: Callable[[], None]
+) -> Generator[dict[str, Any], None, None]:
+    """Private tentative stream; its aggregate proof exists only after exhaustion."""
+    from noyra.autonomy.workflow import DurableWorkflowStore
+
+    validate_source(expected)
     rows, receipts = ArrayDigest(), ArrayDigest()
     previous = None
     high = None
@@ -388,87 +426,66 @@ def verify_bundle(
             "privacy_level TEXT,occurred_at TEXT,payload_json TEXT,"
             "payload_hash TEXT,payload_archive_key TEXT)"
         )
-        for index, segment in enumerate(segments):
+        for record in records:
             checkpoint()
             require(
-                isinstance(segment, dict) and segment.get("name") == f"segment-{index:06d}.enc",
-                "segment name or sequence mismatch",
+                isinstance(record, dict) and set(record) == {"row", "receipt", "high_water"},
+                "invalid chunk record",
             )
-            body = strict_json_loads(store.get(segment, maximum=MAX_CHUNK_BYTES))
+            row, receipt = record["row"], record["receipt"]
             require(
-                isinstance(body, dict)
-                and set(body) == {"format", "records"}
-                and body["format"] == FORMAT
-                and isinstance(body["records"], list)
-                and 0 < len(body["records"]) <= CHUNK_ROWS,
-                "invalid chunk format",
+                isinstance(row, dict)
+                and set(row) == ROW_FIELDS
+                and row["subject_id"] == expected["subject_id"]
+                and row["workflow_id"] == expected["workflow_id"]
+                and row["checkpoint_version"] == rows.count + 1,
+                "restored scope/version mismatch",
             )
             require(
-                type(segment.get("records")) is int
-                and segment["records"] == len(body["records"])
-                and segment.get("first") == rows.count + 1
-                and segment.get("last") == rows.count + len(body["records"]),
-                "invalid segment range",
+                isinstance(row["state_json"], str)
+                and len(row["state_json"].encode()) <= MAX_STATE_ROW_BYTES,
+                "restored row exceeds byte budget",
             )
-            for record in body["records"]:
-                checkpoint()
+            DurableWorkflowStore._from_row(row)
+            require(
+                row["status"]
+                in DurableWorkflowStore._ALLOWED[
+                    None if previous is None else previous["status"]
+                ]
+                and (previous is None or row["workflow_type"] == previous["workflow_type"]),
+                "restored transition mismatch",
+            )
+            evidence.execute("DELETE FROM events")
+            if receipt is not None:
                 require(
-                    isinstance(record, dict) and set(record) == {"row", "receipt", "high_water"},
-                    "invalid chunk record",
-                )
-                row, receipt = record["row"], record["receipt"]
-                require(
-                    isinstance(row, dict)
-                    and set(row) == ROW_FIELDS
-                    and row["subject_id"] == expected["subject_id"]
-                    and row["workflow_id"] == expected["workflow_id"]
-                    and row["checkpoint_version"] == rows.count + 1,
-                    "restored scope/version mismatch",
-                )
-                require(
-                    isinstance(row["state_json"], str)
-                    and len(row["state_json"].encode()) <= MAX_STATE_ROW_BYTES,
-                    "restored row exceeds byte budget",
-                )
-                DurableWorkflowStore._from_row(row)
-                require(
-                    row["status"]
-                    in DurableWorkflowStore._ALLOWED[
-                        None if previous is None else previous["status"]
-                    ]
-                    and (previous is None or row["workflow_type"] == previous["workflow_type"]),
-                    "restored transition mismatch",
-                )
-                evidence.execute("DELETE FROM events")
-                if receipt is not None:
-                    require(
-                        isinstance(receipt, dict)
-                        and set(receipt) == {*EVENT_FIELDS, "payload"}
-                        and receipt["event_id"]
-                        == checkpoint_clock.receipt_id(
-                            expected["subject_id"], expected["workflow_id"], rows.count + 1
-                        )
-                        and receipt["payload_hash"] == content_hash(receipt["payload"]),
-                        "invalid restored receipt",
+                    isinstance(receipt, dict)
+                    and set(receipt) == {*EVENT_FIELDS, "payload"}
+                    and receipt["event_id"]
+                    == checkpoint_clock.receipt_id(
+                        expected["subject_id"], expected["workflow_id"], rows.count + 1
                     )
-                    evidence.execute(
-                        "INSERT INTO events VALUES(?,?,?,?,?,?,?,?,NULL)",
-                        (
-                            *(receipt[key] for key in EVENT_FIELDS[:-1]),
-                            canonical_json(receipt["payload"]),
-                            receipt["payload_hash"],
-                        ),
-                    )
-                    receipts.add({"version": row["checkpoint_version"], "receipt": receipt})
-                high = checkpoint_clock.verify(evidence, row, previous, high)
-                require(high == record["high_water"], "restored clock differs")
-                rows.add(row)
-                state_bytes += len(row["state_json"].encode())
-                require(
-                    rows.count <= MAX_ROWS and state_bytes <= MAX_STATE_BYTES,
-                    "restored budget exceeded",
+                    and receipt["payload_hash"] == content_hash(receipt["payload"]),
+                    "invalid restored receipt",
                 )
-                previous = row
+                evidence.execute(
+                    "INSERT INTO events VALUES(?,?,?,?,?,?,?,?,NULL)",
+                    (
+                        *(receipt[key] for key in EVENT_FIELDS[:-1]),
+                        canonical_json(receipt["payload"]),
+                        receipt["payload_hash"],
+                    ),
+                )
+                receipts.add({"version": row["checkpoint_version"], "receipt": receipt})
+            high = checkpoint_clock.verify(evidence, row, previous, high)
+            require(high == record["high_water"], "restored clock differs")
+            rows.add(row)
+            state_bytes += len(row["state_json"].encode())
+            require(
+                rows.count <= MAX_ROWS and state_bytes <= MAX_STATE_BYTES,
+                "restored budget exceeded",
+            )
+            previous = row
+            yield record
     require(
         previous is not None
         and rows.count == expected["records"]
@@ -480,3 +497,15 @@ def verify_bundle(
         and content_hash(previous) == expected["last_row_hash"],
         "complete readback differs from source",
     )
+
+
+def verify_bundle(
+    store: BundleReader,
+    descriptor: dict[str, Any],
+    expected: dict[str, Any],
+    checkpoint: Callable[[], None],
+) -> None:
+    """Read back the complete aggregate; partial streams are never accepted."""
+    with closing(_bundle_records(store, descriptor, expected, checkpoint)) as records:
+        for _ in _verified_records(records, expected, checkpoint):
+            pass
