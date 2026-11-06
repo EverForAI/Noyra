@@ -237,6 +237,7 @@ docs/development/model-invalidation-boundaries.md
 docs/development/model-pre-send-settlement.md
 docs/development/participant-login-throttling.md
 docs/development/project-coordination.md
+docs/development/query-performance.md
 docs/development/readonly-database.md
 docs/development/self-modification-expiry.md
 docs/development/semantic-memory-recovery.md
@@ -939,6 +940,8 @@ tests/test_common_knowledge.py
 tests/test_common_sync_fencing.py
 tests/test_consciousness_routing.py
 tests/test_credentials.py
+tests/test_d1_memory_ordering.py
+tests/test_d1_schema114.py
 tests/test_deadline_clock.py
 tests/test_delivery_effective_state.py
 tests/test_deployment_contract.py

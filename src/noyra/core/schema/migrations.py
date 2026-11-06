@@ -76,4 +76,12 @@ WHEN NEW.subject_id IS NOT OLD.subject_id
 BEGIN SELECT RAISE(ABORT,'autonomy schedule subject is immutable'); END;
 """,
     113: EMAIL_IDENTITY_SCHEMA,
+    114: """
+CREATE INDEX IF NOT EXISTS idx_memories_subject_rank
+    ON memories(subject_id,status,salience DESC,confidence DESC,updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_subject_type_rank
+    ON memories(subject_id,status,memory_type,salience DESC,confidence DESC,updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_workflow_checkpoints_subject_history
+    ON workflow_checkpoints(subject_id,workflow_id,checkpoint_version);
+""",
 }
