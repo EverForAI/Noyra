@@ -22,6 +22,7 @@ from . import (
     read_wallet,
     sleep_recovery,
     workflow_exports,
+    workflow_increments,
 )
 
 if TYPE_CHECKING:
@@ -159,6 +160,9 @@ def dispatch(self: RequestHandler, owner: NoyraHTTPServer) -> None:
     elif parsed.path == "/api/admin/memory-integration-recovery":
         if read_admin.memory_integration_recovery(self, owner):
             return
+    elif parsed.path == "/api/admin/workflow-increments":
+        workflow_increments.dispatch(self, owner, write=False)
+        return
     elif parsed.path == "/api/admin/workflow-exports":
         workflow_exports.dispatch(self, owner, write=False)
         return

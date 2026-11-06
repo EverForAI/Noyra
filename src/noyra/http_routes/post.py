@@ -24,6 +24,7 @@ from . import (
     post_wallet,
     sleep_recovery,
     workflow_exports,
+    workflow_increments,
 )
 
 if TYPE_CHECKING:
@@ -78,6 +79,9 @@ def dispatch(self: RequestHandler, owner: NoyraHTTPServer) -> None:
     if self.path == "/api/admin/upgrade":
         if post_admin.admin_upgrade(self, owner):
             return
+    if self.path == "/api/admin/workflow-increments":
+        workflow_increments.dispatch(self, owner, write=True)
+        return
     if self.path == "/api/admin/workflow-exports/verify":
         workflow_exports.dispatch(self, owner, write=True, verify=True)
         return

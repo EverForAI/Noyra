@@ -1093,6 +1093,7 @@ class NoyraHTTPServer:
             "/api/admin/project-execution-recovery/release-review",
             "/api/admin/sleep-recovery/abort",
             "/api/admin/workflow-exports",
+            "/api/admin/workflow-increments",
             "/api/admin/workflow-exports/verify",
             "/api/admin/memory-integration-recovery/discard-legacy",
         } or self._is_recovery_mutation(path)

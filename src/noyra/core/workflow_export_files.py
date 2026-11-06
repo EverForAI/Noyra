@@ -25,6 +25,9 @@ PUBLICATION = re.compile(r"wexport_[a-f0-9]{64}\Z")
 
 
 class WorkflowArtifactStore:
+    publication_pattern = PUBLICATION
+    storage_directory = "workflow-exports"
+
     def __init__(
         self,
         database: Database,
@@ -36,7 +39,7 @@ class WorkflowArtifactStore:
         *,
         create: bool,
     ):
-        if not PUBLICATION.fullmatch(publication):
+        if not self.publication_pattern.fullmatch(publication):
             raise ValueError("invalid workflow publication identity")
         cold = resolve_subject_archive_root(
             database,
@@ -44,7 +47,7 @@ class WorkflowArtifactStore:
             database.path.parent / "subject" / "cold",
             create=create,
         )
-        configured = cold / "workflow-exports" / publication
+        configured = cold / self.storage_directory / publication
         self.root = validate_private_root(
             configured,
             create=create and not configured.exists(),

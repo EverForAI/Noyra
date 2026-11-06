@@ -622,6 +622,20 @@ class OperatorControlService:
             self, workflow_id, expected_version, request_key, actor=actor, reason=reason
         )
 
+    def workflow_increments(self, *, limit: int = 50) -> dict[str, Any]:
+        from .workflow_increment_catalog import WorkflowIncrementCatalog
+
+        return WorkflowIncrementCatalog(self.database, self.subject_id).page(limit=limit)
+
+    def export_workflow_increment(
+        self, workflow_id: str, parent_id: str, expected_version: int, request_key: str,
+        *, actor: str, reason: str,
+    ) -> dict[str, Any]:
+        from .workflow_increment_control import export_increment
+
+        return export_increment(self, workflow_id, parent_id, expected_version, request_key,
+                                actor=actor, reason=reason)
+
     def verify_workflow_export(self, publication_id: str) -> dict[str, Any]:
         from .workflow_archive_control import open_workflow_export
 

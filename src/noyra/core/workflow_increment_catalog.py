@@ -60,9 +60,14 @@ REQUEST_FIELDS = (
 
 
 class WorkflowIncrementCatalog:
-    def __init__(self, database: Database, subject: str):
+    def __init__(self, database: Database, subject: str, *, events: EventStore | None = None):
         self.database, self.subject = database, subject
-        self.events = EventStore(database)
+        self.events = events if events is not None else EventStore(database)
+
+    def _base_catalog(self) -> WorkflowExportCatalog:
+        catalog = WorkflowExportCatalog(self.database, self.subject)
+        catalog.events = self.events
+        return catalog
 
     def _event(self, c: Any, event_id: str, kind: str) -> dict[str, Any]:
         row = c.execute("SELECT * FROM events WHERE event_id=?", (event_id,)).fetchone()
@@ -201,7 +206,7 @@ class WorkflowIncrementCatalog:
         require(record["status"] == "accepted", "increment parent is not accepted")
         validate_manifest(record["manifest"])
         if kind == "base":
-            payload = WorkflowExportCatalog(self.database, self.subject).event(
+            payload = self._base_catalog().event(
                 c, record["receipt_event_id"], "workflow_export_accepted"
             )
             binding = WorkflowExportCatalog._binding(record)
@@ -235,7 +240,7 @@ class WorkflowIncrementCatalog:
             require(parent_id not in seen, "increment parent cycle")
             seen.add(parent_id)
             if current["parent"]["kind"] == "base":
-                parent = WorkflowExportCatalog(self.database, self.subject).get(c, parent_id)
+                parent = self._base_catalog().get(c, parent_id)
             else:
                 parent = self._load(c, parent_id)
             require(parent is not None, "increment ancestor is missing")
@@ -255,7 +260,7 @@ class WorkflowIncrementCatalog:
 
     def parent(self, c: Any, identifier: str) -> tuple[dict[str, Any], dict[str, Any]]:
         if isinstance(identifier, str) and PUBLICATION.fullmatch(identifier):
-            record = WorkflowExportCatalog(self.database, self.subject).get(c, identifier)
+            record = self._base_catalog().get(c, identifier)
             kind = "base"
         else:
             record = self.get(c, identifier)
@@ -518,3 +523,48 @@ class WorkflowIncrementCatalog:
             )
             count += 1
         return count
+
+    @staticmethod
+    def public(record: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "publication_id": record["publication_id"],
+            "workflow_id": record["workflow_id"],
+            "parent_id": record["parent"]["publication_id"],
+            "status": record["status"],
+            "artifact_format": FORMAT,
+            "first_version": record["first_version"],
+            "last_version": record["last_version"],
+            "chain_depth": record["chain_depth"],
+            "increment_records": record["last_version"] - record["first_version"] + 1,
+            "records": record["source"]["records"],
+            "state_bytes": record["source"]["state_bytes"],
+            "scope": SCOPE,
+            "created_at": record["created_at"],
+            "updated_at": record["updated_at"],
+            "artifact_observation": "not_checked_by_catalog_read",
+            "source_history_preserved": True,
+            "restore_or_dispatch_authorized": False,
+        }
+
+    def page(self, *, limit: int = 50) -> dict[str, Any]:
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("invalid increment directory limit")
+        with self.database.read_transaction() as c:
+            rows = c.execute(
+                "SELECT publication_id FROM workflow_increment_publications WHERE subject_id=? "
+                "ORDER BY created_at DESC,publication_id DESC LIMIT ?",
+                (self.subject, limit + 1),
+            ).fetchall()
+            items = []
+            for row in rows[:limit]:
+                record = self.get(c, row["publication_id"])
+                require(record is not None, "increment directory record missing")
+                assert record is not None
+                items.append(self.public(record))
+            return {
+                "format": CATALOG_FORMAT,
+                "items": items,
+                "truncated": len(rows) > limit,
+                "record_limit": limit,
+                "scope": "latest_publications_not_total",
+            }

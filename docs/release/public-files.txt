@@ -54,6 +54,7 @@ docs/api/public-contract-v2.md
 docs/api/sleep-recovery.md
 docs/api/workflow-archive-verification.md
 docs/api/workflow-exports.md
+docs/api/workflow-increments.md
 docs/api/workflow-maintenance-status.md
 docs/audit/2026-08-14-current-audit.md
 docs/audit/2026-08-14-full-project-audit.md
@@ -641,8 +642,12 @@ src/noyra/core/workflow_bundle.py
 src/noyra/core/workflow_export_catalog.py
 src/noyra/core/workflow_export_control.py
 src/noyra/core/workflow_export_files.py
+src/noyra/core/workflow_increment_bundle.py
 src/noyra/core/workflow_increment_catalog.py
 src/noyra/core/workflow_increment_contract.py
+src/noyra/core/workflow_increment_control.py
+src/noyra/core/workflow_increment_files.py
+src/noyra/core/workflow_publication_events.py
 src/noyra/core/workflow_reconstruction.py
 src/noyra/core/xml.py
 src/noyra/deployment_setup.py
@@ -684,6 +689,7 @@ src/noyra/http_routes/wallet_payments.py
 src/noyra/http_routes/wallet_resources.py
 src/noyra/http_routes/wallet_rewards.py
 src/noyra/http_routes/workflow_exports.py
+src/noyra/http_routes/workflow_increments.py
 src/noyra/http_transport.py
 src/noyra/interaction/__init__.py
 src/noyra/interaction/accounts.py
@@ -1017,6 +1023,11 @@ tests/test_i1_workflow_increment_dependencies.py
 tests/test_i1_workflow_increment_faults.py
 tests/test_i1_workflow_increment_process.py
 tests/test_i1_workflow_increment_schema.py
+tests/test_i2_workflow_increment_control.py
+tests/test_i2_workflow_increment_faults.py
+tests/test_i2_workflow_increment_format.py
+tests/test_i2_workflow_increment_http.py
+tests/test_i2_workflow_increment_process.py
 tests/test_identity_challenges.py
 tests/test_inbound.py
 tests/test_independent_audit_profiles.py

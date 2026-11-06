@@ -1,8 +1,8 @@
 # Increment metadata and dependency catalog
 
 I1 adds schema 116 metadata for the reviewed incremental parent-chain protocol.
-It does not publish incremental files or expose incremental HTTP controls. The
-existing v1 base catalog, format, accepted reader and maintenance routes retain
+I2 now uses this catalog for [controlled incremental publication](../api/workflow-increments.md).
+The existing v1 base catalog, format, accepted reader and maintenance routes retain
 their contracts. `wdelta_` identities are distinct from `wexport_` bases and cannot
 be passed to the existing base artifact reader.
 
@@ -41,8 +41,8 @@ the source database transaction. Preparation requires a supported complete
 source description, an independently accepted parent and a recorded, validated
 keyring generation. It freezes a `noyra-workflow-increment/v1` artifact binding
 and private preparation event. It does not prove source-prefix equivalence by
-itself; the separate I2 writer must verify the coherent source and complete
-accepted prefix before preparing an increment.
+itself; the I2 writer verifies the coherent source and complete accepted prefix before
+preparing an increment.
 
 `get` verifies state hashes, original preparation/acceptance events and exact
 parent references all the way to the base, with a 16-node total bound. Parent
@@ -60,14 +60,13 @@ key rotation. Same-version content changes cannot retarget an existing request.
 The `requested` lookup resolves the original request independently of later live
 progress; using the key with another parent, workflow or version fails.
 
-`finish` is a metadata transition primitive, not a publication control. Before
-calling it, I2 must fully verify files outside the writer transaction, establish
-actual directory durability, then recheck source/lease/ownership/migration,
-privacy, keys and deadline in the final source transaction. The caller must
-commit operator audit in that same transaction. This module neither performs
-those file proofs nor asserts them on behalf of a runtime route. Tests of this
-primitive use synthetic descriptors and do not claim real incremental artifacts
-or platform durability. I1 has no caller that publishes incremental files.
+`finish` is a metadata transition primitive, not a publication control. The I2
+control fully verifies files outside the writer transaction, establishes
+actual directory durability, then rechecks source/lease/ownership/migration,
+privacy, keys and deadline in the final source transaction. It commits operator
+audit in that transaction. This metadata module itself does not perform file
+proofs. I1 primitive tests use synthetic descriptors; I2 separately tests actual
+incremental artifacts, real readback and POSIX durability.
 
 A complete, independently verified publication can be unconfirmed or accepted.
 A prepared/unconfirmed increment is never an eligible parent. Repeated terminal
@@ -100,9 +99,9 @@ are untouched.
 
 ## Remaining implementation gates
 
-I2 must implement the owned, paused/drained incremental file writer and the
-atomic publication/audit protocol described above, with real source-prefix,
-interrupt/restart and platform storage tests. I3 must implement explicit-tip
-chain file reading, complete and ancestor-boundary proofs, isolated reconstruction
-and compatible operator interfaces. Until both exist, the new catalog is
-metadata infrastructure only. Hot history remains authoritative and retained.
+I2 now implements the owned, paused/drained incremental file publisher and atomic
+acceptance/audit protocol with real prefix/readback and process/platform tests.
+I3 remains responsible for an externally usable explicit-tip evidence reader and
+operator verification interface, reusing complete and ancestor-boundary proofs.
+Internal writer readback does not enable ordinary cold reading or runtime
+recovery. Hot history remains authoritative and retained.

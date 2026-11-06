@@ -310,6 +310,7 @@ def handler_type(
                 "/api/admin/memory-integration-recovery/discard-legacy",
                 "/api/admin/workflow-clock/acknowledge",
                 "/api/admin/workflow-exports",
+                "/api/admin/workflow-increments",
                 "/api/admin/workflow-exports/verify",
             }:
                 # The authenticated operator method owns the lock order and

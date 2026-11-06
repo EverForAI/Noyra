@@ -2,9 +2,10 @@
 
 Status: the design and isolated fault prototype are complete. I1 now supplies
 [schema-116 metadata and dependency protection](workflow-increment-metadata.md).
-Incremental file publication (I2) and chain file reading (I3) are not implemented.
-Existing v1 complete bases and their accepted evidence reader remain available.
-No incremental HTTP control, source cutoff or runtime restore is enabled. Raw
+I2 implements [controlled incremental file publication](../api/workflow-increments.md)
+with complete internal chain readback. An external chain evidence reader (I3)
+is not yet implemented. Existing v1 complete bases and their accepted evidence
+reader remain available. No source cutoff or runtime restore is enabled. Raw
 prototype code and validation evidence remain outside the public source tree.
 
 ## Scope and compatibility
@@ -56,8 +57,8 @@ parent ID, workflow and expected resulting version. Reusing a key for another
 intent fails. Retrying an accepted request verifies the originally selected
 artifact even after later live progress; retrying a preparation cannot silently
 retarget a newer source. The isolated prototype exercises source-bound logical
-idempotency; I1 now persists request intents and receipts; operator retry dispatch remains
-an I2 control gate.
+idempotency. I1 persists request intents and receipts; I2 now resolves those
+original intents before inspecting the live workflow.
 
 ## Creating a candidate increment
 
@@ -190,14 +191,15 @@ multi-boundary proof. A performance shortcut cannot skip ancestor evidence.
 
 I1 has completed the additive metadata catalog/migration, frozen request intents
 and parent/key/runtime-export/lifecycle/integrity/privacy dependency integration.
-Before incremental file publication and reading can ship, independently complete:
+I2 adds actual file encoding, coherent full-prefix verification, original-request
+dispatch, same-source-transaction acceptance/audit fencing and platform fault
+validation. Files and independent receipts are read before writer scopes; metadata
+primitives are never used alone to claim publication.
 
-1. Integrate I1 metadata with I2 coherent source/prefix verification and request
-   dispatch; metadata primitives alone do not prove file publication.
-2. Existing owned control and same-source-transaction acceptance/audit fencing,
-   deadline/revocation checks, actual platform storage and key lifecycle validation.
-3. Production reader/HTTP compatibility, old-library rejection, bounded chain
-   controls, cross-platform regression and source preservation review.
+The remaining I3 gate is an externally usable explicit-tip chain reader and
+operator evidence interface with current privacy/lease/key checks throughout
+access, old-library rejection, cross-platform regression and source preservation
+review. Internal writer proof is not runtime recovery or an external reader.
 
 Keep hot history throughout these gates. This design adds no default network
 allowlists, per-message human approval or restrictions on ordinary autonomy.
