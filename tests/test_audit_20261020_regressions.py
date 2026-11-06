@@ -383,8 +383,10 @@ def test_cloudflare_setup_from_installed_wheel(tmp_path: Path) -> None:
     )
 
 
-def test_concurrent_rotation_is_rejected_then_retry_preserves_backup(tmp_path: Path) -> None:
-    keyring = tmp_path / "keyring.json"
+def test_concurrent_rotation_is_rejected_then_retry_preserves_backup(
+    tmp_path: Path, rotation_directory: Path
+) -> None:
+    keyring = rotation_directory / "keyring.json"
     BackupKeyring.initialize(keyring)
     entered, release = tmp_path / "entered", tmp_path / "release"
     source = str(Path(__file__).resolve().parents[1] / "src")
@@ -454,10 +456,10 @@ BackupKeyring.rotate(sys.argv[2])
 
 
 def test_failed_rotation_releases_lock_and_keeps_previous_keyring(
-    tmp_path: Path,
+    rotation_directory: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    keyring = tmp_path / "keyring.json"
+    keyring = rotation_directory / "keyring.json"
     before = BackupKeyring.initialize(keyring)
     with monkeypatch.context() as patch:
 

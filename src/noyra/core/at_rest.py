@@ -33,6 +33,7 @@ from typing import Any, Literal, cast
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from .backup_keyring_paths import BackupRotationBoundary, BackupRotationPathError
 from .errors import IntegrityError, RuntimeOwnershipError
 from .locking import ProcessLock
 from .types import canonical_json, utc_now
@@ -128,6 +129,10 @@ class BackupKeyring:
             raise BackupKeyUnavailableError("backup keyring metadata is unavailable") from error
         with resolved.open("rb") as stream:
             raw = stream.read(_MAX_KEYRING_BYTES + 1)
+        return cls._from_bytes(raw)
+
+    @classmethod
+    def _from_bytes(cls, raw: bytes) -> BackupKeyring:
         if not raw or len(raw) > _MAX_KEYRING_BYTES:
             raise BackupKeyUnavailableError("backup keyring size is invalid")
         try:
@@ -207,19 +212,23 @@ class BackupKeyring:
 
     @classmethod
     def rotate(cls, path: Path | str) -> BackupKeyring:
-        target = Path(path).expanduser().resolve()
-        # This stable sibling is never replaced or removed. Locking the keyring
-        # inode itself would not serialize readers after its atomic replacement.
-        lock = ProcessLock(target.with_name(target.name + ".rotation.lock"))
-        lock.acquire()
         try:
-            return cls._rotate_locked(target)
-        finally:
-            lock.release()
+            boundary = BackupRotationBoundary(path, permission_error=_keyring_permission_error)
+            # Keep the stable sibling lock and its non-blocking semantics, but
+            # opt into a checked descriptor before ProcessLock can write it.
+            lock = ProcessLock(boundary.lock_path, opener=boundary.open_lock)
+            try:
+                lock.acquire()
+                boundary.validate()
+                return cls._rotate_locked(boundary)
+            finally:
+                lock.release()
+        except BackupRotationPathError as error:
+            raise BackupKeyUnavailableError(str(error)) from error
 
     @classmethod
-    def _rotate_locked(cls, target: Path) -> BackupKeyring:
-        current = cls.from_path(target)
+    def _rotate_locked(cls, boundary: BackupRotationBoundary) -> BackupKeyring:
+        current = cls._from_bytes(boundary.read(_MAX_KEYRING_BYTES))
         if len(current._keys) >= _MAX_KEYS:
             raise ValueError("backup keyring reached its retained-key limit")
         key = os.urandom(32)
@@ -238,7 +247,7 @@ class BackupKeyring:
             active_key_id=active_key_id,
             keys=materials,
         )
-        rotated.write(target, create_only=False)
+        rotated.write(boundary.target, create_only=False, _rotation_boundary=boundary)
         return rotated
 
     def resolve(self, key_id: object, fingerprint: object) -> BackupKeyMaterial:
@@ -257,8 +266,20 @@ class BackupKeyring:
             "retained_keys": len(self._keys),
         }
 
-    def write(self, path: Path | str, *, create_only: bool) -> None:
-        target = Path(path).expanduser().resolve()
+    def write(
+        self,
+        path: Path | str,
+        *,
+        create_only: bool,
+        _rotation_boundary: BackupRotationBoundary | None = None,
+    ) -> None:
+        if _rotation_boundary is not None:
+            _rotation_boundary.validate(audit_windows=False)
+        target = (
+            Path(path).expanduser().resolve()
+            if _rotation_boundary is None
+            else _rotation_boundary.target
+        )
         target.parent.mkdir(parents=True, exist_ok=True)
         if create_only and target.exists():
             raise FileExistsError(f"backup keyring already exists: {target}")
@@ -280,25 +301,43 @@ class BackupKeyring:
         if hasattr(os, "O_BINARY"):
             flags |= os.O_BINARY
         descriptor = os.open(temporary, flags, 0o600)
+        temporary_identity: tuple[int, int] | None = None
+
+        def cleanup() -> None:
+            if _rotation_boundary is None:
+                temporary.unlink(missing_ok=True)
+            elif temporary_identity is not None:
+                _rotation_boundary.cleanup_temporary(temporary, temporary_identity)
+
         try:
             try:
+                if _rotation_boundary is not None:
+                    temporary_metadata = os.fstat(descriptor)
+                    temporary_identity = (temporary_metadata.st_dev, temporary_metadata.st_ino)
+                    _rotation_boundary.prepare_temporary(descriptor)
+                    if os.name == "nt":
+                        _windows_harden(temporary)
                 raw = canonical_json(payload).encode("utf-8")
                 _write_descriptor(descriptor, raw)
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
         except Exception:
-            temporary.unlink(missing_ok=True)
+            cleanup()
             raise
         try:
-            with suppress(OSError):
-                os.chmod(temporary, 0o600)
+            if _rotation_boundary is None:
+                with suppress(OSError):
+                    os.chmod(temporary, 0o600)
             if os.name == "nt":
                 _windows_harden(temporary)
+            if _rotation_boundary is not None:
+                assert temporary_identity is not None
+                _rotation_boundary.before_replace(temporary, temporary_identity)
             temporary.replace(target)
             _fsync_directory(target.parent)
         except Exception:
-            temporary.unlink(missing_ok=True)
+            cleanup()
             raise
 
     @staticmethod

@@ -3,7 +3,7 @@ from __future__ import annotations
 import errno
 import os
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from importlib import import_module
 from pathlib import Path
@@ -17,8 +17,9 @@ _lock_module: Any = import_module("msvcrt" if os.name == "nt" else "fcntl")
 class ProcessLock:
     """Non-blocking cross-process lock released automatically when the process exits."""
 
-    def __init__(self, path: Path | str):
+    def __init__(self, path: Path | str, *, opener: Callable[[Path], BinaryIO] | None = None):
         self.path = Path(path)
+        self._opener = opener
         self._handle: BinaryIO | None = None
         self._mutex = threading.Lock()
 
@@ -31,8 +32,12 @@ class ProcessLock:
         with self._mutex:
             if self._handle is not None:
                 return False
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            handle = self.path.open("a+b")
+            handle: BinaryIO
+            if self._opener is None:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                handle = self.path.open("a+b")
+            else:
+                handle = self._opener(self.path)
             acquired = False
             try:
                 # ``a+b`` leaves the CRT file position at EOF for an existing
