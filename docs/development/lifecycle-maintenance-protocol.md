@@ -172,6 +172,11 @@ See `workflow-isolated-evidence.md` and `../api/workflow-archive-verification.md
 The accepted format remains version 1 and runtime schema remains 115; increments
 and persistent/active restore are not implemented by this stage.
 
+The [increment parent-chain protocol](workflow-increment-protocol.md) has a
+separate design and isolated fault prototype. It validates the data/failure
+model while production incremental publication remains unimplemented. Its
+implementation gates do not authorize source cutoff or runtime activation.
+
 ## Staged implementation gates
 
 | Stage | Scope | Risk | Exit requirement |

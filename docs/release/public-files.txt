@@ -250,6 +250,7 @@ docs/development/sleep-failure-recovery.md
 docs/development/social-proposal-recovery.md
 docs/development/workflow-export-format.md
 docs/development/workflow-export-publications.md
+docs/development/workflow-increment-protocol.md
 docs/development/workflow-isolated-evidence.md
 docs/development/world-acquisition-design.md
 docs/evaluation.md

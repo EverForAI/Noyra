@@ -31,3 +31,7 @@ accepted artifacts.
 This stage implements complete base reading and ephemeral isolated evidence
 reconstruction only. Increment chains, persistent restore files, production
 reader switching, source cutoff and runtime activation remain separate work.
+
+A separately reviewed [increment parent-chain design](workflow-increment-protocol.md)
+and isolated fault prototype define the next gate. They do not change this base
+reader, the source schema or the accepted format.
