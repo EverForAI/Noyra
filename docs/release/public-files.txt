@@ -247,6 +247,7 @@ docs/development/semantic-memory-recovery.md
 docs/development/sleep-failure-recovery.md
 docs/development/social-proposal-recovery.md
 docs/development/workflow-export-format.md
+docs/development/workflow-export-publications.md
 docs/development/world-acquisition-design.md
 docs/evaluation.md
 docs/genesis-experience.md
@@ -614,6 +615,7 @@ src/noyra/core/schema/migrations_v043_v052.py
 src/noyra/core/schema/migrations_v053_v054.py
 src/noyra/core/schema/migrations_v055_v069.py
 src/noyra/core/schema/migrations_v070_v107.py
+src/noyra/core/schema/workflow_exports.py
 src/noyra/core/schema/world_poll.py
 src/noyra/core/secret_cleanup.py
 src/noyra/core/sleep_recovery.py
@@ -629,6 +631,7 @@ src/noyra/core/usage_projection.py
 src/noyra/core/usage_schema.py
 src/noyra/core/wallet_schema.py
 src/noyra/core/workflow_bundle.py
+src/noyra/core/workflow_export_catalog.py
 src/noyra/core/workflow_export_files.py
 src/noyra/core/xml.py
 src/noyra/deployment_setup.py
@@ -957,6 +960,8 @@ tests/test_d2a_lifecycle_diagnostics.py
 tests/test_d2a_workflow_http.py
 tests/test_d2a_workflow_maintenance.py
 tests/test_d2b_workflow_bundle.py
+tests/test_d2b_workflow_export_catalog.py
+tests/test_d2b_workflow_export_schema.py
 tests/test_deadline_clock.py
 tests/test_delivery_effective_state.py
 tests/test_deployment_contract.py

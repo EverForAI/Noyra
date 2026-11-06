@@ -1372,7 +1372,7 @@ def _default_checks() -> tuple[IntegrityCheckSpec, ...]:
         ),
         IntegrityCheckSpec(
             "operations.retention",
-            1,
+            2,
             "operations",
             _DEEP_PROFILES,
             _check_retention_runs,
@@ -1682,7 +1682,21 @@ def _check_retention_runs(context: IntegrityContext) -> IntegrityCheckOutcome:
             validate_retention_run_row(row)
         except (TypeError, ValueError) as error:
             raise IntegrityError(f"retention run provenance is invalid: {error}") from error
-    return IntegrityCheckOutcome(details={"runs": len(rows), "retention_registry": registry})
+    publications = 0
+    if context.connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_export_publications'"
+    ).fetchone():
+        from .workflow_export_catalog import WorkflowExportCatalog
+
+        catalog = WorkflowExportCatalog(context.source_database, context.subject_id)
+        for publication in context.connection.execute(
+            "SELECT * FROM workflow_export_publications WHERE subject_id=?", (context.subject_id,)
+        ):
+            catalog.decode(context.connection, publication)
+            publications += 1
+    return IntegrityCheckOutcome(details={
+        "runs": len(rows), "retention_registry": registry, "workflow_exports": publications,
+    })
 
 
 def _check_foreign_keys(context: IntegrityContext) -> IntegrityCheckOutcome:

@@ -736,6 +736,11 @@ _OWNERSHIP_GRAPHS[113] = {
     **_OWNERSHIP_GRAPHS[112],
     "email_ingress_evidence": _subject_rule(),
 }
+_OWNERSHIP_GRAPHS[114] = _OWNERSHIP_GRAPHS[113]
+_OWNERSHIP_GRAPHS[115] = {
+    **_OWNERSHIP_GRAPHS[114],
+    "workflow_export_publications": _subject_rule(),
+}
 
 
 @dataclass(frozen=True)

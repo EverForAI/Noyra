@@ -39,6 +39,7 @@ _GROUPS: dict[str, str] = {
     relationship_social_runs strategy_profile_revisions strategy_profiles
     thought_agenda_items thought_agenda_revisions thought_episodes
     thought_round_closures value_profile_revisions value_profiles workflow_checkpoints
+    workflow_export_publications
     """,
     "common_knowledge": """
     common_knowledge_evaluation_events common_knowledge_import_provenance

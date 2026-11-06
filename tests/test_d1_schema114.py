@@ -10,7 +10,7 @@ import pytest
 
 from noyra.core import Database, EventStore, IdentityStore
 from noyra.core import database as database_module
-from noyra.core.database import MIGRATIONS
+from noyra.core.database import CURRENT_SCHEMA_VERSION, MIGRATIONS
 from noyra.core.errors import SchemaContractError
 from noyra.core.schema.contracts import _SCHEMA_DDL_FINGERPRINTS
 from noyra.core.types import content_hash
@@ -65,12 +65,12 @@ def test_historical113_upgrades_idempotently_with_unchanged_source_rows(
     with upgraded.read_transaction() as c:
         assert (
             int(c.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0])
-            == 114
+            == CURRENT_SCHEMA_VERSION
         )
         found = {row[0] for row in c.execute("SELECT name FROM sqlite_schema WHERE type='index'")}
         assert INDEXES.issubset(found)
         ddl = Database.schema_ddl_fingerprint(c)
-        assert ddl == _SCHEMA_DDL_FINGERPRINTS[114]
+        assert ddl == _SCHEMA_DDL_FINGERPRINTS[CURRENT_SCHEMA_VERSION]
     reopened = Database(old_database.path, strict_schema_contract=True)
     with reopened.read_transaction() as c:
         assert Database.schema_ddl_fingerprint(c) == ddl

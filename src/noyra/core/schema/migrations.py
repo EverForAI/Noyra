@@ -12,6 +12,7 @@ from .migrations_v043_v052 import MIGRATIONS_V043_V052
 from .migrations_v053_v054 import MIGRATIONS_V053_V054
 from .migrations_v055_v069 import MIGRATIONS_V055_V069
 from .migrations_v070_v107 import MIGRATIONS_V070_V107
+from .workflow_exports import WORKFLOW_EXPORT_SCHEMA
 from .world_poll import WORLD_POLL_SCHEMA
 
 MIGRATIONS: dict[int, str] = {
@@ -84,4 +85,5 @@ CREATE INDEX IF NOT EXISTS idx_memories_subject_type_rank
 CREATE INDEX IF NOT EXISTS idx_workflow_checkpoints_subject_history
     ON workflow_checkpoints(subject_id,workflow_id,checkpoint_version);
 """,
+    115: WORKFLOW_EXPORT_SCHEMA,
 }

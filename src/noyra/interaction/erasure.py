@@ -559,6 +559,15 @@ class ConversationErasure:
             (subject,),
         ).fetchone():
             raise ErasureReviewRequired("private_exports_in_flight")
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_export_publications'"
+        ).fetchone() and connection.execute(
+            "SELECT 1 FROM workflow_export_publications WHERE subject_id=? LIMIT 1", (subject,)
+        ).fetchone():
+            # The workflow bundle is not a managed conversation export. Its
+            # derivative review/retirement must not be silently claimed by the
+            # historical erasure compatibility path.
+            raise ErasureReviewRequired("private_legacy_export_review_required")
         # Legacy exports can have arbitrary destinations with no job ownership.
         # Retiring the managed job directory cannot prove those copies are gone.
         if connection.execute(
