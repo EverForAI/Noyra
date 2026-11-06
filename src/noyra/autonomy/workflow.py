@@ -158,10 +158,13 @@ class DurableWorkflowStore:
                     "maintenance": {
                         "reason_code": "workflow_history_exceeds_recovery_bound",
                         "exceeded": exceeded,
-                        "execution_available": False,
-                        "execution_route": None,
+                        "execution_available": True,
+                        "execution_route": "/api/v1/admin/workflow-exports",
+                        "execution_readiness": (
+                            "requires_paused_owned_drained_runtime_and_archive_key"
+                        ),
                         "acknowledgement_allowed": False,
-                        "next_action": "preserve_history_pending_supported_maintenance",
+                        "next_action": "export_with_controlled_route_preserving_source_history",
                     },
                 }
             result = self._clock_history(

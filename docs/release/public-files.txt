@@ -52,6 +52,7 @@ docs/api/project-execution-recovery.md
 docs/api/public-contract-v1.md
 docs/api/public-contract-v2.md
 docs/api/sleep-recovery.md
+docs/api/workflow-exports.md
 docs/api/workflow-maintenance-status.md
 docs/audit/2026-08-14-current-audit.md
 docs/audit/2026-08-14-full-project-audit.md
@@ -632,6 +633,7 @@ src/noyra/core/usage_schema.py
 src/noyra/core/wallet_schema.py
 src/noyra/core/workflow_bundle.py
 src/noyra/core/workflow_export_catalog.py
+src/noyra/core/workflow_export_control.py
 src/noyra/core/workflow_export_files.py
 src/noyra/core/xml.py
 src/noyra/deployment_setup.py
@@ -672,6 +674,7 @@ src/noyra/http_routes/wallet_automation.py
 src/noyra/http_routes/wallet_payments.py
 src/noyra/http_routes/wallet_resources.py
 src/noyra/http_routes/wallet_rewards.py
+src/noyra/http_routes/workflow_exports.py
 src/noyra/http_transport.py
 src/noyra/interaction/__init__.py
 src/noyra/interaction/accounts.py
@@ -961,6 +964,9 @@ tests/test_d2a_workflow_http.py
 tests/test_d2a_workflow_maintenance.py
 tests/test_d2b_workflow_bundle.py
 tests/test_d2b_workflow_export_catalog.py
+tests/test_d2b_workflow_export_control.py
+tests/test_d2b_workflow_export_http.py
+tests/test_d2b_workflow_export_process.py
 tests/test_d2b_workflow_export_schema.py
 tests/test_deadline_clock.py
 tests/test_delivery_effective_state.py

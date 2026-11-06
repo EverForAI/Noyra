@@ -21,8 +21,11 @@ When either existing bound is exceeded, the response is metadata only:
 - `expected_fingerprint`, `unexplained_versions`, `unexplained_count` and
   `high_water_at` are null. An unknown inversion count is not shown as zero.
 - `maintenance` explains the exceeded bounds and requires preservation.
-  `execution_available` is false and `execution_route` is null because a
-  supported production export/maintenance action is not yet available.
+  `execution_available` is true and `execution_route` is
+  `/api/v1/admin/workflow-exports`. This advertises the supported D2b control,
+  not permission to execute immediately. `execution_readiness` requires a
+  manually paused, owned, drained runtime and a usable archive key.
+  `next_action` directs controlled export while preserving source history.
 
 The oversized response does not claim hashes, transitions or receipts were
 verified. The capacity metadata cannot authorize acknowledgement. The original
@@ -36,8 +39,10 @@ this observation does not accept corruption or replace that audit. The response
 contains no checkpoint state or private reason. Operator permissions, at-rest,
 CSRF on writes, lifecycle/drain and migration controls retain their contracts.
 
-This stage provides an honest maintenance explanation, not compaction, archive
-acceptance, recovery or an incremental trust cache. Source histories, unknown
-paid calls and fee reservations remain unchanged. The next stage must separately
-implement and validate an owned export/acceptance protocol before any source
-representation change is considered.
+This observation remains metadata only. The separate
+[controlled export API](workflow-exports.md) performs complete source and artifact
+verification before recording publication or acceptance; the capacity response
+cannot substitute for that verification. Source histories, unknown paid calls
+and fee reservations remain unchanged. Export acceptance does not remove these
+ordinary recovery bounds or authorize compaction, acknowledgement, recovery,
+resume or a source representation change.

@@ -1,10 +1,11 @@
 # Lifecycle maintenance and verified workflow snapshots
 
-Status: staged design with D2a advisory diagnostics implemented. D2a separates
-preservation coverage from table-name drift and explains oversized workflow
-recovery as `maintenance_required`. It does not enable a cleanup worker, a
-checkpoint trust cache, a restore endpoint or a new deletion policy. Full
-integrity and acknowledgement checks remain authoritative. Raw later-stage
+Status: D2a advisory diagnostics and D2b controlled base export are implemented.
+D2a separates preservation coverage from table-name drift and explains oversized
+workflow recovery as `maintenance_required`. D2b adds encrypted complete-history
+publication, readback and independent acceptance records under schema 115.
+D2c increment/restore and D2d representation changes below remain design gates.
+Full integrity and acknowledgement checks remain authoritative. Raw later-stage
 protocol experiments and private evidence are kept outside the public tree.
 
 ## Separate structural coverage from lifecycle authority
@@ -53,10 +54,11 @@ unrelated actions, calls, wallet state, privacy state or budgets.
 The D2a maintenance catalog returns a metadata response with
 `maintenance_required` when ordinary recovery bounds are exceeded. It states
 record/byte counts and supported limits without shortening history or presenting
-a partial fingerprint as complete. It explicitly reports that no production
-maintenance execution route is available yet. The existing acknowledgement
-operation retains its bounds and cannot consume this unverified observation.
-See `lifecycle-diagnostics.md` and `../api/workflow-maintenance-status.md`.
+a partial fingerprint as complete. It advertises the separate D2b controlled
+export route and its paused/owned/drained/key prerequisites. The existing
+acknowledgement operation retains its bounds and cannot consume this unverified
+observation. See `lifecycle-diagnostics.md`,
+`../api/workflow-maintenance-status.md` and `../api/workflow-exports.md`.
 
 A supported export must capture a coherent SQLite backup, including committed
 WAL data, and verify the complete source history and relevant event-chain
@@ -129,6 +131,28 @@ representation or a completely verifiable new one. Directory durability,
 Windows ACL behavior, key rotation, encrypted archive dependencies and remote
 replica availability require explicit platform validation. Local file fsync and
 rename tests alone do not establish crash or power-loss durability.
+
+## Implemented D2b boundary
+
+The operator-only API publishes a complete base for one workflow. It uses a
+tracked lease, manual pause, runtime ownership, drain, migration and protected
+storage checks. File I/O stays outside the final writer transaction. A
+same-connection SQLite data-version check rejects any intervening writer before
+acceptance; even an unrelated writer can require retry with the original request
+key. No automatic retry loop or weaker partial comparison bypasses this check.
+
+Preparation, directory state and an independent private acceptance receipt bind
+the frozen source, key and manifest. Accepted objects are read back on retry and
+never silently overwritten when missing. Directory reads validate receipts but
+explicitly do not probe current file health. Key references include all states.
+Privacy erasure intent prevents new copies pending derivative review.
+
+On POSIX, successful directory fsync through the data root is required for
+`accepted`. Windows currently reports `published_durability_unknown` after
+successful complete readback; it does not claim directory durability. Neither
+state grants restore, activation, source deletion or fee/accounting changes.
+Process interruption and real non-root POSIX fsync have been exercised; physical
+power-loss and remote-replica durability are not inferred from those results.
 
 ## Staged implementation gates
 

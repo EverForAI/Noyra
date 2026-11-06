@@ -38,8 +38,8 @@ def test_oversized_workflow_http_is_metadata_only_and_cannot_authorize_ack(
     assert not result["history_verified"] and result["expected_fingerprint"] is None
     assert result["unexplained_count"] is None and result["unexplained_versions"] is None
     assert result["capacity"]["records"] == 50_001
-    assert not result["maintenance"]["execution_available"]
-    assert result["maintenance"]["execution_route"] is None
+    assert result["maintenance"]["execution_available"]
+    assert result["maintenance"]["execution_route"] == "/api/v1/admin/workflow-exports"
     assert "PRIVATE_WORKFLOW_REASON" not in str(result)
     assert call(instance.http, path.replace("/api/", "/api/v1/"), headers=headers)[1] == result
     assert (

@@ -23,7 +23,7 @@ def test_large_workflow_returns_explicit_unverified_maintenance_metadata(
     assert result["expected_fingerprint"] is None
     assert result["capacity"]["records"] == 50_001
     assert result["unexplained_versions"] is None
-    assert result["maintenance"]["execution_available"] is False
+    assert result["maintenance"]["execution_available"] is True
 
 
 @pytest.mark.parametrize("damage", ["state_hash", "version_gap", "wrong_type"])

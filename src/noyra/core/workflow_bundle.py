@@ -370,7 +370,7 @@ def verify_bundle(
         isinstance(manifest, dict)
         and set(manifest) == {"format", "source", "segments"}
         and manifest["format"] == FORMAT
-        and manifest["source"] == expected,
+        and canonical_json(manifest["source"]) == canonical_json(expected),
         "manifest source mismatch",
     )
     segments = manifest["segments"]

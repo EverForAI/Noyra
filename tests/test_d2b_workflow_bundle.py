@@ -15,7 +15,7 @@ from noyra.autonomy.workflow import DurableWorkflowStore
 from noyra.core import Database, EventStore, IdentityStore
 from noyra.core.archive import ArchiveKeyring
 from noyra.core.errors import IntegrityError
-from noyra.core.types import canonical_json, content_hash
+from noyra.core.types import canonical_json, content_hash, strict_json_loads
 from noyra.core.workflow_bundle import (
     ArrayDigest,
     inspect_source,
@@ -222,3 +222,17 @@ def test_source_identity_ignores_only_advancing_event_head(database: Database) -
     changed, _ = export(database, Objects())
     assert changed["last_row_hash"] == first["last_row_hash"]
     assert source_identity(changed) != source_identity(first)
+
+
+@pytest.mark.parametrize("invalid_count", [True, 1.0])
+def test_manifest_source_preserves_exact_json_types(
+    database: Database, invalid_count: Any
+) -> None:
+    seed(database, 1)
+    objects = Objects()
+    proof, _ = export(database, objects)
+    manifest = strict_json_loads(objects.values["manifest.enc"])
+    manifest["source"]["records"] = invalid_count
+    descriptor = objects.put("manifest.enc", canonical_json(manifest).encode())
+    with pytest.raises(IntegrityError, match="manifest source mismatch"):
+        verify_bundle(objects, descriptor, proof, nothing)

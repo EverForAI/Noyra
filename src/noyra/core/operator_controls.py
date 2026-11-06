@@ -608,6 +608,20 @@ class OperatorControlService:
             except (IntegrityError, sqlite3.Error) as error:
                 raise OperatorControlConflict("memory_recovery_evidence_unavailable") from error
 
+    def workflow_exports(self, *, limit: int = 50) -> dict[str, Any]:
+        from .workflow_export_catalog import WorkflowExportCatalog
+
+        return WorkflowExportCatalog(self.database, self.subject_id).page(limit=limit)
+
+    def export_workflow(
+        self, workflow_id: str, expected_version: int, request_key: str, *, actor: str, reason: str
+    ) -> dict[str, Any]:
+        from .workflow_export_control import export_workflow
+
+        return export_workflow(
+            self, workflow_id, expected_version, request_key, actor=actor, reason=reason
+        )
+
     def workflow_clock_history(self, workflow_id: str) -> dict[str, Any]:
         from noyra.autonomy.workflow import DurableWorkflowStore
 
@@ -903,6 +917,14 @@ class OperatorControlService:
                         (self.subject_id, self.subject_id),
                     ).fetchone()[0]
                 )
+                if connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='workflow_export_publications'"
+                ).fetchone():
+                    references += int(connection.execute(
+                        "SELECT COUNT(*) FROM workflow_export_publications WHERE subject_id=?",
+                        (self.subject_id,),
+                    ).fetchone()[0])
             configured = ArchiveKeyring.configured()
             if not configured and references == 0:
                 return {"state": "not_configured", "configured": False, "references": 0}

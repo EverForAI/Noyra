@@ -23,6 +23,7 @@ from . import (
     post_public,
     post_wallet,
     sleep_recovery,
+    workflow_exports,
 )
 
 if TYPE_CHECKING:
@@ -77,6 +78,9 @@ def dispatch(self: RequestHandler, owner: NoyraHTTPServer) -> None:
     if self.path == "/api/admin/upgrade":
         if post_admin.admin_upgrade(self, owner):
             return
+    if self.path == "/api/admin/workflow-exports":
+        workflow_exports.dispatch(self, owner, write=True)
+        return
     if self.path == "/api/admin/sleep-recovery/abort":
         sleep_recovery.dispatch(self, owner, write=True)
         return
