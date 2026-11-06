@@ -593,7 +593,16 @@ class PublicProjection:
                     "autonomous_project",
                 }:
                     item["summary"] = item["category"]
-        return {"items": safe_page, "next_cursor": next_cursor}
+        return {
+            "items": safe_page,
+            "next_cursor": next_cursor,
+            "page": {
+                "scope": "anchored_keyset_page",
+                "returned": len(safe_page),
+                "record_limit": bounded,
+                "has_more": next_cursor is not None,
+            },
+        }
 
     @staticmethod
     def _log_timestamp(value: str | None) -> str | None:

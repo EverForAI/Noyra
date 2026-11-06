@@ -40,3 +40,20 @@ wall-clock latency threshold. Growth fixtures include one long workflow,
 multiple independent histories, empty subjects, foreign ownership and bad hashes.
 The speedup is specific to repeated SQL work; it does not turn full evidence
 verification into a constant-time operation.
+
+## Capacity and page scope
+
+The existing clock-recovery catalog adds `capacity`: complete workflow row count,
+UTF-8 state bytes, the unchanged 50,000-record/16-MiB limits and `truncated=false`.
+The values use the same snapshot and aggregate already required by recovery.
+An oversized history is refused before materialization, never shortened into an
+apparently valid fingerprint. This does not add a maintenance/compaction protocol
+or make a large recovery history pageable without complete evidence verification.
+
+The existing anchored runtime-log keyset page adds `page`: `returned`,
+`record_limit`, `has_more` and `scope=anchored_keyset_page`. These are page facts,
+not total matching records, total pages or completeness of the entire history.
+No global count, offset scan or cursor format change is introduced. Existing
+snapshot anchors continue to exclude concurrently appended/backdated records
+from later pages of the same browsing context. Old response fields and readers
+remain compatible.

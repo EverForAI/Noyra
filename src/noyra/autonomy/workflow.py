@@ -16,6 +16,9 @@ from noyra.core.types import (
     utc_now,
 )
 
+CLOCK_HISTORY_RECORD_LIMIT = 50_000
+CLOCK_HISTORY_STATE_BYTE_LIMIT = 16 * 1024 * 1024
+
 # Distinct owned keys make each foreign-owner probe run once per workflow,
 # rather than once per checkpoint against every row of that same history.
 CHECKPOINT_OWNERSHIP_SQL = """
@@ -114,14 +117,14 @@ class DurableWorkflowStore:
             "FROM workflow_checkpoints WHERE workflow_id=?",
             (workflow_id,),
         ).fetchone()
-        if size[0] > 50000 or size[1] > 16 * 1024 * 1024:
+        if size[0] > CLOCK_HISTORY_RECORD_LIMIT or size[1] > CLOCK_HISTORY_STATE_BYTE_LIMIT:
             raise ValueError("checkpoint clock history exceeds recovery bound")
         rows = connection.execute(
             "SELECT * FROM workflow_checkpoints WHERE workflow_id=? "
-            "ORDER BY checkpoint_version LIMIT 50001",
-            (workflow_id,),
+            "ORDER BY checkpoint_version LIMIT ?",
+            (workflow_id, CLOCK_HISTORY_RECORD_LIMIT + 1),
         ).fetchall()
-        if not rows or len(rows) > 50000:
+        if not rows or len(rows) > CLOCK_HISTORY_RECORD_LIMIT:
             raise ValueError("checkpoint clock history missing or exceeds recovery bound")
         if any(row["subject_id"] != subject_id for row in rows):
             raise PermissionError("workflow belongs to another subject")
@@ -144,6 +147,14 @@ class DurableWorkflowStore:
         return {
             "workflow_id": workflow_id,
             "checkpoint_count": len(rows),
+            "capacity": {
+                "scope": "complete_workflow_history",
+                "records": len(rows),
+                "state_bytes": int(size[1]),
+                "record_limit": CLOCK_HISTORY_RECORD_LIMIT,
+                "state_byte_limit": CLOCK_HISTORY_STATE_BYTE_LIMIT,
+                "truncated": False,
+            },
             "expected_fingerprint": content_hash([dict(r) for r in rows]),
             "unexplained_versions": inversions,
             "high_water_at": high,
