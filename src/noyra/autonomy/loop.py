@@ -5,13 +5,15 @@ import math
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
+from noyra.core.admission import OperationInvalidated, bind_lease
+from noyra.core.errors import IntegrityError, RuntimeOwnershipError
 from noyra.core.events import EventStore
 from noyra.core.integrity_watchdog import IntegrityWatchdog
 from noyra.core.runtime import SubjectKernel
-from noyra.core.types import utc_now
 from noyra.sleep import FatigueTracker, SleepEngine, SleepReflectionPlan, SleepRunRecord
 from noyra.sleep.errors import SleepStateConflictError
 
+from .sleep_recovery import failures, record_failure
 from .types import LoopConfig, TickResult
 
 ActiveHook = Callable[[], Awaitable[str | None]]
@@ -46,10 +48,15 @@ class AutonomyLoop:
         self.pre_tick_hook = pre_tick_hook
         self.next_wakeup_hook = next_wakeup_hook
         self.events = EventStore(kernel.database)
-        self.fatigue = FatigueTracker(kernel.database)
-        self.sleep = SleepEngine(kernel.database, kernel.subject_id)
-        self._tick_lock = asyncio.Lock()
         self._clock = clock
+        self.fatigue = FatigueTracker(kernel.database, clock=self._timestamp)
+        self.sleep = SleepEngine(
+            kernel.database,
+            kernel.subject_id,
+            clock=self._timestamp,
+            mutation_guard=kernel.lifecycle.mutation_guard,
+        )
+        self._tick_lock = asyncio.Lock()
         self._sleep_conflict_started_at: datetime | None = None
         self.integrity_watchdog = IntegrityWatchdog(
             kernel,
@@ -85,14 +92,27 @@ class AutonomyLoop:
                     )
                 if guarded is not None:
                     return guarded
+            self._finish_failed_sleep()
             circuit_wait = self._begin_tick()
             if circuit_wait is not None:
                 return circuit_wait
             try:
                 result = await self._tick_once()
+            except (OperationInvalidated, RuntimeOwnershipError):
+                raise
             except Exception as error:
                 self._record_failure(type(error).__name__)
+                if not isinstance(error, IntegrityError):
+                    self._finish_failed_sleep()
                 raise
+            self._finish_failed_sleep()
+            if (
+                result.lifecycle in {"winding_down", "reflective_sleep", "deep_sleep", "waking"}
+                and self.kernel.lifecycle.current().state == "paused"
+            ):
+                result = TickResult(
+                    "paused", "sleep_failed_paused", None, self.config.sleep_interval_seconds
+                )
             self._record_success()
             return result
 
@@ -156,7 +176,7 @@ class AutonomyLoop:
         wake_after: str | None,
     ) -> TickResult:
         """Keep the runtime active while recoverable work gets a chance to settle."""
-        now = self._clock()
+        now = self._now()
         if self._sleep_conflict_started_at is None:
             persisted_started_at = self._load_sleep_conflict_started_at()
             self._sleep_conflict_started_at = persisted_started_at or now
@@ -228,7 +248,7 @@ class AutonomyLoop:
     def _clear_sleep_conflict(self) -> None:
         had_persisted_conflict = self._load_sleep_conflict_started_at() is not None
         if self._sleep_conflict_started_at is not None or had_persisted_conflict:
-            now = self._clock()
+            now = self._now()
             self.events.append(
                 self.kernel.subject_id,
                 "autonomy_sleep_conflict_cleared",
@@ -284,7 +304,7 @@ class AutonomyLoop:
         return {**dict(row), "integrity_watchdog": self.integrity_watchdog.health()}
 
     def _ensure_loop_state(self) -> None:
-        now = utc_now()
+        now = self._timestamp()
         with self.kernel.database.transaction() as connection:
             connection.execute(
                 "INSERT OR IGNORE INTO autonomy_loop_state(subject_id, updated_at) VALUES (?, ?)",
@@ -293,7 +313,7 @@ class AutonomyLoop:
 
     def _begin_tick(self) -> TickResult | None:
         self._ensure_loop_state()
-        now = utc_now()
+        now = self._timestamp()
         with self.kernel.database.transaction() as connection:
             row = connection.execute(
                 "SELECT * FROM autonomy_loop_state WHERE subject_id = ?",
@@ -319,7 +339,7 @@ class AutonomyLoop:
         return None
 
     def _record_success(self) -> None:
-        now = utc_now()
+        now = self._timestamp()
         with self.kernel.database.transaction() as connection:
             connection.execute(
                 "UPDATE autonomy_loop_state SET consecutive_failures = 0, "
@@ -330,7 +350,7 @@ class AutonomyLoop:
             )
 
     def _record_failure(self, error_type: str) -> None:
-        now = datetime.now(UTC)
+        now = self._now()
         with self.kernel.database.transaction() as connection:
             row = connection.execute(
                 "SELECT consecutive_failures FROM autonomy_loop_state WHERE subject_id = ?",
@@ -375,17 +395,77 @@ class AutonomyLoop:
 
     async def _advance_sleep(self, lifecycle: str) -> TickResult:
         run = self.sleep.current()
-        if run is None or self.reflection_hook is None:
+        lease = self.kernel.admission.begin("sleep_tick", sleep_work=True)
+        try:
+            with bind_lease(lease):
+                try:
+                    result = await self._advance_sleep_owned(lifecycle)
+                except (IntegrityError, OperationInvalidated, RuntimeOwnershipError):
+                    raise
+                except Exception as error:
+                    if run is not None:
+                        record_failure(self.sleep, run, type(error).__name__)
+                    raise
+        finally:
+            self.kernel.admission.finish(lease)
+        if result.action == "wake_completed":
+            with self.kernel.admission.lifecycle_control_scope():
+                state = self.kernel.lifecycle.current()
+                if state.state == "active":
+                    self.kernel.admission.open(epoch=state.version)
+        return result
+
+    def _finish_failed_sleep(self) -> None:
+        if self.kernel.lifecycle.current().state not in {
+            "winding_down",
+            "reflective_sleep",
+            "deep_sleep",
+            "waking",
+        }:
+            return
+        with self.kernel.admission.lifecycle_control_scope():
+            self.kernel.admission.require_owned(self.kernel.process_lock)
+            if self.kernel.admission.active_operations:
+                return
+            run = self.sleep.current()
+            if run is None:
+                return
+            with self.kernel.database.read_transaction() as connection:
+                count = failures(self.sleep, connection, run)
+            if count < self.config.max_consecutive_failures:
+                return
+            self.sleep.fail(run.sleep_id, "persistent_stage_failure", expected_version=run.version)
+            self.kernel.admission.invalidate()
+
+    def _now(self) -> datetime:
+        now = self._clock()
+        if now.tzinfo is None:
+            raise ValueError("autonomy clock must include a timezone")
+        return now.astimezone(UTC)
+
+    def _timestamp(self) -> str:
+        return self._now().isoformat(timespec="milliseconds")
+
+    async def _advance_sleep_owned(self, lifecycle: str) -> TickResult:
+        run = self.sleep.current()
+        if run is None:
+            raise SleepStateConflictError("sleep lifecycle has no open run")
+        if run.status != lifecycle:
+            raise SleepStateConflictError("sleep run differs from runtime lifecycle")
+        if self.reflection_hook is None and (
+            run.status == "winding_down"
+            or (run.status == "reflective_sleep" and run.reflection_event_id is None)
+        ):
+            record_failure(self.sleep, run, "ReflectionHookUnavailable")
             return TickResult(
-                lifecycle,
-                "sleep_state_wait",
-                None,
-                self.config.sleep_interval_seconds,
+                lifecycle, "sleep_state_wait", None, self.config.sleep_interval_seconds
             )
         if run.status == "winding_down":
             self.sleep.begin_reflection(run.sleep_id)
             action = "reflection_started"
         elif run.status == "reflective_sleep" and run.reflection_event_id is None:
+            if self.reflection_hook is None:
+                raise SleepStateConflictError("reflection hook is unavailable")
             plan = await self.reflection_hook(run)
             self.sleep.commit_reflection(run.sleep_id, plan)
             action = "reflection_committed"
@@ -393,7 +473,7 @@ class AutonomyLoop:
             self.sleep.enter_deep_sleep(run.sleep_id)
             action = "deep_sleep_entered"
         elif run.status == "deep_sleep":
-            if run.wake_after and datetime.now(UTC) < datetime.fromisoformat(run.wake_after):
+            if run.wake_after and self._now() < datetime.fromisoformat(run.wake_after):
                 action = "deep_sleep_wait"
             else:
                 self.sleep.wake(run.sleep_id, "scheduled autonomous wake")
@@ -413,7 +493,7 @@ class AutonomyLoop:
     def _wake_after(self, trigger: str) -> str | None:
         if self.config.deep_sleep_seconds == 0:
             return None
-        now = datetime.now(UTC)
+        now = self._now()
         if trigger == "budget":
             wake_at = (now + timedelta(days=1)).replace(
                 hour=0,

@@ -483,6 +483,7 @@ src/noyra/__init__.py
 src/noyra/__main__.py
 src/noyra/autonomy/__init__.py
 src/noyra/autonomy/loop.py
+src/noyra/autonomy/sleep_recovery.py
 src/noyra/autonomy/types.py
 src/noyra/autonomy/workflow.py
 src/noyra/capability/__init__.py
@@ -911,6 +912,7 @@ tests/test_c0_external_assistance.py
 tests/test_c0_inbound_contacts.py
 tests/test_c1_memory_conflicts.py
 tests/test_c1_self_modification_expiry.py
+tests/test_c2_sleep_loop.py
 tests/test_c2_sleep_recovery.py
 tests/test_capability.py
 tests/test_capability_file_races.py
