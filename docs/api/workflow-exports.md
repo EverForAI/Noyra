@@ -102,4 +102,8 @@ supports only an older schema must refuse the newer database; do not downgrade
 its schema version manually. Keep referenced archive keys, including retained
 retired keys, and include encrypted artifacts in any separately planned backup.
 This API does not download objects, delete artifacts, rotate keys or restore a
-runtime. The independent cold reader and isolated reconstruction are D2c work.
+runtime. D2c now provides a separate
+[accepted archive verification endpoint](workflow-archive-verification.md) and
+context-bound internal reader with ephemeral isolated reconstruction. Increment
+chains, persistent/full-instance restore and runtime activation remain separate
+work.

@@ -9,7 +9,12 @@ from urllib.parse import parse_qs
 
 from noyra.core.admission import OperationInvalidated
 from noyra.core.at_rest import AtRestError
-from noyra.core.errors import ArchiveKeyUnavailableError, IntegrityError, RuntimeOwnershipError
+from noyra.core.errors import (
+    ArchiveKeyUnavailableError,
+    IntegrityError,
+    RuntimeOwnershipError,
+    SchemaContractError,
+)
 from noyra.core.operator_controls import OperatorControlConflict
 
 if TYPE_CHECKING:
@@ -18,7 +23,9 @@ if TYPE_CHECKING:
     from .contracts import RequestHandler
 
 
-def dispatch(self: RequestHandler, owner: NoyraHTTPServer, *, write: bool) -> None:
+def dispatch(
+    self: RequestHandler, owner: NoyraHTTPServer, *, write: bool, verify: bool = False
+) -> None:
     if not self._authorized("operator"):
         if write:
             self._discard_small_request_body()
@@ -39,25 +46,33 @@ def dispatch(self: RequestHandler, owner: NoyraHTTPServer, *, write: bool) -> No
             payload = self._request_json()
             if payload is None:
                 return
-            if set(payload) != {"workflow_id", "expected_version", "request_key", "reason"}:
-                self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_workflow_export_request"})
-                return
-            if (
-                not isinstance(payload["workflow_id"], str)
-                or not isinstance(payload["request_key"], str)
-                or not isinstance(payload["reason"], str)
-                or type(payload["expected_version"]) is not int
-                or payload["expected_version"] < 1
-            ):
-                self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_workflow_export_request"})
-                return
-            result = controls.export_workflow(
-                payload["workflow_id"],
-                payload["expected_version"],
-                payload["request_key"],
-                actor=self._actor(),
-                reason=payload["reason"],
-            )
+            if verify:
+                if set(payload) != {"publication_id"} or not isinstance(
+                    payload["publication_id"], str
+                ):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_workflow_export_request"})
+                    return
+                result = controls.verify_workflow_export(payload["publication_id"])
+            else:
+                if set(payload) != {"workflow_id", "expected_version", "request_key", "reason"}:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_workflow_export_request"})
+                    return
+                if (
+                    not isinstance(payload["workflow_id"], str)
+                    or not isinstance(payload["request_key"], str)
+                    or not isinstance(payload["reason"], str)
+                    or type(payload["expected_version"]) is not int
+                    or payload["expected_version"] < 1
+                ):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_workflow_export_request"})
+                    return
+                result = controls.export_workflow(
+                    payload["workflow_id"],
+                    payload["expected_version"],
+                    payload["request_key"],
+                    actor=self._actor(),
+                    reason=payload["reason"],
+                )
         else:
             query = parse_qs(self.path.partition("?")[2], keep_blank_values=True)
             if set(query) - {"limit"} or any(len(values) != 1 for values in query.values()):
@@ -89,7 +104,7 @@ def dispatch(self: RequestHandler, owner: NoyraHTTPServer, *, write: bool) -> No
             {"error": "workflow_export_control_or_storage_unavailable"},
         )
         return
-    except (IntegrityError, PermissionError):
+    except (IntegrityError, SchemaContractError, PermissionError):
         self._json(HTTPStatus.CONFLICT, {"error": "workflow_export_evidence_unavailable"})
         return
     self._json(HTTPStatus.OK, result)

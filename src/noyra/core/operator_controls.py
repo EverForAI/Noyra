@@ -622,6 +622,12 @@ class OperatorControlService:
             self, workflow_id, expected_version, request_key, actor=actor, reason=reason
         )
 
+    def verify_workflow_export(self, publication_id: str) -> dict[str, Any]:
+        from .workflow_archive_control import open_workflow_export
+
+        with open_workflow_export(self, publication_id) as evidence:
+            return {"publication_id": publication_id, **evidence.summary()}
+
     def workflow_clock_history(self, workflow_id: str) -> dict[str, Any]:
         from noyra.autonomy.workflow import DurableWorkflowStore
 

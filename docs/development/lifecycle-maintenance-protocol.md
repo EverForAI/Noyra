@@ -4,7 +4,9 @@ Status: D2a advisory diagnostics and D2b controlled base export are implemented.
 D2a separates preservation coverage from table-name drift and explains oversized
 workflow recovery as `maintenance_required`. D2b adds encrypted complete-history
 publication, readback and independent acceptance records under schema 115.
-D2c increment/restore and D2d representation changes below remain design gates.
+D2c base-only reading and ephemeral isolated reconstruction are implemented.
+Increment chains, persistent/full-instance restore and D2d representation changes
+below remain design gates.
 Full integrity and acknowledgement checks remain authoritative. Raw later-stage
 protocol experiments and private evidence are kept outside the public tree.
 
@@ -153,6 +155,22 @@ successful complete readback; it does not claim directory durability. Neither
 state grants restore, activation, source deletion or fee/accounting changes.
 Process interruption and real non-root POSIX fsync have been exercised; physical
 power-loss and remote-replica durability are not inferred from those results.
+
+## Implemented D2c base verification boundary
+
+The accepted directory, private receipts and supported source schema/genesis
+form the reader's trust root. Artifact self-description, prepared or unconfirmed
+publication cannot substitute. The read control retains paused/owned/drained,
+lease, migration, protected storage and privacy checks, including rechecks after
+reconstruction and on internal evidence access. It never writes source or keys.
+
+Complete base records are reconstructed into a fresh in-memory SQLite evidence
+schema, read back and fully reverified before exposure, then queried only through
+bounded pages and destroyed on exit. The structure cannot act as a runtime
+restore. Source privacy and unresolved financial evidence remain authoritative.
+See `workflow-isolated-evidence.md` and `../api/workflow-archive-verification.md`.
+The accepted format remains version 1 and runtime schema remains 115; increments
+and persistent/active restore are not implemented by this stage.
 
 ## Staged implementation gates
 

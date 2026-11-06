@@ -52,6 +52,7 @@ docs/api/project-execution-recovery.md
 docs/api/public-contract-v1.md
 docs/api/public-contract-v2.md
 docs/api/sleep-recovery.md
+docs/api/workflow-archive-verification.md
 docs/api/workflow-exports.md
 docs/api/workflow-maintenance-status.md
 docs/audit/2026-08-14-current-audit.md
@@ -632,6 +633,7 @@ src/noyra/core/upgrade.py
 src/noyra/core/usage_projection.py
 src/noyra/core/usage_schema.py
 src/noyra/core/wallet_schema.py
+src/noyra/core/workflow_archive_control.py
 src/noyra/core/workflow_bundle.py
 src/noyra/core/workflow_export_catalog.py
 src/noyra/core/workflow_export_control.py
@@ -970,6 +972,9 @@ tests/test_d2b_workflow_export_control.py
 tests/test_d2b_workflow_export_http.py
 tests/test_d2b_workflow_export_process.py
 tests/test_d2b_workflow_export_schema.py
+tests/test_d2c_workflow_archive_control.py
+tests/test_d2c_workflow_archive_http.py
+tests/test_d2c_workflow_archive_process.py
 tests/test_d2c_workflow_reconstruction.py
 tests/test_deadline_clock.py
 tests/test_delivery_effective_state.py

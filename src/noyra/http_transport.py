@@ -310,6 +310,7 @@ def handler_type(
                 "/api/admin/memory-integration-recovery/discard-legacy",
                 "/api/admin/workflow-clock/acknowledge",
                 "/api/admin/workflow-exports",
+                "/api/admin/workflow-exports/verify",
             }:
                 # The authenticated operator method owns the lock order and
                 # domain recovery transaction. Do not nest a gate scope around
