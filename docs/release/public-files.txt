@@ -250,6 +250,7 @@ docs/development/sleep-failure-recovery.md
 docs/development/social-proposal-recovery.md
 docs/development/workflow-export-format.md
 docs/development/workflow-export-publications.md
+docs/development/workflow-increment-metadata.md
 docs/development/workflow-increment-protocol.md
 docs/development/workflow-isolated-evidence.md
 docs/development/world-acquisition-design.md
@@ -620,6 +621,7 @@ src/noyra/core/schema/migrations_v053_v054.py
 src/noyra/core/schema/migrations_v055_v069.py
 src/noyra/core/schema/migrations_v070_v107.py
 src/noyra/core/schema/workflow_exports.py
+src/noyra/core/schema/workflow_increments.py
 src/noyra/core/schema/world_poll.py
 src/noyra/core/secret_cleanup.py
 src/noyra/core/sleep_recovery.py
@@ -639,6 +641,8 @@ src/noyra/core/workflow_bundle.py
 src/noyra/core/workflow_export_catalog.py
 src/noyra/core/workflow_export_control.py
 src/noyra/core/workflow_export_files.py
+src/noyra/core/workflow_increment_catalog.py
+src/noyra/core/workflow_increment_contract.py
 src/noyra/core/workflow_reconstruction.py
 src/noyra/core/xml.py
 src/noyra/deployment_setup.py
@@ -1008,6 +1012,11 @@ tests/test_gate3_contract_ops.py
 tests/test_goal_governance.py
 tests/test_http_access_logging.py
 tests/test_http_failure_boundary.py
+tests/test_i1_workflow_increment_catalog.py
+tests/test_i1_workflow_increment_dependencies.py
+tests/test_i1_workflow_increment_faults.py
+tests/test_i1_workflow_increment_process.py
+tests/test_i1_workflow_increment_schema.py
 tests/test_identity_challenges.py
 tests/test_inbound.py
 tests/test_independent_audit_profiles.py

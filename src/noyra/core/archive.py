@@ -376,6 +376,14 @@ class ArchiveKeyring:
                 " UNION SELECT encryption_key_id,encryption_key_fingerprint "
                 "FROM workflow_export_publications"
             )
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='workflow_increment_publications'"
+        ).fetchone():
+            reference_sql += (
+                " UNION SELECT encryption_key_id,encryption_key_fingerprint "
+                "FROM workflow_increment_publications"
+            )
         referenced = connection.execute(reference_sql)
         for row in referenced:
             if row["encryption_key_id"] is None and row["encryption_key_fingerprint"] is None:

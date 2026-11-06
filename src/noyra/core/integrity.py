@@ -1372,7 +1372,7 @@ def _default_checks() -> tuple[IntegrityCheckSpec, ...]:
         ),
         IntegrityCheckSpec(
             "operations.retention",
-            2,
+            3,
             "operations",
             _DEEP_PROFILES,
             _check_retention_runs,
@@ -1694,8 +1694,23 @@ def _check_retention_runs(context: IntegrityContext) -> IntegrityCheckOutcome:
         ):
             catalog.decode(context.connection, publication)
             publications += 1
+    increments = requests = 0
+    if context.connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_increment_publications'"
+    ).fetchone():
+        from .workflow_increment_catalog import WorkflowIncrementCatalog
+
+        increment_catalog = WorkflowIncrementCatalog(context.source_database, context.subject_id)
+        for row in context.connection.execute(
+            "SELECT publication_id FROM workflow_increment_publications WHERE subject_id=?",
+            (context.subject_id,),
+        ):
+            increment_catalog.get(context.connection, row["publication_id"])
+            increments += 1
+        requests = increment_catalog.verify_requests(context.connection)
     return IntegrityCheckOutcome(details={
         "runs": len(rows), "retention_registry": registry, "workflow_exports": publications,
+        "workflow_increments": increments, "workflow_increment_requests": requests,
     })
 
 

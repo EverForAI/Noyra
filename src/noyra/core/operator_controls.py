@@ -923,14 +923,14 @@ class OperatorControlService:
                         (self.subject_id, self.subject_id),
                     ).fetchone()[0]
                 )
-                if connection.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' "
-                    "AND name='workflow_export_publications'"
-                ).fetchone():
-                    references += int(connection.execute(
-                        "SELECT COUNT(*) FROM workflow_export_publications WHERE subject_id=?",
-                        (self.subject_id,),
-                    ).fetchone()[0])
+                for table in ("workflow_export_publications", "workflow_increment_publications"):
+                    if connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                    ).fetchone():
+                        references += int(connection.execute(
+                            "SELECT COUNT(*) FROM " + table + " WHERE subject_id=?",
+                            (self.subject_id,),
+                        ).fetchone()[0])
             configured = ArchiveKeyring.configured()
             if not configured and references == 0:
                 return {"state": "not_configured", "configured": False, "references": 0}

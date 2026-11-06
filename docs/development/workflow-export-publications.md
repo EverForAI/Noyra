@@ -37,3 +37,6 @@ history is deleted and no privacy permission is inferred from export acceptance.
 Migration 115 preserves prior SQL/fingerprints, adds immutable-source/transition/
 accepted-row guards, and uses the established backup/rollback and schema-contract
 checks. This directory is not an artifact restore endpoint or a hot/cold cutoff.
+Schema 116 adds a [separate increment metadata catalog](workflow-increment-metadata.md).
+It retains these base records unchanged, uses distinct publication identities,
+and adds no incremental file writer or base-reader compatibility shortcut.

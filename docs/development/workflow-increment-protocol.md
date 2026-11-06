@@ -1,10 +1,11 @@
 # Incremental workflow archive protocol: reviewed design
 
-Status: design with an isolated fault prototype. Production code still supports
-version-1 complete bases and their accepted evidence reader. This document does
-not enable incremental publication, a new schema, a new HTTP route, source
-cutoff or runtime restore. Raw prototype code and validation evidence remain
-outside the public source tree.
+Status: the design and isolated fault prototype are complete. I1 now supplies
+[schema-116 metadata and dependency protection](workflow-increment-metadata.md).
+Incremental file publication (I2) and chain file reading (I3) are not implemented.
+Existing v1 complete bases and their accepted evidence reader remain available.
+No incremental HTTP control, source cutoff or runtime restore is enabled. Raw
+prototype code and validation evidence remain outside the public source tree.
 
 ## Scope and compatibility
 
@@ -17,9 +18,10 @@ a full subject backup. It grants no dispatch, activation or financial authority.
 
 Existing v1 bases and schema-115 catalog rows stay immutable and retain their
 current readers. An experimental delta uses a separate format discriminator and
-logical identity domain. A future production implementation needs an additive,
-versioned catalog contract and explicit base/delta dispatch; a delta cannot be
-inserted into the current base catalog or interpreted as a v1 base. Unsupported
+logical identity domain. Schema 116 adds a separate,
+versioned metadata catalog. File publication and reading still need explicit
+base/delta dispatch; a delta cannot be inserted into the base catalog or
+interpreted as a v1 base. Unsupported
 formats fail closed. There is no silent schema translation across a chain.
 
 ## Trust root and exact parent reference
@@ -54,7 +56,8 @@ parent ID, workflow and expected resulting version. Reusing a key for another
 intent fails. Retrying an accepted request verifies the originally selected
 artifact even after later live progress; retrying a preparation cannot silently
 retarget a newer source. The isolated prototype exercises source-bound logical
-idempotency; persistent operator request-key dispatch remains a production gate.
+idempotency; I1 now persists request intents and receipts; operator retry dispatch remains
+an I2 control gate.
 
 ## Creating a candidate increment
 
@@ -185,10 +188,12 @@ with chain depth times complete history size. Production capacity/deadline tests
 must set an operational chain bound or adopt a separately verified one-pass
 multi-boundary proof. A performance shortcut cannot skip ancestor evidence.
 
-Before production implementation can ship, independently complete:
+I1 has completed the additive metadata catalog/migration, frozen request intents
+and parent/key/runtime-export/lifecycle/integrity/privacy dependency integration.
+Before incremental file publication and reading can ship, independently complete:
 
-1. Additive catalog/migration and frozen request-key protocol; parent, key,
-   runtime-export, lifecycle, integrity and privacy dependency integration.
+1. Integrate I1 metadata with I2 coherent source/prefix verification and request
+   dispatch; metadata primitives alone do not prove file publication.
 2. Existing owned control and same-source-transaction acceptance/audit fencing,
    deadline/revocation checks, actual platform storage and key lifecycle validation.
 3. Production reader/HTTP compatibility, old-library rejection, bounded chain

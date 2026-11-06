@@ -169,12 +169,14 @@ schema, read back and fully reverified before exposure, then queried only throug
 bounded pages and destroyed on exit. The structure cannot act as a runtime
 restore. Source privacy and unresolved financial evidence remain authoritative.
 See `workflow-isolated-evidence.md` and `../api/workflow-archive-verification.md`.
-The accepted format remains version 1 and runtime schema remains 115; increments
-and persistent/active restore are not implemented by this stage.
+The base format remains version 1. Schema 116 separately adds increment metadata
+and dependencies; incremental file publication/reading and persistent/active
+restore remain unimplemented.
 
 The [increment parent-chain protocol](workflow-increment-protocol.md) has a
-separate design and isolated fault prototype. It validates the data/failure
-model while production incremental publication remains unimplemented. Its
+separate design and isolated fault prototype. I1 adds the
+[versioned increment metadata catalog](workflow-increment-metadata.md) and its
+dependency protections. Production incremental publication remains unimplemented. Its
 implementation gates do not authorize source cutoff or runtime activation.
 
 ## Staged implementation gates
