@@ -52,6 +52,7 @@ docs/api/project-execution-recovery.md
 docs/api/public-contract-v1.md
 docs/api/public-contract-v2.md
 docs/api/sleep-recovery.md
+docs/api/workflow-maintenance-status.md
 docs/audit/2026-08-14-current-audit.md
 docs/audit/2026-08-14-full-project-audit.md
 docs/audit/2026-08-14-remediation-m1.md
@@ -950,6 +951,8 @@ tests/test_d1_schema114.py
 tests/test_d1_workflow_queries.py
 tests/test_d2a_diagnostics_http.py
 tests/test_d2a_lifecycle_diagnostics.py
+tests/test_d2a_workflow_http.py
+tests/test_d2a_workflow_maintenance.py
 tests/test_deadline_clock.py
 tests/test_delivery_effective_state.py
 tests/test_deployment_contract.py

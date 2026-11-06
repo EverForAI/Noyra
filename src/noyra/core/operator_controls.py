@@ -613,10 +613,11 @@ class OperatorControlService:
 
         if not isinstance(workflow_id, str) or not 1 <= len(workflow_id) <= 256:
             raise OperatorControlConflict("invalid_workflow_clock_request")
-        result = DurableWorkflowStore(self.database).clock_history(self.subject_id, workflow_id)
-        result["unexplained_count"] = len(result["unexplained_versions"])
-        result["truncated"] = result["unexplained_count"] > 100
-        result["unexplained_versions"] = result["unexplained_versions"][:100]
+        result = DurableWorkflowStore(self.database).clock_catalog(self.subject_id, workflow_id)
+        unexplained = result["unexplained_versions"]
+        result["unexplained_count"] = None if unexplained is None else len(unexplained)
+        result["truncated"] = unexplained is not None and len(unexplained) > 100
+        result["unexplained_versions"] = None if unexplained is None else unexplained[:100]
         return result
 
     def acknowledge_workflow_clock(

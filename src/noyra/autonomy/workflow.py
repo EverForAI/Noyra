@@ -107,16 +107,97 @@ class DurableWorkflowStore:
             )
         return self._from_row(row)
 
+    def clock_catalog(self, subject_id: str, workflow_id: str) -> dict[str, Any]:
+        """Inspect recovery capacity without treating an oversized history as verified."""
+        if not all(
+            isinstance(value, str) and 1 <= len(value) <= 256 and value.strip()
+            for value in (subject_id, workflow_id)
+        ):
+            raise ValueError("invalid workflow clock scope")
+        with self.database.read_transaction() as connection:
+            # Scope is checked before size and state content. Do not disclose
+            # another subject's capacity or accept a mixed-owner history.
+            foreign = connection.execute(
+                "SELECT 1 FROM workflow_checkpoints WHERE workflow_id=? "
+                "AND subject_id IS NOT ? LIMIT 1",
+                (workflow_id, subject_id),
+            ).fetchone()
+            if foreign is not None:
+                raise PermissionError("workflow belongs to another subject")
+            size = connection.execute(
+                "SELECT COUNT(*),COALESCE(SUM(length(CAST(state_json AS BLOB))),0) "
+                "FROM workflow_checkpoints WHERE workflow_id=?",
+                (workflow_id,),
+            ).fetchone()
+            count, state_bytes = int(size[0]), int(size[1])
+            if not count:
+                raise ValueError("workflow checkpoint history is missing")
+            exceeded = []
+            if count > CLOCK_HISTORY_RECORD_LIMIT:
+                exceeded.append("record_limit")
+            if state_bytes > CLOCK_HISTORY_STATE_BYTE_LIMIT:
+                exceeded.append("state_byte_limit")
+            if exceeded:
+                return {
+                    "workflow_id": workflow_id,
+                    "status": "maintenance_required",
+                    "history_verified": False,
+                    "structure_verified": False,
+                    "checkpoint_count": count,
+                    "capacity": {
+                        "scope": "complete_workflow_history",
+                        "records": count,
+                        "state_bytes": state_bytes,
+                        "record_limit": CLOCK_HISTORY_RECORD_LIMIT,
+                        "state_byte_limit": CLOCK_HISTORY_STATE_BYTE_LIMIT,
+                        "truncated": False,
+                    },
+                    "expected_fingerprint": None,
+                    "unexplained_versions": None,
+                    "high_water_at": None,
+                    "maintenance": {
+                        "reason_code": "workflow_history_exceeds_recovery_bound",
+                        "exceeded": exceeded,
+                        "execution_available": False,
+                        "execution_route": None,
+                        "acknowledgement_allowed": False,
+                        "next_action": "preserve_history_pending_supported_maintenance",
+                    },
+                }
+            result = self._clock_history(
+                connection, subject_id, workflow_id, capacity=(count, state_bytes)
+            )
+            explained = not result["unexplained_versions"]
+            return {
+                **result,
+                "status": "verified" if explained else "clock_evidence_required",
+                "history_verified": explained,
+                "structure_verified": True,
+            }
+
     def clock_history(self, subject_id: str, workflow_id: str) -> dict[str, Any]:
         with self.database.read_transaction() as connection:
             return self._clock_history(connection, subject_id, workflow_id)
 
-    def _clock_history(self, connection: Any, subject_id: str, workflow_id: str) -> dict[str, Any]:
-        size = connection.execute(
-            "SELECT COUNT(*),COALESCE(SUM(length(CAST(state_json AS BLOB))),0) "
-            "FROM workflow_checkpoints WHERE workflow_id=?",
-            (workflow_id,),
-        ).fetchone()
+    def _clock_history(
+        self,
+        connection: Any,
+        subject_id: str,
+        workflow_id: str,
+        *,
+        capacity: tuple[int, int] | None = None,
+    ) -> dict[str, Any]:
+        # Only clock_catalog supplies the aggregate already read in this exact
+        # transaction snapshot. Direct history/acknowledgement still measure it.
+        size = (
+            capacity
+            if capacity is not None
+            else connection.execute(
+                "SELECT COUNT(*),COALESCE(SUM(length(CAST(state_json AS BLOB))),0) "
+                "FROM workflow_checkpoints WHERE workflow_id=?",
+                (workflow_id,),
+            ).fetchone()
+        )
         if size[0] > CLOCK_HISTORY_RECORD_LIMIT or size[1] > CLOCK_HISTORY_STATE_BYTE_LIMIT:
             raise ValueError("checkpoint clock history exceeds recovery bound")
         rows = connection.execute(
@@ -262,9 +343,7 @@ class DurableWorkflowStore:
     ) -> int:
         if not isinstance(subject_id, str) or not subject_id.strip():
             raise IntegrityError("workflow checkpoint subject is invalid")
-        crossing = connection.execute(
-            CHECKPOINT_OWNERSHIP_SQL, (subject_id, subject_id)
-        ).fetchone()
+        crossing = connection.execute(CHECKPOINT_OWNERSHIP_SQL, (subject_id, subject_id)).fetchone()
         if crossing is not None:
             raise IntegrityError(
                 f"workflow checkpoint crosses subject boundary: {crossing['workflow_id']}"

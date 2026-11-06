@@ -1,9 +1,11 @@
 # Lifecycle maintenance and verified workflow snapshots
 
-Status: design and isolated protocol validation. This document does not enable a
-cleanup worker, a checkpoint cache, a restore endpoint or a new deletion policy.
-Normal runtime and integrity readers retain their current behavior. Raw protocol
-experiments and private evidence are kept outside the public source tree.
+Status: staged design with D2a advisory diagnostics implemented. D2a separates
+preservation coverage from table-name drift and explains oversized workflow
+recovery as `maintenance_required`. It does not enable a cleanup worker, a
+checkpoint trust cache, a restore endpoint or a new deletion policy. Full
+integrity and acknowledgement checks remain authoritative. Raw later-stage
+protocol experiments and private evidence are kept outside the public tree.
 
 ## Separate structural coverage from lifecycle authority
 
@@ -48,11 +50,13 @@ latest-row hash cannot attest all preceding rows. A workflow-only artifact is
 not a full subject backup and must not be used to start a runtime or recover
 unrelated actions, calls, wallet state, privacy state or budgets.
 
-The proposed maintenance catalog returns a bounded metadata response with
-`maintenance_required` when ordinary recovery bounds are exceeded. It should
-state record/byte counts, supported limits and an available maintenance route;
-it must not shorten the history and present a partial fingerprint as complete.
-This status and route are proposed interfaces, not currently activated APIs.
+The D2a maintenance catalog returns a metadata response with
+`maintenance_required` when ordinary recovery bounds are exceeded. It states
+record/byte counts and supported limits without shortening history or presenting
+a partial fingerprint as complete. It explicitly reports that no production
+maintenance execution route is available yet. The existing acknowledgement
+operation retains its bounds and cannot consume this unverified observation.
+See `lifecycle-diagnostics.md` and `../api/workflow-maintenance-status.md`.
 
 A supported export must capture a coherent SQLite backup, including committed
 WAL data, and verify the complete source history and relevant event-chain
