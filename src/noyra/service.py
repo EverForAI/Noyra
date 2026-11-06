@@ -2556,6 +2556,7 @@ class NoyraService:
             self._event_loop.call_soon_threadsafe(self._stop_event.set)
 
     async def _integrity_pre_tick(self) -> TickResult | None:
+        recovery_epoch = self.kernel.admission.epoch
         worker = asyncio.create_task(
             asyncio.to_thread(self.integrity.run_periodic_if_due),
             name="noyra-integrity-watchdog",
@@ -2651,11 +2652,24 @@ class NoyraService:
         current = self.kernel.lifecycle.current()
         if (
             not self._boot_recovery_pending
-            and current.state == "active"
             and not self.kernel.admission.closed
             and not self._http_quarantine_active()
         ):
-            self.kernel.admission.open(epoch=current.version)
+            if current.state == "active":
+                self.kernel.admission.open(epoch=current.version)
+            elif (
+                current.state
+                in {"paused", "winding_down", "reflective_sleep", "deep_sleep", "waking"}
+                and self.integrity.policy_mode == "pause"
+                and blocking["status"] == "ok"
+                and self.kernel.admission.quarantined
+                and not self.kernel.admission.migration_fenced
+                and self.kernel.process_lock.held
+            ):
+                # Verified recovery restores controls and sleep advancement,
+                # while manual pause still forbids ordinary cognition. Keep
+                # the invalidated epoch so pre-quarantine work stays stale.
+                self.kernel.admission.clear_quarantine(expected_epoch=recovery_epoch)
         return None
 
     def _integrity_checkpoint(self) -> None:

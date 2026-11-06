@@ -69,3 +69,25 @@ Rollback to older writers needs coordinated handling of evidence and runtime
 state: an old writer can rewrite a new envelope without updating its marker.
 New readers will reject that mismatch rather than treat an old green report
 as current evidence. Do not edit checksums or remove findings to force readiness.
+
+## Verified recovery while manually paused or sleeping
+
+A changed or rebuilt registry cannot reuse the previous green report as proof
+that new checks passed. Startup-only coverage leaves deep-only checks pending;
+incomplete or corrupt results retain quarantine until the required evidence is
+complete and clean. Tests advance an injected clock through these stages rather
+than relying on scheduler delays or clearing the pending flag by hand.
+
+After a clean report removes that integrity quarantine, a paused runtime regains
+its management control lane while ordinary admission remains closed. Lifecycle
+and admission epoch are unchanged; only an authenticated operator's normal resume
+control can return a manually paused subject to active work. Old operation leases
+remain invalid. Recovery is bound to the observed admission epoch; a newer
+quarantine or invalidation prevents that older observation from clearing it.
+A verified sleeping runtime can likewise continue its existing sleep protocol
+without enabling ordinary cognition early.
+
+This recovery does not clear a migration fence, reopen a draining runtime, bypass
+ownership, or treat an unavailable/incomplete/corrupt result as clean. It retains
+the existing `off`, `alert` and `pause` policy meanings. Known findings and the
+report's actual registered coverage remain visible.
