@@ -24,6 +24,7 @@ from noyra.core.private_sources import (
 )
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.interaction import InteractionStore
+from noyra.interaction.help_language import help_request_is_coercive
 from noyra.interaction.participants import ParticipantStore
 from noyra.mind import AffectPolicy, MemoryStore, MindEngine, RelationshipStore
 from noyra.mind.types import RelationshipRecord
@@ -546,10 +547,12 @@ class RelationshipSocialCognition:
             raise RelationshipSocialValidationError(
                 "current affect strongly favors distance over contact"
             )
-        if proposal.disposition == "request_help" and proposal.content is not None:
-            prohibited = ("urgent", "must", "owe me", "if you cared", "otherwise")
-            if any(term in proposal.content.casefold() for term in prohibited):
-                raise RelationshipSocialValidationError("help request uses coercive language")
+        if (
+            proposal.disposition == "request_help"
+            and proposal.content is not None
+            and help_request_is_coercive(proposal.content)
+        ):
+            raise RelationshipSocialValidationError("help request uses coercive language")
         return relationship, channel or "none"
 
     def _route(

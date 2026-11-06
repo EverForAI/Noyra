@@ -227,6 +227,7 @@ docs/development/cognition-result-categories.md
 docs/development/communication-state.md
 docs/development/email-identity-continuity.md
 docs/development/epistemic-review-recovery.md
+docs/development/help-request-language.md
 docs/development/http-failure-boundary.md
 docs/development/integrity-evidence.md
 docs/development/integrity-health.md
@@ -672,6 +673,7 @@ src/noyra/interaction/email_identity.py
 src/noyra/interaction/erasure.py
 src/noyra/interaction/errors.py
 src/noyra/interaction/expression.py
+src/noyra/interaction/help_language.py
 src/noyra/interaction/inbound.py
 src/noyra/interaction/integrity.py
 src/noyra/interaction/outbound.py
@@ -923,6 +925,7 @@ tests/test_c2_sleep_loop.py
 tests/test_c2_sleep_operator.py
 tests/test_c2_sleep_recovery.py
 tests/test_c3_delivery_views.py
+tests/test_c3_help_language.py
 tests/test_c3_result_kinds.py
 tests/test_capability.py
 tests/test_capability_file_races.py
