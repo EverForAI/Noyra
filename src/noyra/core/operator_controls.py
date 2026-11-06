@@ -636,6 +636,12 @@ class OperatorControlService:
         return export_increment(self, workflow_id, parent_id, expected_version, request_key,
                                 actor=actor, reason=reason)
 
+    def verify_workflow_chain(self, tip_id: str) -> dict[str, Any]:
+        from .workflow_chain_control import open_workflow_chain
+
+        with open_workflow_chain(self, tip_id) as evidence:
+            return evidence.summary()
+
     def verify_workflow_export(self, publication_id: str) -> dict[str, Any]:
         from .workflow_archive_control import open_workflow_export
 

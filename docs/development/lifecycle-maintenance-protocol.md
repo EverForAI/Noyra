@@ -171,14 +171,16 @@ restore. Source privacy and unresolved financial evidence remain authoritative.
 See `workflow-isolated-evidence.md` and `../api/workflow-archive-verification.md`.
 The base format remains version 1. Schema 116 separately adds increment metadata
 and dependencies. I2 now supplies controlled incremental file publication with
-complete internal readback; an external chain reader and persistent/active restore
-remain unimplemented.
+complete internal readback. I3 adds accepted-tip chain evidence reading and
+operator verification; persistent/full-instance restore and runtime activation
+remain separate gates.
 
 The [increment parent-chain protocol](workflow-increment-protocol.md) has a
 separate design and isolated fault prototype. I1 adds the
 [versioned increment metadata catalog](workflow-increment-metadata.md) and its
 dependency protections. I2 adds [controlled incremental publication](../api/workflow-increments.md);
-external chain reading remains a separate gate. Its
+I3 adds [accepted chain evidence verification](../api/workflow-chain-verification.md).
+This completes the bounded evidence capability without enabling source cutoff. Its
 implementation gates do not authorize source cutoff or runtime activation.
 
 ## Staged implementation gates

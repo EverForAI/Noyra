@@ -69,8 +69,9 @@ and hard-link checks reuse the reviewed archive boundary.
 The publisher reads the actual base and increment files, verifies the complete
 result and rechecks every accepted ancestor boundary using isolated in-memory
 SQLite evidence. Nothing is returned from this internal record stream. This is
-writer verification; an ordinary chain reader/restore endpoint is separate I3
-work. The proof preserves original timestamps and rollback receipts and never
+writer verification. I3 now adds a separate
+[accepted chain evidence verifier](workflow-chain-verification.md) and internal
+context-bound reader; these do not restore a runtime. The proof preserves original timestamps and rollback receipts and never
 claims to reproduce the source's complete event chain.
 
 All archive write/readback and directory fsync occur outside the final source
@@ -139,3 +140,6 @@ reviewable preparation or unconfirmed metadata for the original intent.
 Existing transport body/rate limits also apply. No automatic infinite retry,
 implicit source change, parent pruning, full-instance restore or hot/cold cutoff
 is introduced by this API.
+
+The separate `POST /api/v1/admin/workflow-increments/verify` route accepts only
+`tip_id`. Publication requests on this page retain their original fields.

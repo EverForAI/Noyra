@@ -311,6 +311,7 @@ def handler_type(
                 "/api/admin/workflow-clock/acknowledge",
                 "/api/admin/workflow-exports",
                 "/api/admin/workflow-increments",
+                "/api/admin/workflow-increments/verify",
                 "/api/admin/workflow-exports/verify",
             }:
                 # The authenticated operator method owns the lock order and

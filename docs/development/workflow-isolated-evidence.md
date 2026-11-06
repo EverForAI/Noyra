@@ -28,10 +28,12 @@ checkpoint versions, never wall-clock ordering. All work uses cancellation
 checkpoints. A failure discards the evidence view, preserving the source and
 accepted artifacts.
 
-This stage implements complete base reading and ephemeral isolated evidence
-reconstruction only. Increment chains, persistent restore files, production
-reader switching, source cutoff and runtime activation remain separate work.
+The base reader retains this complete-history proof and ephemeral isolation.
+I3 separately adds [accepted chain evidence reading](../api/workflow-chain-verification.md)
+with the same access and page limits. Persistent restore files, ordinary
+hot/cold reader switching, source cutoff and runtime activation remain separate
+work.
 
 A separately reviewed [increment parent-chain design](workflow-increment-protocol.md)
-and isolated fault prototype define the next gate. They do not change this base
-reader, the source schema or the accepted format.
+and isolated fault prototype underpin I1/I2/I3. The base reader's schema and
+accepted format remain unchanged.

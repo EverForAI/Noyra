@@ -8,8 +8,26 @@ from noyra.autonomy.workflow import DurableWorkflowStore
 from noyra.core.workflow_export_files import WorkflowArtifactStore
 from noyra.core.workflow_increment_files import WorkflowIncrementStore
 from noyra.service import NoyraService
-from test_authentication_input_contract import call
+from test_authentication_input_contract import call as http_call
 from test_m42_p3_06_operator_controls import service as service
+
+
+def call(
+    server: Any,
+    path: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict[str, Any], str]:
+    maintenance = payload is not None and path.startswith(
+        (
+            "/api/v1/admin/workflow-",
+            "/api/admin/workflow-",
+        )
+    )
+    return http_call(
+        server, path, payload=payload, headers=headers, timeout=130.0 if maintenance else 5.0
+    )
 
 
 def test_publication_http_obeys_operator_csrf_pause_and_private_response_contract(

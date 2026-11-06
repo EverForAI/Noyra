@@ -101,7 +101,7 @@ are untouched.
 
 I2 now implements the owned, paused/drained incremental file publisher and atomic
 acceptance/audit protocol with real prefix/readback and process/platform tests.
-I3 remains responsible for an externally usable explicit-tip evidence reader and
-operator verification interface, reusing complete and ancestor-boundary proofs.
-Internal writer readback does not enable ordinary cold reading or runtime
-recovery. Hot history remains authoritative and retained.
+I3 now adds an [explicit-tip evidence reader and operator verifier](../api/workflow-chain-verification.md),
+reusing complete and ancestor-boundary proofs with current access guards.
+Runtime recovery and normal hot/cold read switching remain separate authority.
+Hot history remains authoritative and retained.

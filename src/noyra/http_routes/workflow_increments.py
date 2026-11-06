@@ -23,7 +23,9 @@ if TYPE_CHECKING:
     from .contracts import RequestHandler
 
 
-def dispatch(self: RequestHandler, owner: NoyraHTTPServer, *, write: bool) -> None:
+def dispatch(
+    self: RequestHandler, owner: NoyraHTTPServer, *, write: bool, verify: bool = False
+) -> None:
     if not self._authorized("operator"):
         if write:
             self._discard_small_request_body()
@@ -44,26 +46,34 @@ def dispatch(self: RequestHandler, owner: NoyraHTTPServer, *, write: bool) -> No
             payload = self._request_json()
             if payload is None:
                 return
-            if (
-                set(payload)
-                != {"workflow_id", "parent_id", "expected_version", "request_key", "reason"}
-                or any(
-                    not isinstance(payload[name], str)
-                    for name in ("workflow_id", "parent_id", "request_key", "reason")
+            if verify:
+                if set(payload) != {"tip_id"} or not isinstance(payload["tip_id"], str):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_workflow_chain_request"})
+                    return
+                result = controls.verify_workflow_chain(payload["tip_id"])
+            else:
+                if (
+                    set(payload)
+                    != {"workflow_id", "parent_id", "expected_version", "request_key", "reason"}
+                    or any(
+                        not isinstance(payload[name], str)
+                        for name in ("workflow_id", "parent_id", "request_key", "reason")
+                    )
+                    or type(payload["expected_version"]) is not int
+                    or payload["expected_version"] < 2
+                ):
+                    self._json(
+                        HTTPStatus.BAD_REQUEST, {"error": "invalid_workflow_increment_request"}
+                    )
+                    return
+                result = controls.export_workflow_increment(
+                    payload["workflow_id"],
+                    payload["parent_id"],
+                    payload["expected_version"],
+                    payload["request_key"],
+                    actor=self._actor(),
+                    reason=payload["reason"],
                 )
-                or type(payload["expected_version"]) is not int
-                or payload["expected_version"] < 2
-            ):
-                self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_workflow_increment_request"})
-                return
-            result = controls.export_workflow_increment(
-                payload["workflow_id"],
-                payload["parent_id"],
-                payload["expected_version"],
-                payload["request_key"],
-                actor=self._actor(),
-                reason=payload["reason"],
-            )
         else:
             query = parse_qs(self.path.partition("?")[2], keep_blank_values=True)
             if set(query) - {"limit"} or any(len(values) != 1 for values in query.values()):

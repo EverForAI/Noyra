@@ -53,6 +53,7 @@ docs/api/public-contract-v1.md
 docs/api/public-contract-v2.md
 docs/api/sleep-recovery.md
 docs/api/workflow-archive-verification.md
+docs/api/workflow-chain-verification.md
 docs/api/workflow-exports.md
 docs/api/workflow-increments.md
 docs/api/workflow-maintenance-status.md
@@ -639,6 +640,7 @@ src/noyra/core/usage_schema.py
 src/noyra/core/wallet_schema.py
 src/noyra/core/workflow_archive_control.py
 src/noyra/core/workflow_bundle.py
+src/noyra/core/workflow_chain_control.py
 src/noyra/core/workflow_export_catalog.py
 src/noyra/core/workflow_export_control.py
 src/noyra/core/workflow_export_files.py
@@ -1028,6 +1030,10 @@ tests/test_i2_workflow_increment_faults.py
 tests/test_i2_workflow_increment_format.py
 tests/test_i2_workflow_increment_http.py
 tests/test_i2_workflow_increment_process.py
+tests/test_i3_workflow_chain_control.py
+tests/test_i3_workflow_chain_faults.py
+tests/test_i3_workflow_chain_http.py
+tests/test_i3_workflow_chain_process.py
 tests/test_identity_challenges.py
 tests/test_inbound.py
 tests/test_independent_audit_profiles.py

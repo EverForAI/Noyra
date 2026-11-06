@@ -58,6 +58,7 @@ def call(
     *,
     payload: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
+    timeout: float = 5.0,
 ) -> tuple[int, dict[str, Any], str]:
     req = Request(
         f"http://127.0.0.1:{server.address[1]}{path}",
@@ -65,7 +66,7 @@ def call(
         headers={"Content-Type": "application/json", **(headers or {})},
     )
     try:
-        response = urlopen(req, timeout=5)
+        response = urlopen(req, timeout=timeout)
     except HTTPError as error:
         response = error
     with response:

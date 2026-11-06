@@ -1,10 +1,10 @@
-"""Bounded incremental encoding and complete writer readback; no public cold reader."""
+"""Bounded incremental encoding and complete, isolated chain evidence proof."""
 
 from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Generator, Iterator
-from contextlib import closing
+from contextlib import closing, contextmanager
 from itertools import islice
 from typing import Any, cast
 
@@ -28,7 +28,7 @@ from .workflow_export_files import PUBLICATION, WorkflowArtifactStore
 from .workflow_increment_catalog import WorkflowIncrementCatalog
 from .workflow_increment_contract import FORMAT, MAX_CHAIN_NODES, compatible
 from .workflow_increment_files import WorkflowIncrementStore
-from .workflow_reconstruction import MAX_RECONSTRUCTION_BYTES, MAX_SQLITE_PAGES
+from .workflow_reconstruction import MAX_RECONSTRUCTION_BYTES, MAX_SQLITE_PAGES, _WorkflowEvidence
 
 MAX_CHAIN_SEGMENTS = 4096
 Chain = list[tuple[str, dict[str, Any]]]
@@ -215,12 +215,13 @@ def _chain_records(
         require(next_version == record["last_version"] + 1, "increment suffix incomplete")
 
 
-def verify_increment_chain(
+@contextmanager
+def _reconstruct_increment_chain(
     database: Database, nodes: Chain, ring: ArchiveKeyring, checkpoint: Callable[[], None]
-) -> None:
-    """Internal writer proof; candidate bindings originate from protected preparation.
+) -> Iterator[_WorkflowEvidence]:
+    """Internal context: independent roots or a protected writer candidate are required.
 
-    No row is returned or exposed, and no candidate becomes accepted here.
+    Only after every boundary passes may the owning control expose this view.
     """
     require(
         0 < len(nodes) <= MAX_CHAIN_NODES and nodes[0][0] == "base",
@@ -286,10 +287,15 @@ def verify_increment_chain(
         memory.execute(f"PRAGMA max_page_count={MAX_SQLITE_PAGES}")
         memory.execute("PRAGMA temp_store=MEMORY")
         memory.execute("PRAGMA journal_mode=MEMORY")
-        memory.execute("CREATE TABLE proof(version INTEGER PRIMARY KEY,record_json TEXT NOT NULL)")
+        memory.execute(
+            "CREATE TABLE reconstructed_records("
+            "version INTEGER PRIMARY KEY,record_json TEXT NOT NULL)"
+        )
 
         def stored() -> Iterator[Any]:
-            for (encoded,) in memory.execute("SELECT record_json FROM proof ORDER BY version"):
+            for (encoded,) in memory.execute(
+                "SELECT record_json FROM reconstructed_records ORDER BY version"
+            ):
                 yield strict_json_loads(encoded)
 
         total = 0
@@ -302,7 +308,8 @@ def verify_increment_chain(
                 total += len(encoded.encode())
                 require(total <= MAX_RECONSTRUCTION_BYTES, "increment chain proof exceeds budget")
                 memory.execute(
-                    "INSERT INTO proof VALUES(?,?)", (row["row"]["checkpoint_version"], encoded)
+                    "INSERT INTO reconstructed_records VALUES(?,?)",
+                    (row["row"]["checkpoint_version"], encoded),
                 )
         memory.commit()
         memory.execute("PRAGMA query_only=ON")
@@ -317,3 +324,16 @@ def verify_increment_chain(
                 for _ in proof:
                     pass
         checkpoint()
+        view = _WorkflowEvidence(memory, strict_json_loads(canonical_json(expected)), checkpoint)
+        try:
+            yield view
+        finally:
+            view._closed = True
+
+
+def verify_increment_chain(
+    database: Database, nodes: Chain, ring: ArchiveKeyring, checkpoint: Callable[[], None]
+) -> None:
+    """Consume the complete proof without exposing writer candidates."""
+    with _reconstruct_increment_chain(database, nodes, ring, checkpoint):
+        pass

@@ -3,8 +3,8 @@
 Status: the design and isolated fault prototype are complete. I1 now supplies
 [schema-116 metadata and dependency protection](workflow-increment-metadata.md).
 I2 implements [controlled incremental file publication](../api/workflow-increments.md)
-with complete internal chain readback. An external chain evidence reader (I3)
-is not yet implemented. Existing v1 complete bases and their accepted evidence
+with complete internal chain readback. I3 adds an
+[accepted-tip evidence reader and operator verifier](../api/workflow-chain-verification.md). Existing v1 complete bases and their accepted evidence
 reader remain available. No source cutoff or runtime restore is enabled. Raw
 prototype code and validation evidence remain outside the public source tree.
 
@@ -196,10 +196,11 @@ dispatch, same-source-transaction acceptance/audit fencing and platform fault
 validation. Files and independent receipts are read before writer scopes; metadata
 primitives are never used alone to claim publication.
 
-The remaining I3 gate is an externally usable explicit-tip chain reader and
-operator evidence interface with current privacy/lease/key checks throughout
-access, old-library rejection, cross-platform regression and source preservation
-review. Internal writer proof is not runtime recovery or an external reader.
+I3 completes the accepted explicit-tip chain evidence reader and operator
+verification interface, including current privacy/lease/key checks on access,
+base compatibility, cross-platform process tests and source preservation.
+I1/I2/I3 close this bounded capability. Runtime activation, normal read switching,
+source cutoff or a permanent full-instance restore remain separate work.
 
 Keep hot history throughout these gates. This design adds no default network
 allowlists, per-message human approval or restrictions on ordinary autonomy.
