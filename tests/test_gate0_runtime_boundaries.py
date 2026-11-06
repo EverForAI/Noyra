@@ -130,12 +130,24 @@ def test_second_service_cannot_touch_database_before_ownership(tmp_path: Path) -
             second = NoyraService(settings)
             with pytest.raises(RuntimeOwnershipError):
                 second.boot()
-        health = second.kernel.health()
-        assert health["subject_id"] == settings.subject_id
+        # Losing construction/boot must not open SQLite or create sidecars.
+        # An explicitly requested live diagnostic is a separate mode=ro read;
+        # SQLite may create WAL/SHM coordination files for that reader.
         assert database.read_bytes() == before
         for suffix, path in sidecars.items():
             assert (path.read_bytes() if path.exists() else None) == sidecars_before[suffix]
-        second.close()
+        assert second.kernel.database.read_only
+        assert not second.kernel.database.immutable_snapshot
+        assert not second.kernel.process_lock.held
+        assert first.kernel.process_lock.held
+        try:
+            health = second.kernel.health()
+            assert health["subject_id"] == settings.subject_id
+            assert database.read_bytes() == before
+            assert not second.kernel.process_lock.held
+            assert first.kernel.process_lock.held
+        finally:
+            second.close()
     finally:
         first.close()
 

@@ -48,3 +48,19 @@ consistent transactions, write rejection, missing inputs, sealed files,
 journal refusal, filename escaping and runtime ownership transfer. Its POSIX
 permission case requires a non-root account; Windows or root-only runs must
 report that case as skipped rather than claim equivalent permission coverage.
+
+## Runtime construction versus explicit diagnostics
+
+A service that loses the process-lock race constructs only a deferred preflight
+facade. Its constructor and rejected `boot()` must not open SQLite or change the
+main file or its coordination files. Calling `kernel.health()` explicitly is a
+separate live diagnostic read, with the WAL-aware read-only contract above. It
+must see committed WAL identity/checkpoint/lifecycle changes without acquiring
+ownership or enabling writes. Main-file and committed WAL bytes remain unchanged;
+SHM coordination state is not treated as application data or immutable evidence.
+
+The startup gate checks the zero-access boundary before requesting diagnostics.
+A separate live-WAL regression verifies the diagnostic state, unchanged business
+rows and write rejection with `query_only` disabled. Restoring `immutable=1` for
+these live reads would violate the diagnostic contract even if it happened to
+avoid creating sidecars.
