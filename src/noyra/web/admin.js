@@ -788,6 +788,7 @@ function renderOverviewAttention(data, failures=[]) {
       for(const [key,title,section] of [["unknown_actions","有外部行动结果未知","logs"],["unknown_model_calls","有模型调用结果未知","logs"],["unknown_payments","有付款结果未知","wallet"],["unresolved_deliveries","有外部投递需要核对","channels"]]){
         const item=data.attention?.[key];
         if(item?.count)add("risk",title,`${item.count}${item.more ? "+":""} 项；保留结果与费用证据，先核对，不要盲目重试。`,section);
+        if(item?.truncated)add("reminder","投递摘要只覆盖近期样本","较早投递尚未包含在本次摘要中，请在渠道记录中查看完整状态。",section);
       }
       if(!data.attention)add("reminder","部分运行防护尚未读取","完整性、加密卷、钱包和外部投递的详细状态请在运行防护中核对；轻量摘要不能替代准入检查。","runtime");
       if(data.resources?.data_free_bytes!=null && data.resources.data_free_bytes<536870912)add("risk","数据盘可用空间低于 512 MiB","这是容量提醒，不代表数据卷权限与加密检查通过；请查看运行防护和保留设置。","runtime");
@@ -905,8 +906,9 @@ function renderChatMessages() {
     const mine=row.direction==="incoming" && row.channel==="web" && row.author_verified;
     const author=row.direction==="outgoing" ? "Noyra" : mine?"我":row.channel==="web"?"历史网页访客（作者未确认）":`${row.channel} · ${row.counterparty}`;
     const progress=["offered","deferred"].includes(row.status)?({executing:"模型调用中",prepared:"模型调用已准备",failed:"最近调用失败，等待后续处理",unknown:"调用结果未知，等待核对"}[row.model_call_status]||chatStatus[row.status]):chatStatus[row.status];
+    const communication=({local_available:"回复已保存在本站",not_scheduled:"尚无外部投递记录",delivery_sample_incomplete:"仅显示部分投递记录"}[row.communication_status] || "");
     const delivery=(row.delivery_statuses || []).map(status=>({queued:"等待平台投递",sending:"平台投递中",delivered:"平台已接收",failed:"平台投递失败",unknown:"平台投递结果未知，需核对",cancelled:"平台投递已取消"}[status] || "未知投递状态")).join("、");
-    return heading+`<article class="chat-message ${mine?"mine":""}"><small>${esc(author)} · ${esc(formatTimestamp(row.created_at))}</small><p>${esc(row.content)}</p><small>${esc(progress||row.status)}${row.related_interaction_id?" · 回复关联原消息":""}${delivery ? " · "+esc(delivery):""}</small><button data-copy-message="${esc(row.interaction_id)}" title="复制消息" type="button">复制</button></article>`;
+    return heading+`<article class="chat-message ${mine?"mine":""}"><small>${esc(author)} · ${esc(formatTimestamp(row.created_at))}</small><p>${esc(row.content)}</p><small>${esc(progress||row.status)}${row.related_interaction_id?" · 回复关联原消息":""}${communication ? " · "+esc(communication):""}${delivery ? " · "+esc(delivery):""}</small><button data-copy-message="${esc(row.interaction_id)}" title="复制消息" type="button">复制</button></article>`;
   }).join("") || '<p class="muted">暂无消息</p>';
 }
 async function loadChatMessages({older=false}={}) {

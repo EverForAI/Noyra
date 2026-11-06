@@ -224,6 +224,7 @@ docs/development/architecture-boundaries.md
 docs/development/autonomy-scheduling.md
 docs/development/checkpoint-clock-and-recovery.md
 docs/development/cognition-result-categories.md
+docs/development/communication-state.md
 docs/development/email-identity-continuity.md
 docs/development/epistemic-review-recovery.md
 docs/development/http-failure-boundary.md
@@ -665,6 +666,7 @@ src/noyra/interaction/assistance.py
 src/noyra/interaction/assistance_routes.py
 src/noyra/interaction/collaboration.py
 src/noyra/interaction/conversations.py
+src/noyra/interaction/delivery_view.py
 src/noyra/interaction/diary.py
 src/noyra/interaction/email_identity.py
 src/noyra/interaction/erasure.py
@@ -920,6 +922,7 @@ tests/test_c1_self_modification_expiry.py
 tests/test_c2_sleep_loop.py
 tests/test_c2_sleep_operator.py
 tests/test_c2_sleep_recovery.py
+tests/test_c3_delivery_views.py
 tests/test_c3_result_kinds.py
 tests/test_capability.py
 tests/test_capability_file_races.py

@@ -1039,3 +1039,21 @@ test("recovery exit explains fixed conditions and checker failures without trust
   assert.match(html,/尚无|未识别条件/);
   assert.ok(!html.includes("<unsafe>")&&!html.includes("private injected label"));
 });
+
+
+test("chat distinguishes local replies and unscheduled delivery without claiming a send", () => {
+  const { sandbox, nodes } = context({
+    chat: { rows: [
+      { interaction_id:"local", direction:"outgoing", channel:"web", status:"sent", content:"Local reply", created_at:"2026-11-06T00:00:00Z", communication_status:"local_available", delivery_statuses:[] },
+      { interaction_id:"help", direction:"outgoing", channel:"web", status:"sent", content:"Help", created_at:"2026-11-06T00:00:00Z", communication_status:"not_scheduled", delivery_statuses:[] },
+      { interaction_id:"delivered", direction:"outgoing", channel:"email", status:"sent", content:"Email", created_at:"2026-11-06T00:00:00Z", communication_status:"delivered", delivery_statuses:["delivered"] },
+    ] }, chatStatus: { sent:"已生成回复" },
+  });
+  vm.runInContext(functionsBetween("function renderChatMessages()", "async function loadChatMessages("), sandbox);
+  sandbox.renderChatMessages();
+  const html=nodes.get("#mailbox-list").innerHTML;
+  assert.match(html,/回复已保存在本站/);
+  assert.match(html,/尚无外部投递记录/);
+  assert.match(html,/平台已接收/);
+  assert.doesNotMatch(html,/已发送/);
+});

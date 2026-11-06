@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .cognitive_waits import terminal_wait_reason
+from .delivery_state import delivery_attention_sample
 from .errors import IntegrityError
 from .fair_scheduling import ScheduleState
 from .recovery_budget import (
@@ -277,19 +278,9 @@ class RuntimeObserver:
                     (self.subject_id,),
                 ).fetchall()
                 attention[name] = {"count": min(50, len(found)), "more": len(found) > 50}
-            deliveries = connection.execute(
-                "SELECT 1 FROM interaction_deliveries d WHERE d.subject_id=? "
-                "AND d.status IN ('unknown','failed') AND NOT EXISTS "
-                "(SELECT 1 FROM interaction_delivery_reconciliations r "
-                "WHERE r.delivery_id=d.delivery_id "
-                "AND r.outcome IN ('delivered','failed','cancelled')) "
-                "LIMIT 51",
-                (self.subject_id,),
-            ).fetchall()
-            attention["unresolved_deliveries"] = {
-                "count": min(50, len(deliveries)),
-                "more": len(deliveries) > 50,
-            }
+            attention["unresolved_deliveries"] = delivery_attention_sample(
+                connection, self.subject_id
+            )
             waits = connection.execute(
                 "SELECT task_id,purpose,status FROM waiting_cognitive_tasks "
                 "WHERE subject_id=? AND status IN ('waiting','cancelled') "
@@ -485,7 +476,7 @@ class RuntimeObserver:
                     },
                 }
             )
-        except (OSError, sqlite3.Error):
+        except (OSError, sqlite3.Error, IntegrityError):
             # Incomplete queries never masquerade as zero usage or healthy state.
             pass
         finally:

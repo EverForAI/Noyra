@@ -262,3 +262,36 @@ def delivery_status_counts(connection: Any, subject_id: str) -> dict[str, int]:
             raise IntegrityError("delivery reconciliation count is invalid")
         counts[record.outcome] = counts.get(record.outcome, 0) + 1
     return {status: count for status, count in counts.items() if count}
+
+
+def verified_delivery_status(connection: Any, delivery: Any) -> str:
+    """Validate a selected delivery's receipt history before projecting its state."""
+    for _record in verified_reconciliations(
+        connection, str(delivery["subject_id"]), delivery_id=str(delivery["delivery_id"])
+    ):
+        pass
+    return effective_delivery_status(connection, delivery)
+
+
+def delivery_attention_sample(
+    connection: Any, subject_id: str, *, limit: int = 100
+) -> dict[str, Any]:
+    """Bounded display sample, never an inventory/admission or resend decision."""
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("invalid delivery attention limit")
+    rows = connection.execute(
+        "SELECT delivery_id,subject_id,status FROM interaction_deliveries "
+        "WHERE subject_id=? AND status IN ('unknown','failed') ORDER BY rowid DESC LIMIT ?",
+        (subject_id, limit + 1),
+    ).fetchall()
+    count = sum(
+        verified_delivery_status(connection, row) in {"unknown", "failed"} for row in rows[:limit]
+    )
+    return {
+        "count": min(50, count),
+        "more": count > 50,
+        "scope": "latest_unknown_or_failed_deliveries_not_total",
+        "sampled": min(limit, len(rows)),
+        "record_limit": limit,
+        "truncated": len(rows) > limit,
+    }
