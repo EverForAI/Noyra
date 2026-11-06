@@ -1072,3 +1072,22 @@ test("truncated delivery observation remains visible even with zero sampled unre
   assert.match(html,/较早投递尚未包含/);
   assert.doesNotMatch(html,/有外部投递需要核对/);
 });
+
+
+test("retention distinguishes structural baseline from advisory preservation coverage", () => {
+  const { sandbox, nodes } = context();
+  sandbox.$("#retention-settings-form").querySelectorAll=()=>[];
+  vm.runInContext(functionsBetween("function renderRetention(", "async function loadRetention("),sandbox);
+  sandbox.renderRetention({settings:{revision:0},lifecycle_diagnostics:{
+    policy_coverage:{implemented_retention_objects:18,documented_domain_objects:9,preservation_only_objects:218,unreviewed_objects:1},
+    structural_drift:{status:"matches_baseline"},
+  }});
+  let html=nodes.get("#retention-summary").innerHTML;
+  assert.match(html,/待审 1 项/);
+  assert.match(html,/不代表完整结构检查或全部保留策略已审核/);
+  assert.match(html,/不阻断正常认知/);
+  sandbox.renderRetention({settings:{revision:0},lifecycle_diagnostics:{status:"unavailable"}});
+  html=nodes.get("#retention-summary").innerHTML;
+  assert.match(html,/暂未取得，不按零项处理/);
+  assert.doesNotMatch(html,/待审 0 项/);
+});

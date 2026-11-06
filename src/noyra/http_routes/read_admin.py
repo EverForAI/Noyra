@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import SplitResult, parse_qs
 
 from noyra.core.errors import IntegrityError, NotFoundError
+from noyra.core.lifecycle_diagnostics import LifecycleCatalogUnavailable
 from noyra.core.runtime_observation import ObservationBusy
 from noyra.core.upgrade import UpgradeError
 from noyra.interaction.conversations import ConversationConflict
@@ -438,12 +439,46 @@ def mailbox(self: RequestHandler, owner: NoyraHTTPServer, limit: int) -> bool:
     return False
 
 
+def lifecycle_catalog(
+    self: RequestHandler, owner: NoyraHTTPServer, parsed: SplitResult
+) -> bool:
+    if not self._authorized("operator"):
+        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+        return True
+    try:
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        if set(query) - {"limit", "cursor"} or any(len(value) != 1 for value in query.values()):
+            raise ValueError("invalid lifecycle catalog query")
+        limit = int(query.get("limit", ["50"])[0])
+        result = owner.retention.lifecycle_catalog(
+            limit=limit, cursor=query.get("cursor", [None])[0]
+        )
+    except (ValueError, TypeError):
+        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_lifecycle_catalog_query"})
+        return True
+    except LifecycleCatalogUnavailable:
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "lifecycle_catalog_unavailable"})
+        return True
+    self._json(HTTPStatus.OK, result)
+    return True
+
+
 def admin_retention(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
     if not self._authorized():
         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
         return True
     retention_policy = owner.retention.policy(owner.kernel.subject_id)
     settings = retention_policy["settings"]
+    try:
+        lifecycle = owner.retention.lifecycle_catalog(limit=1)
+        lifecycle_summary = {
+            "policy_coverage": lifecycle["policy_coverage"],
+            "structural_drift": lifecycle["structural_drift"],
+        }
+    except LifecycleCatalogUnavailable:
+        lifecycle_summary = {
+            "status": "unavailable", "reason_code": "lifecycle_catalog_unavailable"
+        }
     self._json(
         HTTPStatus.OK,
         {
@@ -457,6 +492,7 @@ def admin_retention(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
             "sqlite_space": owner.retention.sqlite_space(),
             "plan": owner.retention.retention_plan(owner.kernel.subject_id),
             "evidence_capacity": owner.retention.evidence_capacity(owner.kernel.subject_id),
+            "lifecycle_diagnostics": lifecycle_summary,
         },
     )
     return False

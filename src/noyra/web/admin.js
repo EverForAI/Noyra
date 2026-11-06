@@ -1372,6 +1372,9 @@ function renderRetention(payload) {
   const backupPlan = plan.backup || {};
   const backupSummary = backupPlan.backup_summary || {};
   const capacity = payload?.evidence_capacity;
+  const lifecycle = payload?.lifecycle_diagnostics;
+  const coverage = lifecycle?.policy_coverage;
+  const drift = lifecycle?.structural_drift;
   const latestDeleted = latest?.deleted_by_table ? Object.entries(latest.deleted_by_table).map(([key,value]) => `${key}: ${formatInteger(value)}`).join(" · ") : "暂无清理记录";
   const form = $("#retention-settings-form");
   if (!form.dataset.dirty) { for (const input of form.querySelectorAll("input[name]")) input.value = settings[input.name]; form.dataset.revision = settings.revision; }
@@ -1394,6 +1397,9 @@ function renderRetention(payload) {
     ["备份占用 / 水位", `${formatInteger(backupSummary.total_bytes_after_plan)} 字节 · ${backupSummary.space_status || "未知"}`],
     ["未验证备份关注", formatInteger((backupPlan.backup_attention || []).length)],
     ["证据容量", capacity?.blocked ? "已达上限，暂停新增认知工作" : "可用"],
+    ["生命周期策略盘点", coverage ? `现有清理规则 ${formatInteger(coverage.implemented_retention_objects)} 项 / 领域协议 ${formatInteger(coverage.documented_domain_objects)} 项 / 保留基线 ${formatInteger(coverage.preservation_only_objects)} 项 / 待审 ${formatInteger(coverage.unreviewed_objects)} 项` : "暂未取得，不按零项处理"],
+    ["策略覆盖说明", "盘点仅供维护参考；未审对象保持保留，不新增删除权限，也不阻断正常认知"],
+    ["结构清单比对", ({matches_baseline:"与表清单基线一致；不代表完整结构检查或全部保留策略已审核",mismatch:"发现新增或缺失对象，请查看完整性记录",baseline_unavailable:"结构基线暂不可验证"}[drift?.status] || "暂未取得")],
     ["必要证据每表上限", formatInteger(capacity?.limit_per_table)],
     ["模型调用 / 尝试", `${formatInteger(capacity?.counts?.model_calls)} / ${formatInteger(capacity?.counts?.model_attempts)}`],
   ]);

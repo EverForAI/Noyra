@@ -231,6 +231,7 @@ docs/development/help-request-language.md
 docs/development/http-failure-boundary.md
 docs/development/integrity-evidence.md
 docs/development/integrity-health.md
+docs/development/lifecycle-diagnostics.md
 docs/development/lifecycle-maintenance-protocol.md
 docs/development/memory-literal-search.md
 docs/development/migration-approval-boundaries.md
@@ -565,6 +566,8 @@ src/noyra/core/integrity.py
 src/noyra/core/integrity_evidence.py
 src/noyra/core/integrity_watchdog.py
 src/noyra/core/lifecycle.py
+src/noyra/core/lifecycle_diagnostics.py
+src/noyra/core/lifecycle_inventory.py
 src/noyra/core/locking.py
 src/noyra/core/maintenance_evidence.py
 src/noyra/core/managed_data_root.py
@@ -945,6 +948,8 @@ tests/test_d1_capacity_metadata.py
 tests/test_d1_memory_ordering.py
 tests/test_d1_schema114.py
 tests/test_d1_workflow_queries.py
+tests/test_d2a_diagnostics_http.py
+tests/test_d2a_lifecycle_diagnostics.py
 tests/test_deadline_clock.py
 tests/test_delivery_effective_state.py
 tests/test_deployment_contract.py

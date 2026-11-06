@@ -8,6 +8,7 @@ import re
 import shutil
 import sqlite3
 import stat
+import time
 from collections.abc import Mapping
 from copy import copy, deepcopy
 from dataclasses import asdict, dataclass
@@ -498,6 +499,27 @@ class RetentionManager:
             ).fetchone()
             is not None
         )
+
+    def lifecycle_catalog(
+        self, *, limit: int = 50, cursor: str | None = None
+    ) -> dict[str, Any]:
+        from .lifecycle_diagnostics import LifecycleCatalogUnavailable, lifecycle_catalog
+
+        # This advisory read cannot make the existing cleanup or cognition
+        # paths wait for a full schema/content scan.
+        try:
+            with self.database.read_transaction() as connection:
+                connection.execute("PRAGMA busy_timeout=200")
+                deadline = time.monotonic() + 0.25
+                connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+                try:
+                    return lifecycle_catalog(connection, limit=limit, cursor=cursor)
+                finally:
+                    connection.set_progress_handler(None, 0)
+        except sqlite3.Error as error:
+            raise LifecycleCatalogUnavailable(
+                "lifecycle metadata is temporarily unavailable"
+            ) from error
 
     def evidence_capacity(self, subject_id: str) -> dict[str, Any]:
         with self.database.connection() as connection:

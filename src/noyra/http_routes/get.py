@@ -302,6 +302,9 @@ def dispatch(self: RequestHandler, owner: NoyraHTTPServer) -> None:
     elif parsed.path in {"/api/v1/admin/provider-health", "/api/admin/provider-health"}:
         if health.admin_provider_health(self, owner, query):
             return
+    elif parsed.path == "/api/admin/retention/lifecycle":
+        if read_admin.lifecycle_catalog(self, owner, parsed):
+            return
     elif parsed.path in {"/api/v1/admin/retention", "/api/admin/retention"}:
         if read_admin.admin_retention(self, owner):
             return
