@@ -89,6 +89,18 @@ class OperatorControlService:
     def subject_id(self) -> str:
         return str(self.kernel.subject_id)
 
+    def sleep_recovery(self) -> dict[str, Any]:
+        from .sleep_recovery import directory
+
+        return directory(self)
+
+    def abort_sleep(
+        self, sleep_id: str, expected_version: int, *, actor: str, reason: str
+    ) -> dict[str, Any]:
+        from .sleep_recovery import abort
+
+        return abort(self, sleep_id, expected_version, actor=actor, reason=reason)
+
     def pause(self, *, actor: str, reason: str) -> OperatorMutation:
         actor, reason = self._validate_actor_reason(actor, reason)
         with self._lock:

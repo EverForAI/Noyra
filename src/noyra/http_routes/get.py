@@ -20,6 +20,7 @@ from . import (
     read_migration,
     read_public,
     read_wallet,
+    sleep_recovery,
 )
 
 if TYPE_CHECKING:
@@ -151,6 +152,9 @@ def dispatch(self: RequestHandler, owner: NoyraHTTPServer) -> None:
     elif parsed.path.startswith("/api/public/"):
         if read_public.public_item(self, owner, parsed):
             return
+    elif parsed.path == "/api/admin/sleep-recovery":
+        sleep_recovery.dispatch(self, owner, write=False)
+        return
     elif parsed.path == "/api/admin/memory-integration-recovery":
         if read_admin.memory_integration_recovery(self, owner):
             return

@@ -22,6 +22,7 @@ from . import (
     post_migration,
     post_public,
     post_wallet,
+    sleep_recovery,
 )
 
 if TYPE_CHECKING:
@@ -76,6 +77,9 @@ def dispatch(self: RequestHandler, owner: NoyraHTTPServer) -> None:
     if self.path == "/api/admin/upgrade":
         if post_admin.admin_upgrade(self, owner):
             return
+    if self.path == "/api/admin/sleep-recovery/abort":
+        sleep_recovery.dispatch(self, owner, write=True)
+        return
     if self.path == "/api/admin/memory-integration-recovery/discard-legacy":
         operator.discard_memory_integration(self, owner)
         return

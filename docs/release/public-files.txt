@@ -51,6 +51,7 @@ docs/api/participants.md
 docs/api/project-execution-recovery.md
 docs/api/public-contract-v1.md
 docs/api/public-contract-v2.md
+docs/api/sleep-recovery.md
 docs/audit/2026-08-14-current-audit.md
 docs/audit/2026-08-14-full-project-audit.md
 docs/audit/2026-08-14-remediation-m1.md
@@ -604,6 +605,7 @@ src/noyra/core/schema/migrations_v055_v069.py
 src/noyra/core/schema/migrations_v070_v107.py
 src/noyra/core/schema/world_poll.py
 src/noyra/core/secret_cleanup.py
+src/noyra/core/sleep_recovery.py
 src/noyra/core/snapshots.py
 src/noyra/core/storage.py
 src/noyra/core/storage_lifecycle.py
@@ -648,6 +650,7 @@ src/noyra/http_routes/read_migration.py
 src/noyra/http_routes/read_public.py
 src/noyra/http_routes/read_wallet.py
 src/noyra/http_routes/search.py
+src/noyra/http_routes/sleep_recovery.py
 src/noyra/http_routes/validation.py
 src/noyra/http_routes/wallet_automation.py
 src/noyra/http_routes/wallet_payments.py
@@ -913,6 +916,7 @@ tests/test_c0_inbound_contacts.py
 tests/test_c1_memory_conflicts.py
 tests/test_c1_self_modification_expiry.py
 tests/test_c2_sleep_loop.py
+tests/test_c2_sleep_operator.py
 tests/test_c2_sleep_recovery.py
 tests/test_capability.py
 tests/test_capability_file_races.py

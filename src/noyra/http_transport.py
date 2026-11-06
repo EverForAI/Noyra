@@ -306,16 +306,22 @@ def handler_type(
                 return
             if self.path in {
                 "/api/admin/project-execution-recovery/release-review",
+                "/api/admin/sleep-recovery/abort",
                 "/api/admin/memory-integration-recovery/discard-legacy",
                 "/api/admin/workflow-clock/acknowledge",
             }:
                 # The authenticated operator method owns the lock order and
-                # paused/drained transaction. Do not nest a gate scope around
+                # domain recovery transaction. Do not nest a gate scope around
                 # its service lock or count this request as in-flight work.
                 try:
                     self._dispatch_post()
                 except (OperationInvalidated, RuntimeOwnershipError) as error:
-                    self._runtime_http_failure(error, "project_recovery_unavailable")
+                    code = (
+                        "sleep_recovery_unavailable"
+                        if self.path == "/api/admin/sleep-recovery/abort"
+                        else "project_recovery_unavailable"
+                    )
+                    self._runtime_http_failure(error, code)
                 return
             # Lifecycle controls intentionally invalidate/reopen the gate
             # as part of their own transaction.  They must not run under
