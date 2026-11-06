@@ -367,3 +367,57 @@ def test_local_git_replace_cannot_hide_original_introduced_objects(repository: P
     git(repository, "replace", introduced, base)
     findings = GUARD["check"](repository, tip, base=base)
     assert any(introduced[:12] in item for item in findings)
+
+
+def test_release_and_ci_use_identical_range_selection_without_shell_event_interpolation() -> None:
+    from test_publication_boundary import ROOT
+
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    for workflow in [
+        ci[ci.index("  public-source:") : ci.index("\n  test:")],
+        release[release.index("  quality-gate:") : release.index("\n  release:")],
+    ]:
+        assert "fetch-depth: 0" in workflow
+        assert "python scripts/check-publication-boundary.py --github-event" in workflow
+        assert "NOYRA_PUBLICATION_REVIEW_BASE: ${{ vars.PUBLICATION_REVIEW_BASE }}" in workflow
+        guard_step = workflow[
+            workflow.index("run: python scripts/check-publication-boundary.py") :
+        ].split("\n")[0]
+        assert "${{" not in guard_step
+    assert release.index("check-publication-boundary.py") < release.index(
+        "public-file-manifest.py check"
+    )
+    assert "--scope full --profile soak" in release
+
+
+def test_missing_manual_or_tag_baseline_explains_action_without_echoing_event_body(
+    repository: Path, tmp_path: Path
+) -> None:
+    note(repository, "Synthetic safe note\n")
+    env = event_environment(
+        repository, tmp_path, "workflow_dispatch", {"inputs": {}, "body": "SYNTHETIC_NEVER_ECHO"}
+    )
+    result = run_event(repository, env)
+    assert result.returncode == 1 and "PUBLICATION_REVIEW_BASE" in result.stderr
+    assert "SYNTHETIC_NEVER_ECHO" not in result.stderr
+
+
+def test_force_push_without_reviewed_ancestor_does_not_infer_a_fallback(
+    repository: Path, tmp_path: Path
+) -> None:
+    original = git(repository, "rev-parse", "HEAD").decode().strip()
+    note(repository, "Synthetic safe tip\n")
+    git(repository, "checkout", "--quiet", "--orphan", "unrelated-history")
+    (repository / "README.md").write_text("Synthetic force push root\n", encoding="utf-8")
+    git(repository, "add", "--", "README.md")
+    commit(repository)
+    tip = git(repository, "rev-parse", "HEAD").decode().strip()
+    env = event_environment(
+        repository,
+        tmp_path,
+        "push",
+        {"ref": "refs/heads/main", "before": original, "after": tip, "forced": True},
+        GITHUB_REF="refs/heads/main",
+    )
+    assert run_event(repository, env).returncode == 1

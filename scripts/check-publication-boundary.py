@@ -20,6 +20,10 @@ MAX_EVENT_BYTES = 2 * 1024 * 1024
 LOCAL_REFERENCE = re.compile(r"(?i)(?<![a-z0-9])[a-z]:[\\/]|/mnt/[a-z]/")
 
 
+class PublicationScopeError(ValueError):
+    """A safe, fixed-scope diagnostic; never contains event or source text."""
+
+
 def git(root: Path, *args: str) -> bytes:
     return subprocess.run(
         ["git", "-c", "core.quotePath=false", *args],
@@ -131,10 +135,10 @@ def _text_findings(root: Path, diff_args: tuple[str, ...]) -> list[str]:
 
 def _range_findings(root: Path, commit: str, base: str) -> list[str]:
     if git(root, "rev-parse", "--is-shallow-repository").strip() != b"false":
-        raise ValueError("publication range requires non-shallow history")
+        raise PublicationScopeError("publication range requires non-shallow history")
     trusted = resolve_commit(root, base)
     if trusted == commit:
-        raise ValueError("publication base must precede the selected commit")
+        raise PublicationScopeError("publication base must precede the selected commit")
     git(root, "merge-base", "--is-ancestor", trusted, commit)
     introduced = (
         git(
@@ -149,7 +153,7 @@ def _range_findings(root: Path, commit: str, base: str) -> list[str]:
         .splitlines()
     )
     if not introduced or len(introduced) > MAX_RANGE_COMMITS:
-        raise ValueError("publication range exceeds reviewed work bound")
+        raise PublicationScopeError("publication range exceeds reviewed work bound")
     findings: list[str] = []
     for candidate in introduced:
         # Inspect every newly reachable snapshot against the trusted tree.
@@ -165,7 +169,7 @@ def check(root: Path, revision: str | None, *, base: str | None = None) -> list[
     diff_args: tuple[str, ...]
     if base is not None:
         if revision is None:
-            raise ValueError("publication base requires a selected revision")
+            raise PublicationScopeError("publication base requires a selected revision")
         return _range_findings(root, resolve_commit(root, revision), base)
     if revision is None:
         names = git(root, "ls-files", "-z").decode("utf-8").split("\0")
@@ -189,16 +193,16 @@ def check(root: Path, revision: str | None, *, base: str | None = None) -> list[
 
 def _event_oid(value: Any) -> str:
     if not isinstance(value, str) or re.fullmatch(r"(?:[a-f0-9]{40}|[a-f0-9]{64})", value) is None:
-        raise ValueError("publication event requires an exact object ID")
+        raise PublicationScopeError("publication event requires an exact object ID")
     if not value.strip("0"):
-        raise ValueError("publication event has no reviewed before commit")
+        raise PublicationScopeError("publication event has no reviewed before commit")
     return value
 
 
 def _field(value: Any, *names: str) -> Any:
     for name in names:
         if not isinstance(value, dict) or name not in value:
-            raise ValueError("publication event scope is incomplete")
+            raise PublicationScopeError("publication event scope is incomplete")
         value = value[name]
     return value
 
@@ -212,43 +216,52 @@ def github_scope(root: Path, environment: Mapping[str, str]) -> tuple[str, str]:
     with Path(environment.get("GITHUB_EVENT_PATH", "")).open("rb") as stream:
         raw = stream.read(MAX_EVENT_BYTES + 1)
     if not raw or len(raw) > MAX_EVENT_BYTES:
-        raise ValueError("publication event exceeds its metadata bound")
+        raise PublicationScopeError("publication event exceeds its metadata bound")
     event = json.loads(raw)
     if not isinstance(event, dict):
-        raise ValueError("invalid publication event")
+        raise PublicationScopeError("invalid publication event")
     tip = resolve_commit(root, _event_oid(environment.get("GITHUB_SHA")))
     if resolve_commit(root, "HEAD") != tip:
-        raise ValueError("publication checkout does not match the event commit")
+        raise PublicationScopeError("publication checkout does not match the event commit")
     kind = environment.get("GITHUB_EVENT_NAME")
     if kind == "pull_request":
         base = _event_oid(_field(event, "pull_request", "base", "sha"))
         head = resolve_commit(root, _event_oid(_field(event, "pull_request", "head", "sha")))
         parents = git(root, "rev-list", "--parents", "-n", "1", tip).decode("ascii").split()
         if parents != [tip, resolve_commit(root, base), head]:
-            raise ValueError("publication PR checkout is not the event's exact merge candidate")
+            raise PublicationScopeError(
+                "publication PR checkout is not the event's exact merge candidate"
+            )
     elif kind == "push":
         ref = _field(event, "ref")
         if not isinstance(ref, str) or ref != environment.get("GITHUB_REF"):
-            raise ValueError("publication push ref differs from event")
+            raise PublicationScopeError("publication push ref differs from event")
         after = resolve_commit(root, _event_oid(_field(event, "after")))
         if after != tip or event.get("deleted") is True:
-            raise ValueError("publication push commit differs from event")
+            raise PublicationScopeError("publication push commit differs from event")
         if ref.startswith("refs/heads/"):
             base = _event_oid(_field(event, "before"))
         elif ref.startswith("refs/tags/"):
-            base = _event_oid(environment.get("NOYRA_PUBLICATION_REVIEW_BASE"))
+            configured = environment.get("NOYRA_PUBLICATION_REVIEW_BASE")
+            if not configured:
+                raise PublicationScopeError("tag review requires PUBLICATION_REVIEW_BASE")
+            base = _event_oid(configured)
         else:
-            raise ValueError("unsupported publication push ref")
+            raise PublicationScopeError("unsupported publication push ref")
     elif kind == "workflow_dispatch":
         inputs = event.get("inputs", {})
         if not isinstance(inputs, dict):
-            raise ValueError("invalid publication dispatch inputs")
+            raise PublicationScopeError("invalid publication dispatch inputs")
         supplied = inputs.get("publication_base")
         if supplied is None or supplied == "":
             supplied = environment.get("NOYRA_PUBLICATION_REVIEW_BASE")
+        if not supplied:
+            raise PublicationScopeError(
+                "manual review requires publication_base or PUBLICATION_REVIEW_BASE"
+            )
         base = _event_oid(supplied)
     else:
-        raise ValueError("unsupported publication event")
+        raise PublicationScopeError("unsupported publication event")
     return base, tip
 
 
@@ -273,9 +286,14 @@ def main() -> int:
             findings = check(root, tip, base=base)
         else:
             findings = check(root, args.revision, base=args.base)
+    except PublicationScopeError as error:
+        print(f"Publication boundary scope rejected: {error}", file=sys.stderr)
+        return 1
     except (OSError, ValueError, subprocess.CalledProcessError):
         print(
-            "Publication boundary check could not read the requested Git snapshot.", file=sys.stderr
+            "Publication boundary check could not read or verify "
+            "the requested Git scope/event metadata.",
+            file=sys.stderr,
         )
         return 1
     if findings:

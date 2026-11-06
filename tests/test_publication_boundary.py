@@ -174,8 +174,11 @@ def test_ci_and_native_hook_share_one_guard_and_preserve_existing_jobs() -> None
     assert "python scripts/public-file-manifest.py check --index" in hook
     assert hook.index("check-publication-boundary.py") < hook.index("public-file-manifest.py")
     public_source = ci[ci.index("  public-source:") : ci.index("\n  test:")]
-    assert "python scripts/check-publication-boundary.py --revision" in public_source
-    assert "fetch-depth: 3" in public_source
+    assert "python scripts/check-publication-boundary.py --github-event" in public_source
+    assert "fetch-depth: 0" in public_source
+    assert "NOYRA_PUBLICATION_REVIEW_BASE: ${{ vars.PUBLICATION_REVIEW_BASE }}" in public_source
+    assert "publication_base:" in ci
+    assert "github.event.pull_request.head.sha || github.sha" not in public_source
     assert "continue-on-error" not in public_source
 
 

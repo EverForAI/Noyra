@@ -244,6 +244,7 @@ docs/development/model-invalidation-boundaries.md
 docs/development/model-pre-send-settlement.md
 docs/development/participant-login-throttling.md
 docs/development/project-coordination.md
+docs/development/publication-range-guard.md
 docs/development/query-performance.md
 docs/development/readonly-database.md
 docs/development/self-modification-expiry.md

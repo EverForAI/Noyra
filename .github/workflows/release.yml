@@ -20,6 +20,10 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+      - name: Check complete publication range
+        env:
+          NOYRA_PUBLICATION_REVIEW_BASE: ${{ vars.PUBLICATION_REVIEW_BASE }}
+        run: python scripts/check-publication-boundary.py --github-event
       - name: Verify reviewed public source inventory
         run: python scripts/public-file-manifest.py check --revision "${{ github.sha }}"
       - run: python -m pip install --require-hashes --requirement requirements-dev.lock
