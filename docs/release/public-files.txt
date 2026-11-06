@@ -236,6 +236,7 @@ docs/development/project-coordination.md
 docs/development/readonly-database.md
 docs/development/self-modification-expiry.md
 docs/development/semantic-memory-recovery.md
+docs/development/sleep-failure-recovery.md
 docs/development/social-proposal-recovery.md
 docs/development/world-acquisition-design.md
 docs/evaluation.md
@@ -765,6 +766,7 @@ src/noyra/signer_service.py
 src/noyra/sleep/__init__.py
 src/noyra/sleep/engine.py
 src/noyra/sleep/errors.py
+src/noyra/sleep/failure.py
 src/noyra/sleep/fatigue.py
 src/noyra/sleep/integrity.py
 src/noyra/sleep/types.py
@@ -909,6 +911,7 @@ tests/test_c0_external_assistance.py
 tests/test_c0_inbound_contacts.py
 tests/test_c1_memory_conflicts.py
 tests/test_c1_self_modification_expiry.py
+tests/test_c2_sleep_recovery.py
 tests/test_capability.py
 tests/test_capability_file_races.py
 tests/test_cloud_ci_contract.py

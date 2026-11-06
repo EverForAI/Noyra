@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from noyra.core.database import Database
@@ -13,8 +14,9 @@ from .types import FatigueInputs, FatigueState
 class FatigueTracker:
     """Durable fatigue derived from hard resource pressure and cognitive strain."""
 
-    def __init__(self, database: Database):
+    def __init__(self, database: Database, *, clock: Callable[[], str] = utc_now):
         self.database = database
+        self.clock = clock
 
     def ensure(self, subject_id: str) -> FatigueState:
         with self.database.transaction() as connection:
@@ -23,7 +25,7 @@ class FatigueTracker:
             ).fetchone()
             if row is not None:
                 return self._from_row(row)
-            now = utc_now()
+            now = self.clock()
             state_hash = self._state_hash(
                 0,
                 "active",
@@ -67,7 +69,7 @@ class FatigueTracker:
                 fatigue = 100.0
             mode = self.mode_for(fatigue)
             version = int(row["version"]) + 1
-            now = utc_now()
+            now = self.clock()
             state_hash = self._state_hash(fatigue, mode, inputs)
             connection.execute(
                 """UPDATE fatigue_states SET fatigue = ?, mode = ?, resource_pressure = ?,
@@ -134,7 +136,7 @@ class FatigueTracker:
             )
             mode = self.mode_for(fatigue)
             version = int(row["version"]) + 1
-            now = utc_now()
+            now = self.clock()
             state_hash = self._state_hash(fatigue, mode, inputs)
             connection.execute(
                 """UPDATE fatigue_states SET fatigue = ?, mode = ?, cognitive_load = 0,
@@ -195,7 +197,7 @@ class FatigueTracker:
         cognitive pool is exhausted.  This prevents an economy outage from
         disabling deep cognition (and vice versa).
         """
-        now = utc_now()
+        now = self.clock()
         allowed = {"economy", "deep", "search", "browser", "embedding"}
         with self.database.transaction() as connection:
             for pool, value in pressures.items():
@@ -290,8 +292,7 @@ class FatigueTracker:
             raise NotFoundError(f"fatigue state not found: {subject_id}")
         return cls._from_row(row)
 
-    @staticmethod
-    def _insert_initial(connection: Any, subject_id: str) -> None:
+    def _insert_initial(self, connection: Any, subject_id: str) -> None:
         inputs = FatigueInputs(
             resource_pressure=0.0,
             cognitive_load=0.0,
@@ -299,7 +300,7 @@ class FatigueTracker:
             goal_conflict=0.0,
             staleness=0.0,
         )
-        now = utc_now()
+        now = self.clock()
         connection.execute(
             """INSERT OR IGNORE INTO fatigue_states(
                 subject_id, fatigue, mode, resource_pressure, cognitive_load,

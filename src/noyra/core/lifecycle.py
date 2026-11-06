@@ -13,10 +13,10 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "orienting": frozenset({"active", "stopped"}),
     "active": frozenset({"paused", "winding_down", "stopped"}),
     "paused": frozenset({"active", "stopped"}),
-    "winding_down": frozenset({"reflective_sleep", "stopped"}),
-    "reflective_sleep": frozenset({"deep_sleep", "stopped"}),
-    "deep_sleep": frozenset({"waking", "stopped"}),
-    "waking": frozenset({"active", "stopped"}),
+    "winding_down": frozenset({"reflective_sleep", "paused", "stopped"}),
+    "reflective_sleep": frozenset({"deep_sleep", "paused", "stopped"}),
+    "deep_sleep": frozenset({"waking", "paused", "stopped"}),
+    "waking": frozenset({"active", "paused", "stopped"}),
     "stopped": frozenset({"booting", "resetting"}),
     "resetting": frozenset({"booting", "stopped"}),
 }
@@ -78,6 +78,14 @@ class LifecycleManager:
         with self.database.transaction() as connection:
             if self.mutation_guard is not None:
                 self.mutation_guard(connection)
+            if new_state == "paused":
+                row = connection.execute(
+                    "SELECT state FROM runtime_state WHERE subject_id=?", (self.subject_id,)
+                ).fetchone()
+                if row is not None and row["state"] in {
+                    "winding_down", "reflective_sleep", "deep_sleep", "waking"
+                }:
+                    raise InvalidTransitionError("sleep pause requires the sleep failure protocol")
             return self._transition_connection(connection, new_state, reason, actor=actor)
 
     def safe_pause(
