@@ -15,6 +15,7 @@ from noyra.core.types import content_hash, new_id, utc_now
 from ._integrity import durable_boundary, durable_float, durable_int
 from .attention import attention_batch
 from .epistemic import pending_epistemic_trigger
+from .result_kinds import cycle_result_outcome
 from .settings import CognitionSettings
 
 CognitiveStrategy = Literal[
@@ -739,16 +740,8 @@ class MetacognitiveControl:
             outcome = "productive" if result == "metacognitive_sleep_requested" else "failed"
         elif decision.strategy == "wait":
             outcome = "stagnant"
-        elif any(token in result for token in ("failed", "rejected", "budget_exhausted")):
-            outcome = "failed"
-        elif (
-            result == "action_deliberation_waiting_reconciliation"
-            or result.endswith("_waiting")
-            or result.endswith("_waited")
-        ):
-            outcome = "stagnant"
         else:
-            outcome = "unknown"
+            outcome = cycle_result_outcome(result)
         return (
             "cycle_result",
             content_hash(
