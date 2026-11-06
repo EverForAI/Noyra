@@ -1057,3 +1057,18 @@ test("chat distinguishes local replies and unscheduled delivery without claiming
   assert.match(html,/平台已接收/);
   assert.doesNotMatch(html,/已发送/);
 });
+
+
+test("truncated delivery observation remains visible even with zero sampled unresolved work", () => {
+  const { sandbox, nodes } = context({ runtimeExplanation: () => ["Recent activity", "Synthetic", "runtime"] });
+  vm.runInContext(functionsBetween("async function loadOverview()", "function renderModelObservability("), sandbox);
+  sandbox.renderOverviewAttention({
+    format:"noyra-runtime-observation/v1", database_observation:"ok",
+    cognition:{enabled:true}, loop:{reason_code:"recent_success"},
+    attention:{unresolved_deliveries:{count:0,more:false,truncated:true,sampled:100,record_limit:100}},
+  });
+  const html=nodes.get("#overview-attention").innerHTML;
+  assert.match(html,/投递摘要只覆盖近期样本/);
+  assert.match(html,/较早投递尚未包含/);
+  assert.doesNotMatch(html,/有外部投递需要核对/);
+});
