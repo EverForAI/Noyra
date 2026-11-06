@@ -231,6 +231,7 @@ docs/development/help-request-language.md
 docs/development/http-failure-boundary.md
 docs/development/integrity-evidence.md
 docs/development/integrity-health.md
+docs/development/lifecycle-maintenance-protocol.md
 docs/development/memory-literal-search.md
 docs/development/migration-approval-boundaries.md
 docs/development/model-invalidation-boundaries.md
