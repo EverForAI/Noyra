@@ -67,7 +67,7 @@ def test_liveness_and_readiness_are_separate(tmp_path: Path) -> None:
 
 
 def test_proxy_identity_diagnostic_is_private_and_repeated_headers_keep_chain_order(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     token = "proxy-readiness-token-with-enough-entropy-12345"
     service = NoyraService(
@@ -82,7 +82,12 @@ def test_proxy_identity_diagnostic_is_private_and_repeated_headers_keep_chain_or
     try:
         _, port = service.http.address
         resolved: list[str] = []
-        service.http.allow_request = cast(Any, lambda client: resolved.append(client) or True)
+
+        def allow_request(client: str) -> bool:
+            resolved.append(client)
+            return True
+
+        monkeypatch.setattr(service.http, "allow_request", allow_request)
         with socket.create_connection(("127.0.0.1", port), timeout=5) as connection:
             connection.sendall(
                 b"GET /health/live HTTP/1.1\r\n"
