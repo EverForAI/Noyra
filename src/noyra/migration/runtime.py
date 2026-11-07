@@ -347,24 +347,10 @@ class MigrationRuntime:
             if policy.wallet_mode == "external_signer_rebind":
                 wallet["signer_id"] = values.get("signer_id") or getattr(signer, "signer_id", None)
             else:
-                # Local key transfer requires an explicit, expiring task-bound
-                # operator approval, independent of automatic host selection.
-                with self.owner.kernel.database.connection() as connection:
-                    rows = connection.execute(
-                        "SELECT payload_json FROM migration_audit_events WHERE subject_id=? "
-                        "AND action='migration_local_wallet_approved' "
-                        "ORDER BY rowid DESC LIMIT 256",
-                        (task.subject_id,),
-                    ).fetchall()
-                wallet["approval"] = next(
-                    (
-                        json.loads(row["payload_json"])["approval"]
-                        for row in rows
-                        if json.loads(row["payload_json"]).get("task_id") == task.task_id
-                        and json.loads(row["payload_json"]).get("policy_revision")
-                        == policy.revision
-                    ),
-                    values.get("local_wallet_approval"),
+                from .local_wallet_approval import load_local_wallet
+
+                wallet["approval"] = load_local_wallet(
+                    self.owner.kernel.database, task, signer.address
                 )
         return {"credential_binding": credential, "wallet_binding": wallet}
 

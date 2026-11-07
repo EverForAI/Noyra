@@ -28,14 +28,18 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from .backup_keyring_paths import BackupRotationBoundary
 from .errors import IntegrityError, RuntimeOwnershipError
 from .locking import ProcessLock
 from .types import canonical_json, utc_now
+
+if TYPE_CHECKING:
+    from .backup_rotation import RotationJournalStatus
 
 AT_REST_THREAT_MODEL = "noyra-at-rest/offline-media-v1"
 BACKUP_KEYRING_FORMAT = "noyra-backup-keyring/v1"
@@ -128,6 +132,10 @@ class BackupKeyring:
             raise BackupKeyUnavailableError("backup keyring metadata is unavailable") from error
         with resolved.open("rb") as stream:
             raw = stream.read(_MAX_KEYRING_BYTES + 1)
+        return cls._from_bytes(raw)
+
+    @classmethod
+    def _from_bytes(cls, raw: bytes) -> BackupKeyring:
         if not raw or len(raw) > _MAX_KEYRING_BYTES:
             raise BackupKeyUnavailableError("backup keyring size is invalid")
         try:
@@ -206,40 +214,33 @@ class BackupKeyring:
         return keyring
 
     @classmethod
-    def rotate(cls, path: Path | str) -> BackupKeyring:
-        target = Path(path).expanduser().resolve()
-        # This stable sibling is never replaced or removed. Locking the keyring
-        # inode itself would not serialize readers after its atomic replacement.
-        lock = ProcessLock(target.with_name(target.name + ".rotation.lock"))
-        lock.acquire()
-        try:
-            return cls._rotate_locked(target)
-        finally:
-            lock.release()
+    def rotate(
+        cls,
+        path: Path | str,
+        *,
+        request_id: str | None = None,
+        expected_generation: int | None = None,
+        expected_source_hash: str | None = None,
+    ) -> RotationJournalStatus:
+        """Rotate an explicit operation; implicit legacy retries are rejected.
 
-    @classmethod
-    def _rotate_locked(cls, target: Path) -> BackupKeyring:
-        current = cls.from_path(target)
-        if len(current._keys) >= _MAX_KEYS:
-            raise ValueError("backup keyring reached its retained-key limit")
-        key = os.urandom(32)
-        fingerprint = hashlib.sha256(key).hexdigest()
-        generation = current.generation + 1
-        active_key_id = f"backup-{generation}-{fingerprint[:12]}"
-        materials = (
-            *(
-                BackupKeyMaterial(item.key_id, item.key, item.fingerprint, "retired")
-                for item in current._keys.values()
-            ),
-            BackupKeyMaterial(active_key_id, key, fingerprint, "active"),
+        The result is operation metadata, not a keyring containing secret bytes.
+        Use from_path explicitly if a caller needs current decryption material.
+        """
+        from .backup_rotation import BackupRotationJournal
+        from .backup_rotation_records import RotationRequestRequiredError
+
+        if request_id is None or expected_generation is None or expected_source_hash is None:
+            raise RotationRequestRequiredError(
+                "backup rotation requires request_id, expected_generation "
+                "and expected_source_hash; "
+                "use backup-key status, prepare and resume with a retained request ID"
+            )
+        return BackupRotationJournal(path).rotate(
+            request_id=request_id,
+            expected_generation=expected_generation,
+            expected_source_hash=expected_source_hash,
         )
-        rotated = cls(
-            generation=generation,
-            active_key_id=active_key_id,
-            keys=materials,
-        )
-        rotated.write(target, create_only=False)
-        return rotated
 
     def resolve(self, key_id: object, fingerprint: object) -> BackupKeyMaterial:
         if not isinstance(key_id, str) or not isinstance(fingerprint, str):
@@ -257,8 +258,20 @@ class BackupKeyring:
             "retained_keys": len(self._keys),
         }
 
-    def write(self, path: Path | str, *, create_only: bool) -> None:
-        target = Path(path).expanduser().resolve()
+    def write(
+        self,
+        path: Path | str,
+        *,
+        create_only: bool,
+        _rotation_boundary: BackupRotationBoundary | None = None,
+    ) -> None:
+        if _rotation_boundary is not None:
+            _rotation_boundary.validate(audit_windows=False)
+        target = (
+            Path(path).expanduser().resolve()
+            if _rotation_boundary is None
+            else _rotation_boundary.target
+        )
         target.parent.mkdir(parents=True, exist_ok=True)
         if create_only and target.exists():
             raise FileExistsError(f"backup keyring already exists: {target}")
@@ -280,25 +293,43 @@ class BackupKeyring:
         if hasattr(os, "O_BINARY"):
             flags |= os.O_BINARY
         descriptor = os.open(temporary, flags, 0o600)
+        temporary_identity: tuple[int, int] | None = None
+
+        def cleanup() -> None:
+            if _rotation_boundary is None:
+                temporary.unlink(missing_ok=True)
+            elif temporary_identity is not None:
+                _rotation_boundary.cleanup_temporary(temporary, temporary_identity)
+
         try:
             try:
+                if _rotation_boundary is not None:
+                    temporary_metadata = os.fstat(descriptor)
+                    temporary_identity = (temporary_metadata.st_dev, temporary_metadata.st_ino)
+                    _rotation_boundary.prepare_temporary(descriptor)
+                    if os.name == "nt":
+                        _windows_harden(temporary)
                 raw = canonical_json(payload).encode("utf-8")
                 _write_descriptor(descriptor, raw)
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
         except Exception:
-            temporary.unlink(missing_ok=True)
+            cleanup()
             raise
         try:
-            with suppress(OSError):
-                os.chmod(temporary, 0o600)
+            if _rotation_boundary is None:
+                with suppress(OSError):
+                    os.chmod(temporary, 0o600)
             if os.name == "nt":
                 _windows_harden(temporary)
+            if _rotation_boundary is not None:
+                assert temporary_identity is not None
+                _rotation_boundary.before_replace(temporary, temporary_identity)
             temporary.replace(target)
             _fsync_directory(target.parent)
         except Exception:
-            temporary.unlink(missing_ok=True)
+            cleanup()
             raise
 
     @staticmethod
@@ -817,11 +848,15 @@ class EncryptedBackupManager:
             lock.acquire()
         except RuntimeOwnershipError as error:
             raise RuntimeOwnershipError("stop Noyra before creating an at-rest backup") from error
-        work_root = Path(tempfile.mkdtemp(prefix=".noyra-backup-", dir=self.data_root))
-        payload_root = work_root / "payload"
-        tar_path = work_root / "payload.tar"
-        created_at = utc_now()
+        work_root: Path | None = None
         try:
+            # Everything after lock acquisition, including staging creation and
+            # the clock read, must release ownership even if an error traceback
+            # retains this frame. Cleanup itself must not prevent release.
+            work_root = Path(tempfile.mkdtemp(prefix=".noyra-backup-", dir=self.data_root))
+            payload_root = work_root / "payload"
+            tar_path = work_root / "payload.tar"
+            created_at = utc_now()
             payload_root.mkdir(mode=0o700)
             self._snapshot_database(database_path, payload_root / "noyra.sqlite3")
             self._copy_persistent_tree(payload_root, work_root)
@@ -846,8 +881,11 @@ class EncryptedBackupManager:
                 created_at=created_at,
             )
         finally:
-            shutil.rmtree(work_root, ignore_errors=True)
-            lock.release()
+            try:
+                if work_root is not None:
+                    shutil.rmtree(work_root, ignore_errors=True)
+            finally:
+                lock.release()
 
     def restore(self, backup_path: Path | str, target_root: Path | str) -> Path:
         configured_source = Path(backup_path).expanduser()

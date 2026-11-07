@@ -8,24 +8,29 @@ from typing import Any
 from noyra.capability import CapabilityStore, ToolRunner
 from noyra.capability.errors import CapabilityDeniedError
 from noyra.core.database import Database
-from noyra.core.errors import IntegrityError, InvalidTransitionError
+from noyra.core.errors import IntegrityError, InvalidTransitionError, RuntimeOwnershipError
 from noyra.core.events import EventStore
+from noyra.core.locking import ProcessLock
+from noyra.core.model_admission import track_model_preparation
 from noyra.core.payload_codec import decompress_text
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.mind import AffectPolicy, GoalRecord, GoalStore
-from noyra.model import ModelGateway, ModelMessage
+from noyra.model import ModelGateway, ModelLedger, ModelMessage
 from noyra.model.errors import (
     BudgetExhaustedError,
+    ModelCallConflictError,
     ModelCallStateError,
     ProviderCallError,
     StructuredOutputError,
 )
+from noyra.model.request_identity import UNRUNNABLE_BUSINESS_CALL_SQL, business_request_key
 from noyra.sleep import FatigueInputs, FatigueTracker
 from noyra.world import ObservationStore, SafeWebReader, SourceRecord, SourceRegistry
 from noyra.world.errors import ObservationBudgetError
 from noyra.world.poll import SourcePollStore
 
 from ._integrity import durable_boundary, durable_json, durable_string_list
+from .deliberation_recovery import DeliberationRecovery
 from .settings import CognitionSettings
 from .types import ActionDeliberationProposal
 
@@ -35,11 +40,16 @@ EXCLUDED_EVENT_TYPES = (
     "interaction_sent",
     "action_deliberation_rejected",
     "autonomy_error",
+    "action_deliberation_context_bound",
 )
 
 
 class ActionDeliberationValidationError(ValueError):
     pass
+
+
+class ActionDeliberationWaiting(RuntimeError):
+    """Temporary admission conflict; a paid proposal remains recoverable."""
 
 
 @dataclass(frozen=True)
@@ -93,8 +103,33 @@ class ActionDeliberation:
         self.tools = ToolRunner(database)
         self.events = EventStore(database)
         self.fatigue = FatigueTracker(database)
+        self.recovery = DeliberationRecovery(database, subject_id)
 
     async def run_due(self) -> str | None:
+        lock = ProcessLock(
+            self.database.path.parent
+            / "action-deliberation-locks"
+            / (content_hash(self.subject_id) + ".lock")
+        )
+        try:
+            lock.acquire()
+        except RuntimeOwnershipError:
+            return "action_deliberation_waiting_reconciliation"
+        try:
+            return await self._run_due()
+        except ActionDeliberationWaiting:
+            return "action_deliberation_waiting_reconciliation"
+        finally:
+            lock.release()
+
+    async def _run_due(self) -> str | None:
+        try:
+            ModelLedger(self.database).check_lifecycle(self.subject_id, "action_deliberation:0")
+        except ModelCallStateError:
+            return "action_deliberation_model_failed"
+        purpose = f"action_deliberation:{self._committed_count()}"
+        self._require_available_action_slot(purpose)
+        self._require_model_round_ready(purpose)
         goals = self._active_goals()
         sources = self._authorized_sources()
         if not goals or not sources:
@@ -102,7 +137,6 @@ class ActionDeliberation:
         budget_day = self.clock()[:10]
         calls_today = self._calls_today(budget_day)
         context = self._context(goals, sources)
-        purpose = f"action_deliberation:{self._committed_count()}"
         recovered = self._successful_proposal(purpose, context, budget_day)
         if recovered is None:
             if not self._is_due():
@@ -110,18 +144,29 @@ class ActionDeliberation:
             if calls_today >= self.settings.max_action_deliberation_model_calls_per_day:
                 return None
             try:
-                result = await self.gateway.complete_structured(
-                    self.subject_id,
-                    purpose,
-                    self._messages(context),
-                    ActionDeliberationProposal,
-                    idempotency_key=(
-                        f"action-deliberation:{self._committed_count()}:"
-                        f"{budget_day}:{calls_today + 1}"
-                    ),
-                    max_output_tokens=min(2_000, self.settings.max_output_tokens),
-                    temperature=self.settings.temperature,
-                )
+
+                def before_prepare(connection: Any, call: Any) -> None:
+                    self._model_preparation_guard(connection, call)
+                    self.recovery.bind(
+                        connection,
+                        call,
+                        context,
+                        max_output_tokens=min(2000, self.settings.max_output_tokens),
+                        temperature=self.settings.temperature,
+                    )
+
+                with track_model_preparation(before_prepare):
+                    result = await self.gateway.complete_structured(
+                        self.subject_id,
+                        purpose,
+                        self._messages(context),
+                        ActionDeliberationProposal,
+                        idempotency_key=business_request_key(
+                            self.database, self.subject_id, purpose
+                        ),
+                        max_output_tokens=min(2_000, self.settings.max_output_tokens),
+                        temperature=self.settings.temperature,
+                    )
             except BudgetExhaustedError:
                 self.fatigue.assess(
                     self.subject_id,
@@ -135,11 +180,20 @@ class ActionDeliberation:
                     reason="model budget exhausted during autonomous action deliberation",
                 )
                 return "action_deliberation_budget_exhausted"
+            except ModelCallConflictError as error:
+                ModelLedger(self.database).quarantine_prepared_context(self.subject_id, purpose)
+                raise ActionDeliberationWaiting("prepared action context changed") from error
             except (ProviderCallError, StructuredOutputError, ModelCallStateError):
                 return "action_deliberation_model_failed"
             proposal, call_id = result.output, result.call_id
         else:
             proposal, call_id = recovered
+        call = ModelLedger(self.database).get_call(call_id)
+        try:
+            context = self.recovery.context(call, proposal, context)
+        except ActionDeliberationValidationError as error:
+            self._record_rejection(call_id, type(error).__name__)
+            return "action_deliberation_rejected"
         try:
             self._validate_evidence(proposal, context)
         except ActionDeliberationValidationError as error:
@@ -171,6 +225,7 @@ class ActionDeliberation:
                 "SELECT * FROM action_deliberation_runs WHERE subject_id = ? ORDER BY created_at",
                 (self.subject_id,),
             ).fetchall()
+            DeliberationRecovery(self.database, self.subject_id).verify_connection(connection)
             for row in rows:
                 record = self._from_row(row)
                 call = connection.execute(
@@ -401,7 +456,7 @@ class ActionDeliberation:
         ):
             raise ActionDeliberationValidationError("goal action limit reached")
         if self._has_open_action(except_idempotency_key=f"action-deliberation:{call_id}"):
-            raise ActionDeliberationValidationError("another action needs reconciliation")
+            raise ActionDeliberationWaiting("another action needs reconciliation")
         return goal, source
 
     @staticmethod
@@ -440,12 +495,17 @@ class ActionDeliberation:
                 strategy_id=strategy_id,
                 expected_outcome=proposal.expected_observation,
                 public_goal_reference=goal.goal_id,
+                before_prepare=lambda connection: self._require_action_slot_connection(
+                    connection, idempotency_key
+                ),
             )
         except (CapabilityDeniedError, InvalidTransitionError):
             action_id = self._action_id(idempotency_key)
             self._commit_record(proposal, call_id, action_id, None, "rejected")
             self._record_fatigue(call_id, "rejected")
             return "action_deliberation_rejected"
+        if result.status == "unknown":
+            raise ActionDeliberationWaiting("own action outcome still needs reconciliation")
         observation_id: str | None = None
         status = "failed"
         if result.status == "succeeded" and result.document is not None:
@@ -456,6 +516,12 @@ class ActionDeliberation:
                     result.document,
                     max_content_chars=self.settings.max_observation_chars,
                 )
+            except IntegrityError as error:
+                if str(error) != "world poll completion is out of order":
+                    raise
+                observation = None
+                created = False
+                status = "outcome_unavailable"
             except ObservationBudgetError:
                 SourcePollStore(self.database).failed(
                     self.subject_id, source.source_id, self.clock()
@@ -701,6 +767,66 @@ class ActionDeliberation:
                 ).fetchone()[0]
             )
 
+    def _require_available_action_slot(self, purpose: str) -> None:
+        with self.database.read_transaction() as connection:
+            open_actions = connection.execute(
+                "SELECT idempotency_key,status FROM actions WHERE subject_id=? "
+                "AND status IN ('prepared','executing','unknown') LIMIT 2",
+                (self.subject_id,),
+            ).fetchall()
+            if not open_actions:
+                return
+            if len(open_actions) == 1 and open_actions[0]["status"] == "prepared":
+                cached = connection.execute(
+                    "SELECT c.call_id FROM model_calls c WHERE c.subject_id=? AND c.purpose=? "
+                    "AND c.status='succeeded' AND ?='action-deliberation:'||c.call_id "
+                    "AND NOT EXISTS (SELECT 1 FROM action_deliberation_runs r "
+                    "WHERE r.subject_id=c.subject_id AND r.model_call_id=c.call_id)",
+                    (self.subject_id, purpose, open_actions[0]["idempotency_key"]),
+                ).fetchone()
+                if cached is not None:
+                    return
+            raise ActionDeliberationWaiting("another action needs reconciliation")
+
+    def _require_action_slot_connection(self, connection: Any, own_key: str | None = None) -> None:
+        if connection.execute(
+            "SELECT 1 FROM actions WHERE subject_id=? "
+            "AND status IN ('prepared','executing','unknown') "
+            "AND (? IS NULL OR idempotency_key!=?) LIMIT 1",
+            (self.subject_id, own_key, own_key),
+        ).fetchone():
+            raise ActionDeliberationWaiting("another action needs reconciliation")
+
+    def _require_model_round_ready(self, purpose: str) -> None:
+        with self.database.read_transaction() as connection:
+            blocked = connection.execute(
+                "SELECT 1 FROM model_calls c WHERE c.subject_id=:subject "
+                "AND c.purpose=:purpose AND " + UNRUNNABLE_BUSINESS_CALL_SQL + " LIMIT 1",
+                {
+                    "subject": self.subject_id,
+                    "purpose": purpose,
+                    "require_prepared_authorization": int(
+                        getattr(self.gateway, "requires_explicit_prepared_retry", False)
+                    ),
+                },
+            ).fetchone()
+            if blocked is not None:
+                raise ActionDeliberationWaiting("model outcome still needs reconciliation")
+            if connection.execute(
+                "SELECT 1 FROM model_attempts a JOIN model_calls c ON c.call_id=a.call_id "
+                "WHERE c.subject_id=? AND c.purpose=? "
+                "AND a.status IN ('authorized','executing') LIMIT 1",
+                (self.subject_id, purpose),
+            ).fetchone():
+                raise ActionDeliberationWaiting("model attempt still in progress")
+
+    def _model_preparation_guard(self, connection: Any, call: Any) -> None:
+        if call.subject_id != self.subject_id or not call.purpose.startswith(
+            "action_deliberation:"
+        ):
+            raise IntegrityError("action deliberation model preparation belongs to another round")
+        self._require_action_slot_connection(connection, f"action-deliberation:{call.call_id}")
+
     def _has_open_action(self, *, except_idempotency_key: str | None = None) -> bool:
         with self.database.connection() as connection:
             if except_idempotency_key is None:
@@ -755,20 +881,21 @@ class ActionDeliberation:
     ) -> tuple[ActionDeliberationProposal, str] | None:
         with self.database.connection() as connection:
             rows = connection.execute(
-                "SELECT call_id, response_json FROM model_calls WHERE subject_id = ? "
-                "AND purpose = ? AND status = 'succeeded' ORDER BY created_at DESC",
+                "SELECT * FROM model_calls WHERE subject_id = ? "
+                "AND purpose = ? AND status = 'succeeded' ORDER BY CASE WHEN EXISTS ("
+                "SELECT 1 FROM actions a WHERE a.subject_id=model_calls.subject_id "
+                "AND a.idempotency_key='action-deliberation:'||model_calls.call_id "
+                "AND a.status='prepared') THEN 0 ELSE 1 END,created_at DESC,call_id DESC",
                 (self.subject_id, purpose),
             ).fetchall()
         for row in rows:
-            response = self._json_object(row["response_json"])
-            content = response.get("content")
-            if not isinstance(content, str):
-                raise IntegrityError("successful action deliberation call has no content")
-            proposal = ActionDeliberationProposal.model_validate_json(content)
+            call = ModelLedger._call_from_row(row)
+            proposal = ModelGateway._cached_result(call, ActionDeliberationProposal).output
             try:
-                self._validate_evidence(proposal, context)
+                recovered_context = self.recovery.context(call, proposal, context)
+                self._validate_evidence(proposal, recovered_context)
                 if proposal.disposition == "investigate":
-                    self._validate(proposal, context, budget_day, str(row["call_id"]))
+                    self._validate(proposal, recovered_context, budget_day, call.call_id)
             except ActionDeliberationValidationError as error:
                 self._record_rejection(str(row["call_id"]), type(error).__name__)
                 continue

@@ -52,13 +52,16 @@ class SleepEngine:
         subject_id: str,
         *,
         clock: Callable[[], str] = utc_now,
+        mutation_guard: Callable[[Any], None] | None = None,
     ):
         self.database = database
         self.subject_id = subject_id
-        self.clock = clock
+        self.clock: Callable[[], str] = lambda: EventStore._normalize_timestamp(clock())
         self.events = EventStore(database)
-        self.lifecycle = LifecycleManager(database, self.events, subject_id)
-        self.fatigue = FatigueTracker(database)
+        self.lifecycle = LifecycleManager(
+            database, self.events, subject_id, mutation_guard=mutation_guard
+        )
+        self.fatigue = FatigueTracker(database, clock=self.clock)
         self.memories = MemoryStore(database)
         self.beliefs = BeliefStore(database)
         self.goals = GoalStore(database)
@@ -95,6 +98,8 @@ class SleepEngine:
                 if existing["trigger_type"] != trigger_type or existing["trigger_reason"] != reason:
                     raise SleepStateConflictError("another sleep run is already active")
                 return self._from_row(existing)
+            if self.lifecycle.mutation_guard is not None:
+                self.lifecycle.mutation_guard(connection)
             self._require_quiescent_actions(connection)
             lifecycle = connection.execute(
                 "SELECT state FROM runtime_state WHERE subject_id = ?", (self.subject_id,)
@@ -170,6 +175,7 @@ class SleepEngine:
                 return self._from_row(row)
             if row["status"] != "winding_down":
                 raise SleepStateConflictError("reflection can begin only after winding down")
+            self._require_lifecycle(connection, row)
             self._require_quiescent_actions(connection)
             self.lifecycle._transition_connection(
                 connection, "reflective_sleep", reason, actor="subject"
@@ -184,6 +190,7 @@ class SleepEngine:
             row = self._get_row(connection, sleep_id)
             if row["status"] != "reflective_sleep":
                 raise SleepStateConflictError("reflection can commit only in reflective sleep")
+            self._require_lifecycle(connection, row)
             existing = connection.execute(
                 "SELECT * FROM sleep_reflections WHERE sleep_id = ?", (sleep_id,)
             ).fetchone()
@@ -272,6 +279,7 @@ class SleepEngine:
                 return self._from_row(row)
             if row["status"] != "reflective_sleep" or row["reflection_event_id"] is None:
                 raise SleepStateConflictError("deep sleep requires a committed reflection")
+            self._require_lifecycle(connection, row)
             identity = connection.execute(
                 "SELECT state_version FROM subject_identity WHERE subject_id = ?",
                 (self.subject_id,),
@@ -323,6 +331,7 @@ class SleepEngine:
                 and self._parse_time(self.clock()) < self._parse_time(row["wake_after"])
             ):
                 raise SleepStateConflictError("scheduled wake time has not arrived")
+            self._require_lifecycle(connection, row)
             self.lifecycle._transition_connection(connection, "waking", reason, actor="subject")
             self._transition_run(connection, row, "waking", reason)
             return self._load_connection(connection, sleep_id)
@@ -334,6 +343,7 @@ class SleepEngine:
                 return self._from_row(row)
             if row["status"] != "waking":
                 raise SleepStateConflictError("wake completion requires waking state")
+            self._require_lifecycle(connection, row)
             self.lifecycle._transition_connection(connection, "active", reason, actor="subject")
             hours = max(
                 0.0,
@@ -380,6 +390,7 @@ class SleepEngine:
             if row["status"] != "deep_sleep":
                 raise SleepStateConflictError("early wake can begin only from deep sleep")
 
+            self._require_lifecycle(connection, row)
             self.lifecycle._transition_connection(connection, "waking", reason, actor=actor)
             self._transition_run(connection, row, "waking", reason)
             waking = self._get_row(connection, sleep_id)
@@ -405,6 +416,27 @@ class SleepEngine:
             )
             self._transition_run(connection, waking, "complete", reason, completed_at=wake_time)
             return self._load_connection(connection, sleep_id)
+
+    def fail(
+        self, sleep_id: str, reason_code: str, *, expected_version: int, actor: str = "runtime"
+    ) -> SleepRunRecord:
+        from .failure import fail_connection
+
+        with self.database.transaction() as connection:
+            row = self._get_row(connection, sleep_id)
+            if self.lifecycle.mutation_guard is not None:
+                self.lifecycle.mutation_guard(connection)
+            fail_connection(self, connection, row, reason_code, actor, expected_version)
+            return self._load_connection(connection, sleep_id)
+
+    def _require_lifecycle(self, connection: Any, row: Any) -> None:
+        if self.lifecycle.mutation_guard is not None:
+            self.lifecycle.mutation_guard(connection)
+        state = connection.execute(
+            "SELECT state FROM runtime_state WHERE subject_id=?", (self.subject_id,)
+        ).fetchone()
+        if state is None or state["state"] != row["status"]:
+            raise SleepStateConflictError("sleep phase and runtime lifecycle differ")
 
     def get(self, sleep_id: str) -> SleepRunRecord:
         with self.database.connection() as connection:
@@ -965,18 +997,18 @@ class SleepEngine:
             raise ValueError("scheduled wake time must be in the future")
         return parsed.isoformat(timespec="milliseconds")
 
-    @staticmethod
-    def _get_row(connection: Any, sleep_id: str) -> Any:
+    def _get_row(self, connection: Any, sleep_id: str) -> Any:
         row = connection.execute(
-            "SELECT * FROM sleep_runs WHERE sleep_id = ?", (sleep_id,)
+            "SELECT * FROM sleep_runs WHERE sleep_id = ? AND subject_id = ?",
+            (sleep_id, self.subject_id),
         ).fetchone()
         if row is None:
             raise NotFoundError(f"sleep run not found: {sleep_id}")
+        self._from_row(row)
         return row
 
-    @classmethod
-    def _load_connection(cls, connection: Any, sleep_id: str) -> SleepRunRecord:
-        return cls._from_row(cls._get_row(connection, sleep_id))
+    def _load_connection(self, connection: Any, sleep_id: str) -> SleepRunRecord:
+        return self._from_row(self._get_row(connection, sleep_id))
 
     @classmethod
     def _from_row(cls, row: Any) -> SleepRunRecord:

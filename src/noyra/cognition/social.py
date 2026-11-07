@@ -9,10 +9,13 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import ValidationError
+
 from noyra.core.database import Database
-from noyra.core.errors import IntegrityError
+from noyra.core.errors import IntegrityError, RuntimeOwnershipError
 from noyra.core.events import EventStore
-from noyra.core.payload_codec import decompress_text
+from noyra.core.locking import ProcessLock
+from noyra.core.model_admission import track_model_preparation
 from noyra.core.private_sources import (
     WITHDRAWN_PARTICIPANT_INVITATION,
     InvitationWithdrawnError,
@@ -21,10 +24,11 @@ from noyra.core.private_sources import (
 )
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.interaction import InteractionStore
+from noyra.interaction.help_language import help_request_is_coercive
 from noyra.interaction.participants import ParticipantStore
 from noyra.mind import AffectPolicy, MemoryStore, MindEngine, RelationshipStore
 from noyra.mind.types import RelationshipRecord
-from noyra.model import ModelGateway, ModelMessage
+from noyra.model import ModelGateway, ModelLedger, ModelMessage
 from noyra.model.errors import (
     BudgetExhaustedError,
     ModelAuthorizationError,
@@ -33,9 +37,11 @@ from noyra.model.errors import (
     ProviderCallError,
     StructuredOutputError,
 )
+from noyra.model.request_identity import business_request_key
 from noyra.sleep import FatigueTracker
 
 from .settings import CognitionSettings
+from .social_rounds import SocialRoundControl, SocialRoundWaiting
 from .types import RelationshipSocialProposal
 
 
@@ -107,9 +113,30 @@ class RelationshipSocialCognition:
         self.events = EventStore(database)
 
     async def run_due(self) -> str | None:
+        lock = ProcessLock(
+            self.database.path.parent
+            / "social-cognition-locks"
+            / (content_hash(self.subject_id) + ".lock")
+        )
+        try:
+            lock.acquire()
+        except RuntimeOwnershipError:
+            return "relationship_social_waiting"
+        try:
+            return await self._run_due()
+        except SocialRoundWaiting as error:
+            return str(error)
+        finally:
+            lock.release()
+
+    async def _run_due(self) -> str | None:
+        try:
+            ModelLedger(self.database).check_lifecycle(
+                self.subject_id, "relationship_social:review"
+            )
+        except ModelCallStateError:
+            return "relationship_social_model_failed"
         if not self._is_due():
-            return None
-        if self._calls_today() >= self.settings.max_social_model_calls_per_day:
             return None
         context = self._context()
         if context is None:
@@ -123,41 +150,33 @@ class RelationshipSocialCognition:
                 "routes": {key: asdict(route) for key, route in context.routes.items()},
             }
         )
-        purpose = f"relationship_social:{period}:route:{route_key}"
-        # A new room cannot bypass an unfinished request. An explicitly
-        # prepared retry may continue only on the very same frozen route.
-        prefix = f"relationship_social:{period}"
-        with self.database.connection() as connection:
-            unfinished = connection.execute(
-                "SELECT purpose,status FROM model_calls WHERE subject_id=? AND "
-                "(purpose=? OR substr(purpose,1,?)=?) AND "
-                "status IN ('prepared','executing','unknown')",
-                (self.subject_id, prefix, len(prefix + ":route:"), prefix + ":route:"),
-            ).fetchall()
-            conflicted = connection.execute(
-                "SELECT 1 FROM model_calls c WHERE c.subject_id=? AND c.purpose=? "
-                "AND c.status='prepared' AND EXISTS ("
-                "SELECT 1 FROM audit_records a WHERE a.subject_id=c.subject_id "
-                "AND a.action='model_request_context_conflict' "
-                "AND json_valid(a.payload_json) "
-                "AND json_extract(a.payload_json,'$.call_id')=c.call_id) LIMIT 1",
-                (self.subject_id, purpose),
-            ).fetchone()
-        if any(row["status"] != "prepared" or row["purpose"] != purpose for row in unfinished):
-            return "relationship_social_model_failed"
-        if conflicted is not None:
-            return "relationship_social_context_changed"
+        purpose = self._round_control().recovery_purpose(
+            f"relationship_social:{period}:route:{route_key}", route_key
+        )
+        with self.database.read_transaction() as connection:
+            self._require_round_ready(connection, purpose)
         existing = self._successful_proposal(purpose, context)
         if existing is None:
+            if self._calls_today() >= self.settings.max_social_model_calls_per_day:
+                return None
             try:
                 route = next(iter(context.routes.values()))
-                with invitation_input_scope(self.subject_id, route.interaction_id):
+                with (
+                    invitation_input_scope(self.subject_id, route.interaction_id),
+                    track_model_preparation(
+                        lambda connection, call: self._model_preparation_guard(
+                            connection, call, purpose
+                        )
+                    ),
+                ):
                     result = await self.gateway.complete_structured(
                         self.subject_id,
                         purpose,
                         self._messages(context),
                         RelationshipSocialProposal,
-                        idempotency_key=f"relationship-social:{period}:{route_key}",
+                        idempotency_key=business_request_key(
+                            self.database, self.subject_id, purpose
+                        ),
                         max_output_tokens=min(2_000, self.settings.max_output_tokens),
                         temperature=self.settings.temperature,
                     )
@@ -176,7 +195,8 @@ class RelationshipSocialCognition:
         try:
             relationship, channel = self._validate(proposal, context)
             record = self._commit(proposal, call_id, relationship, channel, context)
-        except RelationshipSocialValidationError:
+        except RelationshipSocialValidationError as error:
+            self._reject(call_id, context, str(error))
             return "relationship_social_rejected"
         return f"relationship_social_{record.disposition}"
 
@@ -527,10 +547,12 @@ class RelationshipSocialCognition:
             raise RelationshipSocialValidationError(
                 "current affect strongly favors distance over contact"
             )
-        if proposal.disposition == "request_help" and proposal.content is not None:
-            prohibited = ("urgent", "must", "owe me", "if you cared", "otherwise")
-            if any(term in proposal.content.casefold() for term in prohibited):
-                raise RelationshipSocialValidationError("help request uses coercive language")
+        if (
+            proposal.disposition == "request_help"
+            and proposal.content is not None
+            and help_request_is_coercive(proposal.content)
+        ):
+            raise RelationshipSocialValidationError("help request uses coercive language")
         return relationship, channel or "none"
 
     def _route(
@@ -740,27 +762,81 @@ class RelationshipSocialCognition:
             )
             return self._load_connection(connection, social_id)
 
+    def _round_control(self) -> SocialRoundControl:
+        return SocialRoundControl(self.database, self.subject_id, self.clock)
+
+    def _model_preparation_guard(self, connection: Any, call: Any, purpose: str) -> None:
+        if call.subject_id != self.subject_id or call.purpose != purpose:
+            raise IntegrityError("social model preparation belongs to another round")
+        self._require_round_ready(connection, purpose, call.call_id)
+
+    def _require_round_ready(
+        self, connection: Any, purpose: str, own_prepared_call: str | None = None
+    ) -> None:
+        self._round_control().require_ready(
+            connection,
+            purpose,
+            require_prepared_authorization=bool(
+                getattr(self.gateway, "requires_explicit_prepared_retry", False)
+            ),
+            own_prepared_call=own_prepared_call,
+        )
+
+    @staticmethod
+    def _context_hash(context: _SocialContext) -> str:
+        return content_hash(
+            {
+                "format": "social-evaluated-context/v1",
+                "context": json.loads(context.serialized),
+                "routes": {key: asdict(route) for key, route in context.routes.items()},
+                "relationship_revisions": {
+                    key: relationship.current_revision
+                    for key, relationship in context.relationships.items()
+                },
+            }
+        )
+
+    def _reject(self, call_id: str, context: _SocialContext, reason: str) -> None:
+        self._round_control().reject(
+            ModelLedger(self.database).get_call(call_id),
+            self._context_hash(context),
+            reason,
+            self.settings.social_review_interval_seconds,
+        )
+
     def _successful_proposal(
         self, purpose: str, context: _SocialContext
     ) -> tuple[RelationshipSocialProposal, str] | None:
         with self.database.connection() as connection:
-            rows = connection.execute(
-                "SELECT call_id, response_json FROM model_calls WHERE subject_id = ? "
-                "AND purpose = ? AND status = 'succeeded' ORDER BY created_at DESC",
+            row = connection.execute(
+                "SELECT * FROM model_calls WHERE subject_id=? AND purpose=? "
+                "AND status='succeeded' ORDER BY rowid DESC LIMIT 1",
                 (self.subject_id, purpose),
-            ).fetchall()
-        for row in rows:
-            response = json.loads(decompress_text(row["response_json"]) or "null")
-            content = response.get("content") if isinstance(response, dict) else None
-            if not isinstance(content, str):
-                raise IntegrityError("successful social cognition has no content")
+            ).fetchone()
+        if row is None:
+            return None
+        call = ModelLedger._call_from_row(row)
+        # _call_from_row verifies the durable response hash. Reconciliation
+        # evidence may contain only content: do not invent usage/cost metadata
+        # or impose the gateway cache's stronger billing-envelope requirement.
+        content = (call.response or {}).get("content")
+        if not isinstance(content, str):
+            raise IntegrityError("successful social cognition has no content")
+        try:
             proposal = RelationshipSocialProposal.model_validate_json(content)
-            try:
-                self._validate(proposal, context)
-            except RelationshipSocialValidationError:
-                continue
-            return proposal, str(row["call_id"])
-        return None
+        except ValidationError as error:
+            raise IntegrityError("successful social cognition has invalid content") from error
+        reconsider = self._round_control().may_reconsider(call, self._context_hash(context))
+        if reconsider is not None:
+            if not reconsider:
+                raise SocialRoundWaiting("relationship_social_waiting")
+            return None
+        try:
+            self._validate(proposal, context)
+        except RelationshipSocialValidationError as error:
+            self._reject(call.call_id, context, str(error))
+            raise SocialRoundWaiting("relationship_social_rejected") from error
+        return proposal, call.call_id
 
     def _calls_today(self) -> int:
         with self.database.connection() as connection:

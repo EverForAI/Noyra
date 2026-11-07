@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from noyra.core.actions import ActionLedger
 from noyra.core.admission import OperationInvalidated, accounting_scope, assert_current_lease
 from noyra.core.database import Database
 from noyra.core.types import ActionRecord, utc_now
-from noyra.world import SafeWebReader, SourceRecord, SourceRegistry
+from noyra.world import ObservationStore, SafeWebReader, SourceRecord, SourceRegistry
 
 from .filesystem import normalized_root, read_bounded, write_atomic
 from .store import CapabilityStore
@@ -144,13 +146,36 @@ class ToolRunner:
         strategy_id: str | None = None,
         expected_outcome: str = "",
         public_goal_reference: str | None = None,
+        candidate_trial: bool = False,
+        max_observation_chars: int = 50_000,
+        before_prepare: Callable[[Any], None] | None = None,
     ) -> WebToolResult:
+        if candidate_trial:
+            if not 1_024 <= max_observation_chars <= 500_000:
+                raise ValueError("candidate trial observation budget is invalid")
+            with self.database.connection() as connection:
+                goal = connection.execute(
+                    "SELECT origin, status FROM goals WHERE subject_id=? AND goal_id=?",
+                    (subject_id, goal_id),
+                ).fetchone()
+            if (
+                source.subject_id != subject_id
+                or goal is None
+                or goal["origin"] == "human_proposal"
+                or goal["status"] != "active"
+            ):
+                raise PermissionError(
+                    "candidate trial requires an owned autonomous goal and source"
+                )
+        inputs: dict[str, object] = {"source_id": source.source_id, "url": source.url}
+        if candidate_trial:
+            inputs["candidate_trial"] = True
         action = self.actions.prepare(
             subject_id,
             "web_read",
             "safe_web_reader",
             source.url,
-            {"source_id": source.source_id, "url": source.url},
+            inputs,
             goal_id=goal_id,
             project_id=project_id,
             phase_id=phase_id,
@@ -158,7 +183,18 @@ class ToolRunner:
             expected_outcome=expected_outcome,
             side_effect=False,
             idempotency_key=idempotency_key,
+            before_prepare=before_prepare,
         )
+        if candidate_trial and action.status == "executing":
+            # A prior process may have sent this read. Preserve uncertainty;
+            # a new research run can reconsider it with its own admission.
+            with accounting_scope():
+                action = self.actions.finish(
+                    action.action_id,
+                    "unknown",
+                    {"error": "candidate_trial_interrupted"},
+                    public_explanation="Candidate trial was interrupted; no retry was sent.",
+                )
         terminal = self._terminal_result(action)
         if terminal is not None:
             return WebToolResult(terminal.action_id, terminal.status, None)
@@ -182,16 +218,49 @@ class ToolRunner:
             current_source = SourceRegistry(self.database).get(
                 source.source_id, subject_id=subject_id
             )
-            if current_source.status != "active" or current_source.url != source.url:
+            allowed = {"active", "candidate"} if candidate_trial else {"active"}
+            if current_source.status not in allowed or current_source.url != source.url:
                 raise PermissionError("world source changed before dispatch")
             self.capabilities.revalidate_use(
                 grant.grant_id, subject_id, "web_read", source.url, side_effect=False
             )
+            if candidate_trial:
+                with self.database.connection() as connection:
+                    current_goal = connection.execute(
+                        "SELECT origin, status FROM goals WHERE subject_id=? AND goal_id=?",
+                        (subject_id, goal_id),
+                    ).fetchone()
+                if (
+                    current_goal is None
+                    or current_goal["origin"] == "human_proposal"
+                    or current_goal["status"] != "active"
+                ):
+                    raise PermissionError("trial goal changed before dispatch")
             assert_current_lease()
 
         try:
-            document = await reader.fetch(source, before_send=authorize)
+            if candidate_trial:
+                document = await reader.fetch_trial(source, before_send=authorize)
+            else:
+                document = await reader.fetch(source, before_send=authorize)
             authorize()
+            observation = None
+            observation_created = False
+            if candidate_trial:
+                if not document.content.strip():
+                    raise ValueError("candidate trial returned no readable content")
+                if document.feed_items is None and len(document.content) > max_observation_chars:
+                    raise ValueError("candidate trial exceeds the observation budget")
+                # Commit evidence before settling the read. A restart can reuse
+                # this observation; search snippets never enter this path.
+                observation, observation_created = ObservationStore(self.database).ingest(
+                    subject_id,
+                    source.source_id,
+                    document,
+                    max_content_chars=max_observation_chars,
+                    candidate_trial=True,
+                    before_record=authorize,
+                )
         except Exception as error:
             with accounting_scope():
                 finished = self.actions.finish(
@@ -210,12 +279,24 @@ class ToolRunner:
 
             SourcePollStore(self.database).failed(subject_id, source.source_id, utc_now())
             return WebToolResult(finished.action_id, finished.status, None)
+        evidence = {"source_id": source.source_id, "content_hash": document.content_hash}
+        if candidate_trial and observation is not None:
+            evidence.update(
+                {
+                    "observation_id": observation.observation_id,
+                    "observation_hash": observation.content_hash,
+                }
+            )
+        result_payload: dict[str, object] = dict(evidence)
+        if candidate_trial:
+            result_payload["links"] = list(document.links)
+            result_payload["observation_created"] = observation_created
         byte_count = len(document.content.encode("utf-8"))
         with accounting_scope():
             finished = self.actions.finish(
                 action.action_id,
                 "succeeded",
-                {"source_id": source.source_id, "content_hash": document.content_hash},
+                result_payload,
                 public_goal_reference=public_goal_reference,
                 public_target=source.url,
                 public_explanation="Read an authorized public source.",

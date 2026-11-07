@@ -4,6 +4,7 @@ import asyncio
 import json
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Self, cast
@@ -130,12 +131,24 @@ def test_second_service_cannot_touch_database_before_ownership(tmp_path: Path) -
             second = NoyraService(settings)
             with pytest.raises(RuntimeOwnershipError):
                 second.boot()
-        health = second.kernel.health()
-        assert health["subject_id"] == settings.subject_id
+        # Losing construction/boot must not open SQLite or create sidecars.
+        # An explicitly requested live diagnostic is a separate mode=ro read;
+        # SQLite may create WAL/SHM coordination files for that reader.
         assert database.read_bytes() == before
         for suffix, path in sidecars.items():
             assert (path.read_bytes() if path.exists() else None) == sidecars_before[suffix]
-        second.close()
+        assert second.kernel.database.read_only
+        assert not second.kernel.database.immutable_snapshot
+        assert not second.kernel.process_lock.held
+        assert first.kernel.process_lock.held
+        try:
+            health = second.kernel.health()
+            assert health["subject_id"] == settings.subject_id
+            assert database.read_bytes() == before
+            assert not second.kernel.process_lock.held
+            assert first.kernel.process_lock.held
+        finally:
+            second.close()
     finally:
         first.close()
 
@@ -667,6 +680,13 @@ def test_clean_integrity_report_does_not_reopen_paused_admission(
         assert service.kernel.lifecycle.current().state == "paused"
         assert not service.kernel.admission.accepting
 
+        checks_run: list[str] = []
+        now = [datetime.now(UTC)]
+
+        def clean(_context: Any) -> IntegrityCheckOutcome:
+            checks_run.append("gate0.clean_periodic")
+            return IntegrityCheckOutcome()
+
         registry = IntegrityRegistry(
             (
                 IntegrityCheckSpec(
@@ -674,7 +694,7 @@ def test_clean_integrity_report_does_not_reopen_paused_admission(
                     1,
                     "gate0",
                     frozenset({"periodic_deep"}),
-                    lambda _context: IntegrityCheckOutcome(),
+                    clean,
                     "light",
                 ),
             )
@@ -683,15 +703,30 @@ def test_clean_integrity_report_does_not_reopen_paused_admission(
             service.kernel,
             settings.data_dir,
             policy_mode="pause",
-            interval_seconds=0.01,
+            interval_seconds=1,
             registry=registry,
+            clock=lambda: now[0],
         )
         service.http.integrity = service.integrity
         service.loop.pre_tick_hook = service._integrity_pre_tick
         service.loop.next_wakeup_hook = service.integrity.seconds_until_due
 
-        assert asyncio.run(service._integrity_pre_tick()) is None
+        # The previous registry's green report does not cover this deep-only
+        # check. Empty startup coverage must retain the evidence quarantine.
+        first = asyncio.run(service._integrity_pre_tick())
+        assert first is not None and first.action == "integrity_evidence_recheck_pending"
+        assert not checks_run
+        assert service.integrity.summary()["evidence"]["recheck_pending"]
         assert not service.kernel.admission.accepting
+        assert service.kernel.lifecycle.current().state == "paused"
+
+        now[0] += timedelta(seconds=2)
+        assert asyncio.run(service._integrity_pre_tick()) is None
+        assert checks_run == ["gate0.clean_periodic"]
+        assert not service.integrity.summary()["evidence"]["recheck_pending"]
+        assert service.integrity.summary()["coverage"]["status"] == "complete"
+        assert not service.kernel.admission.accepting
+        assert service.kernel.lifecycle.current().state == "paused"
     finally:
         service.close()
 

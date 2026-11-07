@@ -8,7 +8,7 @@ import re
 from collections.abc import Awaitable, Callable, Sequence
 from html.parser import HTMLParser
 from typing import Any, cast
-from urllib.parse import SplitResult, parse_qsl, urlsplit, urlunsplit
+from urllib.parse import SplitResult, parse_qsl, urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -56,10 +56,14 @@ class _TextExtractor(HTMLParser):
         self._in_title = False
         self.title_parts: list[str] = []
         self.text_parts: list[str] = []
+        self.links: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        del attrs
         normalized = tag.lower()
+        if normalized == "a" and not self._skip_depth and len(self.links) < 64:
+            href = dict(attrs).get("href")
+            if href and len(href) <= 2_048:
+                self.links.append(href)
         if normalized in {"script", "style", "noscript", "template"}:
             self._skip_depth += 1
         if normalized == "title":
@@ -79,6 +83,43 @@ class _TextExtractor(HTMLParser):
         self.text_parts.append(text)
         if self._in_title:
             self.title_parts.append(text)
+
+
+# Match credential names and delimited words, not arbitrary substrings such as
+# author/keyword/monkey. parse_qsl decodes names before this check.
+_CREDENTIAL_WORDS = frozenset(
+    {
+        "token",
+        "key",
+        "secret",
+        "password",
+        "passwd",
+        "signature",
+        "auth",
+        "authorization",
+        "authentication",
+        "credential",
+        "credentials",
+        "apikey",
+        "accesstoken",
+        "authtoken",
+        "refreshtoken",
+        "clientsecret",
+        "accesskey",
+        "secretkey",
+        "session",
+        "sessionid",
+        "sig",
+    }
+)
+
+
+def _credential_parameter(name: str) -> bool:
+    # Retain camel-case token boundaries (apiKey, accessToken), including prefixed names.
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+    words = set(filter(None, re.split(r"[^a-z0-9]+", separated.casefold())))
+    compact = "".join(re.findall(r"[a-z0-9]+", name.casefold()))
+    return bool(words & _CREDENTIAL_WORDS) or compact in _CREDENTIAL_WORDS
 
 
 def canonical_public_url(url: str) -> str:
@@ -105,9 +146,8 @@ def canonical_public_url(url: str) -> str:
         address = None
     if address is not None and not is_public_address(address):
         raise UnsafeSourceError("source address is not globally routable")
-    sensitive_query = re.compile(r"(token|key|secret|password|signature|auth)", re.I)
     if any(
-        sensitive_query.search(key) for key, _ in parse_qsl(parsed.query, keep_blank_values=True)
+        _credential_parameter(key) for key, _ in parse_qsl(parsed.query, keep_blank_values=True)
     ):
         raise UnsafeSourceError("source URL query cannot contain credential-like parameters")
     netloc = f"[{host}]" if ":" in host else host
@@ -339,7 +379,9 @@ class SafeWebReader:
             trust_env=False,
             transport=PublicDNSAsyncHTTPTransport(
                 max_connections=8,
-                resolver=self._resolver,
+                # The transport's default resolver propagates its actual connect
+                # budget to the killable DNS helper, without an extra 30s wrapper.
+                resolver=resolver,
             ),
         )
         self._verify_peer_address = verify_peer_address
@@ -348,6 +390,21 @@ class SafeWebReader:
 
     async def fetch(
         self, source: SourceRecord, *, before_send: Callable[[], None] | None = None
+    ) -> FetchedDocument:
+        return await self._fetch(source, before_send=before_send, candidate_trial=False)
+
+    async def fetch_trial(
+        self, source: SourceRecord, *, before_send: Callable[[], None] | None = None
+    ) -> FetchedDocument:
+        """Read a registered candidate without granting it ongoing polling status."""
+        return await self._fetch(source, before_send=before_send, candidate_trial=True)
+
+    async def _fetch(
+        self,
+        source: SourceRecord,
+        *,
+        before_send: Callable[[], None] | None,
+        candidate_trial: bool,
     ) -> FetchedDocument:
         def authorize() -> None:
             assert_current_lease()
@@ -360,7 +417,7 @@ class SafeWebReader:
                 authorize()
 
         authorize()
-        if source.status != "active":
+        if source.status != "active" and not (candidate_trial and source.status == "candidate"):
             raise UnsafeSourceError("only active world sources can be fetched")
         url = canonical_public_url(source.url)
         parsed = urlsplit(url)
@@ -476,6 +533,7 @@ class SafeWebReader:
                     last_modified=response.headers.get("last-modified"),
                     fetched_at=utc_now(),
                     feed_items=feed_items,
+                    links=self._links(media_type, text, url, feed_items),
                 )
         except (FetchError, UnsafeSourceError):
             raise
@@ -504,12 +562,39 @@ class SafeWebReader:
             return peer
         return None
 
-    @staticmethod
-    async def _default_resolver(host: str, port: int) -> Sequence[str]:
+    async def _default_resolver(self, host: str, port: int) -> Sequence[str]:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.total_timeout_seconds
         return cast(
             Sequence[str],
-            await _call_sync_resolver_async(public_addresses, host, port, timeout=30.0),
+            await _call_sync_resolver_async(
+                lambda: public_addresses(host, port, timeout=max(0.0, deadline - loop.time())),
+                timeout=self.total_timeout_seconds,
+            ),
         )
+
+    @staticmethod
+    def _links(
+        media_type: str, text: str, url: str, feed_items: tuple[Any, ...] | None
+    ) -> tuple[str, ...]:
+        raw: list[str] = []
+        if feed_items is not None:
+            raw = [item.link for item in feed_items[:64]]
+        elif media_type in {"text/html", "application/xhtml+xml"}:
+            parser = _TextExtractor()
+            parser.feed(text)
+            raw = parser.links
+        links: list[str] = []
+        for value in raw:
+            try:
+                candidate = canonical_public_url(urljoin(url, value).split("#", 1)[0])
+            except (ValueError, UnsafeSourceError):
+                continue
+            if candidate != url and candidate not in links:
+                links.append(candidate)
+            if len(links) == 16:
+                break
+        return tuple(links)
 
     @staticmethod
     def _extract(media_type: str, text: str) -> tuple[str | None, str]:

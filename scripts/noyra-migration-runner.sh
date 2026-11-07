@@ -45,26 +45,20 @@ safe_segment "$REQUEST_ID" || { echo 'unsafe migration request id' >&2; exit 2; 
 [[ -n "$ACTION" ]] || { usage; exit 2; }
 [[ "$(id -u)" -eq 0 ]] || { echo 'migration runner must run as root' >&2; exit 1; }
 
-if [[ "$ACTION" != status ]]; then
-  runner_python="${NOYRA_MIGRATION_RUNNER_PY:-$SCRIPT_DIR/noyra-migration-runner.py}"
-  if [[ ! -f "$runner_python" ]]; then
-    runner_python="/opt/noyra/current/scripts/noyra-migration-runner.py"
-  fi
-  [[ -f "$runner_python" && ! -L "$runner_python" ]] || {
-    echo 'migration runner implementation is unavailable' >&2
-    exit 1
-  }
-  python_bin="${NOYRA_PYTHON:-python3}"
-  NOYRA_MIGRATION_DATA_ROOT="$DATA_ROOT" exec "$python_bin" "$runner_python" --request-id "$REQUEST_ID" "$ACTION"
-fi
-
-case "$ACTION" in
-  status)
-    status_file="$STATUS_DIR/$REQUEST_ID.json"
-    [[ -f "$status_file" && ! -L "$status_file" ]] || {
-      echo '{"status":"not_found"}'
-      exit 0
-    }
-    cat -- "$status_file"
-    ;;
-esac
+# The installed root helper is independent of release imports and caller PATH.
+# Neither NOYRA_PYTHON nor NOYRA_MIGRATION_RUNNER_PY can select executable code.
+runner_python="$SCRIPT_DIR/noyra-migration-runner.py"
+[[ -f "$runner_python" && ! -L "$runner_python" ]] || {
+  echo 'installed migration runner implementation is unavailable' >&2
+  exit 1
+}
+[[ "$(stat -c '%u' -- "$runner_python")" == 0 ]] || {
+  echo 'migration runner implementation must be owned by root' >&2
+  exit 1
+}
+helper_mode="$(stat -c '%a' -- "$runner_python")"
+(( (8#$helper_mode & 8#022) == 0 )) || {
+  echo 'migration runner implementation must not be group or world writable' >&2
+  exit 1
+}
+NOYRA_MIGRATION_DATA_ROOT="$DATA_ROOT" exec /usr/bin/python3 -I "$runner_python" --request-id "$REQUEST_ID" "$ACTION"

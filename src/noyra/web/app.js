@@ -79,7 +79,7 @@ const labels = {
     not_supported: ["未获支持", "Not supported"],
     partial: ["部分支持", "Partly supported"],
     delivered: ["已送达", "Delivered"],
-    sent: ["已发送", "Sent"],
+    sent: ["已记录", "Recorded"],
     normal: ["正常", "Normal"],
     limited: ["有限", "Limited"],
     undisclosed: ["未公开", "Undisclosed"],

@@ -3,6 +3,8 @@ from __future__ import annotations
 import errno
 import os
 import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from importlib import import_module
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -15,8 +17,9 @@ _lock_module: Any = import_module("msvcrt" if os.name == "nt" else "fcntl")
 class ProcessLock:
     """Non-blocking cross-process lock released automatically when the process exits."""
 
-    def __init__(self, path: Path | str):
+    def __init__(self, path: Path | str, *, opener: Callable[[Path], BinaryIO] | None = None):
         self.path = Path(path)
+        self._opener = opener
         self._handle: BinaryIO | None = None
         self._mutex = threading.Lock()
 
@@ -29,8 +32,12 @@ class ProcessLock:
         with self._mutex:
             if self._handle is not None:
                 return False
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            handle = self.path.open("a+b")
+            handle: BinaryIO
+            if self._opener is None:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                handle = self.path.open("a+b")
+            else:
+                handle = self._opener(self.path)
             acquired = False
             try:
                 # ``a+b`` leaves the CRT file position at EOF for an existing
@@ -80,6 +87,21 @@ class ProcessLock:
             # unrelated file setup/read/write errors remain untouched.
             return getattr(error, "winerror", None) == 33 or error.errno == errno.EACCES
         return error.errno in {errno.EACCES, errno.EAGAIN}
+
+    @contextmanager
+    def ownership_scope(self) -> Iterator[None]:
+        """Keep already-held ownership through one short synchronous control.
+
+        This scope does not acquire a runtime lock or reopen a released owner.
+        A concurrent release waits until the scope exits, so ownership cannot
+        disappear between a final guard and its database commit. Callers must
+        acquire any admission gate before entering, never wait for other work
+        or call acquire/release from inside this non-reentrant scope.
+        """
+        with self._mutex:
+            if self._handle is None:
+                raise RuntimeOwnershipError("runtime process ownership is unavailable")
+            yield
 
     def release(self) -> None:
         with self._mutex:

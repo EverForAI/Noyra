@@ -37,8 +37,16 @@ unavailable, or incomplete. A live Administrator, the signed-in service identity
 and an already unlocked volume remain outside the offline-media threat model.
 
 Initialize the backup keyring only once and keep an offline copy separate from `NOYRA_DATA_DIR`.
-Later rotations use `python -m noyra backup-key rotate --path
-$env:NOYRA_BACKUP_KEYRING_PATH`; retained backups still require their retired historical keys.
+Later rotations require a saved request ID plus the exact source generation
+and hash. Use `backup-key status`, then `prepare` and `resume` as documented in
+the [backup-key command contract](../development/backup-key-commands.md).
+The old implicit `backup-key rotate --path ...` command now fails with a usage
+error instead of starting another unidentifiable rotation.
+
+Durable rotation currently requires supported POSIX storage. Windows reports
+exit code 5 before a rotation mutation; key initialization, reading, encrypted
+backup/restoration and private-ACL status inspection remain supported. A missing
+Windows durability implementation is never reported as successful rotation.
 
 Open `http://127.0.0.1:8765` for the public site or `/admin` for the creator management surface.
 The management surface accepts the configured operator/admin/break-glass token once and keeps an

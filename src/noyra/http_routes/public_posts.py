@@ -186,7 +186,7 @@ def issue_public_post_captcha(self: RequestHandler, owner: NoyraHTTPServer) -> N
         controls = owner.public_post_controls()
         challenge = owner.public_posts.issue_captcha(
             owner.kernel.subject_id,
-            owner.client_ip(str(self.client_address[0]), self.headers.get("X-Forwarded-For")),
+            owner.client_ip(str(self.client_address[0]), self.headers.get_all("X-Forwarded-For")),
             ttl_seconds=controls["captcha_ttl_seconds"],
             max_attempts=controls["captcha_max_attempts"],
             mode=controls["captcha_mode"],

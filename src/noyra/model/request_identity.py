@@ -40,12 +40,38 @@ UNRUNNABLE_BUSINESS_CALL_SQL = """(
 def is_business_round(purpose: str) -> bool:
     parts = purpose.split(":")
     return (
-        len(parts) == 2 and parts[0] in {"world_cognition", "sleep_reflection"} and bool(parts[1])
-    ) or (
-        len(parts) == 3
-        and parts[0] in {"interaction_cognition", "intrinsic_thought"}
-        and bool(parts[1])
-        and parts[2].isdigit()
+        (len(parts) == 2 and parts[0] == "action_deliberation" and parts[1].isdigit())
+        or (
+            len(parts) == 4
+            and parts[0] == "relationship_social"
+            and bool(parts[1])
+            and parts[2] == "route"
+            and len(parts[3]) == 64
+            and all(char in "0123456789abcdef" for char in parts[3])
+        )
+        or (
+            len(parts) == 3
+            and parts[0] == "semantic_memory_integration"
+            and parts[1] == "round"
+            and parts[2].isdigit()
+        )
+        or (
+            len(parts) == 2
+            and parts[0] in {"world_cognition", "sleep_reflection", "epistemic_review"}
+            and bool(parts[1])
+        )
+        or (
+            len(parts) == 3
+            and parts[0] in {"interaction_cognition", "intrinsic_thought"}
+            and bool(parts[1])
+            and parts[2].isdigit()
+        )
+        or (
+            len(parts) in {2, 4}
+            and parts[0] == "research_plan"
+            and parts[1].isdigit()
+            and all(parts[2:])
+        )
     )
 
 

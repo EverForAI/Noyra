@@ -727,6 +727,27 @@ _OWNERSHIP_GRAPHS[111] = {
     "thought_round_closures": _subject_rule(),
 }
 
+_OWNERSHIP_GRAPHS[112] = {
+    **_OWNERSHIP_GRAPHS[111],
+    "autonomy_schedule_state": _subject_rule(),
+}
+
+_OWNERSHIP_GRAPHS[113] = {
+    **_OWNERSHIP_GRAPHS[112],
+    "email_ingress_evidence": _subject_rule(),
+}
+_OWNERSHIP_GRAPHS[114] = _OWNERSHIP_GRAPHS[113]
+_OWNERSHIP_GRAPHS[115] = {
+    **_OWNERSHIP_GRAPHS[114],
+    "workflow_export_publications": _subject_rule(),
+}
+
+_OWNERSHIP_GRAPHS[116] = {
+    **_OWNERSHIP_GRAPHS[115],
+    "workflow_increment_publications": _subject_rule(),
+    "workflow_increment_requests": _subject_rule(),
+}
+
 
 @dataclass(frozen=True)
 class RuntimeExportArtifact:

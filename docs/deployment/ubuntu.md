@@ -131,8 +131,12 @@ that contains only that proxy (for a same-host proxy, normally `127.0.0.1/32` an
 Noyra ignores `X-Forwarded-For` from every other peer. Leaving this setting empty is safe for an
 SSH tunnel, but behind a reverse proxy it intentionally places all visitors in the proxy's shared
 rate-limit bucket. Never enter a broad client or internet CIDR: that would let clients spoof the
-source identity used by public-post and CAPTCHA abuse controls. Forwarded chains are bounded and
-parsed from the trusted proxy backwards.
+source identity used by public-post and CAPTCHA abuse controls. Default routes (`0.0.0.0/0` and
+`::/0`) are rejected. Forwarded chains, including repeated list-valued header fields, are bounded
+and parsed from the trusted proxy backwards; malformed or oversized chains fall back to the socket
+peer. The operator-authenticated `/api/v1/admin/readiness` response reports the loaded proxy CIDRs
+and forwarding mode under `client_ip_resolution`; it describes configuration, not a live proxy
+connection. The public `/health/ready` response does not expose this information.
 
 Strict migration review is separate from the default self-attested workflow. If
 `NOYRA_MIGRATION_REQUIRE_INDEPENDENT_REVIEW=true`, Noyra requires a proxy HMAC
@@ -536,10 +540,35 @@ sudo -u noyra env \
 sudo systemctl start noyra
 ```
 
-Rotate the backup key deliberately with `sudo /opt/noyra/current/.venv/bin/python -m noyra backup-key rotate
---path /etc/noyra/backup-keyring.json`, then restore `root:noyra` ownership and mode `0640`. Rotation
-retains old material. Never remove a retired key while any retained backup names it; key loss makes
-that backup intentionally unavailable.
+Rotate through an explicit request, retaining its identity and original source
+expectation for every retry. Generate a request ID once and record the read-only
+status:
+
+```sh
+request_id=$(/opt/noyra/current/.venv/bin/python -c 'import uuid; print(uuid.uuid4().hex)')
+printf 'Retain this rotation request ID: %s\n' "$request_id"
+sudo /opt/noyra/current/.venv/bin/python -m noyra backup-key status \
+  --path /etc/noyra/backup-keyring.json --request-id "$request_id"
+```
+
+Copy `generation` and `observed_keyring_hash` from that status into the two
+placeholders below. The `prepare` call does not replace the active keyring;
+`resume` publishes only its recorded target:
+
+```sh
+sudo /opt/noyra/current/.venv/bin/python -m noyra backup-key prepare \
+  --path /etc/noyra/backup-keyring.json --request-id "$request_id" \
+  --expected-generation GENERATION_FROM_STATUS --expected-source-hash HASH_FROM_STATUS
+sudo /opt/noyra/current/.venv/bin/python -m noyra backup-key resume \
+  --path /etc/noyra/backup-keyring.json --request-id "$request_id"
+```
+
+If a response is lost or synchronization reports exit 3, keep the same ID and
+inspect/resume it. Do not generate a new ID or substitute the newly visible
+keyring generation as though the failed attempt had no effect. Old keys remain
+available for earlier backups. Rotation preserves root-owned service-group
+`0640` permissions and does not require changing the runtime database. See the
+[command and exit-code contract](../development/backup-key-commands.md).
 
 Restore only while the service is stopped and only to an absent or empty child directory on an
 encrypted volume. Do not use the mount point itself: plaintext staging is created beside the target,

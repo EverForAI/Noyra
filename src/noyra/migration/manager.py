@@ -18,6 +18,7 @@ from noyra.core.identity import validate_subject_id
 from noyra.core.redaction import redact_secret_text, redact_secrets
 from noyra.core.types import content_hash, new_id, utc_now
 
+from .approval_evidence import record_review, review_kinds
 from .policy import MigrationPolicy, MigrationStore
 from .targets import TargetRegistry
 
@@ -234,6 +235,7 @@ class MigrationManager:
             if task_row is not None:
                 self._assert_task_integrity(task_row)
                 if task_row["status"] == "approved":
+                    self.assert_review_authority(connection, self._task(task_row))
                     return self._task(task_row)
             if row["status"] not in _PROPOSAL_ACTIVE:
                 raise MigrationApprovalError("migration_proposal_not_pending")
@@ -305,11 +307,25 @@ class MigrationManager:
                     approval_rows = [*approval_rows, approval_values]
                 else:
                     result_task = self._task(task_row) if task_row is not None else None
+                recorded = approval_values if existing_approval is None else existing_approval
+                record_review(
+                    connection,
+                    recorded,
+                    "principal"
+                    if reviewer_principal is not None
+                    else "legacy_binding"
+                    if identity_binding is not None
+                    else "actor",
+                )
                 if required == 2:
                     approvals = {
                         str(item["identity_binding"])
                         for item in approval_rows
                         if item["identity_binding"] is not None
+                        and (
+                            not self.require_principal_identity
+                            or "principal" in review_kinds(connection, item)
+                        )
                     }
                 else:
                     approvals = {
@@ -753,7 +769,9 @@ class MigrationManager:
         if row is None:
             raise NotFoundError(f"migration proposal not found: {proposal_id}")
         self._assert_proposal_integrity(row)
-        return self._proposal_projection(row, approvals=approvals)
+        return self._proposal_projection(row, approvals=approvals) | {
+            "review_semantics": self.review_semantics(row["approval_mode"])
+        }
 
     def list_proposals(self, subject_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
         validate_subject_id(subject_id)
@@ -770,6 +788,7 @@ class MigrationManager:
             }
         return [
             self._proposal_projection(row, approvals=approvals[str(row["proposal_id"])])
+            | {"review_semantics": self.review_semantics(row["approval_mode"])}
             for row in rows
         ]
 
@@ -791,10 +810,44 @@ class MigrationManager:
                 # Historical approvals are retained for audit, but cannot
                 # satisfy the identity-bound dual-review gate.
                 continue
+            kinds = review_kinds(connection, approval)
+            if (
+                row["approval_mode"] == "dual_review"
+                and self.require_principal_identity
+                and "principal" not in kinds
+            ):
+                continue
             approvals.append(
-                {"actor": str(approval["actor"]), "created_at": str(approval["created_at"])}
+                {
+                    "actor": str(approval["actor"]),
+                    "created_at": str(approval["created_at"]),
+                    "identity_kind": "principal" if "principal" in kinds else "legacy_binding",
+                }
             )
         return approvals
+
+    def review_semantics(self, mode: str) -> str:
+        if mode == "dual_review":
+            return (
+                "independent_principals" if self.require_principal_identity else "legacy_bindings"
+            )
+        return mode
+
+    def assert_review_authority(self, connection: Any, task: MigrationTask) -> None:
+        if not self.require_principal_identity:
+            return
+        proposal = connection.execute(
+            "SELECT * FROM migration_proposals WHERE subject_id=? AND proposal_id=?",
+            (task.subject_id, task.proposal_id),
+        ).fetchone()
+        if proposal is None:
+            raise MigrationApprovalError("migration_proposal_missing")
+        self._assert_proposal_integrity(proposal)
+        if (
+            proposal["approval_mode"] == "dual_review"
+            and len(self._proposal_approvals(connection, proposal)) < 2
+        ):
+            raise MigrationApprovalError("migration_independent_review_incomplete")
 
     def get_task(self, task_id: str, *, subject_id: str | None = None) -> MigrationTask:
         with self.database.connection() as connection:

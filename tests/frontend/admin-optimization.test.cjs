@@ -16,6 +16,7 @@ function context(extra = {}) {
   const sandbox = {
     csrfToken: "synthetic-session", overviewLoadVersion: 0, latestDiagnostics: null,
     adminSessionGeneration: 0, adminReadVersions: new Map(), activeLoginAttempt: null,
+    projectRecoveryRecords: new Map(), projectRecoveryPending: new Set(),
     $: selector => {
       if (!nodes.has(selector)) nodes.set(selector, { innerHTML: "", textContent: "", value:"", dataset:{},
         options:[], querySelector:()=>null, replaceChildren(){this.innerHTML="";this.textContent="";} });
@@ -608,7 +609,7 @@ test("logout clears every private panel, loaded option, cache and open dialog",a
   vm.runInContext(functionsBetween("async function logout(","async function loadOverview("),sandbox);
   for(const id of ["search-provider-list","capability-list","channel-list","binding-list",
     "migration-policy-summary","migration-target-list","migration-proposal-list","migration-task-list",
-    "runtime-summary","public-post-usage","setup-guide-list","model-observability-summary","retention-summary"])
+    "runtime-summary","project-recovery-list","public-post-usage","setup-guide-list","model-observability-summary","retention-summary"])
     sandbox.$("#"+id).innerHTML="private data";
   await sandbox.logout();
   assert.equal(sandbox.csrfToken,"");
@@ -839,4 +840,254 @@ test("runtime samples explain resource groups, terminal waits and unknown billin
   assert.ok(text.includes("管理员测试 1") && text.includes("不代表自主业务完成"));
   assert.ok(text.includes("不证明供应商未执行或未计费"));
   assert.ok(!text.includes("<script>") && !text.includes("<img>"));
+});
+
+
+test("autonomy recovery explains temporary protection and real delivery states", () => {
+  const {sandbox,nodes}=observationContext();
+  vm.runInContext(functionsBetween("function summaryRows(", "const integerFormatter"),sandbox);
+  const sample={database_observation:"ok",autonomy_observation:"ok",resources:{},cognition:{enabled:true},
+    autonomy_recovery:{active:true,reserved_attempts_rolling_day:4},
+    project_coordination:{records:[{project_id:"<img src=x>",reason:"help_delivery_pending",
+      next_due_at:"2026-08-15T00:00:00Z"}]},
+    world_poll_sample:{records:[{source_id:"fixture",last_attempt_at:null,last_success_at:null,
+      last_change_at:null,checks:1,unchanged_checks:0}]}};
+  sandbox.renderRuntimeObservation(sample,null);
+  let html=nodes.get("#cognition-summary").innerHTML;
+  assert.ok(html.includes("保守预留 4") && html.includes("非供应商账单"));
+  assert.ok(html.includes("尚未确认送达") && !html.includes("求助已确认送达"));
+  assert.ok(html.includes("&lt;img") && !html.includes("<img"));
+  sample.autonomy_recovery.active=false;
+  sandbox.renderRuntimeObservation(sample,null);
+  html=nodes.get("#cognition-summary").innerHTML;
+  assert.ok(html.includes("已自动退出临时限额"));
+});
+
+test("missing recovery evidence never implies normal autonomy", () => {
+  const {sandbox,nodes}=observationContext();
+  vm.runInContext(functionsBetween("function summaryRows(", "const integerFormatter"),sandbox);
+  sandbox.renderRuntimeObservation({database_observation:"ok",autonomy_observation:"unavailable",
+    resources:{},cognition:{enabled:true}},null);
+  const html=nodes.get("#cognition-summary").innerHTML;
+  assert.ok(html.includes("不按正常处理"));
+  assert.ok(!html.includes("未触发，按正常资源预算运行"));
+});
+
+
+test("workflow service metadata distinguishes consideration from activity and escapes identifiers", () => {
+  const {sandbox,nodes}=observationContext();
+  vm.runInContext(functionsBetween("function summaryRows(", "const integerFormatter"),sandbox);
+  sandbox.renderRuntimeObservation({database_observation:"ok",autonomy_observation:"ok",
+    resources:{},cognition:{enabled:true},workflow_schedule:{turn:12,
+      clock_status:"wall_clock_behind_history",workflows:{"<img>":{reason:"waiting_budget",
+        last_considered_at:null,last_progress_at:null,next_due_at:null}}}},null);
+  const html=nodes.get("#cognition-summary").innerHTML;
+  assert.ok(html.includes("被考虑不代表发送请求或产生新进展"));
+  assert.ok(html.includes("时钟落后于历史"));
+  assert.ok(html.includes("&lt;img") && !html.includes("<img>"));
+});
+
+
+function walletAutomationContext(automation, rejected = false) {
+  const { sandbox, nodes } = context({
+    walletPolicyLoadVersion: 0, renderWalletPolicy() {},
+    request: async (path) => {
+      if (path === "/api/admin/wallet-policy") return {};
+      if (rejected) throw new Error("synthetic unavailable");
+      return automation;
+    },
+  });
+  vm.runInContext(functionsBetween("const walletFailureReasonLabels =", "const providerHealthStateLabels ="), sandbox);
+  return { sandbox, nodes };
+}
+
+test("wallet observation errors never render zero pending or no failures", async () => {
+  for (const execution_observation of [undefined, { status: "unavailable" }]) {
+    const { sandbox, nodes } = walletAutomationContext({
+      status: "disabled", execution_observation, pending_reason_counts: null, latest_failure: null,
+    });
+    await sandbox.loadWalletPolicy();
+    assert.ok(nodes.get("#wallet-automation-status").textContent.includes("未知"));
+    assert.ok(!nodes.get("#wallet-automation-status").textContent.includes("待处理 0"));
+    assert.ok(nodes.get("#wallet-automation-failure").textContent.includes("未读取"));
+    assert.ok(!nodes.get("#wallet-automation-failure").textContent.includes("暂无"));
+  }
+});
+
+test("wallet observations distinguish a verified empty result and a real unknown delivery", async () => {
+  const automation = { status: "disabled", execution_observation: { status: "ok" },
+    pending_reason_counts: {}, latest_failure: null, emergency_paused: false };
+  const { sandbox, nodes } = walletAutomationContext(automation);
+  await sandbox.loadWalletPolicy();
+  assert.ok(nodes.get("#wallet-automation-status").textContent.includes("待处理 0"));
+  assert.ok(nodes.get("#wallet-automation-failure").textContent.includes("暂无"));
+  automation.pending_reason_counts = { broadcast_unknown: 2 };
+  automation.latest_failure = { reason_code: "broadcast_unknown", status: "unknown",
+    requires_reconciliation: true, updated_at: "2026-08-15T00:00:00Z" };
+  await sandbox.loadWalletPolicy();
+  assert.ok(nodes.get("#wallet-automation-status").textContent.includes("待处理 2"));
+  assert.ok(nodes.get("#wallet-automation-failure").textContent.includes("需人工对账"));
+});
+
+test("failed wallet refresh clears a stale healthy failure message", async () => {
+  const { sandbox, nodes } = walletAutomationContext({}, true);
+  sandbox.$("#wallet-automation-failure").textContent = "暂无待处理的付款失败或未知结果。";
+  await sandbox.loadWalletPolicy();
+  assert.ok(nodes.get("#wallet-automation-failure").textContent.includes("未读取"));
+  assert.ok(!nodes.get("#wallet-automation-failure").textContent.includes("暂无"));
+});
+
+
+function recoveryContext(extra = {}) {
+  const value = context({window:{prompt:()=>"Verified incomplete local attempt",confirm:()=>true}, ...extra});
+  vm.runInContext(functionsBetween("const projectRecoveryRecords =", "async function loadRuntime("), value.sandbox);
+  return value;
+}
+const recoveryRow = {execution_id:"interrupted",project_id:"project",phase_id:"phase",
+  status:"unknown",execution_type:"research_note",reason_code:"review_release_available",
+  expected_fingerprint:"b".repeat(64),can_release:true};
+const recoveryEvent = button => ({target:{closest:()=>button}});
+const recoveryResult = (row = recoveryRow) => ({records:[row],runtime_paused:true,
+  operations_drained:true,runtime_owned:true,migration_fenced:false,external_blockers:{}});
+
+test("project recovery renders bounded metadata escaped and never invents success",()=>{
+  const {sandbox,nodes}=recoveryContext();
+  sandbox.renderProjectExecutionRecovery(recoveryResult({...recoveryRow,
+    execution_id:'<unsafe>',can_release:false,reason:'private operator reason'}));
+  const html=nodes.get("#project-recovery-list").innerHTML;
+  assert.ok(html.includes("&lt;unsafe>"));
+  assert.ok(!html.includes("<unsafe>"));
+  assert.ok(!html.includes("private operator reason"));
+  assert.ok(html.includes("原始状态 unknown"));
+  assert.ok(html.includes("disabled"));
+  const page=readFileSync(join(__dirname,"../../src/noyra/web/admin.html"),"utf8");
+  assert.ok(page.includes('id="project-recovery-list"'));
+  assert.ok(page.includes("不会重发未知请求或释放费用预留"));
+});
+
+test("project recovery submits exact snapshot once and cannot auto resume or retry",async()=>{
+  const posts=[];
+  const write=deferred();
+  const {sandbox,nodes}=recoveryContext({request:async(path,options)=>{
+    if(options?.method==="POST"){posts.push({path,body:JSON.parse(options.body)});return write.promise;}
+    return recoveryResult({...recoveryRow,can_release:false,review_released:true,reason_code:"review_released"});
+  }});
+  sandbox.renderProjectExecutionRecovery(recoveryResult());
+  const button={dataset:{projectRecovery:"interrupted"},disabled:false};
+  const first=sandbox.releaseProjectExecutionReview(recoveryEvent(button));
+  await sandbox.releaseProjectExecutionReview(recoveryEvent(button));
+  assert.equal(posts.length,1);
+  assert.equal(posts[0].path,"/api/admin/project-execution-recovery/release-review");
+  assert.deepEqual(posts[0].body,{execution_id:"interrupted",expected_fingerprint:"b".repeat(64),reason:"Verified incomplete local attempt"});
+  assert.equal(button.disabled,true);
+  write.resolve({review_released:true});await first;
+  assert.match(nodes.get("#project-recovery-action-status").textContent,/已交还自主审查/);
+  assert.match(nodes.get("#project-recovery-list").innerHTML,/已放行自主审查/);
+});
+
+test("project recovery refuses cached rows from an old login",async()=>{
+  let prompted=0,writes=0;
+  const {sandbox}=recoveryContext({window:{prompt:()=>{prompted++;return "reason";},confirm:()=>true},request:async()=>{writes++;}});
+  sandbox.renderProjectExecutionRecovery(recoveryResult());sandbox.adminSessionGeneration++;
+  await sandbox.releaseProjectExecutionReview(recoveryEvent({dataset:{projectRecovery:"interrupted"}}));
+  assert.equal(prompted,0);assert.equal(writes,0);
+});
+
+for(const failure of [false,true])test(`project recovery ignores old-session read (${failure})`,async()=>{
+  const wait=deferred();const {sandbox,nodes}=recoveryContext({request:()=>wait.promise});
+  const pending=sandbox.loadProjectExecutionRecovery();sandbox.adminSessionGeneration++;
+  sandbox.$("#project-recovery-list").innerHTML="new-session";
+  if(failure)wait.reject({status:401});else wait.resolve(recoveryResult());
+  await pending;assert.equal(nodes.get("#project-recovery-list").innerHTML,"new-session");
+});
+
+test("project recovery old-session write cannot repaint the new session",async()=>{
+  const wait=deferred();let calls=0;
+  const {sandbox,nodes}=recoveryContext({request:()=>{calls++;return wait.promise;}});
+  sandbox.renderProjectExecutionRecovery(recoveryResult());
+  const pending=sandbox.releaseProjectExecutionReview(recoveryEvent({dataset:{projectRecovery:"interrupted"}}));
+  sandbox.adminSessionGeneration++;sandbox.$("#project-recovery-action-status").textContent="new-session";
+  wait.resolve({review_released:true});await pending;
+  assert.equal(nodes.get("#project-recovery-action-status").textContent,"new-session");assert.equal(calls,1);
+});
+
+test("project recovery explains committed release when refresh fails and disables stale actions",async()=>{
+  let calls=0;
+  const {sandbox,nodes}=recoveryContext({request:async()=>{if(++calls>1)throw new Error("offline");return {};}});
+  sandbox.renderProjectExecutionRecovery(recoveryResult());
+  const event=recoveryEvent({dataset:{projectRecovery:"interrupted"}});
+  await sandbox.releaseProjectExecutionReview(event);
+  assert.match(nodes.get("#project-recovery-action-status").textContent,/已放行；读取更新失败/);
+  assert.equal(nodes.get("#project-recovery-list").innerHTML,"");
+  await sandbox.releaseProjectExecutionReview(event);assert.equal(calls,2);
+});
+
+
+test("recovery exit explains fixed conditions and checker failures without trusting injected labels",()=>{
+  const {sandbox,nodes}=observationContext();
+  const observation={format:"noyra-runtime-observation/v1",autonomy_observation:"ok",lifecycle:"active",
+    cognition:{enabled:true},resources:{},autonomy_recovery:{active:true,reserved_attempts_rolling_day:6,
+      last_health_evaluated_at:"2026-11-04T12:00:00+00:00",clock_status:"wall_clock_behind_history",
+      exit_conditions:[{code:"wall_clock",satisfied:false,unmet_since:"2026-11-04T11:59:59+00:00",observed_at:"2026-11-04T11:59:59+00:00"},
+        {code:"<unsafe>",label:"private injected label",satisfied:false,observed_at:"2026-11-04T12:00:00+00:00"}]},
+    integrity_watchdog:{status:"escalated",consecutive_failures:5,escalated:true,next_retry_at:"2026-11-04T12:30:00+00:00"}};
+  sandbox.renderRuntimeObservation(observation,{lifecycle:{state:"active"}});
+  const html=nodes.get("#cognition-summary").innerHTML;
+  assert.match(html,/墙钟追平历史：未满足/);
+  assert.match(html,/不重开预算/);
+  assert.match(html,/已升级告警/);
+  assert.match(html,/尚无|未识别条件/);
+  assert.ok(!html.includes("<unsafe>")&&!html.includes("private injected label"));
+});
+
+
+test("chat distinguishes local replies and unscheduled delivery without claiming a send", () => {
+  const { sandbox, nodes } = context({
+    chat: { rows: [
+      { interaction_id:"local", direction:"outgoing", channel:"web", status:"sent", content:"Local reply", created_at:"2026-11-06T00:00:00Z", communication_status:"local_available", delivery_statuses:[] },
+      { interaction_id:"help", direction:"outgoing", channel:"web", status:"sent", content:"Help", created_at:"2026-11-06T00:00:00Z", communication_status:"not_scheduled", delivery_statuses:[] },
+      { interaction_id:"delivered", direction:"outgoing", channel:"email", status:"sent", content:"Email", created_at:"2026-11-06T00:00:00Z", communication_status:"delivered", delivery_statuses:["delivered"] },
+    ] }, chatStatus: { sent:"已生成回复" },
+  });
+  vm.runInContext(functionsBetween("function renderChatMessages()", "async function loadChatMessages("), sandbox);
+  sandbox.renderChatMessages();
+  const html=nodes.get("#mailbox-list").innerHTML;
+  assert.match(html,/回复已保存在本站/);
+  assert.match(html,/尚无外部投递记录/);
+  assert.match(html,/平台已接收/);
+  assert.doesNotMatch(html,/已发送/);
+});
+
+
+test("truncated delivery observation remains visible even with zero sampled unresolved work", () => {
+  const { sandbox, nodes } = context({ runtimeExplanation: () => ["Recent activity", "Synthetic", "runtime"] });
+  vm.runInContext(functionsBetween("async function loadOverview()", "function renderModelObservability("), sandbox);
+  sandbox.renderOverviewAttention({
+    format:"noyra-runtime-observation/v1", database_observation:"ok",
+    cognition:{enabled:true}, loop:{reason_code:"recent_success"},
+    attention:{unresolved_deliveries:{count:0,more:false,truncated:true,sampled:100,record_limit:100}},
+  });
+  const html=nodes.get("#overview-attention").innerHTML;
+  assert.match(html,/投递摘要只覆盖近期样本/);
+  assert.match(html,/较早投递尚未包含/);
+  assert.doesNotMatch(html,/有外部投递需要核对/);
+});
+
+
+test("retention distinguishes structural baseline from advisory preservation coverage", () => {
+  const { sandbox, nodes } = context();
+  sandbox.$("#retention-settings-form").querySelectorAll=()=>[];
+  vm.runInContext(functionsBetween("function renderRetention(", "async function loadRetention("),sandbox);
+  sandbox.renderRetention({settings:{revision:0},lifecycle_diagnostics:{
+    policy_coverage:{implemented_retention_objects:18,documented_domain_objects:9,preservation_only_objects:218,unreviewed_objects:1},
+    structural_drift:{status:"matches_baseline"},
+  }});
+  let html=nodes.get("#retention-summary").innerHTML;
+  assert.match(html,/待审 1 项/);
+  assert.match(html,/不代表完整结构检查或全部保留策略已审核/);
+  assert.match(html,/不阻断正常认知/);
+  sandbox.renderRetention({settings:{revision:0},lifecycle_diagnostics:{status:"unavailable"}});
+  html=nodes.get("#retention-summary").innerHTML;
+  assert.match(html,/暂未取得，不按零项处理/);
+  assert.doesNotMatch(html,/待审 0 项/);
 });

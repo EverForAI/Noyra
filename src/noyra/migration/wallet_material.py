@@ -19,8 +19,20 @@ def verify_local_wallet(root: Path, address: str) -> None:
 
 
 def source_wallet_files(
-    task: Any, binding: Mapping[str, Any], rpc_file: Path
+    task: Any,
+    binding: Mapping[str, Any],
+    rpc_file: Path,
+    *,
+    database: Any,
+    artifact_id: str,
+    recipient_key_fingerprint: str,
 ) -> tuple[Path, Path, Path]:
+    from .local_wallet_approval import authorize_material
+
+    # Establish real source authority before reading keystore/password paths.
+    authorize_material(
+        database, task, binding, artifact_id, recipient_key_fingerprint=recipient_key_fingerprint
+    )
     approval = binding.get("approval")
     address = binding.get("address")
     if (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .email_identity import EMAIL_IDENTITY_SCHEMA
 from .migrations_v002_v005 import MIGRATIONS_V002_V005
 from .migrations_v006_v017 import MIGRATIONS_V006_V017
 from .migrations_v018_v021 import MIGRATIONS_V018_V021
@@ -11,6 +12,8 @@ from .migrations_v043_v052 import MIGRATIONS_V043_V052
 from .migrations_v053_v054 import MIGRATIONS_V053_V054
 from .migrations_v055_v069 import MIGRATIONS_V055_V069
 from .migrations_v070_v107 import MIGRATIONS_V070_V107
+from .workflow_exports import WORKFLOW_EXPORT_SCHEMA
+from .workflow_increments import WORKFLOW_INCREMENT_SCHEMA
 from .world_poll import WORLD_POLL_SCHEMA
 
 MIGRATIONS: dict[int, str] = {
@@ -61,4 +64,28 @@ CREATE TRIGGER IF NOT EXISTS prevent_thought_round_closure_delete
 BEFORE DELETE ON thought_round_closures
 BEGIN SELECT RAISE(ABORT,'thought round closures are append-only'); END;
 """,
+    112: """
+CREATE TABLE IF NOT EXISTS autonomy_schedule_state (
+    subject_id TEXT PRIMARY KEY REFERENCES subject_identity(subject_id),
+    revision INTEGER NOT NULL CHECK(revision >= 1),
+    state_json TEXT NOT NULL CHECK(length(state_json) <= 64000),
+    state_hash TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS preserve_autonomy_schedule_subject
+BEFORE UPDATE OF subject_id ON autonomy_schedule_state
+WHEN NEW.subject_id IS NOT OLD.subject_id
+BEGIN SELECT RAISE(ABORT,'autonomy schedule subject is immutable'); END;
+""",
+    113: EMAIL_IDENTITY_SCHEMA,
+    114: """
+CREATE INDEX IF NOT EXISTS idx_memories_subject_rank
+    ON memories(subject_id,status,salience DESC,confidence DESC,updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_subject_type_rank
+    ON memories(subject_id,status,memory_type,salience DESC,confidence DESC,updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_workflow_checkpoints_subject_history
+    ON workflow_checkpoints(subject_id,workflow_id,checkpoint_version);
+""",
+    115: WORKFLOW_EXPORT_SCHEMA,
+    116: WORKFLOW_INCREMENT_SCHEMA,
 }

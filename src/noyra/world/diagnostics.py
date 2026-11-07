@@ -11,6 +11,7 @@ from noyra.core.types import utc_now
 
 from .injection import INJECTION_CLASSIFIER_VERSION
 from .poll import MAX_SEEN_VERSIONS, SourcePollStore
+from .store import MAX_FEED_OBSERVATIONS_PER_POLL
 
 SOURCE_LIMIT = 25
 QUERY_BUDGET_SECONDS = 0.2
@@ -79,6 +80,10 @@ class WorldAcquisitionProjection:
             "format": "noyra-world-acquisition/v1",
             "sampled_at": utc_now(),
             "scope": "since_tracking_started",
+            "new_item_versions_scope": "acknowledged_identities_including_fragments",
+            "retained_entry_versions_scope": "retained_deduplication_identities_not_articles",
+            "max_observations_per_feed_poll": MAX_FEED_OBSERVATIONS_PER_POLL,
+            "observation_budget_unit": "characters_not_bytes",
             "source_limit": SOURCE_LIMIT,
             "truncated": len(sources) > SOURCE_LIMIT,
             "items": items,

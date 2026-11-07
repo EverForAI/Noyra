@@ -14,6 +14,7 @@ from noyra.interaction.conversations import ConversationConflict
 from noyra.interaction.errors import InteractionStateConflictError
 
 from . import (
+    operator,
     post_admin,
     post_cognition,
     post_connections,
@@ -21,6 +22,9 @@ from . import (
     post_migration,
     post_public,
     post_wallet,
+    sleep_recovery,
+    workflow_exports,
+    workflow_increments,
 )
 
 if TYPE_CHECKING:
@@ -75,6 +79,30 @@ def dispatch(self: RequestHandler, owner: NoyraHTTPServer) -> None:
     if self.path == "/api/admin/upgrade":
         if post_admin.admin_upgrade(self, owner):
             return
+    if self.path == "/api/admin/workflow-increments/verify":
+        workflow_increments.dispatch(self, owner, write=True, verify=True)
+        return
+    if self.path == "/api/admin/workflow-increments":
+        workflow_increments.dispatch(self, owner, write=True)
+        return
+    if self.path == "/api/admin/workflow-exports/verify":
+        workflow_exports.dispatch(self, owner, write=True, verify=True)
+        return
+    if self.path == "/api/admin/workflow-exports":
+        workflow_exports.dispatch(self, owner, write=True)
+        return
+    if self.path == "/api/admin/sleep-recovery/abort":
+        sleep_recovery.dispatch(self, owner, write=True)
+        return
+    if self.path == "/api/admin/memory-integration-recovery/discard-legacy":
+        operator.discard_memory_integration(self, owner)
+        return
+    if self.path == "/api/admin/workflow-clock/acknowledge":
+        operator.acknowledge_workflow_clock(self, owner)
+        return
+    if self.path == "/api/admin/project-execution-recovery/release-review":
+        operator.release_project_execution(self, owner)
+        return
     if self.path in {
         "/api/admin/lifecycle/pause",
         "/api/admin/lifecycle/resume",

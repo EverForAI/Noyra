@@ -30,6 +30,7 @@ from noyra.core.types import canonical_json, content_hash, new_id, strict_json_l
 from noyra.interaction import InteractionStore
 from noyra.model import ModelLedger, ModelMessage
 from noyra.model.errors import BudgetExhaustedError, ModelCallStateError, ProviderCallError
+from noyra.research.exploration import verify_reading_evidence
 from noyra.world import PredictionStore
 from noyra.world.types import PredictionProposal
 
@@ -419,6 +420,10 @@ class ProjectExecutionLedger:
                     raise ProjectExecutionError("terminal execution cannot transition")
                 self._verify_execution_connection(connection, row)
                 return current
+            from .execution_recovery import read_release
+
+            if read_release(connection, self.database, row) is not None:
+                raise ProjectExecutionError("review-released execution cannot transition")
             if current.status == "prepared" and status != "executing":
                 raise ProjectExecutionError("prepared execution must enter executing state")
             acceptance = dict(current.acceptance)
@@ -551,7 +556,9 @@ class ProjectExecutionLedger:
                 ).fetchone()
                 if succeeded is None:
                     raise IntegrityError("completed project phase has no validated execution")
-            DurableWorkflowStore._verify_integrity_connection(connection, self.subject_id)
+            DurableWorkflowStore._verify_integrity_connection(
+                connection, self.subject_id, database=self.database
+            )
         return len(rows)
 
     def _verify_execution_connection(self, connection: Any, row: Any) -> None:
@@ -685,6 +692,9 @@ class ProjectExecutionLedger:
         elif isinstance(validator, dict) and validator.get("status") == "passed":
             raise IntegrityError("non-successful project execution has a passed validator")
 
+        from .execution_recovery import read_release
+
+        read_release(connection, self.database, row)
         if project_phase["phase_status"] == "completed" and record.status == "succeeded":
             return
         if project_phase["project_status"] == "completed" and project_phase["phase_status"] != (
@@ -976,6 +986,15 @@ class ProjectExecutionLedger:
         }
         if evidence != expected_evidence:
             raise ProjectExecutionValidationError("research acceptance evidence was forged")
+        verify_reading_evidence(
+            connection,
+            execution.subject_id,
+            rounds,
+            accepted,
+            goal_id=row["goal_id"],
+            project_id=execution.project_id,
+            phase_id=execution.phase_id,
+        )
         return ["research_state", "research_sources", "research_model_call"]
 
     def _validate_software_connection(

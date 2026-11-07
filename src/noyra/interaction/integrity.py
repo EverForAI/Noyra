@@ -246,6 +246,10 @@ class InteractionIntegrity:
                     )
                 ):
                     raise IntegrityError(f"inbound event mismatch: {event['event_id']}")
+                if event["channel"] == "email":
+                    from .email_identity import read_evidence
+
+                    read_evidence(connection, event)
                 if event["external_thread_id"] is not None:
                     linked_thread = connection.execute(
                         "SELECT 1 FROM interaction_threads WHERE subject_id = ? "
@@ -432,6 +436,11 @@ class InteractionIntegrity:
                 ):
                     raise IntegrityError("public post controls integrity mismatch")
             counts["public_post_controls"] = len(controls)
+        from .expression import ExpressionStore
+
+        counts["autonomous_expression_actions"] = ExpressionStore(
+            self.database, subject_id
+        ).verify_integrity()
         return counts
 
     @staticmethod

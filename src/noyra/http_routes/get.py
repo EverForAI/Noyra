@@ -20,6 +20,9 @@ from . import (
     read_migration,
     read_public,
     read_wallet,
+    sleep_recovery,
+    workflow_exports,
+    workflow_increments,
 )
 
 if TYPE_CHECKING:
@@ -30,7 +33,7 @@ if TYPE_CHECKING:
 
 def dispatch(self: RequestHandler, owner: NoyraHTTPServer) -> None:
     if not owner.allow_request(
-        owner.client_ip(str(self.client_address[0]), self.headers.get("X-Forwarded-For"))
+        owner.client_ip(str(self.client_address[0]), self.headers.get_all("X-Forwarded-For"))
     ):
         self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "rate_limited"})
         return
@@ -150,6 +153,24 @@ def dispatch(self: RequestHandler, owner: NoyraHTTPServer) -> None:
             return
     elif parsed.path.startswith("/api/public/"):
         if read_public.public_item(self, owner, parsed):
+            return
+    elif parsed.path == "/api/admin/sleep-recovery":
+        sleep_recovery.dispatch(self, owner, write=False)
+        return
+    elif parsed.path == "/api/admin/memory-integration-recovery":
+        if read_admin.memory_integration_recovery(self, owner):
+            return
+    elif parsed.path == "/api/admin/workflow-increments":
+        workflow_increments.dispatch(self, owner, write=False)
+        return
+    elif parsed.path == "/api/admin/workflow-exports":
+        workflow_exports.dispatch(self, owner, write=False)
+        return
+    elif parsed.path == "/api/admin/workflow-clock":
+        if read_admin.workflow_clock_history(self, owner, parsed):
+            return
+    elif parsed.path == "/api/admin/project-execution-recovery":
+        if read_admin.project_execution_recovery(self, owner, limit):
             return
     elif parsed.path == "/api/admin/monitoring/soak":
         if read_admin.monitoring_soak(self, owner, parsed):
@@ -288,6 +309,9 @@ def dispatch(self: RequestHandler, owner: NoyraHTTPServer) -> None:
             return
     elif parsed.path in {"/api/v1/admin/provider-health", "/api/admin/provider-health"}:
         if health.admin_provider_health(self, owner, query):
+            return
+    elif parsed.path == "/api/admin/retention/lifecycle":
+        if read_admin.lifecycle_catalog(self, owner, parsed):
             return
     elif parsed.path in {"/api/v1/admin/retention", "/api/admin/retention"}:
         if read_admin.admin_retention(self, owner):

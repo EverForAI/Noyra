@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+from contextlib import nullcontext
 from typing import Any
 
 from noyra.core.database import Database
@@ -37,6 +38,7 @@ class InteractionStore:
         participant_source: tuple[str, str, str] | None = None,
         participant_conversation: str | None = None,
         participant_private: bool = False,
+        _connection: Any | None = None,
     ) -> InteractionRecord:
         self._validate_message(channel, counterparty, content)
         if kind == "subject_message":
@@ -50,7 +52,9 @@ class InteractionStore:
                 "related": related_interaction_id,
             }
         )
-        with self.database.transaction() as connection:
+        with (
+            self.database.transaction() if _connection is None else nullcontext(_connection)
+        ) as connection:
             if verified_binding_id is not None:
                 route = connection.execute(
                     "SELECT 1 FROM private_channel_routes r JOIN interaction_bindings b "

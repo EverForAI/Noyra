@@ -117,6 +117,12 @@ class SourcePollStore:
 
     def failed(self, subject_id: str, source_id: str, checked_at: str) -> None:
         with self.database.transaction() as connection:
+            previous = self._read(connection, subject_id, source_id)
+            if previous is not None and datetime.fromisoformat(checked_at) < datetime.fromisoformat(
+                previous["last_attempt_at"]
+            ):
+                # A failed read during clock recovery cannot rewrite ordered history.
+                return
             self.complete(connection, subject_id, source_id, checked_at, outcome="failed")
 
     @staticmethod

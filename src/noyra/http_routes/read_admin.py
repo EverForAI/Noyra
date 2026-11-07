@@ -5,12 +5,14 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import json
+import sqlite3
 from datetime import datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 from urllib.parse import SplitResult, parse_qs
 
 from noyra.core.errors import IntegrityError, NotFoundError
+from noyra.core.lifecycle_diagnostics import LifecycleCatalogUnavailable
 from noyra.core.runtime_observation import ObservationBusy
 from noyra.core.upgrade import UpgradeError
 from noyra.interaction.conversations import ConversationConflict
@@ -149,6 +151,20 @@ def admin_runtime_summary(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
             {"error": "runtime_observation_busy"},
         )
         return True
+    if owner.integrity_watchdog_health is not None:
+        try:
+            watchdog = owner.integrity_watchdog_health()
+        except Exception:
+            watchdog = {"status": "unavailable"}
+        # Do not mutate the observer's cached database snapshot. The service
+        # supplies current in-memory fallback health when writes are unavailable.
+        observation = {**observation, "integrity_watchdog": watchdog}
+    if owner.integrity is not None:
+        try:
+            integrity = owner.integrity.summary()
+        except Exception:
+            integrity = {"status": "evidence_unavailable"}
+        observation = {**observation, "integrity": integrity}
     self._json(HTTPStatus.OK, observation)
     return False
 
@@ -157,7 +173,12 @@ def diagnostics(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
     if not self._authorized("read"):
         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
         return True
-    self._json(HTTPStatus.OK, owner.diagnostics())
+    try:
+        result = owner.diagnostics()
+    except (IntegrityError, sqlite3.Error):
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "diagnostics_unavailable"})
+        return True
+    self._json(HTTPStatus.OK, result)
     return False
 
 
@@ -188,6 +209,66 @@ def admin_upgrade_check_admin_upgrade_status_admin_upgrade_installed(
     return False
 
 
+def memory_integration_recovery(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
+    if not self._authorized("operator"):
+        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+        return True
+    if owner.operator_controls is None:
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "operator_controls_unavailable"})
+        return True
+    try:
+        result = owner.operator_controls.memory_integration_recovery()
+    except (IntegrityError, sqlite3.Error):
+        self._json(
+            HTTPStatus.SERVICE_UNAVAILABLE, {"error": "memory_recovery_evidence_unavailable"}
+        )
+        return True
+    self._json(HTTPStatus.OK, result)
+    return True
+
+
+def workflow_clock_history(
+    self: RequestHandler, owner: NoyraHTTPServer, parsed: SplitResult
+) -> bool:
+    if not self._authorized("operator"):
+        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+        return True
+    if owner.operator_controls is None:
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "operator_controls_unavailable"})
+        return True
+    try:
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        if set(query) != {"workflow_id"} or len(query["workflow_id"]) != 1:
+            raise ValueError("invalid workflow ID")
+        result = owner.operator_controls.workflow_clock_history(query["workflow_id"][0])
+    except (ValueError, PermissionError):
+        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_workflow_clock_request"})
+        return True
+    except (IntegrityError, sqlite3.Error):
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "workflow_clock_evidence_invalid"})
+        return True
+    self._json(HTTPStatus.OK, result)
+    return True
+
+
+def project_execution_recovery(self: RequestHandler, owner: NoyraHTTPServer, limit: int) -> bool:
+    if not self._authorized("operator"):
+        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+        return True
+    if owner.operator_controls is None:
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "operator_controls_unavailable"})
+        return True
+    try:
+        result = owner.operator_controls.project_execution_recovery(limit=min(limit, 100))
+    except (IntegrityError, sqlite3.Error, ValueError):
+        self._json(
+            HTTPStatus.SERVICE_UNAVAILABLE, {"error": "project_recovery_evidence_unavailable"}
+        )
+        return True
+    self._json(HTTPStatus.OK, result)
+    return True
+
+
 def admin_recoverable_work(self: RequestHandler, owner: NoyraHTTPServer, limit: int) -> bool:
     if not self._authorized():
         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
@@ -198,10 +279,12 @@ def admin_recoverable_work(self: RequestHandler, owner: NoyraHTTPServer, limit: 
             {"error": "operator_controls_unavailable"},
         )
         return True
-    self._json(
-        HTTPStatus.OK,
-        owner.operator_controls.recoverable_work(limit=limit),
-    )
+    try:
+        work = owner.operator_controls.recoverable_work(limit=limit)
+    except (IntegrityError, sqlite3.Error):
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "recoverable_work_unavailable"})
+        return True
+    self._json(HTTPStatus.OK, work)
     return False
 
 
@@ -356,12 +439,45 @@ def mailbox(self: RequestHandler, owner: NoyraHTTPServer, limit: int) -> bool:
     return False
 
 
+def lifecycle_catalog(self: RequestHandler, owner: NoyraHTTPServer, parsed: SplitResult) -> bool:
+    if not self._authorized("operator"):
+        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+        return True
+    try:
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        if set(query) - {"limit", "cursor"} or any(len(value) != 1 for value in query.values()):
+            raise ValueError("invalid lifecycle catalog query")
+        limit = int(query.get("limit", ["50"])[0])
+        result = owner.retention.lifecycle_catalog(
+            limit=limit, cursor=query.get("cursor", [None])[0]
+        )
+    except (ValueError, TypeError):
+        self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_lifecycle_catalog_query"})
+        return True
+    except LifecycleCatalogUnavailable:
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "lifecycle_catalog_unavailable"})
+        return True
+    self._json(HTTPStatus.OK, result)
+    return True
+
+
 def admin_retention(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
     if not self._authorized():
         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
         return True
     retention_policy = owner.retention.policy(owner.kernel.subject_id)
     settings = retention_policy["settings"]
+    try:
+        lifecycle = owner.retention.lifecycle_catalog(limit=1)
+        lifecycle_summary = {
+            "policy_coverage": lifecycle["policy_coverage"],
+            "structural_drift": lifecycle["structural_drift"],
+        }
+    except LifecycleCatalogUnavailable:
+        lifecycle_summary = {
+            "status": "unavailable",
+            "reason_code": "lifecycle_catalog_unavailable",
+        }
     self._json(
         HTTPStatus.OK,
         {
@@ -375,6 +491,7 @@ def admin_retention(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
             "sqlite_space": owner.retention.sqlite_space(),
             "plan": owner.retention.retention_plan(owner.kernel.subject_id),
             "evidence_capacity": owner.retention.evidence_capacity(owner.kernel.subject_id),
+            "lifecycle_diagnostics": lifecycle_summary,
         },
     )
     return False

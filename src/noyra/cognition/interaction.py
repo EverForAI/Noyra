@@ -308,6 +308,24 @@ class InteractionCognition:
         # recipient scope exists. Keep MemoryStore attached for private
         # cognition and future explicitly scoped retrieval.
         recalled_memories: list[dict[str, object]] = []
+        email_identity = None
+        if interaction.channel == "email":
+            from noyra.interaction.email_identity import read_evidence
+
+            with self.database.read_transaction() as connection:
+                events = connection.execute(
+                    "SELECT * FROM interaction_inbound_events WHERE subject_id=? "
+                    "AND interaction_id=? LIMIT 2",
+                    (self.subject_id, interaction.interaction_id),
+                ).fetchall()
+                identity = read_evidence(connection, events[0]) if len(events) == 1 else None
+            email_identity = {
+                "claimed_mailbox": interaction.counterparty,
+                "mailbox_verified": identity is not None and identity.verified,
+                "verification": identity.verification
+                if identity is not None
+                else "legacy_unverified",
+            }
         metadata = canonical_json(
             {
                 "interaction_id": interaction.interaction_id,
@@ -325,6 +343,7 @@ class InteractionCognition:
                     if who
                     else None
                 ),
+                "email_identity": email_identity,
                 "current_affect": affect,
                 "recalled_memories": recalled_memories,
                 "authorized_recent_private_history": [

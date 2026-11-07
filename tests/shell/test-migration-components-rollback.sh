@@ -8,6 +8,7 @@ test_root="$(mktemp -d "${TMPDIR:-/tmp}/noyra-migration-components.XXXXXX")"
 trap 'rm -rf --one-file-system -- "$test_root"' EXIT
 
 runner="$test_root/libexec/noyra-migration-runner.sh"
+runner_py="$test_root/libexec/noyra-migration-runner.py"
 agent_unit="$test_root/systemd/noyra-migration-agent.service"
 runner_unit="$test_root/systemd/noyra-migration-runner.service"
 target_path_unit="$test_root/systemd/noyra-target-activation.path"
@@ -36,13 +37,16 @@ systemctl() {
 
 printf 'old runner\n' > "$runner"
 printf 'old agent\n' > "$agent_unit"
-noyra_migration_components_snapshot "$backup" "$runner" "$agent_unit" "$runner_unit" "$target_path_unit"
+printf 'old helper\n' > "$runner_py"
+noyra_migration_components_snapshot "$backup" "$runner" "$agent_unit" "$runner_unit" "$target_path_unit" "$runner_py"
 noyra_migration_components_mark_changed
 printf 'new runner\n' > "$runner"
 printf 'new agent\n' > "$agent_unit"
+printf 'new helper\n' > "$runner_py"
 printf 'new runner unit\n' > "$runner_unit"
-noyra_migration_components_restore "$runner" "$agent_unit" "$runner_unit" "$target_path_unit" || fail 'restore failed'
+noyra_migration_components_restore "$runner" "$agent_unit" "$runner_unit" "$target_path_unit" "$runner_py" || fail 'restore failed'
 [[ "$(cat "$runner")" == 'old runner' ]] || fail 'runner was not restored'
+[[ "$(cat "$runner_py")" == 'old helper' ]] || fail 'root helper was not restored'
 [[ "$(cat "$agent_unit")" == 'old agent' ]] || fail 'agent unit was not restored'
 [[ ! -e "$runner_unit" ]] || fail 'new runner unit remained'
 [[ "$agent_enabled:$agent_active" == 'enabled:active' ]] || fail 'activation state changed'

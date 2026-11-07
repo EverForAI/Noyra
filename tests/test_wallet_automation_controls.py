@@ -172,3 +172,50 @@ def test_concurrent_http_controls_have_single_winner(control_server: NoyraHTTPSe
         control_server.wallet_economy.get_policy(control_server.kernel.subject_id).policy_version
         == 2
     )
+
+
+def test_execution_observation_failure_is_unknown_and_recovers_without_policy_change(
+    control_server: NoyraHTTPServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sqlite3
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from noyra.http_routes.wallet_automation import wallet_automation_projection
+
+    server = control_server
+    before = server.wallet_economy.get_policy(server.kernel.subject_id)
+    database = server.kernel.database
+    original = database.read_transaction
+    for failed_query in ("GROUP BY error_code", "ORDER BY updated_at DESC", "'signing'"):
+
+        @contextmanager
+        def broken_read(failed_query: str = failed_query) -> Iterator[Any]:
+            with original() as connection:
+
+                def execute(sql: str, parameters: Any = ()) -> Any:
+                    if "wallet_payment_executions" in sql and failed_query in sql:
+                        raise sqlite3.DatabaseError("synthetic private diagnostic detail")
+                    return connection.execute(sql, parameters)
+
+                yield SimpleNamespace(execute=execute)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(database, "read_transaction", broken_read)
+            payload = wallet_automation_projection(None, server)  # type: ignore[arg-type]
+        assert payload["active_executions"] is None
+        assert payload["pending_reason_counts"] is None
+        assert payload["latest_failure"] is None
+        assert payload["execution_observation"] == {
+            "status": "unavailable",
+            "reason_code": "wallet_execution_observation_unavailable",
+        }
+        assert payload["status"] == "disabled"
+        assert "synthetic private" not in json.dumps(payload)
+    healthy = wallet_automation_projection(None, server)  # type: ignore[arg-type]
+    assert healthy["execution_observation"] == {"status": "ok", "reason_code": None}
+    assert healthy["active_executions"] == 0
+    assert healthy["pending_reason_counts"] == {}
+    assert healthy["latest_failure"] is None
+    assert server.wallet_economy.get_policy(server.kernel.subject_id) == before

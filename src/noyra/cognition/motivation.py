@@ -28,6 +28,12 @@ from ._integrity import (
     durable_json,
     durable_string_list,
 )
+from .decision_evidence import (
+    DecisionValidationError,
+    append_rejection,
+    rejection_receipt,
+    unsettled_decision,
+)
 from .settings import CognitionSettings
 from .types import (
     MissionDevelopmentProposal,
@@ -36,7 +42,7 @@ from .types import (
 )
 
 
-class MotivationDevelopmentValidationError(ValueError):
+class MotivationDevelopmentValidationError(DecisionValidationError):
     pass
 
 
@@ -120,16 +126,19 @@ class MotivationDevelopment:
         context = self._context()
         if context is None or not self._is_due(latest, context.source_state_hash):
             return None
-        if self._calls_today() >= self.settings.max_motivation_model_calls_per_day:
-            return None
         round_number = self._review_count()
         purpose = f"motivation_development:{round_number}:{context.source_state_hash[:16]}"
         idempotency_key = f"motivation-development:{round_number}:{context.source_state_hash[:16]}"
+        wait = unsettled_decision(self.database, self.subject_id, "motivation_development", purpose)
+        if wait is not None:
+            return f"motivation_development_{wait}"
         existing = self._existing(idempotency_key)
         if existing is not None:
             return f"motivation_development_{existing.status}"
         recovered = self._successful_proposal(purpose, context)
         if recovered is None:
+            if self._calls_today() >= self.settings.max_motivation_model_calls_per_day:
+                return None
             if self._terminal_call_exists(idempotency_key):
                 return None
             try:
@@ -151,7 +160,26 @@ class MotivationDevelopment:
             proposal, call_id = recovered
         try:
             self._validate(proposal, context)
-        except MotivationDevelopmentValidationError:
+        except MotivationDevelopmentValidationError as error:
+            receipt = rejection_receipt(
+                validator="motivation",
+                call_id=call_id,
+                error=error,
+                context_hash=context.source_state_hash,
+                context_version="motivation-context/v2",
+                snapshot={
+                    "event_ids": sorted(context.event_ids),
+                    "memory_ids": sorted(context.memory_ids),
+                    "belief_ids": sorted(context.belief_ids),
+                    "goal_ids": sorted(context.goal_ids),
+                    "relationship_ids": sorted(context.relationship_ids),
+                    "values": {key: record.__dict__ for key, record in context.values.items()},
+                    "missions": {key: record.__dict__ for key, record in context.missions.items()},
+                    "policy": self._validation_policy(),
+                    "completed_sleep_count": context.completed_sleep_count,
+                },
+                proposal=proposal.model_dump(mode="json"),
+            )
             self._commit_review(
                 proposal,
                 call_id,
@@ -160,6 +188,7 @@ class MotivationDevelopment:
                 status="rejected",
                 changed_value_ids=(),
                 changed_mission_ids=(),
+                receipt=receipt,
             )
             return "motivation_development_rejected"
         record = self._commit(proposal, call_id, idempotency_key, context)
@@ -369,7 +398,8 @@ class MotivationDevelopment:
             event_rows = connection.execute(
                 "SELECT event_id, event_type, source, occurred_at, payload_hash FROM events "
                 "WHERE subject_id = ? AND event_type NOT LIKE 'interaction_%' "
-                "AND event_type NOT IN ('motivation_development_committed', 'autonomy_tick') "
+                "AND event_type NOT IN ('motivation_development_committed', 'autonomy_tick', "
+                "'intrinsic_decision_rejected') "
                 "ORDER BY occurred_at DESC, event_id DESC LIMIT 96",
                 (self.subject_id,),
             ).fetchall()
@@ -417,6 +447,8 @@ class MotivationDevelopment:
             values = self._load_values(connection)
             missions = self._load_missions(connection)
         payload: dict[str, Any] = {
+            "context_version": "motivation-context/v2",
+            "validation_policy": self._validation_policy(),
             "completed_sleep_count": completed_sleep_count,
             "existing_values": [record.__dict__ for record in values.values()],
             "existing_missions": [record.__dict__ for record in missions.values()],
@@ -458,14 +490,36 @@ class MotivationDevelopment:
             completed_sleep_count,
         )
 
+    def _validation_policy(self) -> dict[str, int | float]:
+        return {
+            "minimum_mission_value_count": self.settings.minimum_mission_value_count,
+            "minimum_mission_sleep_count": self.settings.minimum_mission_sleep_count,
+            "minimum_mission_adoption_sleep_count": (
+                self.settings.minimum_mission_adoption_sleep_count
+            ),
+            "max_value_weight_delta": self.settings.max_value_weight_delta,
+            "max_value_confidence_delta": 0.2,
+            "max_mission_commitment_delta": 0.2,
+            "max_mission_confidence_delta": 0.2,
+            "max_new_value_weight": 0.75,
+            "max_new_value_confidence": 0.65,
+            "max_new_mission_commitment": 0.6,
+            "max_new_mission_confidence": 0.6,
+            "min_adopted_mission_commitment": 0.7,
+            "min_adopted_mission_confidence": 0.7,
+            "minimum_mission_event_count": 3,
+        }
+
     @staticmethod
     def _messages(context: _MotivationContext) -> tuple[ModelMessage, ...]:
         system = (
             "You propose evidence-bound development of Noyra's values and long-horizon mission. "
             "Values and missions are revisable internal orientations, not commands, assigned "
             "personas, immutable essences or proof of consciousness. Human message text is absent. "
-            "Use only supplied IDs. A new value requires recurring evidence. A mission requires "
-            "multiple established values, at least three supplied events and repeated sleep. "
+            "Use only supplied IDs and obey validation_policy in the context. No change is a "
+            "valid choice. Short-term autonomous goals do not require a mission. A new value "
+            "requires recurring evidence. A mission requires "
+            "multiple evidence-backed values, at least three supplied events and repeated sleep. "
             "Prefer no mission change over premature certainty. Do not create goals, execute "
             "tools, contact anyone, claim progress or describe an external action. Return only "
             "the requested "
@@ -847,9 +901,10 @@ class MotivationDevelopment:
         status: str,
         changed_value_ids: tuple[str, ...],
         changed_mission_ids: tuple[str, ...],
+        receipt: dict[str, Any] | None = None,
     ) -> MotivationReviewRecord:
         with self.database.transaction() as connection:
-            return self._commit_review_connection(
+            record = self._commit_review_connection(
                 connection,
                 proposal,
                 call_id,
@@ -860,6 +915,10 @@ class MotivationDevelopment:
                 changed_mission_ids=changed_mission_ids,
                 now=self.clock(),
             )
+
+            if receipt is not None:
+                append_rejection(connection, self.database, self.subject_id, receipt, self.clock())
+            return record
 
     def _commit_review_connection(
         self,
@@ -919,6 +978,9 @@ class MotivationDevelopment:
     def _is_due(self, latest: MotivationReviewRecord | None, source_state_hash: str) -> bool:
         if latest is None:
             return True
+        if latest.status == "rejected":
+            elapsed = self._parse_time(self.clock()) - self._parse_time(latest.created_at)
+            return elapsed.total_seconds() >= self.settings.motivation_review_interval_seconds
         with self.database.connection() as connection:
             row = connection.execute(
                 "SELECT source_state_hash FROM motivation_reviews WHERE review_id = ?",
@@ -944,10 +1006,9 @@ class MotivationDevelopment:
             if not isinstance(content, str):
                 raise IntegrityError("successful motivation call has no content")
             proposal = MotivationDevelopmentProposal.model_validate_json(content)
-            try:
-                self._validate(proposal, context)
-            except MotivationDevelopmentValidationError:
-                continue
+            # Recover the provider fact even when local validation rejects it.
+            # The caller records that rejection atomically instead of losing
+            # the result or reissuing a paid call at the daily boundary.
             return proposal, str(row["call_id"])
         return None
 

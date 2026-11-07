@@ -122,6 +122,8 @@ class ServiceSettings(BaseModel):
                 network = ipaddress.ip_network(item, strict=False)
             except ValueError as error:
                 raise ValueError(f"trusted proxy CIDR is invalid: {item}") from error
+            if network.prefixlen == 0:
+                raise ValueError("default routes cannot be trusted proxy CIDRs")
             normalized.append(str(network))
         return tuple(dict.fromkeys(normalized))
 

@@ -42,6 +42,27 @@ python scripts/public-file-manifest.py verify-export --revision HEAD --archive n
 
 源码包内不含 `.git`；使用 `verify-export` 对照提交时，需要一个含对应提交的 Git checkout。下载包整体还应核对发行页的签名校验表。GitHub 自动生成的 Source code ZIP/TAR 不属于这份人工允许清单的产物。
 
+## 完整候选的发布边界
+
+提交前的原生钩子仍使用 `--staged`，只检查当前暂存内容。发布包含多个提交的候选时，
+需要使用可信已审基线覆盖整个引入范围；单独的 `--revision HEAD` 只证明一次提交的窄范围。
+
+```sh
+python scripts/check-publication-boundary.py --base REVIEWED_BASE_COMMIT --revision CANDIDATE_COMMIT
+```
+
+先把两个占位符换成真实的已审基线和候选提交。工具验证完整祖先关系，并检查全部新可达
+提交的快照；较早提交或合并侧历史里的内容，不能因最后一次只改了别的文件而漏过。
+已审基线里同路径的旧文本继续按历史豁免处理，不因此扫描全部历史或重写旧记录。
+
+普通 PR 和 main 推送自动从 GitHub 事件确定范围。手动 quality 可以填写 `publication_base`
+完整 SHA，或使用仓库变量 `PUBLICATION_REVIEW_BASE`；**标签发布前必须配置该变量为
+已审的严格祖先 SHA**。缺失时会提前拒绝，不自动以候选自身或最近父提交充当已审基线。
+此修复不会远程创建变量或自动认可任意基线。
+
+完整历史、失败语义、合并/重命名与基线信任要求见
+[候选范围检查合同](../development/publication-range-guard.md)。
+
 ## CI 与正式发布
 
 普通 CI 在 Linux 和 Windows 上分别运行清单校验、实际导出和归档复核；现有 Python 测试矩阵运行专门的回归测试。发布质量门禁再次检查标签提交，正式发布任务从同一个提交生成 `dist/noyra-source.zip` 并复核，再将它和其他发行产物一起纳入现有 `SHA256SUMS`、签名与发布附件流程。
@@ -55,3 +76,14 @@ python scripts/public-file-manifest.py verify-export --revision HEAD --archive n
 普通删除或取消跟踪不会清除 Git 历史、旧 PR 引用、缓存和已下载副本。本次材料整理不是历史擦除，也不承诺降低完整历史克隆的体积。
 
 本地提交钩子与现有 CI 共同检查当前快照的发布边界，安装方式和范围见 [贡献指南](../../CONTRIBUTING.md#publication-boundary)。清单工具仍负责精确 Git blob 的允许、排除和归档一致性，两者不能互相替代。
+
+## Backup-key administration compatibility
+
+Rotation now requires an explicit saved request ID and the expected source
+generation/hash; the old implicit command/API fails before mutation. Python
+`BackupKeyring.rotate` returns operation metadata rather than secret keyring
+material. Scripts must migrate according to the
+[backup-key command and exit-code contract](../development/backup-key-commands.md).
+Initialization, backup creation/restoration and runtime key reading are unchanged.
+Unknown outcomes must resume the same request. Windows durable rotation reports
+unsupported before mutation; it does not silently downgrade the durability claim.

@@ -130,9 +130,11 @@ def test_public_schema_has_fixed_reviewed_fingerprints(
     archive: tuple[PublicArchive, SubjectKernel],
 ) -> None:
     _, kernel = archive
-    # Reviewed whole-database schema 111, not only archive tables. Versions
-    # 108-111 add acquisition state, its immutable-cache guard, an agenda
-    # revision index and append-only thought-round closures. Archive tables
+    # Reviewed whole-database schema 113, not only archive tables. Versions
+    # 108-112 add acquisition state, its immutable-cache guard, an agenda
+    # revision index, append-only thought-round closures and bounded scheduling state.
+    # v113 adds explicit email identity versions and per-event mailbox evidence.
+    # Archive tables
     # retain their contract. Keep independent literal values, never derive the
     # expectation from the implementation's fingerprint registry.
     with kernel.database.connection() as connection:
@@ -141,15 +143,15 @@ def test_public_schema_has_fixed_reviewed_fingerprints(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()[0]
             == str(CURRENT_SCHEMA_VERSION)
-            == "111"
+            == "113"
         )
         assert (
             kernel.database.schema_ddl_fingerprint(connection)
-            == "a750d174056db2032ae4bae68df71dc79dc2e3ef0bcc2283f3ffdd3f241b0397"
+            == "e070d0be4362c38381c8491e20f9d46805c60651d9c80a03160f05ecc90d9994"
         )
         assert (
             kernel.database.schema_structure_fingerprint(connection)
-            == "4a5f61c6841f87f06293644d441e0a8071605d2025f1a4f5f859d0a2dcba55dd"
+            == "800ecf6f66a188e66f86dbfacdb1fffb452636b591a09d2950b2361e4a9f5608"
         )
 
 
@@ -205,12 +207,9 @@ def test_schema_upgrade_preserves_reviewed_public_archive(
                 "WHERE name GLOB 'public_*' ORDER BY type,name"
             ).fetchall()
             assert [tuple(row) for row in actual_schema] == expected_schema
-            assert (
-                connection.execute(
-                    "SELECT value FROM schema_meta WHERE key='schema_version'"
-                ).fetchone()[0]
-                == "111"
-            )
+            assert connection.execute(
+                "SELECT value FROM schema_meta WHERE key='schema_version'"
+            ).fetchone()[0] == str(CURRENT_SCHEMA_VERSION)
     finally:
         current.close()
 

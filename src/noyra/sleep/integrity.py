@@ -92,6 +92,9 @@ class SleepIntegrity:
             ).fetchall()
             for row in runs:
                 run = self._sleep_run_from_row(row)
+                from .failure import verify_failure
+
+                verify_failure(self.database, connection, row)
                 transitions = connection.execute(
                     "SELECT * FROM sleep_transitions WHERE sleep_id = ? ORDER BY rowid",
                     (row["sleep_id"],),

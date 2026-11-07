@@ -25,6 +25,7 @@ class OperationLease:
     kind: str
     _gate: RuntimeAdmissionGate
     allow_quarantine: bool = False
+    sleep_work: bool = False
 
     def assert_current(self) -> None:
         self._gate.assert_current(self)
@@ -54,6 +55,7 @@ class RuntimeAdmissionGate:
         ownership_check: Callable[[], bool] | None = None,
         control_ownership_check: Callable[[], bool] | None = None,
         migration_clear_check: Callable[[], bool] | None = None,
+        sleep_check: Callable[[], bool] | None = None,
     ):
         self.subject_id = subject_id
         self._condition = threading.Condition(threading.RLock())
@@ -65,6 +67,7 @@ class RuntimeAdmissionGate:
         self._ownership_check = ownership_check
         self._control_ownership_check = control_ownership_check or ownership_check
         self._migration_clear_check = migration_clear_check
+        self._sleep_check = sleep_check
         self._migration_fenced = False
         self._migration_fence_epoch: int | None = None
         self._migration_control_active = False
@@ -122,11 +125,13 @@ class RuntimeAdmissionGate:
     def quarantine(self) -> int:
         return self.invalidate(quarantined=True)
 
-    def clear_quarantine(self) -> None:
-        """Clear a startup quarantine after integrity recovery without opening admission."""
+    def clear_quarantine(self, *, expected_epoch: int | None = None) -> None:
+        """Clear verified quarantine without opening admission or reviving stale work."""
         with self._condition:
             if self._closed:
                 raise OperationInvalidated("runtime is draining")
+            if expected_epoch is not None and self._epoch != expected_epoch:
+                return  # A later invalidation outranks the earlier clean observation.
             self._quarantined = False
             self._accepting = False
             self._condition.notify_all()
@@ -207,7 +212,9 @@ class RuntimeAdmissionGate:
             if not self._migration_fenced:
                 raise OperationInvalidated("migration source is not fenced")
 
-    def begin(self, kind: str, *, allow_quarantine: bool = False) -> OperationLease:
+    def begin(
+        self, kind: str, *, allow_quarantine: bool = False, sleep_work: bool = False
+    ) -> OperationLease:
         if not kind or not kind.strip():
             raise ValueError("operation kind is required")
         with self._condition:
@@ -217,7 +224,14 @@ class RuntimeAdmissionGate:
                 raise OperationInvalidated("runtime is draining")
             if self._migration_fenced:
                 raise RuntimeOwnershipError("runtime is fenced for migration")
-            if not self._accepting and not allow_quarantine:
+            if sleep_work and (
+                kind != "sleep_tick"
+                or allow_quarantine
+                or self._sleep_check is None
+                or not self._sleep_check()
+            ):
+                raise OperationInvalidated("sleep admission requires an open sleep lifecycle")
+            if not self._accepting and not allow_quarantine and not sleep_work:
                 raise OperationInvalidated("runtime admission is closed")
             if self._quarantined and not allow_quarantine:
                 raise OperationInvalidated("runtime is in integrity quarantine")
@@ -228,6 +242,7 @@ class RuntimeAdmissionGate:
                 kind,
                 self,
                 allow_quarantine,
+                sleep_work,
             )
             self._active += 1
             return lease
@@ -292,7 +307,11 @@ class RuntimeAdmissionGate:
             raise OperationInvalidated("runtime is draining")
         if self._migration_fenced:
             raise OperationInvalidated("runtime is fenced for migration")
-        if not self._accepting and not lease.allow_quarantine:
+        if lease.sleep_work and (
+            lease.kind != "sleep_tick" or self._sleep_check is None or not self._sleep_check()
+        ):
+            raise OperationInvalidated("sleep lifecycle changed")
+        if not self._accepting and not lease.allow_quarantine and not lease.sleep_work:
             raise OperationInvalidated("runtime admission is closed")
         if self._quarantined and not lease.allow_quarantine:
             raise OperationInvalidated("runtime is in integrity quarantine")

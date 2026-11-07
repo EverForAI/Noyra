@@ -593,7 +593,16 @@ class PublicProjection:
                     "autonomous_project",
                 }:
                     item["summary"] = item["category"]
-        return {"items": safe_page, "next_cursor": next_cursor}
+        return {
+            "items": safe_page,
+            "next_cursor": next_cursor,
+            "page": {
+                "scope": "anchored_keyset_page",
+                "returned": len(safe_page),
+                "record_limit": bounded,
+                "has_more": next_cursor is not None,
+            },
+        }
 
     @staticmethod
     def _log_timestamp(value: str | None) -> str | None:
@@ -882,22 +891,36 @@ class PublicProjection:
         return result
 
     def interactions_view(self, subject_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
-        return [
-            {
-                "interaction_id": record.interaction_id,
-                "direction": record.direction,
-                "kind": record.kind,
-                "channel": record.channel,
-                "counterparty": record.counterparty,
-                "content": record.content,
-                "related_interaction_id": record.related_interaction_id,
-                "status": record.status,
-                "created_at": record.created_at,
-                "decided_at": record.decided_at,
-            }
-            for record in self.interactions.list(subject_id, limit=limit)
-            if record.direction == "outgoing" and record.channel.startswith("public:")
-        ]
+        from .delivery_view import communication_view
+
+        bounded = max(1, min(limit, 1_000))
+        with self.database.read_transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM interactions WHERE subject_id=? "
+                "ORDER BY created_at DESC,interaction_id DESC LIMIT ?",
+                (subject_id, bounded),
+            ).fetchall()
+            result = []
+            for row in rows:
+                record = InteractionStore._from_row(row)
+                if record.direction != "outgoing" or not record.channel.startswith("public:"):
+                    continue
+                result.append(
+                    {
+                        "interaction_id": record.interaction_id,
+                        "direction": record.direction,
+                        "kind": record.kind,
+                        "channel": record.channel,
+                        "counterparty": record.counterparty,
+                        "content": record.content,
+                        "related_interaction_id": record.related_interaction_id,
+                        "status": record.status,
+                        "created_at": record.created_at,
+                        "decided_at": record.decided_at,
+                        **communication_view(connection, row),
+                    }
+                )
+            return result
 
     def public_posts_view(self, subject_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
         """Return only moderated public posts; no author identity beyond its label."""

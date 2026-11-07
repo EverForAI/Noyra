@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import secrets
-from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from typing import TYPE_CHECKING
 
@@ -25,7 +23,18 @@ def admin_migration_tasks_wallet_approval(self: RequestHandler, owner: NoyraHTTP
         return True
     task_id = self.path.split("/")[-2]
     try:
-        task = owner.migration_manager.get_task(task_id)
+        task = owner.migration_manager.get_task(task_id, subject_id=owner.kernel.subject_id)
+        if payload.get("revoke_local_wallet") is True:
+            from noyra.migration.local_wallet_approval import revoke_local_wallet
+
+            revoke_local_wallet(
+                owner.kernel.database,
+                task,
+                str(payload.get("approval_id", "")),
+                actor=self._actor(),
+            )
+            self._json(HTTPStatus.OK, {"status": "revoked"})
+            return True
         policy = owner.migration_store.read_policy(owner.kernel.subject_id)
         if (
             task.subject_id != owner.kernel.subject_id
@@ -37,29 +46,25 @@ def admin_migration_tasks_wallet_approval(self: RequestHandler, owner: NoyraHTTP
             or payload.get("authorize_local_wallet") is not True
         ):
             raise ValueError("local wallet approval unavailable")
-        approval = {
-            "approval_id": secrets.token_hex(24),
-            "task_id": task_id,
-            "address": getattr(owner.wallet_signer, "address", None),
-            "channel_id": f"recipient-{task.target_id}",
-            "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
-        }
-        with owner.kernel.database.transaction() as connection:
-            owner.migration_store._append_audit(
-                connection,
-                task.subject_id,
-                "migration_local_wallet_approved",
-                self._actor(),
-                {
-                    "task_id": task_id,
-                    "policy_revision": policy.revision,
-                    "approval": approval,
-                },
-            )
+        from noyra.migration.local_wallet_approval import grant_local_wallet
+
+        approval = grant_local_wallet(
+            owner.kernel.database,
+            task,
+            str(getattr(owner.wallet_signer, "address", "")),
+            actor=self._actor(),
+        )
     except (ValueError, NotFoundError):
         self._json(HTTPStatus.CONFLICT, {"error": "migration_wallet_approval_failed"})
         return True
-    self._json(HTTPStatus.OK, {"status": "approved", "expires_at": approval["expires_at"]})
+    self._json(
+        HTTPStatus.OK,
+        {
+            "status": "approved",
+            "approval_id": approval["approval_id"],
+            "expires_at": approval["expires_at"],
+        },
+    )
     return True
     return False
 

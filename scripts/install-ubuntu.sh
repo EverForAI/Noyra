@@ -102,6 +102,7 @@ UPGRADE_RECOVER_UNIT=/etc/systemd/system/noyra-upgrade-recover.service
 MIGRATION_AGENT_UNIT=/etc/systemd/system/noyra-migration-agent.service
 MIGRATION_RUNNER_UNIT=/etc/systemd/system/noyra-migration-runner.service
 MIGRATION_RUNNER=/usr/local/libexec/noyra-migration-runner.sh
+MIGRATION_RUNNER_PY=/usr/local/libexec/noyra-migration-runner.py
 TARGET_ACTIVATION_RUNNER=/usr/local/libexec/noyra-target-activation-runner.py
 TARGET_ACTIVATION_UNIT=/etc/systemd/system/noyra-target-activation.service
 TARGET_ACTIVATION_PATH_UNIT=/etc/systemd/system/noyra-target-activation.path
@@ -872,7 +873,7 @@ on_error() {
     if ! noyra_migration_components_restore \
       "$MIGRATION_RUNNER" "$MIGRATION_AGENT_UNIT" "$MIGRATION_RUNNER_UNIT" \
       "$TARGET_ACTIVATION_RUNNER" "$TARGET_ACTIVATION_UNIT" \
-      "$TARGET_ACTIVATION_PATH_UNIT" "$TARGET_ACTIVATION_RECOVER_UNIT"; then
+      "$TARGET_ACTIVATION_PATH_UNIT" "$TARGET_ACTIVATION_RECOVER_UNIT" "$MIGRATION_RUNNER_PY"; then
       migration_components_restored=false
       echo 'Failed to restore migration agent components; Noyra will remain stopped.' >&2
       status=1
@@ -1327,11 +1328,11 @@ MIGRATION_COMPONENT_BACKUP_DIR="$INSTALL_DIR/.migration-components.$$.$RANDOM"
 noyra_migration_components_snapshot \
   "$MIGRATION_COMPONENT_BACKUP_DIR" "$MIGRATION_RUNNER" "$MIGRATION_AGENT_UNIT" \
   "$MIGRATION_RUNNER_UNIT" "$TARGET_ACTIVATION_RUNNER" "$TARGET_ACTIVATION_UNIT" \
-  "$TARGET_ACTIVATION_PATH_UNIT" "$TARGET_ACTIVATION_RECOVER_UNIT"
+  "$TARGET_ACTIVATION_PATH_UNIT" "$TARGET_ACTIVATION_RECOVER_UNIT" "$MIGRATION_RUNNER_PY"
 noyra_migration_components_mark_changed
 for migration_file in "$MIGRATION_RUNNER" "$MIGRATION_AGENT_UNIT" "$MIGRATION_RUNNER_UNIT" \
   "$TARGET_ACTIVATION_RUNNER" "$TARGET_ACTIVATION_UNIT" "$TARGET_ACTIVATION_PATH_UNIT" \
-  "$TARGET_ACTIVATION_RECOVER_UNIT"; do
+  "$TARGET_ACTIVATION_RECOVER_UNIT" "$MIGRATION_RUNNER_PY"; do
   if [[ -L "$migration_file" || ( -e "$migration_file" && ! -f "$migration_file" ) ]]; then
     echo "Migration system file must be regular and not a symlink: $migration_file" >&2
     exit 1
@@ -1348,6 +1349,7 @@ chmod 0700 "$DATA_DIR/migration/source"
 install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/fences"
 install -d -o noyra -g noyra -m 0700 "$DATA_DIR/migration/requests"
 install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/status"
+install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/restored"
 install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/target-activation"
 install -d -o root -g noyra -m 0730 "$DATA_DIR/migration/target-activation/requests"
 install -d -o root -g noyra -m 0750 "$DATA_DIR/migration/target-activation/status"
@@ -1390,6 +1392,7 @@ if [[ -e "$CONFIG_DIR/migration/identity.json" || -L "$CONFIG_DIR/migration/iden
   chmod 0640 "$CONFIG_DIR/migration/identity.json"
 fi
 install -o root -g root -m 0750 "$SOURCE_DIR/scripts/noyra-migration-runner.sh" "$MIGRATION_RUNNER"
+install -o root -g root -m 0750 "$SOURCE_DIR/scripts/noyra-migration-runner.py" "$MIGRATION_RUNNER_PY"
 install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-migration-agent.service" "$MIGRATION_AGENT_UNIT"
 install -o root -g root -m 0644 "$SOURCE_DIR/deploy/systemd/noyra-migration-runner.service" "$MIGRATION_RUNNER_UNIT"
 install -o root -g root -m 0750 "$SOURCE_DIR/scripts/noyra-target-activation-runner.py" "$TARGET_ACTIVATION_RUNNER"

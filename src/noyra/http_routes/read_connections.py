@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from http import HTTPStatus
 from typing import TYPE_CHECKING
 from urllib.parse import SplitResult
@@ -203,16 +204,23 @@ def deliveries(self: RequestHandler, owner: NoyraHTTPServer, limit: int) -> bool
     if not self._authorized("read"):
         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
         return True
-    with owner.kernel.database.connection() as connection:
-        delivery_rows = connection.execute(
-            "SELECT delivery_id FROM interaction_deliveries WHERE subject_id = ? "
-            "ORDER BY updated_at DESC LIMIT ?",
-            (owner.kernel.subject_id, limit),
-        ).fetchmany(limit)
-    self._json(
-        HTTPStatus.OK,
-        [owner.deliveries.get_delivery(str(row["delivery_id"])).__dict__ for row in delivery_rows],
-    )
+    try:
+        with owner.kernel.database.read_transaction() as connection:
+            delivery_rows = connection.execute(
+                "SELECT delivery_id FROM interaction_deliveries WHERE subject_id = ? "
+                "ORDER BY updated_at DESC,delivery_id DESC LIMIT ?",
+                (owner.kernel.subject_id, limit),
+            ).fetchall()
+            records = [
+                owner.deliveries._get_delivery_connection(
+                    connection, str(row["delivery_id"]), subject_id=owner.kernel.subject_id
+                ).__dict__
+                for row in delivery_rows
+            ]
+    except (IntegrityError, sqlite3.Error):
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "delivery_state_unavailable"})
+        return True
+    self._json(HTTPStatus.OK, records)
     return False
 
 
@@ -232,6 +240,9 @@ def deliveries_reconciliations(
         )
     except NotFoundError:
         self._json(HTTPStatus.NOT_FOUND, {"error": "delivery_not_found"})
+        return True
+    except (IntegrityError, sqlite3.Error):
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "delivery_state_unavailable"})
         return True
     self._json(
         HTTPStatus.OK,

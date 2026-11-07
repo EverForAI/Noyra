@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import nullcontext
 from typing import Any
 
 from .database import Database, action_state_hash, behavior_log_state_hash
@@ -44,6 +46,7 @@ class ActionLedger:
         side_effect: bool = False,
         resource_cost: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        before_prepare: Callable[[Any], None] | None = None,
     ) -> ActionRecord:
         if not action_type.strip() or not tool.strip() or not target.strip():
             raise ValueError("action_type, tool and target are required")
@@ -110,6 +113,10 @@ class ActionLedger:
                 raise InvalidTransitionError(
                     "this strategy is blocked until genuinely new evidence is recorded"
                 )
+            if before_prepare is not None:
+                # Caller admission is checked in the same writer transaction as
+                # the intent. Never run external work in this callback.
+                before_prepare(connection)
             existing = connection.execute(
                 "SELECT * FROM actions WHERE subject_id = ? AND idempotency_key = ?",
                 (subject_id, idempotency_key),
@@ -188,10 +195,13 @@ class ActionLedger:
         resource_summary: str = "none",
         public_explanation: str = "",
         redaction_reason: str | None = None,
+        _connection: Any | None = None,
     ) -> ActionRecord:
         if status not in EXECUTOR_COMPLETION_STATES:
             raise ValueError(f"invalid action completion status: {status}")
-        with self.database.transaction() as connection:
+        with (
+            self.database.transaction() if _connection is None else nullcontext(_connection)
+        ) as connection:
             row = self._get_row(connection, action_id)
             if row["status"] != "executing":
                 raise InvalidTransitionError(f"cannot finish action in state {row['status']}")
