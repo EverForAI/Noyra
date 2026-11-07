@@ -439,9 +439,7 @@ def mailbox(self: RequestHandler, owner: NoyraHTTPServer, limit: int) -> bool:
     return False
 
 
-def lifecycle_catalog(
-    self: RequestHandler, owner: NoyraHTTPServer, parsed: SplitResult
-) -> bool:
+def lifecycle_catalog(self: RequestHandler, owner: NoyraHTTPServer, parsed: SplitResult) -> bool:
     if not self._authorized("operator"):
         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
         return True
@@ -477,7 +475,8 @@ def admin_retention(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
         }
     except LifecycleCatalogUnavailable:
         lifecycle_summary = {
-            "status": "unavailable", "reason_code": "lifecycle_catalog_unavailable"
+            "status": "unavailable",
+            "reason_code": "lifecycle_catalog_unavailable",
         }
     self._json(
         HTTPStatus.OK,

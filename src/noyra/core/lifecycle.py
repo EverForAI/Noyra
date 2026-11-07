@@ -83,7 +83,10 @@ class LifecycleManager:
                     "SELECT state FROM runtime_state WHERE subject_id=?", (self.subject_id,)
                 ).fetchone()
                 if row is not None and row["state"] in {
-                    "winding_down", "reflective_sleep", "deep_sleep", "waking"
+                    "winding_down",
+                    "reflective_sleep",
+                    "deep_sleep",
+                    "waking",
                 }:
                     raise InvalidTransitionError("sleep pause requires the sleep failure protocol")
             return self._transition_connection(connection, new_state, reason, actor=actor)

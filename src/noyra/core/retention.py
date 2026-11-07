@@ -500,9 +500,7 @@ class RetentionManager:
             is not None
         )
 
-    def lifecycle_catalog(
-        self, *, limit: int = 50, cursor: str | None = None
-    ) -> dict[str, Any]:
+    def lifecycle_catalog(self, *, limit: int = 50, cursor: str | None = None) -> dict[str, Any]:
         from .lifecycle_diagnostics import LifecycleCatalogUnavailable, lifecycle_catalog
 
         # This advisory read cannot make the existing cleanup or cognition

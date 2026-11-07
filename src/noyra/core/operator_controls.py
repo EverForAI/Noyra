@@ -628,13 +628,20 @@ class OperatorControlService:
         return WorkflowIncrementCatalog(self.database, self.subject_id).page(limit=limit)
 
     def export_workflow_increment(
-        self, workflow_id: str, parent_id: str, expected_version: int, request_key: str,
-        *, actor: str, reason: str,
+        self,
+        workflow_id: str,
+        parent_id: str,
+        expected_version: int,
+        request_key: str,
+        *,
+        actor: str,
+        reason: str,
     ) -> dict[str, Any]:
         from .workflow_increment_control import export_increment
 
-        return export_increment(self, workflow_id, parent_id, expected_version, request_key,
-                                actor=actor, reason=reason)
+        return export_increment(
+            self, workflow_id, parent_id, expected_version, request_key, actor=actor, reason=reason
+        )
 
     def verify_workflow_chain(self, tip_id: str) -> dict[str, Any]:
         from .workflow_chain_control import open_workflow_chain
@@ -947,10 +954,12 @@ class OperatorControlService:
                     if connection.execute(
                         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
                     ).fetchone():
-                        references += int(connection.execute(
-                            "SELECT COUNT(*) FROM " + table + " WHERE subject_id=?",
-                            (self.subject_id,),
-                        ).fetchone()[0])
+                        references += int(
+                            connection.execute(
+                                "SELECT COUNT(*) FROM " + table + " WHERE subject_id=?",
+                                (self.subject_id,),
+                            ).fetchone()[0]
+                        )
             configured = ArchiveKeyring.configured()
             if not configured and references == 0:
                 return {"state": "not_configured", "configured": False, "references": 0}

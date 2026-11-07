@@ -449,9 +449,7 @@ def _verified_records(
             DurableWorkflowStore._from_row(row)
             require(
                 row["status"]
-                in DurableWorkflowStore._ALLOWED[
-                    None if previous is None else previous["status"]
-                ]
+                in DurableWorkflowStore._ALLOWED[None if previous is None else previous["status"]]
                 and (previous is None or row["workflow_type"] == previous["workflow_type"]),
                 "restored transition mismatch",
             )

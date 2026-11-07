@@ -601,12 +601,16 @@ def test_deadline_expiring_before_final_commit_prevents_acceptance(
     assert control.kernel.admission.active_operations == 0
     assert control.workflow_exports()["items"][0]["status"] == "prepared"
     with control.database.read_transaction() as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM workflow_checkpoints"
-        ).fetchone()[0] == 4
-        assert connection.execute(
-            "SELECT COUNT(*) FROM events WHERE event_type='workflow_export_accepted'"
-        ).fetchone()[0] == 0
-        assert connection.execute(
-            "SELECT COUNT(*) FROM audit_records WHERE action='workflow_export_accepted'"
-        ).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM workflow_checkpoints").fetchone()[0] == 4
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM events WHERE event_type='workflow_export_accepted'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM audit_records WHERE action='workflow_export_accepted'"
+            ).fetchone()[0]
+            == 0
+        )

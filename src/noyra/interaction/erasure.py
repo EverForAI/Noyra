@@ -560,11 +560,14 @@ class ConversationErasure:
         ).fetchone():
             raise ErasureReviewRequired("private_exports_in_flight")
         for table in ("workflow_export_publications", "workflow_increment_publications"):
-            if connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-            ).fetchone() and connection.execute(
-                "SELECT 1 FROM " + table + " WHERE subject_id=? LIMIT 1", (subject,)
-            ).fetchone():
+            if (
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                ).fetchone()
+                and connection.execute(
+                    "SELECT 1 FROM " + table + " WHERE subject_id=? LIMIT 1", (subject,)
+                ).fetchone()
+            ):
                 # These preserved derivatives cannot be retired by the legacy
                 # managed conversation export cleanup path.
                 raise ErasureReviewRequired("private_legacy_export_review_required")

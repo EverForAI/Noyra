@@ -135,8 +135,7 @@ def test_empty_subject_and_middle_type_corruption_still_use_complete_history(
     # The final valid row cannot hide an invalid middle row.
     with workflows.database.transaction() as c:
         c.execute(
-            "UPDATE workflow_checkpoints SET workflow_type='changed' "
-            "WHERE checkpoint_version=128"
+            "UPDATE workflow_checkpoints SET workflow_type='changed' WHERE checkpoint_version=128"
         )
     with pytest.raises(IntegrityError):
         workflows.verify_integrity("one")

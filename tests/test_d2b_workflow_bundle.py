@@ -225,9 +225,7 @@ def test_source_identity_ignores_only_advancing_event_head(database: Database) -
 
 
 @pytest.mark.parametrize("invalid_count", [True, 1.0])
-def test_manifest_source_preserves_exact_json_types(
-    database: Database, invalid_count: Any
-) -> None:
+def test_manifest_source_preserves_exact_json_types(database: Database, invalid_count: Any) -> None:
     seed(database, 1)
     objects = Objects()
     proof, _ = export(database, objects)

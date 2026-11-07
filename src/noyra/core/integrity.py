@@ -1708,10 +1708,15 @@ def _check_retention_runs(context: IntegrityContext) -> IntegrityCheckOutcome:
             increment_catalog.get(context.connection, row["publication_id"])
             increments += 1
         requests = increment_catalog.verify_requests(context.connection)
-    return IntegrityCheckOutcome(details={
-        "runs": len(rows), "retention_registry": registry, "workflow_exports": publications,
-        "workflow_increments": increments, "workflow_increment_requests": requests,
-    })
+    return IntegrityCheckOutcome(
+        details={
+            "runs": len(rows),
+            "retention_registry": registry,
+            "workflow_exports": publications,
+            "workflow_increments": increments,
+            "workflow_increment_requests": requests,
+        }
+    )
 
 
 def _check_foreign_keys(context: IntegrityContext) -> IntegrityCheckOutcome:

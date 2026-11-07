@@ -35,6 +35,7 @@ def _accepted_root(
     ring = ArchiveKeyring.from_env()
     with controls.database.read_transaction() as connection:
         connection.execute("PRAGMA query_only=ON")
+
         # Interrupt long schema/count scans too. SQLite converts a progress
         # callback exception to an interrupted query; the caller fails closed.
         def progress() -> int:
