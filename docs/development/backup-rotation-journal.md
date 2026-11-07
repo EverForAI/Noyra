@@ -3,7 +3,9 @@
 `BackupRotationJournal` adds an administrative preparation and inspection API.
 Preparation records a proposed v1 keyring privately; it leaves the active
 keyring bytes, inode, generation and service-group permissions unchanged. This
-module does not publish that proposal or create an acceptance receipt.
+preparation call does not publish that proposal or create an acceptance receipt.
+The separate [publication and resume API](backup-rotation-publication.md) uses
+only an existing prepared request.
 
 ## Explicit request and expected source
 
@@ -53,10 +55,13 @@ also rejects them if they are forcibly staged.
 Retained snapshots also retain their keys; future key destruction must account
 for them. This module does not automatically prune records.
 
-The reader accepts at most 63 operations, 127 directory entries, 2 MiB per
+The reader accepts at most 63 operations, 128 directory entries, 2 MiB per
 intent, 4 KiB per header/acceptance record and 8 MiB in total. Unknown, nested,
-linked, incomplete, malformed or over-budget entries cause rejection. A private
-orphan is preserved for explicit inspection rather than silently deleted.
+linked, incomplete, malformed or over-budget entries cause rejection. The one
+reserved acceptance-stage name is bound to the latest intent and must contain
+an exact prefix of its expected receipt. A crash may leave exactly two aliases
+of that receipt inside this private directory; no other hard links qualify.
+Unrecognized private orphans are preserved for inspection rather than deleted.
 
 Writes require the existing stable sibling rotation lock. Journal creation and
 its parent entry are synchronized before preparation completes. Records are
@@ -96,5 +101,6 @@ platforms reject it before opening the keyring or creating a lock/journal.
 Windows inspection still enforces the existing private-ACL policy. A no-op
 Windows directory synchronization is not reported as durable preparation.
 Native process-exit tests demonstrate process recovery, not hardware power-loss
-behavior. Publication, resume, acceptance writing and CLI migration belong to
-subsequent modules. No runtime or database migration is required for preparation.
+behavior. Publication, resume and acceptance writing are described in the
+separate protocol; CLI migration remains separate. No runtime or database
+migration is required for preparation or publication.

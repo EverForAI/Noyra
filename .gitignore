@@ -58,3 +58,6 @@ build/
 
 # Private backup-rotation intents contain key snapshots
 .*.rotation-journal/
+
+# Same-directory private keyring publication staging
+.noyra-rotation-*.publish.tmp

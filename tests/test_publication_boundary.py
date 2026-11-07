@@ -60,6 +60,7 @@ def command(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
         "OUTPUT/report.txt",
         "snapshot.bundle",
         "copy.BUNDLE",
+        ".noyra-rotation-" + "a" * 64 + ".publish.tmp",
         ".backup-keyring.json.rotation-journal/header.json",
         "nested/.BACKUP.ROTATION-JOURNAL/synthetic.intent.json",
         "docs/audit/synthetic-evidence/result.json",
@@ -304,3 +305,17 @@ def test_private_rotation_journal_ignore_and_forced_add_guard(repository: Path) 
     git(repository, "add", "-f", "--", path)
     result = command(repository, "--staged")
     assert result.returncode == 1 and "synthetic private placeholder" not in result.stderr
+
+
+def test_private_keyring_target_stage_is_ignored_and_forced_add_is_blocked(
+    repository: Path,
+) -> None:
+    (repository / ".gitignore").write_bytes((ROOT / ".gitignore").read_bytes())
+    path = "nested/.noyra-rotation-" + "a" * 64 + ".publish.tmp"
+    file = repository / path
+    file.parent.mkdir(parents=True)
+    file.write_text("synthetic stage placeholder", encoding="utf-8")
+    assert git(repository, "check-ignore", "--", path).decode().strip() == path
+    git(repository, "add", "-f", "--", path)
+    result = command(repository, "--staged")
+    assert result.returncode == 1 and "synthetic stage placeholder" not in result.stderr

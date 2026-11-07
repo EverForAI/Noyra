@@ -18,9 +18,11 @@ from .backup_rotation_records import (
     MAX_KEYRING_BYTES,
     MAX_OPERATIONS,
     RotationAcceptance,
+    RotationConflictError,
     RotationHeader,
     RotationIntent,
     RotationJournalError,
+    RotationOutcomeUnknownError,
     RotationPreparationUnknownError,
     keyring_bytes,
     sha256,
@@ -31,7 +33,13 @@ from .backup_rotation_records import (
 from .backup_rotation_storage import RotationStorage, supported_preparation
 from .locking import ProcessLock
 
-__all__ = ["BackupRotationJournal", "RotationJournalError", "RotationPreparationUnknownError"]
+__all__ = [
+    "BackupRotationJournal",
+    "RotationConflictError",
+    "RotationJournalError",
+    "RotationOutcomeUnknownError",
+    "RotationPreparationUnknownError",
+]
 
 
 @dataclass(frozen=True)
@@ -95,6 +103,26 @@ def _catalog(values: dict[str, bytes], binding: str) -> _Catalog:
         ):
             raise RotationJournalError("rotation journal predecessor chain conflicts")
         previous = intent
+    stages = [(name, raw) for name, raw in values.items() if name.endswith(".tmp")]
+    if len(stages) > 1:
+        raise RotationJournalError("rotation journal has too many publication stages")
+    latest = (
+        max(intents.values(), key=lambda entry: entry[0].expected_generation)[0]
+        if intents
+        else None
+    )
+    for name, raw in stages:
+        if latest is None:
+            raise RotationJournalError("rotation stage has no matching intent")
+        stem = latest.filename.removesuffix(".intent.json")
+        if name == stem + ".accept.tmp":
+            expected = RotationAcceptance(
+                sha256(intents[latest.request_id][1]), latest.target_hash, latest.request_id
+            ).to_bytes()
+        else:
+            raise RotationJournalError("rotation stage request binding conflicts")
+        if not expected.startswith(raw):
+            raise RotationJournalError("rotation stage content conflicts")
     return _Catalog(header, values["header.json"], intents, frozenset(accepted))
 
 
@@ -184,6 +212,12 @@ class BackupRotationJournal:
                 "rotation journal inspection boundary is unavailable"
             ) from error
 
+    def resume(self, *, request_id: str) -> RotationJournalStatus:
+        """Publish only an existing intent; retry never prepares another key."""
+        from .backup_rotation_publication import resume
+
+        return resume(self.path, request_id=request_id)
+
     def prepare(
         self, *, request_id: str, expected_generation: int, expected_source_hash: str
     ) -> RotationJournalStatus:
@@ -228,6 +262,8 @@ class BackupRotationJournal:
                             "accepted rotation source regressed; refusing prepare"
                         )
                 else:
+                    if any(name.endswith(".tmp") for name in values):
+                        raise RotationJournalError("rotation publication recovery is still pending")
                     if set(catalog.intents) - catalog.accepted:
                         raise RotationJournalError("another rotation request is still pending")
                     if len(catalog.intents) >= MAX_OPERATIONS:

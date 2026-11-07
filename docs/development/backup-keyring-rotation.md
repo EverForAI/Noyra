@@ -58,9 +58,11 @@ protect a process from an attacker already controlling that account or root.
 
 File fsync, atomic replacement and directory fsync retain their existing error
 semantics. A directory-sync error after replacement can still leave the new
-generation visible. This path-protection change does not classify that case as
-unpublished, swallow its exception or implement an idempotent durability-retry
-protocol. The latter requires a separate change.
+generation visible. Path protection alone does not classify that case as
+unpublished or swallow its exception. Explicit prepared requests now use the
+separate [publication/resume protocol](backup-rotation-publication.md) to verify
+the fixed target and confirm its acceptance without another rotation. The
+legacy command interface is migrated separately.
 
 Regression coverage uses synthetic keys and isolated storage. It covers native
 POSIX permissions, root/service-group reads, Windows ACLs and junctions, injected

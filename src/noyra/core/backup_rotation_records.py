@@ -20,7 +20,7 @@ MAX_INTENT_BYTES = 2 * 1024 * 1024
 MAX_METADATA_BYTES = 4096
 MAX_KEYRING_BYTES = 1024 * 1024
 MAX_OPERATIONS = 63
-MAX_ENTRIES = 1 + 2 * MAX_OPERATIONS
+MAX_ENTRIES = 1 + 2 * MAX_OPERATIONS + 1
 
 
 class RotationJournalError(BackupKeyUnavailableError):
@@ -35,6 +35,21 @@ class RotationPreparationUnknownError(RotationJournalError):
             "rotation preparation durability is unknown; inspect or retry same request"
         )
         self.request_id = request_id
+
+
+class RotationConflictError(RotationJournalError):
+    """Existing source, target or evidence does not match the requested operation."""
+
+
+class RotationOutcomeUnknownError(RotationJournalError):
+    """The fixed request remains recoverable; the caller must not start another."""
+
+    def __init__(self, request_id: str, *, observed_state: str = "unavailable"):
+        super().__init__(
+            "rotation publication outcome is unknown; inspect or resume the same request"
+        )
+        self.request_id = request_id
+        self.observed_state = observed_state
 
 
 def sha256(raw: bytes) -> str:

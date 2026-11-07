@@ -39,6 +39,10 @@ def prohibited_path(path: str) -> bool:
     return (
         normalized.startswith("output/")
         or normalized.endswith(".bundle")
+        or re.fullmatch(
+            r"\.noyra-rotation-[a-f0-9]{64}\.publish\.tmp", normalized.rsplit("/", 1)[-1]
+        )
+        is not None
         or any(
             part.startswith(".") and part.endswith(".rotation-journal")
             for part in normalized.split("/")
