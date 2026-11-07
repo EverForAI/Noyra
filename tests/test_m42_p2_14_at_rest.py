@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 import pytest
 from pydantic import SecretStr, ValidationError
 
+from backup_rotation_helpers import rotate_new_request
 from noyra.core.at_rest import (
     VOLUME_ATTESTATION_FORMAT,
     AtRestConfig,
@@ -669,6 +670,7 @@ def test_service_settings_require_keyring_and_attestation_paths(tmp_path: Path) 
         )
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX durable rotation")
 def test_backup_key_rotation_retains_old_restore_keys(
     tmp_path: Path, rotation_directory: Path
 ) -> None:
@@ -681,7 +683,7 @@ def test_backup_key_rotation_retains_old_restore_keys(
     second = tmp_path / "second.noyra-backup"
 
     first_artifact = manager.create(first)
-    rotated = BackupKeyring.rotate(keyring_path)
+    rotated = rotate_new_request(keyring_path)
     second_artifact = manager.create(second)
 
     assert rotated.generation == 2
@@ -715,6 +717,7 @@ def test_encrypted_backup_round_trip_hides_secrets_and_cleans_plaintext_work(
     assert not list(tmp_path.glob(".noyra-restore-*"))
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX durable rotation")
 def test_missing_historical_key_fails_without_partial_restore(
     tmp_path: Path, rotation_directory: Path
 ) -> None:
@@ -725,7 +728,7 @@ def test_missing_historical_key_fails_without_partial_restore(
     manager = EncryptedBackupManager(data_root, keyring_path, max_total_bytes=100_000_000)
     backup = tmp_path / "old.noyra-backup"
     manager.create(backup)
-    rotated = BackupKeyring.rotate(keyring_path)
+    rotated = rotate_new_request(keyring_path)
     active = rotated.active
     BackupKeyring(
         generation=rotated.generation,

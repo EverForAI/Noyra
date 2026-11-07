@@ -76,3 +76,14 @@ python scripts/check-publication-boundary.py --base REVIEWED_BASE_COMMIT --revis
 普通删除或取消跟踪不会清除 Git 历史、旧 PR 引用、缓存和已下载副本。本次材料整理不是历史擦除，也不承诺降低完整历史克隆的体积。
 
 本地提交钩子与现有 CI 共同检查当前快照的发布边界，安装方式和范围见 [贡献指南](../../CONTRIBUTING.md#publication-boundary)。清单工具仍负责精确 Git blob 的允许、排除和归档一致性，两者不能互相替代。
+
+## Backup-key administration compatibility
+
+Rotation now requires an explicit saved request ID and the expected source
+generation/hash; the old implicit command/API fails before mutation. Python
+`BackupKeyring.rotate` returns operation metadata rather than secret keyring
+material. Scripts must migrate according to the
+[backup-key command and exit-code contract](../development/backup-key-commands.md).
+Initialization, backup creation/restoration and runtime key reading are unchanged.
+Unknown outcomes must resume the same request. Windows durable rotation reports
+unsupported before mutation; it does not silently downgrade the durability claim.

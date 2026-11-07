@@ -21,6 +21,7 @@ from urllib.request import Request, urlopen
 import pytest
 from pydantic import SecretStr
 
+from backup_rotation_helpers import rotate_new_request
 from noyra.autonomy.loop import AutonomyLoop
 from noyra.cognition import CognitionSettings, SleepReflectionCognition
 from noyra.core import EventStore, SubjectKernel
@@ -383,6 +384,7 @@ def test_cloudflare_setup_from_installed_wheel(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX durable rotation")
 def test_concurrent_rotation_is_rejected_then_retry_preserves_backup(
     tmp_path: Path, rotation_directory: Path
 ) -> None:
@@ -394,18 +396,22 @@ def test_concurrent_rotation_is_rejected_then_retry_preserves_backup(
 import sys,time
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
-from noyra.core.at_rest import BackupKeyring
-original=BackupKeyring.write
+from noyra.core.backup_rotation import BackupRotationJournal
+import noyra.core.backup_rotation_publication as publication
+api=BackupRotationJournal(sys.argv[2])
+request='a'*32
+state=api.status(request_id=request)
 entered,release=Path(sys.argv[3]),Path(sys.argv[4])
-def controlled(self,*args,**kwargs):
-    entered.write_text('ready')
-    deadline=time.monotonic()+60
-    while not release.exists():
-        if time.monotonic()>deadline:raise TimeoutError('test schedule')
-        time.sleep(.02)
-    return original(self,*args,**kwargs)
-BackupKeyring.write=controlled
-BackupKeyring.rotate(sys.argv[2])
+def checkpoint(name):
+    if name=='target_replaced':
+        entered.write_text('ready')
+        deadline=time.monotonic()+60
+        while not release.exists():
+            if time.monotonic()>deadline:raise TimeoutError('test schedule')
+            time.sleep(.02)
+publication.checkpoint=checkpoint
+api.rotate(request_id=request,expected_generation=state.generation,
+           expected_source_hash=state.observed_keyring_hash)
 """
     first = subprocess.Popen(
         [sys.executable, "-B", "-c", script, source, str(keyring), str(entered), str(release)],
@@ -424,8 +430,8 @@ BackupKeyring.rotate(sys.argv[2])
                 "-B",
                 "-c",
                 "import sys;sys.path.insert(0,sys.argv[1]);"
-                "from noyra.core.at_rest import BackupKeyring;"
-                "BackupKeyring.rotate(sys.argv[2])",
+                "from noyra.core.backup_rotation import BackupRotationJournal;"
+                "BackupRotationJournal(sys.argv[2]).resume(request_id='a'*32)",
                 source,
                 str(keyring),
             ],
@@ -433,8 +439,7 @@ BackupKeyring.rotate(sys.argv[2])
             text=True,
             timeout=60,
         )
-        assert attempt.returncode != 0
-        assert "RuntimeOwnershipError" in attempt.stderr
+        assert attempt.returncode != 0 and "RuntimeOwnershipError" in attempt.stderr
     finally:
         release.write_text("release", encoding="utf-8")
         _, stderr = first.communicate(timeout=90)
@@ -449,28 +454,41 @@ BackupKeyring.rotate(sys.argv[2])
     manager = EncryptedBackupManager(data, keyring)
     artifact = manager.create(tmp_path / "test.noyra-backup")
     manager.restore(artifact.path, tmp_path / "before")
-    final = BackupKeyring.rotate(keyring)
+    final = rotate_new_request(keyring)
     assert final.generation == 3
     assert final.resolve(intermediate.active.key_id, intermediate.active.fingerprint)
     manager.restore(artifact.path, tmp_path / "after")
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX durable rotation")
 def test_failed_rotation_releases_lock_and_keeps_previous_keyring(
     rotation_directory: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from noyra.core.backup_rotation import BackupRotationJournal
+    from noyra.core.backup_rotation_records import RotationOutcomeUnknownError, sha256
+
     keyring = rotation_directory / "keyring.json"
     before = BackupKeyring.initialize(keyring)
+    api = BackupRotationJournal(keyring)
+    expected = sha256(keyring.read_bytes())
+    request = "a" * 32
+
+    def fail(name: str) -> None:
+        if name == "before_target_replace":
+            raise OSError("synthetic publication failure")
+
     with monkeypatch.context() as patch:
-
-        def failed_write(*args: Any, **kwargs: Any) -> None:
-            raise OSError("fixture")
-
-        patch.setattr(BackupKeyring, "write", failed_write)
-        with pytest.raises(OSError):
-            BackupKeyring.rotate(keyring)
+        patch.setattr("noyra.core.backup_rotation_publication.checkpoint", fail)
+        with pytest.raises(RotationOutcomeUnknownError):
+            api.rotate(request_id=request, expected_generation=1, expected_source_hash=expected)
     assert BackupKeyring.from_path(keyring).active_key_id == before.active_key_id
-    assert BackupKeyring.rotate(keyring).generation == 2
+    assert (
+        api.rotate(
+            request_id=request, expected_generation=1, expected_source_hash=expected
+        ).generation
+        == 2
+    )
 
 
 def test_legacy_sleep_cutoff_catches_sleep_arrivals_without_schema_migration(

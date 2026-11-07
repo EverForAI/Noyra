@@ -132,7 +132,7 @@ def test_private_permissions_and_legacy_publication_guard(rotation_directory: Pa
     assert stat.S_IMODE(directory(target).stat().st_mode) == 0o700
     for entry in directory(target).iterdir():
         assert stat.S_IMODE(entry.stat().st_mode) == 0o600 and entry.stat().st_nlink == 1
-    with pytest.raises(BackupKeyUnavailableError, match="journal exists"):
+    with pytest.raises(BackupKeyUnavailableError, match="request_id"):
         BackupKeyring.rotate(target)
     assert target.read_bytes() == source
     assert api.status(request_id=REQ).state == "prepared_recorded"
@@ -631,7 +631,7 @@ def test_legacy_rotation_does_not_bypass_broken_journal_link(rotation_directory:
         directory(target).symlink_to(rotation_directory / "missing", target_is_directory=True)
     except OSError:
         pytest.skip("native symlinks unavailable")
-    with pytest.raises(BackupKeyUnavailableError, match="journal exists"):
+    with pytest.raises(BackupKeyUnavailableError, match="request_id"):
         BackupKeyring.rotate(target)
     assert target.read_bytes() == source
 

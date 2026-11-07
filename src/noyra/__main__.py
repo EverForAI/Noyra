@@ -79,17 +79,9 @@ def _setup_command(arguments: list[str]) -> None:
 
 
 def _backup_key_command(arguments: list[str]) -> None:
-    from noyra.core.at_rest import BackupKeyring
+    from noyra.backup_key_cli import run
 
-    parser = argparse.ArgumentParser(prog="python -m noyra backup-key")
-    parser.add_argument("action", choices=("init", "rotate"))
-    parser.add_argument("--path", required=True, type=Path)
-    options = parser.parse_args(arguments)
-    if options.action == "init":
-        keyring = BackupKeyring.initialize(options.path)
-    else:
-        keyring = BackupKeyring.rotate(options.path)
-    print(json.dumps(keyring.metadata(), sort_keys=True))
+    run(arguments)
 
 
 def _backup_command(arguments: list[str], *, restore: bool) -> None:

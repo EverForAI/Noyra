@@ -62,7 +62,8 @@ generation visible. Path protection alone does not classify that case as
 unpublished or swallow its exception. Explicit prepared requests now use the
 separate [publication/resume protocol](backup-rotation-publication.md) to verify
 the fixed target and confirm its acceptance without another rotation. The
-legacy command interface is migrated separately.
+[command and API migration](backup-key-commands.md) requires an explicit request
+and source expectation for every new rotation.
 
 Regression coverage uses synthetic keys and isolated storage. It covers native
 POSIX permissions, root/service-group reads, Windows ACLs and junctions, injected
@@ -72,5 +73,6 @@ lock; that is asserted as a successful barrier rather than counted as a skipped
 identity test. Local verification does not rotate or attest production keys.
 
 The separate [preparation journal](backup-rotation-journal.md) records explicit
-requests before publication. Legacy rotation stops when that journal exists,
-including incomplete state, so it cannot bypass a prepared proposal.
+requests before publication. Implicit legacy rotation is now rejected before
+path access. Explicit rotation uses the same prepared request and cannot bypass
+its journal evidence. See the command/API migration before updating callers.

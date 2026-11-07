@@ -87,12 +87,12 @@ fsync or write. It describes observed records: `absent`, `request_missing`,
 `durability_confirmed`. A successful `prepare` returns `prepared` and confirms
 only the preparation evidence, not publication of the main keyring.
 
-Once a journal path exists, legacy `BackupKeyring.rotate` refuses publication
-under the same lock. This also applies to incomplete or linked journal paths;
-it prevents a legacy writer from bypassing a recorded proposal. Ordinary
-rotation without a journal, key initialization, reading, backup and restoration
-retain their existing behavior. Do not delete preparation evidence merely to
-re-enable a legacy command.
+Implicit legacy `BackupKeyring.rotate(path)` calls are rejected before storage
+access. Explicit calls use this journal and the publication protocol. Initialization,
+reading, backup creation and restoration retain their existing interfaces.
+Do not delete preparation evidence to revive an implicit writer. The
+[command/API migration](backup-key-commands.md) lists required fields and retry
+semantics.
 
 ## Platform and rollout scope
 
@@ -102,5 +102,5 @@ Windows inspection still enforces the existing private-ACL policy. A no-op
 Windows directory synchronization is not reported as durable preparation.
 Native process-exit tests demonstrate process recovery, not hardware power-loss
 behavior. Publication, resume and acceptance writing are described in the
-separate protocol; CLI migration remains separate. No runtime or database
+separate protocol; the command/API migration is documented alongside it. No runtime or database
 migration is required for preparation or publication.

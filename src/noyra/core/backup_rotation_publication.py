@@ -28,6 +28,7 @@ from .backup_rotation_records import (
     RotationIntent,
     RotationOutcomeUnknownError,
     RotationPreparationUnknownError,
+    RotationUnsupportedError,
     sha256,
     validate_id,
 )
@@ -196,7 +197,7 @@ def _run(storage: RotationStorage, request_id: str) -> RotationJournalStatus:
 def resume(path: Path | str, *, request_id: str) -> RotationJournalStatus:
     request_id = validate_id(request_id)
     if not supported_preparation():
-        raise RotationConflictError(
+        raise RotationUnsupportedError(
             "rotation publication requires POSIX file and directory durability"
         )
     try:

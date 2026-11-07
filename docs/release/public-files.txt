@@ -227,6 +227,7 @@ docs/deployment/windows-data-root-migration.md
 docs/development/action-deliberation-recovery.md
 docs/development/architecture-boundaries.md
 docs/development/autonomy-scheduling.md
+docs/development/backup-key-commands.md
 docs/development/backup-keyring-rotation.md
 docs/development/backup-rotation-journal.md
 docs/development/backup-rotation-publication.md
@@ -507,6 +508,7 @@ src/noyra/autonomy/loop.py
 src/noyra/autonomy/sleep_recovery.py
 src/noyra/autonomy/types.py
 src/noyra/autonomy/workflow.py
+src/noyra/backup_key_cli.py
 src/noyra/capability/__init__.py
 src/noyra/capability/errors.py
 src/noyra/capability/filesystem.py
@@ -861,6 +863,7 @@ src/noyra/world/prediction.py
 src/noyra/world/source.py
 src/noyra/world/store.py
 src/noyra/world/types.py
+tests/backup_rotation_helpers.py
 tests/conftest.py
 tests/contracts/database-definition-contract.json
 tests/contracts/remediation_acceptance.json
@@ -955,6 +958,7 @@ tests/test_b2_local_wallet_approval.py
 tests/test_b2_runner_boundaries.py
 tests/test_b3_integrity_evidence.py
 tests/test_b3_integrity_health.py
+tests/test_backup_key_cli.py
 tests/test_backup_keyring_rotation_paths.py
 tests/test_backup_rotation_journal.py
 tests/test_backup_rotation_publication.py

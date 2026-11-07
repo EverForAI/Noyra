@@ -10,8 +10,41 @@ from typing import Any
 
 import pytest
 
-from noyra.core.at_rest import BackupKeyring, BackupKeyUnavailableError
+from backup_rotation_helpers import rotate_new_request
+from noyra.core.at_rest import BackupKeyring, BackupKeyUnavailableError, _keyring_permission_error
+from noyra.core.backup_keyring_paths import BackupRotationBoundary, BackupRotationPathError
+from noyra.core.backup_rotation import BackupRotationJournal
+from noyra.core.backup_rotation_records import RotationOutcomeUnknownError, sha256
 from noyra.core.locking import ProcessLock
+
+
+def guarded_read(path: Path) -> BackupKeyring:
+    """Exercise D4a itself on both platforms, without invoking a legacy writer."""
+    try:
+        boundary = BackupRotationBoundary(path, permission_error=_keyring_permission_error)
+        lock = ProcessLock(boundary.lock_path, opener=boundary.open_lock)
+        try:
+            lock.acquire()
+            return BackupKeyring._from_bytes(boundary.read(1024 * 1024))
+        finally:
+            lock.release()
+    except BackupRotationPathError as error:
+        raise BackupKeyUnavailableError(str(error)) from error
+
+
+def guarded_rewrite(path: Path) -> None:
+    """Exercise the existing low-level guarded writer's pre-replace checks."""
+    try:
+        boundary = BackupRotationBoundary(path, permission_error=_keyring_permission_error)
+        lock = ProcessLock(boundary.lock_path, opener=boundary.open_lock)
+        try:
+            lock.acquire()
+            current = BackupKeyring._from_bytes(boundary.read(1024 * 1024))
+            current.write(path, create_only=False, _rotation_boundary=boundary)
+        finally:
+            lock.release()
+    except BackupRotationPathError as error:
+        raise BackupKeyUnavailableError(str(error)) from error
 
 
 def _ring(root: Path) -> Path:
@@ -46,7 +79,7 @@ def test_raw_symlink_is_rejected_before_key_parsing(
 
     monkeypatch.setattr(BackupKeyring, "_from_bytes", classmethod(must_not_parse), raising=False)
     with pytest.raises(BackupKeyUnavailableError):
-        BackupKeyring.rotate(alias)
+        guarded_read(alias)
     assert target.read_bytes() == before
     assert not target.with_name(target.name + ".rotation.lock").exists()
 
@@ -59,7 +92,7 @@ def test_original_ancestor_link_is_rejected(rotation_directory: Path) -> None:
     _symlink(alias, real, directory=True)
     before = target.read_bytes()
     with pytest.raises(BackupKeyUnavailableError):
-        BackupKeyring.rotate(alias / target.name)
+        guarded_read(alias / target.name)
     assert target.read_bytes() == before
 
 
@@ -71,7 +104,7 @@ def test_link_before_parent_traversal_is_not_normalized_away(rotation_directory:
     _symlink(alias, child, directory=True)
     before = target.read_bytes()
     with pytest.raises(BackupKeyUnavailableError):
-        BackupKeyring.rotate(alias / ".." / target.name)
+        guarded_read(alias / ".." / target.name)
     assert target.read_bytes() == before
 
 
@@ -81,7 +114,7 @@ def test_keyring_hard_link_is_rejected(rotation_directory: Path) -> None:
     alias = rotation_directory / "hard-link.json"
     os.link(target, alias)
     with pytest.raises(BackupKeyUnavailableError):
-        BackupKeyring.rotate(target)
+        guarded_read(target)
     assert target.read_bytes() == before
 
 
@@ -97,7 +130,7 @@ def test_unsafe_lock_never_writes_its_referent(rotation_directory: Path, kind: s
     else:
         os.link(victim, lock)
     with pytest.raises(BackupKeyUnavailableError):
-        BackupKeyring.rotate(target)
+        guarded_read(target)
     assert victim.read_bytes() == b""
     assert target.read_bytes() == before
 
@@ -119,7 +152,7 @@ def test_posix_unsafe_permissions_fail_before_publication(
     path.chmod(0o644 if unsafe == "key" else 0o777)
     try:
         with pytest.raises(BackupKeyUnavailableError):
-            BackupKeyring.rotate(target)
+            guarded_read(target)
         assert target.read_bytes() == before
         assert lock.read_bytes() == b""
     finally:
@@ -133,7 +166,7 @@ def test_fifo_source_does_not_block_or_get_read(rotation_directory: Path) -> Non
     assert callable(mkfifo)
     mkfifo(target, 0o600)
     with pytest.raises(BackupKeyUnavailableError):
-        BackupKeyring.rotate(target)
+        guarded_read(target)
 
 
 @pytest.mark.parametrize("change", ["source", "parent", "lock"])
@@ -175,21 +208,21 @@ def test_changes_while_acquiring_lock_are_rejected_and_lock_is_released(
     with monkeypatch.context() as patch:
         patch.setattr(ProcessLock, "acquire", acquire)
         try:
-            rotated = BackupKeyring.rotate(target)
+            rotated = guarded_read(target)
         except BackupKeyUnavailableError as error:
             assert not blocked_by_os and "identity changed" in str(error)
         else:
-            assert blocked_by_os and change in {"parent", "lock"} and rotated.generation == 2
+            assert blocked_by_os and change in {"parent", "lock"} and rotated.generation == 1
     if blocked_by_os:
         assert other.read_bytes() == other_bytes
-        assert BackupKeyring.rotate(target).generation == 3
+        assert guarded_read(target).generation == 1
     else:
         if change == "lock":
             assert BackupKeyring.from_path(target).generation == 1
         else:
             assert target.read_bytes() == other_bytes
             assert BackupKeyring.from_path(target).active_key_id == replacement.active_key_id
-        assert BackupKeyring.rotate(target).generation == 2
+        assert guarded_read(target).generation == 1
 
 
 def test_source_replaced_between_path_check_and_open_is_not_read(
@@ -216,9 +249,9 @@ def test_source_replaced_between_path_check_and_open_is_not_read(
     with monkeypatch.context() as patch:
         patch.setattr(os, "open", opened)
         with pytest.raises(BackupKeyUnavailableError, match="before reading"):
-            BackupKeyring.rotate(target)
+            guarded_read(target)
     assert swapped and target.read_bytes() == expected
-    assert BackupKeyring.rotate(target).generation == 2
+    assert guarded_read(target).generation == 1
 
 
 def test_source_mutation_during_read_is_rejected(
@@ -240,7 +273,7 @@ def test_source_mutation_during_read_is_rejected(
     with monkeypatch.context() as patch:
         patch.setattr(os, "read", read)
         with pytest.raises(BackupKeyUnavailableError, match="while reading"):
-            BackupKeyring.rotate(target)
+            guarded_read(target)
     assert BackupKeyring.from_path(target).generation == 1
 
 
@@ -266,9 +299,9 @@ def test_change_before_replace_is_not_published(
     with monkeypatch.context() as patch:
         patch.setattr(BackupRotationBoundary, "before_replace", checkpoint)
         with pytest.raises(BackupKeyUnavailableError, match="identity changed"):
-            BackupKeyring.rotate(target)
+            guarded_rewrite(target)
     assert target.read_bytes() == (other_bytes if change == "source" else before)
-    assert BackupKeyring.rotate(target).generation == 2
+    assert guarded_read(target).generation == 1
 
 
 def test_relative_path_with_ordinary_parent_traversal_still_rotates(
@@ -278,38 +311,43 @@ def test_relative_path_with_ordinary_parent_traversal_still_rotates(
     nested = rotation_directory / "nested"
     nested.mkdir()
     monkeypatch.chdir(nested)
-    rotated = BackupKeyring.rotate(Path("..") / target.name)
-    assert rotated.generation == 2
+    rotated = guarded_read(Path("..") / target.name)
+    assert rotated.generation == 1
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX durable rotation")
 def test_rotation_retains_keys_and_lock_inode(rotation_directory: Path) -> None:
     target = _ring(rotation_directory)
     first = BackupKeyring.from_path(target)
-    second = BackupKeyring.rotate(target)
+    second = rotate_new_request(target)
     lock = target.with_name(target.name + ".rotation.lock")
     inode = lock.stat().st_ino
-    third = BackupKeyring.rotate(target)
+    third = rotate_new_request(target)
     assert (first.generation, second.generation, third.generation) == (1, 2, 3)
     assert third.resolve(first.active.key_id, first.active.fingerprint).key == first.active.key
     assert third.resolve(second.active.key_id, second.active.fingerprint).key == second.active.key
     assert lock.stat().st_ino == inode
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX durable rotation")
 def test_replace_then_directory_fsync_error_remains_explicit(
-    rotation_directory: Path, monkeypatch: pytest.MonkeyPatch
+    rotation_directory: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     target = _ring(rotation_directory)
+    api = BackupRotationJournal(target)
+    expected = sha256(target.read_bytes())
+    api.prepare(request_id="a" * 32, expected_generation=1, expected_source_hash=expected)
 
-    def failed(directory: Path) -> None:
+    def failed(path: Path) -> None:
         raise OSError("synthetic directory fsync failure")
 
     with monkeypatch.context() as patch:
-        patch.setattr("noyra.core.at_rest._fsync_directory", failed)
-        with pytest.raises(OSError, match="synthetic directory fsync"):
-            BackupKeyring.rotate(target)
-    # D4b is a separate durability/retry protocol. Do not silently hide it or
-    # assert an exception proves that the visible keyring was never replaced.
+        patch.setattr("noyra.core.backup_rotation_publication._fsync_directory", failed)
+        with pytest.raises(RotationOutcomeUnknownError):
+            api.resume(request_id="a" * 32)
     assert BackupKeyring.from_path(target).generation == 2
+    assert api.resume(request_id="a" * 32).generation == 2
 
 
 @pytest.mark.skipif(os.name != "posix" or not hasattr(os, "geteuid"), reason="POSIX owner")
@@ -327,7 +365,7 @@ def test_root_service_group_permissions_survive_rotation() -> None:
         chown(target, 0, 65534)
         target.chmod(0o640)
         before = BackupKeyring.from_path(target)
-        after = BackupKeyring.rotate(target)
+        after = rotate_new_request(target)
         metadata = target.stat()
         assert (metadata.st_uid, metadata.st_gid, stat.S_IMODE(metadata.st_mode)) == (
             0,
@@ -339,11 +377,12 @@ def test_root_service_group_permissions_survive_rotation() -> None:
         script = """
 import pathlib,sys
 sys.path.insert(0,sys.argv[1])
-from noyra.core.at_rest import BackupKeyring,BackupKeyUnavailableError,validate_keyring_path
+from noyra.core.at_rest import BackupKeyring,validate_keyring_path,_keyring_permission_error
+from noyra.core.backup_keyring_paths import BackupRotationBoundary,BackupRotationPathError
 assert BackupKeyring.from_path(validate_keyring_path(sys.argv[2])).generation == 2
 try:
-    BackupKeyring.rotate(sys.argv[2])
-except BackupKeyUnavailableError as error:
+    BackupRotationBoundary(sys.argv[2],permission_error=_keyring_permission_error)
+except BackupRotationPathError as error:
     assert 'requires the keyring owner' in str(error), str(error)
 else:
     raise AssertionError('read-only service user must not rotate root-owned keys')
@@ -391,7 +430,7 @@ $item.SetAccessControl($acl)
 """
     subprocess.run(_powershell_command(script), check=True, capture_output=True)
     with pytest.raises(BackupKeyUnavailableError, match="ACL"):
-        BackupKeyring.rotate(target)
+        guarded_read(target)
     assert target.read_bytes() == before
     assert lock.read_bytes() == b""
 
@@ -410,7 +449,7 @@ def test_native_windows_junction_is_rejected(rotation_directory: Path) -> None:
     )
     assert getattr(alias.lstat(), "st_file_attributes", 0) & 0x400
     with pytest.raises(BackupKeyUnavailableError, match="reparse"):
-        BackupKeyring.rotate(alias / target.name)
+        guarded_read(alias / target.name)
     assert target.read_bytes() == before
 
 
@@ -438,9 +477,9 @@ def test_lock_replaced_while_opening_is_rejected_before_any_write(
     with monkeypatch.context() as patch:
         patch.setattr(os, "open", opened)
         with pytest.raises(BackupKeyUnavailableError, match="changed while opening"):
-            BackupKeyring.rotate(target)
+            guarded_read(target)
     assert swapped and target.read_bytes() == before and lock.read_bytes() == b""
-    assert BackupKeyring.rotate(target).generation == 2
+    assert guarded_read(target).generation == 1
 
 
 @pytest.mark.parametrize(
@@ -455,16 +494,16 @@ def test_invalid_key_content_does_not_publish_and_releases_lock(
     valid = target.read_bytes()
     target.write_bytes(payload)
     with pytest.raises(BackupKeyUnavailableError):
-        BackupKeyring.rotate(target)
+        guarded_read(target)
     assert target.read_bytes() == payload
     target.write_bytes(valid)
-    assert BackupKeyring.rotate(target).generation == 2
+    assert guarded_read(target).generation == 1
 
 
 def test_missing_source_does_not_create_directories_or_locks(rotation_directory: Path) -> None:
     target = rotation_directory / "missing" / "keyring.json"
     with pytest.raises(BackupKeyUnavailableError):
-        BackupKeyring.rotate(target)
+        guarded_read(target)
     assert not target.parent.exists()
 
 
@@ -481,7 +520,7 @@ def test_windows_acl_probe_failure_is_closed_and_diagnostic_does_not_echo_comman
 
     monkeypatch.setattr("noyra.core.backup_keyring_paths.subprocess.run", failed)
     with pytest.raises(BackupKeyUnavailableError, match="ACL") as caught:
-        BackupKeyring.rotate(target)
+        guarded_read(target)
     assert "SYNTHETIC_PRIVATE_COMMAND" not in str(caught.value)
     assert target.read_bytes() == before
     assert not target.with_name(target.name + ".rotation.lock").exists()
@@ -514,7 +553,7 @@ def test_temporary_fstat_failure_closes_descriptor_and_keeps_original(
         patch.setattr(os, "open", opened)
         patch.setattr(os, "fstat", fstat)
         with pytest.raises(OSError, match="temporary fstat"):
-            BackupKeyring.rotate(target)
+            guarded_rewrite(target)
     assert failed and descriptor is not None and target.read_bytes() == before
     with pytest.raises(OSError):
         original_fstat(descriptor)
@@ -522,4 +561,4 @@ def test_temporary_fstat_failure_closes_descriptor_and_keeps_original(
     # than unlinking a path whose inode cannot be proved to be ours.
     leftovers = list(rotation_directory.glob(".keyring.json.*.tmp"))
     assert len(leftovers) == 1 and leftovers[0].read_bytes() == b""
-    assert BackupKeyring.rotate(target).generation == 2
+    assert guarded_read(target).generation == 1

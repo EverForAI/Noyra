@@ -19,6 +19,7 @@ from noyra.core.backup_rotation_records import (
     RotationConflictError,
     RotationIntent,
     RotationOutcomeUnknownError,
+    RotationUnsupportedError,
     sha256,
 )
 from noyra.core.backup_rotation_target import staging_path
@@ -66,7 +67,7 @@ def test_resume_requires_existing_request_without_creating_storage(tmp_path: Pat
 @pytest.mark.skipif(os.name != "nt", reason="Windows capability boundary")
 def test_windows_resume_refuses_before_lock_or_directory_creation(tmp_path: Path) -> None:
     root = tmp_path / "absent"
-    with pytest.raises(RotationConflictError, match="POSIX"):
+    with pytest.raises(RotationUnsupportedError, match="POSIX"):
         BackupRotationJournal(root / "keyring.json").resume(request_id=REQ)
     assert not root.exists()
 

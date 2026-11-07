@@ -27,6 +27,14 @@ class RotationJournalError(BackupKeyUnavailableError):
     """A fixed diagnostic without key bytes, command text or local paths."""
 
 
+class RotationRequestRequiredError(RotationJournalError):
+    """Implicit legacy rotation cannot distinguish a retry from another operation."""
+
+
+class RotationUnsupportedError(RotationJournalError):
+    """The requested durability profile is not supported before mutation."""
+
+
 class RotationPreparationUnknownError(RotationJournalError):
     """Preparation may be visible; the main keyring has not been published."""
 

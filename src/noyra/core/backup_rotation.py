@@ -24,6 +24,7 @@ from .backup_rotation_records import (
     RotationJournalError,
     RotationOutcomeUnknownError,
     RotationPreparationUnknownError,
+    RotationUnsupportedError,
     keyring_bytes,
     sha256,
     validate_generation,
@@ -212,6 +213,55 @@ class BackupRotationJournal:
                 "rotation journal inspection boundary is unavailable"
             ) from error
 
+    def rotate(
+        self,
+        *,
+        request_id: str,
+        expected_generation: int,
+        expected_source_hash: str,
+    ) -> RotationJournalStatus:
+        """Prepare once, or resume the same bound request without reinterpreting it."""
+        request_id = validate_id(request_id)
+        expected_generation = validate_generation(expected_generation)
+        expected_source_hash = validate_hash(expected_source_hash)
+        if not supported_preparation():
+            raise RotationUnsupportedError("rotation requires POSIX file and directory durability")
+        # A read-only lookup may discover a completed or partially published
+        # request whose original source is no longer the current keyring.
+        # Never replace that source expectation with freshly observed values.
+        try:
+            location = BackupRotationLocation(self.path, permission_error=_keyring_permission_error)
+            values = RotationStorage(location).catalog()
+        except (OSError, BackupRotationPathError) as error:
+            raise RotationConflictError(
+                "rotation request lookup storage is unavailable or unsafe"
+            ) from error
+        if values:
+            catalog = _catalog(values, self._binding(location))
+            entry = catalog.intents.get(request_id)
+            if entry is not None:
+                intent, _ = entry
+                if (intent.expected_generation, intent.source_hash) != (
+                    expected_generation,
+                    expected_source_hash,
+                ):
+                    raise RotationConflictError(
+                        "rotation request is bound to another expected source"
+                    )
+            else:
+                self.prepare(
+                    request_id=request_id,
+                    expected_generation=expected_generation,
+                    expected_source_hash=expected_source_hash,
+                )
+        else:
+            self.prepare(
+                request_id=request_id,
+                expected_generation=expected_generation,
+                expected_source_hash=expected_source_hash,
+            )
+        return self.resume(request_id=request_id)
+
     def resume(self, *, request_id: str) -> RotationJournalStatus:
         """Publish only an existing intent; retry never prepares another key."""
         from .backup_rotation_publication import resume
@@ -225,7 +275,7 @@ class BackupRotationJournal:
         expected_generation = validate_generation(expected_generation)
         expected_source_hash = validate_hash(expected_source_hash)
         if not supported_preparation():
-            raise RotationJournalError(
+            raise RotationUnsupportedError(
                 "rotation preparation requires POSIX file and directory durability"
             )
         try:

@@ -28,15 +28,18 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from .backup_keyring_paths import BackupRotationBoundary, BackupRotationPathError
+from .backup_keyring_paths import BackupRotationBoundary
 from .errors import IntegrityError, RuntimeOwnershipError
 from .locking import ProcessLock
 from .types import canonical_json, utc_now
+
+if TYPE_CHECKING:
+    from .backup_rotation import RotationJournalStatus
 
 AT_REST_THREAT_MODEL = "noyra-at-rest/offline-media-v1"
 BACKUP_KEYRING_FORMAT = "noyra-backup-keyring/v1"
@@ -211,53 +214,33 @@ class BackupKeyring:
         return keyring
 
     @classmethod
-    def rotate(cls, path: Path | str) -> BackupKeyring:
-        try:
-            boundary = BackupRotationBoundary(path, permission_error=_keyring_permission_error)
-            # Keep the stable sibling lock and its non-blocking semantics, but
-            # opt into a checked descriptor before ProcessLock can write it.
-            lock = ProcessLock(boundary.lock_path, opener=boundary.open_lock)
-            try:
-                lock.acquire()
-                boundary.validate()
-                try:
-                    boundary.journal_path.lstat()
-                except FileNotFoundError:
-                    pass
-                else:
-                    raise BackupKeyUnavailableError(
-                        "backup rotation journal exists; inspect its prepared request "
-                        "before using a publication interface"
-                    )
-                return cls._rotate_locked(boundary)
-            finally:
-                lock.release()
-        except BackupRotationPathError as error:
-            raise BackupKeyUnavailableError(str(error)) from error
+    def rotate(
+        cls,
+        path: Path | str,
+        *,
+        request_id: str | None = None,
+        expected_generation: int | None = None,
+        expected_source_hash: str | None = None,
+    ) -> RotationJournalStatus:
+        """Rotate an explicit operation; implicit legacy retries are rejected.
 
-    @classmethod
-    def _rotate_locked(cls, boundary: BackupRotationBoundary) -> BackupKeyring:
-        current = cls._from_bytes(boundary.read(_MAX_KEYRING_BYTES))
-        if len(current._keys) >= _MAX_KEYS:
-            raise ValueError("backup keyring reached its retained-key limit")
-        key = os.urandom(32)
-        fingerprint = hashlib.sha256(key).hexdigest()
-        generation = current.generation + 1
-        active_key_id = f"backup-{generation}-{fingerprint[:12]}"
-        materials = (
-            *(
-                BackupKeyMaterial(item.key_id, item.key, item.fingerprint, "retired")
-                for item in current._keys.values()
-            ),
-            BackupKeyMaterial(active_key_id, key, fingerprint, "active"),
+        The result is operation metadata, not a keyring containing secret bytes.
+        Use from_path explicitly if a caller needs current decryption material.
+        """
+        from .backup_rotation import BackupRotationJournal
+        from .backup_rotation_records import RotationRequestRequiredError
+
+        if request_id is None or expected_generation is None or expected_source_hash is None:
+            raise RotationRequestRequiredError(
+                "backup rotation requires request_id, expected_generation "
+                "and expected_source_hash; "
+                "use backup-key status, prepare and resume with a retained request ID"
+            )
+        return BackupRotationJournal(path).rotate(
+            request_id=request_id,
+            expected_generation=expected_generation,
+            expected_source_hash=expected_source_hash,
         )
-        rotated = cls(
-            generation=generation,
-            active_key_id=active_key_id,
-            keys=materials,
-        )
-        rotated.write(boundary.target, create_only=False, _rotation_boundary=boundary)
-        return rotated
 
     def resolve(self, key_id: object, fingerprint: object) -> BackupKeyMaterial:
         if not isinstance(key_id, str) or not isinstance(fingerprint, str):

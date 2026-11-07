@@ -92,11 +92,12 @@ reports catalog/keyring state; it does not claim every staging artifact is healt
 
 ## Compatibility and validation boundary
 
-The legacy rotation writer remains fenced when a journal exists. Backup reading,
+The implicit legacy rotation writer has been removed; missing request or
+source expectation is rejected before storage access. Backup reading,
 creation and restoration use the current keyring as before, including all retained
 old decryption keys. The runtime, database schema, network access and provider
-budgets are unchanged. This module exposes the Python publication API; CLI
-request/expectation migration is a separate change. Do not delete evidence to
+budgets are unchanged. The [command/API contract](backup-key-commands.md) exposes the same explicit
+request and expectation through `backup-key` and the former rotation API. Do not delete evidence to
 make a legacy command run again.
 
 Tests inject errors before/after writes, synchronization, replacement, receipt
