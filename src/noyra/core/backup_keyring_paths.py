@@ -135,8 +135,8 @@ foreach ($record in $records) {{
         raise BackupRotationPathError("backup rotation path ACL is unsafe or unavailable")
 
 
-class BackupRotationBoundary:
-    """Retain the raw path, checked ancestors and the exact source revision."""
+class BackupRotationLocation:
+    """Keep the original directory/lock boundary independent of keyring revisions."""
 
     def __init__(self, path: Path | str, *, permission_error: Callable[[Path], str | None]):
         self.raw = Path(path).expanduser().absolute()
@@ -144,7 +144,7 @@ class BackupRotationBoundary:
         self._permission_error = permission_error
         self._lock_handle: BinaryIO | None = None
         self._parents = self._directories()
-        self._source = _metadata(self.raw)
+        _metadata(self.raw)
         self._check_key_permissions()
         # Resolve only AFTER the original components (including link/..) were
         # examined. Keep validating the original spelling at every boundary.
@@ -153,7 +153,11 @@ class BackupRotationBoundary:
         except OSError as error:
             raise BackupRotationPathError("backup rotation target is unavailable") from error
         self.lock_path = self.target.with_name(self.target.name + ".rotation.lock")
-        self.validate()
+        self.validate_location()
+
+    @property
+    def journal_path(self) -> Path:
+        return self.target.with_name("." + self.target.name + ".rotation-journal")
 
     def _directories(self) -> tuple[tuple[int, ...], ...]:
         result = []
@@ -173,16 +177,14 @@ class BackupRotationBoundary:
         error = self._permission_error(self.raw)
         if error is not None:
             raise BackupRotationPathError(error)
-        if os.name != "posix" or self._source.st_uid != _effective_uid():
+        if os.name != "posix" or _metadata(self.raw).st_uid != _effective_uid():
             raise BackupRotationPathError("backup rotation requires the keyring owner")
 
-    def validate(self, *, audit_windows: bool = True) -> None:
-        if self._directories() != self._parents or _revision(_metadata(self.raw)) != _revision(
-            self._source
-        ):
+    def validate_location(self, *, audit_windows: bool = True) -> None:
+        if self._directories() != self._parents:
             raise BackupRotationPathError("backup rotation original path identity changed")
         self._check_key_permissions()
-        if _identity(_metadata(self.target)) != _identity(self._source):
+        if _identity(_metadata(self.target)) != _identity(_metadata(self.raw)):
             raise BackupRotationPathError("backup rotation resolved target identity changed")
         lock = None
         if self._lock_handle is not None:
@@ -192,6 +194,9 @@ class BackupRotationBoundary:
                 raise BackupRotationPathError("backup rotation lock identity changed")
         if os.name == "nt" and audit_windows:
             _windows_permissions(self.raw, self.parents, lock)
+
+    def validate(self, *, audit_windows: bool = True) -> None:
+        self.validate_location(audit_windows=audit_windows)
 
     @staticmethod
     def _check_lock(value: os.stat_result) -> None:
@@ -231,13 +236,14 @@ class BackupRotationBoundary:
         self._lock_handle = handle
         return handle
 
-    def read(self, max_bytes: int) -> bytes:
-        self.validate(audit_windows=False)
+    def read_current(self, max_bytes: int) -> bytes:
+        self.validate_location(audit_windows=False)
+        expected = _metadata(self.raw)
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
         try:
             descriptor = os.open(self.raw, flags | getattr(os, "O_NONBLOCK", 0))
             try:
-                if _revision(os.fstat(descriptor)) != _revision(self._source):
+                if _revision(os.fstat(descriptor)) != _revision(expected):
                     raise BackupRotationPathError("backup rotation source changed before reading")
                 chunks = []
                 remaining = max_bytes + 1
@@ -247,14 +253,36 @@ class BackupRotationBoundary:
                         break
                     chunks.append(chunk)
                     remaining -= len(chunk)
-                if _revision(os.fstat(descriptor)) != _revision(self._source):
+                if _revision(os.fstat(descriptor)) != _revision(expected):
                     raise BackupRotationPathError("backup rotation source changed while reading")
             finally:
                 os.close(descriptor)
         except OSError as error:
             raise BackupRotationPathError("backup rotation source cannot be read safely") from error
-        self.validate(audit_windows=False)
+        self.validate_location(audit_windows=False)
+        if _revision(_metadata(self.raw)) != _revision(expected):
+            raise BackupRotationPathError("backup rotation source changed after reading")
         return b"".join(chunks)
+
+
+class BackupRotationBoundary(BackupRotationLocation):
+    """A location plus one pinned source revision; replacement cannot reset it."""
+
+    def __init__(self, path: Path | str, *, permission_error: Callable[[Path], str | None]):
+        super().__init__(path, permission_error=permission_error)
+        self._source = _metadata(self.raw)
+        self.validate()
+
+    def validate(self, *, audit_windows: bool = True) -> None:
+        self.validate_location(audit_windows=audit_windows)
+        if _revision(_metadata(self.raw)) != _revision(self._source):
+            raise BackupRotationPathError("backup rotation original path identity changed")
+
+    def read(self, max_bytes: int) -> bytes:
+        self.validate(audit_windows=False)
+        raw = self.read_current(max_bytes)
+        self.validate(audit_windows=False)
+        return raw
 
     def prepare_temporary(self, descriptor: int) -> None:
         if os.name == "posix":

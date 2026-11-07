@@ -228,6 +228,7 @@ docs/development/action-deliberation-recovery.md
 docs/development/architecture-boundaries.md
 docs/development/autonomy-scheduling.md
 docs/development/backup-keyring-rotation.md
+docs/development/backup-rotation-journal.md
 docs/development/checkpoint-clock-and-recovery.md
 docs/development/cognition-result-categories.md
 docs/development/communication-state.md
@@ -558,6 +559,9 @@ src/noyra/core/archive.py
 src/noyra/core/at_rest.py
 src/noyra/core/backup_keyring_paths.py
 src/noyra/core/backup_retention.py
+src/noyra/core/backup_rotation.py
+src/noyra/core/backup_rotation_records.py
+src/noyra/core/backup_rotation_storage.py
 src/noyra/core/checkpoint_clock.py
 src/noyra/core/cognitive_waits.py
 src/noyra/core/conversation_schema.py
@@ -949,6 +953,8 @@ tests/test_b2_runner_boundaries.py
 tests/test_b3_integrity_evidence.py
 tests/test_b3_integrity_health.py
 tests/test_backup_keyring_rotation_paths.py
+tests/test_backup_rotation_journal.py
+tests/test_backup_rotation_records.py
 tests/test_boundary_remediation.py
 tests/test_browser_dispatch_fencing.py
 tests/test_c0_assistance.py

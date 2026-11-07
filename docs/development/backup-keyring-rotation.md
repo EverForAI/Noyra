@@ -68,3 +68,7 @@ path/descriptor changes, concurrent rotation, old-backup restoration and failure
 cleanup. Native sharing rules may themselves deny a Windows rename of a held
 lock; that is asserted as a successful barrier rather than counted as a skipped
 identity test. Local verification does not rotate or attest production keys.
+
+The separate [preparation journal](backup-rotation-journal.md) records explicit
+requests before publication. Legacy rotation stops when that journal exists,
+including incomplete state, so it cannot bypass a prepared proposal.

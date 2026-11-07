@@ -39,6 +39,10 @@ def prohibited_path(path: str) -> bool:
     return (
         normalized.startswith("output/")
         or normalized.endswith(".bundle")
+        or any(
+            part.startswith(".") and part.endswith(".rotation-journal")
+            for part in normalized.split("/")
+        )
         or RAW_EVIDENCE.match(path) is not None
         or (normalized.startswith("docs/audit/") and normalized.endswith("-verification.json"))
     )

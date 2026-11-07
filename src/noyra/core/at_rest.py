@@ -220,6 +220,15 @@ class BackupKeyring:
             try:
                 lock.acquire()
                 boundary.validate()
+                try:
+                    boundary.journal_path.lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise BackupKeyUnavailableError(
+                        "backup rotation journal exists; inspect its prepared request "
+                        "before using a publication interface"
+                    )
                 return cls._rotate_locked(boundary)
             finally:
                 lock.release()

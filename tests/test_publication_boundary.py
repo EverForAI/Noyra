@@ -60,6 +60,8 @@ def command(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
         "OUTPUT/report.txt",
         "snapshot.bundle",
         "copy.BUNDLE",
+        ".backup-keyring.json.rotation-journal/header.json",
+        "nested/.BACKUP.ROTATION-JOURNAL/synthetic.intent.json",
         "docs/audit/synthetic-evidence/result.json",
         "docs/audit/synthetic-verification.json",
     ],
@@ -290,3 +292,15 @@ def test_merge_revision_checks_first_parent_and_full_snapshot(repository: Path) 
         "synthetic merge",
     )
     assert command(repository, "--revision", "HEAD").returncode == 0
+
+
+def test_private_rotation_journal_ignore_and_forced_add_guard(repository: Path) -> None:
+    (repository / ".gitignore").write_bytes((ROOT / ".gitignore").read_bytes())
+    path = "nested/.synthetic-keyring.rotation-journal/synthetic.intent.json"
+    file = repository / path
+    file.parent.mkdir(parents=True)
+    file.write_text("synthetic private placeholder", encoding="utf-8")
+    assert git(repository, "check-ignore", "--", path).decode().strip() == path
+    git(repository, "add", "-f", "--", path)
+    result = command(repository, "--staged")
+    assert result.returncode == 1 and "synthetic private placeholder" not in result.stderr
