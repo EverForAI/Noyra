@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import sqlite3
+from contextlib import closing
+from itertools import permutations
+from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
 import test_autonomous_projects as helpers
 from noyra.cognition import AutonomousProjectManager, ProjectExecutionLedger
 from noyra.cognition.execution_recovery import ProjectExecutionRecovery
+from noyra.core.database import Database
+from noyra.core.errors import IntegrityError
 from noyra.core.operator_controls import OperatorControlService
-from noyra.core.types import content_hash
+from noyra.core.types import content_hash, new_id
 from test_a0_project_recovery import case as case
 from test_a0_project_recovery import count, review
 
@@ -526,3 +532,165 @@ async def test_released_executing_snapshot_cannot_accept_a_late_worker_update(
         ledger.transition(identifier, "unknown", reason="Late callback")
     assert ledger.get(identifier) == before
     ledger.verify_integrity()
+
+
+_SAME_TICK = "2026-11-08T00:00:00.000+00:00"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("id_order", list(permutations((1, 2, 3))))
+async def test_same_millisecond_revisions_follow_append_order_through_recovery(
+    case: helpers.AutonomousProjectsTestCase, id_order: tuple[int, ...]
+) -> None:
+    identifiers = iter(id_order)
+
+    def ordered_id(prefix: str) -> str:
+        return f"pexec-rev_{next(identifiers):032x}" if prefix == "pexec-rev" else new_id(prefix)
+
+    with (
+        patch("noyra.cognition.execution.utc_now", return_value=_SAME_TICK),
+        patch("noyra.cognition.execution.new_id", side_effect=ordered_id),
+    ):
+        _manager, identifier = await interrupted(case)
+    ledger = ProjectExecutionLedger(case.kernel.database, case.subject_id)
+    with case.kernel.database.read_transaction() as c:
+        original = [
+            dict(r)
+            for r in c.execute(
+                "SELECT * FROM autonomous_project_execution_revisions "
+                "WHERE execution_id=? ORDER BY rowid",
+                (identifier,),
+            )
+        ]
+    assert [row["status"] for row in original] == ["prepared", "executing", "unknown"]
+    assert {row["created_at"] for row in original} == {_SAME_TICK}
+    assert ledger.verified(identifier).status == "unknown"
+    assert (
+        ProjectExecutionLedger(
+            Database(case.kernel.database.path), case.subject_id
+        ).verify_integrity()
+        == 1
+    )
+    # The real operator-recovery path must consume the same verified history.
+    issue(case, identifier)
+    with case.kernel.database.read_transaction() as c:
+        assert [
+            dict(r)
+            for r in c.execute(
+                "SELECT * FROM autonomous_project_execution_revisions "
+                "WHERE execution_id=? ORDER BY rowid",
+                (identifier,),
+            )
+        ] == original
+        assert c.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert ledger.verified(identifier).status == "unknown"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("maintenance", ["reopen", "backup", "vacuum"])
+async def test_tied_revision_evidence_survives_native_sqlite_maintenance(
+    case: helpers.AutonomousProjectsTestCase, tmp_path: Path, maintenance: str
+) -> None:
+    identifiers = iter((4, 3, 2, 1))
+
+    def ordered_id(prefix: str) -> str:
+        return f"pexec-rev_{next(identifiers):032x}" if prefix == "pexec-rev" else new_id(prefix)
+
+    with (
+        patch("noyra.cognition.execution.utc_now", return_value=_SAME_TICK),
+        patch("noyra.cognition.execution.new_id", side_effect=ordered_id),
+    ):
+        _manager, identifier = await interrupted(case, "prepared")
+        ledger = ProjectExecutionLedger(case.kernel.database, case.subject_id)
+        for version in (1, 2):
+            ledger.transition(identifier, "executing", evidence={"version": version}, reason="tick")
+        ledger.transition(identifier, "unknown", reason="Synthetic interruption")
+    database = case.kernel.database
+    with database.read_transaction() as c:
+        before = [
+            dict(r)
+            for r in c.execute(
+                "SELECT * FROM autonomous_project_execution_revisions WHERE execution_id=? "
+                "ORDER BY rowid",
+                (identifier,),
+            )
+        ]
+    if maintenance == "backup":
+        target = tmp_path / "native-backup.sqlite3"
+        with database.connection() as source, closing(sqlite3.connect(target)) as destination:
+            source.backup(destination)
+        database = Database(target)
+    elif maintenance == "vacuum":
+        with database.connection() as c:
+            c.execute("VACUUM")
+    else:
+        database = Database(database.path)
+    reopened = ProjectExecutionLedger(database, case.subject_id)
+    assert reopened.verified(identifier).status == "unknown"
+    assert reopened.verify_integrity() == 1
+    with database.read_transaction() as c:
+        assert [
+            dict(r)
+            for r in c.execute(
+                "SELECT * FROM autonomous_project_execution_revisions WHERE execution_id=? "
+                "ORDER BY rowid",
+                (identifier,),
+            )
+        ] == before
+        assert c.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        assert c.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", ["origin", "executing", "hash", "after_terminal", "clock_order"])
+async def test_same_tick_revision_order_does_not_hide_broken_state_history(
+    case: helpers.AutonomousProjectsTestCase, damage: str
+) -> None:
+    with patch("noyra.cognition.execution.utc_now", return_value=_SAME_TICK):
+        _manager, identifier = await interrupted(case)
+    ledger = ProjectExecutionLedger(case.kernel.database, case.subject_id)
+    with case.kernel.database.transaction() as c:
+        if damage in {"origin", "executing"}:
+            c.execute("DROP TRIGGER prevent_project_execution_revision_delete")
+            c.execute(
+                "DELETE FROM autonomous_project_execution_revisions "
+                "WHERE execution_id=? AND status=?",
+                (identifier, "prepared" if damage == "origin" else "executing"),
+            )
+        elif damage == "hash":
+            c.execute("DROP TRIGGER prevent_project_execution_revision_update")
+            c.execute(
+                "UPDATE autonomous_project_execution_revisions SET state_hash=? "
+                "WHERE execution_id=?",
+                ("0" * 64, identifier),
+            )
+        elif damage == "clock_order":
+            # Distinct timestamps still define chronology. An authentic hash
+            # alone cannot make an origin dated after its terminal state valid.
+            c.execute("DROP TRIGGER prevent_project_execution_revision_update")
+            row = c.execute(
+                "SELECT * FROM autonomous_project_execution_revisions "
+                "WHERE execution_id=? AND status='prepared'",
+                (identifier,),
+            ).fetchone()
+            created_at = "2026-11-08T00:00:01.000+00:00"
+            state_hash = content_hash(
+                {
+                    "execution_id": identifier,
+                    "status": row["status"],
+                    "result_hash": row["result_hash"],
+                    "reason": row["reason"],
+                    "created_at": created_at,
+                }
+            )
+            c.execute(
+                "UPDATE autonomous_project_execution_revisions SET created_at=?, state_hash=? "
+                "WHERE revision_id=?",
+                (created_at, state_hash, row["revision_id"]),
+            )
+        else:
+            # A correctly hashed but illegal append after a terminal state must
+            # still fail; do not repair chronology by sorting on status names.
+            ledger._revision(c, identifier, "executing", "b" * 64, "illegal append", _SAME_TICK)
+    with pytest.raises(IntegrityError):
+        ledger.verified(identifier)

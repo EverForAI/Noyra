@@ -9,7 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Self
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import httpx
 
@@ -309,7 +309,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
             )
             revision = connection.execute(
                 "SELECT * FROM autonomous_project_execution_revisions WHERE execution_id = ? "
-                "ORDER BY created_at DESC, revision_id DESC LIMIT 1",
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
                 (execution_id,),
             ).fetchone()
             revision_state = content_hash(
@@ -343,6 +343,52 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             restarted.verified(execution.execution_id).result_hash, execution.result_hash
         )
+
+    async def test_same_tick_prediction_revisions_reopen_with_joined_digests(self: Self) -> None:
+        from noyra.core.types import new_id
+
+        sequence = iter(range(100, 0, -1))
+
+        def reverse_id(prefix: str) -> str:
+            return f"pexec-rev_{next(sequence):032x}" if prefix == "pexec-rev" else new_id(prefix)
+
+        with (
+            patch(
+                "noyra.cognition.execution.utc_now", return_value="2026-11-08T00:00:00.000+00:00"
+            ),
+            patch("noyra.cognition.execution.new_id", side_effect=reverse_id),
+        ):
+            ledger, execution = await self.prediction_execution()
+        self.assertEqual(ledger.verified(execution.execution_id).status, "succeeded")
+        with self.kernel.database.read_transaction() as connection:
+            before = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM autonomous_project_execution_revisions WHERE execution_id=? "
+                    "ORDER BY rowid",
+                    (execution.execution_id,),
+                )
+            ]
+        self.assertEqual(len({row["created_at"] for row in before}), 1)
+        self.assertEqual(before[0]["status"], "prepared")
+        self.assertEqual(before[-1]["status"], "succeeded")
+        restarted = ProjectExecutionLedger(Database(self.database_path), self.subject_id)
+        self.assertEqual(restarted.verify_integrity(), 1)
+        self.assertEqual(
+            restarted.verified(execution.execution_id).result_hash, execution.result_hash
+        )
+        with restarted.database.read_transaction() as connection:
+            self.assertEqual(
+                [
+                    dict(row)
+                    for row in connection.execute(
+                        "SELECT * FROM autonomous_project_execution_revisions WHERE execution_id=? "
+                        "ORDER BY rowid",
+                        (execution.execution_id,),
+                    )
+                ],
+                before,
+            )
 
     async def test_execution_prepare_rejects_forged_subject_and_phase_bindings(self: Self) -> None:
         project, phase = await self.active_project("self_experiment", "self_development")

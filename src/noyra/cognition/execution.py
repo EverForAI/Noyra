@@ -596,9 +596,12 @@ class ProjectExecutionLedger:
         ):
             raise IntegrityError("project execution evidence hash mismatch")
 
+        # Revision IDs are random and wall time has millisecond precision.
+        # Preserve the native append order for ties, including existing ledgers;
+        # retain the timestamp order and all hash/state-transition checks.
         revisions = connection.execute(
             "SELECT * FROM autonomous_project_execution_revisions "
-            "WHERE execution_id = ? ORDER BY created_at, revision_id",
+            "WHERE execution_id = ? ORDER BY created_at, rowid",
             (record.execution_id,),
         ).fetchall()
         if not revisions:
