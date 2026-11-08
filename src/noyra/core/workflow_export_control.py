@@ -202,12 +202,15 @@ def _export(
             try:
                 current.execute("BEGIN IMMEDIATE")
                 checkpoint()
+                # Privacy withdrawal is a terminal control condition, not a
+                # generic source-change retry. Recheck it unconditionally on
+                # this locked transaction; checkpoints may be throttled.
+                _guard(controls, lease, current)
                 if current.execute("PRAGMA data_version").fetchone()[0] != data_version:
                     raise ValueError(
                         "workflow export database changed during publication; "
                         "retry unchanged request"
                     )
-                _guard(controls, lease, current)
                 ring.validate_revision(database, controls.subject_id, connection=current)
                 before = saved["status"]
                 result = catalog.finish(current, saved, manifest, durable=durable)

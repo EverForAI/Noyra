@@ -219,12 +219,15 @@ def _export(
                 current.execute("BEGIN IMMEDIATE")
                 final_connection = current
                 checkpoint()
+                # Privacy withdrawal is a terminal control condition, not a
+                # generic source-change retry. Recheck it unconditionally on
+                # this locked transaction; checkpoints may be throttled.
+                _guard(controls, lease, current)
                 if current.execute("PRAGMA data_version").fetchone()[0] != data_version:
                     raise ValueError(
                         "increment source database changed during publication; "
                         "retry original intent"
                     )
-                _guard(controls, lease, current)
                 ring.validate_revision(database, controls.subject_id, connection=current)
                 for _kind, node in verification_nodes:
                     ring.resolve(node["encryption_key_id"], node["encryption_key_fingerprint"])

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -10,10 +11,13 @@ from noyra.core.admission import OperationInvalidated
 from noyra.core.archive import ArchiveKeyring
 from noyra.core.at_rest import AtRestError
 from noyra.core.errors import ArchiveKeyUnavailableError, IntegrityError
+from noyra.core.events import EventStore
+from noyra.core.workflow_export_files import WorkflowArtifactStore
 from noyra.core.workflow_increment_bundle import artifact_store
 from noyra.core.workflow_increment_catalog import WorkflowIncrementCatalog
 from noyra.core.workflow_increment_files import WorkflowIncrementStore
 from test_d2b_workflow_export_control import control as control
+from test_d2b_workflow_export_control import run as base_export
 from test_i2_workflow_increment_control import advance, publish
 from test_i2_workflow_increment_control import context as context
 
@@ -341,3 +345,84 @@ def test_unprimed_or_changed_archived_receipt_cannot_fall_back_to_file_io(contex
     }
     with events.no_archive_reads(), pytest.raises(IntegrityError, match="not primed"):
         events.payload_from_row(synthetic)
+
+
+@pytest.mark.parametrize("kind", ["base", "increment"])
+@pytest.mark.parametrize("change", ["privacy", "unrelated"])
+@pytest.mark.parametrize("checkpoint_due", [False, True])
+def test_final_acceptance_guard_precedes_version_retry_independently_of_clock(
+    context: Any, kind: str, change: str, checkpoint_due: bool
+) -> None:
+    from noyra.interaction.conversations import ConversationStore
+
+    controls, _ = context
+    conversation = ConversationStore(controls.database).create(
+        controls.subject_id, "Synthetic final acceptance guard"
+    )
+    with controls.database.read_transaction() as c:
+        before = {
+            table: [dict(row) for row in c.execute("SELECT * FROM " + table)]
+            for table in ("workflow_checkpoints", "model_calls", "model_attempts")
+        }
+        accepted_before = c.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type IN "
+            "('workflow_export_accepted','workflow_increment_accepted')"
+        ).fetchone()[0]
+    monotonic = 100.0
+
+    def flush(_self: Any) -> bool:
+        nonlocal monotonic
+        if change == "privacy":
+            with controls.database.transaction() as c:
+                c.execute(
+                    "UPDATE private_conversations SET status='deleting' WHERE conversation_id=?",
+                    (conversation["conversation_id"],),
+                )
+        else:
+            # A valid unrelated commit must still trip the unchanged data-version
+            # fence; classifying privacy first must never weaken snapshot CAS.
+            EventStore(controls.database).append(
+                controls.subject_id, "synthetic_publication_race", "test", {"changed": True}
+            )
+        if checkpoint_due:
+            monotonic += 0.2
+        return True
+
+    module = (
+        "noyra.core.workflow_" + ("increment" if kind == "increment" else "export") + "_control"
+    )
+    files = WorkflowIncrementStore if kind == "increment" else WorkflowArtifactStore
+    expected = OperationInvalidated if change == "privacy" else ValueError
+    message = "privacy" if change == "privacy" else "database changed during publication"
+    # Freeze the module-local clock so both sides of the 100ms checkpoint
+    # throttle are exercised deterministically, without real sleeps or a global
+    # time patch that would change lease/runtime clock semantics.
+    with (
+        patch(module + ".time", SimpleNamespace(monotonic=lambda: monotonic)),
+        patch.object(files, "flush", flush),
+        pytest.raises(expected, match=message),
+    ):
+        if kind == "increment":
+            publish(context)
+        else:
+            base_export(controls, key="final-guard-base", version=6)
+    with controls.database.read_transaction() as c:
+        assert {
+            table: [dict(row) for row in c.execute("SELECT * FROM " + table)] for table in before
+        } == before
+        assert (
+            c.execute(
+                "SELECT COUNT(*) FROM events WHERE event_type IN "
+                "('workflow_export_accepted','workflow_increment_accepted')"
+            ).fetchone()[0]
+            == accepted_before
+        )
+        table = (
+            "workflow_increment_publications"
+            if kind == "increment"
+            else "workflow_export_publications"
+        )
+        pending = c.execute("SELECT status FROM " + table + " WHERE status!='accepted'").fetchall()
+        assert len(pending) == 1 and pending[0][0] == "prepared"
+    assert controls.kernel.admission.active_operations == 0
+    assert controls.kernel.lifecycle.current().state == "paused"
