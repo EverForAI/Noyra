@@ -9,13 +9,16 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Self
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+
+import httpx
 
 from noyra.capability import CapabilityGrant, CapabilityStore
 from noyra.cognition import (
     AutonomousProjectManager,
     AutonomousProjectPhaseRecord,
     AutonomousProjectRecord,
+    AutonomousResearch,
     CognitionSettings,
     ProjectExecutionError,
     ProjectExecutionLedger,
@@ -36,7 +39,14 @@ from noyra.model import (
     ModelUsage,
     ProviderResponse,
 )
-from noyra.world import ObservationStore, PredictionProposal, PredictionStore, SourceRegistry
+from noyra.research import BrowserSearchExecutor
+from noyra.world import (
+    ObservationStore,
+    PredictionProposal,
+    PredictionStore,
+    SafeWebReader,
+    SourceRegistry,
+)
 from noyra.world.types import FetchedDocument
 
 
@@ -299,7 +309,7 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
             )
             revision = connection.execute(
                 "SELECT * FROM autonomous_project_execution_revisions WHERE execution_id = ? "
-                "ORDER BY created_at DESC, revision_id DESC LIMIT 1",
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
                 (execution_id,),
             ).fetchone()
             revision_state = content_hash(
@@ -333,6 +343,52 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             restarted.verified(execution.execution_id).result_hash, execution.result_hash
         )
+
+    async def test_same_tick_prediction_revisions_reopen_with_joined_digests(self: Self) -> None:
+        from noyra.core.types import new_id
+
+        sequence = iter(range(100, 0, -1))
+
+        def reverse_id(prefix: str) -> str:
+            return f"pexec-rev_{next(sequence):032x}" if prefix == "pexec-rev" else new_id(prefix)
+
+        with (
+            patch(
+                "noyra.cognition.execution.utc_now", return_value="2026-11-08T00:00:00.000+00:00"
+            ),
+            patch("noyra.cognition.execution.new_id", side_effect=reverse_id),
+        ):
+            ledger, execution = await self.prediction_execution()
+        self.assertEqual(ledger.verified(execution.execution_id).status, "succeeded")
+        with self.kernel.database.read_transaction() as connection:
+            before = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM autonomous_project_execution_revisions WHERE execution_id=? "
+                    "ORDER BY rowid",
+                    (execution.execution_id,),
+                )
+            ]
+        self.assertEqual(len({row["created_at"] for row in before}), 1)
+        self.assertEqual(before[0]["status"], "prepared")
+        self.assertEqual(before[-1]["status"], "succeeded")
+        restarted = ProjectExecutionLedger(Database(self.database_path), self.subject_id)
+        self.assertEqual(restarted.verify_integrity(), 1)
+        self.assertEqual(
+            restarted.verified(execution.execution_id).result_hash, execution.result_hash
+        )
+        with restarted.database.read_transaction() as connection:
+            self.assertEqual(
+                [
+                    dict(row)
+                    for row in connection.execute(
+                        "SELECT * FROM autonomous_project_execution_revisions WHERE execution_id=? "
+                        "ORDER BY rowid",
+                        (execution.execution_id,),
+                    )
+                ],
+                before,
+            )
 
     async def test_execution_prepare_rejects_forged_subject_and_phase_bindings(self: Self) -> None:
         project, phase = await self.active_project("self_experiment", "self_development")
@@ -659,6 +715,87 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(execution.status, "executing")
         self.assertEqual(execution.error_code, "prediction_calibration_unavailable")
         self.assertEqual(execution.acceptance["evidence"]["status"], "pending_calibration")
+
+    async def test_research_phase_requires_actual_trial_evidence_and_obeys_action_budget(
+        self: Self,
+    ) -> None:
+        project, phase = await self.active_project("research_note", "research")
+        CapabilityStore(self.kernel.database).grant(
+            self.subject_id,
+            CapabilityGrant(
+                capability_type="web_read",
+                scope={"public_https": True},
+                issuer="fixture",
+                rate_limit_per_hour=20,
+                side_effect=False,
+            ),
+            actor="operator",
+        )
+        plan: dict[str, object] = {
+            "summary": "Search for independent evidence",
+            "disposition": "search",
+            "goal_id": self.goal.goal_id,
+            "query": "independent evidence",
+            "method": "browser",
+            "provider_config_id": None,
+            "expected_information": "Actual public page evidence",
+            "reason": "Autonomous project evidence gap",
+            "evidence_event_ids": [self.event.event_id],
+        }
+        page_requests: list[str] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "www.bing.com":
+                return httpx.Response(
+                    200,
+                    content=(
+                        b"<rss><channel>"
+                        b"<item><title>A</title><link>https://first.example/page</link></item>"
+                        b"<item><title>B</title><link>https://second.example/page</link></item>"
+                        b"</channel></rss>"
+                    ),
+                )
+            page_requests.append(str(request.url))
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/plain"},
+                text="Actual project evidence from a public source.",
+            )
+
+        async def resolver(host: str, port: int) -> list[str]:
+            return ["8.8.8.8"]
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            reader = SafeWebReader(client=client, resolver=resolver, verify_peer_address=False)
+            research = AutonomousResearch(
+                self.kernel.database,
+                self.subject_id,
+                self.gateway([plan, {"sources": [], "follow_links": []}]),
+                self.settings().model_copy(update={"max_search_rounds_per_run": 1}),
+                secret_dir=self.root / "search",
+                reader=reader,
+                browser_search_executor=BrowserSearchExecutor(self.kernel.database, client=client),
+            )
+            try:
+                executor = ProjectPhaseExecutor(self.kernel.database, self.subject_id, research)
+                result = await executor.run_research_phase(project, phase)
+                self.assertEqual(result.status, "succeeded")
+                self.assertEqual(executor.ledger.verify_integrity(), 1)
+                self.assertEqual(research.verify_integrity(), 1)
+                # One search plus one trial fills the project's two-action
+                # envelope. The second candidate cannot send another request.
+                self.assertEqual(page_requests, ["https://first.example/page"])
+                with self.kernel.database.connection() as connection:
+                    row = connection.execute(
+                        "SELECT rounds_json FROM research_search_runs WHERE research_id=?",
+                        (result.research_id,),
+                    ).fetchone()
+                attempts = json.loads(row[0])[-1]["read_attempts"]
+                self.assertEqual(
+                    [item["status"] for item in attempts], ["read", "project_action_budget"]
+                )
+            finally:
+                await research.aclose()
 
 
 if __name__ == "__main__":

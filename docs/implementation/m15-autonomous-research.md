@@ -21,13 +21,31 @@ was fetched.
 3. Ask the remote model to choose `api`, `model`, `browser`, or `wait`.
 4. Validate the selected goal, evidence IDs, provider ID, and duplicate-query boundary locally.
 5. Execute a bounded search round. Configured API and browser searches use the action ledger and
-   hourly limits; model discovery uses the model ledger and daily research-call limit.
+   hourly limits; model discovery uses the model ledger and daily research-call limit. An empty or
+   unavailable API/model route can try the lightweight search surface once per run, retaining both
+   attempts and their outcomes. An unknown action is never automatically reissued.
 6. When another round is allowed, ask the model whether the first result set is sufficient and
    permit a switch to a different available method.
-7. Register distinct HTTPS hosts as candidate world sources with initial trust `0.35`. A candidate
-   is not fetched evidence and must later pass normal source activation and observation controls.
-8. Append an immutable research record containing hashes, method choices, result counts, actions,
-   and accepted source IDs. Raw queries remain private and are represented durably by hashes.
+7. Register distinct canonical HTTPS URLs as candidates with initial trust `0.35`, reusing an
+   existing source identity and respecting operator blocks. Search does not require any existing
+   active source. Model-suggested URLs and search snippets remain unverified candidates.
+8. Trial-read candidates using the existing public reading capability. Trial permission is explicit:
+   the ordinary reader and observation API still require active sources. A trial needs an active,
+   subject-owned autonomous goal, rechecks authorization and the runtime lease before dispatch and
+   evidence commit, and records the actual page as an observation before settling its action.
+9. After successful reads, Noyra may follow useful sources, hold one-off evidence, abandon a
+   candidate, or select a bounded set of links actually present in the pages. Following is an
+   evidence-backed source revision; reading alone never enables ongoing polling. A subject can
+   also stop following a source it previously chose; operator-controlled revisions take precedence.
+10. Read selected links at most one level deep, sharing the same per-run read budget with search
+    candidates. No JavaScript browser, topic whitelist, default domain whitelist, or per-page human
+    approval is added. Optional host-scoped operator grants still apply to every request.
+11. Append an immutable research record containing method choices, discovery counts, read
+    attempts, observation/action receipts and attention decisions. New runs use
+    `noyra-research-reading/v1`; accepted source IDs require clean actual-read receipts. Both
+    research integrity checks and project acceptance validate those links. Historical records keep
+    their original discovery-only contract and are not rewritten or presented as fetched evidence.
+    Raw queries remain private and are represented durably by hashes.
 
 ## Configuration Panel
 
@@ -44,15 +62,45 @@ removes secret access while retaining the immutable resource history.
 
 ## Safety and Recovery
 
-- Only absolute public HTTPS URLs are accepted.
+- Only absolute public HTTPS URLs are accepted. Trial reads use the same DNS pinning, public
+  address validation, redirect rejection, media/response limits, and injection classification as
+  regular reads. Extracted links are candidates and receive the same checks when actually read.
+- Injection-signaled pages can be recorded as untrusted observations, but cannot be promoted,
+  supply continuation links, or count as accepted research evidence. Model attention choices may
+  name only the sources and links in the supplied actual reads.
+- At most `NOYRA_MAX_RESEARCH_READS_PER_RUN` requests are admitted for trial reading. Capability
+  rate limits, project action envelopes, the existing research daily model-call limit, and the
+  gateway's token/cost budgets remain in effect. Reading assessment uses bounded local excerpts;
+  identical extracts are labeled as duplicates rather than independent corroboration.
+- Empty or failed reads never become accepted evidence. Unchanged content updates the poll
+  heartbeat without a new observation, reading assessment, or productive research result. Failed
+  checks cool down; backward clock movement keeps the cooldown closed.
+- Restart recovery uses action-linked observations and model ledger results. A terminal trial does
+  not send another request; an interrupted trial remains unresolved/unknown rather than retrying.
 - API and browser search responses are streamed under a 64 KB header-field limit, a 2 MB identity-
   encoded body limit, a total deadline, disabled redirects, and bounded connection pools. Malformed
   JSON is treated as a failed audited action.
 - API and browser search actions are idempotent. Successful replays restore stored normalized
   results without repeating the network request.
 - Interrupted executing actions are quarantined by the existing action-ledger recovery path.
-- A successful planner call that was not committed after a process failure is reused instead of
-  spending another model call.
+- Planner identity belongs to the independent research lane or one exact project phase, not to
+  the budget date. Existing dated keys remain readable. Unknown/executing calls and unresolved
+  explicit-retry fences keep that lane waiting across day, context, resource and restart changes;
+  another lane advancing the global run counter does not release them.
+- A successful planner call that was not committed after a process failure is reused before the
+  new-call quota check, instead of spending another model call. A matching prepared request keeps
+  its old logical identity; changed request context or routing cannot be escaped by generating a
+  new key. Routed prepared retries retain the existing explicit authorization requirement.
+- Known-failed or locally rejected planning can create another identity after the configured
+  research interval. No new identity is admitted once that purpose has two physical planning-call
+  rows for the budget day; one gateway invocation can still use its existing bounded failover.
+  Daily research and gateway cost/token limits still apply. Rejection receipts are idempotent;
+  unknown outcomes are never converted to known failures by this scheduling policy.
+- Context construction measures the final JSON character count. It removes optional history,
+  compacts long goal/provider text and, when needed, reduces ranked candidates while retaining a
+  real goal and evidence. The resource directory is bounded to 16 entries. Only IDs present in the
+  final JSON are accepted as goal, provider and evidence candidates; bound project research keeps
+  its own goal. Saved goal/provider text and the configured budget are not rewritten.
 - Provider uses, provider revisions, and research runs are append-only. Unique planner-call and
   action-use indexes prevent duplicate durable commits.
 - Human messages and human-proposed goals are excluded from research planning context.
@@ -68,6 +116,7 @@ The operator controls frequency and resource ceilings through:
 - `NOYRA_MAX_SEARCH_RESULTS_PER_ROUND`
 - `NOYRA_MAX_DISCOVERED_SOURCES_PER_RUN`
 - `NOYRA_MAX_BROWSER_SEARCHES_PER_HOUR`
+- `NOYRA_MAX_RESEARCH_READS_PER_RUN` (default 4, including chosen page links)
 
 Exhausted model budget contributes directly to fatigue. Search API usage is additionally bounded by
 the hourly limit saved with each configured resource.
@@ -85,3 +134,12 @@ Ubuntu:
 ```bash
 ./scripts/audit-autonomous-research.sh
 ```
+
+## Verification boundary
+
+The B1 regression suite uses a fixed synthetic web world to exercise no-API search, cross-domain
+reading, explicit source following, one-level limits, forged choices, capability revocation, blocked
+sources, private DNS, injection, empty/unchanged content, restart recovery, project evidence and
+runtime exports. It does not register external accounts or claim that live search availability,
+production deployment, or long-running internet exploration has been verified. Search providers
+and ordinary websites can still be unavailable or reject automated requests.

@@ -12,10 +12,11 @@ import os
 import re
 import secrets
 import signal
+import sys
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future as ConcurrentFuture
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
@@ -42,6 +43,7 @@ from noyra.core.at_rest import AtRestConfig, AtRestError, AtRestGuard
 from noyra.core.credentials import CredentialError, read_secret_file
 from noyra.core.database import Database
 from noyra.core.deadline import remaining_seconds
+from noyra.core.delivery_state import delivery_status_counts
 from noyra.core.errors import (
     IntegrityError,
     InvalidTransitionError,
@@ -87,6 +89,7 @@ from noyra.core.upgrade import (
     UPGRADE_STATUS_PATH,
     UpgradeManager,
 )
+from noyra.http_failures import log_http_failure, request_id
 from noyra.http_routes.auth import _AdminSession as _AdminSession
 from noyra.http_routes.auth import _ascii_token_equal as _ascii_token_equal
 from noyra.http_routes.auth import (
@@ -446,6 +449,12 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             self._worker_slots.release()
             raise
 
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # setup/finish failures can occur outside handle_one_request. The
+        # stdlib fallback prints exception text and client addresses to stderr.
+        # Keep this final server boundary source-safe without global hooks.
+        log_http_failure(sys.exception(), request_id(), event="server_failure")
+
     def process_request_thread(self, request: Any, client_address: Any) -> None:
         with self._handler_condition:
             self._active_handlers += 1
@@ -647,6 +656,7 @@ class NoyraHTTPServer:
             production=settings.profile == "production",
             admission=kernel.admission,
             executor=self.migration_http_executor,
+            require_principal_identity=settings.migration_require_independent_review,
         )
         self.migration_recovery = RecoveryCoordinator(kernel.database)
         observation_provider = TargetObservationProvider(
@@ -670,6 +680,7 @@ class NoyraHTTPServer:
         self._storage_observation_lock = threading.Lock()
         self._storage_observation_at = 0.0
         self._storage_observation: tuple[StorageContract, str] | None = None
+        self.integrity_watchdog_health: Callable[[], dict[str, Any]] | None = None
         self.runtime_observer = RuntimeObserver(
             self.kernel.database.path, self.settings.data_dir, self.kernel.subject_id
         )
@@ -1054,6 +1065,7 @@ class NoyraHTTPServer:
                 and (path.endswith("/retry") or path.endswith("/cancel"))
             )
             or path == "/api/admin/wallet-executions/recover"
+            or path == "/api/admin/workflow-clock/acknowledge"
         )
 
     @staticmethod
@@ -1078,6 +1090,13 @@ class NoyraHTTPServer:
             "/api/admin/lifecycle/resume",
             "/api/admin/lifecycle/reset",
             "/api/admin/lifecycle/wake",
+            "/api/admin/project-execution-recovery/release-review",
+            "/api/admin/sleep-recovery/abort",
+            "/api/admin/workflow-exports",
+            "/api/admin/workflow-increments",
+            "/api/admin/workflow-increments/verify",
+            "/api/admin/workflow-exports/verify",
+            "/api/admin/memory-integration-recovery/discard-legacy",
         } or self._is_recovery_mutation(path)
 
     def _run_export(
@@ -1228,31 +1247,59 @@ class NoyraHTTPServer:
             }
         )
 
-    def client_ip(self, peer: str, forwarded_for: str | None = None) -> str:
+    def client_ip(self, peer: str, forwarded_for: str | Sequence[str] | None = None) -> str:
         """Resolve a rate-limit identity without trusting spoofable headers.
 
         X-Forwarded-For is considered only when the direct peer belongs to an
         explicitly configured trusted proxy network.  Walk the chain from the
         direct peer backwards and select the first address outside the trusted
         networks; this ignores attacker-supplied entries placed before a
-        trusted proxy's appended chain.  Without that configuration, the
-        socket peer remains authoritative.
+        trusted proxy's appended chain. Repeated header fields are combined in
+        arrival order because HTTP permits equivalent list-valued fields.
+        Without trusted proxy configuration, the socket peer remains
+        authoritative.
         """
         try:
             peer_address = ipaddress.ip_address(peer)
         except ValueError:
             return peer
-        trusted = any(
-            peer_address in ipaddress.ip_network(cidr, strict=False)
-            for cidr in self.settings.trusted_proxy_cidrs
+        trusted_networks = tuple(
+            ipaddress.ip_network(cidr, strict=False) for cidr in self.settings.trusted_proxy_cidrs
         )
-        if not trusted or not forwarded_for:
+
+        def is_trusted(address: Any) -> bool:
+            return any(
+                address.version == network.version and address in network
+                for network in trusted_networks
+            )
+
+        if not is_trusted(peer_address) or not forwarded_for:
             return str(peer_address)
-        if len(forwarded_for) > 4_096:
+
+        header_values: tuple[str, ...]
+        if isinstance(forwarded_for, str):
+            header_values = (forwarded_for,)
+        elif isinstance(forwarded_for, Sequence) and not isinstance(
+            forwarded_for, (bytes, bytearray)
+        ):
+            if any(not isinstance(value, str) for value in forwarded_for):
+                return str(peer_address)
+            header_values = tuple(forwarded_for)
+        else:
             return str(peer_address)
-        parts = forwarded_for.split(",")
-        if len(parts) > 32:
+
+        if not header_values or len(header_values) > 32:
             return str(peer_address)
+        total_chars = 0
+        parts: list[str] = []
+        for value in header_values:
+            total_chars += len(value) + 1
+            if total_chars > 4_096:
+                return str(peer_address)
+            parts.extend(value.split(","))
+            if len(parts) > 32:
+                return str(peer_address)
+
         parsed_chain: list[Any] = []
         for candidate in (part.strip() for part in parts):
             try:
@@ -1263,10 +1310,7 @@ class NoyraHTTPServer:
             except ValueError:
                 return str(peer_address)
         for candidate in reversed(parsed_chain):
-            if not any(
-                candidate in ipaddress.ip_network(cidr, strict=False)
-                for cidr in self.settings.trusted_proxy_cidrs
-            ):
+            if not is_trusted(candidate):
                 return str(candidate)
         return str(peer_address)
 
@@ -1408,7 +1452,7 @@ class NoyraHTTPServer:
             "runs": 0,
             "by_method": {method: {} for method in ("api", "model", "browser", "wait")},
         }
-        with self.kernel.database.connection() as connection:
+        with self.kernel.database.read_transaction() as connection:
             loop = connection.execute(
                 "SELECT circuit_status, consecutive_failures, next_retry_at, "
                 "last_successful_tick_at, last_error_type FROM autonomy_loop_state "
@@ -1423,17 +1467,7 @@ class NoyraHTTPServer:
                 "SELECT COUNT(*) FROM model_calls WHERE subject_id = ? AND status = 'unknown'",
                 (self.kernel.subject_id,),
             ).fetchone()[0]
-            for row in connection.execute(
-                "SELECT COALESCE(r.outcome, d.status) AS status, COUNT(*) AS count "
-                "FROM interaction_deliveries d "
-                "LEFT JOIN interaction_delivery_reconciliations r ON r.delivery_id = d.delivery_id "
-                "AND r.outcome IN ('delivered', 'failed', 'cancelled') "
-                "WHERE d.subject_id = ? GROUP BY COALESCE(r.outcome, d.status)",
-                (self.kernel.subject_id,),
-            ):
-                if len(delivery_counts) >= DIAGNOSTICS_MAX_STATUS_BUCKETS:
-                    break
-                delivery_counts[str(row["status"])] = int(row["count"])
+            delivery_counts = delivery_status_counts(connection, self.kernel.subject_id)
             for row in connection.execute(
                 "SELECT status, COUNT(*) AS count FROM interaction_inbound_events "
                 "WHERE subject_id = ? GROUP BY status",
@@ -1963,6 +1997,7 @@ class NoyraService:
             pre_tick_hook=self._integrity_pre_tick,
             next_wakeup_hook=self.integrity.seconds_until_due,
         )
+        self.http.integrity_watchdog_health = self.loop.integrity_watchdog.snapshot
         self._event_loop: asyncio.AbstractEventLoop | None = None
         self._stop_event: asyncio.Event | None = None
         self._integrity_worker: asyncio.Task[Any] | None = None
@@ -1980,7 +2015,12 @@ class NoyraService:
             return True
         return bool(
             self.integrity.policy_mode == "pause"
-            and (summary.get("pause_pending") or summary.get("p0") or summary.get("p1"))
+            and (
+                summary.get("pause_pending")
+                or summary.get("p0")
+                or summary.get("p1")
+                or summary.get("evidence", {}).get("recheck_pending")
+            )
         )
 
     def __del__(self) -> None:
@@ -2298,7 +2338,10 @@ class NoyraService:
             if (
                 integrity is not None
                 and self.integrity.policy_mode == "pause"
-                and integrity.findings
+                and (
+                    integrity.findings
+                    or self.integrity.summary().get("evidence", {}).get("recheck_pending")
+                )
             ):
                 self.kernel.admission.quarantine()
                 return
@@ -2517,6 +2560,7 @@ class NoyraService:
             self._event_loop.call_soon_threadsafe(self._stop_event.set)
 
     async def _integrity_pre_tick(self) -> TickResult | None:
+        recovery_epoch = self.kernel.admission.epoch
         worker = asyncio.create_task(
             asyncio.to_thread(self.integrity.run_periodic_if_due),
             name="noyra-integrity-watchdog",
@@ -2542,6 +2586,16 @@ class NoyraService:
                 self.settings.sleep_interval_seconds,
             )
         summary = self.integrity.summary()
+        if self.integrity.policy_mode == "pause" and summary.get("evidence", {}).get(
+            "recheck_pending"
+        ):
+            self.kernel.admission.quarantine()
+            return TickResult(
+                self.kernel.lifecycle.current().state,
+                "integrity_evidence_recheck_pending",
+                None,
+                self.settings.integrity_retry_seconds,
+            )
         if self._boot_recovery_pending:
             if self.integrity.policy_mode == "pause" and (summary["p0"] or summary["p1"]):
                 self.kernel.admission.quarantine()
@@ -2602,11 +2656,24 @@ class NoyraService:
         current = self.kernel.lifecycle.current()
         if (
             not self._boot_recovery_pending
-            and current.state == "active"
             and not self.kernel.admission.closed
             and not self._http_quarantine_active()
         ):
-            self.kernel.admission.open(epoch=current.version)
+            if current.state == "active":
+                self.kernel.admission.open(epoch=current.version)
+            elif (
+                current.state
+                in {"paused", "winding_down", "reflective_sleep", "deep_sleep", "waking"}
+                and self.integrity.policy_mode == "pause"
+                and blocking["status"] == "ok"
+                and self.kernel.admission.quarantined
+                and not self.kernel.admission.migration_fenced
+                and self.kernel.process_lock.held
+            ):
+                # Verified recovery restores controls and sleep advancement,
+                # while manual pause still forbids ordinary cognition. Keep
+                # the invalidated epoch so pre-quarantine work stays stale.
+                self.kernel.admission.clear_quarantine(expected_epoch=recovery_epoch)
         return None
 
     def _integrity_checkpoint(self) -> None:

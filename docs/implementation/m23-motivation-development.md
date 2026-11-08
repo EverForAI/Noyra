@@ -25,7 +25,9 @@ retire them only through small revisions.
 A mission candidate requires multiple developed values, at least three supplied events and repeated
 sleep. It begins with bounded commitment and confidence. Adoption requires additional sleep and high
 support, so a single dramatic experience or model call cannot define Noyra's life direction. Mission
-history remains revisable and append-only; one adopted mission may exist at a time.
+history remains revisable and append-only; one adopted mission may exist at a time. No mission or
+value profile is required to form or govern a legitimate short-term autonomous goal. The model sees
+the actual local validation limits, and a no-change review remains a valid result.
 
 Motivation review cannot create or activate goals, execute tools, contact people, claim progress or
 perform external actions. Developed values and mission candidates are later supplied as private
@@ -48,3 +50,34 @@ and reasoning remain hidden.
 - `NOYRA_MINIMUM_MISSION_VALUE_COUNT`
 - `NOYRA_MINIMUM_MISSION_SLEEP_COUNT`
 - `NOYRA_MINIMUM_MISSION_ADOPTION_SLEEP_COUNT`
+
+## Rejection evidence and recovery
+
+New local rejections commit a private `noyra-intrinsic-decision/v1` receipt atomically with the
+rejected review. It records the specific reason code, validator version, validation-time context
+hash, evidence IDs, value/mission state and applicable limits. Rejected proposals do not partially
+create values or missions. These diagnostic events are excluded from future motivation context;
+a rejected review respects its review interval even when unrelated input changes.
+
+A successful provider response awaiting its local review can be recovered after the new-call daily
+cap is reached, without another request. Unknown/executing calls wait for reconciliation. If an
+older uncommitted response belongs to a different context, the runtime reports
+`motivation_development_waiting_previous_context` instead of silently spending a new call or
+validating it as though the original context were known. The condition does not block other
+workflows. Existing reconciliation and private-evidence procedures determine recovery.
+
+The local read-only diagnostic accepts an exact subject and review ID:
+
+```sh
+python scripts/diagnose-motivation-review.py /path/to/noyra.sqlite3 \
+  --subject SUBJECT_ID --review REVIEW_ID
+```
+
+It opens the existing database read-only and reports request-capture status, response availability,
+recorded reason/version and whether the captured validation inputs reproduce the reason. It does
+not contact a provider, modify a record, print private prompt bodies, or validate an old proposal
+against today's state. Offline reproduction is available for the recorded `motivation/v1` policy;
+a different implementation/policy is reported as unavailable. Historical reviews without the
+original validation snapshot report `historical_evidence_insufficient`, even if a response remains.
+No reason is invented and no old paid call is replayed. Private receipts follow the existing event
+export and archival boundary; operators should keep diagnostic exports private.

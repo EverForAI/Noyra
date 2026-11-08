@@ -48,6 +48,30 @@ class MemoryIntegrationSupervisor:
         evidence_event_ids: tuple[str, ...],
         reason: str,
     ) -> MemoryIntegrationRecord:
+        with self.database.transaction() as connection:
+            identifier = self._integrate_connection(
+                connection,
+                operation,
+                source_memory_ids,
+                synthesis=synthesis,
+                confidence=confidence,
+                evidence_event_ids=evidence_event_ids,
+                reason=reason,
+            )
+        return self.get(identifier)
+
+    def _integrate_connection(
+        self,
+        connection: Any,
+        operation: str,
+        source_memory_ids: tuple[str, ...],
+        *,
+        synthesis: str,
+        confidence: float,
+        evidence_event_ids: tuple[str, ...],
+        reason: str,
+    ) -> str:
+        """Run the same supervisor validation and writes in a caller-owned transaction."""
         if operation not in {"merge", "supersede", "contradict"}:
             raise MemoryIntegrationError("invalid memory integration operation")
         if len(source_memory_ids) < 2 or len(set(source_memory_ids)) != len(source_memory_ids):
@@ -56,76 +80,77 @@ class MemoryIntegrationSupervisor:
             raise MemoryIntegrationError("invalid integration synthesis")
         if not evidence_event_ids or len(set(evidence_event_ids)) != len(evidence_event_ids):
             raise MemoryIntegrationError("integration evidence is required")
-        records = [self.memories.get(memory_id) for memory_id in source_memory_ids]
+        records = [
+            self.memories._load_connection(connection, memory_id) for memory_id in source_memory_ids
+        ]
         if any(record.subject_id != self.subject_id for record in records):
             raise MemoryIntegrationError("memory integration crosses subject boundary")
         if confidence > max(record.confidence for record in records):
             raise MemoryIntegrationError("integration confidence exceeds source evidence")
-        with self.database.transaction() as connection:
-            for event_id in evidence_event_ids:
-                if (
-                    connection.execute(
-                        "SELECT 1 FROM events WHERE subject_id = ? AND event_id = ?",
-                        (self.subject_id, event_id),
-                    ).fetchone()
-                    is None
-                ):
-                    raise MemoryIntegrationError("integration evidence is unavailable")
-            output = self.memories._create_connection(
-                connection,
+        for event_id in evidence_event_ids:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM events WHERE subject_id = ? AND event_id = ?",
+                    (self.subject_id, event_id),
+                ).fetchone()
+                is None
+            ):
+                raise MemoryIntegrationError("integration evidence is unavailable")
+        output = self.memories._create_connection(
+            connection,
+            self.subject_id,
+            "reflection" if operation == "contradict" else "semantic",
+            synthesis.strip(),
+            salience=max(record.salience for record in records),
+            confidence=confidence,
+            source_event_ids=evidence_event_ids,
+            reason=f"memory integration: {reason.strip()}",
+        )
+        if operation in {"merge", "supersede"}:
+            for record in records:
+                self.memories._revise_connection(
+                    connection,
+                    record.memory_id,
+                    content=record.content,
+                    salience=record.salience,
+                    confidence=record.confidence,
+                    status="superseded",
+                    reason=f"superseded by integration {output.memory_id}",
+                    source_event_ids=evidence_event_ids,
+                    expected_revision=record.current_revision,
+                )
+        now = utc_now()
+        integration_id = new_id("memint")
+        state_hash = self._hash(
+            operation,
+            source_memory_ids,
+            output.memory_id,
+            evidence_event_ids,
+            reason.strip(),
+            confidence,
+            "active",
+        )
+        connection.execute(
+            """INSERT INTO memory_integrations(
+                integration_id, subject_id, operation, source_memory_ids_json,
+                output_memory_id, evidence_event_ids_json, reason, confidence,
+                status, state_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)""",
+            (
+                integration_id,
                 self.subject_id,
-                "reflection" if operation == "contradict" else "semantic",
-                synthesis.strip(),
-                salience=max(record.salience for record in records),
-                confidence=confidence,
-                source_event_ids=evidence_event_ids,
-                reason=f"memory integration: {reason.strip()}",
-            )
-            if operation in {"merge", "supersede"}:
-                for record in records:
-                    self.memories._revise_connection(
-                        connection,
-                        record.memory_id,
-                        content=record.content,
-                        salience=record.salience,
-                        confidence=record.confidence,
-                        status="superseded",
-                        reason=f"superseded by integration {output.memory_id}",
-                        source_event_ids=evidence_event_ids,
-                        expected_revision=record.current_revision,
-                    )
-            now = utc_now()
-            integration_id = new_id("memint")
-            state_hash = self._hash(
                 operation,
-                source_memory_ids,
+                canonical_json(list(source_memory_ids)),
                 output.memory_id,
-                evidence_event_ids,
+                canonical_json(list(evidence_event_ids)),
                 reason.strip(),
                 confidence,
-                "active",
-            )
-            connection.execute(
-                """INSERT INTO memory_integrations(
-                    integration_id, subject_id, operation, source_memory_ids_json,
-                    output_memory_id, evidence_event_ids_json, reason, confidence,
-                    status, state_hash, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)""",
-                (
-                    integration_id,
-                    self.subject_id,
-                    operation,
-                    canonical_json(list(source_memory_ids)),
-                    output.memory_id,
-                    canonical_json(list(evidence_event_ids)),
-                    reason.strip(),
-                    confidence,
-                    state_hash,
-                    now,
-                ),
-            )
-            self._revision(connection, integration_id, "commit", reason.strip(), now)
-        return self.get(integration_id)
+                state_hash,
+                now,
+            ),
+        )
+        self._revision(connection, integration_id, "commit", reason.strip(), now)
+        return integration_id
 
     def revert(self, integration_id: str, *, reason: str) -> MemoryIntegrationRecord:
         record = self.get(integration_id)

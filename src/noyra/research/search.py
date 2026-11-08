@@ -26,6 +26,7 @@ from noyra.core.http import (
 from noyra.core.provider_health import ProviderHealthStore, RoutePermit
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.world import canonical_public_url
+from noyra.world.errors import UnsafeSourceError
 
 from .provider import SearchProviderStore
 from .routing import list_search_provider_controls
@@ -521,7 +522,7 @@ class SearchExecutor:
                         int(item["rank"]),
                     )
                 )
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError, UnsafeSourceError):
                 return ()
         if canonical_json([item.__dict__ for item in restored]) != canonical_json(raw):
             return ()
@@ -674,7 +675,7 @@ class SearchExecutor:
                 continue
             try:
                 url = canonical_public_url(raw_url)
-            except ValueError:
+            except (ValueError, UnsafeSourceError):
                 continue
             if url in seen:
                 continue

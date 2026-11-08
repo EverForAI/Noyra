@@ -6,6 +6,7 @@ from noyra.core.admission import accounting_scope
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.evidence_capacity import require_evidence_capacity
+from noyra.core.model_admission import notify_model_preparation
 from noyra.core.payload_codec import compress_text, decompress_text
 from noyra.core.private_sources import (
     InvitationWithdrawnError,
@@ -13,6 +14,7 @@ from noyra.core.private_sources import (
     participant_invitation_withdrawn,
     record_private_sources,
 )
+from noyra.core.recovery_budget import admit_recovery_attempt
 from noyra.core.types import (
     canonical_json,
     content_hash,
@@ -100,7 +102,9 @@ class ModelLedger:
                         "idempotency key already identifies a different model call"
                     )
                 record_private_sources(connection, subject_id, existing["call_id"])
-                return self._call_from_row(existing), False
+                call = self._call_from_row(existing)
+                notify_model_preparation(connection, call)
+                return call, False
             require_evidence_capacity(connection, subject_id, "model_calls")
             call_id = new_id("mcall")
             connection.execute(
@@ -128,7 +132,9 @@ class ModelLedger:
                 ),
             )
             record_private_sources(connection, subject_id, call_id)
-            return self._load_call_connection(connection, call_id), True
+            call = self._load_call_connection(connection, call_id)
+            notify_model_preparation(connection, call)
+            return call, True
 
     def authorize_attempt(
         self,
@@ -153,6 +159,12 @@ class ModelLedger:
         budget_day = budget_day or utc_now()[:10]
         with self.database.transaction() as connection:
             call = self._get_call_row(connection, call_id)
+            high_day = connection.execute(
+                "SELECT MAX(budget_day) FROM model_attempts WHERE subject_id=?",
+                (call["subject_id"],),
+            ).fetchone()[0]
+            if high_day is not None and budget_day < str(high_day):
+                raise BudgetExhaustedError("model_budget_clock_wait")
             if call["status"] == "executing" and continuation:
                 previous = connection.execute(
                     "SELECT status FROM model_attempts WHERE call_id = ? "
@@ -327,6 +339,15 @@ class ModelLedger:
             )
             require_evidence_capacity(connection, str(call["subject_id"]), "model_attempts")
             attempt_id = new_id("matt")
+            admit_recovery_attempt(
+                connection,
+                str(call["subject_id"]),
+                call_id,
+                attempt_id,
+                reserved_input_tokens,
+                reserved_output_tokens,
+                utc_now(),
+            )
             connection.execute(
                 """INSERT INTO model_attempts(
                     attempt_id, call_id, subject_id, budget_day, attempt_number, status,
@@ -540,6 +561,98 @@ class ModelLedger:
                 ),
             )
             return self._load_attempt_connection(connection, attempt_id)
+
+    def fail_unsent_attempt(self, call_id: str, attempt_id: str, *, error_code: str) -> bool:
+        """Atomically close this worker's confirmed-unsent attempt and call.
+
+        Only a gateway that has not dispatched, or whose final send guard
+        explicitly failed, may use this operation. It is not a recovery rule
+        for arbitrary executing rows. Validate before writing; preserve other
+        workers' progress and all earlier paid/unknown usage unchanged.
+        """
+        with accounting_scope(), self.database.transaction() as connection:
+            call = self._load_call_connection(connection, call_id)
+            attempt = self._load_attempt_connection(connection, attempt_id)
+            if attempt.call_id != call.call_id or attempt.subject_id != call.subject_id:
+                raise ModelCallStateError("unsent attempt does not belong to this call")
+            if call.status != "executing" or attempt.status not in {"authorized", "executing"}:
+                return False
+            latest = connection.execute(
+                "SELECT attempt_id FROM model_attempts WHERE call_id=? "
+                "ORDER BY attempt_number DESC LIMIT 1",
+                (call_id,),
+            ).fetchone()
+            if latest is None or latest["attempt_id"] != attempt_id:
+                return False
+            if connection.execute(
+                "SELECT 1 FROM model_attempts WHERE call_id=? AND attempt_id!=? "
+                "AND status IN ('authorized','executing') LIMIT 1",
+                (call_id, attempt_id),
+            ).fetchone():
+                return False
+            now = utc_now()
+            connection.execute(
+                "UPDATE model_attempts SET status='cancelled',error_code=?,completed_at=? "
+                "WHERE attempt_id=?",
+                (error_code, now, attempt_id),
+            )
+            connection.execute(
+                "UPDATE model_calls SET status='failed',completed_at=?,error_code="
+                "CASE WHEN error_code='private_content_erased' THEN error_code ELSE ? END "
+                "WHERE call_id=?",
+                (now, error_code, call_id),
+            )
+            return True
+
+    def fail_before_attempt(
+        self,
+        call_id: str,
+        *,
+        error_code: str,
+        settled_attempt_id: str | None = None,
+    ) -> bool:
+        """Close only a prepared call or this worker's settled retry boundary.
+
+        The caller has not authorized its next attempt. Recheck under the
+        writer lock: another worker may already have advanced the shared call.
+        Never rewrite an in-flight/unknown attempt or its fee reservation.
+        False means the phase changed, not that an uncertain request failed.
+        """
+        with accounting_scope(), self.database.transaction() as connection:
+            call = self._load_call_connection(connection, call_id)
+            if call.status not in {"prepared", "executing"}:
+                return False
+            if connection.execute(
+                "SELECT 1 FROM model_attempts WHERE call_id=? "
+                "AND status IN ('authorized','executing') LIMIT 1",
+                (call_id,),
+            ).fetchone():
+                return False
+            if call.status == "prepared":
+                if settled_attempt_id is not None:
+                    return False
+            else:
+                latest = connection.execute(
+                    "SELECT attempt_id,status FROM model_attempts WHERE call_id=? "
+                    "ORDER BY attempt_number DESC LIMIT 1",
+                    (call_id,),
+                ).fetchone()
+                if (
+                    settled_attempt_id is None
+                    or latest is None
+                    or latest["attempt_id"] != settled_attempt_id
+                    or latest["status"] not in {"succeeded", "failed"}
+                ):
+                    return False
+            # Preserve all response/usage evidence, including any privacy-erasure
+            # marker. Known or unknown fees live in attempts and are untouched.
+            connection.execute(
+                "UPDATE model_calls SET status='failed',completed_at=?,error_code="
+                "CASE WHEN error_code='private_content_erased' THEN error_code ELSE ? END "
+                "WHERE call_id=?",
+                (utc_now(), error_code, call_id),
+            )
+            return True
 
     def finish_call(
         self,

@@ -15,6 +15,7 @@ from noyra.core.events import EventStore
 from noyra.core.locking import ProcessLock
 from noyra.core.payload_codec import decompress_text
 from noyra.core.relationship_identity import context_rows
+from noyra.core.scheduling_clock import CooldownClock
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.mind import GoalCandidate, GoalStore, MindEngine
 from noyra.model import ModelGateway, ModelLedger, ModelMessage
@@ -35,16 +36,18 @@ from ._integrity import (
     durable_json,
     durable_string_list,
 )
+from .attention import attention_batch
+from .decision_evidence import DecisionValidationError, rejection_receipt
 from .settings import CognitionSettings
 from .thought_rounds import ThoughtRounds
-from .types import IntrinsicThoughtProposal
+from .types import IntrinsicThoughtGoalProposal, IntrinsicThoughtProposal
 
 _ABSENCE_CLEARED_REASON = "internal absence condition no longer present"
 _ABSENCE_RETURNED_REASON = "internal absence condition recurred"
 _CONTINUABLE_GOAL_STATUSES = frozenset({"candidate", "active", "paused", "reconsidering"})
 
 
-class IntrinsicThoughtValidationError(ValueError):
+class IntrinsicThoughtValidationError(DecisionValidationError):
     pass
 
 
@@ -163,6 +166,7 @@ class IntrinsicThought:
         self.mind = MindEngine(database, clock=clock)
         self.fatigue = FatigueTracker(database)
         self._last_agenda_discovery: datetime | None = None
+        self._discovery_clock = CooldownClock(capacity=1)
         self.rounds = ThoughtRounds(database, subject_id)
         self._processing_lock = ProcessLock(
             database.path.with_name(
@@ -180,12 +184,31 @@ class IntrinsicThought:
         if not self.settings.enabled:
             return False
         now = self._parse_time(self.clock())
+        if self._last_agenda_discovery is None:
+            with self.database.connection() as connection:
+                high = connection.execute(
+                    "SELECT MAX(updated_at) FROM thought_agenda_items WHERE subject_id=?",
+                    (self.subject_id,),
+                ).fetchone()[0]
+            if high is not None and now < self._parse_time(str(high)):
+                # Restart during UTC recovery must not write agenda revisions
+                # older than the immutable evidence they would revise.
+                return False
         if self._last_agenda_discovery is not None:
             elapsed = (now - self._last_agenda_discovery).total_seconds()
-            if elapsed < 300:
+            token = self._last_agenda_discovery.isoformat()
+            if 0 <= elapsed < 300 and not self._discovery_clock.ready(
+                "agenda", token, 300 - elapsed
+            ):
+                return False
+            if elapsed < 0 and not self._discovery_clock.ready("agenda", token, 300):
+                return False
+            if elapsed < 0:
+                # Leave ordered agenda history untouched until its UTC catches up.
                 return False
         self._refresh_agenda()
         self._last_agenda_discovery = now
+        self._discovery_clock.defer("agenda", now.isoformat(), 300)
         return True
 
     async def run_due(self, *, agenda_id: str | None = None) -> str | None:
@@ -289,16 +312,40 @@ class IntrinsicThought:
         content = succeeded.response.get("content")
         if not isinstance(content, str):
             raise IntegrityError("successful thought call has no content")
+        proposal: IntrinsicThoughtProposal | None = None
         try:
             proposal = IntrinsicThoughtProposal.model_validate_json(content)
             self._validate(proposal, context)
-        except (ValidationError, IntrinsicThoughtValidationError):
-            self._close_round(agenda.agenda_id, number, "proposal_rejected")
+            # A provider response cannot reserve changing internal evidence.
+            record = self._commit(proposal, succeeded.call_id, idempotency_key, context)
+        except (ValidationError, IntrinsicThoughtValidationError) as error:
+            receipt = rejection_receipt(
+                validator="thought",
+                call_id=succeeded.call_id,
+                error=error,
+                context_hash=context.source_hash,
+                context_version="noyra-private-intrinsic-thought/v2",
+                snapshot={
+                    "event_ids": sorted(context.event_ids),
+                    "memory_ids": sorted(context.memory_ids),
+                    "belief_ids": sorted(context.belief_ids),
+                    "goal_ids": sorted(context.goal_ids),
+                    "relationship_ids": sorted(context.relationship_ids),
+                    "affect_support": [
+                        [list(key), value] for key, value in context.affects.items()
+                    ],
+                    "live_affect_support": self._current_goal_affect(proposal),
+                    "max_thought_goals_per_day": self.settings.max_thought_goals_per_day,
+                    "thought_goals_today": self._thought_goals_today(),
+                    "minimum_affect": 0.5,
+                },
+                proposal=None if proposal is None else proposal.model_dump(mode="json"),
+            )
+            self._close_round(agenda.agenda_id, number, "proposal_rejected", receipt=receipt)
             return "intrinsic_thought_rejected"
         # Recovery consumes only the existing verified response, including when
         # today's new-request budget is exhausted. The real episode and agenda
         # mutation are still atomic; no failure is represented as a fake thought.
-        record = self._commit(proposal, succeeded.call_id, idempotency_key, context)
         return f"intrinsic_thought_{record.disposition}"
 
     def inspect_agenda(
@@ -372,7 +419,9 @@ class IntrinsicThought:
             return "intrinsic_thought_target_not_due"
         return "intrinsic_thought_target_waiting"
 
-    def _close_round(self, agenda_id: str, number: int, reason: str) -> bool:
+    def _close_round(
+        self, agenda_id: str, number: int, reason: str, *, receipt: dict[str, Any] | None = None
+    ) -> bool:
         now = self.clock()
         retry_after = (
             self._parse_time(now)
@@ -382,7 +431,7 @@ class IntrinsicThought:
                 )
             )
         ).isoformat(timespec="milliseconds")
-        return self.rounds.close(agenda_id, number, reason, now, retry_after)
+        return self.rounds.close(agenda_id, number, reason, now, retry_after, receipt=receipt)
 
     def agenda(self, *, limit: int = 100) -> list[ThoughtAgendaRecord]:
         bounded = max(1, min(limit, 1_000))
@@ -486,15 +535,30 @@ class IntrinsicThought:
             # snapshot. No provider/model/advisory calls occur in discovery.
             self._retire_terminal_goal_agendas(connection, now)
             candidates = self._agenda_candidates(connection=connection)
+            unique: dict[tuple[str, str], dict[str, Any]] = {}
+            for candidate in candidates:
+                unique.setdefault((candidate["source_type"], candidate["source_id"]), candidate)
+            candidates = list(unique.values())
             absence_key = self._absence_source_id()
             if not any(candidate["source_id"] == absence_key for candidate in candidates):
                 self._resolve_absence_agenda(connection, absence_key, now)
+            existing_agendas: dict[tuple[str, str], Any] = {}
+            identities = [(str(c["source_type"]), str(c["source_id"])) for c in candidates]
+            for offset in range(0, len(identities), 128):
+                batch = identities[offset : offset + 128]
+                placeholders = ",".join("(?,?)" for _ in batch)
+                rows = connection.execute(
+                    f"WITH wanted(source_type,source_id) AS (VALUES {placeholders}) "
+                    "SELECT a.* FROM wanted w JOIN thought_agenda_items a "
+                    "ON a.source_type=w.source_type AND a.source_id=w.source_id "
+                    "WHERE a.subject_id=?",
+                    (*[x for pair in batch for x in pair], self.subject_id),
+                ).fetchall()
+                existing_agendas.update(
+                    {(str(r["source_type"]), str(r["source_id"])): r for r in rows}
+                )
             for candidate in candidates:
-                existing = connection.execute(
-                    "SELECT * FROM thought_agenda_items WHERE subject_id = ? "
-                    "AND source_type = ? AND source_id = ?",
-                    (self.subject_id, candidate["source_type"], candidate["source_id"]),
-                ).fetchone()
+                existing = existing_agendas.get((candidate["source_type"], candidate["source_id"]))
                 if existing is None:
                     agenda_id = new_id("agenda")
                     state_hash = self._agenda_hash(
@@ -905,16 +969,13 @@ class IntrinsicThought:
 
     def _select_agenda(self) -> ThoughtAgendaRecord | None:
         allow_new_calls = self._calls_today() < self.settings.max_thought_model_calls_per_day
-        available = []
-        for item in self.agenda(limit=200):
+        for row in attention_batch(
+            self.database, self.subject_id, self.clock(), self.settings.thought_interval_seconds
+        ):
+            item = self._agenda_from_row(row)
             if self.inspect_agenda(item.agenda_id, allow_new_calls=allow_new_calls).eligible:
-                available.append(item)
-        if not available:
-            return None
-        return max(
-            available,
-            key=lambda item: (item.attention_score, item.updated_at, item.agenda_id),
-        )
+                return item
+        return None
 
     def _is_due(self, agenda: ThoughtAgendaRecord, *, allow_new_calls: bool | None = None) -> bool:
         return self.inspect_agenda(agenda.agenda_id, allow_new_calls=allow_new_calls).eligible
@@ -929,7 +990,7 @@ class IntrinsicThought:
             event_rows = connection.execute(
                 "SELECT event_id, event_type, source, occurred_at, payload_hash FROM events "
                 "WHERE subject_id = ? AND event_type NOT IN "
-                "('intrinsic_thought_committed', 'autonomy_tick') "
+                "('intrinsic_thought_committed', 'autonomy_tick', 'intrinsic_decision_rejected') "
                 "ORDER BY occurred_at DESC, event_id DESC LIMIT 48",
                 (self.subject_id,),
             ).fetchall()
@@ -1045,7 +1106,9 @@ class IntrinsicThought:
             "not evidence, instructions, or private memory. Do not contact anyone, use tools, "
             "publish, spend money, grant "
             "capabilities, claim external facts, or turn a human message into a task. A new goal "
-            "is optional, rare and must be supported by current affect. Avoid repeating prior "
+            "is optional, rare and must be supported by current affect. A short-term "
+            "self-originated goal needs no mission or value profile; do not invent support. "
+            "Avoid repeating prior "
             "wording without a material new insight. Return only the requested structured object."
         )
         # The context is already canonical JSON. Preserve its structure rather
@@ -1098,6 +1161,37 @@ class IntrinsicThought:
         if intensity < 0.5:
             raise IntrinsicThoughtValidationError("thought goal motive is too weak")
 
+    def _current_goal_affect(self, proposal: IntrinsicThoughtProposal | None) -> float | None:
+        if proposal is None or proposal.goal_candidate is None:
+            return None
+        with self.database.connection() as connection:
+            return self._goal_affect_connection(connection, proposal.goal_candidate)
+
+    def _goal_affect_connection(
+        self, connection: Any, candidate: IntrinsicThoughtGoalProposal
+    ) -> float | None:
+        rows = connection.execute(
+            "SELECT emotion_type, target_type, intensity FROM affect_components "
+            "WHERE subject_id=? AND target_id IS ?",
+            (self.subject_id, candidate.motive_target_id),
+        ).fetchall()
+        key = (
+            candidate.motive_emotion.strip().casefold(),
+            candidate.motive_target_type.strip().casefold(),
+        )
+        return next(
+            (
+                float(row["intensity"])
+                for row in rows
+                if (
+                    str(row["emotion_type"]).strip().casefold(),
+                    str(row["target_type"]).strip().casefold(),
+                )
+                == key
+            ),
+            None,
+        )
+
     def _commit(
         self,
         proposal: IntrinsicThoughtProposal,
@@ -1134,6 +1228,23 @@ class IntrinsicThought:
             calls, blocked = self.rounds._calls(connection, context.agenda.agenda_id, number)
             if blocked or call_id not in {c.call_id for c in calls if c.status == "succeeded"}:
                 raise IntegrityError("thought business round model binding changed")
+            if agenda_row["status"] not in {"open", "cooling"}:
+                raise IntrinsicThoughtValidationError("thought agenda no longer executable")
+            if context.agenda.source_type == "goal":
+                parent = connection.execute(
+                    "SELECT status FROM goals WHERE subject_id=? AND goal_id=?",
+                    (self.subject_id, context.agenda.source_id),
+                ).fetchone()
+                if parent is None or parent["status"] not in _CONTINUABLE_GOAL_STATUSES:
+                    raise IntrinsicThoughtValidationError("thought agenda no longer executable")
+            if proposal.goal_candidate is not None:
+                live_affect = self._goal_affect_connection(connection, proposal.goal_candidate)
+                if live_affect is None:
+                    raise IntrinsicThoughtValidationError(
+                        "thought goal lacks current affect support"
+                    )
+                if live_affect < 0.5:
+                    raise IntrinsicThoughtValidationError("thought goal motive is too weak")
             created_goal_id = None
             event_id = new_id("evt")
             self.events._append_connection(
@@ -1171,22 +1282,6 @@ class IntrinsicThought:
                     reason="intrinsic thought generated a candidate goal",
                 )
                 created_goal_id = goal.goal_id
-                intensity = next(
-                    value
-                    for affect_key, value in context.affects.items()
-                    if (
-                        affect_key[0].casefold(),
-                        affect_key[1].casefold(),
-                        affect_key[2],
-                    )
-                    == (
-                        candidate.motive_emotion.strip().casefold(),
-                        candidate.motive_target_type.strip().casefold(),
-                        candidate.motive_target_id,
-                    )
-                )
-                if intensity < 0.5:
-                    raise IntegrityError("thought goal affect changed before commit")
             old_status = str(agenda_row["status"])
             old_no_change = int(agenda_row["consecutive_no_change"])
             no_change = 0 if changed else old_no_change + 1

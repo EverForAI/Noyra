@@ -39,6 +39,7 @@ class FetchedDocument:
     last_modified: str | None
     fetched_at: str
     feed_items: tuple[FeedItem, ...] | None = None
+    links: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -345,3 +345,47 @@ def test_cooldown_keys_are_not_reported_available(tmp_path: Path) -> None:
         subject_id=subject_id,
     )
     assert store.get(group.group_id, subject_id=subject_id).available_key_count == 0
+
+
+@pytest.mark.parametrize(
+    ("result", "state", "workflow"),
+    [
+        ("interaction_accepted", "attending", "interaction_accepted"),
+        ("interaction_rejected", "attending", "interaction_rejected"),
+        ("interaction_silent", "attending", "interaction_silent"),
+        ("interaction_failed", "degraded", "wait"),
+        ("interaction_budget_exhausted", "degraded", "wait"),
+        ("interaction_waiting", "awake_quiet", "wait"),
+        ("action_deliberation_waited", "acting", "action"),
+        ("metacognitive_action", "acting", "action"),
+        ("action:committed", "acting", "action"),
+        ("world_observation_recorded", "researching", "research"),
+        ("deep_sleep_wait", "sleeping", "sleep"),
+    ],
+)
+def test_consciousness_distinguishes_interaction_from_action_tokens(
+    result: str,
+    state: str,
+    workflow: str,
+) -> None:
+    assert ConsciousnessFrameStore._classify_result(result) == (state, workflow, result)
+
+
+def test_interaction_frame_correction_preserves_old_chain_and_restart(tmp_path: Path) -> None:
+    database, subject_id = make_database(tmp_path)
+    store = ConsciousnessFrameStore(database, subject_id)
+    # A historical frame remains immutable even if its diagnostic category was coarse.
+    old = store.append("acting", workflow="action", reason_code="interaction_accepted")
+    new = store.observe_result("interaction_accepted")
+    assert new.consciousness_state == "attending"
+    assert new.sequence_number == old.sequence_number + 1
+    assert new.previous_frame_hash == old.state_hash
+    restarted = ConsciousnessFrameStore(database, subject_id)
+    assert restarted.latest() == new
+    assert restarted.verify_integrity()["consciousness_frames"] == 2
+    with database.connection() as connection:
+        historical = connection.execute(
+            "SELECT consciousness_state,state_hash FROM consciousness_frames WHERE frame_id=?",
+            (old.frame_id,),
+        ).fetchone()
+    assert tuple(historical) == ("acting", old.state_hash)

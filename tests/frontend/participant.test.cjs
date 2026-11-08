@@ -223,3 +223,104 @@ test("all backend payment states have readable Chinese and English explanations"
         }
     }
 });
+
+test("free public help renders separately from rewards and accepts a private linked reply", async () => {
+    const h = harness(async (path) => {
+        if (path.endsWith("session")) return response({ participant: person, csrf_token: "csrf" });
+        if (path.endsWith("opportunities")) return response({ items: [], help_requests: [{
+            request_id: "projecthelp-one", title: "A question", body: "<script>untrusted</script>",
+        }] });
+        return response({ items: [] });
+    });
+    await h.api.ready;
+    await h.api.show("collaborate");
+    const html = h.node("#participant-panel").innerHTML;
+    assert.match(html, /免费求助/);
+    assert.doesNotMatch(html, /暂时没有开放的协作/);
+    assert.match(html, /name="help_request_id" value="projecthelp-one"/);
+    assert.match(html, /&lt;script&gt;untrusted&lt;\/script&gt;/);
+    assert.doesNotMatch(html, /<script>untrusted/);
+});
+
+test("adaptive login verification is requested only after account failures and refreshes after one use", async () => {
+    const requests = [];
+    let challenges = 0;
+    let logins = 0;
+    const h = harness(async (path, config) => {
+        if (path === "/api/participants/session")
+            return response(logins >= 3 ? { participant: person, csrf_token: "signed-in-csrf" } : { participant: null });
+        if (path === "/api/public-posts/captcha") {
+            challenges++;
+            return response({
+                challenge_id: `challenge-${challenges}`,
+                image: "data:image/png;base64,c3ludGhldGlj",
+            });
+        }
+        if (path === "/api/participants/login") {
+            const body = JSON.parse(config.body);
+            requests.push(body);
+            logins++;
+            if (logins === 1)
+                return { ok: false, status: 401, json: async () => ({ error: "invalid_credentials" }) };
+            if (logins === 2)
+                return { ok: false, status: 401, json: async () => ({ error: "invalid_credentials" }) };
+            return response({ participant: person, csrf_token: "signed-in-csrf" });
+        }
+        return response({ participant: null });
+    });
+    await h.api.ready;
+    await h.api.show("account");
+    const form = {
+        values: { username: "alice", password: "synthetic-password" },
+        dataset: { participantForm: "login" },
+        reportValidity: () => true,
+        querySelectorAll: () => [],
+    };
+    const submit = () => h.events.submit({
+        target: { closest: () => form },
+        preventDefault() {},
+    });
+
+    await submit();
+    const challenge = h.node("#login-captcha");
+    assert.equal(challenges, 1);
+    assert.equal(challenge.hidden, false);
+    assert.equal(challenge.dataset.challenge, "challenge-1");
+    assert.match(challenge.innerHTML, /name="captcha_answer"/);
+    assert.deepEqual(requests[0], { username: "alice", password: "synthetic-password" });
+
+    form.values.captcha_answer = "A1B2C3";
+    await submit();
+    assert.deepEqual(requests[1], {
+        username: "alice", password: "synthetic-password",
+        captcha_answer: "A1B2C3", captcha_id: "challenge-1",
+    });
+    assert.equal(challenges, 2);
+    assert.equal(challenge.dataset.challenge, "challenge-2");
+
+    form.values.captcha_answer = "D4E5F6";
+    await submit();
+    assert.deepEqual(requests[2], {
+        username: "alice", password: "synthetic-password",
+        captcha_answer: "D4E5F6", captcha_id: "challenge-2",
+    });
+    assert.equal(h.api.current().entity_id, person.entity_id);
+});
+
+test("registration captcha refresh stays scoped to its own form", async () => {
+    const h = harness(async (path, config) => {
+        if (path === "/api/participants/session") return response({ participant: null });
+        if (path === "/api/public-posts/captcha")
+            return response({ challenge_id: "registration-only", image: "data:image/png;base64,c3ludGhldGlj" });
+        if (path === "/api/participants/register")
+            return { ok: false, status: 400, json: async () => ({ error: "invalid_captcha" }) };
+        return response({ participant: null });
+    });
+    await h.api.ready;
+    await h.api.show("account");
+    await h.events.click({
+        target: { closest: () => ({ dataset: { accountAction: "captcha", captchaTarget: "#registration-captcha" }, disabled: false }) },
+    });
+    assert.equal(h.node("#registration-captcha").dataset.challenge, "registration-only");
+    assert.equal(h.node("#login-captcha").dataset.challenge, undefined);
+});

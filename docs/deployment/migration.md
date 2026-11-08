@@ -31,3 +31,35 @@
 - `POST /api/admin/migration/recovery`：仅用于 allowlist、已 attested 的 standby 和有界的备份/故障证据。
 
 所有接口要求 operator Bearer 或受认证会话；会话写请求需要 CSRF token。开始远端副作用后的失败保留来源 fence，等待显式协调或回滚；不宣称来源仍可写。默认关闭和默认人工批准保持不变。
+
+## 复核身份语义
+
+单人自核验仍可由一个运营者使用，不要求独立身份服务。兼容 dual_review
+保留历史绑定记录，但不声称两次绑定就是两个独立账户。新的 HTTP 复核中，
+bearer 和该凭据创建的 cookie 会话共享同一绑定，多开浏览器不能增加复核数。
+
+启用 migration_require_independent_review 时，dual_review 必须由可信认证代理
+证明的两个稳定 principal 完成。新证据记录其绑定类型，历史会话或缺少类型
+证明的批准不会被补推为独立账户批准。已经由旧兼容模式批准的任务不能直接
+在独立模式下执行；取消并按当前要求重新生成提案。未完成任务可继续收集
+真实 principal 复核。执行协调器在取围栏、验证和提交前也核对这一要求。
+配置独立账户不等于证明两个不同自然人。
+
+本地钱包授权现在只能由任务的 wallet-approval 管理端点产生；私有目标配置
+中的 local_wallet_approval 不再作为授权来源。旧批准记录保留，导出前需要
+一次明确的新格式确认。有效期内重试返回同一批准，可用当前 approval_id
+撤销；取消任务、变更策略/目标/钱包或过期后不能继续读取本地密钥。
+具体协议见开发文档 migration-approval-boundaries.md。
+
+## 恢复执行环境
+
+root runner 仅使用相邻安装的 root 所有标准库 helper 与 /usr/bin/python3 -I，
+不再从 NOYRA_PYTHON/NOYRA_MIGRATION_RUNNER_PY 或普通应用包选择执行代码。
+加密备份恢复通过现有 noyra-migration-agent.service 的无特权账户及专用运行环境
+完成；旧 root 恢复请求会明确返回 encrypted_backup_requires_unprivileged_agent，
+不会自动转发，也不会先写源围栏。请按 agent 协议核对之前结果后再操作。
+
+升级会将 Python helper 和 wrapper、unit 一起备份/回退，并预建最小 restored
+写目录，保留 ProtectSystem=strict。健康检查只读已恢复数据库。相同 SQLite
+数据库已落盘而回执中断时可以重试完成回执；不同内容和非空加密恢复目录不会
+被覆盖。真实双机、加密卷和服务切换验收仍需在部署环境执行。

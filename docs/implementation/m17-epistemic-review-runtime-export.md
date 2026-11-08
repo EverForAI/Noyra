@@ -27,6 +27,15 @@ Epistemic review runs are append-only and idempotent per triggering analyzed obs
 after higher-priority outcome, goal-governance, research, and action work, so an empty model queue
 cannot block established runtime stages.
 
+Both metacognitive candidate selection and the review executor use the same
+subject-scoped, oldest-first selector. A durable `committed`, `no_change` or
+`rejected` review ends that observation's triggering round, so a locally rejected
+proposal cannot keep taking the next review slot. The observation remains
+analyzed evidence and can still support a later review triggered by new evidence.
+Provider errors and unknown calls do not become rejected review records; the
+existing request identity, accounting fence and daily review quota still apply.
+No historical record needs to be edited to adopt this selection rule.
+
 ## Complete runtime logs
 
 `GET /api/runtime-logs` provides an authenticated, paginated operational timeline. It combines

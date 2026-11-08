@@ -5,15 +5,17 @@ import sqlite3
 import tempfile
 import unittest
 import zipfile
+from contextlib import closing
 from io import BytesIO
 from pathlib import Path
 from typing import Self
 
 from noyra.core import ActionLedger, Database, IdentityStore
-from noyra.core.database import CURRENT_SCHEMA_VERSION, behavior_log_state_hash
+from noyra.core.database import CURRENT_SCHEMA_VERSION, MIGRATIONS, behavior_log_state_hash
 from noyra.core.errors import IntegrityError
 from noyra.core.runtime_export import RuntimeLogExporter
 from noyra.core.types import content_hash, utc_now
+from support.historical import load_historical_fixtures, materialize_historical_database
 
 
 class BehaviorReconciliationTestCase(unittest.TestCase):
@@ -215,24 +217,49 @@ class BehaviorReconciliationTestCase(unittest.TestCase):
         self: Self,
     ) -> None:
         action_id = self._unknown_action()
-        database_path = self.root / "noyra.sqlite3"
-        with self.database.connection() as connection:
-            original = tuple(
-                connection.execute(
-                    "SELECT * FROM behavior_logs WHERE action_id = ?", (action_id,)
-                ).fetchone()
+        # Start from a checksummed historical schema, not a current database
+        # with a downgraded marker and incompatible future tables/triggers.
+        fixtures = load_historical_fixtures(
+            Path(__file__).parent / "fixtures" / "historical" / "manifest.json"
+        )
+        fixture = next(item for item in fixtures if item.schema_version == 31)
+        database_path = materialize_historical_database(fixture, self.root)
+        with (
+            closing(sqlite3.connect(database_path)) as legacy,
+            self.database.connection() as source,
+        ):
+            legacy.execute("PRAGMA foreign_keys = ON")
+            legacy.execute("BEGIN IMMEDIATE")
+            Database._execute_sql_script(legacy, MIGRATIONS[32])
+            legacy.execute("UPDATE schema_meta SET value = '32' WHERE key = 'schema_version'")
+            # Seed only columns that existed in the historical schema, keeping
+            # the original unknown action and its public behavior record.
+            for table in ("subject_identity", "actions", "behavior_logs"):
+                columns = ", ".join(row[1] for row in legacy.execute(f"PRAGMA table_info({table})"))
+                rows = source.execute(
+                    f"SELECT {columns} FROM {table} WHERE subject_id = ?", (self.subject_id,)
+                ).fetchall()
+                placeholders = ", ".join("?" for _ in rows[0])
+                legacy.executemany(f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", rows)
+            original = legacy.execute(
+                "SELECT * FROM behavior_logs WHERE action_id = ?", (action_id,)
+            ).fetchone()
+            self.assertEqual(
+                legacy.execute(
+                    "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+                ).fetchone()[0],
+                "32",
             )
-        with self.database.transaction() as connection:
-            for trigger in (
-                "validate_behavior_log_revision_insert",
-                "prevent_behavior_log_revision_update",
-                "prevent_behavior_log_revision_delete",
-                "prevent_behavior_log_update",
-                "prevent_behavior_log_delete",
-            ):
-                connection.execute(f"DROP TRIGGER {trigger}")
-            connection.execute("DROP TABLE behavior_log_revisions")
-            connection.execute("UPDATE schema_meta SET value = '32' WHERE key = 'schema_version'")
+            self.assertEqual(
+                legacy.execute(
+                    "SELECT name FROM sqlite_schema WHERE name IN "
+                    "('behavior_log_revisions', 'interaction_inbound_events', "
+                    "'validate_email_ingress_subject')"
+                ).fetchall(),
+                [],
+            )
+            self.assertEqual(legacy.execute("PRAGMA foreign_key_check").fetchall(), [])
+            legacy.commit()
 
         migrated = Database(database_path)
         with migrated.connection() as connection:
@@ -264,6 +291,14 @@ class BehaviorReconciliationTestCase(unittest.TestCase):
                 ).fetchone()[0],
                 1,
             )
+            self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+            self.assertEqual(connection.execute("PRAGMA quick_check").fetchone()[0], "ok")
+            self.assertIsNotNone(
+                connection.execute(
+                    "SELECT name FROM sqlite_schema WHERE name = 'validate_email_ingress_subject'"
+                ).fetchone()
+            )
+        ActionLedger(restarted).verify_integrity(self.subject_id)
 
     def test_current_schema_missing_revision_fails_closed_without_repair(self: Self) -> None:
         action_id = self._unknown_action()

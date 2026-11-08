@@ -1461,23 +1461,77 @@ class WalletEconomyStore:
             )
 
     def _settle_order(
-        self, c: Any, row: Any, actor: str, reason: str = "chain receipt confirmed"
+        self,
+        c: Any,
+        row: Any,
+        actor: str,
+        reason: str = "chain receipt confirmed",
+        *,
+        reconfirmation: bool = False,
     ) -> None:
+        """Settle once, or reuse verified evidence after a proven reorganization.
+
+        The execution owner validates the reconciliation record in this same
+        transaction. An old journal's mere existence never proves settlement.
+        Missing historical evidence must not be replaced with a new journal.
+        """
         if row["status"] not in {"broadcast", "unknown"}:
             raise InvalidTransitionError("order is not awaiting settlement")
-        self._transition_order(c, row, "confirmed", actor, reason)
-        # A chain-reorganization reconciliation can move a previously
-        # confirmed order back to ``unknown``.  The original settlement is
-        # immutable historical evidence; do not post it twice when a later
-        # canonical receipt is observed.
+        if row["state_hash"] != self._order_state_hash_row(row, row["status"]):
+            raise IntegrityError("wallet settlement order hash mismatch")
         existing = c.execute(
-            "SELECT 1 FROM wallet_ledger_journals WHERE order_id=? AND journal_type='settlement'",
+            "SELECT * FROM wallet_ledger_journals WHERE order_id=? AND journal_type='settlement'",
             (row["order_id"],),
         ).fetchone()
-        if existing is None:
+        if reconfirmation:
+            if existing is None:
+                raise IntegrityError("wallet reconfirmation settlement is missing")
+            self._verify_settlement_journal(c, row, existing)
+        elif existing is not None:
+            raise IntegrityError("wallet settlement has no reconciliation evidence")
+        self._transition_order(c, row, "confirmed", actor, reason)
+        if not reconfirmation:
             self._post_order_journal(
                 c, row, "settlement", ("reserved", "debit"), ("paid", "credit")
             )
+
+    @staticmethod
+    def _verify_settlement_journal(c: Any, order: Any, journal: Any) -> None:
+        """Validate the bounded original double entry without rewriting it."""
+        try:
+            valid = (
+                journal["journal_type"] == "settlement"
+                and all(
+                    journal[key] == order[key]
+                    for key in ("subject_id", "order_id", "network_id", "asset_id", "amount")
+                )
+                and int(canonical_amount(journal["amount"])) > 0
+                and journal["state_hash"] == wallet_journal_hash(journal)
+            )
+        except (TypeError, ValueError, OverflowError) as error:
+            raise IntegrityError("wallet reconfirmation settlement is malformed") from error
+        if not valid:
+            raise IntegrityError("wallet reconfirmation settlement does not match its order")
+        entries = c.execute(
+            "SELECT * FROM wallet_ledger_entries WHERE journal_id=? LIMIT 3",
+            (journal["journal_id"],),
+        ).fetchall()
+        if len(entries) != 2:
+            raise IntegrityError("wallet reconfirmation settlement requires two entries")
+        accounts = set()
+        for entry in entries:
+            try:
+                valid = all(
+                    entry[key] == journal[key]
+                    for key in ("journal_id", "subject_id", "order_id", "amount", "created_at")
+                ) and entry["state_hash"] == wallet_entry_hash(entry)
+            except (TypeError, ValueError, OverflowError) as error:
+                raise IntegrityError("wallet reconfirmation entry is malformed") from error
+            if not valid:
+                raise IntegrityError("wallet reconfirmation entry does not match its journal")
+            accounts.add((entry["account"], entry["direction"]))
+        if accounts != {("reserved", "debit"), ("paid", "credit")}:
+            raise IntegrityError("wallet reconfirmation settlement accounts are invalid")
 
     @staticmethod
     def _require_resolved_legacy_payments(c: Any, subject_id: str, network_id: str) -> None:

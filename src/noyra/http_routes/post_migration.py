@@ -305,6 +305,7 @@ def admin_migration_proposals_approve(self: RequestHandler, owner: NoyraHTTPServ
         HTTPStatus.ACCEPTED,
         dict(task.__dict__)
         | {
+            "review_semantics": proposal["review_semantics"],
             "approval_count": proposal["approval_count"],
             "required_approvals": proposal["required_approvals"],
             "approval_status": (

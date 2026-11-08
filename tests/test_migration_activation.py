@@ -151,6 +151,8 @@ def _boot_runtime_from_dropin(
         NOYRA_WALLET_MODE="disabled",
         NOYRA_INTEGRITY_MODE="pause",
         PYTHONUTF8="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"),
+        PYTHONDONTWRITEBYTECODE="1",
     )
     environment.update(initial_environment)
     dropin = activator.dropin_dir / "migration-target.conf"
@@ -169,6 +171,10 @@ def _boot_runtime_from_dropin(
             "-c",
             """
 import json
+import os
+from pathlib import Path
+import noyra
+assert Path(noyra.__file__).resolve().is_relative_to(Path(os.environ['PYTHONPATH']).resolve())
 from noyra.service import NoyraService
 service = NoyraService.from_env()
 try:
@@ -490,13 +496,9 @@ def test_approved_source_task_runs_real_bundle_cli_bridge_and_root_activation(
     )
     task = manager.approve(proposal.proposal_id, actor="operator", idempotency_key="full-flow")
     if local_wallet:
-        wallet_binding["approval"] = {
-            "task_id": task.task_id,
-            "address": address,
-            "approval_id": "approval-local",
-            "channel_id": "recipient-channel",
-            "expires_at": "2099-01-01T00:00:00+00:00",
-        }
+        from noyra.migration.local_wallet_approval import grant_local_wallet
+
+        wallet_binding["approval"] = grant_local_wallet(source, task, address, actor="operator")
     target_root = tmp_path / "target"
     target_db = Database(target_root / "noyra.sqlite3")
     IdentityStore(target_db).ensure("Noyra-standby", "b" * 64)

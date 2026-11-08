@@ -14,8 +14,11 @@ from noyra.core.admission import (
     bind_lease,
     current_lease,
 )
+from noyra.core.errors import IntegrityError
 from noyra.core.events import EventStore
+from noyra.core.fair_scheduling import FairScheduler, WorkflowOutcome
 from noyra.core.runtime import SubjectKernel
+from noyra.core.scheduling_clock import CooldownClock
 from noyra.core.types import canonical_json, content_hash, utc_now
 from noyra.knowledge import CommonKnowledgeStore
 from noyra.learning import OutcomeEvaluator
@@ -47,7 +50,7 @@ from noyra.model.errors import (
     ProviderCallError,
     StructuredOutputError,
 )
-from noyra.model.request_identity import business_request_key
+from noyra.model.request_identity import UNRUNNABLE_BUSINESS_CALL_SQL, business_request_key
 from noyra.model.types import CallRecord
 from noyra.sleep import FatigueInputs, FatigueTracker, SleepEngine
 from noyra.sleep.types import SleepReflectionPlan, SleepRunRecord
@@ -64,16 +67,19 @@ from noyra.world.errors import ObservationBudgetError
 from noyra.world.poll import SourcePollStore
 from noyra.world.types import GenesisRunRecord, ObservationRecord
 
+from .assistance import AutonomousAssistance
 from .consciousness import ConsciousnessFrameStore
 from .deliberation import ActionDeliberation
 from .epistemic import EpistemicReview
 from .execution import ProjectPhaseExecutor
+from .expression import AutonomousExpression
 from .governance import GoalGovernance
 from .interaction import InteractionCognition
 from .memory_integration import SemanticMemoryIntegrator
 from .metacognition import MetacognitiveControl, metacognitive_wake_after
 from .motivation import MotivationDevelopment
 from .projects import AutonomousProjectManager
+from .recovery import AutonomyRecovery
 from .reflection import SleepReflectionCognition
 from .research import AutonomousResearch
 from .self_model import OperationalSelfModel
@@ -122,6 +128,14 @@ class CognitionCycle:
         )
         self.settings = self.self_modification.effective_settings()
         self.clock = clock
+        self.scheduler = FairScheduler(kernel.database, self.subject_id, clock=clock)
+        self._poll_clock = CooldownClock()
+        self.recovery = AutonomyRecovery(
+            kernel.database,
+            self.subject_id,
+            clock=clock,
+            source_refresh_seconds=self.settings.source_refresh_seconds,
+        )
         self.reader = reader or SafeWebReader()
         self.common_knowledge = common_knowledge
         self.tools = ToolRunner(kernel.database)
@@ -202,6 +216,7 @@ class CognitionCycle:
             gateway,
             self.settings,
             secret_dir=kernel.database.path.parent / "secrets" / "search",
+            reader=self.reader,
             clock=clock,
         )
         self.outcome_evaluator = OutcomeEvaluator(
@@ -258,6 +273,10 @@ class CognitionCycle:
             ),
             clock=clock,
         )
+        self.autonomous_expression = AutonomousExpression(
+            kernel.database, self.subject_id, gateway, self.settings, clock=clock
+        )
+        self.autonomous_assistance = AutonomousAssistance(self.autonomous_expression)
         self.metacognitive_control = MetacognitiveControl(
             kernel.database,
             self.subject_id,
@@ -316,9 +335,14 @@ class CognitionCycle:
                 self.subject_id,
                 circuit_policy=self.embedding_gateway.circuit_policy,
             )
+        self.recovery.refresh()
         self.consciousness.ensure_initial()
         self._sync_configured_sources()
         self._ensure_world_grant()
+        self.autonomous_expression.store.ensure_grants(
+            enabled=self.settings.autonomous_expression_enabled,
+            rate=self.settings.expression_actions_per_hour,
+        )
         self.genesis.start(
             self.subject_id,
             minimum_cycles=self.settings.minimum_genesis_cycles,
@@ -358,7 +382,12 @@ class CognitionCycle:
         self.bootstrap()
         if self.kernel.lifecycle.current().state != "active":
             return "cognition_inactive"
-        if self.embedding_index is not None:
+        self.recovery.refresh()
+        genesis = self.genesis.start(
+            self.subject_id,
+            minimum_cycles=self.settings.minimum_genesis_cycles,
+        )
+        if self.embedding_index is not None and genesis.status != "complete":
             with suppress(Exception):
                 await asyncio.to_thread(
                     self.embedding_index.rebuild_missing,
@@ -368,50 +397,17 @@ class CognitionCycle:
                 )
             assert_current_lease()
 
-        genesis = self.genesis.start(
-            self.subject_id,
-            minimum_cycles=self.settings.minimum_genesis_cycles,
-        )
         ready_result = self._handle_genesis_ready_for_sleep(genesis)
         if ready_result is not None:
             return ready_result
         if genesis.status == "complete":
-            self_modification_result = self.self_modification.run_due()
-            if self_modification_result is not None:
-                self._refresh_self_modification_settings()
-                return self_modification_result
-            outcome_result = self.outcome_evaluator.run_due()
-            if outcome_result is not None:
-                return outcome_result
-            memory_result = self.memory_consolidator.run_due()
-            if memory_result is not None:
-                return memory_result
-            integration_result = await self.memory_integrator.run_due()
-            assert_current_lease()
-            if integration_result is not None:
-                return integration_result
-            motivation_result = await self.motivation_development.run_due()
-            assert_current_lease()
-            if motivation_result is not None:
-                return motivation_result
-            self_model_result = await self.self_model.run_due()
-            assert_current_lease()
-            if self_model_result is not None:
-                return self_model_result
-            if not self._project_workflow_pending():
-                project_execution = await self._run_project_phase()
-                assert_current_lease()
-                if project_execution is not None:
-                    return project_execution
-                project_result = await self.autonomous_projects.run_due()
-                assert_current_lease()
-                if project_result is not None:
-                    return project_result
-            metacognitive_result = await self._run_metacognitive_strategy()
-            assert_current_lease()
-            if metacognitive_result != "metacognitive_wait":
-                assert metacognitive_result is not None
-                return metacognitive_result
+            # Discovery is bounded, cheap and model-free; it cannot depend on
+            # reaching the metacognitive slot after all project work finishes.
+            self.intrinsic_thought.discover_agenda()
+            return await self.scheduler.run(
+                self._dispatch_workflow,
+                active=lambda: self.kernel.lifecycle.current().state == "active",
+            )
         if genesis.status == "created":
             interaction_result = await self.interaction_cognition.run_due()
             assert_current_lease()
@@ -428,7 +424,48 @@ class CognitionCycle:
             if interaction_result is not None:
                 return interaction_result
 
-        pending = self._pending_observation()
+        result = await self._run_world(genesis)
+        assert result is not None
+        if result in {"world_sources_waiting", "observation_unchanged", "world_fetch_failed"}:
+            # Orientation is still incomplete, but a missing/unchanged source
+            # is not a reason to suppress internal questions or their lawful
+            # governance/search path. Keep genesis evidence and lifecycle intact.
+            evaluated = self.outcome_evaluator.run_due()
+            if evaluated is not None:
+                return evaluated
+            alternative: str | None
+            if self.settings.autonomous_expression_enabled:
+                self.intrinsic_thought.discover_agenda()
+                alternative = await self.scheduler.run(
+                    self._dispatch_orientation_internal,
+                    active=lambda: self.kernel.lifecycle.current().state == "active",
+                )
+            else:
+                alternative = await self._run_metacognitive_strategy()
+            if alternative is not None and alternative not in {
+                "metacognitive_wait",
+                "world_sources_waiting",
+            }:
+                return alternative
+        return result
+
+    async def _dispatch_orientation_internal(self, name: str) -> str | WorkflowOutcome | None:
+        # World orientation still owns its acquisition/evidence path. Only the
+        # shared internal lane is considered here, with the same durable cursor
+        # as normal operation; publishing cannot mark genesis complete.
+        if name == "metacognition":
+            return await self._dispatch_workflow(name)
+        return None
+
+    async def _run_world(self, genesis: GenesisRunRecord, *, mode: str = "combined") -> str | None:
+        if mode == "acquisition":
+            pending = None
+        else:
+            pending = (
+                self._runnable_observation() if mode == "cognition" else self._pending_observation()
+            )
+            if mode == "cognition" and pending is None:
+                return None
         if genesis.status == "goal_seeding":
             reconciled = self._reconcile_goal_seeding(genesis, pending)
             if reconciled is not None:
@@ -437,7 +474,7 @@ class CognitionCycle:
         if pending is None:
             source = self._select_source()
             if source is None:
-                return "world_sources_waiting"
+                return getattr(self, "_source_wait_reason", "world_sources_waiting")
             fetch = await self.tools.fetch_document(
                 self.subject_id,
                 source,
@@ -446,6 +483,9 @@ class CognitionCycle:
             )
             assert_current_lease()
             if fetch.status != "succeeded":
+                SourcePollStore(self.kernel.database).failed(
+                    self.subject_id, source.source_id, self.clock()
+                )
                 self._assess_failure("authorized world fetch failed", frustration=0.35)
                 return "world_fetch_failed"
             if fetch.document is None:
@@ -461,6 +501,10 @@ class CognitionCycle:
                         fetch.document,
                         max_content_chars=self.settings.max_observation_chars,
                     )
+            except IntegrityError as error:
+                if str(error) != "world poll completion is out of order":
+                    raise
+                return "world_poll_clock_wait"
             except ObservationBudgetError:
                 assert_current_lease()
                 SourcePollStore(self.kernel.database).failed(
@@ -474,6 +518,9 @@ class CognitionCycle:
                 return "observation_unchanged"
         else:
             source = self.sources.get(pending.source_id, subject_id=self.subject_id)
+
+        if mode == "acquisition":
+            return "world_observation_recorded"
 
         if genesis.status == "observing":
             genesis = self.genesis.transition(
@@ -546,6 +593,125 @@ class CognitionCycle:
             current = self.genesis.get(genesis.run_id)
             return self._finalize_genesis_cycle(current)
         return "cognition_committed"
+
+    async def _dispatch_workflow(self, name: str) -> str | WorkflowOutcome | None:
+        if name == "embedding_maintenance":
+            if self.embedding_index is None:
+                return None
+            try:
+                rebuilt = await asyncio.to_thread(
+                    self.embedding_index.rebuild_missing,
+                    self.subject_id,
+                    limit=32,
+                    checkpoint=assert_current_lease,
+                )
+            except OperationInvalidated:
+                raise
+            except Exception:
+                return WorkflowOutcome("embedding_maintenance_failed")
+            return WorkflowOutcome(
+                "embedding_maintenance_committed" if rebuilt else "embedding_maintenance_wait",
+                made_progress=bool(rebuilt),
+                did_execute=bool(rebuilt),
+            )
+        if name == "self_modification":
+            result = self.self_modification.run_due()
+            if result is not None:
+                self._refresh_self_modification_settings()
+            return result
+        if name == "outcome_evaluation":
+            return self.outcome_evaluator.run_due()
+        if name == "memory_consolidation":
+            return self.memory_consolidator.run_due()
+        if name == "memory_integration":
+            return await self.memory_integrator.run_due()
+        if name == "motivation":
+            return await self.motivation_development.run_due()
+        if name == "self_model":
+            return await self.self_model.run_due()
+        if name in {"project_execution", "project_review"}:
+            statuses = (
+                ("active",)
+                if name == "project_execution"
+                else ("active", "planned", "paused", "blocked")
+            )
+            projects = self.autonomous_projects.projects(statuses=statuses)
+            target = self.scheduler.next_target(name, [p.project_id for p in projects])
+            if target is None:
+                # No existing project is also the opportunity to consider formation.
+                return (
+                    await self.autonomous_projects.run_due() if name == "project_review" else None
+                )
+            project = self.autonomous_projects.get(target)
+            if name == "project_execution":
+                if self.autonomous_projects.pending_dependencies(project):
+                    return WorkflowOutcome("waiting_dependencies", target_id=target)
+                result = await self._run_project_phase(project_id=target)
+            else:
+                result = await self.autonomous_projects.run_due(project_id=target)
+            outcome = WorkflowOutcome.legacy(result)
+            if result is None:
+                control = self.autonomous_projects.review_control.read(
+                    self.autonomous_projects.get(target)
+                )
+                # Per-project deadlines stay with that project's coordinator;
+                # one project's budget wait must not cool the whole project lane.
+                return WorkflowOutcome(str(control["reason"]), target_id=target)
+            return WorkflowOutcome(
+                outcome.reason, made_progress=outcome.made_progress, target_id=target
+            )
+        if name == "metacognition":
+            target = self.scheduler.next_target(name, ["attention", "expression", "help"])
+            if target == "help":
+                result = await self.autonomous_assistance.run_due()
+                if result is not None:
+                    return WorkflowOutcome(
+                        result,
+                        target_id="help",
+                        made_progress=result
+                        in {"assistance_published", "assistance_reply_considered"},
+                    )
+            if target == "expression":
+                calls_before = self.autonomous_expression._calls_today()
+                result = await self.autonomous_expression.run_due()
+                executed = self.autonomous_expression._calls_today() > calls_before
+                if result is not None and (
+                    executed
+                    or result
+                    not in {
+                        "expression_wait",
+                        "expression_model_wait",
+                        "expression_review_wait",
+                        "expression_authorization_wait",
+                        "expression_waiting_reconciliation",
+                        "expression_budget_exhausted",
+                        "expression_failed",
+                        "expression_review_failed",
+                    }
+                ):
+                    return WorkflowOutcome(
+                        result,
+                        did_execute=executed,
+                        made_progress=result
+                        in {"expression_published", "expression_queued", "expression_withdrawn"},
+                        target_id="expression",
+                    )
+            result = await self._run_metacognitive_strategy()
+            return WorkflowOutcome(
+                result or "metacognitive_wait",
+                target_id=target,
+                made_progress=WorkflowOutcome.legacy(result).made_progress,
+            )
+        if name == "interaction":
+            return await self.interaction_cognition.run_due()
+        if name in {"world_acquisition", "world_cognition"}:
+            genesis = self.genesis.start(
+                self.subject_id, minimum_cycles=self.settings.minimum_genesis_cycles
+            )
+            return await self._run_world(
+                genesis, mode="acquisition" if name == "world_acquisition" else "cognition"
+            )
+        raise ValueError("unknown cognition workflow")
 
     async def aclose(self, *, embedding_timeout: float | None = None) -> None:
         if self._closed:
@@ -637,29 +803,15 @@ class CognitionCycle:
         return result
 
     def _project_workflow_pending(self) -> bool:
-        with self.kernel.database.connection() as connection:
-            row = connection.execute(
-                "SELECT p.goal_id FROM autonomous_projects p "
-                "WHERE p.subject_id = ? AND p.status = 'active' "
-                "AND ("
-                "EXISTS(SELECT 1 FROM observations o WHERE o.subject_id = p.subject_id "
-                "AND o.status = 'new') OR "
-                "EXISTS(SELECT 1 FROM research_search_runs r WHERE r.subject_id = p.subject_id "
-                "AND r.goal_id = p.goal_id AND NOT EXISTS("
-                "SELECT 1 FROM outcome_evaluations e WHERE e.subject_id = r.subject_id "
-                "AND e.source_type = 'research' AND e.source_id = r.research_id)) OR "
-                "EXISTS(SELECT 1 FROM action_deliberation_runs a "
-                "WHERE a.subject_id = p.subject_id AND a.goal_id = p.goal_id "
-                "AND a.action_id IS NOT NULL AND NOT EXISTS("
-                "SELECT 1 FROM outcome_evaluations e WHERE e.subject_id = a.subject_id "
-                "AND e.source_type = 'action' AND e.source_id = a.action_id))"
-                ") LIMIT 1",
-                (self.subject_id,),
-            ).fetchone()
-        return row is not None
-
-    async def _run_project_phase(self) -> str | None:
         project = self.autonomous_projects._selected_project()
+        return project is not None and self.autonomous_projects.pending_dependencies(project)
+
+    async def _run_project_phase(self, *, project_id: str | None = None) -> str | None:
+        project = (
+            self.autonomous_projects._selected_project()
+            if project_id is None
+            else self.autonomous_projects.get(project_id)
+        )
         if project is None or project.status != "active" or project.current_phase_id is None:
             return None
         phase = next(
@@ -672,6 +824,25 @@ class CognitionCycle:
         )
         if phase is None or phase.status != "active":
             return None
+        control = self.autonomous_projects.review_control.read(project)
+        if (
+            control["reason"] == "subject_wait"
+            and control["next_due_at"] is not None
+            and (self._parse_time(self.clock()) < self._parse_time(control["next_due_at"]))
+        ):
+            return None
+        prior = self.autonomous_projects.phase_execution(project)
+        if prior is not None and prior.status in {"succeeded", "failed", "blocked", "unknown"}:
+            # A replay is not new work. Let review/reconciliation and later workflows run.
+            return None
+        if prior is not None and not self.autonomous_projects.phase_needs_work(project, prior):
+            return None
+        # Result recovery must not bypass the project's existing resource envelope
+        # simply because phase dispatch precedes periodic governance in this tick.
+        self.autonomous_projects._sync_resource_usage(project)
+        local = self.autonomous_projects._local_resource_decision(project)
+        if local is not None:
+            return local
         session_id = self.autonomous_projects.begin_execution(project.project_id, "phase_execution")
         try:
             execution = await self.project_executor.run_phase(project, phase)
@@ -684,6 +855,8 @@ class CognitionCycle:
                 raise
         if self.autonomous_projects._expire_overdue_projects():
             return "autonomous_project_deadline_expired"
+        if prior is not None and prior.result_hash == execution.result_hash:
+            return None
         if execution.status == "succeeded":
             return "autonomous_project_phase_succeeded"
         if execution.status == "blocked":
@@ -694,7 +867,7 @@ class CognitionCycle:
 
     def _ensure_world_grant(self) -> None:
         raw_hosts = {urlsplit(source.url).hostname for source in self.settings.sources}
-        if not raw_hosts or any(host is None for host in raw_hosts):
+        if any(host is None for host in raw_hosts):
             raise ValueError("configured world sources require valid hosts")
         hosts = sorted(str(host) for host in raw_hosts)
         # The default policy authorizes any *public HTTPS* source that still
@@ -712,6 +885,17 @@ class CognitionCycle:
             if grant.capability_type == "web_read" and grant.issuer == "environment-config"
         ]
         active_managed = [grant for grant in managed if grant.status == "active"]
+        if not hosts and not self.settings.web_read_public_by_default:
+            # Empty opt-in host policy authorizes no web reads, but is a valid
+            # waiting runtime, not a bootstrap failure or reason to open access.
+            for grant in active_managed:
+                self.capabilities.revoke(
+                    grant.grant_id,
+                    reason=_ENVIRONMENT_WORLD_SCOPE_CHANGED_REASON,
+                    actor="environment-operator",
+                    subject_id=self.subject_id,
+                )
+            return
         matching = [
             grant
             for grant in active_managed
@@ -827,6 +1011,7 @@ class CognitionCycle:
                 )
 
     def _select_source(self) -> SourceRecord | None:
+        self._source_wait_reason = "world_sources_waiting"
         now = self._parse_time(self.clock())
         candidates: list[tuple[datetime | None, SourceRecord]] = []
         for source in self.sources.active(self.subject_id):
@@ -842,7 +1027,14 @@ class CognitionCycle:
                 self.subject_id, source.source_id
             )
             last = self._parse_time(checked) if checked else None
-            if last is None or (now - last).total_seconds() >= self.settings.source_refresh_seconds:
+            # Retain an honest history high-water mark after wall-clock rollback.
+            # Do not repeatedly fetch data that cannot be committed in order.
+            if last is not None and last > now:
+                self._source_wait_reason = "world_poll_clock_wait"
+                continue
+            interval = self.settings.source_refresh_seconds
+            remaining = 0.0 if last is None else interval - (now - last).total_seconds()
+            if self._poll_clock.ready(source.source_id, str(checked) + str(interval), remaining):
                 candidates.append((last, source))
         if not candidates:
             return None
@@ -865,6 +1057,26 @@ class CognitionCycle:
             ).fetchone()
         return (
             self.observations.get(row[0], subject_id=self.subject_id) if row is not None else None
+        )
+
+    def _runnable_observation(self) -> ObservationRecord | None:
+        # Read the same durable ambiguity fence as the existing model router.
+        # Skipping one unknown round neither settles it nor changes its identity.
+        with self.kernel.database.connection() as connection:
+            row = connection.execute(
+                "SELECT o.observation_id FROM observations o WHERE o.subject_id=:subject "
+                "AND o.status='new' AND NOT EXISTS(SELECT 1 FROM model_calls c "
+                "WHERE c.subject_id=o.subject_id "
+                "AND c.purpose='world_cognition:'||o.observation_id "
+                f"AND {UNRUNNABLE_BUSINESS_CALL_SQL}) "
+                "ORDER BY o.fetched_at,o.observation_id LIMIT 1",
+                {
+                    "subject": self.subject_id,
+                    "require_prepared_authorization": int(hasattr(self.gateway, "resources")),
+                },
+            ).fetchone()
+        return (
+            None if row is None else self.observations.get(str(row[0]), subject_id=self.subject_id)
         )
 
     async def _proposal_for(
@@ -1342,7 +1554,15 @@ class CognitionCycle:
             window = int(now.timestamp() // self.settings.source_refresh_seconds)
         else:
             window = self.clock()
-        return content_hash({"source_id": source.source_id, "window": window})
+        with self.kernel.database.connection() as connection:
+            state = SourcePollStore._read(connection, self.subject_id, source.source_id)
+        return content_hash(
+            {
+                "source_id": source.source_id,
+                "window": window,
+                "poll_checks": None if state is None else state["checks"],
+            }
+        )
 
     @staticmethod
     def _parse_time(value: str) -> datetime:

@@ -364,11 +364,27 @@ class ArchiveKeyring:
         for entry in metadata:
             bindings.setdefault(entry["key_id"], entry["fingerprint"])
 
-        referenced = connection.execute(
+        reference_sql = (
             "SELECT encryption_key_id, encryption_key_fingerprint FROM event_payload_segments "
             "UNION SELECT encryption_key_id, encryption_key_fingerprint "
             "FROM observation_content_segments"
         )
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_export_publications'"
+        ).fetchone():
+            reference_sql += (
+                " UNION SELECT encryption_key_id,encryption_key_fingerprint "
+                "FROM workflow_export_publications"
+            )
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='workflow_increment_publications'"
+        ).fetchone():
+            reference_sql += (
+                " UNION SELECT encryption_key_id,encryption_key_fingerprint "
+                "FROM workflow_increment_publications"
+            )
+        referenced = connection.execute(reference_sql)
         for row in referenced:
             if row["encryption_key_id"] is None and row["encryption_key_fingerprint"] is None:
                 if self.legacy_key_id is None:

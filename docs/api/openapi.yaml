@@ -683,6 +683,7 @@ paths:
       tags: [operator]
       operationId: adminReadiness
       security: [{ operatorBearer: [] }]
+      description: Authenticated readiness includes client_ip_resolution, which reports the configured trusted proxy CIDRs and forwarding policy. It describes configuration only, not an observed request path. Public /health/ready remains limited to status and service.
       responses:
         '200': { description: Authenticated startup readiness and runtime identity }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -1005,6 +1006,119 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/JsonObject' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/workflow-clock:
+    get:
+      tags: [observation]
+      operationId: workflowClockHistory
+      security: [{ operatorBearer: [] }]
+      parameters:
+        - name: workflow_id
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 256 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/workflow-clock/acknowledge:
+    post:
+      tags: [configuration]
+      operationId: acknowledgeWorkflowClockHistory
+      security: [{ operatorBearer: [] }]
+      description: Owned paused drained recovery only. Appends evidence explaining exact legacy timestamp inversions; never edits history, resumes runtime, changes costs or waives non-time corruption.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [workflow_id, expected_fingerprint, evidence_sha256, reason]
+              properties:
+                workflow_id: { type: string, minLength: 1, maxLength: 256 }
+                expected_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+                evidence_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+                reason: { type: string, minLength: 1, maxLength: 2000 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/memory-integration-recovery:
+    get:
+      tags: [observation]
+      operationId: memoryIntegrationRecovery
+      security: [{ operatorBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/memory-integration-recovery/discard-legacy:
+    post:
+      tags: [configuration]
+      operationId: discardLegacyMemoryIntegrationResult
+      security: [{ operatorBearer: [] }]
+      description: Paused drained operator recovery; discard only an unbound old local success result after evidence review. The successful call and all costs remain unchanged. Unknown calls cannot be discarded here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [call_id, expected_fingerprint, evidence_sha256, reason]
+              properties:
+                call_id: { type: string, minLength: 1, maxLength: 256 }
+                expected_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+                evidence_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+                reason: { type: string, minLength: 1, maxLength: 2000 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/project-execution-recovery:
+    get:
+      tags: [observation]
+      operationId: projectExecutionRecovery
+      security: [{ operatorBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/Limit' }]
+      description: Bounded review-only recovery candidates, fingerprints and unresolved-work flags. No model content or operator reasons.
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/v1/admin/project-execution-recovery/release-review:
+    post:
+      tags: [configuration]
+      operationId: releaseProjectExecutionReview
+      security: [{ operatorBearer: [] }]
+      description: Requires paused, drained, owned runtime and resolved lower-layer effects. Appends a private review-only receipt; never rewrites execution, accepts success or resends unknown work.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [execution_id, expected_fingerprint, reason]
+              properties:
+                execution_id: { type: string, minLength: 1, maxLength: 256 }
+                expected_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+                reason: { type: string, minLength: 1, maxLength: 2000 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/v1/admin/lifecycle:
     get:
@@ -2648,7 +2762,7 @@ paths:
     post:
       tags: [participants]
       operationId: participantLoginPost
-      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      description: Login accepts username/password and, after repeated failures, captcha_id/captcha_answer from the same-origin public-post image challenge. There is no additional durable hourly login-IP cap; login remains subject to the shared transport per-client request budget, per-account failed-password challenge and global KDF concurrency bound. The public invalid-credentials response is uniform whether or not the account currently requires a challenge. A valid challenge plus correct password allows sign-in and clears only that account's failure window; this is not a permanent account lock. Registration and recovery keep their separate client-IP hourly limits. See participants.md for the full contract.
       requestBody:
         required: true
         content:
@@ -2671,7 +2785,7 @@ paths:
       tags: [participants]
       operationId: participantLogoutPost
       security: [{ ParticipantSession: [] }, { ParticipantBearer: [] }]
-      description: See participants.md for exact field allowlists, ownership, source, cursor and CSRF contracts.
+      description: See participants.md for exact ownership, source, cursor and CSRF contracts.
       requestBody:
         required: true
         content:

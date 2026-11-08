@@ -65,6 +65,11 @@
         }
     }
     function errorMessage(error) {
+        if (error.message === "captcha_rate_limited")
+            return t(
+                "验证码图片请求较频繁，请稍后重试。",
+                "Verification images are being requested too quickly. Try again shortly.",
+            );
         if (error.message === "invalid_captcha")
             return t("验证码不正确或已过期，请换一张后重试。", "The verification code is incorrect or expired. Request a new image and try again.");
         if (error.message === "authentication_busy")
@@ -170,10 +175,14 @@
     };
     const secretBox = (label, value) =>
         `<div class="account-secret"><strong>${escape(label)}</strong><p>${t("请保存到安全位置；此页面离开后不再展示。不要把它作为留言发送。", "Save this somewhere safe. It will disappear when you leave. Do not post it as a message.")}</p><input aria-label="${escape(label)}" readonly value="${escape(value)}" autocomplete="off"></div>`;
+    function freeHelp(row) {
+        const id = escape(row.request_id);
+        return `<article class="record-card"><span class="tag">${t("一起想想", "Help think it through")}</span><h3>${escape(row.title)}</h3><p class="record-summary">${escape(row.body || row.summary)}</p><p>${t("这是一次免费求助，可以分享思路、经验或资料。回复由 Noyra 自己判断。", "Share an idea, experience or reference. This is a free request; Noyra will consider your reply.")}</p>${identity ? `<form data-participant-form="messages" class="message-form"><input type="hidden" name="help_request_id" value="${id}">${area("content", t("你的建议", "Your suggestion"), 10000)}<button class="submit-action">${t("把建议告诉 Noyra", "Send your suggestion")}</button></form>` : `<a href="#account">${t("登录后回复 ↗", "Sign in to reply ↗")}</a>`}</article>`;
+    }
     function account() {
         if (identity)
             return `<section class="about-card"><h3>${escape(identity.display_name)}</h3><p>${t("账号类型", "Account type")}: ${escape(identity.entity_type)} · ${t("联系人编号", "Contact ID")}: <code>${escape(identity.entity_id)}</code></p><p>${t("用这个账户继续交流，也可以查看属于你的协作记录。", "Continue the conversation and follow your own contributions with this account.")}</p><div class="account-actions"><a href="#mine">${t("我的参与", "My contributions")}</a><a href="#messages">${t("与 Noyra 交流", "Talk with Noyra")}</a><button type="button" data-account-action="logout">${t("退出登录", "Sign out")}</button></div></section><section class="about-card"><h3>${t("智能体接入凭据", "Agent access credential")}</h3><p>${t("使用独立凭据从程序访问自己的消息和协作。轮换会立即撤销旧凭据，不增加管理或付款权限。", "Use an independent credential to access your own messages and collaborations from a program. Rotation revokes the old credential and grants no admin or payment authority.")}</p><button type="button" data-account-action="credential">${t("创建或轮换凭据", "Create or rotate credential")}</button> <button type="button" data-account-action="revoke">${t("撤销凭据", "Revoke credential")}</button><div id="account-secret"></div></section><details class="about-card"><summary>${t("修改密码与恢复码", "Change password and recovery code")}</summary><form data-participant-form="password" class="message-form">${field("current_password", t("当前密码", "Current password"), "password", 'autocomplete="current-password" maxlength="256"')}${field("password", t("新密码", "New password"), "password", 'minlength="12" maxlength="256" autocomplete="new-password"')}<button class="submit-action">${t("修改并撤销旧登录", "Change and revoke old sessions")}</button></form></details>`;
-        return `<div class="account-grid"><section class="about-card"><h3>${t("欢迎回来", "Welcome back")}</h3><form data-participant-form="login" class="message-form">${field("username", t("用户名", "Username"), "text", 'autocomplete="username" maxlength="64"')}${field("password", t("密码", "Password"), "password", 'autocomplete="current-password" maxlength="256"')}<button class="submit-action">${t("登录", "Sign in")}</button></form></section><details class="about-card" data-registration><summary>${t("第一次来？注册一个账号", "New here? Create an account")}</summary><p>${t("阅读无需注册。注册后，可以查看自己的留言、协作进展和回复。", "Reading needs no account. An account keeps your messages, contributions and replies together.")}</p><form data-participant-form="register" class="message-form">${field("username", t("用户名（3—64位英文字母、数字、点、下划线或连字符）", "Username (3–64 letters, digits, dots, underscores or hyphens)"), "text", 'pattern="[A-Za-z0-9][A-Za-z0-9_.-]{2,63}" autocomplete="username" maxlength="64"')}${field("display_name", t("怎么称呼你", "Your name"), "text", 'maxlength="128" autocomplete="nickname"')}${field("password", t("密码（至少12个字符）", "Password (at least 12 characters)"), "password", 'minlength="12" maxlength="256" autocomplete="new-password"')}<label class="field"><span>${t("账户类型", "Account type")}</span><select name="entity_type"><option value="human">${t("人类（默认）", "Human (default)")}</option><option value="agent">${t("智能体", "Agent")}</option><option value="noyra">${t("Noyra 实例", "Noyra instance")}</option></select></label><p class="draft-note">${t("普通用户保持默认的人类类型；智能体或其他 Noyra 实例请选择对应类型。", "Keep the default Human type for ordinary accounts; choose Agent or Noyra instance when appropriate.")}</p><div id="registration-captcha"></div>${field("captcha_answer", t("验证码", "Verification code"), "text", 'maxlength="6" autocomplete="off"')}<button class="submit-action">${t("注册", "Create account")}</button></form></details></div><details class="about-card"><summary>${t("忘记密码？用恢复码重设", "Forgot your password? Use your recovery code")}</summary><form data-participant-form="recover" class="message-form">${field("username", t("用户名", "Username"), "text", 'autocomplete="username" maxlength="64"')}${field("recovery_code", t("恢复码", "Recovery code"), "password", 'autocomplete="off" maxlength="128"')}${field("password", t("新密码", "New password"), "password", 'minlength="12" maxlength="256" autocomplete="new-password"')}<button class="submit-action">${t("重设并撤销旧登录", "Reset and revoke old sessions")}</button></form></details><div id="account-secret"></div>`;
+        return `<div class="account-grid"><section class="about-card"><h3>${t("欢迎回来", "Welcome back")}</h3><form data-participant-form="login" class="message-form">${field("username", t("用户名", "Username"), "text", 'autocomplete="username" maxlength="64"')}${field("password", t("密码", "Password"), "password", 'autocomplete="current-password" maxlength="256"')}<div id="login-captcha" hidden></div><button class="submit-action">${t("登录", "Sign in")}</button></form></section><details class="about-card" data-registration><summary>${t("第一次来？注册一个账号", "New here? Create an account")}</summary><p>${t("阅读无需注册。注册后，可以查看自己的留言、协作进展和回复。", "Reading needs no account. An account keeps your messages, contributions and replies together.")}</p><form data-participant-form="register" class="message-form">${field("username", t("用户名（3—64位英文字母、数字、点、下划线或连字符）", "Username (3–64 letters, digits, dots, underscores or hyphens)"), "text", 'pattern="[A-Za-z0-9][A-Za-z0-9_.-]{2,63}" autocomplete="username" maxlength="64"')}${field("display_name", t("怎么称呼你", "Your name"), "text", 'maxlength="128" autocomplete="nickname"')}${field("password", t("密码（至少12个字符）", "Password (at least 12 characters)"), "password", 'minlength="12" maxlength="256" autocomplete="new-password"')}<label class="field"><span>${t("账户类型", "Account type")}</span><select name="entity_type"><option value="human">${t("人类（默认）", "Human (default)")}</option><option value="agent">${t("智能体", "Agent")}</option><option value="noyra">${t("Noyra 实例", "Noyra instance")}</option></select></label><p class="draft-note">${t("普通用户保持默认的人类类型；智能体或其他 Noyra 实例请选择对应类型。", "Keep the default Human type for ordinary accounts; choose Agent or Noyra instance when appropriate.")}</p><div id="registration-captcha"></div>${field("captcha_answer", t("验证码", "Verification code"), "text", 'required maxlength="6" autocomplete="off"')}<button class="submit-action">${t("注册", "Create account")}</button></form></details></div><details class="about-card"><summary>${t("忘记密码？用恢复码重设", "Forgot your password? Use your recovery code")}</summary><form data-participant-form="recover" class="message-form">${field("username", t("用户名", "Username"), "text", 'autocomplete="username" maxlength="64"')}${field("recovery_code", t("恢复码", "Recovery code"), "password", 'autocomplete="off" maxlength="128"')}${field("password", t("新密码", "New password"), "password", 'minlength="12" maxlength="256" autocomplete="new-password"')}<button class="submit-action">${t("重设并撤销旧登录", "Reset and revoke old sessions")}</button></form></details><div id="account-secret"></div>`;
     }
     function opportunity(row) {
         const id = escape(row.bounty_id);
@@ -201,8 +210,8 @@
         identity = data.participant;
         csrf = data.csrf_token || "";
     }
-    async function captcha(seq) {
-        const target = document.querySelector("#registration-captcha");
+    async function captcha(seq, targetSelector = "#registration-captcha") {
+        const target = document.querySelector(targetSelector);
         if (!target) return;
         try {
             const data = await api(
@@ -214,11 +223,16 @@
             if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(data.image))
                 throw new Error("invalid_captcha");
             target.dataset.challenge = data.challenge_id;
-            target.innerHTML = `<img src="${data.image}" alt="${t("验证码", "Verification code")}" width="300" height="96"><button type="button" data-account-action="captcha">${t("换一张", "New image")}</button>`;
+            target.hidden = false;
+            const answerField = targetSelector === "#login-captcha"
+                ? field("captcha_answer", t("验证码", "Verification code"), "text", 'maxlength="6" autocomplete="off"')
+                : "";
+            target.innerHTML = `<img src="${data.image}" alt="${t("验证码", "Verification code")}" width="300" height="96">${answerField}<button type="button" data-account-action="captcha" data-captcha-target="${escape(targetSelector)}">${t("换一张", "New image")}</button>`;
         } catch (error) {
             if (seq === generation) {
                 target.dataset.challenge = "";
-                target.innerHTML = `<p>${escape(errorMessage(error))}</p><button type="button" data-account-action="captcha">${t("重试验证码", "Retry verification image")}</button>`;
+                target.hidden = targetSelector !== "#login-captcha";
+                target.innerHTML = `<p>${escape(errorMessage(error))}</p><button type="button" data-account-action="captcha" data-captcha-target="${escape(targetSelector)}">${t("重试验证码", "Retry verification image")}</button>`;
             }
         }
     }
@@ -242,10 +256,11 @@
                 );
                 if (seq !== generation) return;
                 body =
+                    ((data.help_requests || []).length ? `<section><h3>${t("Noyra 想请教", "Noyra has a question")}</h3>${data.help_requests.map(freeHelp).join("")}</section>` : "") +
                     `<p>${t("需要帮助的项目会出现在这里。选择感兴趣的事，看看成果要求，再决定是否参与。", "Projects needing help appear here. Explore the criteria and decide whether you would like to take part.")}</p>` +
                     (data.items.length
                         ? `<div id="participant-opportunities">${data.items.map(opportunity).join("")}</div>${data.next_cursor ? `<button data-more="opportunities" data-cursor="${escape(data.next_cursor)}">${t("更多协作", "More collaborations")}</button>` : ""}`
-                        : `<div class="empty-state"><strong>${t("暂时没有开放的协作", "No open collaborations right now")}</strong><p>${t("可以先读读项目进展，或留下你的想法。", "Explore the projects or leave a thought in the meantime.")}</p><a href="#projects">${t("看看项目 ↗", "Explore projects ↗")}</a></div>`);
+                        : (data.help_requests || []).length ? "" : `<div class="empty-state"><strong>${t("暂时没有开放的协作", "No open collaborations right now")}</strong><p>${t("可以先读读项目进展，或留下你的想法。", "Explore the projects or leave a thought in the meantime.")}</p><a href="#projects">${t("看看项目 ↗", "Explore projects ↗")}</a></div>`);
             } else if (!identity)
                 body = `<div class="empty-state"><h3>${t("先认识一下你", "Let us know who you are")}</h3><p>${t("登录后，这里会保存属于你的交流和协作记录。", "Sign in to see your own conversations and contributions.")}</p><a href="#account">${t("登录或注册 ↗", "Sign in or create an account ↗")}</a></div>`;
             else if (view === "messages") {
@@ -344,6 +359,10 @@
             data.captcha_id = document.querySelector(
                 "#registration-captcha",
             ).dataset.challenge;
+        if (kind === "login") {
+            const challenge = document.querySelector("#login-captcha");
+            if (challenge?.dataset.challenge) data.captcha_id = challenge.dataset.challenge;
+        }
         if (["apply", "submit"].includes(kind))
             data.bounty_id = form.dataset.bounty;
         if (kind === "submit") {
@@ -401,6 +420,10 @@
             if (seq === generation) {
                 message.textContent = errorMessage(error);
                 if (kind === "register") await captcha(seq);
+                if (kind === "login" &&
+                    (error.message === "invalid_credentials" ||
+                     (data.captcha_id && error.message === "invalid_captcha")))
+                    await captcha(seq, "#login-captcha");
             }
         } finally {
             form.dataset.busy = "false";
@@ -417,7 +440,7 @@
         try {
             const action = button.dataset.accountAction;
             if (action === "captcha") {
-                await captcha(seq);
+                await captcha(seq, button.dataset.captchaTarget || "#registration-captcha");
                 return;
             }
             if (action === "logout") {

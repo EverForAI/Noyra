@@ -22,6 +22,25 @@ def health_live(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
     return True
 
 
+def _integrity_health(owner: NoyraHTTPServer) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        summary = None if owner.integrity is None else owner.integrity.summary()
+    except Exception:
+        summary = {
+            "status": "evidence_unavailable",
+            "policy_mode": getattr(owner.integrity, "policy_mode", "alert"),
+        }
+
+    if owner.integrity_watchdog_health is None:
+        watchdog = {"status": "not_checked", "persisted": False}
+    else:
+        try:
+            watchdog = owner.integrity_watchdog_health()
+        except Exception:
+            watchdog = {"status": "evidence_unavailable", "persisted": False}
+    return summary or {"status": "not_configured", "policy_mode": "off"}, watchdog
+
+
 def health_ready_admin_readiness(
     self: RequestHandler, owner: NoyraHTTPServer, parsed: SplitResult
 ) -> bool:
@@ -37,6 +56,11 @@ def health_ready_admin_readiness(
         )
         quarantine = owner.quarantine_checker
         integrity_ready = not bool(quarantine()) if callable(quarantine) else True
+        integrity_summary, integrity_watchdog = _integrity_health(owner)
+        integrity_status = str(integrity_summary.get("status", "evidence_unavailable"))
+        checker_healthy = integrity_summary.get("policy_mode") == "off" or (
+            integrity_status == "ok" and integrity_watchdog.get("status") in {"ok", "not_checked"}
+        )
         cloud_ready = not (
             owner.cloud_archive_status["configured"] and not owner.cloud_archive_status["ready"]
         )
@@ -48,6 +72,7 @@ def health_ready_admin_readiness(
             and (owner.settings.storage_profile != "recovery_capable" or storage_backup_ready)
             and at_rest_ready
             and integrity_ready
+            and checker_healthy
             and cloud_ready
         )
         checked_at = utc_now()
@@ -73,9 +98,31 @@ def health_ready_admin_readiness(
                 "checked_at": storage_checked_at,
             },
             "integrity": {
-                "status": "ok" if integrity_ready else "degraded",
-                "reason_code": ("ready" if integrity_ready else "integrity_quarantine"),
-                "since": None,
+                "status": (
+                    "disabled"
+                    if integrity_summary.get("policy_mode") == "off"
+                    else "ok"
+                    if integrity_status == "ok" and integrity_ready
+                    else "degraded"
+                ),
+                "reason_code": (
+                    "ready"
+                    if integrity_status == "ok" and integrity_ready
+                    else "integrity_quarantine"
+                    if not integrity_ready
+                    else "integrity_" + integrity_status
+                ),
+                "evidence": integrity_summary.get("evidence"),
+                "coverage": integrity_summary.get("coverage"),
+                "checked_at": checked_at,
+            },
+            "integrity_watchdog": {
+                "status": str(integrity_watchdog.get("status", "evidence_unavailable")),
+                "reason_code": "watchdog_"
+                + str(integrity_watchdog.get("status", "evidence_unavailable")),
+                "consecutive_failures": integrity_watchdog.get("consecutive_failures"),
+                "escalated": integrity_watchdog.get("escalated", False),
+                "persisted": integrity_watchdog.get("persisted", False),
                 "checked_at": checked_at,
             },
             "cloud_archive": {
@@ -93,8 +140,26 @@ def health_ready_admin_readiness(
             "lifecycle": lifecycle,
             "storage": storage.public(),
             "at_rest": at_rest,
+            "integrity": integrity_summary,
+            "integrity_watchdog": integrity_watchdog,
+            "execution_admission": {
+                "runtime_gate_accepting": owner.kernel.admission.accepting,
+                "integrity_quarantined": not integrity_ready,
+            },
             "cloud_archive": owner.cloud_archive_status,
             "components": components,
+            "client_ip_resolution": {
+                "scope": "configuration_only",
+                "mode": (
+                    "trusted_proxy_chain"
+                    if owner.settings.trusted_proxy_cidrs
+                    else "socket_peer_only"
+                ),
+                "forwarded_for_policy": (
+                    "trusted_peers_only" if owner.settings.trusted_proxy_cidrs else "ignored"
+                ),
+                "trusted_proxy_cidrs": list(owner.settings.trusted_proxy_cidrs),
+            },
         }
         reason_code = next(
             (
@@ -108,6 +173,7 @@ def health_ready_admin_readiness(
                     ),
                     (not at_rest_ready, "at_rest_unavailable"),
                     (not integrity_ready, "integrity_quarantine"),
+                    (not checker_healthy, "integrity_checker_unhealthy"),
                     (not cloud_ready, "cloud_archive_unavailable"),
                 )
                 if blocked
@@ -134,6 +200,12 @@ def health_cached(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
     cached_health = owner._cached_health()
     if cached_health is not None:
         cached_status, cached_payload = cached_health
+        integrity, watchdog = _integrity_health(owner)
+        if (
+            cached_payload.get("integrity") != integrity
+            or cached_payload.get("integrity_watchdog") != watchdog
+        ):
+            return False
         self._json(cached_status, self._health_projection(cached_payload))
         return True
     return False
@@ -154,12 +226,11 @@ def health_status(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
             "WHERE subject_id = ?",
             (owner.kernel.subject_id,),
         ).fetchone()
-    integrity = None if owner.integrity is None else owner.integrity.summary()
-    integrity_degraded = (
-        integrity is not None
-        and integrity["policy_mode"] != "off"
-        and integrity["status"] in {"degraded", "corrupt", "incomplete"}
-    )
+    integrity, integrity_watchdog = _integrity_health(owner)
+    integrity_degraded = integrity.get("policy_mode") != "off" and integrity.get("status") != "ok"
+    watchdog_degraded = integrity.get("policy_mode") != "off" and integrity_watchdog.get(
+        "status"
+    ) not in {"ok", "not_checked"}
     secret_cleanup_domains = {
         "transport": owner.transports.secret_cleanup.health(owner.kernel.subject_id, "transport"),
         "search": owner.search_providers.secret_cleanup.health(owner.kernel.subject_id, "search"),
@@ -190,6 +261,7 @@ def health_status(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
     degraded = (
         (loop_state is not None and loop_state["circuit_status"] == "open")
         or integrity_degraded
+        or watchdog_degraded
         or at_rest_degraded
         or operator_health_degraded
         or wallet_acquisition_degraded
@@ -203,6 +275,7 @@ def health_status(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
         "lifecycle": state["lifecycle"],
         "loop": None if loop_state is None else dict(loop_state),
         "integrity": integrity,
+        "integrity_watchdog": integrity_watchdog,
         "at_rest": at_rest,
         "cloud_archive": owner.cloud_archive_status,
         "secret_cleanup": secret_cleanup,
@@ -227,6 +300,22 @@ def health_status(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
                 "status": "ok",
                 "reason_code": "provider_health_isolated",
                 "since": None,
+                "checked_at": utc_now(),
+            },
+            "integrity": {
+                "status": "ok" if not integrity_degraded else "degraded",
+                "reason_code": "integrity_" + str(integrity.get("status", "evidence_unavailable")),
+                "evidence": integrity.get("evidence"),
+                "coverage": integrity.get("coverage"),
+                "checked_at": utc_now(),
+            },
+            "integrity_watchdog": {
+                "status": str(integrity_watchdog.get("status", "evidence_unavailable")),
+                "reason_code": "watchdog_"
+                + str(integrity_watchdog.get("status", "evidence_unavailable")),
+                "consecutive_failures": integrity_watchdog.get("consecutive_failures"),
+                "escalated": integrity_watchdog.get("escalated", False),
+                "persisted": integrity_watchdog.get("persisted", False),
                 "checked_at": utc_now(),
             },
             "reflection": {

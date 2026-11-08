@@ -326,7 +326,9 @@ class ConsciousnessFrameStore:
             return "sleeping", "sleep", normalized
         if "research" in normalized or "world_" in normalized:
             return "researching", "research", normalized
-        if "action" in normalized:
+        # "interaction" contains "action", but denotes communication rather
+        # than an action-ledger effect. Match a result token, not a substring.
+        if "action" in normalized.replace(":", "_").split("_"):
             return "acting", "action", normalized
         if any(term in normalized for term in ("failed", "exhausted", "unavailable")):
             return "degraded", "wait", normalized

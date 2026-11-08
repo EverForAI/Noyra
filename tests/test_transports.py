@@ -1177,6 +1177,13 @@ def test_schema_49_legacy_endpoint_is_upgraded_to_private_endpoint_digest(
             "UPDATE interaction_transports SET endpoint = ?, state_hash = ? WHERE transport_id = ?",
             (legacy_endpoint, legacy_hash, record.transport_id),
         )
+        # Rewind the complete v113 email boundary before synthesizing v49/v50.
+        # A real historical database never had these objects or the marker.
+        connection.execute("DROP TABLE email_ingress_evidence")
+        connection.execute("DROP TRIGGER preserve_email_identity_version")
+        connection.execute(
+            "ALTER TABLE interaction_inbound_events DROP COLUMN email_identity_version"
+        )
         connection.execute("DROP TRIGGER prevent_interaction_inbound_identity_update")
         connection.execute("DROP INDEX idx_interaction_inbound_interaction")
         connection.execute(
@@ -1295,6 +1302,13 @@ async def test_schema_50_reply_context_upgrade_preserves_legacy_queued_reply(
     delivery_id = str(queued["delivery_id"])
 
     with kernel.database.transaction() as connection:
+        # Rewind the complete v113 email boundary before synthesizing v49/v50.
+        # A real historical database never had these objects or the marker.
+        connection.execute("DROP TABLE email_ingress_evidence")
+        connection.execute("DROP TRIGGER preserve_email_identity_version")
+        connection.execute(
+            "ALTER TABLE interaction_inbound_events DROP COLUMN email_identity_version"
+        )
         connection.execute("DROP TRIGGER prevent_interaction_inbound_identity_update")
         connection.execute("DROP INDEX idx_interaction_inbound_interaction")
         connection.execute(

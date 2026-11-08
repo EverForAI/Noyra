@@ -48,7 +48,8 @@ The model may cite only supplied event IDs and existing eligible goal IDs. The S
 
 The same active-goal limit is applied to reflective sleep so sleep cannot bypass awake governance.
 Progress and emotional pressure are preserved; M13 cannot claim that work was completed or change
-psychological pressure. All validated goal revisions and the new focus record commit in one SQLite
+psychological pressure. A short-term goal does not need an adopted mission or established value;
+missing long-term direction is not filled with fabricated mission evidence. All validated goal revisions and the new focus record commit in one SQLite
 transaction using the governance event as an additional causal source.
 
 ## Recovery, limits, and integrity
@@ -56,7 +57,11 @@ transaction using the governance event as an additional causal source.
 Model-call purposes are numbered by committed governance rounds. A crash after the provider returns
 reuses the successful stored response and the call-derived idempotency key. Invalid successful
 responses are ignored and privately audited. The separate daily call cap prevents a malformed model
-or an unstable goal set from starving world cognition. Hard model-budget denial becomes resource
+or an unstable goal set from starving world cognition. Unknown/executing governance calls wait for
+reconciliation instead of being reissued under a new date-based key. New local rejections also
+record a versioned private reason code and validation-time goal/evidence snapshot. These receipts
+are excluded from later governance context and do not change existing governance hashes.
+Hard model-budget denial becomes resource
 pressure and leads into the existing budget-sleep path.
 
 `goal_governance_runs` is append-only and stores the private proposal hash, focus, intention, causal

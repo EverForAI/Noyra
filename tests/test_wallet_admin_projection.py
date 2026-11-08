@@ -320,3 +320,62 @@ def test_wallet_page_http_auth_validation_and_read_only(tmp_path: Path) -> None:
     finally:
         server.close()
         kernel.close()
+
+
+def test_wallet_list_aliases_fail_closed_before_projection_when_storage_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import Mock
+
+    from noyra.core.at_rest import AtRestError
+
+    token = "synthetic-wallet-boundary-operator-token"
+    settings = ServiceSettings(
+        data_dir=tmp_path,
+        subject_id="wallet-list-storage-gate",
+        genesis_hash=content_hash("wallet-storage-gate"),
+        host="127.0.0.1",
+        port=0,
+        admin_token=SecretStr(token),
+    )
+    kernel = SubjectKernel(tmp_path / "noyra.sqlite3", settings.subject_id, settings.genesis_hash)
+    kernel.boot()
+    server = NoyraHTTPServer(kernel, settings)
+    server.start()
+    guard = Mock(required=True)
+    guard.require_request_ready.side_effect = AtRestError("synthetic storage unavailable")
+    guard.require_ready.side_effect = AtRestError("synthetic storage unavailable")
+    monkeypatch.setattr(server, "at_rest", guard)
+    projection = Mock(return_value={"items": []})
+    monkeypatch.setattr(WalletAdminProjection, "page", projection)
+    base = f"http://127.0.0.1:{server.address[1]}"
+    try:
+        for prefix in ("/api", "/api/v1"):
+            path = f"{prefix}/admin/wallet-lists/networks"
+            with pytest.raises(HTTPError) as denied:
+                urlopen(base + path, timeout=10)
+            assert denied.value.code == 401
+            for kind in WalletAdminProjection.SOURCES:
+                request = Request(
+                    base + f"{prefix}/admin/wallet-lists/{kind}",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                with pytest.raises(HTTPError) as unavailable:
+                    urlopen(request, timeout=10)
+                assert unavailable.value.code == 503
+                assert json.loads(unavailable.value.read()) == {
+                    "error": "at_rest_boundary_unavailable"
+                }
+        projection.assert_not_called()
+        guard.require_request_ready.side_effect = None
+        request = Request(base + path, headers={"Authorization": f"Bearer {token}"})
+        with urlopen(request, timeout=10) as response:
+            assert response.status == 200
+            assert json.loads(response.read()) == {"items": []}
+        projection.assert_called_once()
+        with urlopen(base + "/health/live", timeout=10) as response:
+            assert response.status == 200
+    finally:
+        server.close()
+        kernel.close()

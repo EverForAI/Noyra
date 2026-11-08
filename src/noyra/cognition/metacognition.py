@@ -13,6 +13,9 @@ from noyra.core.relationship_identity import context_rows
 from noyra.core.types import content_hash, new_id, utc_now
 
 from ._integrity import durable_boundary, durable_float, durable_int
+from .attention import attention_batch
+from .epistemic import pending_epistemic_trigger
+from .result_kinds import cycle_result_outcome
 from .settings import CognitionSettings
 
 CognitiveStrategy = Literal[
@@ -190,7 +193,9 @@ class MetacognitiveControl:
             ).fetchall()
             from .epistemic import EpistemicReview
 
-            epistemic_review_count = EpistemicReview._verify_connection(connection, self.subject_id)
+            epistemic_review_count = EpistemicReview._verify_connection(
+                connection, self.subject_id, database=self.database
+            )
             for row in decisions:
                 self._decision_from_row(row)
             for row in outcomes:
@@ -283,7 +288,6 @@ class MetacognitiveControl:
             }
 
     def _candidates(self) -> tuple[list[_Candidate], float]:
-        now = self._parse_time(self.clock())
         with self.database.connection() as connection:
             fatigue = connection.execute(
                 "SELECT fatigue, resource_pressure, cognitive_load, frustration, "
@@ -308,7 +312,9 @@ class MetacognitiveControl:
                     LEFT JOIN outcome_evaluations o
                       ON o.subject_id = r.subject_id AND o.source_type = 'research'
                      AND o.source_id = r.research_id
-                    WHERE r.subject_id = ? AND o.evaluation_id IS NULL
+                    WHERE r.subject_id = ? AND r.goal_id IS NOT NULL
+                      AND r.status IN ('accepted','no_results','failed')
+                      AND o.evaluation_id IS NULL
                 ) LIMIT 1""",
                 (self.subject_id, self.subject_id),
             ).fetchone()
@@ -334,25 +340,13 @@ class MetacognitiveControl:
                 "ORDER BY priority DESC, commitment DESC LIMIT 1",
                 (self.subject_id,),
             ).fetchone()
-            agenda = connection.execute(
-                "SELECT agenda_id, urgency, novelty, emotional_weight, recurrence_count, "
-                "consecutive_no_change, status, cooldown_until FROM thought_agenda_items "
-                "WHERE subject_id = ? AND status IN ('open', 'cooling') "
-                "ORDER BY updated_at DESC LIMIT 100",
-                (self.subject_id,),
-            ).fetchall()
-            trigger_observation = connection.execute(
-                """SELECT o.observation_id FROM observations o
-                   LEFT JOIN epistemic_review_runs r
-                     ON r.subject_id = o.subject_id AND r.trigger_observation_id = o.observation_id
-                    AND r.status IN ('committed', 'no_change')
-                   WHERE o.subject_id = ? AND o.status = 'analyzed' AND r.review_id IS NULL
-                   ORDER BY o.fetched_at, o.observation_id LIMIT 1""",
-                (self.subject_id,),
-            ).fetchone()
+            trigger_observation = pending_epistemic_trigger(
+                connection, self.subject_id, database=self.database
+            )
             relationship = connection.execute(
                 "SELECT relationship_id, trust, affinity, conflict, familiarity "
-                "FROM relationships WHERE subject_id = ? AND entity_type = 'human' "
+                "FROM relationships WHERE subject_id = ? "
+                "AND entity_type IN ('human','agent','entity') "
                 "ORDER BY MAX(affinity, conflict) DESC, familiarity DESC LIMIT 1",
                 (self.subject_id,),
             ).fetchone()
@@ -386,14 +380,9 @@ class MetacognitiveControl:
                 break
             repeat_streak += 1
         candidates: list[_Candidate] = []
-        available_agenda = [
-            row
-            for row in agenda
-            if row["status"] == "open"
-            or (
-                row["cooldown_until"] is not None and self._parse_time(row["cooldown_until"]) <= now
-            )
-        ]
+        available_agenda = attention_batch(
+            self.database, self.subject_id, self.clock(), self.settings.thought_interval_seconds
+        )
         if self.agenda_inspector is not None:
             available_agenda = [
                 row
@@ -401,16 +390,7 @@ class MetacognitiveControl:
                 if self.agenda_inspector(str(row["agenda_id"])).eligible
             ]
         if available_agenda:
-            selected_agenda = max(
-                available_agenda,
-                key=lambda row: (
-                    float(row["urgency"]) * 0.4
-                    + float(row["novelty"]) * 0.25
-                    + float(row["emotional_weight"]) * 0.25
-                    - min(0.45, int(row["consecutive_no_change"]) * 0.15),
-                    row["agenda_id"],
-                ),
-            )
+            selected_agenda = available_agenda[0]
             candidates.append(
                 _Candidate(
                     "think",
@@ -451,8 +431,7 @@ class MetacognitiveControl:
                     ),
                     uncertainty,
                     self._recent_failure_risk("research"),
-                    authorized_source is not None
-                    and self._interval_due(
+                    self._interval_due(
                         last_times["research"], self.settings.research_interval_seconds
                     ),
                 )
@@ -483,7 +462,7 @@ class MetacognitiveControl:
                 _Candidate(
                     "epistemic_review",
                     "observation",
-                    str(trigger_observation["observation_id"]),
+                    trigger_observation,
                     "analyzed_evidence_awaits_belief_review",
                     0.78,
                     0.7,
@@ -761,12 +740,8 @@ class MetacognitiveControl:
             outcome = "productive" if result == "metacognitive_sleep_requested" else "failed"
         elif decision.strategy == "wait":
             outcome = "stagnant"
-        elif any(token in result for token in ("failed", "rejected", "budget_exhausted")):
-            outcome = "failed"
-        elif result.endswith("_waiting") or result.endswith("_waited"):
-            outcome = "stagnant"
         else:
-            outcome = "unknown"
+            outcome = cycle_result_outcome(result)
         return (
             "cycle_result",
             content_hash(

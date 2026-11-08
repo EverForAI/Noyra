@@ -72,7 +72,11 @@ def _database(path: Path, *, calls: int = 1, attempts: int = 1) -> None:
             CREATE TABLE wallet_payment_executions(subject_id TEXT,status TEXT);
             CREATE TABLE interaction_deliveries(
               delivery_id TEXT PRIMARY KEY,subject_id TEXT,status TEXT);
-            CREATE TABLE interaction_delivery_reconciliations(delivery_id TEXT,outcome TEXT);
+            CREATE TABLE interaction_delivery_reconciliations(
+              reconciliation_id TEXT PRIMARY KEY,delivery_id TEXT,subject_id TEXT,sequence INTEGER,
+              source TEXT,outcome TEXT,provider_message_id TEXT,provider_status TEXT,
+              evidence_json TEXT,evidence_hash TEXT,actor TEXT,reason TEXT,state_hash TEXT,
+              created_at TEXT);
             CREATE TABLE runtime_state(subject_id TEXT PRIMARY KEY, state TEXT);
             CREATE TABLE autonomy_loop_state(subject_id TEXT PRIMARY KEY, circuit_status TEXT,
               consecutive_failures INTEGER,last_successful_tick_at TEXT,next_retry_at TEXT);
@@ -298,14 +302,33 @@ def test_attention_does_not_hide_old_unknown_payments_or_resolved_deliveries(
         connection.execute(
             "INSERT INTO interaction_deliveries VALUES ('pending','subject','unknown')"
         )
+        receipt = {
+            "reconciliation_id": "synthetic-receipt",
+            "delivery_id": "old",
+            "subject_id": "subject",
+            "sequence": 1,
+            "source": "operator",
+            "outcome": "delivered",
+            "provider_message_id": None,
+            "provider_status": None,
+            "evidence_hash": content_hash({}),
+            "actor": "operator",
+            "reason": "Synthetic receipt",
+            "created_at": NOW.isoformat(),
+        }
+        fields = [*receipt, "evidence_json", "state_hash"]
         connection.execute(
-            "INSERT INTO interaction_delivery_reconciliations VALUES ('old','delivered')"
+            "INSERT INTO interaction_delivery_reconciliations(" + ",".join(fields) + ") "
+            "VALUES (" + ",".join("?" for _ in fields) + ")",
+            (*receipt.values(), "{}", content_hash(receipt)),
         )
     observation = RuntimeObserver(database, tmp_path, "subject").snapshot(
         cognition_enabled=True, interval_seconds=30
     )
     assert observation["attention"]["unknown_payments"] == {"count": 50, "more": True}
-    assert observation["attention"]["unresolved_deliveries"] == {"count": 1, "more": False}
+    attention = observation["attention"]["unresolved_deliveries"]
+    assert attention["count"] == 1 and attention["more"] is False
+    assert attention["sampled"] == 2 and attention["truncated"] is False
 
 
 def test_resource_samples_distinguish_operator_tests_and_do_not_expose_responses(

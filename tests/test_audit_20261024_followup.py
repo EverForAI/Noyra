@@ -599,7 +599,11 @@ async def test_social_recovery_same_route_reuses_successful_response(kernel: Sub
 
 
 def unknown_fixture(
-    owner: SubjectKernel, tmp_path: Path, routed: bool
+    owner: SubjectKernel,
+    tmp_path: Path,
+    routed: bool,
+    *,
+    receive_clock: Callable[[], str] | None = None,
 ) -> tuple[
     InteractionCognition,
     FakeProvider,
@@ -648,17 +652,27 @@ def unknown_fixture(
     assert alice and bob
     interactions = InteractionStore(owner.database)
 
+    received_at = datetime(2026, 1, 1, tzinfo=UTC)
+
     def receive(who: Participant, key: str) -> InteractionRecord:
-        return interactions.receive(
-            owner.subject_id,
-            "participant",
-            who.entity_id,
-            "Independent invitation " + key,
-            idempotency_key=key,
-            participant=who,
-            participant_private=True,
-            participant_conversation="participant:" + who.entity_id,
+        nonlocal received_at
+        # These scenarios require Alice to precede Bob. Wall-clock milliseconds
+        # can tie, in which case the scheduler correctly breaks ties by ID.
+        received_at += timedelta(milliseconds=1)
+        timestamp = (
+            receive_clock() if receive_clock else received_at.isoformat(timespec="milliseconds")
         )
+        with patch("noyra.interaction.store.utc_now", return_value=timestamp):
+            return interactions.receive(
+                owner.subject_id,
+                "participant",
+                who.entity_id,
+                "Independent invitation " + key,
+                idempotency_key=key,
+                participant=who,
+                participant_private=True,
+                participant_conversation="participant:" + who.entity_id,
+            )
 
     first = receive(alice, "first")
     second = receive(bob, "second")
@@ -684,6 +698,7 @@ async def test_unknown_round_yields_to_independent_messages_without_releasing_ev
     with kernel.database.connection() as c:
         call = dict(c.execute("SELECT * FROM model_calls").fetchone())
         attempt = dict(c.execute("SELECT * FROM model_attempts").fetchone())
+    assert call["purpose"] == "interaction_cognition:" + first.interaction_id + ":0"
     # Recreate the worker and cross the scheduling day without changing evidence.
     restarted = InteractionCognition(
         kernel.database,
@@ -717,6 +732,70 @@ async def test_unknown_round_yields_to_independent_messages_without_releasing_ev
             == attempt
         )
     assert InteractionStore(kernel.database).get(first.interaction_id).status == "offered"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routed", [False, True])
+@pytest.mark.parametrize("reverse_ids", [False, True])
+async def test_unknown_round_with_equal_timestamps_isolates_the_selected_invitation(
+    kernel: SubjectKernel, tmp_path: Path, routed: bool, reverse_ids: bool
+) -> None:
+    from noyra.core.types import new_id as real_new_id
+    from noyra.interaction import InteractionStore
+
+    ids = ("int_a", "int_b")
+    interaction_ids = iter(reversed(ids) if reverse_ids else ids)
+
+    def controlled_id(prefix: str) -> str:
+        return next(interaction_ids) if prefix == "int" else real_new_id(prefix)
+
+    with patch("noyra.interaction.store.new_id", side_effect=controlled_id):
+        engine, provider, alice, bob, _, _, _ = unknown_fixture(
+            kernel,
+            tmp_path,
+            routed,
+            receive_clock=lambda: "2026-01-01T00:00:00.000+00:00",
+        )
+    assert alice.created_at == bob.created_at
+    selected, independent = sorted((alice, bob), key=lambda item: item.interaction_id)
+    assert due_id(engine) == selected.interaction_id
+    assert await engine.run_due() == "interaction_model_failed"
+    with kernel.database.connection() as connection:
+        call = dict(connection.execute("SELECT * FROM model_calls").fetchone())
+        attempt = dict(connection.execute("SELECT * FROM model_attempts").fetchone())
+    assert call["purpose"] == "interaction_cognition:" + selected.interaction_id + ":0"
+    assert call["status"] == "unknown"
+    restarted = InteractionCognition(
+        kernel.database,
+        kernel.subject_id,
+        engine.gateway,
+        engine.settings,
+        clock=lambda: "2099-01-01T00:00:00.000+00:00",
+    )
+    assert due_id(restarted) == independent.interaction_id
+    assert await restarted.run_due() == "interaction_silent"
+    assert await restarted.run_due() is None
+    assert len(provider.requests) == 2
+    interactions = InteractionStore(kernel.database)
+    assert interactions.get(selected.interaction_id).status == "offered"
+    assert interactions.get(independent.interaction_id).status == "silent"
+    with kernel.database.connection() as connection:
+        assert (
+            dict(
+                connection.execute(
+                    "SELECT * FROM model_calls WHERE call_id=?", (call["call_id"],)
+                ).fetchone()
+            )
+            == call
+        )
+        assert (
+            dict(
+                connection.execute(
+                    "SELECT * FROM model_attempts WHERE attempt_id=?", (attempt["attempt_id"],)
+                ).fetchone()
+            )
+            == attempt
+        )
 
 
 @pytest.mark.asyncio

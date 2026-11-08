@@ -55,3 +55,9 @@ build/
 *.bundle
 /docs/audit/*-evidence/
 /docs/audit/*-verification.json
+
+# Private backup-rotation intents contain key snapshots
+.*.rotation-journal/
+
+# Same-directory private keyring publication staging
+.noyra-rotation-*.publish.tmp

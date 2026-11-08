@@ -28,6 +28,17 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, m
 from noyra.core.admission import OperationInvalidated, accounting_scope, assert_current_lease
 from noyra.core.at_rest import validate_private_file, validate_private_root
 from noyra.core.database import Database
+from noyra.core.delivery_state import (
+    DELIVERY_EVIDENCE_MAX_BYTES as DELIVERY_EVIDENCE_MAX_BYTES,
+)
+from noyra.core.delivery_state import (
+    DeliveryReconciliationRecord as DeliveryReconciliationRecord,
+)
+from noyra.core.delivery_state import (
+    reconciliation_record,
+    terminal_delivery_reconciliation,
+    verified_reconciliations,
+)
 from noyra.core.errors import IntegrityError, InvalidTransitionError, NotFoundError
 from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
@@ -44,7 +55,6 @@ from noyra.core.types import (
     canonical_json,
     content_hash,
     new_id,
-    strict_int,
     strict_json_loads,
     utc_now,
 )
@@ -59,7 +69,6 @@ DeliveryReconciliationOutcome = Literal[
 TRANSPORT_MAX_RESPONSE_BYTES = DEFAULT_MAX_RESPONSE_BYTES
 TRANSPORT_TOTAL_TIMEOUT_SECONDS = 20.0
 TRANSPORT_SECRET_MAX_BYTES = 16_000_000
-DELIVERY_EVIDENCE_MAX_BYTES = 16_384
 SMTP_TIMEOUT_SECONDS = 20.0
 PROVIDER_TOKEN_SKEW_SECONDS = 60.0
 LOGGER = logging.getLogger("noyra.interaction.transport")
@@ -152,6 +161,14 @@ class TransportInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_channel_endpoint(self) -> TransportInput:
+        for key in ("autonomous_send", "require_known_senders"):
+            if key in self.settings and type(self.settings[key]) is not bool:
+                raise ValueError(key + " must be boolean")
+        recipient_scope = self.settings.get("allowed_recipients")
+        if recipient_scope is not None and (
+            not isinstance(recipient_scope, str) or len(recipient_scope) > 8_192
+        ):
+            raise ValueError("allowed_recipients must be a bounded comma-separated string")
         parsed = urlsplit(self.endpoint)
         scheme = parsed.scheme
         if self.channel == "email" and scheme not in {"smtp", "smtps"}:
@@ -210,24 +227,6 @@ class ProviderStatusEvidence:
     provider_status: str
     provider_message_id: str | None = None
     details: Mapping[str, Any] | None = None
-
-
-@dataclass(frozen=True)
-class DeliveryReconciliationRecord:
-    reconciliation_id: str
-    delivery_id: str
-    subject_id: str
-    sequence: int
-    source: str
-    outcome: str
-    provider_message_id: str | None
-    provider_status: str | None
-    evidence: Mapping[str, Any]
-    evidence_hash: str
-    actor: str
-    reason: str
-    state_hash: str
-    created_at: str
 
 
 DeliveryStatusLookup = Callable[
@@ -1244,7 +1243,18 @@ class DeliveryDispatcher:
                 (subject_id, max(1, min(limit, 200))),
             ).fetchall()
             for interaction in interactions:
+                expression = self._expression_route(
+                    connection, subject_id, str(interaction["interaction_id"])
+                )
                 transport = None
+                if expression is not None:
+                    transport = connection.execute(
+                        "SELECT * FROM interaction_transports "
+                        "WHERE subject_id=? AND transport_id=? AND status='active'",
+                        (subject_id, expression["transport_id"]),
+                    ).fetchone()
+                    if transport is None:
+                        continue
                 related_id = interaction["related_interaction_id"]
                 if related_id is not None and interaction["channel"] != "web":
                     # A reply must leave through the same bot/app account that
@@ -1278,11 +1288,26 @@ class DeliveryDispatcher:
                     and interaction["channel"] == "web"
                     and interaction["kind"] == "help_request"
                 ):
-                    transport = connection.execute(
-                        "SELECT * FROM interaction_transports WHERE subject_id = ? "
-                        "AND status = 'active' ORDER BY channel, label LIMIT 1",
+                    choices = connection.execute(
+                        "SELECT * FROM interaction_transports WHERE subject_id=? "
+                        "AND status='active' ORDER BY channel,label LIMIT 100",
                         (subject_id,),
-                    ).fetchone()
+                    ).fetchall()
+                    # A configured sending identity alone does not identify
+                    # the founder/help recipient. Keep the request available
+                    # on-site until a destination has actually been configured.
+                    transport = next(
+                        (
+                            candidate
+                            for candidate in choices
+                            if any(
+                                isinstance(TransportStore._config(candidate).get(key), (str, int))
+                                and str(TransportStore._config(candidate)[key]).strip()
+                                for key in ("recipient", "chat_id", "target", "to")
+                            )
+                        ),
+                        None,
+                    )
                 elif transport is None:
                     transport = connection.execute(
                         "SELECT * FROM interaction_transports WHERE subject_id = ? AND channel = ? "
@@ -1357,6 +1382,38 @@ class DeliveryDispatcher:
                 )
                 created += 1
         return created
+
+    def _expression_route(
+        self, connection: Any, subject: str, interaction_id: str
+    ) -> dict[str, Any] | None:
+        from noyra.core.events import EventStore
+
+        row = connection.execute(
+            "SELECT * FROM events WHERE subject_id=? AND event_id=?",
+            (subject, "evt_outbox_" + content_hash(interaction_id)),
+        ).fetchone()
+        if row is None:
+            return None
+        payload = EventStore(self.database).payload_from_row(row, connection=connection)
+        if (
+            content_hash(payload) != row["payload_hash"]
+            or payload.get("interaction_id") != interaction_id
+            or set(payload)
+            != {"interaction_id", "transport_id", "recipient", "grant_id", "action_id"}
+        ):
+            raise IntegrityError("expression outbox route is invalid")
+        action = connection.execute(
+            "SELECT subject_id,status,result_json FROM actions WHERE action_id=?",
+            (payload["action_id"],),
+        ).fetchone()
+        if (
+            action is None
+            or action["subject_id"] != subject
+            or action["status"] != "succeeded"
+            or strict_json_loads(action["result_json"]).get("interaction_id") != interaction_id
+        ):
+            raise IntegrityError("expression outbox lacks its action receipt")
+        return payload
 
     @staticmethod
     def _web_push_recipient(connection: Any, delivery_id: str) -> str | None:
@@ -1526,7 +1583,9 @@ class DeliveryDispatcher:
             if interaction["related_interaction_id"] is not None:
                 with self.database.connection() as connection:
                     contexts = connection.execute(
-                        "SELECT external_thread_id, reply_selector, reply_context_version, "
+                        "SELECT event_id, content_hash, external_thread_id, provider_event_id, "
+                        "reply_selector, "
+                        "reply_context_version, email_identity_version, "
                         "conversation_id, transport_id, subject_id, external_account_id, "
                         "external_sender_id, channel "
                         "FROM interaction_inbound_events WHERE interaction_id = ? "
@@ -1542,6 +1601,19 @@ class DeliveryDispatcher:
                     legacy_thread = None
                     if context is not None and context["transport_id"] != record.transport_id:
                         raise IntegrityError("reply delivery uses a different source transport")
+                    email_identity = None
+                    if context is not None and record.channel == "email":
+                        from .email_identity import read_evidence
+
+                        email_identity = read_evidence(connection, context)
+                        if email_identity is None:
+                            private = connection.execute(
+                                "SELECT 1 FROM participant_message_links WHERE subject_id=? "
+                                "AND interaction_id=? AND visibility='private'",
+                                (delivery.subject_id, interaction["related_interaction_id"]),
+                            ).fetchone()
+                            if private is not None:
+                                raise PermissionError("legacy email private identity is unverified")
                     if context is not None:
                         permitted = connection.execute(
                             "SELECT 1 FROM interaction_bindings b WHERE b.subject_id=? "
@@ -1597,16 +1669,42 @@ class DeliveryDispatcher:
                             ),
                         ).fetchone()
                 if context is not None:
-                    thread_id = context["external_thread_id"]
+                    thread_id = (
+                        (
+                            email_identity.message_id
+                            if email_identity is not None
+                            else context["provider_event_id"]
+                        )
+                        if record.channel == "email"
+                        else context["external_thread_id"]
+                    )
                     if thread_id is None and legacy_thread is not None:
                         thread_id = legacy_thread["external_thread_id"]
                     if thread_id is not None:
                         send_interaction["thread_id"] = thread_id
                     if context["reply_selector"] is not None:
                         send_interaction["reply_selector"] = context["reply_selector"]
-            send_interaction["counterparty"] = self.transports.delivery_counterparty(
-                record.transport_id, interaction, subject_id=delivery.subject_id
+            from .assistance_routes import AssistanceRoutes
+
+            help_route = None
+            help_routes = AssistanceRoutes(self.database, delivery.subject_id)
+            is_help = interaction["channel"] == "web" and interaction["kind"] == "help_request"
+            if is_help:
+                with self.database.connection() as connection:
+                    help_route = help_routes.read(connection, delivery.delivery_id)
+            send_interaction["counterparty"] = (
+                help_route["recipient"]
+                if help_route is not None
+                else self.transports.delivery_counterparty(
+                    record.transport_id, interaction, subject_id=delivery.subject_id
+                )
             )
+            if is_help and help_route is None:
+                help_route = help_routes.freeze(
+                    delivery.delivery_id, str(send_interaction["counterparty"])
+                )
+            if help_route is not None:
+                send_interaction["counterparty"] = help_route["recipient"]
             with self.database.connection() as connection:
                 push_recipient = self._web_push_recipient(connection, delivery.delivery_id)
             if push_recipient is not None:
@@ -1698,6 +1796,34 @@ class DeliveryDispatcher:
                 or current["content"] != interaction.get("content")
             ):
                 raise PermissionError("delivery authorization withdrawn")
+            expression = self._expression_route(
+                connection, transport.subject_id, str(current["interaction_id"])
+            )
+            if expression is not None:
+                from noyra.capability import CapabilityStore
+                from noyra.interaction.expression import ExpressionProposal, ExpressionStore
+
+                if expression["transport_id"] != transport.transport_id or expression[
+                    "recipient"
+                ] != interaction.get("counterparty"):
+                    raise PermissionError("expression recipient or transport changed")
+                CapabilityStore(self.database).revalidate_use(
+                    expression["grant_id"],
+                    transport.subject_id,
+                    "message",
+                    "transport:" + transport.transport_id,
+                    side_effect=True,
+                )
+                ExpressionStore(self.database, transport.subject_id)._transport(
+                    connection,
+                    ExpressionProposal(
+                        operation="message",
+                        body=str(current["content"]),
+                        transport_id=transport.transport_id,
+                        recipient=str(expression["recipient"]),
+                        reason="dispatch revalidation",
+                    ),
+                )
             withdrawn = connection.execute(
                 "SELECT 1 FROM private_conversation_messages m JOIN private_conversations c "
                 "ON c.conversation_id=m.conversation_id WHERE m.interaction_id IN (?,?) "
@@ -1710,6 +1836,41 @@ class DeliveryDispatcher:
                 "SELECT delivery_id FROM interaction_deliveries WHERE idempotency_key=?",
                 (idempotency_key,),
             ).fetchone()
+            from .assistance_routes import AssistanceRoutes
+
+            help_route = AssistanceRoutes(self.database, transport.subject_id).read(
+                connection, str(delivery[0])
+            )
+            if (
+                current["channel"] == "web"
+                and current["kind"] == "help_request"
+                and str(current["idempotency_key"]).startswith("project-assistance:")
+                and help_route is None
+            ):
+                raise PermissionError("help delivery lacks its destination evidence")
+            if help_route is not None:
+                target = connection.execute(
+                    "SELECT transport_id,config_json FROM interaction_transports "
+                    "WHERE subject_id=? AND transport_id=?",
+                    (transport.subject_id, transport.transport_id),
+                ).fetchone()
+                request = connection.execute(
+                    "SELECT 1 FROM autonomous_project_assistance_requests "
+                    "WHERE subject_id=? AND request_id=? AND status='open'",
+                    (transport.subject_id, help_route["request_id"]),
+                ).fetchone()
+                account = (
+                    None if target is None else TransportStore._config(target).get("account_id")
+                )
+                account = account if isinstance(account, str) and account.strip() else None
+                if (
+                    help_route["transport_id"] != transport.transport_id
+                    or help_route["recipient"] != interaction.get("counterparty")
+                    or target is None
+                    or request is None
+                    or account != help_route["account_id"]
+                ):
+                    raise PermissionError("help delivery authorization withdrawn")
             push_recipient = self._web_push_recipient(connection, delivery[0])
             if push_recipient is not None and (
                 interaction.get("counterparty") != push_recipient
@@ -1722,6 +1883,22 @@ class DeliveryDispatcher:
                 (current["related_interaction_id"], transport.subject_id),
             ).fetchone()
             if context is not None:
+                if context["channel"] == "email":
+                    from .email_identity import read_evidence
+
+                    identity = read_evidence(connection, context)
+                    if identity is not None and interaction.get("thread_id") != identity.message_id:
+                        raise PermissionError("email reply evidence changed before send")
+                    if (
+                        identity is None
+                        and connection.execute(
+                            "SELECT 1 FROM participant_message_links WHERE subject_id=? "
+                            "AND interaction_id=? AND visibility='private'",
+                            (transport.subject_id, current["related_interaction_id"]),
+                        ).fetchone()
+                        is not None
+                    ):
+                        raise PermissionError("legacy email private identity is unverified")
                 permitted = connection.execute(
                     "SELECT 1 FROM interaction_bindings WHERE subject_id=? AND transport_id=? "
                     "AND channel=? AND external_account_id=? AND external_sender_id=? "
@@ -1814,6 +1991,11 @@ class DeliveryDispatcher:
                         idempotency_key,
                         before_send,
                         operation=operation,
+                        thread_id=(
+                            interaction.get("thread_id")
+                            if isinstance(interaction.get("thread_id"), str)
+                            else None
+                        ),
                     )
                 )
             except TimeoutError as error:
@@ -2035,6 +2217,7 @@ class DeliveryDispatcher:
         authorize_send: Callable[[], None] | None = None,
         *,
         operation: SMTPOperation | None = None,
+        thread_id: str | None = None,
     ) -> str:
         operation = operation or SMTPOperation(SMTP_TIMEOUT_SECONDS)
         parsed = urlsplit(endpoint)
@@ -2051,6 +2234,19 @@ class DeliveryDispatcher:
         message["Subject"] = "Noyra message"
         message_id = DeliveryDispatcher._smtp_message_id(idempotency_key)
         message["Message-ID"] = message_id
+        if (
+            isinstance(thread_id, str)
+            and 3 <= len(thread_id) <= 512
+            and thread_id.startswith("<")
+            and thread_id.endswith(">")
+            and thread_id.count("@") == 1
+            and thread_id.isascii()
+            and all(33 <= ord(character) <= 126 for character in thread_id)
+            and "<" not in thread_id[1:-1]
+            and ">" not in thread_id[1:-1]
+        ):
+            message["In-Reply-To"] = thread_id
+            message["References"] = thread_id
         message.set_content(content)
         addresses = public_addresses(host, port, timeout=operation.remaining())
         address = addresses[0]
@@ -2274,21 +2470,21 @@ class DeliveryDispatcher:
         *,
         subject_id: str | None = None,
     ) -> list[DeliveryReconciliationRecord]:
-        with self.database.connection() as connection:
+        with self.database.read_transaction() as connection:
             delivery = connection.execute(
-                "SELECT delivery_id, subject_id FROM interaction_deliveries WHERE delivery_id = ?",
+                "SELECT delivery_id,subject_id,status FROM interaction_deliveries "
+                "WHERE delivery_id = ?",
                 (delivery_id,),
             ).fetchone()
             if delivery is None or (
                 subject_id is not None and delivery["subject_id"] != subject_id
             ):
                 raise NotFoundError(f"delivery not found: {delivery_id}")
-            rows = connection.execute(
-                "SELECT * FROM interaction_delivery_reconciliations "
-                "WHERE delivery_id = ? ORDER BY sequence",
-                (delivery_id,),
-            ).fetchall()
-        return [self._reconciliation_record(row) for row in rows]
+            return list(
+                verified_reconciliations(
+                    connection, str(delivery["subject_id"]), delivery_id=delivery_id
+                )
+            )
 
     async def _lookup_status_endpoint(
         self,
@@ -2542,100 +2738,18 @@ class DeliveryDispatcher:
         if not reason.strip() or len(reason) > 2_000:
             raise ValueError("delivery reconciliation reason is required and bounded")
 
-    @staticmethod
-    def _reconciliation_record(row: Any) -> DeliveryReconciliationRecord:
-        reconciliation_id = row["reconciliation_id"]
-        raw_evidence = row["evidence_json"]
-        if not isinstance(raw_evidence, str):
-            raise IntegrityError(
-                f"delivery reconciliation evidence is invalid: {reconciliation_id}"
-            )
-        if len(raw_evidence.encode("utf-8")) > DELIVERY_EVIDENCE_MAX_BYTES:
-            raise IntegrityError(
-                f"delivery reconciliation evidence is too large: {reconciliation_id}"
-            )
-        try:
-            evidence = strict_json_loads(raw_evidence)
-            sequence = strict_int(row["sequence"])
-        except (TypeError, ValueError) as error:
-            raise IntegrityError(
-                f"delivery reconciliation evidence is invalid: {reconciliation_id}"
-            ) from error
-        if not isinstance(evidence, dict) or sequence <= 0:
-            raise IntegrityError(f"delivery reconciliation is invalid: {reconciliation_id}")
-        source = row["source"]
-        outcome = row["outcome"]
-        provider_message_id = row["provider_message_id"]
-        provider_status = row["provider_status"]
-        if (
-            source not in {"provider", "operator"}
-            or outcome
-            not in {"delivered", "failed", "cancelled", "unknown", "unsupported", "error"}
-            or (source == "operator" and outcome not in {"delivered", "failed", "cancelled"})
-            or (source == "provider" and outcome == "cancelled")
-            or not isinstance(row["actor"], str)
-            or not row["actor"].strip()
-            or not isinstance(row["reason"], str)
-            or not row["reason"].strip()
-            or not isinstance(row["created_at"], str)
-            or not row["created_at"]
-            or (
-                provider_message_id is not None
-                and (not isinstance(provider_message_id, str) or len(provider_message_id) > 512)
-            )
-            or (
-                provider_status is not None
-                and (not isinstance(provider_status, str) or len(provider_status) > 256)
-            )
-        ):
-            raise IntegrityError(f"delivery reconciliation is invalid: {reconciliation_id}")
-        evidence_hash = content_hash(evidence)
-        state = {
-            "reconciliation_id": reconciliation_id,
-            "delivery_id": row["delivery_id"],
-            "subject_id": row["subject_id"],
-            "sequence": sequence,
-            "source": source,
-            "outcome": outcome,
-            "provider_message_id": provider_message_id,
-            "provider_status": provider_status,
-            "evidence_hash": evidence_hash,
-            "actor": row["actor"],
-            "reason": row["reason"],
-            "created_at": row["created_at"],
-        }
-        if row["evidence_hash"] != evidence_hash or row["state_hash"] != content_hash(state):
-            raise IntegrityError(f"delivery reconciliation hash mismatch: {reconciliation_id}")
-        return DeliveryReconciliationRecord(
-            str(reconciliation_id),
-            str(row["delivery_id"]),
-            str(row["subject_id"]),
-            sequence,
-            str(row["source"]),
-            str(row["outcome"]),
-            row["provider_message_id"],
-            row["provider_status"],
-            evidence,
-            str(row["evidence_hash"]),
-            str(row["actor"]),
-            str(row["reason"]),
-            str(row["state_hash"]),
-            str(row["created_at"]),
-        )
+    _reconciliation_record = staticmethod(reconciliation_record)
 
-    def get_delivery(self, delivery_id: str) -> DeliveryRecord:
-        with self.database.connection() as connection:
-            row = connection.execute(
-                "SELECT * FROM interaction_deliveries WHERE delivery_id = ?", (delivery_id,)
-            ).fetchone()
-            reconciliation = connection.execute(
-                "SELECT * FROM interaction_delivery_reconciliations "
-                "WHERE delivery_id = ? AND outcome IN ('delivered', 'failed', 'cancelled')",
-                (delivery_id,),
-            ).fetchone()
-        if row is None:
+    def _get_delivery_connection(
+        self, connection: Any, delivery_id: str, *, subject_id: str | None = None
+    ) -> DeliveryRecord:
+        row = connection.execute(
+            "SELECT * FROM interaction_deliveries WHERE delivery_id = ?",
+            (delivery_id,),
+        ).fetchone()
+        if row is None or (subject_id is not None and row["subject_id"] != subject_id):
             raise NotFoundError(f"delivery not found: {delivery_id}")
-        resolved = None if reconciliation is None else self._reconciliation_record(reconciliation)
+        resolved = terminal_delivery_reconciliation(connection, row)
         return DeliveryRecord(
             delivery_id=str(row["delivery_id"]),
             interaction_id=str(row["interaction_id"]),
@@ -2659,3 +2773,7 @@ class DeliveryDispatcher:
             reconciliation_reason=None if resolved is None else resolved.reason,
             reconciled_at=None if resolved is None else resolved.created_at,
         )
+
+    def get_delivery(self, delivery_id: str) -> DeliveryRecord:
+        with self.database.read_transaction() as connection:
+            return self._get_delivery_connection(connection, delivery_id)

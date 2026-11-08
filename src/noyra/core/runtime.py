@@ -12,13 +12,32 @@ from typing import Any
 from .actions import ActionLedger
 from .admission import RuntimeAdmissionGate
 from .database import Database
-from .errors import IdentityConflictError, IntegrityError, NotFoundError, RuntimeOwnershipError
+from .errors import (
+    IdentityConflictError,
+    IntegrityError,
+    InvalidTransitionError,
+    NotFoundError,
+    RuntimeOwnershipError,
+)
 from .events import EventStore
 from .identity import IdentityStore, validate_subject_id
 from .lifecycle import LifecycleManager
 from .locking import ProcessLock
 from .snapshots import SnapshotStore
 from .types import ActionRecord, RuntimeState, SnapshotRecord, SubjectIdentity, utc_now
+
+
+def _sleep_work_allowed(database: Database, subject_id: str) -> bool:
+    with database.read_transaction() as connection:
+        row = connection.execute(
+            "SELECT state FROM runtime_state WHERE subject_id=?", (subject_id,)
+        ).fetchone()
+    return row is not None and row["state"] in {
+        "winding_down",
+        "reflective_sleep",
+        "deep_sleep",
+        "waking",
+    }
 
 
 def _migration_fence_active(fence_root: Path | None, subject_id: str) -> bool:
@@ -169,6 +188,7 @@ class SubjectKernel:
             self.admission = RuntimeAdmissionGate(
                 subject_id,
                 initially_accepting=False,
+                sleep_check=lambda: _sleep_work_allowed(database_ref, subject_id),
                 ownership_check=lambda: (
                     process_lock_ref.held
                     and _no_active_migration_epoch(
@@ -287,8 +307,10 @@ class SubjectKernel:
 
     def pause(self, reason: str = "operator pause", *, actor: str = "operator") -> RuntimeState:
         self._require_ownership()
-        self.admission.invalidate()
         current = self.lifecycle.current()
+        if current.state in {"winding_down", "reflective_sleep", "deep_sleep", "waking"}:
+            raise InvalidTransitionError("sleep pause requires the sleep failure protocol")
+        self.admission.invalidate()
         if current.state == "paused":
             return current
         try:

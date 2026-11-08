@@ -1023,3 +1023,25 @@ def test_completed_fragment_identity_retains_first_appearance(
         ).fetchone()
     assert first is not None and first[0] == T1
     assert WorldIntegrity(database).verify(SUBJECT)["world_feed_seen"] == 1
+
+
+def test_inflight_wall_clock_regression_rolls_back_new_data_then_recovers_once(
+    context: tuple[Database, SourceRecord, ObservationStore],
+) -> None:
+    database, source, store = context
+    store.ingest(SUBJECT, source.source_id, document(source, rss(item()), T2))
+    before = state(database, source)
+    with pytest.raises(IntegrityError, match="out of order"):
+        store.ingest(SUBJECT, source.source_id, document(source, rss(item(), item("new")), T1))
+    assert state(database, source) == before
+    with database.read_transaction() as c:
+        assert c.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == 1
+        assert c.execute("SELECT COUNT(*) FROM world_feed_seen").fetchone()[0] == 1
+    recovered, created = store.ingest(
+        SUBJECT, source.source_id, document(source, rss(item(), item("new")), T3)
+    )
+    assert recovered is not None and created
+    assert state(database, source)["checks"] == 2
+    assert store.ingest(
+        SUBJECT, source.source_id, document(source, rss(item(), item("new")), T3)
+    ) == (None, False)

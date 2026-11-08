@@ -6,7 +6,7 @@ import sqlite3
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Literal, cast
 
-from noyra.core.errors import InvalidTransitionError, NotFoundError
+from noyra.core.errors import IntegrityError, InvalidTransitionError, NotFoundError
 from noyra.interaction import TransportInput
 from noyra.interaction.conversations import ConversationConflict
 
@@ -201,6 +201,9 @@ def delivery_operation(self: RequestHandler, owner: NoyraHTTPServer) -> None:
             raise ValueError("unsupported delivery operation")
     except NotFoundError:
         self._json(HTTPStatus.NOT_FOUND, {"error": "delivery_not_found"})
+        return
+    except (IntegrityError, sqlite3.Error):
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "delivery_state_unavailable"})
         return
     except InvalidTransitionError:
         self._json(

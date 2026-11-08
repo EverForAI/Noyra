@@ -1718,7 +1718,12 @@ class MigrationAgent:
             if self.backup_manager is None:
                 raise ValueError("encrypted backup restore is not configured")
             try:
-                return Path(self.backup_manager.restore(path, task_root))
+                restored_root = Path(self.backup_manager.restore(path, task_root))
+                if restored_root.resolve() != task_root.resolve():
+                    raise ValueError("encrypted backup restore escaped its task directory")
+                # The backup manager returns a directory; the agent receipt
+                # and health contract always bind the actual database file.
+                return restored_root / "noyra.sqlite3"
             except Exception as error:
                 raise ValueError("encrypted backup restore failed") from error
         if artifact_format != "sqlite":

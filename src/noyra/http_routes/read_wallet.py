@@ -29,6 +29,11 @@ def admin_wallet_lists_item(
     if not self._authorized("operator"):
         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
         return True
+    # This route is dispatched before the shared /api storage guard. Keep
+    # authentication first, but never read wallet records through an unavailable boundary.
+    if not self._at_rest_available():
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "at_rest_boundary_unavailable"})
+        return True
     try:
         list_query = parse_qs(parsed.query, keep_blank_values=True)
         if set(list_query) - {"limit", "status", "network_id", "cursor"} or any(

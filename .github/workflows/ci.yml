@@ -8,6 +8,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      publication_base:
+        description: "Exact reviewed ancestor SHA (or configure PUBLICATION_REVIEW_BASE)"
+        required: false
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -30,12 +35,14 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 3
+          fetch-depth: 0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: Check publication boundary
-        run: python scripts/check-publication-boundary.py --revision "${{ github.event.pull_request.head.sha || github.sha }}"
+        env:
+          NOYRA_PUBLICATION_REVIEW_BASE: ${{ vars.PUBLICATION_REVIEW_BASE }}
+        run: python scripts/check-publication-boundary.py --github-event
       - name: Check reviewed public source inventory
         run: python scripts/public-file-manifest.py check --revision "${{ github.sha }}"
       - name: Export exact public Git blobs
@@ -59,7 +66,8 @@ jobs:
       - run: python -m pip install --require-hashes --requirement requirements-dev.lock
       - run: python -m pip install --no-deps --no-build-isolation -e ".[dev]"
       - run: python scripts/audit-m41.py --scope targeted --profile smoke
-      - run: python -m pytest --cov=noyra --cov-report=term-missing
+      - name: Run complete tests in two verified partitions
+        run: python scripts/run-ci-tests.py --workers 2
       - name: Verify Ubuntu installer backup boundary
         if: matrix.os == 'ubuntu-24.04' && matrix.python-version == '3.12'
         run: |

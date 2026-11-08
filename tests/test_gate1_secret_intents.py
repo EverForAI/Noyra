@@ -22,6 +22,7 @@ from noyra.model import (
     EmbeddingResourceStore,
 )
 from noyra.research import SearchProviderInput, SearchProviderStore
+from support.historical import materialize_migration_database
 
 
 def _database(tmp_path: Path) -> tuple[Database, str]:
@@ -581,34 +582,15 @@ def test_schema_42_migrates_secret_journal_and_archive_generation_trigger(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "migration.sqlite3"
-    database = Database(path)
-    with database.transaction() as connection:
-        connection.execute("DROP TABLE secret_file_intents")
-        connection.execute("DROP TRIGGER validate_archive_keyring_generation_insert")
-        connection.execute("DROP TRIGGER validate_public_post_moderation_transition")
-        connection.execute("DROP TRIGGER validate_public_post_identity_insert")
-        connection.execute("DROP TRIGGER prevent_public_post_identity_update")
-        connection.execute("DROP INDEX uq_public_post_moderation_revision")
-        connection.execute("DROP INDEX uq_public_post_moderation_idempotency")
-        connection.execute("DROP INDEX idx_public_post_rate_events_subject_time")
-        connection.execute("DROP INDEX idx_public_post_captcha_issue_subject_time")
-        connection.execute("ALTER TABLE public_post_moderation_events DROP COLUMN idempotency_key")
-        connection.execute(
-            "ALTER TABLE public_post_moderation_events DROP COLUMN previous_event_id"
+    legacy = materialize_migration_database(path, 41)
+    with legacy.connection() as connection:
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_schema WHERE name IN "
+                "('secret_file_intents', 'validate_email_ingress_subject')"
+            ).fetchall()
+            == []
         )
-        connection.execute("ALTER TABLE public_post_moderation_events DROP COLUMN revision")
-        connection.execute("ALTER TABLE public_posts DROP COLUMN author_provenance")
-        connection.execute("ALTER TABLE public_posts DROP COLUMN identity_hash")
-        connection.execute(
-            "ALTER TABLE public_post_controls DROP COLUMN captcha_global_rate_per_minute"
-        )
-        connection.execute(
-            "ALTER TABLE public_post_controls DROP COLUMN captcha_issue_limit_per_hour"
-        )
-        connection.execute("ALTER TABLE public_post_controls DROP COLUMN storage_cap_bytes")
-        connection.execute("ALTER TABLE interaction_transports DROP COLUMN endpoint_digest")
-        connection.execute("ALTER TABLE interaction_transports DROP COLUMN endpoint_contract")
-        connection.execute("UPDATE schema_meta SET value = '41' WHERE key = 'schema_version'")
 
     migrated = Database(path)
     with migrated.connection() as connection:

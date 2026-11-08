@@ -23,6 +23,7 @@ from noyra.core.http import (
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.core.xml import parse_untrusted_xml
 from noyra.world import canonical_public_url
+from noyra.world.errors import UnsafeSourceError
 
 from .routing import get_search_routing_mode
 from .types import SearchExecution, SearchResult
@@ -262,7 +263,7 @@ class BrowserSearchExecutor:
                 continue
             try:
                 url = canonical_public_url(raw_url)
-            except ValueError:
+            except (ValueError, UnsafeSourceError):
                 continue
             if url in seen:
                 continue
@@ -343,7 +344,7 @@ class BrowserSearchExecutor:
                         int(item["rank"]),
                     )
                 )
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError, UnsafeSourceError):
                 return ()
         if canonical_json([item.__dict__ for item in restored]) != canonical_json(raw):
             return ()

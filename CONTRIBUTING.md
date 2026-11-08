@@ -68,6 +68,15 @@ the existing public-source CI matrix runs the same guard as a backstop.
 The hook also rejects stale staged public-file hashes without rewriting or
 staging anything; the CI check continues to verify the exact committed snapshot.
 
+CI uses `--github-event` to inspect every newly reachable commit against a
+reviewed event baseline, including earlier introductions, removed intermediate
+content and merge-side history. The native hook remains index-scoped. A manual
+run needs an explicit `publication_base` SHA or `PUBLICATION_REVIEW_BASE`
+repository variable; tag releases require that variable to name a reviewed
+strict ancestor. No base is guessed when history or review authority is missing.
+See the [candidate-range contract](docs/development/publication-range-guard.md)
+for local `--base` review, trust assumptions and bootstrap/rewrite handling.
+
 Keep GitHub Secret scanning and Push protection enabled for supported credential
 patterns. They complement, but do not replace, review of personal information and
 coordinated disclosure. The curated source export exclusions are not a secrecy

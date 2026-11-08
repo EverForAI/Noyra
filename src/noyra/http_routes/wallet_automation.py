@@ -18,8 +18,13 @@ if TYPE_CHECKING:
 
 def wallet_automation_projection(self: RequestHandler, owner: NoyraHTTPServer) -> dict[str, Any]:
     policy = owner.wallet_economy.get_policy(owner.kernel.subject_id)
-    pending: dict[str, int] = {}
+    pending: dict[str, int] | None = None
     latest_failure: dict[str, Any] | None = None
+    active: int | None = None
+    observation: dict[str, str | None] = {
+        "status": "unavailable",
+        "reason_code": "wallet_execution_observation_unavailable",
+    }
     try:
         with owner.kernel.database.read_transaction() as connection:
             rows = connection.execute(
@@ -35,8 +40,16 @@ def wallet_automation_projection(self: RequestHandler, owner: NoyraHTTPServer) -
                 "ORDER BY updated_at DESC,execution_id DESC LIMIT 1",
                 (owner.kernel.subject_id,),
             ).fetchone()
+            active = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM wallet_payment_executions "
+                    "WHERE subject_id=? AND status IN ('signing','broadcast','unknown')",
+                    (owner.kernel.subject_id,),
+                ).fetchone()[0]
+            )
         from noyra.wallet.execution import WalletPaymentExecutionEngine
 
+        pending = {}
         for row in rows:
             code = WalletPaymentExecutionEngine.normalize_reason_code(row["error_code"])
             pending[code] = pending.get(code, 0) + int(row["count"])
@@ -51,23 +64,11 @@ def wallet_automation_projection(self: RequestHandler, owner: NoyraHTTPServer) -
                     latest["status"] == "unknown" or reason_code == "reconcile_required"
                 ),
             }
+        observation = {"status": "ok", "reason_code": None}
     except Exception:
-        pending = {}
-        latest_failure = None
-    active = 0
-    try:
-        with owner.kernel.database.read_transaction() as connection:
-            active = int(
-                connection.execute(
-                    """
-                                SELECT COUNT(*) FROM wallet_payment_executions
-                                WHERE subject_id=? AND status IN ('signing','broadcast','unknown')
-                                """,
-                    (owner.kernel.subject_id,),
-                ).fetchone()[0]
-            )
-    except Exception:
-        pass
+        # The three measures share a snapshot. A failed/partial read is unknown,
+        # never an empty result or proof that there is no unsettled payment.
+        pending, latest_failure, active = None, None, None
     evidence = activation_status()
     evidence_blocked = owner.settings.profile == "production" and evidence["status"] != "verified"
     return {
@@ -81,6 +82,7 @@ def wallet_automation_projection(self: RequestHandler, owner: NoyraHTTPServer) -
         "active_executions": active,
         "pending_reason_counts": pending,
         "latest_failure": latest_failure,
+        "execution_observation": observation,
         "status": (
             "paused"
             if policy.emergency_paused
