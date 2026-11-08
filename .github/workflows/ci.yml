@@ -66,7 +66,8 @@ jobs:
       - run: python -m pip install --require-hashes --requirement requirements-dev.lock
       - run: python -m pip install --no-deps --no-build-isolation -e ".[dev]"
       - run: python scripts/audit-m41.py --scope targeted --profile smoke
-      - run: python -m pytest --cov=noyra --cov-report=term-missing
+      - name: Run complete tests in two verified partitions
+        run: python scripts/run-ci-tests.py --workers 2
       - name: Verify Ubuntu installer backup boundary
         if: matrix.os == 'ubuntu-24.04' && matrix.python-version == '3.12'
         run: |

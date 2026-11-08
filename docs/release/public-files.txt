@@ -472,6 +472,7 @@ scripts/public-file-manifest.py
 scripts/remote-acceptance.sh
 scripts/repair-capability-profile.py
 scripts/rotate-operator-token.sh
+scripts/run-ci-tests.py
 scripts/setup-ubuntu-single-disk-storage.sh
 scripts/unlock-ubuntu-single-disk-storage.sh
 scripts/upgrade-ubuntu-runner.sh
@@ -903,6 +904,7 @@ tests/shell/test-single-disk-storage-contract.sh
 tests/shell/test-upgrade-components-rollback.sh
 tests/shell/test-upgrade-runner.sh
 tests/support/__init__.py
+tests/support/ci_shard.py
 tests/support/faults.py
 tests/support/historical.py
 tests/support/relationship_provenance.py
@@ -980,6 +982,7 @@ tests/test_c3_help_language.py
 tests/test_c3_result_kinds.py
 tests/test_capability.py
 tests/test_capability_file_races.py
+tests/test_ci_test_runner.py
 tests/test_cloud_ci_contract.py
 tests/test_cloud_dependency_compatibility.py
 tests/test_cognition.py

@@ -130,11 +130,12 @@ def test_public_schema_has_fixed_reviewed_fingerprints(
     archive: tuple[PublicArchive, SubjectKernel],
 ) -> None:
     _, kernel = archive
-    # Reviewed whole-database schema 113, not only archive tables. Versions
+    # Reviewed whole-database schema 116, not only archive tables. Versions
     # 108-112 add acquisition state, its immutable-cache guard, an agenda
     # revision index, append-only thought-round closures and bounded scheduling state.
     # v113 adds explicit email identity versions and per-event mailbox evidence.
-    # Archive tables
+    # v114 adds bounded lookup indexes; v115-v116 add immutable workflow
+    # export acceptance and increment-parent metadata. Public archive tables
     # retain their contract. Keep independent literal values, never derive the
     # expectation from the implementation's fingerprint registry.
     with kernel.database.connection() as connection:
@@ -143,15 +144,15 @@ def test_public_schema_has_fixed_reviewed_fingerprints(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()[0]
             == str(CURRENT_SCHEMA_VERSION)
-            == "113"
+            == "116"
         )
         assert (
             kernel.database.schema_ddl_fingerprint(connection)
-            == "e070d0be4362c38381c8491e20f9d46805c60651d9c80a03160f05ecc90d9994"
+            == "e78f5e9d12d781e71b504dae847c793e680be7788af14d8af5b769f4cd4cd847"
         )
         assert (
             kernel.database.schema_structure_fingerprint(connection)
-            == "800ecf6f66a188e66f86dbfacdb1fffb452636b591a09d2950b2361e4a9f5608"
+            == "2c848bc479a0b2ae97c2ef91d271e01fdf8363110892d7f681412dae64e488d0"
         )
 
 
@@ -425,6 +426,13 @@ def test_public_interactions_verify_hashes_and_case_sensitive_namespace(
 def test_public_lifecycle_remains_readable_after_verified_cold_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_layout: bool
 ) -> None:
+    from noyra.interaction import public_archive as module
+
+    assert module.MAX_PUBLIC_QUERY_SECONDS == 2.0
+    # This tests cold-archive contents, not subprocess startup speed under
+    # coverage. The real deadline/termination contract is tested separately
+    # in test_public_cold_reader with an intentionally blocked IPC worker.
+    monkeypatch.setattr(module, "MAX_PUBLIC_QUERY_SECONDS", 10.0)
     kernel = SubjectKernel(
         tmp_path / "archive.sqlite3", "lifecycle-archive", content_hash("lifecycle")
     )

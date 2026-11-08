@@ -45,6 +45,7 @@ from noyra.model.errors import (
     StructuredOutputError,
 )
 from noyra.model.resources import MAX_USD, SQLITE_INT64_MAX
+from support.historical import materialize_migration_database
 
 
 class Insight(BaseModel):
@@ -198,11 +199,16 @@ class ModelTestCase(unittest.IsolatedAsyncioTestCase):
         }
 
     def test_schema_migrates_from_version_one(self: Self) -> None:
-        with self.database.transaction() as connection:
-            connection.execute("DROP TABLE model_attempts")
-            connection.execute("DROP TABLE model_calls")
-            connection.execute("UPDATE schema_meta SET value = '1' WHERE key = 'schema_version'")
-        migrated = Database(self.db_path)
+        path = self.db_path.with_name("legacy-v1.sqlite3")
+        legacy = materialize_migration_database(path, 1)
+        with legacy.connection() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT name FROM sqlite_schema WHERE name IN ('model_calls', 'model_attempts')"
+                ).fetchall(),
+                [],
+            )
+        migrated = Database(path)
         with migrated.connection() as connection:
             version = connection.execute(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"

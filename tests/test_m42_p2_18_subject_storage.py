@@ -20,6 +20,7 @@ from noyra.core.subject_storage import SubjectStorageDirectory
 from noyra.core.training_export import TrainingDatasetExporter
 from noyra.core.types import content_hash
 from noyra.service import ServiceSettings
+from support.historical import materialize_migration_database
 
 _STORAGE_KEY = re.compile(r"^subject_[0-9a-f]{32}$")
 
@@ -205,12 +206,25 @@ def test_keyed_directory_reparse_point_is_rejected(tmp_path: Path) -> None:
 
 def test_schema_39_subjects_receive_keys_during_upgrade(tmp_path: Path) -> None:
     path = tmp_path / "noyra.sqlite3"
-    database = Database(path)
+    database = materialize_migration_database(path, 39)
     subject_id = "Noyra-schema-upgrade"
-    _identity(database, subject_id)
     with database.transaction() as connection:
-        connection.execute("DROP TABLE subject_storage_keys")
-        connection.execute("UPDATE schema_meta SET value = '39' WHERE key = 'schema_version'")
+        connection.execute(
+            "INSERT INTO subject_identity(subject_id, project_name, genesis_hash, "
+            "identity_status, created_at, updated_at) VALUES (?, 'Noyra', ?, 'active', ?, ?)",
+            (
+                subject_id,
+                "a" * 64,
+                "2026-08-19T00:00:00.000+00:00",
+                "2026-08-19T00:00:00.000+00:00",
+            ),
+        )
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_schema WHERE name='subject_storage_keys'"
+            ).fetchone()
+            is None
+        )
     upgraded = Database(path)
     with upgraded.connection() as connection:
         row = connection.execute(

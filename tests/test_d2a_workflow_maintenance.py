@@ -54,8 +54,8 @@ def test_oversized_catalog_does_not_pretend_to_have_checked_hashes(
     seed(workflows, 50_001)
     with workflows.database.transaction() as c:
         c.execute(
-            "UPDATE workflow_checkpoints SET state_hash=? WHERE checkpoint_version=50_001",
-            ("0" * 64,),
+            "UPDATE workflow_checkpoints SET state_hash=? WHERE checkpoint_version=?",
+            ("0" * 64, 50_001),
         )
     with patch.object(
         DurableWorkflowStore, "_from_row", side_effect=AssertionError("materialized history")

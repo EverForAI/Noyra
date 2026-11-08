@@ -29,6 +29,7 @@ from noyra.core.storage import StorageLayout, StorageUsage, StorageUsageScanner
 from noyra.core.types import canonical_json, content_hash
 from noyra.world import FetchedDocument, ObservationStore, SourceRegistry
 from noyra.world.observation_archive import ObservationContentArchive
+from support.historical import materialize_migration_database
 
 
 def _insert_committed_event_staging_manifest(
@@ -123,77 +124,32 @@ def _configure_archive_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _materialize_v42_database(path: Path) -> tuple[str, str]:
-    """Create a real v42 queue shape without relying on a historical fixture."""
-    database = Database(path)
+    """Seed an actual forward-migrated v42 queue, without future feature objects."""
+    database = materialize_migration_database(path, 42)
     subject_id = "Noyra-v42-migration"
-    IdentityStore(database).ensure(subject_id, content_hash({"seed": subject_id}))
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO subject_identity(subject_id, project_name, genesis_hash, "
+            "identity_status, created_at, updated_at) VALUES (?, 'Noyra', ?, 'active', ?, ?)",
+            (
+                subject_id,
+                content_hash({"seed": subject_id}),
+                "2026-08-19T00:00:00.000+00:00",
+                "2026-08-19T00:00:00.000+00:00",
+            ),
+        )
+        assert "claim_token" not in {
+            row[1] for row in connection.execute("PRAGMA table_info(archive_transfer_queue)")
+        }
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_schema WHERE name IN "
+                "('archive_staging_manifests', 'validate_email_ingress_subject')"
+            ).fetchall()
+            == []
+        )
     transfer_id = "transfer-v42-uploading"
     with database.transaction() as connection:
-        for trigger in (
-            "validate_archive_transfer_claim_insert",
-            "validate_archive_transfer_claim_update",
-            "validate_archive_transfer_identity_immutable",
-            "validate_archive_transfer_transition",
-            "prevent_archive_transfer_delete",
-            "validate_training_record_event_subject",
-        ):
-            connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
-        connection.execute("DROP INDEX IF EXISTS idx_archive_transfer_lease")
-        connection.execute("DROP INDEX IF EXISTS idx_archive_transfer_due")
-        connection.execute(
-            "ALTER TABLE archive_transfer_queue RENAME TO archive_transfer_queue_v43"
-        )
-        connection.executescript(
-            """
-CREATE TABLE archive_transfer_queue (
-    transfer_id TEXT PRIMARY KEY,
-    subject_id TEXT NOT NULL REFERENCES subject_identity(subject_id),
-    storage_class TEXT NOT NULL CHECK (storage_class IN ('cold', 'cloud')),
-    object_key TEXT NOT NULL,
-    payload_path TEXT NOT NULL,
-    byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
-    content_hash TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('queued', 'uploading', 'uploaded', 'failed', 'dead')),
-    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
-    next_attempt_at TEXT NOT NULL,
-    last_error TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(subject_id, object_key)
-);
-CREATE INDEX idx_archive_transfer_due
-    ON archive_transfer_queue(subject_id, status, next_attempt_at);
-CREATE TRIGGER prevent_archive_transfer_delete
-BEFORE DELETE ON archive_transfer_queue BEGIN
-    SELECT RAISE(ABORT, 'archive transfer records cannot be deleted');
-END;
-DROP TABLE archive_transfer_queue_v43;
-DROP TABLE archive_staging_manifests;
-"""
-        )
-        connection.execute("DROP TRIGGER validate_public_post_moderation_transition")
-        connection.execute("DROP TRIGGER validate_public_post_identity_insert")
-        connection.execute("DROP TRIGGER prevent_public_post_identity_update")
-        connection.execute("DROP INDEX uq_public_post_moderation_revision")
-        connection.execute("DROP INDEX uq_public_post_moderation_idempotency")
-        connection.execute("DROP INDEX idx_public_post_rate_events_subject_time")
-        connection.execute("DROP INDEX idx_public_post_captcha_issue_subject_time")
-        connection.execute("ALTER TABLE public_post_moderation_events DROP COLUMN idempotency_key")
-        connection.execute(
-            "ALTER TABLE public_post_moderation_events DROP COLUMN previous_event_id"
-        )
-        connection.execute("ALTER TABLE public_post_moderation_events DROP COLUMN revision")
-        connection.execute("ALTER TABLE public_posts DROP COLUMN author_provenance")
-        connection.execute("ALTER TABLE public_posts DROP COLUMN identity_hash")
-        connection.execute(
-            "ALTER TABLE public_post_controls DROP COLUMN captcha_global_rate_per_minute"
-        )
-        connection.execute(
-            "ALTER TABLE public_post_controls DROP COLUMN captcha_issue_limit_per_hour"
-        )
-        connection.execute("ALTER TABLE public_post_controls DROP COLUMN storage_cap_bytes")
-        connection.execute("ALTER TABLE interaction_transports DROP COLUMN endpoint_digest")
-        connection.execute("ALTER TABLE interaction_transports DROP COLUMN endpoint_contract")
         connection.execute(
             """INSERT INTO archive_transfer_queue(
                    transfer_id, subject_id, storage_class, object_key, payload_path,
@@ -211,7 +167,6 @@ DROP TABLE archive_staging_manifests;
                 "2026-08-19T00:00:00.000+00:00",
             ),
         )
-        connection.execute("UPDATE schema_meta SET value = '42' WHERE key = 'schema_version'")
     return subject_id, transfer_id
 
 

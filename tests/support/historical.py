@@ -4,9 +4,15 @@ import gzip
 import hashlib
 import json
 import shutil
+import sqlite3
+import tempfile
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
+
+from noyra.core.database import SCHEMA_SQL, Database
 
 
 @dataclass(frozen=True)
@@ -83,3 +89,49 @@ def materialize_historical_database(fixture: HistoricalFixture, destination_dir:
         target.unlink(missing_ok=True)
         raise ValueError(f"historical fixture database checksum mismatch: {fixture.name}")
     return target
+
+
+def materialize_migration_database(path: Path, version: int) -> Database:
+    """Build an early schema by forward migration, never by relabeling a current DB.
+
+    Use checksum-verified historical anchors when one precedes the target; v1
+    is the base SQL itself. Stop the real migration runner before any later
+    feature pass. Wallet approval migrations (v59+) are deliberately excluded.
+    The returned facade does not initialize or install current optional features.
+    """
+    if not 1 <= version < 59:
+        raise ValueError("historical test target must be between schema 1 and 58")
+    if path.exists():
+        raise FileExistsError(path)
+    fixtures = load_historical_fixtures(
+        Path(__file__).parents[1] / "fixtures" / "historical" / "manifest.json"
+    )
+    anchors = [
+        item
+        for item in fixtures
+        if item.schema_version <= version and item.expected_migration_error is None
+    ]
+    with tempfile.TemporaryDirectory(prefix="legacy-schema-", dir=path.parent) as folder:
+        if anchors:
+            anchor = max(anchors, key=lambda item: item.schema_version)
+            source = materialize_historical_database(anchor, Path(folder))
+        else:
+            source = Path(folder) / "schema-v1.sqlite3"
+            with closing(sqlite3.connect(source)) as connection:
+                Database._execute_sql_script(connection, SCHEMA_SQL)
+                connection.commit()
+        database = Database(source, initialize=False)
+        with patch("noyra.core.database.CURRENT_SCHEMA_VERSION", version):
+            database._migrate()
+        with database.connection() as connection:
+            marker = connection.execute(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+            ).fetchone()[0]
+            if marker != str(version):
+                raise ValueError("historical test target schema was not reached")
+            if connection.execute("PRAGMA foreign_key_check").fetchall():
+                raise ValueError("historical test schema has invalid foreign keys")
+            if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise ValueError("historical test schema is corrupt")
+        source.rename(path)
+    return Database(path, initialize=False)

@@ -35,6 +35,7 @@ from noyra.interaction import (
     PublicProjection,
 )
 from noyra.service import NoyraService, ServiceSettings
+from support.historical import materialize_migration_database
 
 _REAL_CHOICE = secrets.choice
 
@@ -593,52 +594,20 @@ class PublicPostAbuseTestCase(unittest.TestCase):
 
     def test_schema_47_backfills_moderation_once_and_distinguishes_rejection(self: Self) -> None:
         now = "2026-08-22T00:00:00.000+00:00"
-        with self.database.transaction() as connection:
-            for trigger in (
-                "validate_public_post_moderation_transition",
-                "validate_public_post_identity_insert",
-                "prevent_public_post_identity_update",
-                "prevent_public_post_delete",
-                "validate_public_post_status_update",
-                "validate_public_post_published_at",
-                "prevent_public_post_moderation_update",
-                "prevent_public_post_moderation_delete",
-                "validate_public_post_moderation_subject",
-            ):
-                connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
-            for index in (
-                "uq_public_post_moderation_revision",
-                "uq_public_post_moderation_idempotency",
-                "idx_public_post_rate_events_subject_time",
-            ):
-                connection.execute(f"DROP INDEX IF EXISTS {index}")
-            for column in ("idempotency_key", "previous_event_id", "revision"):
+        path = self.database.path.with_name("legacy-v47.sqlite3")
+        legacy = materialize_migration_database(path, 47)
+        with legacy.transaction() as connection:
+            connection.execute(
+                "INSERT INTO subject_identity(subject_id, project_name, genesis_hash, "
+                "identity_status, created_at, updated_at) "
+                "VALUES (?, 'Noyra', ?, 'active', ?, ?)",
+                (self.subject_id, content_hash({"subject": self.subject_id}), now, now),
+            )
+            self.assertIsNone(
                 connection.execute(
-                    f"ALTER TABLE public_post_moderation_events DROP COLUMN {column}"
-                )
-            connection.execute("DROP TABLE public_post_moderation_events")
-            for column in (
-                "captcha_global_rate_per_minute",
-                "captcha_issue_limit_per_hour",
-                "storage_cap_bytes",
-            ):
-                connection.execute(f"ALTER TABLE public_post_controls DROP COLUMN {column}")
-            connection.execute("DROP TABLE public_post_controls")
-            connection.execute("DROP TABLE public_post_captcha_issue_events")
-            for column in ("author_provenance", "identity_hash"):
-                connection.execute(f"ALTER TABLE public_posts DROP COLUMN {column}")
-
-            connection.execute("DROP TRIGGER prevent_interaction_inbound_identity_update")
-            connection.execute("DROP INDEX idx_interaction_inbound_interaction")
-            for column in (
-                "reply_context_version",
-                "reply_selector",
-                "external_thread_id",
-            ):
-                connection.execute(f"ALTER TABLE interaction_inbound_events DROP COLUMN {column}")
-            connection.execute("ALTER TABLE interaction_transports DROP COLUMN endpoint_digest")
-            connection.execute("ALTER TABLE interaction_transports DROP COLUMN endpoint_contract")
-
+                    "SELECT name FROM sqlite_schema WHERE name='public_post_moderation_events'"
+                ).fetchone()
+            )
             for post_id, status, published_at in (
                 ("legacy-published", "published", now),
                 ("legacy-rejected-archive", "archived", None),
@@ -661,9 +630,8 @@ class PublicPostAbuseTestCase(unittest.TestCase):
                         published_at,
                     ),
                 )
-            connection.execute("UPDATE schema_meta SET value = '47' WHERE key = 'schema_version'")
 
-        upgraded = Database(self.database.path)
+        upgraded = Database(path)
         with upgraded.connection() as connection:
             history = connection.execute(
                 "SELECT post_id, revision, from_status, to_status "
@@ -678,7 +646,7 @@ class PublicPostAbuseTestCase(unittest.TestCase):
             ],
         )
         self.assertEqual(InteractionIntegrity(upgraded).verify(self.subject_id)["public_posts"], 2)
-        reopened = Database(self.database.path)
+        reopened = Database(path)
         with reopened.connection() as connection:
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM public_post_moderation_events").fetchone()[
