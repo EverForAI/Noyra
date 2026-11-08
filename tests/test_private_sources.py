@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -38,8 +39,9 @@ def test_schema85_upgrade_preserves_messages_and_installs_source_contract(tmp_pa
         assert connection.execute("SELECT COUNT(*) FROM private_model_sources").fetchone()[0] == 0
 
 
+@pytest.mark.parametrize("same_tick", [False, True])
 def test_authorized_history_spans_windows_and_excludes_unverified_and_other_owner(
-    tmp_path: Path,
+    tmp_path: Path, same_tick: bool
 ) -> None:
     db = Database(tmp_path / "history.sqlite3")
     for owner in ("owner", "other"):
@@ -48,12 +50,21 @@ def test_authorized_history_spans_windows_and_excludes_unverified_and_other_owne
     messages = InteractionStore(db)
     first = windows.create("owner", "first")
     second = windows.create("owner", "second")
-    old = messages.receive(
-        "owner", "web", "web-user", "remember a fact", conversation_id=first["conversation_id"]
-    )
-    messages.send(
-        "owner", "web", "web-user", "a true reply", related_interaction_id=old.interaction_id
-    )
+    timestamps = ["2026-01-01T00:00:00.000+00:00"] * 2
+    if not same_tick:
+        timestamps[1] = "2026-01-01T00:00:00.001+00:00"
+    with (
+        patch("noyra.interaction.store.utc_now", side_effect=timestamps),
+        patch("noyra.interaction.store.new_id", side_effect=("int_b", "int_a")),
+    ):
+        old = messages.receive(
+            "owner", "web", "web-user", "remember a fact", conversation_id=first["conversation_id"]
+        )
+        reply = messages.send(
+            "owner", "web", "web-user", "a true reply", related_interaction_id=old.interaction_id
+        )
+    assert (old.created_at == reply.created_at) is same_tick
+    assert reply.related_interaction_id == old.interaction_id
     unknown = messages.receive("owner", "web", "web-user", "unconfirmed legacy text")
     with db.transaction() as connection:
         connection.execute(
@@ -65,7 +76,9 @@ def test_authorized_history_spans_windows_and_excludes_unverified_and_other_owne
         "owner", "web", "web-user", "new window", conversation_id=second["conversation_id"]
     )
     history = windows.authorized_history("owner", current.interaction_id)
-    assert [row["content"] for row in history] == ["remember a fact", "a true reply"]
+    expected = (reply, old) if same_tick else (old, reply)
+    assert [row["content"] for row in history] == [item.content for item in expected]
+    assert [row["interaction_id"] for row in history] == [item.interaction_id for item in expected]
     assert windows.authorized_history("other", current.interaction_id) == []
     assert windows.authorized_history("owner", unknown.interaction_id) == []
 
