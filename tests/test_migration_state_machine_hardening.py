@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import base64
+import json
 from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from noyra.core import Database, IdentityStore
+from noyra.core.types import utc_now
 from noyra.migration.manager import MigrationManager
 from noyra.migration.policy import MigrationStore
 from noyra.migration.targets import TargetRegistry
@@ -57,7 +59,20 @@ def _proposal(manager: MigrationManager) -> Any:
     )
 
 
-def test_rejection_is_atomic_and_audited(tmp_path: Any) -> None:
+@pytest.fixture(params=[False, True], ids=["ascending-audit-ids", "descending-audit-ids"])
+def tied_audit_clock(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    timestamp = utc_now()
+    numbers = iter(range(10000, 0, -1) if request.param else range(10000))
+
+    def audit_id(prefix: str) -> str:
+        assert prefix == "migrationaudit"
+        return f"{prefix}_{next(numbers):032x}"
+
+    monkeypatch.setattr("noyra.migration.policy.utc_now", lambda: timestamp)
+    monkeypatch.setattr("noyra.migration.policy.new_id", audit_id)
+
+
+def test_rejection_is_atomic_and_audited(tmp_path: Any, tied_audit_clock: None) -> None:
     db, manager = _manager(tmp_path)
     proposal = _proposal(manager)
     rejection = manager.reject(proposal.proposal_id, actor="operator", reason="risk too high")
@@ -68,7 +83,9 @@ def test_rejection_is_atomic_and_audited(tmp_path: Any) -> None:
             (proposal.proposal_id,),
         ).fetchone()
         audit = connection.execute(
-            "SELECT action FROM migration_audit_events WHERE subject_id=? ORDER BY occurred_at",
+            # This assertion checks append order, not wall-clock order. Timestamps
+            # may tie or move backwards; the live SQLite rowid records insertion.
+            "SELECT action,payload_json,occurred_at FROM migration_audit_events WHERE subject_id=? ORDER BY rowid",
             ("Noyra-0001",),
         ).fetchall()
     assert row["status"] == "rejected"
@@ -78,9 +95,16 @@ def test_rejection_is_atomic_and_audited(tmp_path: Any) -> None:
         "migration_proposal_created",
         "migration_proposal_rejected",
     ]
+    assert len({item["occurred_at"] for item in audit}) == 1
+    assert all(
+        json.loads(item["payload_json"])["proposal_id"] == proposal.proposal_id
+        for item in audit[-2:]
+    )
 
 
-def test_task_transitions_reject_skips_and_record_audit(tmp_path: Any) -> None:
+def test_task_transitions_reject_skips_and_record_audit(
+    tmp_path: Any, tied_audit_clock: None
+) -> None:
     db, manager = _manager(tmp_path)
     proposal = _proposal(manager)
     task = manager.approve(proposal.proposal_id, actor="operator", idempotency_key="task-1")
@@ -90,10 +114,18 @@ def test_task_transitions_reject_skips_and_record_audit(tmp_path: Any) -> None:
     assert updated.status == "preparing"
     with db.connection() as connection:
         actions = connection.execute(
-            "SELECT action FROM migration_audit_events WHERE subject_id=? ORDER BY occurred_at",
+            # This assertion checks append order, not wall-clock order. Timestamps
+            # may tie or move backwards; the live SQLite rowid records insertion.
+            "SELECT action,payload_json,occurred_at FROM migration_audit_events WHERE subject_id=? ORDER BY rowid",
             ("Noyra-0001",),
         ).fetchall()
     assert actions[-1]["action"] == "migration_task_transitioned"
+    assert len({item["occurred_at"] for item in actions}) == 1
+    assert json.loads(actions[-1]["payload_json"]) == {
+        "task_id": task.task_id,
+        "from": "approved",
+        "to": "preparing",
+    }
 
 
 def test_task_transition_rejects_stale_policy_revision(tmp_path: Any) -> None:

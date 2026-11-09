@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -17,7 +18,10 @@ from noyra.interaction.conversations import ConversationConflict, ConversationSt
 from noyra.service import NoyraHTTPServer, ServiceSettings
 
 
-def test_windows_keep_identity_and_reply_links_and_independent_names(tmp_path: Path) -> None:
+@pytest.mark.parametrize("same_tick", [False, True])
+def test_windows_keep_identity_and_reply_links_and_independent_names(
+    tmp_path: Path, same_tick: bool
+) -> None:
     db = Database(tmp_path / "windows.sqlite3")
     IdentityStore(db).ensure("owner", content_hash("owner"))
     IdentityStore(db).ensure("other", content_hash("other"))
@@ -25,21 +29,32 @@ def test_windows_keep_identity_and_reply_links_and_independent_names(tmp_path: P
     first = windows.create("owner", "same")
     second = windows.create("owner", "same")
     interactions = InteractionStore(db)
-    message = interactions.receive(
-        "owner",
-        "web",
-        "web-user",
-        "hello",
-        idempotency_key="message-1",
-        conversation_id=first["conversation_id"],
-    )
-    reply = interactions.send(
-        "owner", "web", "web-user", "response", related_interaction_id=message.interaction_id
-    )
+    timestamps = ["2026-01-01T00:00:00.000+00:00"] * 2
+    if not same_tick:
+        timestamps[1] = "2026-01-01T00:00:00.001+00:00"
+    with (
+        patch("noyra.interaction.store.utc_now", side_effect=timestamps),
+        patch("noyra.interaction.store.new_id", side_effect=("int_b", "int_a")),
+    ):
+        message = interactions.receive(
+            "owner",
+            "web",
+            "web-user",
+            "hello",
+            idempotency_key="message-1",
+            conversation_id=first["conversation_id"],
+        )
+        reply = interactions.send(
+            "owner", "web", "web-user", "response", related_interaction_id=message.interaction_id
+        )
+    # Timelines break equal timestamps by ID; reply linkage remains explicit.
+    expected = (reply, message) if same_tick else (message, reply)
     assert [
         row["interaction_id"]
         for row in windows.messages("owner", first["conversation_id"])["items"]
-    ] == [message.interaction_id, reply.interaction_id]
+    ] == [item.interaction_id for item in expected]
+    assert (message.created_at == reply.created_at) is same_tick
+    assert reply.related_interaction_id == message.interaction_id
     assert windows.messages("owner", second["conversation_id"])["items"] == []
     assert all(
         row["author_verified"]
@@ -74,24 +89,49 @@ def test_windows_keep_identity_and_reply_links_and_independent_names(tmp_path: P
     )
 
 
-def test_window_history_pages_and_migration_preserve_originals(tmp_path: Path) -> None:
+@pytest.mark.parametrize("clock_order", ["chronological", "tied", "mixed"])
+def test_window_history_pages_and_migration_preserve_originals(
+    tmp_path: Path, clock_order: str
+) -> None:
     db = Database(tmp_path / "history.sqlite3")
     IdentityStore(db).ensure("owner", content_hash("owner"))
     interactions = InteractionStore(db)
-    records = [interactions.receive("owner", "web", "web-user", f"message {i}") for i in range(5)]
+    ticks = {
+        "chronological": [0, 1, 2, 3, 4],
+        "tied": [0, 0, 0, 0, 0],
+        "mixed": [0, 0, 1, 1, 2],
+    }[clock_order]
+    timestamps = [f"2026-01-01T00:00:00.{tick:03d}+00:00" for tick in ticks]
+    with (
+        patch("noyra.interaction.store.utc_now", side_effect=timestamps),
+        patch(
+            "noyra.interaction.store.new_id",
+            side_effect=("int_d", "int_a", "int_e", "int_b", "int_c"),
+        ),
+    ):
+        records = [
+            interactions.receive("owner", "web", "web-user", f"message {i}") for i in range(5)
+        ]
+    expected = sorted(records, key=lambda record: (record.created_at, record.interaction_id))
     windows = ConversationStore(db)
     window = windows.list("owner")["items"][0]
     page = windows.messages("owner", window["conversation_id"], limit=2)
     assert len(page["items"]) == 2
     collected = page["items"]
+    cursors: set[str] = set()
     while page["next_before"]:
-        page = windows.messages(
-            "owner", window["conversation_id"], limit=2, before=page["next_before"]
-        )
+        cursor = page["next_before"]
+        assert cursor not in cursors
+        cursors.add(cursor)
+        page = windows.messages("owner", window["conversation_id"], limit=2, before=cursor)
+        assert len(page["items"]) <= 2
         collected = page["items"] + collected
+        assert len(collected) <= len(records)
     assert [row["interaction_id"] for row in collected] == [
-        record.interaction_id for record in records
+        record.interaction_id for record in expected
     ]
+    assert [row["content"] for row in collected] == [record.content for record in expected]
+    assert len({row["interaction_id"] for row in collected}) == 5
     assert (
         len(windows.messages("owner", window["conversation_id"], query="message 2")["items"]) == 1
     )
@@ -103,7 +143,12 @@ def test_window_history_pages_and_migration_preserve_originals(tmp_path: Path) -
     migrated = ConversationStore(Database(db.path))
     window = migrated.list("owner")["items"][0]
     assert window["title"] == "历史对话"
-    assert len(migrated.messages("owner", window["conversation_id"])["items"]) == 5
+    restored = migrated.messages("owner", window["conversation_id"])["items"]
+    assert [row["interaction_id"] for row in restored] == [
+        record.interaction_id for record in expected
+    ]
+    assert [row["content"] for row in restored] == [record.content for record in expected]
+    assert [row["created_at"] for row in restored] == [record.created_at for record in expected]
 
 
 def test_conversation_http_auth_revision_and_failed_send_rollback(tmp_path: Path) -> None:

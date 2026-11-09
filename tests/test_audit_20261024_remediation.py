@@ -11,7 +11,7 @@ import pytest
 from noyra.cognition import CognitionSettings, InteractionCognition
 from noyra.cognition.settings import WorldSourceConfig
 from noyra.core import SubjectKernel
-from noyra.core.types import content_hash
+from noyra.core.types import content_hash, new_id
 from noyra.interaction import InteractionStore
 from noyra.interaction.accounts import AccountStore
 from noyra.interaction.collaboration import ParticipantCollaboration
@@ -94,8 +94,11 @@ def cognition(kernel: SubjectKernel, count: int = 2) -> tuple[InteractionCogniti
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [4000, 4001, 10000])
 @pytest.mark.parametrize("attributed", [False, True])
+@pytest.mark.parametrize(
+    "arrival_order", ["chronological", "tied_long_first", "tied_followup_first"]
+)
 async def test_long_invitation_and_followup_both_progress(
-    kernel: SubjectKernel, size: int, attributed: bool
+    kernel: SubjectKernel, size: int, attributed: bool, arrival_order: str
 ) -> None:
     accounts = AccountStore(kernel.database, kernel.subject_id)
     accounts.register("alice", "correct horse battery", "Alice")
@@ -103,33 +106,56 @@ async def test_long_invitation_and_followup_both_progress(
     assert who
     interactions = InteractionStore(kernel.database)
     body = " " * 4100 + "长" * size
-    first = interactions.receive(
-        kernel.subject_id,
-        "participant" if attributed else "web",
-        who.entity_id,
-        body,
-        idempotency_key="long",
-        participant=who if attributed else None,
-        participant_private=attributed,
-        participant_conversation="participant:" + who.entity_id,
-    )
-    second = interactions.receive(
-        kernel.subject_id,
-        "participant" if attributed else "web",
-        who.entity_id,
-        "A normal followup",
-        idempotency_key="followup",
-        participant=who if attributed else None,
-        participant_private=attributed,
-        participant_conversation="participant:" + who.entity_id,
-    )
+    # Receive calls may share a millisecond, so submission order alone does
+    # not determine the scheduler's supported (created_at, interaction_id) order.
+    # Exercise both tie-break directions and a chronological pair with reversed IDs.
+    ids = ("int_a", "int_b") if arrival_order == "tied_long_first" else ("int_b", "int_a")
+    interaction_ids = iter(ids)
+
+    def controlled_id(prefix: str) -> str:
+        return next(interaction_ids) if prefix == "int" else new_id(prefix)
+
+    timestamps = ["2026-01-01T00:00:00.000+00:00"] * 2
+    if arrival_order == "chronological":
+        timestamps[1] = "2026-01-01T00:00:00.001+00:00"
+    with (
+        patch("noyra.interaction.store.utc_now", side_effect=timestamps),
+        patch("noyra.interaction.store.new_id", side_effect=controlled_id),
+    ):
+        first = interactions.receive(
+            kernel.subject_id,
+            "participant" if attributed else "web",
+            who.entity_id,
+            body,
+            idempotency_key="long",
+            participant=who if attributed else None,
+            participant_private=attributed,
+            participant_conversation="participant:" + who.entity_id,
+        )
+        second = interactions.receive(
+            kernel.subject_id,
+            "participant" if attributed else "web",
+            who.entity_id,
+            "A normal followup",
+            idempotency_key="followup",
+            participant=who if attributed else None,
+            participant_private=attributed,
+            participant_conversation="participant:" + who.entity_id,
+        )
     engine, provider = cognition(kernel)
     with patch.object(engine.memories, "recall", wraps=engine.memories.recall) as recall:
         assert await engine.run_due() == "interaction_silent"
         assert await engine.run_due() == "interaction_silent"
         recall.assert_not_called()
     assert len(provider.requests) == 2
-    assert body in provider.requests[0].messages[1].content
+    expected = (second, first) if arrival_order == "tied_followup_first" else (first, second)
+    for request, invitation in zip(provider.requests, expected, strict=True):
+        prompt = request.messages[1].content
+        metadata = json.loads(prompt.splitlines()[1])
+        assert metadata["interaction_id"] == invitation.interaction_id
+        # Check the complete current invitation, not its truncated history entry.
+        assert invitation.content in prompt
+    assert await engine.run_due() is None
     assert interactions.get(first.interaction_id).content == body
     assert interactions.get(first.interaction_id).status == "silent"
     assert interactions.get(second.interaction_id).status == "silent"

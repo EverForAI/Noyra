@@ -25,7 +25,7 @@ from noyra.core.integrity import (
     IntegrityRuntimeController,
 )
 from noyra.core.operator_controls import OperatorControlConflict, OperatorControlService
-from noyra.core.types import content_hash
+from noyra.core.types import content_hash, utc_now
 from noyra.interaction import (
     DeliveryDispatcher,
     InteractionStore,
@@ -804,7 +804,10 @@ def test_async_handler_timeout_cancels_and_drains_main_loop_task(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_delivery_cancellation_stops_queue_progression(tmp_path: Path) -> None:
+@pytest.mark.parametrize("reverse_ids", [False, True])
+async def test_delivery_cancellation_stops_queue_progression(
+    tmp_path: Path, reverse_ids: bool
+) -> None:
     subject_id = "Noyra-gate0-delivery"
     kernel = SubjectKernel(
         tmp_path / "delivery.sqlite3",
@@ -825,45 +828,66 @@ async def test_delivery_cancellation_stops_queue_progression(tmp_path: Path) -> 
             actor="gate0-test",
         )
         interactions = InteractionStore(kernel.database)
-        interactions.send(
-            subject_id,
-            "webhook",
-            "target",
-            "first",
-            idempotency_key="gate0-first",
-        )
-        interactions.send(
-            subject_id,
-            "webhook",
-            "target",
-            "second",
-            idempotency_key="gate0-second",
-        )
+        ids = ("int_b", "int_a") if reverse_ids else ("int_a", "int_b")
+        with (
+            patch("noyra.interaction.store.utc_now", return_value=utc_now()),
+            patch("noyra.interaction.store.new_id", side_effect=ids),
+        ):
+            first = interactions.send(
+                subject_id,
+                "webhook",
+                "target",
+                "first",
+                idempotency_key="gate0-first",
+            )
+            second = interactions.send(
+                subject_id,
+                "webhook",
+                "target",
+                "second",
+                idempotency_key="gate0-second",
+            )
+        assert first.created_at == second.created_at
         dispatcher = DeliveryDispatcher(kernel.database, transports)
         entered = asyncio.Event()
         release = asyncio.Event()
 
-        async def blocked(*_args: object, **_kwargs: object) -> str | None:
+        started: list[str] = []
+
+        async def blocked(
+            transport: object, secret: object, interaction: Any, idempotency_key: str
+        ) -> str | None:
+            del transport, secret, idempotency_key
+            started.append(str(interaction["interaction_id"]))
             entered.set()
             await release.wait()
             return None
 
         dispatcher._send = blocked  # type: ignore[method-assign]
         task = asyncio.create_task(dispatcher.deliver_pending(subject_id, limit=2))
-        await asyncio.wait_for(entered.wait(), timeout=5)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        # Cancellation must stop the second dispatch regardless of which
+        # equally timestamped message entered the transport first.
+        assert len(started) == 1
+        assert started[0] in {first.interaction_id, second.interaction_id}
         with kernel.database.connection() as connection:
             rows = connection.execute(
-                "SELECT i.content, d.status FROM interaction_deliveries d "
+                "SELECT i.interaction_id, d.status, d.attempts FROM interaction_deliveries d "
                 "JOIN interactions i ON i.interaction_id = d.interaction_id "
                 "WHERE d.subject_id = ? ORDER BY i.content",
                 (subject_id,),
             ).fetchall()
-        assert [(str(row["content"]), str(row["status"])) for row in rows] == [
-            ("first", "unknown"),
-            ("second", "queued"),
-        ]
+        actual = {row["interaction_id"]: (row["status"], row["attempts"]) for row in rows}
+        assert actual == {
+            record.interaction_id: ("unknown", 1)
+            if record.interaction_id == started[0]
+            else ("queued", 0)
+            for record in (first, second)
+        }
     finally:
         kernel.close()
