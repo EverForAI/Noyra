@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ from noyra.core.database import CURRENT_SCHEMA_VERSION
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.event_archive import EventPayloadArchive
 from noyra.core.events import EventStore
-from noyra.core.types import content_hash
+from noyra.core.types import content_hash, new_id
 from noyra.interaction.public_archive import PublicArchive, PublicationConflict
 
 
@@ -244,11 +245,76 @@ def test_lifecycle_projects_only_state_and_not_reason(
     store, kernel = archive
     kernel.lifecycle.transition("paused", "PRIVATE-SENTINEL", actor="operator")
     page = store.page(kernel.subject_id, kind="lifecycle")
-    assert page["items"][0]["details"] == {"from": "active", "to": "paused"}
+    # A millisecond can contain several transitions; the public timeline uses
+    # event IDs to break ties, while overview carries the current state.
+    paused = store.page(kernel.subject_id, kind="lifecycle", status="paused")
+    assert len(paused["items"]) == 1
+    assert paused["items"][0]["details"] == {"from": "active", "to": "paused"}
+    assert all(set(item["details"]) == {"from", "to"} for item in page["items"])
     assert "PRIVATE-SENTINEL" not in str(page)
+    assert "PRIVATE-SENTINEL" not in str(paused)
     overview = store.overview(kernel.subject_id)
     assert set(overview["lifecycle"]) == {"state", "changed_at"}
+    assert overview["lifecycle"]["state"] == "paused"
     assert "PRIVATE-SENTINEL" not in str(overview)
+
+
+@pytest.mark.parametrize("reverse_ids", [False, True])
+def test_tied_lifecycle_timeline_paginates_without_confusing_current_state(
+    tmp_path: Path, reverse_ids: bool
+) -> None:
+    numbers = iter(range(10000, 0, -1) if reverse_ids else range(10000))
+
+    def controlled_id(prefix: str) -> str:
+        return f"evt_{next(numbers):032x}" if prefix == "evt" else new_id(prefix)
+
+    with (
+        patch("noyra.core.lifecycle.utc_now", return_value="2026-01-01T00:00:00.000+00:00"),
+        patch("noyra.core.events.new_id", side_effect=controlled_id),
+    ):
+        kernel = SubjectKernel(tmp_path / "tied.sqlite3", "lifecycle-tied", content_hash("tied"))
+        try:
+            kernel.boot()
+            kernel.orient()
+            kernel.activate()
+            kernel.lifecycle.transition("paused", "PRIVATE-SENTINEL", actor="operator")
+            store = PublicArchive(kernel.database)
+            with kernel.database.connection() as connection:
+                events = connection.execute(
+                    "SELECT event_id,occurred_at,payload_json FROM events WHERE subject_id=? "
+                    "AND event_type='lifecycle_transition' AND privacy_level='public_status'",
+                    (kernel.subject_id,),
+                ).fetchall()
+            assert len(events) >= 3
+            assert len({event["occurred_at"] for event in events}) == 1
+            expected_ids = sorted((event["event_id"] for event in events), reverse=True)
+            expected_details = {
+                event["event_id"]: {
+                    key: json.loads(event["payload_json"])[key] for key in ("from", "to")
+                }
+                for event in events
+            }
+            collected = []
+            cursor = None
+            seen_cursors: set[str] = set()
+            while True:
+                page = store.page(kernel.subject_id, kind="lifecycle", limit=2, cursor=cursor)
+                assert "PRIVATE-SENTINEL" not in str(page)
+                collected.extend(page["items"])
+                assert len(collected) <= len(events)
+                cursor = page["next_cursor"]
+                if cursor is None:
+                    break
+                assert cursor not in seen_cursors
+                seen_cursors.add(cursor)
+            assert [item["id"] for item in collected] == expected_ids
+            assert {item["id"]: item["details"] for item in collected} == expected_details
+            overview = store.overview(kernel.subject_id)
+            assert overview["lifecycle"]["state"] == "paused"
+            assert "PRIVATE-SENTINEL" not in str(overview)
+            EventStore(kernel.database).verify_chain(kernel.subject_id)
+        finally:
+            kernel.close()
 
 
 def test_management_cursor_keeps_withdrawn_rows_and_subject_isolation(

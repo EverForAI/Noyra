@@ -89,24 +89,49 @@ def test_windows_keep_identity_and_reply_links_and_independent_names(
     )
 
 
-def test_window_history_pages_and_migration_preserve_originals(tmp_path: Path) -> None:
+@pytest.mark.parametrize("clock_order", ["chronological", "tied", "mixed"])
+def test_window_history_pages_and_migration_preserve_originals(
+    tmp_path: Path, clock_order: str
+) -> None:
     db = Database(tmp_path / "history.sqlite3")
     IdentityStore(db).ensure("owner", content_hash("owner"))
     interactions = InteractionStore(db)
-    records = [interactions.receive("owner", "web", "web-user", f"message {i}") for i in range(5)]
+    ticks = {
+        "chronological": [0, 1, 2, 3, 4],
+        "tied": [0, 0, 0, 0, 0],
+        "mixed": [0, 0, 1, 1, 2],
+    }[clock_order]
+    timestamps = [f"2026-01-01T00:00:00.{tick:03d}+00:00" for tick in ticks]
+    with (
+        patch("noyra.interaction.store.utc_now", side_effect=timestamps),
+        patch(
+            "noyra.interaction.store.new_id",
+            side_effect=("int_d", "int_a", "int_e", "int_b", "int_c"),
+        ),
+    ):
+        records = [
+            interactions.receive("owner", "web", "web-user", f"message {i}") for i in range(5)
+        ]
+    expected = sorted(records, key=lambda record: (record.created_at, record.interaction_id))
     windows = ConversationStore(db)
     window = windows.list("owner")["items"][0]
     page = windows.messages("owner", window["conversation_id"], limit=2)
     assert len(page["items"]) == 2
     collected = page["items"]
+    cursors: set[str] = set()
     while page["next_before"]:
-        page = windows.messages(
-            "owner", window["conversation_id"], limit=2, before=page["next_before"]
-        )
+        cursor = page["next_before"]
+        assert cursor not in cursors
+        cursors.add(cursor)
+        page = windows.messages("owner", window["conversation_id"], limit=2, before=cursor)
+        assert len(page["items"]) <= 2
         collected = page["items"] + collected
+        assert len(collected) <= len(records)
     assert [row["interaction_id"] for row in collected] == [
-        record.interaction_id for record in records
+        record.interaction_id for record in expected
     ]
+    assert [row["content"] for row in collected] == [record.content for record in expected]
+    assert len({row["interaction_id"] for row in collected}) == 5
     assert (
         len(windows.messages("owner", window["conversation_id"], query="message 2")["items"]) == 1
     )
@@ -118,7 +143,12 @@ def test_window_history_pages_and_migration_preserve_originals(tmp_path: Path) -
     migrated = ConversationStore(Database(db.path))
     window = migrated.list("owner")["items"][0]
     assert window["title"] == "历史对话"
-    assert len(migrated.messages("owner", window["conversation_id"])["items"]) == 5
+    restored = migrated.messages("owner", window["conversation_id"])["items"]
+    assert [row["interaction_id"] for row in restored] == [
+        record.interaction_id for record in expected
+    ]
+    assert [row["content"] for row in restored] == [record.content for record in expected]
+    assert [row["created_at"] for row in restored] == [record.created_at for record in expected]
 
 
 def test_conversation_http_auth_revision_and_failed_send_rollback(tmp_path: Path) -> None:
