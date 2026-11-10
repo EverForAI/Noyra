@@ -1103,6 +1103,7 @@ tests/test_m42_p3_05_windows_package.py
 tests/test_m42_p3_06_operator_controls.py
 tests/test_m42_p3_07_api_contract.py
 tests/test_m42_p3_08_supply_chain.py
+tests/test_maintenance_route_contract.py
 tests/test_management_integrity_audits.py
 tests/test_memory_blocks.py
 tests/test_memory_integration.py
