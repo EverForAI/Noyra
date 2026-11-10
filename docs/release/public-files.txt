@@ -224,6 +224,7 @@ docs/deployment/runtime-observation.md
 docs/deployment/setup-modes.md
 docs/deployment/ubuntu.md
 docs/deployment/windows-data-root-migration.md
+docs/deployment/workflow-publication-upgrade.md
 docs/development/action-deliberation-recovery.md
 docs/development/architecture-boundaries.md
 docs/development/autonomy-scheduling.md
