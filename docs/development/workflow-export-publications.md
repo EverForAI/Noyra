@@ -66,3 +66,30 @@ canonical JSON. Malformed historical descriptors fail validation without rewriti
 the row or synthesizing a receipt. Existing artifact readback, ownership, privacy
 and transaction fences remain required by the controlled publication interface.
 These application checks do not change schema versions or the v1 archive format.
+
+## Existing request recovery across reviewed schema changes
+
+The controlled base and increment writers reconstruct the live history under its
+actual strict schema before resuming an unfinished publication. An existing request
+is recognized only through its original, validated request intent, before any new
+preparation. A pure comparison checks every reconstructed business field against
+the frozen source. It never edits either source or returns a version-normalized copy.
+The writers and archive verifiers continue to use the original frozen source and
+manifest; the original event-prefix check remains separate and required.
+
+Cross-schema recovery additionally requires a directed, explicitly reviewed pair
+of exact old/new DDL fingerprints and a shared, registered structure fingerprint.
+Adjacent version numbers, unchanged tables alone and transitive pair composition
+are insufficient. No operator parameter or environment setting enables a pair.
+New requests keep their normal identity and same-schema parent checks. In
+particular, a new increment cannot inherit permission to extend an old-schema
+parent from another request's recovery approval. Historical accepted roots remain
+readable under their original supported schema contract.
+
+The comparison path is installed before its migration. The reviewed pair registry
+is currently empty: no cross-schema exception is enabled and schema116 remains
+unchanged. A future trigger-only migration must register its actual reviewed pair
+and measured fingerprints in the same release. Test-only schema117 contracts
+exercise real migration, file readback and process recovery without enabling that
+schema in production. Schema115 and unreviewed future versions gain no implicit
+compatibility. Business changes or an unverified actual schema still fail closed.

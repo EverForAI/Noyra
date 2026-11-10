@@ -667,6 +667,7 @@ src/noyra/core/workflow_increment_files.py
 src/noyra/core/workflow_manifest.py
 src/noyra/core/workflow_publication_events.py
 src/noyra/core/workflow_reconstruction.py
+src/noyra/core/workflow_source_recovery.py
 src/noyra/core/xml.py
 src/noyra/deployment_setup.py
 src/noyra/desktop.py
@@ -912,6 +913,7 @@ tests/support/faults.py
 tests/support/historical.py
 tests/support/relationship_provenance.py
 tests/support/synthetic.py
+tests/support/workflow_recovery_schema.py
 tests/test_a0_project_recovery.py
 tests/test_a0_recovery_budget.py
 tests/test_a1_clock_recovery.py
@@ -1268,6 +1270,9 @@ tests/test_windows_data_root.py
 tests/test_windows_process_identity.py
 tests/test_workflow_manifest_contract.py
 tests/test_workflow_publication_capability.py
+tests/test_workflow_source_recovery.py
+tests/test_workflow_source_recovery_control.py
+tests/test_workflow_source_recovery_process.py
 tests/test_world.py
 tests/test_world_acquisition_diagnostics.py
 tests/test_world_feed_poll.py

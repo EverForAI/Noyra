@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 from .admission import OperationInvalidated, OperationLease, bind_lease
 from .archive import ArchiveKeyring
 from .types import canonical_json, content_hash
-from .workflow_bundle import chain_head, check_anchor, inspect_source, require, source_identity
+from .workflow_bundle import chain_head, check_anchor, inspect_source, require
 from .workflow_export_control import _guard
 from .workflow_export_files import PUBLICATION, WorkflowArtifactStore
 from .workflow_increment_bundle import (
@@ -25,6 +25,7 @@ from .workflow_increment_bundle import (
 from .workflow_increment_catalog import WorkflowIncrementCatalog
 from .workflow_increment_contract import INCREMENT, compatible, publication_id
 from .workflow_publication_events import PublicationEvents
+from .workflow_source_recovery import matches_publication_source
 
 if TYPE_CHECKING:
     from .operator_controls import OperatorControlService
@@ -146,6 +147,8 @@ def _export(
     with database.read_transaction() as c:
         _guard(controls, lease, c)
         saved = catalog.requested(c, request_hash, parent_id, workflow, version)
+    # A new request must retain the ordinary same-schema parent contract.
+    existing_request = saved is not None
     # Existing published evidence remains readable/idempotent. Refuse new file
     # writes before allocating an intent, key revision or artifact directory.
     if saved is None or saved["status"] == "prepared":
@@ -195,7 +198,9 @@ def _export(
                     snapshot, database, controls.subject_id, workflow, checkpoint
                 )
                 require(
-                    source_identity(original) == saved["source_hash"],
+                    matches_publication_source(
+                        original, saved["source"], existing_request=existing_request
+                    ),
                     "increment frozen source changed",
                 )
                 verify_source_prefix(snapshot, database, nodes[-1][1], checkpoint)
