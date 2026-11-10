@@ -461,7 +461,13 @@ class WorkflowIncrementCatalog:
         raw = {key: current[key] for key in FIELDS}
         raw.update(
             status="accepted" if durable else "published_durability_unknown",
-            manifest_json=canonical_json(manifest),
+            # Unknown publications freeze the raw JSON text as well as the
+            # descriptor meaning; a legacy noncanonical layout remains valid.
+            manifest_json=(
+                canonical_json(manifest)
+                if current["status"] == "prepared"
+                else current["manifest_json"]
+            ),
             updated_at=utc_now(),
         )
         if durable:

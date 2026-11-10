@@ -664,6 +664,7 @@ src/noyra/core/workflow_increment_catalog.py
 src/noyra/core/workflow_increment_contract.py
 src/noyra/core/workflow_increment_control.py
 src/noyra/core/workflow_increment_files.py
+src/noyra/core/workflow_manifest.py
 src/noyra/core/workflow_publication_events.py
 src/noyra/core/workflow_reconstruction.py
 src/noyra/core/xml.py
@@ -1265,6 +1266,7 @@ tests/test_wallet_setup.py
 tests/test_web_contract.py
 tests/test_windows_data_root.py
 tests/test_windows_process_identity.py
+tests/test_workflow_manifest_contract.py
 tests/test_workflow_publication_capability.py
 tests/test_world.py
 tests/test_world_acquisition_diagnostics.py

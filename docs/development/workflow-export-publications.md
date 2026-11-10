@@ -47,3 +47,22 @@ or prepared file publication; catalog reads and retries of already published
 requests retain their historical evidence semantics. See the API capability
 fields for this distinction. This admission change does not migrate the catalogs
 or revise any historical acceptance receipt.
+
+## Manifest descriptors and catalog retries
+
+Base and incremental catalogs use the same v1 manifest descriptor contract:
+exactly `name`, `stored_bytes`, `stored_hash` and `plaintext_hash`; the fixed
+`manifest.enc` name; an integer encrypted byte count within the manifest budget;
+and two lowercase SHA-256 digests. Boolean byte counts are rejected. Descriptor
+validation does not prove that an object exists or that storage is durable.
+
+A catalog confirmation requires a Boolean durability observation and the original
+frozen source/key binding. Every retry of a published record must name its original
+manifest, including retries that do not advance status. Matching retries return
+the existing record without an UPDATE or another acceptance event. Promotion of
+an unknown publication preserves the original `manifest_json` text, including
+valid historical whitespace and key order. New prepared publications still use
+canonical JSON. Malformed historical descriptors fail validation without rewriting
+the row or synthesizing a receipt. Existing artifact readback, ownership, privacy
+and transaction fences remain required by the controlled publication interface.
+These application checks do not change schema versions or the v1 archive format.
