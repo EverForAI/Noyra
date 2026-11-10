@@ -17,7 +17,7 @@ RAW_EVIDENCE = re.compile(r"^docs/audit/[^/]*-evidence/", re.IGNORECASE)
 MAX_RANGE_COMMITS = 4096
 MAX_EVENT_BYTES = 2 * 1024 * 1024
 
-LOCAL_REFERENCE = re.compile(r"(?i)(?<![a-z0-9])[a-z]:[\\/]|/mnt/[a-z]/")
+LOCAL_REFERENCE = re.compile(r"(?i)(?<![a-z0-9])[a-z]:[\\/]|(?<![a-z0-9:./])/mnt/[a-z]/")
 
 
 class PublicationScopeError(ValueError):

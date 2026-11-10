@@ -24,8 +24,20 @@ def site(root: Path, content: str = "<html>Public page</html>") -> str:
     return commit(root)
 
 
-def test_pages_stages_exact_git_blobs_without_source_or_extra_files(repository: Path) -> None:
-    revision = site(repository, '<a href="https://example.invalid">Open reading</a>')
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.invalid",
+        "https://example.invalid/home/open-article",
+        "https://example.invalid/mnt/x/public-article",
+    ],
+)
+def test_pages_stages_exact_git_blobs_without_source_or_extra_files(
+    repository: Path, url: str
+) -> None:
+    revision = site(repository, f'<a href="{url}">Open reading</a>')
+    base = git(repository, "rev-parse", "HEAD^").decode().strip()
+    assert BOUNDARY["check"](repository, revision, base=base) == []
     output = repository.parent / "pages-artifact"
     PAGES["prepare"](repository, revision, output)
     assert {p.relative_to(output).as_posix() for p in output.rglob("*") if p.is_file()} == {
@@ -48,6 +60,8 @@ def test_pages_stages_exact_git_blobs_without_source_or_extra_files(repository: 
         "file:///synthetic/private",
         "X&#58;/synthetic/private",
         "X%3A%2Fsynthetic/private",
+        "https://example.invalid/?path=/home/synthetic/private",
+        "https://example.invalid/?path=X:/synthetic/private",
     ],
 )
 def test_pages_refuses_machine_local_content_before_creating_upload(

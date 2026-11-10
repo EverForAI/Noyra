@@ -13,8 +13,8 @@ from urllib.parse import unquote
 TEXT = {".html", ".css", ".js", ".xml", ".txt"}
 ALLOWED = TEXT | {".webp", ".png"}
 LOCAL_REFERENCE = re.compile(
-    r"(?i)(?<![a-z0-9])[a-z]:[\\/]|/mnt/[a-z]/|file:/|"
-    r"/(?:root|home|Users|var/tmp|tmp)/|"
+    r"(?i)(?<![a-z0-9])[a-z]:[\\/]|(?<![a-z0-9:./])/mnt/[a-z]/|file:/|"
+    r"(?<![a-z0-9:./])/(?:root|home|Users|var/tmp|tmp)/|"
     r"\.(?:workbuddy[\\/]private-audit|codex[\\/]worktrees)[\\/]"
 )
 
