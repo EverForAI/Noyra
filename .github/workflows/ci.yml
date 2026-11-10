@@ -83,6 +83,21 @@ jobs:
           sudo "$(command -v python)" -m pytest \
             tests/test_deployment_maintenance.py tests/test_m42_p2_14_at_rest.py \
               tests/test_storage_mode.py -q
+      - name: Verify native root key rotation preserves service group permissions
+        if: matrix.os == 'ubuntu-24.04' && matrix.python-version == '3.12'
+        run: |
+          sudo "$(command -v python)" -m pytest \
+            tests/test_backup_key_cli.py::test_root_explicit_api_retains_group_read_and_rejects_retried_altered_expectation \
+            -q --junitxml="${RUNNER_TEMP}/root-permission.xml" \
+            --basetemp="${RUNNER_TEMP}/root-permission-tmp"
+          python scripts/verify-root-permission-results.py --path "${RUNNER_TEMP}/root-permission.xml"
+      - name: Upload native root permission evidence
+        if: always() && matrix.os == 'ubuntu-24.04' && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: root-permission-junit
+          path: ${{ runner.temp }}/root-permission.xml
+          if-no-files-found: error
       - run: python -m ruff check .
       - run: python -m ruff format --check .
       - run: python -m mypy src tests
