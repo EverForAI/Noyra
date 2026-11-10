@@ -444,6 +444,7 @@ scripts/build-historical-fixtures.py
 scripts/build-release-evidence.py
 scripts/build-reproducible-wheel.py
 scripts/build-windows-package.ps1
+scripts/check-pages-publication.py
 scripts/check-publication-boundary.py
 scripts/check-site.py
 scripts/deployment-maintenance.py
@@ -1154,6 +1155,7 @@ tests/test_model_wire_contract.py
 tests/test_motivation_development.py
 tests/test_open_world_research.py
 tests/test_outcome_learning.py
+tests/test_pages_publication.py
 tests/test_participant_accounts.py
 tests/test_participant_http.py
 tests/test_participant_identity_flow.py

@@ -98,3 +98,26 @@ and Windows checks use the same stdlib/Git code. Local success does not claim
 that remote CI ran, that every pre-existing audit line was rescanned, or that
 previously published material was removed. Follow-up publication should use one
 reviewed candidate and the normal required checks.
+
+## Pages publication surface
+
+Pages checks the exact event commit and the complete introduced commit range before upload.
+A manual dispatch must supply an exact reviewed ancestor through `publication_base`, or use
+`PUBLICATION_REVIEW_BASE`; no parent is guessed. Checkout includes full history.
+The public-source Git blob inventory and the existing site link/size checks run first.
+`check-pages-publication.py` then compares every file under `site/` with that exact commit,
+rejects links, extra files, raw evidence paths and machine-local references, and creates a fresh
+upload directory containing only those reviewed blobs. Upload uses that directory, not the
+repository root. The checker prints fixed diagnostics without copying rejected content to logs.
+These checks cover known private path/evidence forms; they do not replace credential protection
+or editorial review. Site-only changes do not require the long runtime test matrix.
+
+| Publication surface | Published artifact and gate |
+| --- | --- |
+| Pages | Exact site blobs; range, source inventory, site validation and artifact staging before upload |
+| Release | Same-SHA full wallet gate (including full pytest), source inventory and signed external evidence |
+| External gates | Reviewed environment, signed evidence for the exact requested release SHA |
+| Quality Docker job | Local test images only; no registry push step |
+
+Workflow checks execute reviewed repository code; branch/environment protection remains the
+trust boundary for changing a publishing workflow itself.

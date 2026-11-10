@@ -54,6 +54,8 @@ def prohibited_path(path: str) -> bool:
 
 def checks_local_references(path: str) -> bool:
     # Deployment examples and synthetic source/tests may legitimately use absolute paths.
+    if path.startswith("site/"):
+        return path.endswith((".html", ".css", ".js", ".xml", ".txt"))
     return path.startswith(("docs/audit/", "docs/roadmap/")) and path.endswith(
         (".md", ".txt", ".log", ".xml", ".json")
     )
