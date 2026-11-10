@@ -36,6 +36,8 @@ def test_chain_verify_http_preserves_operator_csrf_private_and_base_contracts(
     monkeypatch: Any,
 ) -> None:
     instance, operator, readonly = service
+    # Simulated backend for protocol/auth tests; native admission is tested separately.
+    monkeypatch.setattr(WorkflowArtifactStore, "creation_supported", staticmethod(lambda: True))
     monkeypatch.setenv("NOYRA_ARCHIVE_KEYRING_PATH", "")
     monkeypatch.setenv(
         "NOYRA_ARCHIVE_ENCRYPTION_KEY", base64.urlsafe_b64encode(bytes(range(32))).decode()
