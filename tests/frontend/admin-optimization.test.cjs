@@ -1091,3 +1091,38 @@ test("retention distinguishes structural baseline from advisory preservation cov
   assert.match(html,/暂未取得，不按零项处理/);
   assert.doesNotMatch(html,/待审 0 项/);
 });
+
+
+for (const [semantics,mode] of [["legacy_bindings","dual_review"],
+    ["independent_principals","dual_review"],["independent_principals","disabled"]]) {
+  test(`migration identity labels follow server configuration: ${semantics}/${mode}`,async()=>{
+    const independent=semantics==="independent_principals";
+    const label=independent ? "独立账户复核" : "凭据确认（兼容模式）";
+    const policy={revision:1,approval_mode:mode,review_semantics:mode==="dual_review" ? semantics : mode,
+      dual_review_semantics:semantics,allowed_target_ids:[],allowed_regions:[]};
+    const proposals=[{proposal_id:"synthetic-proposal",approval_mode:"dual_review",review_semantics:semantics,
+      status:"awaiting_approval",approval_count:1,required_approvals:2,approvals:[]}];
+    const {sandbox}=context({request:async path=>path.endsWith("policy") ? policy : path.endsWith("proposals") ? proposals : []});
+    const option={textContent:"old label"};
+    sandbox.$("#migration-approval-mode").querySelector=()=>option;
+    vm.runInContext(functionsBetween("async function loadMigration(","function summaryRows("),sandbox);
+    await sandbox.loadMigration();
+    assert.equal(option.textContent,label);
+    assert.match(sandbox.$("#migration-review-help").textContent,independent ? /稳定账户身份/ : /服务端凭据角色/);
+    assert.match(sandbox.$("#migration-proposal-list").innerHTML,independent ? /独立账户复核：1\/2/ : /凭据确认：1\/2/);
+    if(mode==="dual_review")assert.ok(sandbox.$("#migration-policy-summary").innerHTML.includes(label));
+  });
+}
+
+test("identity label refresh preserves a dirty single-operator draft",async()=>{
+  const {sandbox}=context({request:async path=>path.endsWith("policy") ? {
+    revision:2,approval_mode:"disabled",review_semantics:"disabled",dual_review_semantics:"independent_principals"
+  } : []});
+  const form=sandbox.$("#migration-policy-form"),select=sandbox.$("#migration-approval-mode");
+  form.dataset={revision:"1",dirty:"1"};form.elements=[select];select.value="self_attested";
+  const option={textContent:"old"};select.querySelector=()=>option;
+  vm.runInContext(functionsBetween("async function loadMigration(","function summaryRows("),sandbox);
+  await sandbox.loadMigration();
+  assert.equal(form.dataset.revision,"1");assert.equal(select.value,"self_attested");
+  assert.equal(option.textContent,"独立账户复核");
+});

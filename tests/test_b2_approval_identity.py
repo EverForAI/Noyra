@@ -320,3 +320,106 @@ def test_independent_review_http_requires_two_request_authenticated_principals(
     finally:
         server.close()
         kernel.close()
+
+
+@pytest.mark.parametrize(
+    "extra,expected",
+    [
+        ({}, "NOYRA_MIGRATION_PROXY_PRINCIPAL_HMAC_KEY_FILE"),
+        (
+            {
+                "migration_proxy_principal_hmac_key": SecretStr(
+                    "synthetic-review-proof-key-32-bytes"
+                )
+            },
+            "NOYRA_TRUSTED_PROXY_CIDRS",
+        ),
+        (
+            {
+                "migration_proxy_principal_hmac_key": SecretStr("synthetic-short"),
+                "trusted_proxy_cidrs": ("127.0.0.1/32",),
+            },
+            "at least 32 bytes",
+        ),
+    ],
+)
+def test_independent_mode_rejects_incomplete_proxy_config_before_storage(
+    tmp_path: Path, extra: dict[str, Any], expected: str
+) -> None:
+    from pydantic import ValidationError
+
+    from noyra.core.types import content_hash
+    from noyra.service import ServiceSettings
+
+    data = tmp_path / "untouched"
+    with pytest.raises(ValidationError) as error:
+        ServiceSettings(
+            data_dir=data,
+            subject_id="review-configuration",
+            genesis_hash=content_hash("review-configuration"),
+            migration_require_independent_review=True,
+            **extra,
+        )
+    assert expected in str(error.value)
+    assert "synthetic-short" not in str(error.value)
+    assert not data.exists()
+
+
+def test_single_operator_configuration_keeps_independent_identity_optional(tmp_path: Path) -> None:
+    from noyra.core.types import content_hash
+    from noyra.service import ServiceSettings
+
+    settings = ServiceSettings(
+        data_dir=tmp_path,
+        subject_id="single-review-config",
+        genesis_hash=content_hash("single-review-config"),
+        migration_approval_mode="self_attested",
+    )
+    assert not settings.migration_require_independent_review
+    assert settings.migration_proxy_principal_hmac_key is None
+    assert not settings.trusted_proxy_cidrs
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_policy_reports_server_dual_identity_mode_even_when_current_mode_is_disabled(
+    tmp_path: Path, strict: bool
+) -> None:
+    from noyra.core import SubjectKernel
+    from noyra.core.types import content_hash
+    from noyra.service import NoyraHTTPServer, ServiceSettings
+    from test_authentication_input_contract import call
+
+    key = "synthetic-server-principal-config-key-32"
+    token = "synthetic-policy-operator-token-32-bytes"
+    settings = ServiceSettings(
+        data_dir=tmp_path,
+        subject_id="review-mode-projection",
+        genesis_hash=content_hash("review-mode-projection"),
+        host="127.0.0.1",
+        port=0,
+        operator_token=SecretStr(token),
+        migration_require_independent_review=strict,
+        migration_proxy_principal_hmac_key=SecretStr(key) if strict else None,
+        trusted_proxy_cidrs=("127.0.0.1/32",) if strict else (),
+    )
+    kernel = SubjectKernel(tmp_path / "noyra.sqlite3", settings.subject_id, settings.genesis_hash)
+    kernel.boot()
+    kernel.orient()
+    kernel.activate()
+    server = NoyraHTTPServer(kernel, settings)
+    server.start()
+    try:
+        path = "/api/v1/admin/migration/policy"
+        assert call(server, path)[0] == 401
+        headers = {"Authorization": "Bearer " + token}
+        status, result, _ = call(server, path, headers=headers)
+        assert status == 200 and result["approval_mode"] == "disabled"
+        assert result["review_semantics"] == "disabled"
+        assert result["dual_review_semantics"] == (
+            "independent_principals" if strict else "legacy_bindings"
+        )
+        assert key not in str(result) and token not in str(result)
+        assert call(server, path.replace("/api/v1/", "/api/"), headers=headers)[1] == result
+    finally:
+        server.close()
+        kernel.close()

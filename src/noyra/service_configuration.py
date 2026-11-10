@@ -102,7 +102,14 @@ class ServiceSettings(BaseModel):
         "external_signer_rebind", "local_wallet_transfer", "disabled"
     ] = "external_signer_rebind"
     migration_local_wallet_transfer_enabled: bool = False
-    migration_require_independent_review: bool = False
+    migration_require_independent_review: bool = Field(
+        default=False,
+        description=(
+            "dual_review uses credential-role confirmation by default; true requires "
+            "request-signed stable principals from the configured trusted authentication proxy. "
+            "Single-operator modes retain their existing approval semantics."
+        ),
+    )
     migration_proxy_principal_hmac_key: SecretStr | None = None
 
     @field_validator("trusted_proxy_cidrs", mode="before")
@@ -278,9 +285,16 @@ class ServiceSettings(BaseModel):
         if self.migration_require_independent_review and (
             self.migration_proxy_principal_hmac_key is None
         ):
-            raise ValueError("strict migration review requires a signed proxy principal HMAC key")
+            raise ValueError(
+                "strict migration review requires a signed proxy principal HMAC key; configure "
+                "NOYRA_MIGRATION_PROXY_PRINCIPAL_HMAC_KEY_FILE or "
+                "NOYRA_MIGRATION_PROXY_PRINCIPAL_HMAC_KEY_CREDENTIAL"
+            )
         if self.migration_require_independent_review and not self.trusted_proxy_cidrs:
-            raise ValueError("strict migration review requires trusted proxy CIDRs")
+            raise ValueError(
+                "strict migration review requires trusted proxy CIDRs; configure "
+                "NOYRA_TRUSTED_PROXY_CIDRS for the authenticated signing proxy"
+            )
         if self.at_rest_mode == "required" and self.backup_keyring_path is None:
             raise ValueError("required at-rest mode needs NOYRA_BACKUP_KEYRING_PATH")
         if (
