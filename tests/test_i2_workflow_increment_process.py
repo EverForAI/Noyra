@@ -26,8 +26,11 @@ assert Path(noyra.__file__).resolve().is_relative_to(Path(sys.argv[1]).resolve()
 from noyra.core import SubjectKernel
 from noyra.core.operator_controls import OperatorControlService
 from noyra.core.types import content_hash
+from noyra.core.workflow_export_files import WorkflowArtifactStore
 from noyra.core.workflow_increment_files import WorkflowIncrementStore
 from noyra.core.workflow_increment_catalog import WorkflowIncrementCatalog
+# Simulated protocol capability; does not assert native Windows durability.
+WorkflowArtifactStore.creation_supported=staticmethod(lambda:True)
 subject='d2b-control'
 genesis=content_hash({'subject_id':subject,'test':'p3-06'})
 with SubjectKernel(sys.argv[2],subject,genesis,allow_subject_creation=False) as kernel:

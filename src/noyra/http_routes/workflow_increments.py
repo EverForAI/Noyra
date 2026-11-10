@@ -16,6 +16,10 @@ from noyra.core.errors import (
     SchemaContractError,
 )
 from noyra.core.operator_controls import OperatorControlConflict
+from noyra.core.workflow_export_files import (
+    WorkflowArtifactStore,
+    WorkflowPublicationUnsupportedError,
+)
 
 if TYPE_CHECKING:
     from noyra.service import NoyraHTTPServer
@@ -79,6 +83,15 @@ def dispatch(
             if set(query) - {"limit"} or any(len(values) != 1 for values in query.values()):
                 raise ValueError("invalid increment directory query")
             result = controls.workflow_increments(limit=int(query.get("limit", ["50"])[0]))
+    except WorkflowPublicationUnsupportedError:
+        self._json(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            {
+                "error": "workflow_publication_unsupported",
+                "creation_capability": WorkflowArtifactStore.creation_capability(),
+            },
+        )
+        return
     except ValueError:
         self._json(
             HTTPStatus.CONFLICT if write else HTTPStatus.BAD_REQUEST,

@@ -20,6 +20,9 @@ def control(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setenv(
         "NOYRA_ARCHIVE_ENCRYPTION_KEY", base64.urlsafe_b64encode(bytes(range(32))).decode()
     )
+    # Protocol fixtures can model interrupted/legacy publications on every OS.
+    # Native platform admission has separate tests and never mocks fsync to pass.
+    monkeypatch.setattr(WorkflowArtifactStore, "creation_supported", staticmethod(lambda: True))
     kernel = _kernel(tmp_path, "d2b-control")
     workflow = DurableWorkflowStore(kernel.database)
     for n in range(4):

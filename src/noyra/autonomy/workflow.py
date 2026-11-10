@@ -138,6 +138,8 @@ class DurableWorkflowStore:
             if state_bytes > CLOCK_HISTORY_STATE_BYTE_LIMIT:
                 exceeded.append("state_byte_limit")
             if exceeded:
+                from noyra.core.workflow_export_files import WorkflowArtifactStore
+
                 return {
                     "workflow_id": workflow_id,
                     "status": "maintenance_required",
@@ -158,13 +160,19 @@ class DurableWorkflowStore:
                     "maintenance": {
                         "reason_code": "workflow_history_exceeds_recovery_bound",
                         "exceeded": exceeded,
-                        "execution_available": True,
+                        "execution_available": WorkflowArtifactStore.creation_supported(),
                         "execution_route": "/api/v1/admin/workflow-exports",
                         "execution_readiness": (
                             "requires_paused_owned_drained_runtime_and_archive_key"
+                            if WorkflowArtifactStore.creation_supported()
+                            else "platform_directory_durability_unavailable"
                         ),
                         "acknowledgement_allowed": False,
-                        "next_action": "export_with_controlled_route_preserving_source_history",
+                        "next_action": (
+                            "export_with_controlled_route_preserving_source_history"
+                            if WorkflowArtifactStore.creation_supported()
+                            else "use_supported_platform_for_controlled_export"
+                        ),
                     },
                 }
             result = self._clock_history(

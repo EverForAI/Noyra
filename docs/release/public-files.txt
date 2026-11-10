@@ -1265,6 +1265,7 @@ tests/test_wallet_setup.py
 tests/test_web_contract.py
 tests/test_windows_data_root.py
 tests/test_windows_process_identity.py
+tests/test_workflow_publication_capability.py
 tests/test_world.py
 tests/test_world_acquisition_diagnostics.py
 tests/test_world_feed_poll.py

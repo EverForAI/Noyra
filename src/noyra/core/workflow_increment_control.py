@@ -13,7 +13,7 @@ from .archive import ArchiveKeyring
 from .types import canonical_json, content_hash
 from .workflow_bundle import chain_head, check_anchor, inspect_source, require, source_identity
 from .workflow_export_control import _guard
-from .workflow_export_files import PUBLICATION
+from .workflow_export_files import PUBLICATION, WorkflowArtifactStore
 from .workflow_increment_bundle import (
     Chain,
     accepted_chain,
@@ -146,6 +146,10 @@ def _export(
     with database.read_transaction() as c:
         _guard(controls, lease, c)
         saved = catalog.requested(c, request_hash, parent_id, workflow, version)
+    # Existing published evidence remains readable/idempotent. Refuse new file
+    # writes before allocating an intent, key revision or artifact directory.
+    if saved is None or saved["status"] == "prepared":
+        WorkflowArtifactStore.require_creation_supported()
     if saved is None:
         ring.record_revision(database, controls.subject_id)
         with capture() as snapshot:

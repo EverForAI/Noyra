@@ -40,3 +40,10 @@ checks. This directory is not an artifact restore endpoint or a hot/cold cutoff.
 Schema 116 adds a [separate increment metadata catalog](workflow-increment-metadata.md).
 It retains these base records unchanged, uses distinct publication identities,
 and adds no incremental file writer or base-reader compatibility shortcut.
+
+New export/increment file publication is admitted only on platforms with the
+implemented directory-fsync capability. Windows reports unsupported before new
+or prepared file publication; catalog reads and retries of already published
+requests retain their historical evidence semantics. See the API capability
+fields for this distinction. This admission change does not migrate the catalogs
+or revise any historical acceptance receipt.

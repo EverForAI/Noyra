@@ -43,7 +43,7 @@ def test_maintenance_boundary_statuses_match_contract_for_both_aliases(
     instance, operator, readonly = service
     for prefix in ("/api/admin", "/api/v1/admin"):
         for method, suffix in ROUTES:
-            payload = {} if method == "POST" else None
+            payload: dict[str, object] | None = {} if method == "POST" else None
             path = prefix + suffix
             contract = next(
                 r

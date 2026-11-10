@@ -24,6 +24,8 @@ from noyra.core import SubjectKernel
 from noyra.core.operator_controls import OperatorControlService
 from noyra.core.workflow_export_files import WorkflowArtifactStore
 from noyra.core.types import content_hash
+# Simulated protocol capability; does not assert native Windows durability.
+WorkflowArtifactStore.creation_supported=staticmethod(lambda:True)
 subject='d2b-control'
 genesis=content_hash({'subject_id':subject,'test':'p3-06'})
 with SubjectKernel(sys.argv[2],subject,genesis) as kernel:

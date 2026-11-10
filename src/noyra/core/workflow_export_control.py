@@ -138,6 +138,10 @@ def _export(
     with database.read_transaction() as connection:
         _guard(controls, lease, connection)
         saved = catalog.requested(connection, request_hash, workflow, version)
+    # Existing published evidence remains readable/idempotent. Refuse new file
+    # writes before allocating an intent, key revision or artifact directory.
+    if saved is None or saved["status"] == "prepared":
+        WorkflowArtifactStore.require_creation_supported()
     if saved is None:
         ring.record_revision(database, controls.subject_id)
         with capture() as snapshot:
