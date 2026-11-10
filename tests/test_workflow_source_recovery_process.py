@@ -12,7 +12,7 @@ import pytest
 from noyra.core import SubjectKernel
 from noyra.core.operator_controls import OperatorControlService
 from noyra.core.types import content_hash
-from support.workflow_recovery_schema import synthetic_runtime
+from support.workflow_recovery_schema import publication_upgrade_runtime
 from test_workflow_source_recovery_control import RecoverablePublication
 from test_workflow_source_recovery_control import control as control
 from test_workflow_source_recovery_control import recoverable as recoverable
@@ -28,13 +28,13 @@ from noyra.core.types import content_hash
 from noyra.core.workflow_export_files import WorkflowArtifactStore
 from noyra.core.workflow_increment_files import WorkflowIncrementStore
 from noyra.core.workflow_source_recovery import RecoverySchemaPair
-from support.workflow_recovery_schema import synthetic_runtime
+from support.workflow_recovery_schema import publication_upgrade_runtime
 from test_d2b_workflow_export_control import run
 from test_i2_workflow_increment_control import publish
 pair=RecoverySchemaPair(**json.loads(sys.argv[4]))
 parent=sys.argv[5]
 files=WorkflowArtifactStore if not parent else WorkflowIncrementStore
-with synthetic_runtime(pair):
+with publication_upgrade_runtime(pair):
     if os.name=='nt':
         # Explicit simulated capability, never a claim of native directory fsync.
         WorkflowArtifactStore.creation_supported=staticmethod(lambda:True)
@@ -62,7 +62,7 @@ def test_new_process_resumes_the_old_intent_and_interrupted_upgrade_recovery_is_
     controls = recoverable.controls
     before = recoverable.rows()
     stored = recoverable.files()
-    with synthetic_runtime(recoverable.pair):
+    with publication_upgrade_runtime(recoverable.pair):
         recoverable.upgrade()
         controls.kernel.close()
         root = Path(__file__).resolve().parents[1]

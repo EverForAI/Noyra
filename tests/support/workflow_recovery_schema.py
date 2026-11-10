@@ -1,24 +1,35 @@
-"""A synthetic trigger-only upgrade for recovery tests; never a shipped migration."""
+"""Historical schema116 fixtures and the actual publication-guard migration."""
 
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Iterator
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
+
+import pytest
 
 from noyra.core import Database
 from noyra.core import database as database_module
 from noyra.core import workflow_source_recovery as recovery
 from noyra.core.schema.contracts import _SCHEMA_DDL_FINGERPRINTS, _SCHEMA_STRUCTURE_FINGERPRINTS
+from test_d2b_workflow_export_control import control as current_control
 
 TARGET = 117
-SQL = """
-CREATE TRIGGER synthetic_workflow_recovery_probe
-BEFORE UPDATE OF workflow_id ON workflow_export_publications
-WHEN NEW.workflow_id IS NOT OLD.workflow_id
-BEGIN SELECT RAISE(ABORT,'synthetic recovery fixture'); END;
-"""
+
+
+@pytest.fixture
+def control(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[object]:
+    # Use real historical rows and fingerprints; never relabel a schema117 DB.
+    # Only creation runs as116. Tests exercise the actual migration after this.
+    with patch.object(database_module, "CURRENT_SCHEMA_VERSION", 116):
+        controls = cast(Any, current_control).__wrapped__(tmp_path, monkeypatch)
+        instance = next(controls)
+    try:
+        yield instance
+    finally:
+        controls.close()
 
 
 def measured_pair(database: Database) -> recovery.RecoverySchemaPair:
@@ -29,31 +40,25 @@ def measured_pair(database: Database) -> recovery.RecoverySchemaPair:
             ]
         )
         assert version == 116
-        original = Database.schema_ddl_fingerprint(snapshot)
-        assert original == _SCHEMA_DDL_FINGERPRINTS[116]
-        structure = Database.schema_structure_fingerprint(snapshot)
-        # The sealed snapshot stays query-only; measure DDL on a separate copy.
-        with closing(sqlite3.connect(":memory:")) as candidate:
-            candidate.row_factory = sqlite3.Row
-            snapshot.backup(candidate)
-            Database._execute_sql_script(candidate, SQL)
-            target = Database.schema_ddl_fingerprint(candidate)
-            assert target != original
-            assert Database.schema_structure_fingerprint(candidate) == structure
-    return recovery.RecoverySchemaPair(116, original, TARGET, target, structure)
+        assert Database.schema_ddl_fingerprint(snapshot) == _SCHEMA_DDL_FINGERPRINTS[116]
+    return recovery.RecoverySchemaPair(
+        116,
+        _SCHEMA_DDL_FINGERPRINTS[116],
+        TARGET,
+        _SCHEMA_DDL_FINGERPRINTS[TARGET],
+        _SCHEMA_STRUCTURE_FINGERPRINTS[116],
+    )
 
 
 @contextmanager
-def synthetic_runtime(
+def publication_upgrade_runtime(
     pair: recovery.RecoverySchemaPair, *, approved: bool = True
 ) -> Iterator[None]:
-    # Only these test-scoped contracts make the synthetic target recognizable.
-    # Production has no new migration, version or approved recovery pair in M2.2.
-    with (
-        patch.object(database_module, "CURRENT_SCHEMA_VERSION", TARGET),
-        patch.dict(database_module.MIGRATIONS, {TARGET: SQL}),
-        patch.dict(_SCHEMA_DDL_FINGERPRINTS, {TARGET: pair.target_ddl}),
-        patch.dict(_SCHEMA_STRUCTURE_FINGERPRINTS, {TARGET: pair.structure}),
-        patch.object(recovery, "_REVIEWED_SCHEMA_PAIRS", (pair,) if approved else ()),
-    ):
+    # Contracts and migration are actual production definitions. Only negative
+    # tests disable the explicitly reviewed source-recovery pair.
+    assert pair in recovery._REVIEWED_SCHEMA_PAIRS
+    if approved:
         yield
+    else:
+        with patch.object(recovery, "_REVIEWED_SCHEMA_PAIRS", ()):
+            yield

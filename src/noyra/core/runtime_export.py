@@ -748,6 +748,9 @@ _OWNERSHIP_GRAPHS[116] = {
     "workflow_increment_requests": _subject_rule(),
 }
 
+# Schema117 changes only guards; the complete subject ownership graph is unchanged.
+_OWNERSHIP_GRAPHS[117] = dict(_OWNERSHIP_GRAPHS[116])
+
 
 @dataclass(frozen=True)
 class RuntimeExportArtifact:

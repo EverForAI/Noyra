@@ -22,8 +22,8 @@ from noyra.core.workflow_increment_catalog import WorkflowIncrementCatalog
 from noyra.core.workflow_increment_files import WorkflowIncrementStore
 from noyra.core.workflow_source_recovery import RecoverySchemaPair
 from noyra.interaction.conversations import ConversationStore
-from support.workflow_recovery_schema import measured_pair, synthetic_runtime
-from test_d2b_workflow_export_control import control as control
+from support.workflow_recovery_schema import control as control
+from support.workflow_recovery_schema import measured_pair, publication_upgrade_runtime
 from test_d2b_workflow_export_control import run
 from test_i2_workflow_increment_control import advance, publish
 
@@ -130,7 +130,7 @@ def test_real_existing_request_recovers_without_normalizing_live_or_frozen_sourc
     before = recoverable.rows()
     stored = recoverable.files()
     original = dict(recoverable.saved)
-    with synthetic_runtime(recoverable.pair):
+    with publication_upgrade_runtime(recoverable.pair):
         recoverable.upgrade()
         controls = recoverable.controls
         with controls.database.read_snapshot() as c:
@@ -198,7 +198,7 @@ def test_unapproved_transition_remains_rejected_without_writes(
 ) -> None:
     before = recoverable.rows()
     stored = recoverable.files()
-    with synthetic_runtime(recoverable.pair, approved=False):
+    with publication_upgrade_runtime(recoverable.pair, approved=False):
         recoverable.upgrade()
         with pytest.raises(IntegrityError, match=r"source.*changed"):
             recoverable.call()
@@ -208,7 +208,7 @@ def test_unapproved_transition_remains_rejected_without_writes(
 def test_real_advanced_history_is_not_hidden_by_schema_compatibility(
     recoverable: RecoverablePublication,
 ) -> None:
-    with synthetic_runtime(recoverable.pair):
+    with publication_upgrade_runtime(recoverable.pair):
         recoverable.upgrade()
         advance(recoverable.controls, count=1)
         before = recoverable.rows()
@@ -224,7 +224,7 @@ def test_resumed_publication_cannot_bypass_final_runtime_or_transaction_fences(
 ) -> None:
     controls = recoverable.controls
     native_flush = recoverable.file_class.flush
-    with synthetic_runtime(recoverable.pair):
+    with publication_upgrade_runtime(recoverable.pair):
         recoverable.upgrade()
         conversation = (
             ConversationStore(controls.database).create(controls.subject_id, "Synthetic privacy")
@@ -270,7 +270,7 @@ def test_resumed_publication_cannot_bypass_final_runtime_or_transaction_fences(
 def test_strict_actual_schema_still_rejects_an_unregistered_trigger_change(
     recoverable: RecoverablePublication,
 ) -> None:
-    with synthetic_runtime(recoverable.pair):
+    with publication_upgrade_runtime(recoverable.pair):
         recoverable.upgrade()
         with recoverable.controls.database.transaction() as c:
             c.execute(
@@ -288,7 +288,7 @@ def test_schema_bridge_does_not_hide_rehashed_same_version_business_changes(
 ) -> None:
     from noyra.core.types import canonical_json
 
-    with synthetic_runtime(recoverable.pair):
+    with publication_upgrade_runtime(recoverable.pair):
         recoverable.upgrade()
         with recoverable.controls.database.transaction() as c:
             state = {"synthetic": "revised business evidence"}
@@ -307,7 +307,7 @@ def test_schema_bridge_does_not_hide_rehashed_same_version_business_changes(
 def test_old_parent_and_existing_request_do_not_authorize_new_cross_schema_work(
     recoverable: RecoverablePublication,
 ) -> None:
-    with synthetic_runtime(recoverable.pair):
+    with publication_upgrade_runtime(recoverable.pair):
         recoverable.upgrade()
         if recoverable.parent is None:
             # A genuinely new base keeps the actual target schema and new identity.
@@ -360,7 +360,7 @@ def test_archived_intent_receipts_and_retired_keys_still_verify_on_resumption(
     )
     ring.record_revision(controls.database, controls.subject_id)
     with (
-        synthetic_runtime(recoverable.pair),
+        publication_upgrade_runtime(recoverable.pair),
         patch.object(ArchiveKeyring, "from_env", return_value=ring),
     ):
         recoverable.upgrade()

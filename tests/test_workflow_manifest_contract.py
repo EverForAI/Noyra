@@ -275,6 +275,8 @@ def test_legacy_base_with_rehashed_invalid_descriptor_is_rejected_on_read(
                 event_id=raw["receipt_event_id"],
             )
         # This is a pre-existing schema-115/116 row, not a call through finish.
+        # Construct corrupt historical metadata after the strict source read.
+        c.execute("DROP TRIGGER validate_workflow_export_manifest_update")
         c.execute(
             "UPDATE workflow_export_publications SET status=?,manifest_json=?,"
             "receipt_event_id=?,state_hash=? WHERE publication_id=?",
@@ -313,18 +315,29 @@ def schema115_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return database.path
 
 
+@pytest.fixture(scope="module")
+def schema116_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    with patch.object(database_module, "CURRENT_SCHEMA_VERSION", 116):
+        database = Database(
+            tmp_path_factory.mktemp("schema116") / "legacy.sqlite3", strict_schema_contract=True
+        )
+    IdentityStore(database).ensure(SUBJECT, content_hash("export-genesis"))
+    return database.path
+
+
 @pytest.mark.parametrize("version", (115, 116))
 @pytest.mark.parametrize("state", ("prepared", "published_durability_unknown", "accepted"))
 def test_valid_legacy_base_records_remain_readable_without_rewriting_source_or_receipts(
     template: Path,
     schema115_template: Path,
+    schema116_template: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     version: int,
     state: str,
 ) -> None:
     path = tmp_path / "legacy.sqlite3"
-    selected = schema115_template if version == 115 else template
+    selected = schema115_template if version == 115 else schema116_template
     with closing(sqlite3.connect(selected)) as source, closing(sqlite3.connect(path)) as target:
         source.backup(target)
     database = Database(path, initialize=False, strict_schema_contract=True)

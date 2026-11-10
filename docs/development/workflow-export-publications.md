@@ -86,10 +86,35 @@ particular, a new increment cannot inherit permission to extend an old-schema
 parent from another request's recovery approval. Historical accepted roots remain
 readable under their original supported schema contract.
 
-The comparison path is installed before its migration. The reviewed pair registry
-is currently empty: no cross-schema exception is enabled and schema116 remains
-unchanged. A future trigger-only migration must register its actual reviewed pair
-and measured fingerprints in the same release. Test-only schema117 contracts
-exercise real migration, file readback and process recovery without enabling that
-schema in production. Schema115 and unreviewed future versions gain no implicit
-compatibility. Business changes or an unverified actual schema still fail closed.
+Schema117 installs the reviewed trigger-only publication migration and enables
+exactly its measured 116-to-117 recovery pair. Table/index/view structure remains
+unchanged. Historical 115/116 migration SQL and schema fingerprints are retained.
+Recovery tests construct actual116 rows and use the real117 migration, including
+file readback and process restarts. Schema115 and unreviewed future versions gain
+no implicit recovery compatibility; historical accepted archives remain readable.
+Business changes or an unverified actual schema still fail closed.
+
+## Schema117 publication guards and upgrade evidence
+
+The migration explicitly replaces the base transition guard so every UPDATE is
+checked. Prepared records can only become unknown or accepted; unknown records
+can only become accepted with the identical raw manifest text. Accepted records,
+source bindings, request intents and deletion guards retain their immutability.
+New base rows must begin prepared. Both catalogs enforce the same manifest JSON
+shape, integer byte range and lowercase digest syntax at the SQL boundary,
+including NUL/byte-length cases. Acceptance additionally requires the expected
+receipt identity, subject, source, event type and privacy metadata. These SQL
+checks do not authenticate file contents or replace the catalog/event verifier.
+
+Before changing the guards, the existing migration transaction streams old
+publication and increment-intent evidence: hashes, supported source bindings,
+keys, descriptor bounds, exact parent references and receipt bindings must agree.
+Inline event payloads are checked directly. For archived payloads, the preflight
+checks the expected payload hash without archive-file I/O under the writer lock;
+normal archive readers and runtime integrity gates still verify physical objects.
+Bad old evidence fails the migration without rehashing, deleting or inventing
+history. Existing migration backup/restore handles failure; a successful upgrade
+preserves publication rows and receipts, including valid noncanonical manifest
+JSON. An old runtime refuses a newer database. Downgrade therefore requires a
+matched pre-upgrade snapshot and an explicit check for writes since that snapshot,
+not simply running the previous binary against schema117.

@@ -21,10 +21,16 @@ class RecoverySchemaPair:
     structure: str
 
 
-# Add a pair only with its actual versioned migration and measured fingerprints.
-# An adjacent version, equal table layout or a chain of pairs is not authority.
-# M2.2 installs the comparison path; no cross-schema exception is enabled yet.
-_REVIEWED_SCHEMA_PAIRS: tuple[RecoverySchemaPair, ...] = ()
+# Exact reviewed trigger-only migration117. No adjacent/transitive inference.
+_REVIEWED_SCHEMA_PAIRS: tuple[RecoverySchemaPair, ...] = (
+    RecoverySchemaPair(
+        116,
+        "e78f5e9d12d781e71b504dae847c793e680be7788af14d8af5b769f4cd4cd847",
+        117,
+        "6ddaea3121a169783d2151c7dfb6907ed41ad3c98ed7bb978fc45503b122f41d",
+        "2c848bc479a0b2ae97c2ef91d271e01fdf8363110892d7f681412dae64e488d0",
+    ),
+)
 
 
 def matches_publication_source(

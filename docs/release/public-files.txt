@@ -639,6 +639,7 @@ src/noyra/core/schema/migrations_v055_v069.py
 src/noyra/core/schema/migrations_v070_v107.py
 src/noyra/core/schema/workflow_exports.py
 src/noyra/core/schema/workflow_increments.py
+src/noyra/core/schema/workflow_publication_guards.py
 src/noyra/core/schema/world_poll.py
 src/noyra/core/secret_cleanup.py
 src/noyra/core/sleep_recovery.py
@@ -666,6 +667,7 @@ src/noyra/core/workflow_increment_control.py
 src/noyra/core/workflow_increment_files.py
 src/noyra/core/workflow_manifest.py
 src/noyra/core/workflow_publication_events.py
+src/noyra/core/workflow_publication_upgrade.py
 src/noyra/core/workflow_reconstruction.py
 src/noyra/core/workflow_source_recovery.py
 src/noyra/core/xml.py
@@ -1076,6 +1078,7 @@ tests/test_locking.py
 tests/test_m2_checkpoint_clock.py
 tests/test_m2_clock_http.py
 tests/test_m2_integrity_watchdog.py
+tests/test_m2_publication_migration.py
 tests/test_m2_recovery_exit.py
 tests/test_m41_verification_foundation.py
 tests/test_m42_p1_01_sleep_deadlock.py

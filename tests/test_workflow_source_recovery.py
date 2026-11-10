@@ -49,9 +49,14 @@ def enable(monkeypatch: pytest.MonkeyPatch, pair: recovery.RecoverySchemaPair) -
     monkeypatch.setattr(recovery, "_REVIEWED_SCHEMA_PAIRS", (pair,))
 
 
-def test_no_cross_schema_pair_is_enabled_before_its_actual_migration() -> None:
-    assert recovery._REVIEWED_SCHEMA_PAIRS == ()
-    assert 117 not in _SCHEMA_DDL_FINGERPRINTS
+def test_only_actual_reviewed_publication_migration_enables_cross_schema_recovery() -> None:
+    assert len(recovery._REVIEWED_SCHEMA_PAIRS) == 1
+    pair = recovery._REVIEWED_SCHEMA_PAIRS[0]
+    assert (pair.source_version, pair.target_version) == (116, 117)
+    assert pair.source_ddl == _SCHEMA_DDL_FINGERPRINTS[116]
+    assert pair.target_ddl == _SCHEMA_DDL_FINGERPRINTS[117]
+    assert pair.structure == _SCHEMA_STRUCTURE_FINGERPRINTS[116]
+    assert pair.structure == _SCHEMA_STRUCTURE_FINGERPRINTS[117]
 
 
 def test_source_comparison_preserves_actual_and_frozen_evidence(

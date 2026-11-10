@@ -10,7 +10,7 @@ import pytest
 
 from noyra.core import Database, IdentityStore
 from noyra.core import database as database_module
-from noyra.core.database import MIGRATIONS
+from noyra.core.database import CURRENT_SCHEMA_VERSION, MIGRATIONS
 from noyra.core.errors import IntegrityError
 from noyra.core.schema.contracts import _SCHEMA_DDL_FINGERPRINTS
 from noyra.core.types import canonical_json, content_hash
@@ -82,7 +82,10 @@ def test_old_115_migration_rolls_back_then_preserves_old_base_and_refuses_downgr
     for _ in range(2):
         current = Database(old.path, strict_schema_contract=True)
         with current.read_transaction() as c:
-            assert Database.schema_ddl_fingerprint(c) == _SCHEMA_DDL_FINGERPRINTS[116]
+            assert (
+                Database.schema_ddl_fingerprint(c)
+                == _SCHEMA_DDL_FINGERPRINTS[CURRENT_SCHEMA_VERSION]
+            )
             assert before == {
                 table: [dict(r) for r in c.execute("SELECT * FROM " + table)] for table in tables
             }
