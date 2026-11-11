@@ -63,4 +63,7 @@ def test_root_case_runs_in_bounded_ubuntu_job_with_retained_evidence() -> None:
     assert GUARD["REQUIRED"][1] in section
     assert '--junitxml="${RUNNER_TEMP}/root-permission.xml"' in section
     assert "python scripts/verify-root-permission-results.py --path" in section
+    assert "id: root-permission" in section
     assert "if: always()" in section and "if-no-files-found: error" in section
+    assert "steps.root-permission.outcome == 'success'" in section
+    assert "steps.root-permission.outcome == 'failure'" in section
