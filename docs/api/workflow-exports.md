@@ -69,11 +69,15 @@ preparation intact, without acceptance.
 | `published_durability_unknown` | Complete encrypted files were verified; directory durability was not confirmed. |
 | `accepted` | Complete readback and directory durability checks passed; the independent acceptance receipt and private operator audit committed together. |
 
-Windows currently returns `published_durability_unknown` even when full readback
-succeeds. POSIX can reach `accepted` after successful directory fsync through the
-data root. This distinction does not assert survival of a physical power failure
-on every storage stack or any remote replica. Neither status permits source
-cutoff, restore, runtime activation or changes to unresolved financial evidence.
+New publications and incomplete `prepared` retries require POSIX directory-fsync
+capability. Windows rejects them with HTTP 503 `workflow_publication_unsupported`
+before allocating an intent, recording a new archive key revision or creating files.
+GET returns `creation_capability` with the reason and keeps historical metadata readable.
+Existing published requests retain idempotent verification: an unknown publication is not
+promoted without confirmed durability, and an already accepted publication keeps its original
+receipt. Starting a new request key still requires creation capability. This does not implement
+native Windows directory durability. POSIX support permits an attempt; actual fsync/readback
+must still pass before acceptance. No status authorizes restore or source cutoff.
 
 POST returns the public publication metadata plus `idempotent`,
 `readback_verified` and `durability_confirmed`. First publication or promotion has

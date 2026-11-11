@@ -109,7 +109,9 @@ def test_ci_job_keeps_matrix_and_runs_all_checks() -> None:
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "os: [ubuntu-24.04, windows-2022]" in workflow
     assert 'python-version: ["3.11", "3.12"]' in workflow
-    assert "python scripts/run-ci-tests.py --workers 2" in workflow
+    assert workflow.index(
+        "tests/test_public_archive.py::test_public_schema_has_fixed_reviewed_fingerprints"
+    ) < workflow.index("python scripts/run-ci-tests.py --workers 2")
     for command in (
         "audit-m41.py --scope targeted --profile smoke",
         "ruff check .",

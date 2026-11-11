@@ -51,6 +51,24 @@ bearer 和该凭据创建的 cookie 会话共享同一绑定，多开浏览器�
 撤销；取消任务、变更策略/目标/钱包或过期后不能继续读取本地密钥。
 具体协议见开发文档 migration-approval-boundaries.md。
 
+### 配置独立账户复核
+
+管理台将兼容 `dual_review` 显示为“凭据确认”，按不同服务端凭据角色计数，
+不将两种凭据说成两个独立账户。`dual_review_semantics` 单独报告服务器的身份模式，
+即使迁移关闭或当前选择单人自核验，选项和说明也仍使用正确的身份口径。
+
+需要独立账户复核时，先部署能够提供请求绑定签名的认证代理，再配置：
+
+- `NOYRA_TRUSTED_PROXY_CIDRS`：仅信任实际认证代理的来源网络。
+- `NOYRA_MIGRATION_PROXY_PRINCIPAL_HMAC_KEY_FILE` 或
+  `NOYRA_MIGRATION_PROXY_PRINCIPAL_HMAC_KEY_CREDENTIAL`：私有签名密钥来源，至少 32 字节。
+- `NOYRA_MIGRATION_REQUIRE_INDEPENDENT_REVIEW=true`：启用服务器的独立账户模式。
+
+配置缺少密钥或可信代理时，服务启动会明确拒绝。配置通过只证明参数齐备；
+上线前仍应验证可信代理签名、同一账户多会话只计一次、两个账户能够分别完成复核。
+密钥、原始账户名和签名不在管理台策略响应中返回。单人自核验保留原有流程；
+不需要独立账户基础设施的部署保持该开关默认关闭即可。
+
 ## 恢复执行环境
 
 root runner 仅使用相邻安装的 root 所有标准库 helper 与 /usr/bin/python3 -I，

@@ -8,7 +8,8 @@ from .archive import ArchiveKeyring
 from .database import Database
 from .events import EventStore
 from .types import canonical_json, content_hash, strict_json_loads, utc_now
-from .workflow_bundle import SCOPE, require, source_identity, validate_source
+from .workflow_bundle import MAX_MANIFEST_BYTES, SCOPE, require, source_identity, validate_source
+from .workflow_manifest import validate_manifest_descriptor
 
 CATALOG_FORMAT = "workflow-export-publication/v1"
 FIELDS = (
@@ -101,11 +102,8 @@ class WorkflowExportCatalog:
                 "prepared publication has terminal data",
             )
         else:
-            require(
-                isinstance(manifest, dict)
-                and set(manifest) == {"name", "stored_bytes", "stored_hash", "plaintext_hash"}
-                and manifest["name"] == "manifest.enc",
-                "published manifest descriptor differs",
+            validate_manifest_descriptor(
+                manifest, maximum=MAX_MANIFEST_BYTES, reason="published manifest descriptor differs"
             )
             if row["status"] == "accepted":
                 expected_id = "evt_wexport_accepted_" + row["source_hash"]
@@ -213,18 +211,33 @@ class WorkflowExportCatalog:
     def finish(
         self, connection: Any, record: dict[str, Any], manifest: dict[str, Any], *, durable: bool
     ) -> dict[str, Any]:
+        validate_manifest_descriptor(manifest, maximum=MAX_MANIFEST_BYTES)
+        if type(durable) is not bool:
+            raise ValueError("invalid workflow export durability observation")
         current = self.get(connection, record["publication_id"])
         require(current is not None, "publication disappeared")
         assert current is not None
-        require(current["source_hash"] == record["source_hash"], "publication source changed")
-        if current["status"] == "accepted" or (
-            current["status"] == "published_durability_unknown" and not durable
-        ):
-            return current
+        require(
+            canonical_json(self._binding(record)) == canonical_json(self._binding(current)),
+            "publication frozen binding changed",
+        )
+        if current["status"] != "prepared":
+            require(
+                canonical_json(current["manifest"]) == canonical_json(manifest),
+                "published manifest cannot be replaced",
+            )
+            if current["status"] == "accepted" or not durable:
+                return current
         raw = {key: current[key] for key in FIELDS}
         raw.update(
             status="accepted" if durable else "published_durability_unknown",
-            manifest_json=canonical_json(manifest),
+            # Preserve the exact historical descriptor text when confirming an
+            # existing publication; JSON whitespace does not change its meaning.
+            manifest_json=(
+                canonical_json(manifest)
+                if current["status"] == "prepared"
+                else current["manifest_json"]
+            ),
             updated_at=utc_now(),
         )
         if durable:

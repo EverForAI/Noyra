@@ -15,12 +15,12 @@ from .workflow_bundle import (
     check_anchor,
     inspect_source,
     require,
-    source_identity,
     verify_bundle,
     write_bundle,
 )
 from .workflow_export_catalog import WorkflowExportCatalog
 from .workflow_export_files import WorkflowArtifactStore
+from .workflow_source_recovery import matches_publication_source
 
 if TYPE_CHECKING:
     from .operator_controls import OperatorControlService
@@ -138,6 +138,13 @@ def _export(
     with database.read_transaction() as connection:
         _guard(controls, lease, connection)
         saved = catalog.requested(connection, request_hash, workflow, version)
+    # Only an intent found by the original request key may cross a reviewed
+    # schema transition; preparing a new request never grants that authority.
+    existing_request = saved is not None
+    # Existing published evidence remains readable/idempotent. Refuse new file
+    # writes before allocating an intent, key revision or artifact directory.
+    if saved is None or saved["status"] == "prepared":
+        WorkflowArtifactStore.require_creation_supported()
     if saved is None:
         ring.record_revision(database, controls.subject_id)
         with capture() as snapshot:
@@ -177,7 +184,9 @@ def _export(
                     snapshot, database, controls.subject_id, workflow, checkpoint
                 )
                 require(
-                    source_identity(source) == saved["source_hash"],
+                    matches_publication_source(
+                        source, saved["source"], existing_request=existing_request
+                    ),
                     "prepared source history changed",
                 )
                 check_anchor(snapshot, controls.subject_id, saved["source"]["event_head"])

@@ -610,8 +610,12 @@ class OperatorControlService:
 
     def workflow_exports(self, *, limit: int = 50) -> dict[str, Any]:
         from .workflow_export_catalog import WorkflowExportCatalog
+        from .workflow_export_files import WorkflowArtifactStore
 
-        return WorkflowExportCatalog(self.database, self.subject_id).page(limit=limit)
+        return {
+            **WorkflowExportCatalog(self.database, self.subject_id).page(limit=limit),
+            "creation_capability": WorkflowArtifactStore.creation_capability(),
+        }
 
     def export_workflow(
         self, workflow_id: str, expected_version: int, request_key: str, *, actor: str, reason: str
@@ -623,9 +627,13 @@ class OperatorControlService:
         )
 
     def workflow_increments(self, *, limit: int = 50) -> dict[str, Any]:
+        from .workflow_export_files import WorkflowArtifactStore
         from .workflow_increment_catalog import WorkflowIncrementCatalog
 
-        return WorkflowIncrementCatalog(self.database, self.subject_id).page(limit=limit)
+        return {
+            **WorkflowIncrementCatalog(self.database, self.subject_id).page(limit=limit),
+            "creation_capability": WorkflowArtifactStore.creation_capability(),
+        }
 
     def export_workflow_increment(
         self,

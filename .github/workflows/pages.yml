@@ -7,6 +7,10 @@ on:
       - 'website/**'
       - 'site/**'
       - 'scripts/check-site.py'
+      - 'scripts/check-pages-publication.py'
+      - 'scripts/check-publication-boundary.py'
+      - 'scripts/public-file-manifest.py'
+      - 'docs/release/public-files*'
       - '.github/workflows/pages.yml'
       - 'README.md'
       - 'README.en.md'
@@ -15,6 +19,11 @@ on:
       - 'pyproject.toml'
       - 'docs/research/**'
   workflow_dispatch:
+    inputs:
+      publication_base:
+        description: "Exact reviewed ancestor SHA (or configure PUBLICATION_REVIEW_BASE)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -28,15 +37,26 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
+      - name: Check complete publication range
+        env:
+          NOYRA_PUBLICATION_REVIEW_BASE: ${{ vars.PUBLICATION_REVIEW_BASE }}
+        run: python scripts/check-publication-boundary.py --github-event
+      - name: Check exact public source inventory
+        run: python scripts/public-file-manifest.py check --revision "${{ github.sha }}"
       - name: Validate generated site
         run: python scripts/check-site.py
+      - name: Stage exact reviewed Pages artifact
+        run: python scripts/check-pages-publication.py --revision "${GITHUB_SHA}" --output "${RUNNER_TEMP}/noyra-pages"
       - name: Upload static site
         uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
-          path: site
+          path: ${{ runner.temp }}/noyra-pages
 
   deploy:
     needs: build

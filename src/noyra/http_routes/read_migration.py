@@ -22,6 +22,9 @@ def admin_migration_policy(self: RequestHandler, owner: NoyraHTTPServer) -> bool
     policy = owner.migration_store.read_policy(owner.kernel.subject_id)
     projection = dict(policy.__dict__)
     projection["review_semantics"] = owner.migration_manager.review_semantics(policy.approval_mode)
+    # Describe the server's dual-review identity mode even while migration is disabled
+    # or a single-operator mode is selected. This is configuration, not an IdP health proof.
+    projection["dual_review_semantics"] = owner.migration_manager.review_semantics("dual_review")
     with owner.kernel.database.connection() as connection:
         epoch = connection.execute(
             "SELECT epoch_id,target_id,epoch_number,status,acquired_at,revoked_at "

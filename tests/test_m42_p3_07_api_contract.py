@@ -61,7 +61,10 @@ def _openapi_operations() -> dict[str, set[str]]:
 
 
 def _runtime_literal_paths() -> set[str]:
-    source = (ROOT / "src" / "noyra" / "service.py").read_text(encoding="utf-8")
+    source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (ROOT / "src" / "noyra" / "http_routes").glob("*.py")
+    )
     paths = set(
         re.findall(
             r'(?:parsed\.path|self\.path)\s*==\s*"(/(?:api/[^\"]+|health(?:/(?:live|ready))?))"',
@@ -72,7 +75,10 @@ def _runtime_literal_paths() -> set[str]:
 
 
 def _runtime_prefixes() -> set[str]:
-    source = (ROOT / "src" / "noyra" / "service.py").read_text(encoding="utf-8")
+    source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (ROOT / "src" / "noyra" / "http_routes").glob("*.py")
+    )
     prefixes = set(
         re.findall(
             r'(?:parsed\.path|self\.path)\.startswith\(\s*"(/api[^\"]*)"',

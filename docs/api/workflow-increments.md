@@ -97,12 +97,15 @@ roll back together. No file I/O is used to repair a conflict in that transaction
 | `published_durability_unknown` | The complete files passed readback but directory durability was not confirmed. |
 | `accepted` | Complete chain readback and directory durability passed; independent acceptance and private audit committed atomically. |
 
-Windows currently produces `published_durability_unknown` for a new actual
-publication because directory fsync is not confirmed. POSIX can reach `accepted`
-when real directory fsync succeeds through the protected data root. An unconfirmed
-publication cannot become a parent. Promotion requires an unchanged source,
-complete readback and confirmed durability, without rewriting published files.
-Mocked acceptance tests do not establish Windows physical durability.
+New publications and incomplete `prepared` retries require POSIX directory-fsync
+capability. Windows rejects them with HTTP 503 `workflow_publication_unsupported`
+before allocating an intent, recording a new archive key revision or creating files.
+GET returns `creation_capability` with the reason and keeps historical metadata readable.
+Existing published requests retain idempotent verification: an unknown publication is not
+promoted without confirmed durability, and an already accepted publication keeps its original
+receipt. Starting a new request key still requires creation capability. This does not implement
+native Windows directory durability. POSIX support permits an attempt; actual fsync/readback
+must still pass before acceptance. No status authorizes restore or source cutoff.
 
 Accepted retries never silently overwrite missing/damaged objects. The directory
 can still show accepted metadata while a fresh POST reports file unavailability;

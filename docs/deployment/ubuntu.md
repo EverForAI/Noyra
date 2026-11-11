@@ -647,6 +647,10 @@ pre-update backup before the old release can safely run.
 
 ### Upgrade from the management page
 
+For releases containing schema117, also follow the
+[workflow publication upgrade notes](workflow-publication-upgrade.md) for matched
+backup material, unfinished requests and database rollback boundaries.
+
 After a native Ubuntu installation that includes the upgrade runner, open the HTTPS management page
 and use **总览 → Noyra 版本与升级**. Select **检查最新版本** to read the official GitHub stable release
 commit, then review its short SHA, commit time, and title before selecting **升级到最新版** and

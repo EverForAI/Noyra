@@ -9,6 +9,7 @@ import pytest
 from noyra.autonomy.workflow import DurableWorkflowStore
 from noyra.core.errors import IntegrityError
 from noyra.core.types import canonical_json, content_hash
+from noyra.core.workflow_export_files import WorkflowArtifactStore
 from test_d1_workflow_queries import seed
 from test_d1_workflow_queries import workflows as workflows
 
@@ -23,7 +24,9 @@ def test_large_workflow_returns_explicit_unverified_maintenance_metadata(
     assert result["expected_fingerprint"] is None
     assert result["capacity"]["records"] == 50_001
     assert result["unexplained_versions"] is None
-    assert result["maintenance"]["execution_available"] is True
+    assert (
+        result["maintenance"]["execution_available"] is WorkflowArtifactStore.creation_supported()
+    )
 
 
 @pytest.mark.parametrize("damage", ["state_hash", "version_gap", "wrong_type"])

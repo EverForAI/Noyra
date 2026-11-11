@@ -9,6 +9,7 @@ from .schema.contracts import _SCHEMA_DDL_FINGERPRINTS
 from .types import content_hash
 from .workflow_bundle import MAX_MANIFEST_BYTES, require, source_identity, validate_source
 from .workflow_export_files import PUBLICATION
+from .workflow_manifest import validate_manifest_descriptor
 
 FORMAT = "noyra-workflow-increment/v1"
 CATALOG_FORMAT = "workflow-increment-publication/v1"
@@ -121,13 +122,6 @@ def compatible(parent_source: dict[str, Any], source: dict[str, Any]) -> None:
 
 
 def validate_manifest(manifest: Any) -> None:
-    require(
-        isinstance(manifest, dict)
-        and set(manifest) == {"name", "stored_bytes", "stored_hash", "plaintext_hash"}
-        and manifest["name"] == "manifest.enc"
-        and type(manifest["stored_bytes"]) is int
-        and 37 <= manifest["stored_bytes"] <= MAX_MANIFEST_BYTES + 37
-        and digest(manifest["stored_hash"])
-        and digest(manifest["plaintext_hash"]),
-        "increment manifest descriptor is invalid",
+    validate_manifest_descriptor(
+        manifest, maximum=MAX_MANIFEST_BYTES, reason="increment manifest descriptor is invalid"
     )

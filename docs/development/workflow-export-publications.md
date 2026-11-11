@@ -40,3 +40,81 @@ checks. This directory is not an artifact restore endpoint or a hot/cold cutoff.
 Schema 116 adds a [separate increment metadata catalog](workflow-increment-metadata.md).
 It retains these base records unchanged, uses distinct publication identities,
 and adds no incremental file writer or base-reader compatibility shortcut.
+
+New export/increment file publication is admitted only on platforms with the
+implemented directory-fsync capability. Windows reports unsupported before new
+or prepared file publication; catalog reads and retries of already published
+requests retain their historical evidence semantics. See the API capability
+fields for this distinction. This admission change does not migrate the catalogs
+or revise any historical acceptance receipt.
+
+## Manifest descriptors and catalog retries
+
+Base and incremental catalogs use the same v1 manifest descriptor contract:
+exactly `name`, `stored_bytes`, `stored_hash` and `plaintext_hash`; the fixed
+`manifest.enc` name; an integer encrypted byte count within the manifest budget;
+and two lowercase SHA-256 digests. Boolean byte counts are rejected. Descriptor
+validation does not prove that an object exists or that storage is durable.
+
+A catalog confirmation requires a Boolean durability observation and the original
+frozen source/key binding. Every retry of a published record must name its original
+manifest, including retries that do not advance status. Matching retries return
+the existing record without an UPDATE or another acceptance event. Promotion of
+an unknown publication preserves the original `manifest_json` text, including
+valid historical whitespace and key order. New prepared publications still use
+canonical JSON. Malformed historical descriptors fail validation without rewriting
+the row or synthesizing a receipt. Existing artifact readback, ownership, privacy
+and transaction fences remain required by the controlled publication interface.
+These application checks do not change schema versions or the v1 archive format.
+
+## Existing request recovery across reviewed schema changes
+
+The controlled base and increment writers reconstruct the live history under its
+actual strict schema before resuming an unfinished publication. An existing request
+is recognized only through its original, validated request intent, before any new
+preparation. A pure comparison checks every reconstructed business field against
+the frozen source. It never edits either source or returns a version-normalized copy.
+The writers and archive verifiers continue to use the original frozen source and
+manifest; the original event-prefix check remains separate and required.
+
+Cross-schema recovery additionally requires a directed, explicitly reviewed pair
+of exact old/new DDL fingerprints and a shared, registered structure fingerprint.
+Adjacent version numbers, unchanged tables alone and transitive pair composition
+are insufficient. No operator parameter or environment setting enables a pair.
+New requests keep their normal identity and same-schema parent checks. In
+particular, a new increment cannot inherit permission to extend an old-schema
+parent from another request's recovery approval. Historical accepted roots remain
+readable under their original supported schema contract.
+
+Schema117 installs the reviewed trigger-only publication migration and enables
+exactly its measured 116-to-117 recovery pair. Table/index/view structure remains
+unchanged. Historical 115/116 migration SQL and schema fingerprints are retained.
+Recovery tests construct actual116 rows and use the real117 migration, including
+file readback and process restarts. Schema115 and unreviewed future versions gain
+no implicit recovery compatibility; historical accepted archives remain readable.
+Business changes or an unverified actual schema still fail closed.
+
+## Schema117 publication guards and upgrade evidence
+
+The migration explicitly replaces the base transition guard so every UPDATE is
+checked. Prepared records can only become unknown or accepted; unknown records
+can only become accepted with the identical raw manifest text. Accepted records,
+source bindings, request intents and deletion guards retain their immutability.
+New base rows must begin prepared. Both catalogs enforce the same manifest JSON
+shape, integer byte range and lowercase digest syntax at the SQL boundary,
+including NUL/byte-length cases. Acceptance additionally requires the expected
+receipt identity, subject, source, event type and privacy metadata. These SQL
+checks do not authenticate file contents or replace the catalog/event verifier.
+
+Before changing the guards, the existing migration transaction streams old
+publication and increment-intent evidence: hashes, supported source bindings,
+keys, descriptor bounds, exact parent references and receipt bindings must agree.
+Inline event payloads are checked directly. For archived payloads, the preflight
+checks the expected payload hash without archive-file I/O under the writer lock;
+normal archive readers and runtime integrity gates still verify physical objects.
+Bad old evidence fails the migration without rehashing, deleting or inventing
+history. Existing migration backup/restore handles failure; a successful upgrade
+preserves publication rows and receipts, including valid noncanonical manifest
+JSON. An old runtime refuses a newer database. Downgrade therefore requires a
+matched pre-upgrade snapshot and an explicit check for writes since that snapshot,
+not simply running the previous binary against schema117.

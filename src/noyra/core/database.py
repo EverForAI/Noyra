@@ -3813,6 +3813,10 @@ END;
                     continue
                 try:
                     connection.execute("BEGIN IMMEDIATE")
+                    if target_version == 117:
+                        from .workflow_publication_upgrade import validate_publication_upgrade
+
+                        validate_publication_upgrade(connection)
                     self._execute_sql_script(connection, migration)
                     self._set_schema_version(connection, target_version)
                     connection.commit()

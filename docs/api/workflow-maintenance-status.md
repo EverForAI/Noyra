@@ -21,11 +21,12 @@ When either existing bound is exceeded, the response is metadata only:
 - `expected_fingerprint`, `unexplained_versions`, `unexplained_count` and
   `high_water_at` are null. An unknown inversion count is not shown as zero.
 - `maintenance` explains the exceeded bounds and requires preservation.
-  `execution_available` is true and `execution_route` is
-  `/api/v1/admin/workflow-exports`. This advertises the supported D2b control,
-  not permission to execute immediately. `execution_readiness` requires a
-  manually paused, owned, drained runtime and a usable archive key.
-  `next_action` directs controlled export while preserving source history.
+  `execution_route` is `/api/v1/admin/workflow-exports`. `execution_available`
+  reflects new-publication platform capability, not permission to execute immediately.
+  On POSIX, `execution_readiness` still requires a manually paused, owned, drained
+  runtime and a usable archive key. On Windows it reports
+  `platform_directory_durability_unavailable`; `next_action` directs use of a
+  supported platform for controlled export while preserving source history.
 
 The oversized response does not claim hashes, transitions or receipts were
 verified. The capacity metadata cannot authorize acknowledgement. The original

@@ -24,9 +24,33 @@ NAME = re.compile(r"(?:manifest|segment-[0-9]{6})\.enc\Z")
 PUBLICATION = re.compile(r"wexport_[a-f0-9]{64}\Z")
 
 
+class WorkflowPublicationUnsupportedError(OSError):
+    """The platform cannot confirm new workflow directory publication durability."""
+
+
 class WorkflowArtifactStore:
     publication_pattern = PUBLICATION
     storage_directory = "workflow-exports"
+
+    @staticmethod
+    def creation_supported() -> bool:
+        # This is admission capability, not a promise that a particular fsync succeeds.
+        return os.name == "posix"
+
+    @classmethod
+    def creation_capability(cls) -> dict[str, Any]:
+        supported = cls.creation_supported()
+        return {
+            "supported": supported,
+            "reason_code": None if supported else "platform_directory_durability_unavailable",
+            "scope": "new_or_prepared_workflow_publication",
+            "history_read_available": True,
+        }
+
+    @classmethod
+    def require_creation_supported(cls) -> None:
+        if not cls.creation_supported():
+            raise WorkflowPublicationUnsupportedError("platform_directory_durability_unavailable")
 
     def __init__(
         self,

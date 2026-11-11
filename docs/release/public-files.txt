@@ -224,6 +224,7 @@ docs/deployment/runtime-observation.md
 docs/deployment/setup-modes.md
 docs/deployment/ubuntu.md
 docs/deployment/windows-data-root-migration.md
+docs/deployment/workflow-publication-upgrade.md
 docs/development/action-deliberation-recovery.md
 docs/development/architecture-boundaries.md
 docs/development/autonomy-scheduling.md
@@ -444,6 +445,7 @@ scripts/build-historical-fixtures.py
 scripts/build-release-evidence.py
 scripts/build-reproducible-wheel.py
 scripts/build-windows-package.ps1
+scripts/check-pages-publication.py
 scripts/check-publication-boundary.py
 scripts/check-site.py
 scripts/deployment-maintenance.py
@@ -478,6 +480,7 @@ scripts/unlock-ubuntu-single-disk-storage.sh
 scripts/upgrade-ubuntu-runner.sh
 scripts/verify-cloud-security-results.py
 scripts/verify-committed.py
+scripts/verify-root-permission-results.py
 scripts/verify_external_gates.py
 site/.nojekyll
 site/assets/continuity-mobile.webp
@@ -637,6 +640,7 @@ src/noyra/core/schema/migrations_v055_v069.py
 src/noyra/core/schema/migrations_v070_v107.py
 src/noyra/core/schema/workflow_exports.py
 src/noyra/core/schema/workflow_increments.py
+src/noyra/core/schema/workflow_publication_guards.py
 src/noyra/core/schema/world_poll.py
 src/noyra/core/secret_cleanup.py
 src/noyra/core/sleep_recovery.py
@@ -662,8 +666,11 @@ src/noyra/core/workflow_increment_catalog.py
 src/noyra/core/workflow_increment_contract.py
 src/noyra/core/workflow_increment_control.py
 src/noyra/core/workflow_increment_files.py
+src/noyra/core/workflow_manifest.py
 src/noyra/core/workflow_publication_events.py
+src/noyra/core/workflow_publication_upgrade.py
 src/noyra/core/workflow_reconstruction.py
+src/noyra/core/workflow_source_recovery.py
 src/noyra/core/xml.py
 src/noyra/deployment_setup.py
 src/noyra/desktop.py
@@ -909,6 +916,7 @@ tests/support/faults.py
 tests/support/historical.py
 tests/support/relationship_provenance.py
 tests/support/synthetic.py
+tests/support/workflow_recovery_schema.py
 tests/test_a0_project_recovery.py
 tests/test_a0_recovery_budget.py
 tests/test_a1_clock_recovery.py
@@ -1071,6 +1079,7 @@ tests/test_locking.py
 tests/test_m2_checkpoint_clock.py
 tests/test_m2_clock_http.py
 tests/test_m2_integrity_watchdog.py
+tests/test_m2_publication_migration.py
 tests/test_m2_recovery_exit.py
 tests/test_m41_verification_foundation.py
 tests/test_m42_p1_01_sleep_deadlock.py
@@ -1103,6 +1112,7 @@ tests/test_m42_p3_05_windows_package.py
 tests/test_m42_p3_06_operator_controls.py
 tests/test_m42_p3_07_api_contract.py
 tests/test_m42_p3_08_supply_chain.py
+tests/test_maintenance_route_contract.py
 tests/test_management_integrity_audits.py
 tests/test_memory_blocks.py
 tests/test_memory_integration.py
@@ -1152,6 +1162,7 @@ tests/test_model_wire_contract.py
 tests/test_motivation_development.py
 tests/test_open_world_research.py
 tests/test_outcome_learning.py
+tests/test_pages_publication.py
 tests/test_participant_accounts.py
 tests/test_participant_http.py
 tests/test_participant_identity_flow.py
@@ -1163,6 +1174,7 @@ tests/test_private_erasure.py
 tests/test_private_erasure_assessment.py
 tests/test_private_erasure_disabled.py
 tests/test_private_sources.py
+tests/test_privileged_ci_contract.py
 tests/test_production_secret_sources.py
 tests/test_project_execution_recovery.py
 tests/test_project_execution_recovery_http.py
@@ -1260,6 +1272,11 @@ tests/test_wallet_setup.py
 tests/test_web_contract.py
 tests/test_windows_data_root.py
 tests/test_windows_process_identity.py
+tests/test_workflow_manifest_contract.py
+tests/test_workflow_publication_capability.py
+tests/test_workflow_source_recovery.py
+tests/test_workflow_source_recovery_control.py
+tests/test_workflow_source_recovery_process.py
 tests/test_world.py
 tests/test_world_acquisition_diagnostics.py
 tests/test_world_feed_poll.py

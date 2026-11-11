@@ -17,6 +17,8 @@ def test_archive_verification_http_preserves_auth_csrf_pause_and_private_boundar
     monkeypatch: Any,
 ) -> None:
     instance, token, read = service
+    # Simulated backend for protocol/auth tests; native admission is tested separately.
+    monkeypatch.setattr(WorkflowArtifactStore, "creation_supported", staticmethod(lambda: True))
     monkeypatch.setenv("NOYRA_ARCHIVE_KEYRING_PATH", "")
     monkeypatch.setenv(
         "NOYRA_ARCHIVE_ENCRYPTION_KEY", base64.urlsafe_b64encode(bytes(range(32))).decode()

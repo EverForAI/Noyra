@@ -35,6 +35,8 @@ def test_publication_http_obeys_operator_csrf_pause_and_private_response_contrac
     monkeypatch: Any,
 ) -> None:
     instance, operator, readonly = service
+    # Simulated backend for protocol/auth tests; native admission is tested separately.
+    monkeypatch.setattr(WorkflowArtifactStore, "creation_supported", staticmethod(lambda: True))
     monkeypatch.setenv("NOYRA_ARCHIVE_KEYRING_PATH", "")
     monkeypatch.setenv(
         "NOYRA_ARCHIVE_ENCRYPTION_KEY", base64.urlsafe_b64encode(bytes(range(32))).decode()

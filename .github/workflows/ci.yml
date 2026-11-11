@@ -65,6 +65,24 @@ jobs:
           cache: pip
       - run: python -m pip install --require-hashes --requirement requirements-dev.lock
       - run: python -m pip install --no-deps --no-build-isolation -e ".[dev]"
+      - name: Verify reviewed database fingerprints before the full suite
+        run: python -m pytest -q tests/test_public_archive.py::test_public_schema_has_fixed_reviewed_fingerprints
+      - name: Verify native root key rotation preserves service group permissions
+        id: root-permission
+        if: matrix.os == 'ubuntu-24.04' && matrix.python-version == '3.12'
+        run: |
+          sudo "$(command -v python)" -B -m pytest \
+            tests/test_backup_key_cli.py::test_root_explicit_api_retains_group_read_and_rejects_retried_altered_expectation \
+            -q -p no:cacheprovider --junitxml="${RUNNER_TEMP}/root-permission.xml" \
+            --basetemp="${RUNNER_TEMP}/root-permission-tmp"
+          python scripts/verify-root-permission-results.py --path "${RUNNER_TEMP}/root-permission.xml"
+      - name: Upload native root permission evidence
+        if: always() && (steps.root-permission.outcome == 'success' || steps.root-permission.outcome == 'failure')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: root-permission-junit
+          path: ${{ runner.temp }}/root-permission.xml
+          if-no-files-found: error
       - run: python scripts/audit-m41.py --scope targeted --profile smoke
       - name: Run complete tests in two verified partitions
         run: python scripts/run-ci-tests.py --workers 2

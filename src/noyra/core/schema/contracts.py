@@ -19,6 +19,7 @@ from __future__ import annotations
 
 
 _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
+    117: "6ddaea3121a169783d2151c7dfb6907ed41ad3c98ed7bb978fc45503b122f41d",
     116: "e78f5e9d12d781e71b504dae847c793e680be7788af14d8af5b769f4cd4cd847",
     115: "4dbda4ff72d6e9baca8185573efcd5ab92cf059bf9b471d6cf410b30a45dd319",
     114: "7aa43424fbcf88ecfd6596bc1d1de1b38cb6183b7c75e42a87c75f882006cd48",
@@ -63,6 +64,7 @@ _SCHEMA_DDL_FINGERPRINTS: dict[int, str] = {
 
 
 _SCHEMA_STRUCTURE_FINGERPRINTS: dict[int, str] = {
+    117: "2c848bc479a0b2ae97c2ef91d271e01fdf8363110892d7f681412dae64e488d0",
     116: "2c848bc479a0b2ae97c2ef91d271e01fdf8363110892d7f681412dae64e488d0",
     115: "c25f12c1743b0649fb53155e5b4e77841afd98afa274bc35b239ae2abf7aa4b6",
     114: "07f4d37b8afb791ae960245e9a634b357482de002bc3e0f30f13ee0e3fd04dc5",
