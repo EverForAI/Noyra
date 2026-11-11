@@ -59,7 +59,7 @@ def test_root_case_runs_in_bounded_ubuntu_job_with_retained_evidence() -> None:
     section = workflow.split("      - name: Verify native root key rotation", 1)[1]
     section = section.split("      - run: python -m ruff", 1)[0]
     assert "matrix.os == 'ubuntu-24.04' && matrix.python-version == '3.12'" in section
-    assert 'sudo "$(command -v python)" -m pytest' in section
+    assert 'sudo "$(command -v python)" -B -m pytest' in section
     assert GUARD["REQUIRED"][1] in section
     assert '--junitxml="${RUNNER_TEMP}/root-permission.xml"' in section
     assert "python scripts/verify-root-permission-results.py --path" in section
@@ -67,3 +67,7 @@ def test_root_case_runs_in_bounded_ubuntu_job_with_retained_evidence() -> None:
     assert "if: always()" in section and "if-no-files-found: error" in section
     assert "steps.root-permission.outcome == 'success'" in section
     assert "steps.root-permission.outcome == 'failure'" in section
+    assert workflow.index("      - name: Verify native root key rotation") < workflow.index(
+        "      - name: Run complete tests in two verified partitions"
+    )
+    assert "-p no:cacheprovider" in section

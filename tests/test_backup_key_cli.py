@@ -479,6 +479,20 @@ def test_root_explicit_api_retains_group_read_and_rejects_retried_altered_expect
     assert callable(uid) and callable(chown)
     if uid() != 0:
         pytest.skip("actual root service group")
+    # A root-owned key and immediate parent are insufficient if an ordinary
+    # runner owns an ancestor. Correct fixture placement must not weaken this
+    # production boundary, nor change the runner's existing directories.
+    untrusted = rotation_directory / "runner-owned"
+    untrusted.mkdir()
+    private = untrusted / "root-owned"
+    private.mkdir(mode=0o700)
+    rejected_target, rejected_source, rejected_args = setup(private)
+    chown(untrusted, 65534, 65534)
+    refused = command("rotate", *rejected_args, *expected(rejected_source))
+    assert refused.returncode == 4, refused.stderr
+    assert json.loads(refused.stderr)["code"] == "conflict"
+    assert rejected_target.read_bytes() == rejected_source
+    assert {entry.name for entry in private.iterdir()} == {"keyring.json"}
     target, source, args = setup(rotation_directory)
     chown(target, 0, 65534)
     target.chmod(0o640)
