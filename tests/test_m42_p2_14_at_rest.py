@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
 import subprocess
+import tarfile
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Self
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -32,6 +34,7 @@ from noyra.core.at_rest import (
     _posix_metadata_error,
     _private_paths,
     _private_permission_error,
+    _safe_archive_path,
     _windows_harden,
     _windows_permission_audit,
     validate_keyring_path,
@@ -103,6 +106,72 @@ def _keyring(tmp_path: Path) -> Path:
     path = tmp_path / "offline" / "backup-keyring.json"
     BackupKeyring.initialize(path)
     return path
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path semantics")
+@pytest.mark.parametrize(
+    "member_name",
+    ["C:escape.txt", "C:/Windows/System32/escape.txt", "file.txt:payload"],
+)
+def test_safe_archive_path_rejects_windows_drive_and_stream_names(member_name: str) -> None:
+    with pytest.raises(BackupAuthenticationError, match="not a safe relative path on Windows"):
+        _safe_archive_path(member_name)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows drive-relative path semantics")
+def test_restore_rejects_windows_drive_paths_and_cleans_temporary_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    keyring_path = _keyring(tmp_path)
+    backup = tmp_path / "malicious.noyra-backup"
+    backup.write_bytes(b"test placeholder")
+    manager = EncryptedBackupManager(tmp_path / "unused", keyring_path)
+    target = tmp_path / "restored"
+    member_name = "C:noyra-h03-probe-escape.txt"
+    escaped_destination = target.joinpath(*PurePosixPath(member_name).parts)
+    assert not escaped_destination.is_relative_to(target)
+    blocked_paths: list[Path] = []
+    native_open = os.open
+
+    def block_escaped_path(
+        path: str | bytes | os.PathLike[str],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if Path(path) == escaped_destination:
+            blocked_paths.append(Path(path))
+            raise BackupAuthenticationError("test blocked escaped archive path")
+        if dir_fd is None:
+            return native_open(path, flags, mode)
+        return native_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr("noyra.core.at_rest.os.open", block_escaped_path)
+
+    def decrypt_with_drive_path(_source: Path, tar_path: Path, _keyring: BackupKeyring) -> None:
+        payload = b"untrusted"
+        with tarfile.open(tar_path, "w") as archive:
+            member = tarfile.TarInfo(member_name)
+            member.size = len(payload)
+            archive.addfile(member, io.BytesIO(payload))
+
+    monkeypatch.setattr(manager, "_decrypt", decrypt_with_drive_path)
+
+    with pytest.raises(BackupAuthenticationError, match="not a safe relative path on Windows"):
+        manager.restore(backup, target)
+
+    assert not target.exists()
+    assert not list(tmp_path.glob(".noyra-restore-*"))
+    assert not blocked_paths
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permits colons in path components")
+def test_safe_archive_path_preserves_posix_colon_names() -> None:
+    assert _safe_archive_path("legacy:section/archive.bin").as_posix() == (
+        "legacy:section/archive.bin"
+    )
 
 
 def test_platform_private_permissions_are_hardened_and_audited(tmp_path: Path) -> None:

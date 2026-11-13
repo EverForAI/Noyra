@@ -27,7 +27,7 @@ from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from cryptography.exceptions import InvalidTag
@@ -2120,6 +2120,12 @@ def _safe_archive_path(value: object) -> PurePosixPath:
     path = PurePosixPath(value)
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise BackupAuthenticationError("backup member path escapes the restore root")
+    if os.name == "nt":
+        windows_path = PureWindowsPath(value)
+        if windows_path.drive or windows_path.root or any(":" in part for part in path.parts):
+            raise BackupAuthenticationError(
+                "backup member path is not a safe relative path on Windows"
+            )
     return path
 
 
