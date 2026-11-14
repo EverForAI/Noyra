@@ -141,8 +141,9 @@ def test_restore_rejects_windows_drive_paths_and_cleans_temporary_tree(
         *,
         dir_fd: int | None = None,
     ) -> int:
-        if Path(path) == escaped_destination:
-            blocked_paths.append(Path(path))
+        candidate = Path(os.fsdecode(path))
+        if candidate == escaped_destination:
+            blocked_paths.append(candidate)
             raise BackupAuthenticationError("test blocked escaped archive path")
         if dir_fd is None:
             return native_open(path, flags, mode)
