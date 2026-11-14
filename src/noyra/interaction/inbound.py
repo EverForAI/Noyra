@@ -567,13 +567,14 @@ class QQInboundAdapter:
         signing_key: str | None = None,
         account_id: str | None = None,
     ) -> InboundEnvelope | InboundChallenge | InboundIgnored:
+        # QQ's official SDK authenticates the complete callback before
+        # dispatching either a message or an address-validation request.
+        _verify_qq_signature(body, headers, secret, legacy_secret=signing_key)
         payload = _json(body)
         op = payload.get("op")
         data = payload.get("d")
         if op == 13:
-            # QQ's callback-address validation request is intentionally
-            # unsigned.  Possession of AppSecret is proven by the Ed25519
-            # response signature over event_ts + plain_token.
+            # Keep the platform's event_ts + plain_token response format.
             if not isinstance(data, dict):
                 raise ValueError("qq validation payload is invalid")
             plain_token = _text(data.get("plain_token"), "qq plain_token")
@@ -583,7 +584,6 @@ class QQInboundAdapter:
                 plain_token,
                 {"plain_token": plain_token, "signature": signature.hex()},
             )
-        _verify_qq_signature(body, headers, secret, legacy_secret=signing_key)
         event_type = str(payload.get("t") or "").strip()
         message_types = {
             "C2C_MESSAGE_CREATE",
