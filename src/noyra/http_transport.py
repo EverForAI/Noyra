@@ -336,8 +336,14 @@ def handler_type(
                 "/api/admin/lifecycle/reset",
                 "/api/admin/lifecycle/wake",
             }:
+                controls = owner.operator_controls
+                scope = (
+                    owner.admission.lifecycle_control_scope()
+                    if controls is None
+                    else controls.lifecycle_control_scope()
+                )
                 try:
-                    with owner.admission.lifecycle_control_scope():
+                    with scope:
                         if not owner.allow_mutation(self.path):
                             raise OperationInvalidated(
                                 "lifecycle control crossed integrity quarantine"
