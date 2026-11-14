@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -198,6 +199,17 @@ class OperatorControlService:
             self._audit("operator_wake", actor, reason, {"idempotent": False})
             return OperatorMutation("wake", state.__dict__, False)
 
+    @contextmanager
+    def lifecycle_control_scope(self) -> Iterator[None]:
+        """Serialize controls in operator -> admission -> ownership order.
+
+        HTTP callers must enter here before holding admission. Other recovery
+        controls use the same operator-first order; reset must not hold the
+        gate while waiting for them to finish.
+        """
+        with self._lock, self.kernel.admission.lifecycle_control_scope():
+            yield
+
     def reset(self, *, actor: str, reason: str) -> OperatorMutation:
         """Reset transient runtime control state without deleting subject data.
 
@@ -209,13 +221,9 @@ class OperatorControlService:
 
         actor, reason = self._validate_actor_reason(actor, reason)
         try:
-            # Match the HTTP control lock order. Keep process ownership until
-            # both the durable reset and reopening admission have completed.
-            with (
-                self.kernel.admission.lifecycle_control_scope(),
-                self._lock,
-                self.kernel.process_lock.ownership_scope(),
-            ):
+            # Keep process ownership until both the durable reset and
+            # reopening admission have completed.
+            with self.lifecycle_control_scope(), self.kernel.process_lock.ownership_scope():
                 return self._reset_owned(actor=actor, reason=reason)
         except (OperationInvalidated, RuntimeOwnershipError) as error:
             raise OperatorControlConflict(

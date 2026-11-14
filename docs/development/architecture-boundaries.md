@@ -31,6 +31,8 @@ graph TD
 
 一个路径分支被选中并不一定已经处理完毕。例如健康缓存未命中要继续计算，模型资源前缀下仍要按具体操作匹配。领域路由返回 True 表示原方法应退出，False 表示原控制流应继续；不能把选中分支的 False 当成未选中该分支，从而改变 elif 的优先级。
 
+生命周期和恢复控制统一按 `operator_controls._lock → admission gate → process ownership → 数据库事务` 取得嵌套锁。HTTP 生命周期入口通过 `OperatorControlService.lifecycle_control_scope()` 进入相同顺序，再复查修改策略；不得在持有 admission 时等待 operator 锁。reset 在数据库提交和 admission 重新开放后才释放进程所有权。其他恢复操作维持各自的隔离准入规则，不因统一锁序取得额外权限。
+
 静态资源使用 service 注入的包内 web_root。不得在移动后的域文件中用新的 __file__ 计算原 web 目录。公开文章保留兼容入口的渲染器注入位置。
 
 ## 可执行不变量

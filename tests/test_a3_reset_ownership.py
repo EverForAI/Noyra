@@ -6,6 +6,7 @@ import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import TracebackType
 from typing import Any
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -371,3 +372,94 @@ def test_http_reset_preserves_authentication_and_refuses_stale_ownership(
         assert not kernel.admission.accepting
     finally:
         owner.close()
+
+
+@pytest.mark.parametrize("via_http", [False, True], ids=["direct", "http"])
+@pytest.mark.parametrize("operation", ["pause", "resume"])
+def test_reset_waits_for_operator_lock_without_holding_admission(
+    kernel: SubjectKernel, via_http: bool, operation: str
+) -> None:
+    controls = OperatorControlService(kernel)
+    if operation == "pause":
+        controls.resume(actor="operator", reason="Prepare active lifecycle")
+    owner = None
+    token = "synthetic-lock-order-" + "o" * 32
+    if via_http:
+        owner = NoyraHTTPServer(
+            kernel,
+            ServiceSettings(
+                data_dir=kernel.database.path.parent,
+                subject_id=kernel.subject_id,
+                genesis_hash=content_hash("a3-reset"),
+                host="127.0.0.1",
+                port=0,
+                operator_token=SecretStr(token),
+            ),
+        )
+        owner.operator_controls = controls
+        owner.start()
+    operator_lock = controls._lock
+    main_thread = threading.get_ident()
+    waiting = threading.Event()
+    lock_failures: list[str] = []
+
+    class ObservedLock:
+        def __enter__(self) -> None:
+            if threading.get_ident() != main_thread:
+                waiting.set()
+            # A bounded real lock acquisition lets the old implementation fail
+            # and unwind instead of leaving deadlocked threads in the test run.
+            if not operator_lock.acquire(timeout=3):
+                lock_failures.append("operator lock timed out")
+                raise RuntimeError("synthetic operator lock deadline")
+
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            traceback: TracebackType | None,
+        ) -> None:
+            operator_lock.release()
+
+    def reset() -> str:
+        if owner is None:
+            try:
+                return str(
+                    controls.reset(actor="operator", reason="Concurrent reset").lifecycle["state"]
+                )
+            except OperatorControlConflict as error:
+                return error.code
+        request = Request(
+            f"http://127.0.0.1:{owner.address[1]}/api/v1/admin/lifecycle/reset",
+            data=json.dumps({"reason": "Concurrent reset"}).encode(),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + token},
+        )
+        try:
+            with urlopen(request, timeout=10) as response:
+                return str(json.loads(response.read())["lifecycle"]["state"])
+        except HTTPError as error:
+            return str(json.loads(error.read())["error"])
+
+    try:
+        with (
+            patch.object(controls, "_lock", ObservedLock()),
+            ThreadPoolExecutor(max_workers=1) as pool,
+        ):
+            # Stop the first operator immediately after it acquired the lock.
+            # The reset must then wait here before it can acquire admission.
+            with controls._lock:
+                future = pool.submit(reset)
+                assert waiting.wait(5), "reset did not reach the operator lock"
+                result = getattr(controls, operation)(
+                    actor="operator", reason="Finish first control"
+                )
+            reset_result = future.result(timeout=10)
+        assert not lock_failures, lock_failures
+        assert result.lifecycle["state"] == ("paused" if operation == "pause" else "active")
+        assert reset_result == ("active" if operation == "pause" else "reset_requires_paused")
+        assert kernel.lifecycle.current().state == "active"
+        with kernel.admission.operation("work-after-concurrent-controls"):
+            pass
+    finally:
+        if owner is not None:
+            owner.close()
