@@ -1242,6 +1242,7 @@ tests/test_service.py
 tests/test_service_security_profile.py
 tests/test_service_wallet_modes.py
 tests/test_signer_credentials.py
+tests/test_signer_endpoint_boundaries.py
 tests/test_signer_service.py
 tests/test_signer_systemd_credentials.py
 tests/test_sitemap_tokens.py
