@@ -113,6 +113,7 @@ def _run(storage: RotationStorage, request_id: str) -> RotationJournalStatus:
     values = storage.catalog()
     if values is None:
         raise RotationConflictError("rotation request has no preparation journal")
+    storage.require_no_pending()
     catalog = _catalog(values, sha256(str(storage.location.target).encode("utf-8")))
     entry = catalog.intents.get(request_id)
     if entry is None:

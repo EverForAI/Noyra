@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 
 from .at_rest import (
@@ -18,12 +20,25 @@ from .backup_rotation_records import (
     MAX_INTENT_BYTES,
     MAX_METADATA_BYTES,
     RotationJournalError,
+    RotationPendingRecoveryUnknownError,
     RotationPreparationUnknownError,
+    sha256,
 )
 from .locking import ProcessLock
 
 MAX_TOTAL_BYTES = 8 * 1024 * 1024
+MAX_PENDING_ENTRIES = 128
 _ENTRY = re.compile(r"[a-f0-9]{64}\.(?:(?:intent|accepted)\.json|accept\.tmp)")
+_PENDING = re.compile(r"\.pending-[a-f0-9]{32}")
+
+
+@dataclass(frozen=True)
+class _DirectorySnapshot:
+    root_revision: tuple[int, ...]
+    metadata: dict[str, os.stat_result]
+    pending: dict[str, os.stat_result]
+    pending_fingerprint: str | None
+    pending_bytes: int
 
 
 def supported_preparation() -> bool:
@@ -37,6 +52,20 @@ class RotationStorage:
         self.location, self.lock = location, lock
         self.root = location.journal_path
         self._root: tuple[int, ...] | None = None
+        self._snapshot: _DirectorySnapshot | None = None
+        self._pending_identities: frozenset[tuple[int, int]] = frozenset()
+
+    @property
+    def pending_count(self) -> int:
+        return len(self._snapshot.pending) if self._snapshot is not None else 0
+
+    @property
+    def pending_bytes(self) -> int:
+        return self._snapshot.pending_bytes if self._snapshot is not None else 0
+
+    @property
+    def pending_fingerprint(self) -> str | None:
+        return self._snapshot.pending_fingerprint if self._snapshot is not None else None
 
     def _directory(self) -> os.stat_result | None:
         self.location.validate(audit_windows=False)
@@ -75,6 +104,9 @@ class RotationStorage:
         self._require_lock()
         if self._directory() is None:
             self.root.mkdir(mode=0o700)
+        else:
+            self.catalog()
+            self.require_no_pending()
         if self._directory() is None:
             raise RotationJournalError("rotation journal directory disappeared")
         # Directory creation and its parent's entry must precede any intent.
@@ -83,15 +115,35 @@ class RotationStorage:
         self._directory()
 
     def path(self, name: str) -> Path:
-        if name != "header.json" and _ENTRY.fullmatch(name) is None:
+        if (
+            name != "header.json"
+            and _ENTRY.fullmatch(name) is None
+            and _PENDING.fullmatch(name) is None
+        ):
             raise RotationJournalError("rotation journal entry name is invalid or incomplete")
         return self.root / name
 
-    def _file(self, path: Path) -> os.stat_result:
-        value = path.lstat()
+    @staticmethod
+    def _ordinary_file(value: os.stat_result) -> None:
         if not stat.S_ISREG(value.st_mode) or getattr(value, "st_file_attributes", 0) & 0x400:
             raise RotationJournalError("rotation journal requires regular non-linked files")
-        if value.st_nlink != 1:
+        if os.name == "posix" and (
+            value.st_uid != _effective_uid() or value.st_mode & 0o077
+        ):
+            raise RotationJournalError("rotation journal file owner or permissions are unsafe")
+        _identity(value)
+
+    def _file(
+        self,
+        path: Path,
+        *,
+        pending_identities: frozenset[tuple[int, int]] = frozenset(),
+    ) -> os.stat_result:
+        value = path.lstat()
+        self._ordinary_file(value)
+        if value.st_nlink != 1 and not (
+            value.st_nlink == 2 and _identity(value) in pending_identities
+        ):
             # A crash after create-only receipt linking can leave exactly its
             # two private, hash-bound aliases. No unrelated hard links qualify.
             if path.name.endswith(".accepted.json"):
@@ -111,13 +163,90 @@ class RotationStorage:
                 or _identity(value) != _identity(other)
             ):
                 raise RotationJournalError("rotation receipt alias is unsafe")
-        if os.name == "posix":
-            if value.st_uid != _effective_uid():
-                raise RotationJournalError("rotation journal file owner or permissions are unsafe")
-            if value.st_mode & 0o077:
-                raise RotationJournalError("rotation journal file owner or permissions are unsafe")
-        _identity(value)
         return value
+
+    def _inventory(self) -> _DirectorySnapshot | None:
+        before = self._directory()
+        if before is None:
+            self._snapshot = None
+            self._pending_identities = frozenset()
+            return None
+        metadata: dict[str, os.stat_result] = {}
+        names: list[str] = []
+        total = 0
+        with os.scandir(self.root) as entries:
+            for entry in entries:
+                if len(names) >= MAX_ENTRIES + MAX_PENDING_ENTRIES:
+                    raise RotationJournalError("rotation journal exceeds its entry budget")
+                name = entry.name
+                if (
+                    name != "header.json"
+                    and _ENTRY.fullmatch(name) is None
+                    and _PENDING.fullmatch(name) is None
+                ):
+                    raise RotationJournalError(
+                        "rotation journal entry name is invalid or incomplete"
+                    )
+                value = self.path(name).lstat()
+                metadata[name] = value
+                names.append(name)
+                total += value.st_size
+                if total > MAX_TOTAL_BYTES:
+                    raise RotationJournalError("rotation journal exceeds its total byte budget")
+
+        pending = {name: metadata[name] for name in names if _PENDING.fullmatch(name)}
+        committed = {name: metadata[name] for name in names if name not in pending}
+        if len(committed) > MAX_ENTRIES:
+            raise RotationJournalError("rotation journal exceeds its entry budget")
+        if len(pending) > MAX_PENDING_ENTRIES:
+            raise RotationJournalError("rotation journal exceeds its pending-entry budget")
+        for value in pending.values():
+            self._ordinary_file(value)
+            if not 0 <= value.st_size <= MAX_INTENT_BYTES:
+                raise RotationJournalError("rotation pending entry exceeds its byte budget")
+            if value.st_nlink == 2:
+                peers = [peer for peer in committed.values() if _identity(peer) == _identity(value)]
+                if len(peers) != 1 or peers[0].st_nlink != 2:
+                    raise RotationJournalError("rotation pending hard-link alias is unsafe")
+                self._ordinary_file(peers[0])
+            elif value.st_nlink != 1:
+                raise RotationJournalError("rotation pending hard-link count is unsafe")
+
+        if os.name == "nt":
+            ready, _ = _windows_permission_audit(
+                self.root, max_entries=MAX_ENTRIES + MAX_PENDING_ENTRIES + 1
+            )
+            if not ready:
+                raise RotationJournalError("rotation journal ACL is unsafe or unavailable")
+        root_after = self._directory()
+        if root_after is None or _revision(before) != _revision(root_after):
+            raise RotationJournalError("rotation journal changed during inspection; retry")
+        for name, value in pending.items():
+            if _revision(self.path(name).lstat()) != _revision(value):
+                raise RotationJournalError("rotation pending entry changed during inspection")
+        pending_bytes = sum(value.st_size for value in pending.values())
+        fingerprint = None
+        if pending:
+            encoded = json.dumps(
+                {
+                    "root": _revision(before),
+                    "pending": [
+                        [name, _revision(value)] for name, value in sorted(pending.items())
+                    ],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+            fingerprint = sha256(encoded)
+        return _DirectorySnapshot(
+            _revision(before), metadata, pending, fingerprint, pending_bytes
+        )
+
+    def require_no_pending(self) -> None:
+        if self.pending_count:
+            raise RotationJournalError(
+                "rotation pending temporary files require explicit recovery"
+            )
 
     @staticmethod
     def _limit(name: str) -> int:
@@ -129,7 +258,7 @@ class RotationStorage:
         if self._directory() is None:
             raise RotationJournalError("rotation journal directory is unavailable")
         path = self.path(name)
-        before = self._file(path)
+        before = self._file(path, pending_identities=self._pending_identities)
         limit = self._limit(name)
         if not (0 <= before.st_size <= limit) or (not before.st_size and not name.endswith(".tmp")):
             raise RotationJournalError("rotation journal entry exceeds its byte budget")
@@ -151,7 +280,8 @@ class RotationStorage:
         finally:
             os.close(descriptor)
         self._directory()
-        if _revision(self._file(path)) != _revision(before):
+        current = self._file(path, pending_identities=self._pending_identities)
+        if _revision(current) != _revision(before):
             raise RotationJournalError("rotation journal file changed after reading")
         raw = b"".join(chunks)
         if len(raw) > limit or (not raw and not name.endswith(".tmp")):
@@ -159,30 +289,98 @@ class RotationStorage:
         return raw
 
     def catalog(self) -> dict[str, bytes] | None:
-        before = self._directory()
-        if before is None:
+        snapshot = self._inventory()
+        if snapshot is None:
             return None
-        names: list[str] = []
-        total = 0
-        with os.scandir(self.root) as entries:
-            for entry in entries:
-                if len(names) >= MAX_ENTRIES:
-                    raise RotationJournalError("rotation journal exceeds its entry budget")
-                path = self.path(entry.name)
-                value = self._file(path)
-                total += value.st_size
-                if total > MAX_TOTAL_BYTES:
-                    raise RotationJournalError("rotation journal exceeds its total byte budget")
-                names.append(entry.name)
-        if os.name == "nt":
-            ready, _ = _windows_permission_audit(self.root, max_entries=MAX_ENTRIES + 1)
-            if not ready:
-                raise RotationJournalError("rotation journal ACL is unsafe or unavailable")
-        values = {name: self.read(name) for name in sorted(names)}
-        after = self._directory()
-        if after is None or _revision(before) != _revision(after):
+        pending_identities = frozenset(_identity(value) for value in snapshot.pending.values())
+        self._snapshot = snapshot
+        self._pending_identities = pending_identities
+        names = sorted(name for name in snapshot.metadata if name not in snapshot.pending)
+        values: dict[str, bytes] = {}
+        for name in names:
+            value = self._file(self.path(name), pending_identities=pending_identities)
+            if _revision(value) != _revision(snapshot.metadata[name]):
+                raise RotationJournalError("rotation journal changed during inspection; retry")
+            values[name] = self.read(name)
+        after = self._inventory()
+        if (
+            after is None
+            or snapshot.root_revision != after.root_revision
+            or snapshot.pending_fingerprint != after.pending_fingerprint
+        ):
             raise RotationJournalError("rotation journal changed during inspection; retry")
+        self._snapshot = after
+        self._pending_identities = frozenset(_identity(value) for value in after.pending.values())
         return values
+
+    def recover_pending(self, expected_fingerprint: str) -> tuple[int, int]:
+        self._require_lock()
+        values = self.catalog()
+        if values is None:
+            raise RotationJournalError("rotation journal is unavailable")
+        if not self.pending_count or self.pending_fingerprint != expected_fingerprint:
+            raise RotationJournalError("rotation pending fingerprint changed; inspect again")
+        snapshot = self._snapshot
+        assert snapshot is not None
+        removed_count, removed_bytes = len(snapshot.pending), snapshot.pending_bytes
+        for name, expected in sorted(snapshot.pending.items()):
+            try:
+                descriptor = os.open(
+                    self.path(name),
+                    os.O_RDONLY
+                    | int(getattr(os, "O_NOFOLLOW", 0))
+                    | int(getattr(os, "O_NONBLOCK", 0)),
+                )
+                try:
+                    opened = os.fstat(descriptor)
+                    current = self.path(name).lstat()
+                    if (
+                        _revision(opened) != _revision(expected)
+                        or _revision(current) != _revision(expected)
+                    ):
+                        raise RotationJournalError(
+                            "rotation pending entry changed before recovery"
+                        )
+                    self._ordinary_file(opened)
+                    if opened.st_nlink not in {1, 2}:
+                        raise RotationJournalError("rotation pending hard-link count is unsafe")
+                    if opened.st_nlink == 2:
+                        peers = [
+                            peer
+                            for peer in snapshot.metadata
+                            if peer not in snapshot.pending
+                            and _identity(snapshot.metadata[peer]) == _identity(opened)
+                        ]
+                        if len(peers) != 1:
+                            raise RotationJournalError("rotation pending alias is unsafe")
+                        peer = peers[0]
+                        peer_path = self.path(peer)
+                        peer_current = self._file(peer_path, pending_identities=frozenset({
+                            _identity(opened)
+                        }))
+                        if (
+                            _revision(peer_current) != _revision(snapshot.metadata[peer])
+                            or peer_current.st_nlink != 2
+                        ):
+                            raise RotationJournalError(
+                                "rotation pending alias changed before recovery"
+                            )
+                    self._directory()
+                    self.path(name).unlink()
+                finally:
+                    os.close(descriptor)
+            except (OSError, RotationJournalError) as error:
+                raise RotationPendingRecoveryUnknownError() from error
+        try:
+            _fsync_directory(self.root)
+            remaining = self.catalog()
+            if remaining is None or self.pending_count:
+                raise RotationPendingRecoveryUnknownError()
+        except (OSError, RotationJournalError) as error:
+            if isinstance(error, RotationPendingRecoveryUnknownError):
+                raise
+            raise RotationPendingRecoveryUnknownError() from error
+        return removed_count, removed_bytes
 
     def _cleanup(self, temporary: Path, identity: tuple[int, int] | None) -> None:
         if identity is None:
@@ -213,6 +411,7 @@ class RotationStorage:
             or (sum(len(value) for value in existing.values()) + len(raw) > MAX_TOTAL_BYTES)
         ):
             raise RotationJournalError("rotation journal new entry exceeds its work or byte budget")
+        self.require_no_pending()
         # Temporary names are never accepted by the reader as committed records.
         temporary = self.root / (".pending-" + os.urandom(16).hex())
         identity = None
@@ -262,6 +461,7 @@ class RotationStorage:
         existing = self.catalog()
         if existing is None:
             raise RotationJournalError("rotation journal is unavailable")
+        self.require_no_pending()
         path = self.path(name)
         previous = existing.get(name)
         if previous is not None and not raw.startswith(previous):
@@ -314,6 +514,7 @@ class RotationStorage:
         values = self.catalog()
         if values is None or self.read(stage) != raw:
             raise RotationJournalError("rotation acceptance staging conflicts")
+        self.require_no_pending()
         if (
             len(values) >= MAX_ENTRIES
             or sum(len(data) for data in values.values()) + len(raw) > MAX_TOTAL_BYTES
@@ -327,6 +528,8 @@ class RotationStorage:
 
     def remove_stage(self, name: str, raw: bytes) -> None:
         self._require_lock()
+        self.catalog()
+        self.require_no_pending()
         if not name.endswith(".accept.tmp") or self.read(name) != raw:
             raise RotationJournalError("rotation staging cleanup conflicts")
         expected = self._file(self.path(name))
@@ -338,6 +541,8 @@ class RotationStorage:
 
     def confirm(self, name: str) -> None:
         self._require_lock()
+        self.catalog()
+        self.require_no_pending()
         if self._directory() is None:
             raise RotationJournalError("rotation journal directory is unavailable")
         before = self._file(self.path(name))

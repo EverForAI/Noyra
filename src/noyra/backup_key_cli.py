@@ -14,6 +14,7 @@ from .core.backup_keyring_paths import BackupRotationPathError
 from .core.backup_rotation import BackupRotationJournal, RotationJournalStatus
 from .core.backup_rotation_records import (
     RotationOutcomeUnknownError,
+    RotationPendingRecoveryUnknownError,
     RotationPreparationUnknownError,
     RotationUnsupportedError,
     validate_generation,
@@ -27,10 +28,10 @@ from .core.errors import RuntimeOwnershipError
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m noyra backup-key")
     sub = parser.add_subparsers(dest="action", required=True)
-    for action in ("init", "status", "prepare", "resume", "rotate"):
+    for action in ("init", "status", "prepare", "resume", "rotate", "recover-pending"):
         command = sub.add_parser(action)
         command.add_argument("--path", required=True, type=Path)
-        if action != "init":
+        if action not in {"init", "recover-pending"}:
             command.add_argument(
                 "--request-id",
                 required=True,
@@ -39,6 +40,8 @@ def _parser() -> argparse.ArgumentParser:
         if action in {"prepare", "rotate"}:
             command.add_argument("--expected-generation", type=int, required=True)
             command.add_argument("--expected-source-hash", required=True)
+        if action == "recover-pending":
+            command.add_argument("--expected-pending-fingerprint", required=True)
     return parser
 
 
@@ -59,42 +62,61 @@ def run(arguments: list[str]) -> None:
         ring = BackupKeyring.initialize(options.path)
         _emit(ring.metadata(), sys.stdout)
         return
+    request_id: str | None = None
     try:
-        request_id = validate_id(options.request_id)
+        if action != "recover-pending":
+            request_id = validate_id(options.request_id)
         if action in {"prepare", "rotate"}:
             validate_generation(options.expected_generation)
             validate_hash(options.expected_source_hash)
+        if action == "recover-pending":
+            validate_hash(options.expected_pending_fingerprint)
     except BackupKeyUnavailableError:
-        parser.error("invalid request ID, expected generation or source hash")
+        parser.error("invalid request ID, expectation or pending fingerprint")
     api = BackupRotationJournal(options.path)
     try:
-        # Request ID must be recorded by the operator before publishing. A
-        # closed stdout cannot cause an unreported keyring replacement.
-        if action in {"prepare", "rotate", "resume"}:
+        # Flush mutation identity before touching storage; a closed stdout must
+        # not leave an unreported keyring replacement or cleanup operation.
+        if action in {"prepare", "rotate", "resume", "recover-pending"}:
             requested: dict[str, Any] = {
                 "event": "request",
                 "action": action,
-                "request_id": request_id,
             }
+            if request_id is not None:
+                requested["request_id"] = request_id
             if action in {"prepare", "rotate"}:
                 requested.update(
                     expected_generation=options.expected_generation,
                     expected_source_hash=options.expected_source_hash,
                 )
+            if action == "recover-pending":
+                requested["expected_pending_fingerprint"] = (
+                    options.expected_pending_fingerprint
+                )
             _emit(requested, sys.stdout)
         if action != "status" and not supported_preparation():
             raise RotationUnsupportedError("required durable publication profile is unavailable")
         if action == "status":
+            assert request_id is not None
             result = api.status(request_id=request_id)
+        elif action == "recover-pending":
+            recovery = api.recover_pending(
+                expected_fingerprint=options.expected_pending_fingerprint
+            )
+            _emit({"event": "result", **asdict(recovery)}, sys.stdout)
+            return
         elif action == "prepare":
+            assert request_id is not None
             result = api.prepare(
                 request_id=request_id,
                 expected_generation=options.expected_generation,
                 expected_source_hash=options.expected_source_hash,
             )
         elif action == "resume":
+            assert request_id is not None
             result = api.resume(request_id=request_id)
         else:
+            assert request_id is not None
             # The preparation summary is flushed before the first publication
             # attempt. Existing request replay skips prepare's source-current
             # requirement, but still checks the original expectation binding.
@@ -117,19 +139,30 @@ def run(arguments: list[str]) -> None:
             {
                 "event": "error",
                 "code": "unsupported",
-                "request_id": request_id,
-                "message": "required POSIX durability is unavailable; no publication attempted",
+                **({"request_id": request_id} if request_id else {}),
+                "message": (
+                    "required POSIX durability is unavailable; "
+                    "no journal mutation attempted"
+                ),
             },
             sys.stderr,
         )
         raise SystemExit(5) from None
-    except (RotationOutcomeUnknownError, RotationPreparationUnknownError):
+    except (
+        RotationOutcomeUnknownError,
+        RotationPreparationUnknownError,
+        RotationPendingRecoveryUnknownError,
+    ) as error:
         _emit(
             {
                 "event": "error",
                 "code": "outcome_unknown",
-                "request_id": request_id,
-                "message": "inspect or resume the same request; do not start another rotation",
+                **({"request_id": request_id} if request_id else {}),
+                "message": (
+                    "inspect the pending fingerprint before retrying recovery"
+                    if isinstance(error, RotationPendingRecoveryUnknownError)
+                    else "inspect or resume the same request; do not start another rotation"
+                ),
             },
             sys.stderr,
         )
@@ -139,7 +172,7 @@ def run(arguments: list[str]) -> None:
             {
                 "event": "error",
                 "code": "busy",
-                "request_id": request_id,
+                **({"request_id": request_id} if request_id else {}),
                 "message": "another operation owns the rotation lock; retry the same request",
             },
             sys.stderr,
@@ -150,7 +183,7 @@ def run(arguments: list[str]) -> None:
             {
                 "event": "error",
                 "code": "conflict",
-                "request_id": request_id,
+                **({"request_id": request_id} if request_id else {}),
                 "message": "stored evidence, source expectation or private storage conflicts",
             },
             sys.stderr,
@@ -163,7 +196,7 @@ def run(arguments: list[str]) -> None:
             {
                 "event": "error",
                 "code": "outcome_unknown",
-                "request_id": request_id,
+                **({"request_id": request_id} if request_id is not None else {}),
                 "message": "I/O or response failed; inspect the same retained request",
             },
             sys.stderr,

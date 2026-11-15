@@ -570,6 +570,12 @@ available for earlier backups. Rotation preserves root-owned service-group
 `0640` permissions and does not require changing the runtime database. See the
 [command and exit-code contract](../development/backup-key-commands.md).
 
+If status reports `pending_count` greater than zero, do not delete journal files
+manually. Record its `pending_fingerprint`, then run `backup-key recover-pending`
+with `--expected-pending-fingerprint` set to that exact value. Re-run status and
+continue with the original request ID and source expectation only after recovery
+reports success.
+
 Restore only while the service is stopped and only to an absent or empty child directory on an
 encrypted volume. Do not use the mount point itself: plaintext staging is created beside the target,
 so the target and its parent must be the same encrypted filesystem. The restore authenticates every

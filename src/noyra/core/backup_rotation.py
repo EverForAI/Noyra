@@ -23,6 +23,7 @@ from .backup_rotation_records import (
     RotationIntent,
     RotationJournalError,
     RotationOutcomeUnknownError,
+    RotationPendingRecoveryUnknownError,
     RotationPreparationUnknownError,
     RotationUnsupportedError,
     keyring_bytes,
@@ -39,6 +40,8 @@ __all__ = [
     "RotationConflictError",
     "RotationJournalError",
     "RotationOutcomeUnknownError",
+    "RotationPendingRecovery",
+    "RotationPendingRecoveryUnknownError",
     "RotationPreparationUnknownError",
 ]
 
@@ -55,6 +58,16 @@ class RotationJournalStatus:
     profile: str | None = None
     target_generation: int | None = None
     observed_keyring_hash: str | None = None
+    pending_count: int = 0
+    pending_bytes: int = 0
+    pending_fingerprint: str | None = None
+
+
+@dataclass(frozen=True)
+class RotationPendingRecovery:
+    removed_count: int
+    removed_bytes: int
+    durability_confirmed: bool = True
 
 
 @dataclass(frozen=True)
@@ -166,6 +179,17 @@ class BackupRotationJournal:
                 return RotationJournalStatus(
                     "absent", ring.generation, request_id, observed_keyring_hash=sha256(source)
                 )
+            if not values:
+                state = "pending_recovery_required" if storage.pending_count else "absent"
+                return RotationJournalStatus(
+                    state,
+                    ring.generation,
+                    request_id,
+                    observed_keyring_hash=sha256(source),
+                    pending_count=storage.pending_count,
+                    pending_bytes=storage.pending_bytes,
+                    pending_fingerprint=storage.pending_fingerprint,
+                )
             catalog = _catalog(values, self._binding(location))
             entry = catalog.intents.get(request_id)
             if entry is None:
@@ -175,6 +199,9 @@ class BackupRotationJournal:
                     request_id,
                     catalog.header.slot_id,
                     observed_keyring_hash=sha256(source),
+                    pending_count=storage.pending_count,
+                    pending_bytes=storage.pending_bytes,
+                    pending_fingerprint=storage.pending_fingerprint,
                 )
             intent, raw = entry
             state = "conflict"
@@ -207,6 +234,9 @@ class BackupRotationJournal:
                 sha256(raw),
                 target_generation=intent.expected_generation + 1,
                 observed_keyring_hash=sha256(source),
+                pending_count=storage.pending_count,
+                pending_bytes=storage.pending_bytes,
+                pending_fingerprint=storage.pending_fingerprint,
             )
         except (BackupRotationPathError, OSError) as error:
             raise RotationJournalError(
@@ -231,11 +261,13 @@ class BackupRotationJournal:
         # Never replace that source expectation with freshly observed values.
         try:
             location = BackupRotationLocation(self.path, permission_error=_keyring_permission_error)
-            values = RotationStorage(location).catalog()
+            storage = RotationStorage(location)
+            values = storage.catalog()
         except (OSError, BackupRotationPathError) as error:
             raise RotationConflictError(
                 "rotation request lookup storage is unavailable or unsafe"
             ) from error
+        storage.require_no_pending()
         if values:
             catalog = _catalog(values, self._binding(location))
             entry = catalog.intents.get(request_id)
@@ -291,6 +323,7 @@ class BackupRotationJournal:
                     raise RotationJournalError("backup keyring reached its retained-key limit")
                 storage = RotationStorage(boundary, lock)
                 values = storage.catalog()
+                storage.require_no_pending()
                 if values is None or not values:
                     storage.ensure()
                     header = RotationHeader(os.urandom(16).hex(), self._binding(boundary))
@@ -370,3 +403,43 @@ class BackupRotationJournal:
             raise RotationPreparationUnknownError(request_id) from error
         except BackupRotationPathError as error:
             raise RotationJournalError("rotation preparation path boundary is unsafe") from error
+
+    def recover_pending(self, *, expected_fingerprint: str) -> RotationPendingRecovery:
+        """Remove only the private temporary files observed in a prior status result."""
+        expected_fingerprint = validate_hash(expected_fingerprint)
+        if not supported_preparation():
+            raise RotationUnsupportedError(
+                "pending-file recovery requires POSIX file and directory durability"
+            )
+        try:
+            boundary = BackupRotationBoundary(self.path, permission_error=_keyring_permission_error)
+            lock = ProcessLock(boundary.lock_path, opener=boundary.open_lock)
+            lock.acquire()
+            try:
+                source = boundary.read(MAX_KEYRING_BYTES)
+                BackupKeyring._from_bytes(source)
+                storage = RotationStorage(boundary, lock)
+                values = storage.catalog()
+                if values is None:
+                    raise RotationJournalError("rotation journal is unavailable")
+                if values:
+                    _catalog(values, self._binding(boundary))
+                elif not storage.pending_count:
+                    raise RotationJournalError("rotation journal has no pending files to recover")
+                removed_count, removed_bytes = storage.recover_pending(expected_fingerprint)
+                try:
+                    boundary.validate()
+                except (OSError, BackupRotationPathError) as error:
+                    raise RotationPendingRecoveryUnknownError() from error
+                return RotationPendingRecovery(removed_count, removed_bytes)
+            finally:
+                try:
+                    lock.release()
+                except OSError as error:
+                    raise RotationPendingRecoveryUnknownError() from error
+        except RotationPendingRecoveryUnknownError:
+            raise
+        except OSError as error:
+            raise RotationPendingRecoveryUnknownError() from error
+        except BackupRotationPathError as error:
+            raise RotationJournalError("rotation recovery path boundary is unsafe") from error

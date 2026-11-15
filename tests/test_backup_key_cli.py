@@ -129,6 +129,49 @@ def test_cli_init_and_status_are_compatible_and_secret_free(rotation_directory: 
     assert {p.name for p in rotation_directory.iterdir()} == {"keyring.json"}
 
 
+@POSIX
+def test_cli_reports_and_recovers_only_confirmed_pending_snapshot(
+    rotation_directory: Path,
+) -> None:
+    target, source, args = setup(rotation_directory)
+    assert command("prepare", *args, *expected(source)).returncode == 0
+    journal = target.with_name("." + target.name + ".rotation-journal")
+    pending = journal / (".pending-" + "b" * 32)
+    pending.write_bytes(b"synthetic incomplete staging")
+    pending.chmod(0o600)
+
+    inspected = command("status", *args)
+    assert inspected.returncode == 0, inspected.stderr
+    state = json.loads(inspected.stdout)
+    fingerprint = state["pending_fingerprint"]
+    assert state["pending_count"] == 1 and len(fingerprint) == 64
+    assert pending.exists() and target.read_bytes() == source
+
+    stale = command(
+        "recover-pending",
+        "--path",
+        str(target),
+        "--expected-pending-fingerprint",
+        "0" * 64,
+    )
+    assert stale.returncode == 4 and pending.exists()
+    assert json.loads(stale.stdout)["action"] == "recover-pending"
+
+    recovered = command(
+        "recover-pending",
+        "--path",
+        str(target),
+        "--expected-pending-fingerprint",
+        fingerprint,
+    )
+    assert recovered.returncode == 0, recovered.stderr
+    events = [json.loads(line) for line in recovered.stdout.splitlines()]
+    assert [item["event"] for item in events] == ["request", "result"]
+    assert events[-1]["removed_count"] == 1
+    assert events[-1]["removed_bytes"] == len(b"synthetic incomplete staging")
+    assert not pending.exists() and target.read_bytes() == source
+
+
 @pytest.mark.skipif(os.name != "nt", reason="native Windows capability")
 @pytest.mark.parametrize("action", ["prepare", "resume", "rotate"])
 def test_cli_windows_mutation_is_unsupported_before_touching_missing_path(
@@ -459,6 +502,8 @@ def test_cli_deployment_docs_share_current_requests_and_exit_codes() -> None:
             "--expected-source-hash",
             "RotationRequestRequiredError",
             "RotationJournalStatus",
+            "recover-pending",
+            "pending_fingerprint",
         ]
     )
     ubuntu = (ROOT / "docs/deployment/ubuntu.md").read_text(encoding="utf-8")
@@ -466,6 +511,8 @@ def test_cli_deployment_docs_share_current_requests_and_exit_codes() -> None:
     assert (
         "backup-key prepare" in ubuntu
         and "backup-key resume" in ubuntu
+        and "backup-key recover-pending" in ubuntu
+        and "--expected-pending-fingerprint" in ubuntu
         and "--request-id" in ubuntu
     )
     assert "exit code 5" in desktop and "backup-key-commands.md" in desktop

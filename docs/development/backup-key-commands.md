@@ -8,7 +8,7 @@ interfaces and encrypted v1 keyring/backup formats.
 
 ## Commands
 
-`python -m noyra backup-key` provides five actions:
+`python -m noyra backup-key` provides six actions:
 
 | Action | Required arguments besides `--path` | Behavior |
 |---|---|---|
@@ -17,12 +17,32 @@ interfaces and encrypted v1 keyring/backup formats.
 | `prepare` | `--request-id`, `--expected-generation`, `--expected-source-hash` | Persist exactly one proposed target; leave current keyring unchanged |
 | `resume` | `--request-id` | Publish or confirm only that existing request |
 | `rotate` | `--request-id`, `--expected-generation`, `--expected-source-hash` | Prepare if missing, otherwise resume the original bound request |
+| `recover-pending` | `--expected-pending-fingerprint` | Remove only the exact temporary files observed in a prior status result |
 
 Generate a lowercase 128-bit hex request ID once and save it in the operator's
 maintenance record. `status` returns `generation` and `observed_keyring_hash`.
 Use those values as the expected source for `prepare`/`rotate`; do not re-read and
 substitute the new source values after an uncertain outcome. The ID is not a
 credential; journal snapshots are secret and must never be pasted into a report.
+
+If `status` reports a nonzero `pending_count`, retain its
+`pending_fingerprint` and `pending_bytes`. `prepare` and `resume` remain blocked;
+they never adopt or automatically remove these files. Recovery requires an
+explicit call using the observed fingerprint:
+
+```sh
+python -m noyra backup-key recover-pending --path /path/to/keyring.json \
+  --expected-pending-fingerprint FINGERPRINT_FROM_STATUS
+```
+
+The operation reacquires the rotation lock, rechecks the complete fingerprint,
+validates file identity, ownership, permissions and any create-only hard-link
+alias, removes only exact `.pending-<32 lowercase hex>` entries, and synchronizes
+the journal directory. A stale fingerprint or unknown/unsafe entry is rejected
+without cleanup. After recovery, inspect status again and retry the original
+request ID and original source expectation; never substitute a new request ID
+just because preparation had an uncertain result. A `pending_recovery_required`
+state means a crash happened before the journal header was committed.
 
 For a new operation, the preferred sequence is `status` → `prepare` → `resume`.
 Preparation returns an immutable target hash. A missing request cannot be created
@@ -34,7 +54,8 @@ ID with the old source expectation also fails instead of rotating the new source
 ## Output, exit codes and lost responses
 
 Mutation commands emit a JSON request record and flush stdout before touching
-storage. A new combined rotation also flushes its prepared target summary before
+storage. `recover-pending` records the supplied fingerprint in that request
+record. A new combined rotation also flushes its prepared target summary before
 publication. Successful completion emits a JSON result record; output is JSONL,
 not one large JSON object. `status` emits only its result, and `init` retains the
 previous single metadata object. Results contain IDs, hashes, generations and
@@ -45,7 +66,7 @@ durability barrier.
 |---:|---|---|
 | 0 | Action completed; inspect the returned state | Retain the request record |
 | 2 | Missing or invalid command arguments | Correct the arguments before retrying |
-| 3 | Preparation/publication/response outcome is unknown | Inspect or resume the same saved request |
+| 3 | Preparation/publication/recovery/response outcome is unknown | Inspect status before retrying the same operation |
 | 4 | Evidence, expectation or private storage conflicts | Inspect that request/storage; do not start another rotation |
 | 5 | Required POSIX durability is unsupported | Use supported storage/platform; no publication attempted |
 | 6 | Another process owns the rotation lock | Retry the same request after it releases ownership |
