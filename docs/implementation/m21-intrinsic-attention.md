@@ -35,6 +35,29 @@ receives bounded private events, memories, beliefs, autonomous goals, relationsh
 self-model context. It can cite only supplied IDs. It cannot call tools, browse, publish, communicate,
 spend funds, alter capabilities or claim an external action occurred.
 
+The context limit measures the final escaped UTF-8 bytes, including JSON syntax and escaped
+control markers. The historical `NOYRA_MAX_THOUGHT_CONTEXT_CHARS` setting name remains available;
+the fixed JSON envelope is additional overhead of fewer than 100 bytes. A context that already
+fits keeps its original representation and prompt.
+
+The worker first checks whether the dictionaries and one event anchor can fit together. If they
+can, it only prunes optional source rows. Otherwise, it projects agenda descriptions and the
+current self-model, reserving a quarter of the budget for agenda metadata and a third for the
+self-model. Only the agenda topic is shortened; agenda/source IDs, attention
+values, status and timestamps remain exact. The self-model keeps its version and bounded prefixes
+of continuity, values, commitments, uncertainties and trait descriptions. Its nested JSON columns
+remain complete JSON arrays, with retained trait provenance IDs and numeric values unchanged.
+Trailing optional entries may be omitted if text shortening alone is insufficient.
+
+Projected dictionaries are marked by `context_projection` with hashes of their full originals.
+The model is told that omitted details remain unknown. These hashes describe truncation and do
+not authorize citations. At least one available event anchor survives list pruning; source-ID
+validation uses exactly the rows still transmitted. If immutable identifiers themselves cannot
+fit, context construction reports an integrity error rather than shortening an identity. The
+durable agenda and self-model stay intact, and context construction does not write to the database.
+Existing budget, cooldown, unknown-call reconciliation and successful-call recovery rules still
+govern provider requests and commits.
+
 A thought may propose one candidate self-origin goal. The local supervisor accepts it only when the
 named motive matches a current affect component with sufficient intensity and the separate daily goal
 limit has not been reached. The goal remains a candidate for normal goal governance; thought does not

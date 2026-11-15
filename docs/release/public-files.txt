@@ -557,6 +557,7 @@ src/noyra/cognition/social.py
 src/noyra/cognition/social_rounds.py
 src/noyra/cognition/supervisor.py
 src/noyra/cognition/thought.py
+src/noyra/cognition/thought_context.py
 src/noyra/cognition/thought_rounds.py
 src/noyra/cognition/types.py
 src/noyra/cognitive_wait_maintenance.py
@@ -1248,6 +1249,7 @@ tests/test_social_rejection_recovery.py
 tests/test_storage.py
 tests/test_storage_lifecycle.py
 tests/test_storage_mode.py
+tests/test_thought_context_budget.py
 tests/test_transport_dispatch_fencing.py
 tests/test_transports.py
 tests/test_upgrade_deployment.py

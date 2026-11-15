@@ -39,6 +39,7 @@ from ._integrity import (
 from .attention import attention_batch
 from .decision_evidence import DecisionValidationError, rejection_receipt
 from .settings import CognitionSettings
+from .thought_context import escape_context_data, fit_context
 from .thought_rounds import ThoughtRounds
 from .types import IntrinsicThoughtGoalProposal, IntrinsicThoughtProposal
 
@@ -982,8 +983,7 @@ class IntrinsicThought:
 
     @staticmethod
     def _escape_context_data(serialized: str) -> str:
-        data = serialized.replace("<", "\\u003c").replace(">", "\\u003e")
-        return data.replace("BEGIN_", "BEGIN\\u005f").replace("END_", "END\\u005f")
+        return escape_context_data(serialized)
 
     def _context(self, agenda: ThoughtAgendaRecord) -> _ThoughtContext:
         with self.database.connection() as connection:
@@ -1053,31 +1053,10 @@ class IntrinsicThought:
                 [] if self.advisory_provider is None else self.advisory_provider(8)
             ),
         }
-        list_keys = (
-            "events",
-            "memories",
-            "beliefs",
-            "goals",
-            "relationships",
-            "affect",
-            "recent_attempts",
-            "common_knowledge_advisories",
-        )
-        # Account for the actual escaped representation, not just its shorter
-        # decoded values, so hostile marker/angle-bracket floods cannot enlarge
-        # a bounded thought context after source selection.
-        while (
-            len(self._escape_context_data(canonical_json(payload)))
-            > self.settings.max_thought_context_chars
-        ):
-            largest = max(list_keys, key=lambda key: len(payload[key]))
-            if payload[largest]:
-                payload[largest].pop()
-                continue
-            raise IntrinsicThoughtValidationError("thought context cannot fit its limit")
+        serialized = fit_context(payload, self.settings.max_thought_context_chars)
         source_payload = {key: value for key, value in payload.items() if key != "recent_attempts"}
         return _ThoughtContext(
-            self._escape_context_data(canonical_json(payload)),
+            serialized,
             content_hash(source_payload),
             agenda,
             frozenset(str(row["event_id"]) for row in payload["events"]),
@@ -1111,6 +1090,11 @@ class IntrinsicThought:
             "Avoid repeating prior "
             "wording without a material new insight. Return only the requested structured object."
         )
+        if "context_projection" in json.loads(context.serialized):
+            system += (
+                " A context_projection marks shortened descriptions; "
+                "omitted details remain unknown."
+            )
         # The context is already canonical JSON. Preserve its structure rather
         # than adding another layer of quoting; escape textual control markers
         # so hostile values cannot impersonate an out-of-band message boundary.
