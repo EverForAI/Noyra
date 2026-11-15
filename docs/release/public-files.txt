@@ -1083,6 +1083,7 @@ tests/test_identity_challenges.py
 tests/test_inbound.py
 tests/test_independent_audit_profiles.py
 tests/test_installer_operability.py
+tests/test_installer_release_cleanup.py
 tests/test_integrity_hardening.py
 tests/test_interaction.py
 tests/test_interaction_queue_eligibility.py

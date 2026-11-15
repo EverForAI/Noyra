@@ -765,6 +765,17 @@ the database, stop the service and restore the pre-update backup to an empty chi
 encrypted volume, then re-point/start the known-good release only after checking identity and
 integrity.
 
+If a failed installation cannot safely remove its newly published, unused code
+release, it leaves Noyra stopped and reports a cleanup failure. The installer
+checks for mounts at or below that release before deletion, including same-device
+bind mounts, and uses `rm --one-file-system` for the deletion itself. An unavailable
+mount listing or a deletion error also blocks automatic restart. Keep release
+directories free of mounts while installation and failure recovery run; this check
+does not serialize concurrent mount changes by an administrator. Review retained
+paths while stopped, preserve the data backup, and resolve the mount or permission
+problem before retrying. A schema-incompatible old release still requires the
+existing data-recovery procedure; cleanup does not override that safeguard.
+
 To select the recorded previous code release after a failed deployment:
 
 ```bash
