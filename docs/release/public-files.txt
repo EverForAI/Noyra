@@ -232,6 +232,7 @@ docs/development/architecture-boundaries.md
 docs/development/autonomy-scheduling.md
 docs/development/backup-key-commands.md
 docs/development/backup-keyring-rotation.md
+docs/development/backup-restore-publication.md
 docs/development/backup-rotation-journal.md
 docs/development/backup-rotation-publication.md
 docs/development/checkpoint-clock-and-recovery.md
@@ -979,6 +980,7 @@ tests/test_b3_integrity_evidence.py
 tests/test_b3_integrity_health.py
 tests/test_backup_key_cli.py
 tests/test_backup_keyring_rotation_paths.py
+tests/test_backup_restore_publication.py
 tests/test_backup_rotation_journal.py
 tests/test_backup_rotation_publication.py
 tests/test_backup_rotation_records.py

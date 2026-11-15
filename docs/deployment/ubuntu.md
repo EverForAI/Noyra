@@ -609,6 +609,10 @@ Review the restored identity on a separate host or swap directories while stoppe
 processes against the same copied identity. Keep the backup keyring in a separate protected/offline
 backup; it is deliberately excluded from subject backups.
 
+See [restore publication and retry boundaries](../development/backup-restore-publication.md)
+for directory-sync failures, interrupted movement, and retained staging. Keep the
+original encrypted backup until the restored copy has been independently verified.
+
 ## Subject storage and training export
 
 The Windows desktop build and Ubuntu service use the same runtime and storage contract. Set

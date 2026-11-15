@@ -91,6 +91,11 @@ python -m noyra restore-backup `
 Missing historical keys, changed ciphertext, permission drift, and partial archives fail closed and
 leave no published restored identity.
 
+See [restore publication and retry boundaries](../development/backup-restore-publication.md)
+for interrupted movement, errors after publication, and Windows persistence limits.
+Keep the original encrypted backup and its historical key generation until the
+restored copy has been independently verified.
+
 ## Managed Windows packages
 
 For the package lifecycle, use one absolute retained `DataRoot` outside `InstallRoot`. A deliberately new instance requires `start -InitializeDataRoot`; an existing instance starts without that switch. Legacy data under version directories blocks destructive/version-changing operations until it has been reviewed and safely migrated. See [data-root binding and legacy migration](windows-data-root-migration.md) before upgrading an older Windows installation.

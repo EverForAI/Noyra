@@ -903,6 +903,11 @@ class EncryptedBackupManager:
         target_preexisting = target.exists()
         if target_preexisting and (not target.is_dir() or any(target.iterdir())):
             raise FileExistsError("restore target must be absent or an empty directory")
+        created_parents: list[Path] = []
+        parent = target.parent
+        while not parent.exists():
+            created_parents.append(parent)
+            parent = parent.parent
         target.parent.mkdir(parents=True, exist_ok=True)
         if target_preexisting and target.stat().st_dev != target.parent.stat().st_dev:
             raise AtRestError(
@@ -923,10 +928,22 @@ class EncryptedBackupManager:
 
             replay_privacy_deletions(self.data_root, restored)
             _harden_tree(restored)
-            if target.exists():
-                target.rmdir()
-            restored.replace(target)
+            # Replay may change files after extraction's per-file fsync. Persist
+            # the final tree, including nested directory entries, before rename.
+            _sync_restore_tree(restored)
+            _fsync_directory(work_root)
+            if os.name == "nt":
+                # Windows cannot replace an existing directory. The offline
+                # target is empty; the encrypted input remains available for retry.
+                if target.exists():
+                    target.rmdir()
+                _windows_move_restored_directory(restored, target)
+            else:
+                restored.replace(target)
+            _fsync_directory(work_root)
             _fsync_directory(target.parent)
+            for parent in created_parents:
+                _fsync_directory(parent.parent)
             return target
         except Exception:
             if target_preexisting and not target.exists():
@@ -2160,6 +2177,38 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _sync_restore_tree(root: Path) -> None:
+    """Persist the final files and, on POSIX, directory entries from leaves up."""
+    directories = [root]
+    for path in _walk_private_tree(root):
+        if path.is_dir():
+            directories.append(path)
+            continue
+        flags = (os.O_RDWR if os.name == "nt" else os.O_RDONLY) | _binary_flag()
+        flags |= int(getattr(os, "O_NOFOLLOW", 0))
+        descriptor = os.open(path, flags)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    for path in reversed(directories):
+        _fsync_directory(path)
+
+
+def _windows_move_restored_directory(source: Path, target: Path) -> None:
+    # Request synchronous movement without allowing an existing destination to
+    # be overwritten. This is not a general Windows directory-fsync primitive.
+    import ctypes
+    from ctypes import wintypes
+
+    api: Any = ctypes
+    move = api.WinDLL("kernel32", use_last_error=True).MoveFileExW
+    move.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
+    move.restype = wintypes.BOOL
+    if not move(str(source), str(target), 0x00000008):  # MOVEFILE_WRITE_THROUGH
+        raise api.WinError(api.get_last_error())
 
 
 def _read_exact(stream: Any, count: int) -> bytes:
