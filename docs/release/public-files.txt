@@ -999,6 +999,7 @@ tests/test_c3_help_language.py
 tests/test_c3_result_kinds.py
 tests/test_capability.py
 tests/test_capability_file_races.py
+tests/test_capability_public_address_policy.py
 tests/test_ci_test_runner.py
 tests/test_cloud_ci_contract.py
 tests/test_cloud_dependency_compatibility.py
