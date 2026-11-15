@@ -32,6 +32,7 @@ def change_policy(engine: WalletPaymentExecutionEngine, subject: str, kind: str)
         "paused": {"emergency_paused": True},
         "automation": {"automation_enabled": False},
         "limit": {"per_order_limit": "1"},
+        "daily_limit": {"daily_limit": "1"},
         "version": {"daily_limit": "200"},
     }
     update = updates[kind]
@@ -43,7 +44,9 @@ def change_policy(engine: WalletPaymentExecutionEngine, subject: str, kind: str)
     )
 
 
-@pytest.mark.parametrize("kind", ["disabled", "paused", "automation", "limit", "version"])
+@pytest.mark.parametrize(
+    "kind", ["disabled", "paused", "automation", "limit", "daily_limit", "version"]
+)
 @pytest.mark.parametrize("retry", [False, True])
 def test_policy_change_after_prepare_blocks_new_signature_and_preserves_unknown(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, retry: bool
