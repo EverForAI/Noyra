@@ -41,6 +41,7 @@ from noyra.core.evidence_capacity import (
     require_evidence_capacity,
 )
 from noyra.core.evidence_schema import MAX_ROUTE_FAILOVERS
+from noyra.core.http import is_public_address
 from noyra.core.locking import ProcessLock
 from noyra.core.private_sources import InvitationWithdrawnError, participant_invitation_withdrawn
 from noyra.core.provider_health import ProviderHealthStore
@@ -106,14 +107,17 @@ _CANONICAL_INTEGER = re.compile(r"(?:0|[1-9][0-9]*)\Z")
 _CANONICAL_USD = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?\Z")
 
 
-def _normalize_public_model_url(value: str) -> str:
+def _normalize_public_model_url(value: str, *, stored: bool = False) -> str:
     """Return one canonical, operator-safe URL for a remote model endpoint.
 
     ``OpenAICompatibleSettings`` is the source of truth for URL syntax and
     endpoint policy.  This small wrapper keeps the stricter resource-store
     contract in one place and turns parser/provider-specific failures into a
     stable ``ValueError`` for both pydantic input validation and persistence
-    validation callers.
+    validation callers. ``stored`` preserves the historical literal policy
+    when verifying immutable resource history. New configurations use the
+    transport's current public-address policy; existing unsupported endpoints
+    remain readable and revocable without rewriting their hashes.
     """
 
     if type(value) is not str:
@@ -137,10 +141,10 @@ def _normalize_public_model_url(value: str) -> str:
     if hostname.casefold().rstrip(".") == "localhost":
         raise ValueError("operator model resources cannot target localhost")
     try:
-        literal = ipaddress.ip_address(hostname.split("%", 1)[0])
+        literal = ipaddress.ip_address(hostname.split("%", 1)[0] if stored else hostname)
     except ValueError:
         return normalized
-    if not literal.is_global:
+    if not (literal.is_global if stored else is_public_address(literal)):
         raise ValueError("operator model resources require a public endpoint")
     return normalized
 
@@ -461,6 +465,8 @@ class CognitiveResourceStore:
         pending_secret_keys: list[tuple[str, str]] = []
         try:
             values = self._values(subject_id, proposal, now)
+            if _normalize_public_model_url(proposal.base_url) != proposal.base_url:
+                raise IntegrityError("cognitive resource group durable state is invalid")
             self._validate_group_values(values, "active")
         except IntegrityError:
             raise
@@ -2520,7 +2526,7 @@ class CognitiveResourceStore:
         }:
             raise IntegrityError("cognitive resource reasoning effort is invalid")
         try:
-            normalized_url = _normalize_public_model_url(base_url)
+            normalized_url = _normalize_public_model_url(base_url, stored=True)
         except (TypeError, ValueError) as error:
             raise IntegrityError("cognitive resource group durable state is invalid") from error
         if normalized_url != base_url:

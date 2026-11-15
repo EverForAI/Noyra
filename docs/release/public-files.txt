@@ -250,6 +250,7 @@ docs/development/lifecycle-diagnostics.md
 docs/development/lifecycle-maintenance-protocol.md
 docs/development/memory-literal-search.md
 docs/development/migration-approval-boundaries.md
+docs/development/model-endpoint-policy.md
 docs/development/model-invalidation-boundaries.md
 docs/development/model-pre-send-settlement.md
 docs/development/participant-login-throttling.md
@@ -1178,6 +1179,7 @@ tests/test_migration_trust.py
 tests/test_migration_wallet.py
 tests/test_mind.py
 tests/test_model_authorization.py
+tests/test_model_endpoint_address_policy.py
 tests/test_model_gateway.py
 tests/test_model_invalidation_before_attempt.py
 tests/test_model_pre_send_settlement.py
