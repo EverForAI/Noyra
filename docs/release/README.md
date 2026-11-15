@@ -69,6 +69,22 @@ python scripts/check-publication-boundary.py --base REVIEWED_BASE_COMMIT --revis
 
 任一阶段失败时应修复路径审核或校验值，不能通过跳过检查、自动允许所有新增文件或按工作区文本重算来消除告警。
 
+### 发布凭据边界
+
+发布工作流的质量门禁与正式发布作业均为 checkout 设置
+`persist-credentials: false`。检出过程可以使用当前作业令牌取得源码，但 checkout
+结束后不向后续构建步骤保留 Git 认证配置。本地提交读取、清单导出及 wheel 构建
+不需要认证 Git 写操作；如将来引入远端 Git 操作，应单独审核其认证需求。
+
+正式发布作业仍需要 `contents: write` 创建 Release 和上传附件。外部证据查询使用
+已有步骤级 `GH_TOKEN`，跨运行下载与发布/证明动作使用各自的令牌输入；Sigstore
+签名与证明所需的 OIDC、`attestations: write` 及现有保护环境门禁继续保留。
+这些认证路径不依赖 checkout 留下的 Git 配置。
+
+关闭持久化只收紧这一处凭据暴露面，不构成作业内进程之间的权限隔离，也不撤销
+发布作业本身的令牌权限。本地语法与兼容性检查不能替代真实受保护环境中的发布、
+签名和证明验收。
+
 ### CI 作业超时预算
 
 每个工作流作业都显式设置 `timeout-minutes`，预算包含依赖安装、测试及后续检查，
