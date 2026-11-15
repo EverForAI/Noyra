@@ -75,8 +75,7 @@ class RecoverablePublication:
             }
 
     def upgrade(self) -> None:
-        # Database's real versioned migration/backup path, scoped to a test-only
-        # trigger and contracts. Production still runs schema116 after M2.2.
+        # Exercise Database's production migration and rollback path.
         Database(self.controls.database.path, strict_schema_contract=True)
 
     def assert_history_and_fees(self, before: dict[str, list[dict[str, Any]]]) -> None:
@@ -116,7 +115,7 @@ def recoverable(
     identifier = directory["items"][0]["publication_id"]
     with control.database.read_transaction() as c:
         saved = action.catalog().get(c, identifier)
-    assert saved is not None and saved["source"]["schema_version"] == 116
+    assert saved is not None and saved["source"]["schema_version"] == action.pair.source_version
     assert saved["status"] == (
         "prepared" if state == "prepared" else "published_durability_unknown"
     )
@@ -124,6 +123,7 @@ def recoverable(
     yield action
 
 
+@pytest.mark.parametrize("control", [116, 117], indirect=True)
 def test_real_existing_request_recovers_without_normalizing_live_or_frozen_source(
     recoverable: RecoverablePublication,
 ) -> None:
@@ -138,7 +138,7 @@ def test_real_existing_request_recovers_without_normalizing_live_or_frozen_sourc
                 c, controls.database, controls.subject_id, "export-workflow", lambda: None
             )
         assert (
-            actual["schema_version"] == 117
+            actual["schema_version"] == recoverable.pair.target_version
             and actual["schema_ddl_hash"] == recoverable.pair.target_ddl
         )
         # Windows protocol fixture deliberately simulates confirmed flush only;
@@ -316,7 +316,10 @@ def test_old_parent_and_existing_request_do_not_authorize_new_cross_schema_work(
             assert result["publication_id"] != recoverable.saved["publication_id"]
             with recoverable.controls.database.read_transaction() as c:
                 new = recoverable.catalog().get(c, result["publication_id"])
-            assert new is not None and new["source"]["schema_version"] == 117
+            assert (
+                new is not None
+                and new["source"]["schema_version"] == recoverable.pair.target_version
+            )
         else:
             before = recoverable.rows()
             with pytest.raises(IntegrityError, match="scope or schema"):

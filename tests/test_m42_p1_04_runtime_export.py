@@ -540,7 +540,19 @@ def test_audit_named_parent_families_and_common_knowledge_are_subject_isolated(
             [
                 ("key-a", "public-a", "fixture A", utc_now()),
                 ("key-b", "public-b", "fixture B", utc_now()),
+                ("key-unimported", "public-unimported", "fixture trust only", utc_now()),
                 ("key-unrelated", "public-unrelated", "fixture unrelated", utc_now()),
+            ],
+        )
+        connection.executemany(
+            """INSERT INTO common_knowledge_trusted_publishers(
+                subject_id, publisher_subject_id, key_id, status, created_at, revoked_at
+            ) VALUES (?, ?, ?, 'active', ?, NULL)""",
+            [
+                (subject_a, subject_b, "key-b", utc_now()),
+                (subject_a, "Publisher-Only", "key-unimported", utc_now()),
+                (subject_b, subject_a, "key-a", utc_now()),
+                (subject_unrelated, subject_b, "key-b", utc_now()),
             ],
         )
         connection.executemany(
@@ -628,7 +640,18 @@ def test_audit_named_parent_families_and_common_knowledge_are_subject_isolated(
         "package-imported-a",
     }
     assert {row["import_id"] for row in rows["common_knowledge_imports"]} == {"import-a"}
-    assert {row["key_id"] for row in rows["common_knowledge_trusted_keys"]} == {"key-a", "key-b"}
+    assert {row["key_id"] for row in rows["common_knowledge_trusted_keys"]} == {
+        "key-a",
+        "key-b",
+        "key-unimported",
+    }
+    assert {
+        (row["subject_id"], row["publisher_subject_id"], row["key_id"])
+        for row in rows["common_knowledge_trusted_publishers"]
+    } == {
+        (subject_a, subject_b, "key-b"),
+        (subject_a, "Publisher-Only", "key-unimported"),
+    }
     assert {row["key"] for row in rows["schema_meta"]} == {"schema_version"}
     assert all(row["value"] != "must-not-export" for row in rows["schema_meta"])
     assert manifest["ownership_graph"]["version"] == 1

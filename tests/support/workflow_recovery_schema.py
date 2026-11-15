@@ -1,4 +1,4 @@
-"""Historical schema116 fixtures and the actual publication-guard migration."""
+"""Historical schema116/117 fixtures and the actual reviewed migrations."""
 
 from __future__ import annotations
 
@@ -16,14 +16,18 @@ from noyra.core import workflow_source_recovery as recovery
 from noyra.core.schema.contracts import _SCHEMA_DDL_FINGERPRINTS, _SCHEMA_STRUCTURE_FINGERPRINTS
 from test_d2b_workflow_export_control import control as current_control
 
-TARGET = 117
+TARGET = 118
 
 
 @pytest.fixture
-def control(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[object]:
-    # Use real historical rows and fingerprints; never relabel a schema117 DB.
-    # Only creation runs as116. Tests exercise the actual migration after this.
-    with patch.object(database_module, "CURRENT_SCHEMA_VERSION", 116):
+def control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> Iterator[object]:
+    # Only fixture creation uses the historical runtime version. Recovery runs
+    # the actual migrations with original rows and frozen contract fingerprints.
+    version = getattr(request, "param", 116)
+    assert version in (116, 117)
+    with patch.object(database_module, "CURRENT_SCHEMA_VERSION", version):
         controls = cast(Any, current_control).__wrapped__(tmp_path, monkeypatch)
         instance = next(controls)
     try:
@@ -39,14 +43,15 @@ def measured_pair(database: Database) -> recovery.RecoverySchemaPair:
                 0
             ]
         )
-        assert version == 116
-        assert Database.schema_ddl_fingerprint(snapshot) == _SCHEMA_DDL_FINGERPRINTS[116]
+        assert version in (116, 117)
+        assert Database.schema_ddl_fingerprint(snapshot) == _SCHEMA_DDL_FINGERPRINTS[version]
     return recovery.RecoverySchemaPair(
-        116,
-        _SCHEMA_DDL_FINGERPRINTS[116],
+        version,
+        _SCHEMA_DDL_FINGERPRINTS[version],
         TARGET,
         _SCHEMA_DDL_FINGERPRINTS[TARGET],
-        _SCHEMA_STRUCTURE_FINGERPRINTS[116],
+        _SCHEMA_STRUCTURE_FINGERPRINTS[version],
+        _SCHEMA_STRUCTURE_FINGERPRINTS[TARGET],
     )
 
 

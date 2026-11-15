@@ -45,7 +45,8 @@ _GROUPS: dict[str, str] = {
     common_knowledge_evaluation_events common_knowledge_import_provenance
     common_knowledge_imports common_knowledge_packages common_knowledge_peers
     common_knowledge_remote_events common_knowledge_sync_events
-    common_knowledge_sync_runs common_knowledge_trusted_keys common_knowledge_versions
+    common_knowledge_sync_runs common_knowledge_trusted_keys
+    common_knowledge_trusted_publishers common_knowledge_versions
     """,
     "communication": """
     email_ingress_evidence inbound_identity_challenges interaction_bindings

@@ -234,6 +234,7 @@ docs/development/backup-rotation-journal.md
 docs/development/backup-rotation-publication.md
 docs/development/checkpoint-clock-and-recovery.md
 docs/development/cognition-result-categories.md
+docs/development/common-knowledge-publisher-trust.md
 docs/development/communication-state.md
 docs/development/email-identity-continuity.md
 docs/development/epistemic-review-recovery.md
@@ -625,6 +626,7 @@ src/noyra/core/runtime_observation.py
 src/noyra/core/scheduling_clock.py
 src/noyra/core/schema/__init__.py
 src/noyra/core/schema/base.py
+src/noyra/core/schema/common_knowledge_trusted_publishers.py
 src/noyra/core/schema/contracts.py
 src/noyra/core/schema/email_identity.py
 src/noyra/core/schema/evidence.py
@@ -998,6 +1000,8 @@ tests/test_cognitive_limit_policy.py
 tests/test_cognitive_waits.py
 tests/test_committed_verification.py
 tests/test_common_knowledge.py
+tests/test_common_knowledge_identity_binding.py
+tests/test_common_knowledge_trust_http.py
 tests/test_common_sync_fencing.py
 tests/test_consciousness_routing.py
 tests/test_credentials.py

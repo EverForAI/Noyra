@@ -32,7 +32,12 @@ def sources() -> tuple[dict[str, Any], dict[str, Any], recovery.RecoverySchemaPa
         "event_head": {"sequence": 0, "root_hash": None},
     }
     pair = recovery.RecoverySchemaPair(
-        116, frozen["schema_ddl_hash"], 117, "a" * 64, _SCHEMA_STRUCTURE_FINGERPRINTS[116]
+        116,
+        frozen["schema_ddl_hash"],
+        117,
+        "a" * 64,
+        _SCHEMA_STRUCTURE_FINGERPRINTS[116],
+        _SCHEMA_STRUCTURE_FINGERPRINTS[117],
     )
     actual = {
         **frozen,
@@ -45,18 +50,26 @@ def sources() -> tuple[dict[str, Any], dict[str, Any], recovery.RecoverySchemaPa
 
 def enable(monkeypatch: pytest.MonkeyPatch, pair: recovery.RecoverySchemaPair) -> None:
     monkeypatch.setitem(_SCHEMA_DDL_FINGERPRINTS, pair.target_version, pair.target_ddl)
-    monkeypatch.setitem(_SCHEMA_STRUCTURE_FINGERPRINTS, pair.target_version, pair.structure)
+    monkeypatch.setitem(_SCHEMA_STRUCTURE_FINGERPRINTS, pair.source_version, pair.source_structure)
+    monkeypatch.setitem(_SCHEMA_STRUCTURE_FINGERPRINTS, pair.target_version, pair.target_structure)
     monkeypatch.setattr(recovery, "_REVIEWED_SCHEMA_PAIRS", (pair,))
 
 
 def test_only_actual_reviewed_publication_migration_enables_cross_schema_recovery() -> None:
-    assert len(recovery._REVIEWED_SCHEMA_PAIRS) == 1
-    pair = recovery._REVIEWED_SCHEMA_PAIRS[0]
+    assert len(recovery._REVIEWED_SCHEMA_PAIRS) == 3
+    pair = next(item for item in recovery._REVIEWED_SCHEMA_PAIRS if item.source_version == 116)
     assert (pair.source_version, pair.target_version) == (116, 117)
     assert pair.source_ddl == _SCHEMA_DDL_FINGERPRINTS[116]
     assert pair.target_ddl == _SCHEMA_DDL_FINGERPRINTS[117]
-    assert pair.structure == _SCHEMA_STRUCTURE_FINGERPRINTS[116]
-    assert pair.structure == _SCHEMA_STRUCTURE_FINGERPRINTS[117]
+    assert pair.source_structure == _SCHEMA_STRUCTURE_FINGERPRINTS[116]
+    assert pair.target_structure == _SCHEMA_STRUCTURE_FINGERPRINTS[117]
+    cumulative = next(
+        item
+        for item in recovery._REVIEWED_SCHEMA_PAIRS
+        if item.source_version == 116 and item.target_version == 118
+    )
+    assert cumulative.source_structure == _SCHEMA_STRUCTURE_FINGERPRINTS[116]
+    assert cumulative.target_structure == _SCHEMA_STRUCTURE_FINGERPRINTS[118]
 
 
 def test_source_comparison_preserves_actual_and_frozen_evidence(
@@ -155,7 +168,7 @@ def test_missing_or_revised_contracts_never_infer_compatibility(
         actual, frozen = frozen, actual
     else:
         monkeypatch.setitem(_SCHEMA_DDL_FINGERPRINTS, 118, "0" * 64)
-        monkeypatch.setitem(_SCHEMA_STRUCTURE_FINGERPRINTS, 118, pair.structure)
+        monkeypatch.setitem(_SCHEMA_STRUCTURE_FINGERPRINTS, 118, pair.target_structure)
         monkeypatch.setattr(
             recovery,
             "_REVIEWED_SCHEMA_PAIRS",
@@ -202,3 +215,39 @@ def test_schema115_does_not_inherit_approval_for_the116_pair(
     enable(monkeypatch, pair)
     legacy = {**frozen, "schema_version": 115, "schema_ddl_hash": _SCHEMA_DDL_FINGERPRINTS[115]}
     assert not recovery.matches_publication_source(actual, legacy, existing_request=True)
+
+
+def test_exact_additive_trust_migration_preserves_pending_workflow_source() -> None:
+    pair = next(
+        item
+        for item in recovery._REVIEWED_SCHEMA_PAIRS
+        if item.source_version == 117 and item.target_version == 118
+    )
+    frozen = {
+        "format": FORMAT,
+        "scope": SCOPE,
+        "subject_id": "migration-subject",
+        "workflow_id": "migration-workflow",
+        "genesis_hash": "1" * 64,
+        "schema_version": 117,
+        "schema_ddl_hash": pair.source_ddl,
+        "records": 4,
+        "state_bytes": 8,
+        "history_hash": "2" * 64,
+        "receipt_count": 0,
+        "receipts_hash": "3" * 64,
+        "last_row_hash": "4" * 64,
+        "high_water": "2026-11-10T00:00:00+00:00",
+        "event_head": {"sequence": 0, "root_hash": None},
+    }
+    actual = {
+        **frozen,
+        "schema_version": 118,
+        "schema_ddl_hash": pair.target_ddl,
+        "event_head": {"sequence": 1, "root_hash": "5" * 64},
+    }
+    assert recovery.matches_publication_source(actual, frozen, existing_request=True)
+    assert not recovery.matches_publication_source(actual, frozen, existing_request=False)
+    assert not recovery.matches_publication_source(
+        {**actual, "history_hash": "6" * 64}, frozen, existing_request=True
+    )

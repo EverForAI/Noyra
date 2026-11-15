@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .common_knowledge_trusted_publishers import COMMON_KNOWLEDGE_TRUSTED_PUBLISHERS_SCHEMA
 from .email_identity import EMAIL_IDENTITY_SCHEMA
 from .migrations_v002_v005 import MIGRATIONS_V002_V005
 from .migrations_v006_v017 import MIGRATIONS_V006_V017
@@ -90,4 +91,5 @@ CREATE INDEX IF NOT EXISTS idx_workflow_checkpoints_subject_history
     115: WORKFLOW_EXPORT_SCHEMA,
     116: WORKFLOW_INCREMENT_SCHEMA,
     117: WORKFLOW_PUBLICATION_GUARDS_SCHEMA,
+    118: COMMON_KNOWLEDGE_TRUSTED_PUBLISHERS_SCHEMA,
 }
