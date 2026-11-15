@@ -1253,6 +1253,7 @@ tests/test_storage.py
 tests/test_storage_lifecycle.py
 tests/test_storage_mode.py
 tests/test_thought_context_budget.py
+tests/test_thought_recovery_timing.py
 tests/test_transport_dispatch_fencing.py
 tests/test_transports.py
 tests/test_upgrade_deployment.py

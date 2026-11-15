@@ -73,6 +73,29 @@ cooldown and consumes no additional model calls until that cooldown expires. Res
 terminal. Model calls have their own daily limit and one failed or rejected durable call is not retried
 indefinitely under the same idempotency key.
 
+### Settled evidence and fresh calls
+
+Execution eligibility includes two different operations: settling an existing known outcome,
+and authorizing a fresh provider attempt. A known successful response that has not yet produced
+an episode may be recovered without a new provider request, even when today's call budget is
+exhausted or the minimum episode interval has not elapsed. Recovery may append that one owed
+episode during the interval; it is not permission to dispatch a new call. A known failure can
+similarly receive its one durable round closure without creating an episode or changing paid
+accounting. A successfully recovered response still undergoes current local proposal validation.
+
+Hard agenda cooldown, terminal agenda/parent state and unresolved call fences are checked before
+this recovery allowance. A `prepared` call requires another provider attempt, so it does not use
+the settled-outcome shortcut: daily budget, prior failed-round `retry_after`, minimum interval,
+and existing authorization/context checks continue to apply. A day change or worker restart
+does not release an unknown reservation or reset a durable cooldown.
+
+Committing an episode or a failed-round closure advances the business-round identity atomically.
+Subsequent polls inspect the next round, so the same settled call cannot repeatedly create episodes
+or closures. Tests exercise explicit targets and automatic scheduling across worker restarts,
+including every call state during hard cooldown. Evidence-only ledger fixtures also test recovery
+of a pre-existing success during the interval; those fixtures do not imply that the current
+scheduler would dispatch that call before its interval was due.
+
 Agenda revisions and thought episodes are hashed, append-only histories. Integrity verification binds
 each episode to its agenda and exact model response. The full private ledger is included in developer
 runtime export. Public state exposes only aggregate agenda, episode, changed-state and goal counts.
