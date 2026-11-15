@@ -146,9 +146,7 @@ def test_trusted_key_is_bound_to_the_signed_publisher_subject() -> None:
         tempfile.TemporaryDirectory() as publisher_dir,
         tempfile.TemporaryDirectory() as reader_dir,
     ):
-        publisher_kernel, publisher = make_store(
-            Path(publisher_dir), "Noyra-binding-publisher"
-        )
+        publisher_kernel, publisher = make_store(Path(publisher_dir), "Noyra-binding-publisher")
         reader_kernel, reader = make_store(Path(reader_dir), "Noyra-binding-reader")
         try:
             package = publisher.publish(
@@ -183,10 +181,13 @@ def test_trusted_key_is_bound_to_the_signed_publisher_subject() -> None:
                 with pytest.raises(PermissionError, match="not trusted"):
                     reader.import_package(forged)
                 with reader_kernel.database.connection() as connection:
-                    assert connection.execute(
-                        "SELECT 1 FROM common_knowledge_packages WHERE package_id=?",
-                        (forged["package_id"],),
-                    ).fetchone() is None
+                    assert (
+                        connection.execute(
+                            "SELECT 1 FROM common_knowledge_packages WHERE package_id=?",
+                            (forged["package_id"],),
+                        ).fetchone()
+                        is None
+                    )
 
             with pytest.raises(PermissionError, match="cannot trust an external key"):
                 reader.trust_key(

@@ -569,9 +569,12 @@ def test_exact_pending_is_reported_and_requires_explicit_recovery(
     assert recovered.removed_bytes == len(b"uncommitted synthetic bytes")
     assert recovered.durability_confirmed and not pending.exists()
     assert next(directory(target).glob("*.intent.json")).is_file()
-    assert api.prepare(
-        request_id=REQ, expected_generation=1, expected_source_hash=sha256(source)
-    ).state == "prepared"
+    assert (
+        api.prepare(
+            request_id=REQ, expected_generation=1, expected_source_hash=sha256(source)
+        ).state
+        == "prepared"
+    )
     assert target.read_bytes() == source
 
 
@@ -593,9 +596,12 @@ def test_header_creation_orphan_can_be_inspected_and_recovered(
     assert not pending.exists() and target.read_bytes() == source
     recovered_state = api.status(request_id=REQ)
     assert recovered_state.state == "absent" and recovered_state.pending_count == 0
-    assert api.prepare(
-        request_id=REQ, expected_generation=1, expected_source_hash=sha256(source)
-    ).state == "prepared"
+    assert (
+        api.prepare(
+            request_id=REQ, expected_generation=1, expected_source_hash=sha256(source)
+        ).state
+        == "prepared"
+    )
 
 
 @POSIX
@@ -659,9 +665,7 @@ def test_pending_recovery_sync_failure_is_unknown_and_can_be_inspected(
 
 @POSIX
 @pytest.mark.parametrize("kind", ["permissions", "external-hard-link", "symlink"])
-def test_unsafe_exact_pending_entry_is_not_recoverable(
-    rotation_directory: Path, kind: str
-) -> None:
+def test_unsafe_exact_pending_entry_is_not_recoverable(rotation_directory: Path, kind: str) -> None:
     target, _, api = prepared(rotation_directory)
     pending = directory(target) / (".pending-" + "9" * 32)
     if kind == "permissions":

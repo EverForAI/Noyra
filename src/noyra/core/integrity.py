@@ -4374,9 +4374,7 @@ def _check_common_knowledge(context: IntegrityContext) -> Mapping[str, Any]:
             if row["key_id"] != own_key_id:
                 raise IntegrityError("common knowledge publisher key id mismatch")
         else:
-            candidate = trusted.get(
-                (str(row["key_id"]), str(row["publisher_subject_id"]))
-            )
+            candidate = trusted.get((str(row["key_id"]), str(row["publisher_subject_id"])))
             if candidate is None:
                 global_key = global_trusted_keys.get(str(row["key_id"]))
                 if global_key is None:
@@ -4443,9 +4441,7 @@ def _check_common_knowledge(context: IntegrityContext) -> Mapping[str, Any]:
         ):
             raise IntegrityError("common knowledge import provenance mismatch")
         if row["status"] == "accepted":
-            trusted_key = trusted.get(
-                (str(row["key_id"]), str(row["publisher_subject_id"]))
-            )
+            trusted_key = trusted.get((str(row["key_id"]), str(row["publisher_subject_id"])))
             if row["publisher_subject_id"] != context.subject_id:
                 if trusted_key is None:
                     global_key = global_trusted_keys.get(str(row["key_id"]))
@@ -4644,13 +4640,8 @@ def _check_common_knowledge(context: IntegrityContext) -> Mapping[str, Any]:
             or peer["state_hash"] != content_hash(CommonKnowledgeStore._peer_state_values(peer))
         ):
             raise IntegrityError("common knowledge peer state is invalid")
-        trusted_peer_key = trusted.get(
-            (str(peer["key_id"]), str(peer["publisher_subject_id"]))
-        )
-        if (
-            trusted_peer_key is None
-            or trusted_peer_key[0] != peer_input.public_key
-        ):
+        trusted_peer_key = trusted.get((str(peer["key_id"]), str(peer["publisher_subject_id"])))
+        if trusted_peer_key is None or trusted_peer_key[0] != peer_input.public_key:
             raise IntegrityError("common knowledge peer trusted key is missing")
         remote_rows = context.connection.execute(
             "SELECT * FROM common_knowledge_remote_events WHERE peer_id = ? "

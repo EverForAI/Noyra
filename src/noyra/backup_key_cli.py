@@ -90,9 +90,7 @@ def run(arguments: list[str]) -> None:
                     expected_source_hash=options.expected_source_hash,
                 )
             if action == "recover-pending":
-                requested["expected_pending_fingerprint"] = (
-                    options.expected_pending_fingerprint
-                )
+                requested["expected_pending_fingerprint"] = options.expected_pending_fingerprint
             _emit(requested, sys.stdout)
         if action != "status" and not supported_preparation():
             raise RotationUnsupportedError("required durable publication profile is unavailable")
@@ -141,8 +139,7 @@ def run(arguments: list[str]) -> None:
                 "code": "unsupported",
                 **({"request_id": request_id} if request_id else {}),
                 "message": (
-                    "required POSIX durability is unavailable; "
-                    "no journal mutation attempted"
+                    "required POSIX durability is unavailable; no journal mutation attempted"
                 ),
             },
             sys.stderr,

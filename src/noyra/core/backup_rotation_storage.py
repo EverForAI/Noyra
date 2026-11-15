@@ -127,9 +127,7 @@ class RotationStorage:
     def _ordinary_file(value: os.stat_result) -> None:
         if not stat.S_ISREG(value.st_mode) or getattr(value, "st_file_attributes", 0) & 0x400:
             raise RotationJournalError("rotation journal requires regular non-linked files")
-        if os.name == "posix" and (
-            value.st_uid != _effective_uid() or value.st_mode & 0o077
-        ):
+        if os.name == "posix" and (value.st_uid != _effective_uid() or value.st_mode & 0o077):
             raise RotationJournalError("rotation journal file owner or permissions are unsafe")
         _identity(value)
 
@@ -238,15 +236,11 @@ class RotationStorage:
                 separators=(",", ":"),
             ).encode("ascii")
             fingerprint = sha256(encoded)
-        return _DirectorySnapshot(
-            _revision(before), metadata, pending, fingerprint, pending_bytes
-        )
+        return _DirectorySnapshot(_revision(before), metadata, pending, fingerprint, pending_bytes)
 
     def require_no_pending(self) -> None:
         if self.pending_count:
-            raise RotationJournalError(
-                "rotation pending temporary files require explicit recovery"
-            )
+            raise RotationJournalError("rotation pending temporary files require explicit recovery")
 
     @staticmethod
     def _limit(name: str) -> int:
@@ -334,13 +328,10 @@ class RotationStorage:
                 try:
                     opened = os.fstat(descriptor)
                     current = self.path(name).lstat()
-                    if (
-                        _revision(opened) != _revision(expected)
-                        or _revision(current) != _revision(expected)
+                    if _revision(opened) != _revision(expected) or _revision(current) != _revision(
+                        expected
                     ):
-                        raise RotationJournalError(
-                            "rotation pending entry changed before recovery"
-                        )
+                        raise RotationJournalError("rotation pending entry changed before recovery")
                     self._ordinary_file(opened)
                     if opened.st_nlink not in {1, 2}:
                         raise RotationJournalError("rotation pending hard-link count is unsafe")
@@ -355,9 +346,9 @@ class RotationStorage:
                             raise RotationJournalError("rotation pending alias is unsafe")
                         peer = peers[0]
                         peer_path = self.path(peer)
-                        peer_current = self._file(peer_path, pending_identities=frozenset({
-                            _identity(opened)
-                        }))
+                        peer_current = self._file(
+                            peer_path, pending_identities=frozenset({_identity(opened)})
+                        )
                         if (
                             _revision(peer_current) != _revision(snapshot.metadata[peer])
                             or peer_current.st_nlink != 2

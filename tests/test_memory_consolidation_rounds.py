@@ -357,7 +357,6 @@ def test_corrupt_history_is_not_ignored_to_start_a_new_round(case: Case, older: 
     with pytest.raises(IntegrityError, match="consolidation hash mismatch"):
         case.worker().run_due()
     with case.database.read_transaction() as connection:
-        assert (
-            connection.execute("SELECT COUNT(*) FROM memory_consolidation_runs").fetchone()[0]
-            == (2 if older else 1)
-        )
+        assert connection.execute("SELECT COUNT(*) FROM memory_consolidation_runs").fetchone()[
+            0
+        ] == (2 if older else 1)
