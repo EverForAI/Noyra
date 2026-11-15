@@ -9,6 +9,8 @@ permissions: {}
 
 jobs:
   quality-gate:
+    # Includes the unpartitioned full suite and wallet smoke/pressure/soak gates.
+    timeout-minutes: 360
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -68,6 +70,7 @@ jobs:
           if-no-files-found: error
 
   release:
+    timeout-minutes: 90
     needs: quality-gate
     environment: production
     runs-on: ubuntu-24.04
