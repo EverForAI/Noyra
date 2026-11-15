@@ -1300,6 +1300,7 @@ tests/test_wallet_rpc.py
 tests/test_wallet_schema60.py
 tests/test_wallet_setup.py
 tests/test_web_contract.py
+tests/test_webhook_request_limits.py
 tests/test_windows_credential_permissions.py
 tests/test_windows_data_root.py
 tests/test_windows_process_identity.py

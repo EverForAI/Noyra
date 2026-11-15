@@ -934,6 +934,7 @@ def handler_type(
                 return
             length = int(raw_length)
             if length > min(owner.settings.max_request_bytes, 1_048_576):
+                self.close_connection = True
                 self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "too_large"})
                 return
             body = self.rfile.read(length)
