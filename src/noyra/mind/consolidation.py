@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -48,30 +49,51 @@ class MemoryConsolidator:
         self.events = EventStore(database)
 
     def run_due(self) -> str | None:
-        if not self._is_due():
+        latest = self.latest()
+        if not self._due_after(latest, self.clock()):
             return None
         candidates = self._candidates()
-        period = self.clock()[:10]
-        key = f"memory-consolidation:{period}"
-        with self.database.connection() as connection:
-            existing = connection.execute(
-                "SELECT status FROM memory_consolidation_runs WHERE subject_id = ? "
-                "AND idempotency_key = ?",
-                (self.subject_id, key),
-            ).fetchone()
-        if existing is not None:
-            return f"memory_consolidation_{existing['status']}"
-        return self._commit(key, candidates)
+        return self._commit(self._round_key(latest), candidates)
+
+    @staticmethod
+    def _round_key(previous: MemoryConsolidationRecord | None) -> str:
+        predecessor = "initial" if previous is None else previous.consolidation_id
+        return f"memory-consolidation:v2:after:{predecessor}"
+
+    def _latest_connection(
+        self, connection: sqlite3.Connection
+    ) -> MemoryConsolidationRecord | None:
+        # Commit order identifies the predecessor even when timestamps tie or
+        # callers express an instant using different timezone offsets.
+        row = connection.execute(
+            "SELECT * FROM memory_consolidation_runs WHERE subject_id=? "
+            "ORDER BY rowid DESC LIMIT 1",
+            (self.subject_id,),
+        ).fetchone()
+        return MemoryStore._consolidation_from_row(row) if row is not None else None
 
     def latest(self) -> MemoryConsolidationRecord | None:
-        history = self.memories.consolidation_history(self.subject_id)
-        return history[0] if history else None
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM memory_consolidation_runs WHERE subject_id=? ORDER BY rowid DESC",
+                (self.subject_id,),
+            )
+            latest = None
+            for row in rows:
+                record = MemoryStore._consolidation_from_row(row)
+                if latest is None:
+                    latest = record
+            # Preserve the former history-wide hash checks while choosing the
+            # predecessor by commit order rather than timestamp string order.
+            return latest
 
     def _is_due(self) -> bool:
-        latest = self.latest()
+        return self._due_after(self.latest(), self.clock())
+
+    def _due_after(self, latest: MemoryConsolidationRecord | None, now: str) -> bool:
         if latest is None:
             return True
-        elapsed = self._parse_time(self.clock()) - self._parse_time(latest.created_at)
+        elapsed = self._parse_time(now) - self._parse_time(latest.created_at)
         return elapsed.total_seconds() >= self.interval_seconds
 
     def _candidates(self) -> list[_ConsolidationCandidate]:
@@ -107,9 +129,7 @@ class MemoryConsolidator:
                 )
         return candidates
 
-    def _commit(self, key: str, candidates: list[_ConsolidationCandidate]) -> str:
-        now = self.clock()
-        current = self._parse_time(now)
+    def _commit(self, key: str, candidates: list[_ConsolidationCandidate]) -> str | None:
         by_hash: dict[tuple[str, str], list[_ConsolidationCandidate]] = defaultdict(list)
         for candidate in candidates:
             normalized = " ".join(candidate.memory.content.casefold().split())
@@ -146,6 +166,14 @@ class MemoryConsolidator:
                 is not None
             ):
                 return "memory_consolidation_replayed"
+            # BEGIN IMMEDIATE serializes the predecessor check with all memory,
+            # event and receipt writes. A stale worker must not start a new
+            # round after another worker has already settled the selected one.
+            previous = self._latest_connection(connection)
+            now = self.clock()
+            if key != self._round_key(previous) or not self._due_after(previous, now):
+                return None
+            current = self._parse_time(now)
             event = self.events._append_connection(
                 connection,
                 self.subject_id,

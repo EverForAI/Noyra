@@ -1124,6 +1124,7 @@ tests/test_m42_p3_08_supply_chain.py
 tests/test_maintenance_route_contract.py
 tests/test_management_integrity_audits.py
 tests/test_memory_blocks.py
+tests/test_memory_consolidation_rounds.py
 tests/test_memory_integration.py
 tests/test_memory_lifecycle.py
 tests/test_memory_literal_search.py
