@@ -14,6 +14,7 @@ from unittest.mock import patch
 import pytest
 from pydantic import SecretStr, ValidationError
 
+from noyra.core.at_rest import _windows_harden
 from noyra.core.types import content_hash
 from noyra.service import (
     NoyraHTTPServer,
@@ -368,6 +369,8 @@ def test_public_post_hash_key_is_stable_when_reloaded_after_restart(tmp_path: Pa
     key_path.write_text("stable-public-ip-hash-key-which-is-long-enough", encoding="utf-8")
     if os.name == "posix":
         key_path.chmod(0o600)
+    elif os.name == "nt":
+        _windows_harden(tmp_path, entire_tree=True)
     settings = _settings(profile="production", public_hash_key_file=key_path)
 
     first_process_key = _load_public_post_hash_key(settings)

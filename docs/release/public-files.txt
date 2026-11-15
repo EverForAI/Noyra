@@ -224,6 +224,7 @@ docs/deployment/runtime-observation.md
 docs/deployment/setup-modes.md
 docs/deployment/signer-credentials.md
 docs/deployment/ubuntu.md
+docs/deployment/windows-credentials.md
 docs/deployment/windows-data-root-migration.md
 docs/deployment/workflow-publication-upgrade.md
 docs/development/action-deliberation-recovery.md
@@ -660,6 +661,7 @@ src/noyra/core/upgrade.py
 src/noyra/core/usage_projection.py
 src/noyra/core/usage_schema.py
 src/noyra/core/wallet_schema.py
+src/noyra/core/windows_credential_acl.py
 src/noyra/core/workflow_archive_control.py
 src/noyra/core/workflow_bundle.py
 src/noyra/core/workflow_chain_control.py
@@ -1289,6 +1291,7 @@ tests/test_wallet_rpc.py
 tests/test_wallet_schema60.py
 tests/test_wallet_setup.py
 tests/test_web_contract.py
+tests/test_windows_credential_permissions.py
 tests/test_windows_data_root.py
 tests/test_windows_process_identity.py
 tests/test_workflow_manifest_contract.py

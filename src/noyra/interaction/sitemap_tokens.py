@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESSIV
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from noyra.core.at_rest import validate_private_file, validate_private_root
+from noyra.core.at_rest import _windows_harden, validate_private_file, validate_private_root
 from noyra.core.credentials import read_secret_file
 from noyra.core.locking import ProcessLock
 from noyra.core.types import canonical_json
@@ -75,6 +75,10 @@ class SitemapTokens:
                 descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
                 try:
                     with os.fdopen(descriptor, "wb") as stream:
+                        if os.name == "nt":
+                            # The existing secrets root can inherit broad Windows ACLs
+                            # in development. Secure this new file before key bytes exist.
+                            _windows_harden(temporary)
                         stream.write(
                             canonical_json(
                                 {

@@ -13,6 +13,8 @@ import stat
 import struct
 from pathlib import Path
 
+from .windows_credential_acl import require_private_credential_handle
+
 _MAX_CREDENTIAL_BYTES = 16 * 1024
 _MAX_CONFIG_BYTES = 1024 * 1024
 _CREDENTIAL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
@@ -154,11 +156,17 @@ def read_secret_bytes(
             or (metadata.st_dev, metadata.st_ino) != (path_metadata.st_dev, path_metadata.st_ino)
         ):
             raise CredentialError(f"{label} must be a stable regular, non-hard-linked file")
-        try:
-            _validate_permissions(metadata, label=label)
-        except CredentialError:
-            if not _private_systemd_acl(candidate, descriptor, metadata):
-                raise
+        if os.name == "nt":
+            try:
+                require_private_credential_handle(descriptor)
+            except (OSError, ValueError, AttributeError) as error:
+                raise CredentialError(f"{label} Windows ACL is unavailable or unsafe") from error
+        else:
+            try:
+                _validate_permissions(metadata, label=label)
+            except CredentialError:
+                if not _private_systemd_acl(candidate, descriptor, metadata):
+                    raise
         chunks: list[bytes] = []
         remaining = max_bytes + 1
         while remaining:

@@ -27,6 +27,7 @@ from pydantic import SecretStr, ValidationError
 
 from noyra.capability import CapabilityGrant
 from noyra.core import EventStore, OperationInvalidated, SubjectKernel
+from noyra.core.at_rest import _windows_harden
 from noyra.core.database import CURRENT_SCHEMA_VERSION
 from noyra.core.errors import IntegrityError
 from noyra.core.types import content_hash, utc_now
@@ -823,6 +824,8 @@ class ServiceTestCase(unittest.TestCase):
         profile_path.parent.mkdir(parents=True, exist_ok=True)
         profile_path.write_text('{"profiles": []}', encoding="utf-8")
         profile_path.chmod(0o600)
+        if os.name == "nt":
+            _windows_harden(profile_path.parent, entire_tree=True)
         environment = {
             "NOYRA_DATA_DIR": str(self.data_dir / "capability-boundary"),
             "NOYRA_SUBJECT_ID": "Noyra-capability-boot-boundary",
@@ -2552,6 +2555,8 @@ class ServiceTestCase(unittest.TestCase):
         token_path = self.data_dir / "operator.token"
         token_path.write_text("file-operator-token-with-sufficient-entropy\n", encoding="ascii")
         token_path.chmod(0o600)
+        if os.name == "nt":
+            _windows_harden(token_path.parent, entire_tree=True)
         environment = {
             "NOYRA_DATA_DIR": str(self.data_dir / "from-env-token-file"),
             "NOYRA_SUBJECT_ID": "Noyra-operator-token-file",

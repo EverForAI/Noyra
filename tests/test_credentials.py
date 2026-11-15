@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from noyra.core.at_rest import _windows_harden
 from noyra.core.credentials import CredentialError, read_env_secret, read_secret_file
 
 
@@ -12,6 +13,8 @@ def _private_file(path: Path, value: str) -> Path:
     path.write_text(value, encoding="utf-8")
     if os.name == "posix":
         path.chmod(0o600)
+    elif os.name == "nt":
+        _windows_harden(path.parent, entire_tree=True)
     return path
 
 

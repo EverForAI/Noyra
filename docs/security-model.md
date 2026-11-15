@@ -73,6 +73,9 @@ Supervisor：身份、预算、权限和审计控制层
 - 宿主 root/Administrator、已登录的服务账号、进程内存和已解锁卷不在 at-rest 防护范围；
 - 容器无法直接观察宿主块设备时，只接受只读、root 所有、限定数据根且未过期的卷加密证明；
 - 备份使用数据目录外的独立版本化 keyring 和分块 AES-256-GCM，不允许明文回退；
+- Windows 通用凭据入口在读取内容前核验已打开文件的所有者/DACL，只信任服务账户、
+  SYSTEM 和 Administrators；不安全或不可验证时拒绝，不在读取时自动改权限。
+  外部凭据升级要求见[Windows 凭据说明](deployment/windows-credentials.md)；
 - 恢复前验证完整性；
 - 恢复只发布到不存在或为空的目标目录；完整文件清单、路径边界和 SQLite
   `quick_check` 全部通过后才原子发布；

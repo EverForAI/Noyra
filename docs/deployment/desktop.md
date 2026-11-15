@@ -54,6 +54,8 @@ HttpOnly read/operator session with expiry and token-rotation validation; writes
 Export routes require an export-capable bearer. Read/export tokens cannot log in, and break-glass
 is bearer-only: a session exchange is rejected and audited. See the
 [management role matrix](../security/management-roles.md) before sharing credentials.
+File-backed credentials must also satisfy the
+[Windows credential ACL boundary](windows-credentials.md); broad inherited file access is rejected.
 Windows and Ubuntu use the same identity database, resource pools,
 training policy, export endpoint, and storage boundaries. Stop the process before copying the
 runtime directory; never run two processes against the same subject identity.
