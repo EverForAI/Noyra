@@ -1,8 +1,8 @@
 """Conservative, deterministic signals, not a proof of instruction safety.
 
-Topic words alone are not an instruction. Keep the existing override,
-impersonation and tool gates; only replace the overly broad secret noun gate.
-Do not decode arbitrary opaque blobs or invoke a model as a classifier.
+Topic words alone are not an instruction. Exclude only locally recognizable
+descriptive role/tool mentions; ambiguous matches and direct instructions retain
+their gates. Do not decode opaque blobs or invoke a model as a classifier.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import re
 import unicodedata
 from html import unescape
 
-INJECTION_CLASSIFIER_VERSION = 5
+INJECTION_CLASSIFIER_VERSION = 6
 _ACTION = (
     r"(?:read|reveal|print|send|upload|exfiltrate|show|extract|return|copy|leak|provide|"
     r"retrieve|disclose|dump)"
@@ -89,6 +89,71 @@ _PROCEDURAL_PREFIX = re.compile(r"\b(?:to|can|could|may|might)\s*$", re.I)
 _CREDENTIAL = re.compile(r"\b(?:sk-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|ghp_[A-Za-z0-9]{30,})\b")
 _OUTBOUND = re.compile(r"https?://[^\s<>\"]+", re.I)
 
+# These are per-occurrence prose contexts, never whole-document exemptions.
+# A role declaration, addressed instruction or runtime target prevents exclusion.
+_DESCRIPTIVE_SUBJECT = r"\b(?:the|this|that|an?|these|those)\s+(?:[a-z]+\s+){0,4}"
+_ROLE_DISCUSSION_PREFIX = re.compile(
+    _DESCRIPTIVE_SUBJECT
+    + r"(?:is\s+about|discuss(?:es|ed|ing)?|describ(?:e|es|ed|ing)|explain(?:s|ed|ing)?|"
+    r"document(?:s|ed|ing)?|analy[sz](?:e|es|ed|ing)|review(?:s|ed|ing)?|"
+    r"compar(?:e|es|ed|ing)|mention(?:s|ed|ing)?|support(?:s|ed|ing)?|"
+    r"accept(?:s|ed|ing)?|include(?:s|d|ing)?)\s+"
+    r"(?:(?:the|a|an|original|current)\s+){0,3}$",
+    re.I,
+)
+_TOOL_DISCUSSION_PREFIX = re.compile(
+    _DESCRIPTIVE_SUBJECT + r"(?:explains?|describes?|discuss(?:es)?|documents?|shows?|covers?)\s+"
+    r"(?:how|when|whether)\s+to\s*$|"
+    r"\b(?:applications|clients|programs|callers|developers|users|we)\s+"
+    r"(?:(?:can|may|often|typically|usually)\s+)?$",
+    re.I,
+)
+_DIRECTED_CONTEXT = re.compile(
+    r"\b(?:you|assistant|agent)\s+(?:must|should|shall|will|need\s+to|have\s+to)\b",
+    re.I,
+)
+_RUNTIME_TARGET = re.compile(
+    r"\b(?:your|our|runtime|system|operator|internal)\b.{0,40}"
+    r"\b(?:goals?|instructions?|rules?|polic(?:y|ies)|permissions?|memories|memory)\b",
+    re.I,
+)
+_ROLE_DECLARATION_SUFFIX = re.compile(
+    r"\s*(?:[:=]|(?:you|the\s+assistant|this\s+agent)\s+"
+    r"(?:must|should|shall|will)\b|(?:that\s+)?(?:overrides|supersedes|replaces)\b|"
+    r"(?:please\s+)?(?:ignore|obey|follow|replace|override)\b)",
+    re.I,
+)
+_TOOL_OPERATION_SUFFIX = re.compile(
+    r"(?:^|[,:;]|\b(?:to|and|then|now)\s+)\s*(?:(?:please|immediately)\s+)?"
+    r"(?:send|upload|exfiltrate|delete|modify|replace|override|execute|run|write|"
+    r"transmit|forward)\b",
+    re.I,
+)
+_SENTENCE_END = re.compile(r"[!?;\n]|\.(?:\s|$)")
+
+
+def _has_instruction_signal(name: str, pattern: re.Pattern[str], view: str) -> bool:
+    if name not in {"system_impersonation", "tool_coercion"}:
+        return pattern.search(view) is not None
+    discussion = (
+        _ROLE_DISCUSSION_PREFIX if name == "system_impersonation" else _TOOL_DISCUSSION_PREFIX
+    )
+    for match in pattern.finditer(view):
+        # Do not borrow descriptive metadata from another field/paragraph.
+        prefix = view[max(0, match.start() - 120) : match.start()].rsplit("\n", 1)[-1]
+        suffix = view[match.end() : match.end() + 120]
+        if (
+            "\n" in match.group()
+            or (match.end() + len(suffix) < len(view) and not _SENTENCE_END.search(suffix))
+            or _DIRECTED_CONTEXT.search(prefix)
+            or _RUNTIME_TARGET.search(suffix)
+            or (name == "system_impersonation" and _ROLE_DECLARATION_SUFFIX.match(suffix))
+            or (name == "tool_coercion" and _TOOL_OPERATION_SUFFIX.search(suffix))
+            or not discussion.search(prefix)
+        ):
+            return True
+    return False
+
 
 def classify_external_text(*parts: str) -> tuple[str, ...]:
     # Callers bound input before this step. Normalization is only for detection,
@@ -102,7 +167,8 @@ def classify_external_text(*parts: str) -> tuple[str, ...]:
     signals = [
         name
         for name, pattern in INJECTION_PATTERNS
-        if pattern.search(text) or pattern.search(lines)
+        if _has_instruction_signal(name, pattern, text)
+        or _has_instruction_signal(name, pattern, lines)
     ]
     if "secret_extraction" not in signals and any(
         not _PROCEDURAL_PREFIX.search(text[max(0, match.start() - 40) : match.start()])
