@@ -3282,15 +3282,15 @@ components:
     readBearer:
       type: http
       scheme: bearer
-      description: NOYRA_READ_TOKEN (or a higher-privilege token)
+      description: NOYRA_READ_TOKEN, NOYRA_OPERATOR_TOKEN, NOYRA_EXPORT_TOKEN, NOYRA_BREAK_GLASS_TOKEN, or legacy NOYRA_ADMIN_TOKEN; trusted management reads may include private data.
     operatorBearer:
       type: http
       scheme: bearer
-      description: NOYRA_OPERATOR_TOKEN (or break-glass/admin token)
+      description: NOYRA_OPERATOR_TOKEN or break-glass/admin bearer; export/read bearers do not grant operator access. Operator/admin browser sessions require CSRF for writes.
     exportBearer:
       type: http
       scheme: bearer
-      description: NOYRA_EXPORT_TOKEN (or break-glass/admin token)
+      description: NOYRA_EXPORT_TOKEN or break-glass/admin bearer; also grants management reads. Browser sessions and operator/read bearers cannot export; export policy gates still apply.
   parameters:
     PublicArchiveLimit:
       name: limit

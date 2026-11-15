@@ -312,6 +312,14 @@ remains a compatibility all-access token and should be empty in new deployments.
 `NOYRA_GENESIS_HASH` once and keep a secure record of it. Changing the subject id or genesis hash
 does not migrate an existing identity.
 
+Read the [management role matrix](../security/management-roles.md) before distributing
+credentials. The export token also grants management reads, including private data;
+it is not a third-party link for one file. Operator and export permissions are separate:
+an operator bearer cannot export, and an export bearer cannot change operator settings.
+Break-glass is an offline emergency bearer and cannot create a browser session.
+Operator/admin browser sessions grant read/operator access with CSRF checks for writes;
+export routes still require an export-capable bearer, even after an admin login.
+
 Generate a 32-byte archive key outside SQLite and back it up separately:
 
 ```bash

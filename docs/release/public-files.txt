@@ -354,6 +354,7 @@ docs/roadmap/2026-10-26-public-manifest-remediation.md
 docs/roadmap/2026-10-26-service-database-modularization.md
 docs/roadmap/2026-10-27-overnight-health-remediation.md
 docs/security-model.md
+docs/security/management-roles.md
 docs/security/threat-model.md
 docs/state-model.md
 docs/superpowers/plans/2026-09-06-research-preview-release.md
@@ -1124,6 +1125,7 @@ tests/test_m42_p3_07_api_contract.py
 tests/test_m42_p3_08_supply_chain.py
 tests/test_maintenance_route_contract.py
 tests/test_management_integrity_audits.py
+tests/test_management_role_boundaries.py
 tests/test_memory_blocks.py
 tests/test_memory_consolidation_rounds.py
 tests/test_memory_integration.py
