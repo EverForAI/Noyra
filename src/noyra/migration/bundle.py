@@ -5,13 +5,14 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import io
 import os
 import secrets
 import stat
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, cast
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
@@ -20,6 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PublicKey,
 )
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.base import CipherContext
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from noyra.core.identity import validate_subject_id
@@ -88,6 +90,95 @@ def encrypt_bundle(
         raise ValueError("migration bundle destination already exists")
 
     plaintext_digest = _file_digest(source_path)
+
+    def emit(output: BinaryIO) -> None:
+        with os.fdopen(_open_regular_source(source_path), "rb") as stream:
+            while chunk := stream.read(_CHUNK_BYTES):
+                output.write(chunk)
+
+    return _encrypt_source(
+        emit,
+        destination_path,
+        recipient_public_key=recipient_public_key,
+        context=context,
+        plaintext_size=plaintext_size,
+        plaintext_digest=plaintext_digest,
+    )
+
+
+def encrypt_bundle_stream(
+    emit: Callable[[BinaryIO], None],
+    destination: Path | str,
+    *,
+    recipient_public_key: X25519PublicKey,
+    context: Mapping[str, str],
+) -> dict[str, Any]:
+    """Measure then encrypt a repeatable source without a plaintext spool file."""
+    _validate_context(context)
+    if not isinstance(recipient_public_key, X25519PublicKey):
+        raise ValueError("recipient public key is invalid")
+    destination_path = Path(destination).expanduser()
+    if destination_path.exists() or destination_path.is_symlink():
+        raise ValueError("migration bundle destination already exists")
+    measured = _DigestWriter(_MAX_BUNDLE_BYTES)
+    emit(cast(BinaryIO, measured))
+    if not measured.size:
+        raise ValueError("migration bundle size is invalid")
+    return _encrypt_source(
+        emit,
+        destination_path,
+        recipient_public_key=recipient_public_key,
+        context=context,
+        plaintext_size=measured.size,
+        plaintext_digest=measured.digest.hexdigest(),
+    )
+
+
+class _DigestWriter(io.RawIOBase):
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.size = 0
+        self.digest = hashlib.sha256()
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, data: Any, /) -> int:
+        size = len(data)
+        if self.size + size > self.limit:
+            raise ValueError("migration bundle source changed or size limit exceeded")
+        self.size += size
+        self.digest.update(data)
+        return size
+
+
+class _EncryptedWriter(_DigestWriter):
+    def __init__(self, limit: int, output: BinaryIO, encryptor: CipherContext):
+        super().__init__(limit)
+        self.output = output
+        self.encryptor = encryptor
+        self.ciphertext_hash = hashlib.sha256()
+        self.written = 0
+
+    def write(self, data: Any, /) -> int:
+        size = super().write(data)
+        for offset in range(0, size, _CHUNK_BYTES):
+            encrypted = self.encryptor.update(memoryview(data)[offset : offset + _CHUNK_BYTES])
+            self.output.write(encrypted)
+            self.ciphertext_hash.update(encrypted)
+            self.written += len(encrypted)
+        return size
+
+
+def _encrypt_source(
+    emit: Callable[[BinaryIO], None],
+    destination_path: Path,
+    *,
+    recipient_public_key: X25519PublicKey,
+    context: Mapping[str, str],
+    plaintext_size: int,
+    plaintext_digest: str,
+) -> dict[str, Any]:
     ephemeral_private = X25519PrivateKey.generate()
     ephemeral_public = ephemeral_private.public_key().public_bytes_raw()
     recipient_public = recipient_public_key.public_bytes_raw()
@@ -112,38 +203,24 @@ def encrypt_bundle(
     parent_fd, destination_name = _open_private_parent(destination_path)
     temporary = _temporary_path(destination_path)
     temporary_name = temporary.name
-    ciphertext_hash = hashlib.sha256()
-    encrypted_plaintext_hash = hashlib.sha256()
-    written = 0
-    plaintext_read = 0
     try:
-        with ExitStack() as stack:
-            input_stream = stack.enter_context(os.fdopen(_open_regular_source(source_path), "rb"))
-            output_stream = stack.enter_context(
-                os.fdopen(
-                    _open_new_private_file(parent_fd, destination_path.parent, temporary_name),
-                    "wb",
-                )
-            )
-            while chunk := input_stream.read(_CHUNK_BYTES):
-                encrypted_plaintext_hash.update(chunk)
-                plaintext_read += len(chunk)
-                encrypted = encryptor.update(chunk)
-                output_stream.write(encrypted)
-                ciphertext_hash.update(encrypted)
-                written += len(encrypted)
-            final = encryptor.finalize()
-            output_stream.write(final)
-            ciphertext_hash.update(final)
-            tag = encryptor.tag
-            output_stream.write(tag)
-            ciphertext_hash.update(tag)
-            written += len(final) + len(tag)
+        with os.fdopen(
+            _open_new_private_file(parent_fd, destination_path.parent, temporary_name), "wb"
+        ) as output_stream:
+            encrypted_source = _EncryptedWriter(plaintext_size, output_stream, encryptor)
+            emit(cast(BinaryIO, encrypted_source))
             if (
-                plaintext_read != plaintext_size
-                or encrypted_plaintext_hash.hexdigest() != plaintext_digest
+                encrypted_source.size != plaintext_size
+                or encrypted_source.digest.hexdigest() != plaintext_digest
             ):
                 raise ValueError("migration bundle source changed while encrypting")
+            final = encryptor.finalize()
+            output_stream.write(final)
+            encrypted_source.ciphertext_hash.update(final)
+            tag = encryptor.tag
+            output_stream.write(tag)
+            encrypted_source.ciphertext_hash.update(tag)
+            encrypted_source.written += len(final) + len(tag)
             output_stream.flush()
             os.fsync(output_stream.fileno())
         _publish_new_file(
@@ -160,8 +237,8 @@ def encrypt_bundle(
             os.close(parent_fd)
     return {
         **metadata,
-        "ciphertext_size": written,
-        "ciphertext_sha256": ciphertext_hash.hexdigest(),
+        "ciphertext_size": encrypted_source.written,
+        "ciphertext_sha256": encrypted_source.ciphertext_hash.hexdigest(),
     }
 
 

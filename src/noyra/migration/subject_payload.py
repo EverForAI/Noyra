@@ -15,6 +15,7 @@ import sqlite3
 import stat
 import tarfile
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 
@@ -125,18 +126,17 @@ def stage_payload(source: Path, destination: Path, subject_id: str, expected_dig
     verify_archives(destination, subject_id)
 
 
-def create_payload(
+def prepare_payload(
     database: Path,
     data_root: Path,
-    destination: Path,
     subject_id: str,
     *,
-    local_wallet: tuple[Path, Path, Path] | None = None,
-) -> dict[str, Any]:
-    """The caller holds the source fence; preserve the complete SQLite schema."""
+    local_wallet: tuple[Path, Path, Path | bytes] | None = None,
+) -> PayloadSource:
+    """Inventory a fenced snapshot without writing a complete plaintext archive."""
     entries: list[dict[str, Any]] = []
     tree_directories: list[str] = []
-    sources = {"noyra.sqlite3": database}
+    sources: dict[str, Path | bytes] = {"noyra.sqlite3": database}
     if local_wallet is not None:
         sources.update(
             {
@@ -176,8 +176,8 @@ def create_payload(
         if name.casefold() in folded:
             raise ValueError("subject payload paths collide")
         folded.add(name.casefold())
-        digest = file_digest(path)
-        size = path.stat().st_size
+        digest = hashlib.sha256(path).hexdigest() if isinstance(path, bytes) else file_digest(path)
+        size = len(path) if isinstance(path, bytes) else path.stat().st_size
         total += size
         if total > MAX_BYTES:
             raise ValueError("subject payload byte limit exceeded")
@@ -192,25 +192,53 @@ def create_payload(
     raw = canonical_json(inventory).encode()
     if len(raw) > MAX_INVENTORY_BYTES:
         raise ValueError("subject payload inventory too large")
+    return PayloadSource(inventory, sources)
+
+
+@dataclass(frozen=True)
+class PayloadSource:
+    inventory: dict[str, Any]
+    sources: dict[str, Path | bytes]
+
+    def write_to(self, output: BinaryIO) -> None:
+        """Emit deterministic v1 tar bytes with bounded buffers on every pass."""
+        raw = canonical_json(self.inventory).encode()
+        with tarfile.open(fileobj=output, mode="w|", format=tarfile.PAX_FORMAT) as archive:
+            info = tarfile.TarInfo(INVENTORY_NAME)
+            info.size, info.mode = len(raw), 0o600
+            archive.addfile(info, io.BytesIO(raw))
+            for entry in self.inventory["files"]:
+                source = self.sources[entry["path"]]
+                info = tarfile.TarInfo(entry["path"])
+                info.size, info.mode = entry["bytes"], 0o600
+                if isinstance(source, bytes):
+                    archive.addfile(info, io.BytesIO(source))
+                    digest = hashlib.sha256(source).hexdigest()
+                else:
+                    with open_regular(source) as stream:
+                        archive.addfile(info, stream)
+                    digest = file_digest(source)
+                if digest != entry["sha256"]:
+                    raise ValueError("subject files changed during snapshot")
+
+
+def create_payload(
+    database: Path,
+    data_root: Path,
+    destination: Path,
+    subject_id: str,
+    *,
+    local_wallet: tuple[Path, Path, Path | bytes] | None = None,
+) -> dict[str, Any]:
+    """Compatibility file export; online migration uses the repeatable source."""
+    payload = prepare_payload(database, data_root, subject_id, local_wallet=local_wallet)
     descriptor = os.open(
         destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600
     )
-    with (
-        os.fdopen(descriptor, "wb") as output,
-        tarfile.open(fileobj=output, mode="w", format=tarfile.PAX_FORMAT) as archive,
-    ):
-        info = tarfile.TarInfo(INVENTORY_NAME)
-        info.size, info.mode = len(raw), 0o600
-        archive.addfile(info, io.BytesIO(raw))
-        for entry in entries:
-            info = tarfile.TarInfo(entry["path"])
-            info.size, info.mode = entry["bytes"], 0o600
-            with open_regular(sources[entry["path"]]) as source:
-                archive.addfile(info, source)
-            if file_digest(sources[entry["path"]]) != entry["sha256"]:
-                raise ValueError("subject files changed during snapshot")
+    with os.fdopen(descriptor, "wb") as output:
+        payload.write_to(output)
     os.chmod(destination, 0o600)
-    return inventory
+    return payload.inventory
 
 
 def _inventory(raw: bytes, subject_id: str) -> dict[str, Any]:

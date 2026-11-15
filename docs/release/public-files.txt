@@ -250,6 +250,7 @@ docs/development/lifecycle-diagnostics.md
 docs/development/lifecycle-maintenance-protocol.md
 docs/development/memory-literal-search.md
 docs/development/migration-approval-boundaries.md
+docs/development/migration-artifact-staging.md
 docs/development/model-endpoint-policy.md
 docs/development/model-invalidation-boundaries.md
 docs/development/model-pre-send-settlement.md
@@ -1150,6 +1151,7 @@ tests/test_migration_activation.py
 tests/test_migration_admin_ui.py
 tests/test_migration_agent.py
 tests/test_migration_agent_cli.py
+tests/test_migration_artifact_privacy.py
 tests/test_migration_assessment.py
 tests/test_migration_binding_proofs.py
 tests/test_migration_bundle.py
@@ -1172,6 +1174,7 @@ tests/test_migration_schema.py
 tests/test_migration_service.py
 tests/test_migration_state_machine_hardening.py
 tests/test_migration_storage_boundary.py
+tests/test_migration_streaming.py
 tests/test_migration_subject_payload.py
 tests/test_migration_targets.py
 tests/test_migration_transfer.py
