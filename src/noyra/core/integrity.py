@@ -1388,7 +1388,7 @@ def _default_checks() -> tuple[IntegrityCheckSpec, ...]:
         ),
         IntegrityCheckSpec("sleep.state", 1, "sleep", _DEEP_PROFILES, _check_sleep),
         IntegrityCheckSpec(
-            "interaction.state", 1, "interaction", _DEEP_PROFILES, _check_interaction
+            "interaction.state", 2, "interaction", _DEEP_PROFILES, _check_interaction
         ),
         IntegrityCheckSpec(
             "interaction.transport", 1, "interaction", _DEEP_PROFILES, _check_transport

@@ -561,6 +561,11 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
         )
         with self.kernel.database.connection() as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM appraisals").fetchone()[0], 0)
+        self.assertIsNone(await cycle.interaction_cognition.run_due())
+        self.assertEqual(len(provider.requests), 1)
+        self.clock_value = (
+            datetime.fromisoformat(self.clock_value) + timedelta(seconds=60)
+        ).isoformat(timespec="milliseconds")
         self.assertEqual(await cycle.run_once(), "interaction_rejected")
         self.assertEqual(len(provider.requests), 2)
 

@@ -19,10 +19,11 @@ from noyra.core.types import canonical_json, utc_now
 from noyra.interaction import InteractionDecision, InteractionStore
 from noyra.interaction.conversations import ConversationStore
 from noyra.interaction.participants import ParticipantStore
+from noyra.interaction.rejections import InteractionRejections
 from noyra.interaction.types import InteractionRecord
 from noyra.mind import AffectImpulse, MemoryStore, MindEngine, RelationshipStore
 from noyra.mind.errors import RelationshipIdentityReviewRequired
-from noyra.model import ModelGateway, ModelMessage
+from noyra.model import ModelGateway, ModelLedger, ModelMessage
 from noyra.model.errors import (
     BudgetExhaustedError,
     ModelCallConflictError,
@@ -61,6 +62,7 @@ class InteractionCognition:
         self.memories = MemoryStore(database, clock=clock)
         self.relationships = RelationshipStore(database)
         self.fatigue = FatigueTracker(database)
+        self.rejections = InteractionRejections(database, subject_id, clock)
         # The cognition scheduler can be driven by more than one worker (for
         # example after a restart while an old tick is still draining).  An
         # offered invitation is deliberately not claimed by changing its
@@ -99,8 +101,14 @@ class InteractionCognition:
     ) -> str | None:
         round_number = self._decision_count(interaction.interaction_id)
         purpose = f"interaction_cognition:{interaction.interaction_id}:{round_number}"
-        proposal = self._successful_proposal(purpose, interaction)
+        recovered = self._successful_proposal(purpose, interaction)
+        proposal = recovered[0] if recovered is not None else None
+        call_id = recovered[1] if recovered is not None else None
         if proposal is None:
+            self._record_schema_failure(purpose, interaction, round_number)
+            with self.database.read_transaction() as connection:
+                if not self.rejections.ready(connection, purpose):
+                    return None
             budget_day = utc_now()[:10]
             calls_today = self._calls_today(budget_day)
             if calls_today >= self.settings.max_interaction_model_calls_per_day:
@@ -135,12 +143,22 @@ class InteractionCognition:
                 self.gateway.ledger.quarantine_prepared_context(self.subject_id, purpose)
                 return "interaction_model_context_changed"
             except (ProviderCallError, StructuredOutputError, ModelCallStateError):
+                self._record_schema_failure(purpose, interaction, round_number)
                 return "interaction_model_failed"
             proposal = result.output
+            call_id = result.call_id
 
         try:
             impulses = self._validated_impulses(proposal, interaction)
         except ValueError:
+            assert call_id is not None
+            self.rejections.record(
+                call_id,
+                interaction.interaction_id,
+                round_number,
+                "invalid_affect_target",
+                self.settings.interaction_cooldown_seconds,
+            )
             return "interaction_proposal_rejected"
         self.mind.process_event(
             self.subject_id,
@@ -234,7 +252,8 @@ class InteractionCognition:
             if recent is not None and self._parse_time(recent) > self._parse_time(cutoff):
                 return None
             row = connection.execute(
-                "SELECT i.interaction_id FROM interactions i "
+                "SELECT i.interaction_id, (SELECT COUNT(*) FROM interaction_decisions d "
+                "WHERE d.interaction_id=i.interaction_id) AS decision_round FROM interactions i "
                 "LEFT JOIN interaction_inbound_events e "
                 "ON e.interaction_id = i.interaction_id "
                 "WHERE i.subject_id = :subject AND i.direction = 'incoming' AND "
@@ -256,14 +275,20 @@ class InteractionCognition:
                 + UNRUNNABLE_BUSINESS_CALL_SQL
                 + ") "
                 "ORDER BY COALESCE(e.scheduling_priority, 0) DESC, "
-                "i.created_at, i.interaction_id LIMIT 1",
+                "i.created_at, i.interaction_id",
                 {
                     "subject": self.subject_id,
                     "cutoff": cutoff,
                     "require_prepared_authorization": self.gateway.requires_explicit_prepared_retry,
                 },
-            ).fetchone()
-        return self.interactions.get(row[0]) if row is not None else None
+            )
+            # Stream past invitations in local rejection backoff. Their offered
+            # status, scheduling priority and private-input fences stay intact.
+            for item in row:
+                purpose = f"interaction_cognition:{item['interaction_id']}:{item['decision_round']}"
+                if self.rejections.ready(connection, purpose):
+                    return self.interactions.get(item["interaction_id"])
+        return None
 
     def _messages(self, interaction: InteractionRecord) -> tuple[ModelMessage, ...]:
         participants = ParticipantStore(self.database)
@@ -424,25 +449,70 @@ class InteractionCognition:
         self,
         purpose: str,
         interaction: InteractionRecord,
-    ) -> InteractionCognitionProposal | None:
+    ) -> tuple[InteractionCognitionProposal, str] | None:
         with self.database.connection() as connection:
             rows = connection.execute(
-                "SELECT response_json FROM model_calls WHERE subject_id = ? AND purpose = ? "
-                "AND status = 'succeeded' ORDER BY created_at DESC",
+                "SELECT * FROM model_calls WHERE subject_id = ? AND purpose = ? "
+                "AND status = 'succeeded' ORDER BY rowid DESC",
                 (self.subject_id, purpose),
             ).fetchall()
         for row in rows:
-            response = json_load(row[0])
+            call = ModelLedger._call_from_row(row)
+            with self.database.read_transaction() as connection:
+                if self.rejections.read(connection, call) is not None:
+                    continue
+            response = call.response
+            assert response is not None
             content = response.get("content")
             if not isinstance(content, str):
                 raise IntegrityError("successful interaction cognition has no content")
-            proposal = InteractionCognitionProposal.model_validate_json(content)
+            try:
+                proposal = InteractionCognitionProposal.model_validate_json(content)
+            except ValueError:
+                self.rejections.record(
+                    call.call_id,
+                    interaction.interaction_id,
+                    self._decision_count(interaction.interaction_id),
+                    "invalid_schema",
+                    self.settings.interaction_cooldown_seconds,
+                )
+                continue
             try:
                 self._validated_impulses(proposal, interaction)
             except ValueError:
+                self.rejections.record(
+                    call.call_id,
+                    interaction.interaction_id,
+                    self._decision_count(interaction.interaction_id),
+                    "invalid_affect_target",
+                    self.settings.interaction_cooldown_seconds,
+                )
                 continue
-            return proposal
+            return proposal, call.call_id
         return None
+
+    def _record_schema_failure(
+        self, purpose: str, interaction: InteractionRecord, number: int
+    ) -> None:
+        with self.database.read_transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM model_calls WHERE subject_id=? AND purpose=? ORDER BY rowid DESC "
+                "LIMIT 1",
+                (self.subject_id, purpose),
+            ).fetchone()
+            call = ModelLedger._call_from_row(row) if row is not None else None
+        if (
+            call is not None
+            and call.status == "failed"
+            and call.error_code == "structured_output_invalid"
+        ):
+            self.rejections.record(
+                call.call_id,
+                interaction.interaction_id,
+                number,
+                "invalid_schema",
+                self.settings.interaction_cooldown_seconds,
+            )
 
     def _calls_today(self, budget_day: str) -> int:
         with self.database.connection() as connection:

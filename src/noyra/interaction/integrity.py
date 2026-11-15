@@ -19,6 +19,8 @@ class InteractionIntegrity:
         self.database = database
 
     def verify(self, subject_id: str) -> dict[str, int]:
+        from .rejections import InteractionRejections
+
         counts: dict[str, int] = {}
         with self.database.read_transaction() as connection:
             if connection.execute("PRAGMA foreign_key_check").fetchall():
@@ -83,6 +85,9 @@ class InteractionIntegrity:
                 (subject_id,),
             ).fetchall()
             counts["interaction_decisions"] = len(decisions)
+            counts["interaction_proposal_rejections"] = InteractionRejections(
+                self.database, subject_id
+            ).verify_connection(connection)
 
             from .conversations import WEB_PRINCIPAL, _row
 

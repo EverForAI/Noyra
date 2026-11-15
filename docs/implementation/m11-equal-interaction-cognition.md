@@ -38,8 +38,27 @@ the decision.
 Interaction appraisal can update private affect, but the allowed target is only the subject, the
 current correspondent, or the current interaction. Every interaction affect impulse has
 `goal_effect = 0`; no goal candidate is accepted, no existing goal receives direct pressure, and no
-action is created. Invalid affect targets produce no partial psychological state and may be retried
-only within the configured daily limit.
+action is created. Invalid affect targets and invalid structured output produce no partial
+psychological state. A private, immutable `model_interaction_rejected` event binds the rejection to
+the settled model call and the invitation's current decision round. It stores identifiers, a
+request hash, status and retry time, without copying the message, prompt or model response. These
+receipts are excluded from default training exports as model I/O. Response hashes remain verified
+by the model ledger; they are not copied into the receipt, so historical privacy erasure can
+replace a response without invalidating the rejection record.
+
+The first rejection pauses that invitation for `max(60, NOYRA_INTERACTION_COOLDOWN_SECONDS)`
+seconds. Repeated rejections in the same decision round double this delay up to
+`max(3600, NOYRA_INTERACTION_COOLDOWN_SECONDS)` seconds. The existing setting is bounded at one day;
+its default of 300 seconds yields delays of 300, 600, 1200, 2400, then 3600 seconds. Restarting or
+rereading a receipt never resets the delay. The scheduler skips invitations still in backoff and
+keeps the existing priority, timestamp and ID ordering among eligible messages. A rejected proposal
+leaves the invitation offered and does not create a subject decision or advance its decision round.
+
+If the process stops after a paid invalid response is settled but before its receipt is written,
+the next worker records that rejection before allowing another model call. A valid, uncommitted
+success still recovers using the original call. Unknown outcomes and prepared retry authorization
+retain their existing reconciliation fences; a rejection receipt does not release reservations or
+authorize ambiguous calls to run again.
 
 `NOYRA_INTERACTION_COOLDOWN_SECONDS` spaces decisions across all incoming invitations. The separate
 `NOYRA_MAX_INTERACTION_MODEL_CALLS_PER_DAY` cap is global per subject and UTC day. When it is

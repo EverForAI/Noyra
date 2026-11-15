@@ -740,6 +740,7 @@ src/noyra/interaction/public_cold_reader.py
 src/noyra/interaction/public_contract.py
 src/noyra/interaction/public_display.py
 src/noyra/interaction/public_reading.py
+src/noyra/interaction/rejections.py
 src/noyra/interaction/sitemap_tokens.py
 src/noyra/interaction/smtp_deadline.py
 src/noyra/interaction/store.py
@@ -1074,6 +1075,7 @@ tests/test_independent_audit_profiles.py
 tests/test_installer_operability.py
 tests/test_integrity_hardening.py
 tests/test_interaction.py
+tests/test_interaction_rejection_backoff.py
 tests/test_intrinsic_thought.py
 tests/test_intrinsic_thought_recurrence.py
 tests/test_intrinsic_thought_rounds.py
