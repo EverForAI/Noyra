@@ -15,9 +15,19 @@ if TYPE_CHECKING:
     from .contracts import RequestHandler
 
 
-def admin_migration_policy(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
+def _read_available(self: RequestHandler) -> bool:
+    """These reads precede the shared API guard; keep auth before storage admission."""
     if not self._authorized("operator"):
         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+        return False
+    if not self._at_rest_available():
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "at_rest_boundary_unavailable"})
+        return False
+    return True
+
+
+def admin_migration_policy(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
+    if not _read_available(self):
         return True
     policy = owner.migration_store.read_policy(owner.kernel.subject_id)
     projection = dict(policy.__dict__)
@@ -43,8 +53,7 @@ def admin_migration_policy(self: RequestHandler, owner: NoyraHTTPServer) -> bool
 
 
 def admin_migration_targets(self: RequestHandler, owner: NoyraHTTPServer, limit: int) -> bool:
-    if not self._authorized("operator"):
-        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+    if not _read_available(self):
         return True
     with owner.kernel.database.connection() as connection:
         rows = connection.execute(
@@ -92,8 +101,7 @@ def admin_migration_targets(self: RequestHandler, owner: NoyraHTTPServer, limit:
 
 
 def admin_migration_candidates(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
-    if not self._authorized("operator"):
-        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+    if not _read_available(self):
         return True
     try:
         candidates = owner.migration_runtime.refresh_candidates()
@@ -109,8 +117,7 @@ def admin_migration_candidates(self: RequestHandler, owner: NoyraHTTPServer) -> 
 
 
 def admin_migration_proposals(self: RequestHandler, owner: NoyraHTTPServer, limit: int) -> bool:
-    if not self._authorized("operator"):
-        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+    if not _read_available(self):
         return True
     try:
         items = owner.migration_manager.list_proposals(owner.kernel.subject_id, limit=limit)
@@ -128,8 +135,7 @@ def admin_migration_proposals(self: RequestHandler, owner: NoyraHTTPServer, limi
 def admin_migration_proposals_item(
     self: RequestHandler, owner: NoyraHTTPServer, parsed: SplitResult
 ) -> bool:
-    if not self._authorized("operator"):
-        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+    if not _read_available(self):
         return True
     proposal_id = parsed.path.removeprefix("/api/admin/migration/proposals/").strip("/")
     if not proposal_id or "/" in proposal_id:
@@ -152,8 +158,7 @@ def admin_migration_proposals_item(
 
 
 def admin_migration_tasks(self: RequestHandler, owner: NoyraHTTPServer, limit: int) -> bool:
-    if not self._authorized("operator"):
-        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+    if not _read_available(self):
         return True
     try:
         tasks = owner.migration_manager.list_tasks(owner.kernel.subject_id, limit=limit)
@@ -178,8 +183,7 @@ def admin_migration_tasks(self: RequestHandler, owner: NoyraHTTPServer, limit: i
 def admin_migration_tasks_item(
     self: RequestHandler, owner: NoyraHTTPServer, parsed: SplitResult
 ) -> bool:
-    if not self._authorized("operator"):
-        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+    if not _read_available(self):
         return True
     task_path = parsed.path.removeprefix("/api/admin/migration/tasks/").strip("/")
     if task_path.endswith("/self-attestation"):

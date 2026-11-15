@@ -1320,6 +1320,13 @@ def handler_type(
             self.wfile.write(body)
 
         def _public_article(self, parsed: Any) -> None:
+            if not self._at_rest_available():
+                self._json(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": "at_rest_boundary_unavailable"},
+                    public_contract=ARCHIVE_CONTRACT,
+                )
+                return
             parts = parsed.path.split("/")
             if len(parts) != 4 or parts[2] not in PUBLIC_VIEWS or not parts[3]:
                 self._text(
@@ -1416,6 +1423,13 @@ def handler_type(
             self._text(HTTPStatus.OK, "text/plain; charset=utf-8", body)
 
         def _sitemap_xml(self, parsed: Any) -> None:
+            if not self._at_rest_available():
+                self._json(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": "at_rest_boundary_unavailable"},
+                    public_contract=ARCHIVE_CONTRACT,
+                )
+                return
             site_url = owner.settings.public_site_url
             if not site_url:
                 self._text(

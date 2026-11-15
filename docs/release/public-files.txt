@@ -943,6 +943,7 @@ tests/test_architecture_dependencies.py
 tests/test_architecture_properties.py
 tests/test_archive.py
 tests/test_archive_s3.py
+tests/test_at_rest_read_boundaries.py
 tests/test_audit_0dea2dd_contracts.py
 tests/test_audit_0dea2dd_goal_origin.py
 tests/test_audit_0dea2dd_social.py

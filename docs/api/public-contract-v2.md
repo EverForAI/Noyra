@@ -6,6 +6,14 @@ The existing versioned path normalization also supports `/api/v1/public/*` and `
 
 ## Routes
 
+When the enforced at-rest boundary is unavailable, the public JSON API, article HTML
+(`/public/{kind}/{id}`), and every sitemap path return 503 before reading archive data.
+Articles and sitemaps use the v2 JSON error `{"error":"at_rest_boundary_unavailable"}`,
+the v2 contract header, `Cache-Control: no-store`, and `Retry-After`. The next request
+resumes normal visibility/hash/query validation once the boundary is ready. Static
+page shells and assets remain available; their availability does not authorize data
+reads. Health diagnostics remain available and report degraded readiness.
+
 - `overview`: display_name, lifecycle `{state, changed_at}`, generated_at, public_diary_count, last_sleep_completed_at, recent/writing/goals/projects (at most 3/1/2/2 public items; writing is an optional latest public diary preview). HTTP success means the public HTTP service answered; lifecycle is separate. Reasons, fatigue, expenses and diagnostic details are excluded.
 - `timeline`, `diary`, `behavior`, `interactions`, `posts`, `goals`, `projects`, `predictions`, `research`, `sleep`, `lifecycle`, `updates`: `{contract, generated_at, items, next_cursor}`. Only timeline allows another `kind`. Query: limit 1–100 (default 20), since/until timezone timestamps, public text search at most 120 characters, status, cursor, id. Invalid/duplicate/unknown parameters return 400.
 
