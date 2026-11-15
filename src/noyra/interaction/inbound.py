@@ -713,7 +713,10 @@ class WeChatInboundAdapter:
                 root = self._parse_xml(raw)
                 values = {child.tag: (child.text or "") for child in root}
             else:
-                _verify_wechat_signature(headers, secret)
+                # The plaintext signature covers only token/timestamp/nonce,
+                # so a captured tuple can authenticate a different message ID
+                # and body. Require the official ciphertext-bound envelope.
+                raise InboundAuthenticationError("wechat message callbacks require encrypted XML")
             if values.get("MsgType", "").strip().casefold() != "text":
                 return InboundIgnored("wechat_non_text_event")
             return _common_envelope(
@@ -726,21 +729,7 @@ class WeChatInboundAdapter:
                 content=values.get("Content"),
                 label="",
             )
-        _verify_wechat_signature(headers, secret)
-        payload = _json(body)
-        message_type = str(payload.get("msgtype") or payload.get("type") or "").casefold()
-        if message_type and message_type != "text":
-            return InboundIgnored("wechat_non_text_event")
-        return _common_envelope(
-            channel=self.channel,
-            transport_id=transport_id,
-            event_id=payload.get("msgid") or payload.get("event_id"),
-            account=payload.get("to") or payload.get("account"),
-            sender=payload.get("from") or payload.get("sender"),
-            conversation=payload.get("conversation_id") or payload.get("from"),
-            content=payload.get("content") or payload.get("text"),
-            label=payload.get("nickname"),
-        )
+        raise InboundAuthenticationError("wechat message callbacks require encrypted XML")
 
     @staticmethod
     def _parse_xml(raw: bytes) -> ET.Element:

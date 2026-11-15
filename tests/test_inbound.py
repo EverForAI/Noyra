@@ -38,6 +38,7 @@ from noyra.interaction.participants import Participant
 from noyra.interaction.types import InteractionKind
 from noyra.model import ModelGateway
 from noyra.service import NoyraService, ServiceSettings
+from support.inbound_callbacks import encrypted_wechat_callback
 
 
 def _setup(tmp_path: Path) -> tuple[SubjectKernel, TransportRecord, InboundStore]:
@@ -902,7 +903,7 @@ def test_wechat_xml_rejects_dtd_and_entity_declarations() -> None:
         )
 
 
-def test_wechat_plaintext_cdata_callback_is_accepted() -> None:
+def test_wechat_plaintext_cdata_callback_is_rejected_without_body_authentication() -> None:
     from noyra.interaction import WeChatInboundAdapter
 
     body = (
@@ -917,20 +918,17 @@ def test_wechat_plaintext_cdata_callback_is_accepted() -> None:
     timestamp = str(int(time.time()))
     nonce = "nonce"
     signature = hashlib.sha1("".join(sorted(("token", timestamp, nonce))).encode()).hexdigest()
-    envelope = WeChatInboundAdapter().parse(
-        body,
-        {
-            "X-Wechat-Signature": signature,
-            "X-Wechat-Timestamp": timestamp,
-            "X-Wechat-Nonce": nonce,
-        },
-        transport_id="transport-1",
-        secret="token",
-    )
-    assert isinstance(envelope, InboundEnvelope)
-    assert envelope.external_account_id == "wx-account"
-    assert envelope.external_sender_id == "user-openid"
-    assert envelope.content == "hello <!DOCTYPE is just text>"
+    with pytest.raises(InboundAuthenticationError, match="encrypted XML"):
+        WeChatInboundAdapter().parse(
+            body,
+            {
+                "X-Wechat-Signature": signature,
+                "X-Wechat-Timestamp": timestamp,
+                "X-Wechat-Nonce": nonce,
+            },
+            transport_id="transport-1",
+            secret="token",
+        )
 
 
 def test_wechat_aes_callback_is_decrypted_and_cdata_is_preserved() -> None:
@@ -946,7 +944,7 @@ def test_wechat_aes_callback_is_decrypted_and_cdata_is_preserved() -> None:
         b"<ToUserName><![CDATA[wx-account]]></ToUserName>"
         b"<FromUserName><![CDATA[user-openid]]></FromUserName>"
         b"<MsgType><![CDATA[text]]></MsgType>"
-        b"<Content><![CDATA[encrypted hello]]></Content>"
+        b"<Content><![CDATA[encrypted hello <!DOCTYPE is only text>]]></Content>"
         b"<MsgId>message-2</MsgId>"
         b"</xml>"
     )
@@ -979,7 +977,7 @@ def test_wechat_aes_callback_is_decrypted_and_cdata_is_preserved() -> None:
     )
     assert isinstance(envelope, InboundEnvelope)
     assert envelope.provider_event_id == "message-2"
-    assert envelope.content == "encrypted hello"
+    assert envelope.content == "encrypted hello <!DOCTYPE is only text>"
 
     stale_timestamp = "1"
     stale_signature = hashlib.sha1(
@@ -1121,6 +1119,7 @@ def test_native_http_callbacks_use_platform_handshakes_and_acknowledgements(
         external_sender_id="qq-user",
         role="participant",
     )
+    wx_key = bytes(range(32))
     wechat = service.http.transports.configure(
         subject_id,
         TransportInput(
@@ -1131,6 +1130,7 @@ def test_native_http_callbacks_use_platform_handshakes_and_acknowledgements(
                 "app_id": SecretStr("wx-app-id"),
                 "app_secret": SecretStr("wx-app-secret"),
                 "webhook_secret": SecretStr("wx-token"),
+                "encoding_aes_key": SecretStr(base64.b64encode(wx_key).decode().rstrip("=")),
             },
         ),
         actor="operator",
@@ -1222,20 +1222,26 @@ def test_native_http_callbacks_use_platform_handshakes_and_acknowledgements(
 
         nonce = "wx-nonce"
         wx_timestamp = str(int(time.time()))
-        wx_signature = hashlib.sha1(
-            "".join(sorted(("wx-token", wx_timestamp, nonce))).encode()
-        ).hexdigest()
-        wx_body = (
+        wx_message = (
             b"<xml><ToUserName>wx-account</ToUserName>"
             b"<FromUserName>wx-user</FromUserName>"
             b"<MsgType>text</MsgType><Content>hello from WeChat</Content>"
             b"<MsgId>wx-http-message</MsgId></xml>"
         )
+        wx_body, wx_headers = encrypted_wechat_callback(
+            wx_message,
+            key=wx_key,
+            token="wx-token",
+            account_id="wx-app-id",
+            timestamp=wx_timestamp,
+            nonce=nonce,
+        )
         # Dispatch uses the normalized path, while signature verification must
         # retain the original query-bearing request target.
         wx_url = (
             f"http://127.0.0.1:{port}/api/v1/webhooks/wechat/{wechat.transport_id}"
-            f"?signature={wx_signature}&timestamp={wx_timestamp}&nonce={nonce}"
+            f"?msg_signature={wx_headers['X-Wechat-MsgSignature']}"
+            f"&timestamp={wx_timestamp}&nonce={nonce}&encrypt_type=aes"
         )
         with urlopen(
             Request(

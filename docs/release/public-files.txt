@@ -243,6 +243,7 @@ docs/development/email-identity-continuity.md
 docs/development/epistemic-review-recovery.md
 docs/development/help-request-language.md
 docs/development/http-failure-boundary.md
+docs/development/inbound-authentication-retries.md
 docs/development/integrity-evidence.md
 docs/development/integrity-health.md
 docs/development/lifecycle-diagnostics.md
@@ -923,6 +924,7 @@ tests/support/__init__.py
 tests/support/ci_shard.py
 tests/support/faults.py
 tests/support/historical.py
+tests/support/inbound_callbacks.py
 tests/support/relationship_provenance.py
 tests/support/synthetic.py
 tests/support/workflow_recovery_schema.py
@@ -1081,6 +1083,7 @@ tests/test_i3_workflow_chain_http.py
 tests/test_i3_workflow_chain_process.py
 tests/test_identity_challenges.py
 tests/test_inbound.py
+tests/test_inbound_replay_boundaries.py
 tests/test_independent_audit_profiles.py
 tests/test_installer_operability.py
 tests/test_installer_release_cleanup.py

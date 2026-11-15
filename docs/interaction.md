@@ -1,5 +1,8 @@
 # Noyra 交互协议
 
+外部通道的认证、合法重复投递及微信加密回调配置要求，见
+[入站认证与重试边界](development/inbound-authentication-retries.md)。
+
 ## 1. 消息分类
 
 收到人类消息后，先记录为事件，再由 Noyra 判断：
