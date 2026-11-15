@@ -1295,6 +1295,7 @@ tests/test_web_contract.py
 tests/test_windows_credential_permissions.py
 tests/test_windows_data_root.py
 tests/test_windows_process_identity.py
+tests/test_workflow_guard_migration_boundaries.py
 tests/test_workflow_manifest_contract.py
 tests/test_workflow_publication_capability.py
 tests/test_workflow_source_recovery.py

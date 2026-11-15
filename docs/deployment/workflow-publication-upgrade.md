@@ -70,6 +70,30 @@ raw evidence or backup locations as release artifacts.
 
 ## Failure and rollback
 
+### Guard preconditions and retries
+
+The schema117 publication SQL replaces `preserve_workflow_export_transition`, which
+schema115 already installed. Its first `DROP TRIGGER` therefore requires that old
+guard to exist, and the next statement recreates the reviewed replacement. The other
+seven `DROP TRIGGER IF EXISTS` statements precede new guards that are absent from
+normal schema115/116 databases. They do not establish that the first guard is optional.
+
+The runtime applies migrations according to the persisted schema version. Reopening
+an upgraded database does not rerun schema117. Its DDL and version update run within
+the existing transaction; an interruption after the drop or replacement rolls back
+the stage, while initialization failure also uses the pre-migration restore path.
+Controlled tests confirm that even repeating this complete guard block preserves the
+resulting DDL and publication rows. This is a test of this block, not a general promise
+that every migration is replayable or an instruction to run migration SQL manually.
+
+If a schema116 input is already missing the required old trigger, the SQL reports
+`no such trigger: preserve_workflow_export_transition`. That is a damaged precondition,
+not a normal migration retry. Failure must preserve that input for investigation;
+restoring its pre-migration image does not make the original damage healthy. Do not
+add `IF EXISTS`, create an ad hoc trigger, or edit version/contract markers to force
+the copy through. Use the supported backup/recovery process and strict schema checks.
+Historical migration SQL and its recorded hashes remain frozen.
+
 If migration fails, the existing database migration backup/restore path attempts to
 restore the original database. Keep the runtime stopped while investigating. Verify the
 old schema and the matching old release before reopening it; do not repeatedly retry
