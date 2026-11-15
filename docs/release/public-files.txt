@@ -1083,6 +1083,7 @@ tests/test_i3_workflow_chain_http.py
 tests/test_i3_workflow_chain_process.py
 tests/test_identity_challenges.py
 tests/test_inbound.py
+tests/test_inbound_crypto_failures.py
 tests/test_inbound_replay_boundaries.py
 tests/test_independent_audit_profiles.py
 tests/test_installer_operability.py

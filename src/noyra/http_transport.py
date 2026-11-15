@@ -1106,10 +1106,16 @@ def handler_type(
                         "scheduling_priority": accepted.scheduling_priority,
                     },
                 )
-            except Exception:
+            except Exception as error:
                 # Durable ingestion is already complete.  A provider must
                 # receive a success response or it will redeliver forever.
-                LOGGER.exception("inbound acceptance audit failed")
+                log_http_failure(
+                    error,
+                    self._http_request_id,
+                    method=self.command,
+                    target=self.path,
+                    event="inbound_acceptance_audit_failure",
+                )
             self._inbound_ack(
                 channel,
                 {

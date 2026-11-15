@@ -352,10 +352,7 @@ def test_signature_replay_outside_authentication_window_is_rejected(kind: str) -
     now = time.time()
     with (
         patch("time.time", return_value=now + 301),
-        pytest.raises(
-            InboundAuthenticationError,
-            match="timestamp is invalid" if kind == "qq" else "stale",
-        ),
+        pytest.raises(InboundAuthenticationError, match="stale"),
     ):
         callback.parse("synthetic-transport")
 

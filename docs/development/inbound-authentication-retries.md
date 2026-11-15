@@ -74,3 +74,39 @@ table, expiry worker or migration is introduced by this change. Local tests cove
 synthetic signatures, duplicate delivery, body mutation, concurrent processing,
 restart and recovery; real provider configuration remains a deployment acceptance
 step.
+
+## Failure classification and diagnostics
+
+Invalid QQ signatures, malformed signature fields and stale timestamps remain
+authentication failures (`401`); a stale timestamp is not relabeled as malformed.
+Malformed authenticated message payloads retain the existing `400` handling.
+
+A missing or unsupported local Ed25519/AES implementation raises
+`CryptoBackendUnavailableError`. The existing HTTP failure boundary returns `503`
+with a fixed `service_unavailable` body and a server-generated request ID. It logs
+the exception class and bounded source-safe frame identifiers without exception
+messages, source lines, callback bodies, signatures, keys or raw URL parameters.
+Unexpected runtime failures remain server errors rather than being disguised as
+invalid client credentials. The response does not expose the local dependency or
+configuration details.
+
+The project already requires and locks `cryptography`; this classification is for
+a local import/backend failure, not a promise that a service can boot with every
+cryptographic package removed. Restore the supported installation/backend and
+retry normal delivery; changing the AppSecret does not repair a missing module.
+Tests inject failures after a normal service boot and verify recovery without
+replacing credentials.
+
+If the invitation is already durably ingested but its ancillary acceptance-audit
+write fails, the platform still receives its normal success acknowledgement. A
+separate `inbound_acceptance_audit_failure` diagnostic records the failed audit
+with `status=200` and `phase=after_ingestion`. This does not claim that the audit
+write succeeded. Duplicate callbacks still refer to the same business interaction.
+The diagnostic also tolerates a failing logging handler, without changing the
+accepted callback into a retry or falling back to raw exception output.
+
+Broad exception handlers are reviewed by their effects: preserving the original
+failure during cleanup, persisting recovery state and recording safe diagnostics
+are different from silently turning a failure into success. This change does not
+remove every broad handler, add a database write to each exception, or promise
+diagnostic delivery when the logging subsystem itself is unavailable.

@@ -11,7 +11,7 @@ from http import HTTPStatus
 
 from noyra.core.admission import OperationInvalidated
 from noyra.core.at_rest import AtRestError
-from noyra.core.errors import IntegrityError, RuntimeOwnershipError
+from noyra.core.errors import CryptoBackendUnavailableError, IntegrityError, RuntimeOwnershipError
 from noyra.http_access_logging import http_log_fields
 
 LOGGER = logging.getLogger("noyra.service")
@@ -31,6 +31,7 @@ def failure_status(error: BaseException) -> HTTPStatus:
             AtRestError,
             OperationInvalidated,
             RuntimeOwnershipError,
+            CryptoBackendUnavailableError,
             OSError,
         ),
     ):
@@ -70,17 +71,33 @@ def log_http_failure(
             frames.append(f"{module}.{function}:{trace.tb_lineno}")
             trace = trace.tb_next
         safe_id = correlation if re.fullmatch(r"[0-9a-f]{32}", correlation) else "unavailable"
+        status: int | str
+        if event == "inbound_acceptance_audit_failure":
+            # The invitation is durable; this ancillary audit failure must
+            # not turn an acknowledged callback into a provider retry.
+            status, phase = 200, "after_ingestion"
+        else:
+            status = (
+                "aborted" if started else int(failure_status(error)) if error is not None else 500
+            )
+            phase = "after_headers" if started else "before_headers"
         LOGGER.error(
             "http event=%s request_id=%s method=%s route=%s status=%s "
             "phase=%s error_type=%s frames=%s",
             event
-            if event in {"handler_failure", "server_failure", "error_response_failure"}
+            if event
+            in {
+                "handler_failure",
+                "server_failure",
+                "error_response_failure",
+                "inbound_acceptance_audit_failure",
+            }
             else "handler_failure",
             safe_id,
             safe_method,
             route,
-            "aborted" if started else int(failure_status(error)) if error is not None else 500,
-            "after_headers" if started else "before_headers",
+            status,
+            phase,
             _identifier(type(error).__name__) if error is not None else "unknown",
             " -> ".join(frames) or "unavailable",
         )
