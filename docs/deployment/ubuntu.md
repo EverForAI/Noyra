@@ -347,6 +347,10 @@ with root-only permissions, then set the corresponding `*_CREDENTIAL` variable (
 the credential name from the environment; systemd supplies its contents through
 `CREDENTIALS_DIRECTORY`. File and systemd credential sources cannot both be set for one value.
 
+The separate wallet signer reads its three systemd credentials directly. When replacing an
+older unit that copied credentials into the signer state directory, update the code and unit
+together and follow [the signer credential migration procedure](signer-credentials.md).
+
 Native production hosts use `NOYRA_STORAGE_PROFILE=recovery_capable` by default. This profile
 requires the configured backup root to be usable before the service starts, so runtime readiness
 cannot hide a missing restore and upgrade safeguard. A deliberate system-disk runtime-only

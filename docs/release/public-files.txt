@@ -222,6 +222,7 @@ docs/deployment/remote-validation.md
 docs/deployment/research-preview.md
 docs/deployment/runtime-observation.md
 docs/deployment/setup-modes.md
+docs/deployment/signer-credentials.md
 docs/deployment/ubuntu.md
 docs/deployment/windows-data-root-migration.md
 docs/deployment/workflow-publication-upgrade.md
@@ -1238,7 +1239,9 @@ tests/test_semantic_memory_recovery.py
 tests/test_service.py
 tests/test_service_security_profile.py
 tests/test_service_wallet_modes.py
+tests/test_signer_credentials.py
 tests/test_signer_service.py
+tests/test_signer_systemd_credentials.py
 tests/test_sitemap_tokens.py
 tests/test_sleep.py
 tests/test_smoke.py

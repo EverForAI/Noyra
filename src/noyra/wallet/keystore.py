@@ -329,6 +329,21 @@ def load_account(path: Path, password: str) -> LocalAccount:
 def read_password_file(path: Path) -> str:
     """Read a private service password file, removing one terminal newline."""
     raw = _read_private(Path(path).expanduser(), MAX_PASSWORD_BYTES, "wallet password file")
+    return _decode_password_file(raw)
+
+
+def read_password_credential(path: Path) -> str:
+    """Read a private credential mount without imposing wallet-storage topology."""
+    if os.name == "nt":
+        # Windows has no systemd credential mount; retain the wallet ACL checks.
+        return read_password_file(path)
+    from noyra.core.credentials import read_secret_bytes
+
+    raw = read_secret_bytes(path, label="wallet password credential", max_bytes=MAX_PASSWORD_BYTES)
+    return _decode_password_file(raw)
+
+
+def _decode_password_file(raw: bytes) -> str:
     if not raw or len(raw) > MAX_PASSWORD_BYTES:
         raise _error("wallet password file is invalid")
     if raw.endswith(b"\r\n"):

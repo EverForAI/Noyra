@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+import struct
 from pathlib import Path
 
 _MAX_CREDENTIAL_BYTES = 16 * 1024
@@ -76,14 +77,63 @@ def _validate_permissions(metadata: os.stat_result, *, label: str) -> None:
     raise CredentialError(f"{label} owner is not the service account or root")
 
 
-def read_secret_file(
+def _private_systemd_acl(candidate: Path, descriptor: int, metadata: os.stat_result) -> bool:
+    """Accept systemd's root-owned, read-only per-user credential ACL only.
+
+    Some systemd builds use a named-user ACL instead of chowning credentials.
+    The apparent group-read bit is the ACL mask, not a grant to the root group.
+    Ordinary root/group files must continue through the existing permission check.
+    """
+    if os.name != "posix" or metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) != 0o440:
+        return False
+    directory_value = os.getenv("CREDENTIALS_DIRECTORY", "").strip()
+    if not directory_value:
+        return False
+    directory = Path(directory_value)
+    if not directory.is_absolute() or candidate.parent != directory:
+        return False
+    fstatvfs = getattr(os, "fstatvfs", None)
+    getxattr = getattr(os, "getxattr", None)
+    geteuid = getattr(os, "geteuid", None)
+    if not callable(fstatvfs) or not callable(getxattr) or not callable(geteuid):
+        return False
+    try:
+        directory_metadata = directory.lstat()
+        if (
+            not stat.S_ISDIR(directory_metadata.st_mode)
+            or directory_metadata.st_uid != 0
+            or directory_metadata.st_mode & 0o027
+            or directory_metadata.st_dev == directory.parent.stat().st_dev
+            or not fstatvfs(descriptor).f_flag & getattr(os, "ST_RDONLY", 1)
+        ):
+            return False
+        # Linux ACL xattr v2: owner read; this UID read; owning group none;
+        # mask read; other none. No additional user or group may receive access.
+        entries = (
+            (0x01, 4, 0xFFFFFFFF),
+            (0x02, 4, geteuid()),
+            (0x04, 0, 0xFFFFFFFF),
+            (0x10, 4, 0xFFFFFFFF),
+            (0x20, 0, 0xFFFFFFFF),
+        )
+        expected = struct.pack("<I", 2) + b"".join(struct.pack("<HHI", *entry) for entry in entries)
+        return bool(getxattr(descriptor, "system.posix_acl_access") == expected)
+    except (AttributeError, OSError, ValueError, struct.error):
+        return False
+
+
+def read_secret_bytes(
     path: Path | str,
     *,
     label: str = "credential",
-    single_line: bool = True,
     max_bytes: int = _MAX_CREDENTIAL_BYTES,
-) -> str:
-    """Read one bounded private credential/configuration file."""
+) -> bytes:
+    """Read bounded credential bytes, including read-only systemd mounts.
+
+    Files must retain the existing stable-file, ownership and permission
+    checks. A separate credential filesystem is allowed; callers must never
+    copy its plaintext into their persistent state directory to read it.
+    """
 
     candidate = _absolute_path(str(path), label=label)
     _reject_reparse_components(candidate, label=label)
@@ -104,7 +154,11 @@ def read_secret_file(
             or (metadata.st_dev, metadata.st_ino) != (path_metadata.st_dev, path_metadata.st_ino)
         ):
             raise CredentialError(f"{label} must be a stable regular, non-hard-linked file")
-        _validate_permissions(metadata, label=label)
+        try:
+            _validate_permissions(metadata, label=label)
+        except CredentialError:
+            if not _private_systemd_acl(candidate, descriptor, metadata):
+                raise
         chunks: list[bytes] = []
         remaining = max_bytes + 1
         while remaining:
@@ -120,6 +174,18 @@ def read_secret_file(
         os.close(descriptor)
     if not raw or len(raw) > max_bytes:
         raise CredentialError(f"{label} size is invalid")
+    return raw
+
+
+def read_secret_file(
+    path: Path | str,
+    *,
+    label: str = "credential",
+    single_line: bool = True,
+    max_bytes: int = _MAX_CREDENTIAL_BYTES,
+) -> str:
+    """Read one bounded private credential/configuration file."""
+    raw = read_secret_bytes(path, label=label, max_bytes=max_bytes)
     try:
         value = raw.decode("utf-8").strip()
     except UnicodeDecodeError as error:
