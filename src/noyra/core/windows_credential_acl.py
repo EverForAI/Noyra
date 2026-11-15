@@ -9,6 +9,7 @@ from __future__ import annotations
 import ctypes
 import os
 import struct
+import sys
 from typing import Any
 
 
@@ -31,7 +32,7 @@ def _require_trusted_acl(
 
 def require_private_credential_handle(descriptor: int) -> None:
     """Reject unreadable/unsafe security descriptors before any secret bytes are read."""
-    if os.name != "nt":
+    if sys.platform != "win32" or os.name != "nt":
         raise OSError("Windows credential ACL backend is unavailable")
     import msvcrt
     from ctypes import wintypes

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import sys
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -153,13 +155,13 @@ def test_signer_credentials_reject_links(tmp_path: Path, reader: str, link_kind:
             os.link(source, linked)
     except OSError:
         pytest.skip("link creation unavailable")
-    operation = {
+    operations: dict[str, Callable[[Path], str | bytes]] = {
         "password": read_password_credential,
         "text": read_secret_file,
         "bytes": read_secret_bytes,
-    }[reader]
+    }
     with pytest.raises(ValueError):
-        operation(linked)
+        operations[reader](linked)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX credential permissions")
@@ -199,6 +201,8 @@ def test_systemd_acl_exception_requires_every_private_boundary(
 
     import noyra.core.credentials as credentials
 
+    if sys.platform == "win32":
+        pytest.skip("POSIX systemd ACL contract")
     directory = Mock()
     directory.is_absolute.return_value = True
     directory.lstat.return_value = SimpleNamespace(
@@ -231,5 +235,5 @@ def test_systemd_acl_exception_requires_every_private_boundary(
         lambda _: SimpleNamespace(f_flag=0 if boundary == "writable-mount" else os.ST_RDONLY),
     )
     monkeypatch.setattr(os, "getxattr", lambda *_: acl)
-    metadata = SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o440)
+    metadata = os.stat_result((stat.S_IFREG | 0o440, 0, 0, 1, 0, 0, 0, 0, 0, 0))
     assert credentials._private_systemd_acl(candidate, 123, metadata) == (boundary == "private")

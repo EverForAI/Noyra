@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -181,6 +182,8 @@ def test_null_dacl_is_rejected_before_any_credential_bytes(tmp_path: Path) -> No
 
 @WINDOWS
 def test_open_handle_is_rechecked_after_its_acl_changes(tmp_path: Path) -> None:
+    if sys.platform != "win32":
+        pytest.skip("Native Windows credential ACL contract")
     path = tmp_path / "drift.key"
     path.write_text(SECRET, encoding="utf-8")
     set_acl(path)
@@ -198,6 +201,8 @@ def test_open_handle_is_rechecked_after_its_acl_changes(tmp_path: Path) -> None:
 
 @WINDOWS
 def test_new_managed_sitemap_key_is_private_before_serializing_key_bytes(tmp_path: Path) -> None:
+    if sys.platform != "win32":
+        pytest.skip("Native Windows credential ACL contract")
     root = tmp_path / "owned-secrets"
     root.mkdir()
     set_acl(root, extra_sid="S-1-5-32-545", directory=True)

@@ -20,6 +20,8 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_real_systemd_credentials_survive_restart_without_state_copies(tmp_path: Path) -> None:
+    if sys.platform == "win32":
+        pytest.skip("requires a POSIX systemd test host")
     if os.geteuid() != 0 or Path("/proc/1/comm").read_text().strip() != "systemd":
         pytest.skip("requires a root-run systemd test host")
     import pwd
