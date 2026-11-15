@@ -907,6 +907,7 @@ tests/fixtures/windows-signature-policy-regression.ps1
 tests/fixtures/windows-state-publish-regression.ps1
 tests/fixtures/windows-verification-regression.ps1
 tests/frontend/admin-optimization.test.cjs
+tests/frontend/admin-startup.test.cjs
 tests/frontend/participant.test.cjs
 tests/frontend/public-archive.test.cjs
 tests/frontend/publication-admin.test.cjs
