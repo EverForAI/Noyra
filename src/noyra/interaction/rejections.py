@@ -95,7 +95,9 @@ class InteractionRejections:
             and call.error_code == "structured_output_invalid"
         )
 
-    def ready(self, connection: Any, purpose: str) -> bool:
+    def ready(
+        self, connection: Any, purpose: str, *, provider_failure_cooldown_seconds: float = 60
+    ) -> bool:
         # The latest physical call determines recovery. An explicitly prepared
         # retry or an uncommitted success must retain its original identity.
         row = connection.execute(
@@ -107,7 +109,29 @@ class InteractionRejections:
             return True
         call = ModelLedger._call_from_row(row)
         receipt = self.read(connection, call)
-        return receipt is None or self._time(self.clock()) >= self._time(receipt["retry_after"])
+        if receipt is not None:
+            return self._time(self.clock()) >= self._time(receipt["retry_after"])
+        if (
+            call.status == "failed"
+            and call.error_code is not None
+            and call.error_code.startswith("provider_")
+        ):
+            # A known provider rejection is not an invalid proposal. Use its
+            # durable settlement time without inventing a rejection receipt or
+            # changing the business round. Explicit operator closure stays runnable.
+            if connection.execute(
+                "SELECT 1 FROM audit_records INDEXED BY idx_audit_subject_action_call "
+                "WHERE subject_id=? AND action='model_unknown_retry_closed' "
+                "AND json_valid(payload_json) "
+                "AND json_extract(payload_json,'$.call_id')=? LIMIT 1",
+                (self.subject_id, call.call_id),
+            ).fetchone():
+                return True
+            delay = max(60.0, provider_failure_cooldown_seconds)
+            return self._time(self.clock()) >= self._time(call.completed_at) + timedelta(
+                seconds=delay
+            )
+        return True
 
     def record(
         self,

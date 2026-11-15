@@ -107,7 +107,11 @@ class InteractionCognition:
         if proposal is None:
             self._record_schema_failure(purpose, interaction, round_number)
             with self.database.read_transaction() as connection:
-                if not self.rejections.ready(connection, purpose):
+                if not self.rejections.ready(
+                    connection,
+                    purpose,
+                    provider_failure_cooldown_seconds=self.settings.interaction_cooldown_seconds,
+                ):
                     return None
             budget_day = utc_now()[:10]
             calls_today = self._calls_today(budget_day)
@@ -282,11 +286,15 @@ class InteractionCognition:
                     "require_prepared_authorization": self.gateway.requires_explicit_prepared_retry,
                 },
             )
-            # Stream past invitations in local rejection backoff. Their offered
+            # Stream past invitations in local proposal/provider backoff. Their offered
             # status, scheduling priority and private-input fences stay intact.
             for item in row:
                 purpose = f"interaction_cognition:{item['interaction_id']}:{item['decision_round']}"
-                if self.rejections.ready(connection, purpose):
+                if self.rejections.ready(
+                    connection,
+                    purpose,
+                    provider_failure_cooldown_seconds=self.settings.interaction_cooldown_seconds,
+                ):
                     return self.interactions.get(item["interaction_id"])
         return None
 

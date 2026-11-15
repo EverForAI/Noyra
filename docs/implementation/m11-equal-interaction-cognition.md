@@ -60,6 +60,25 @@ success still recovers using the original call. Unknown outcomes and prepared re
 retain their existing reconciliation fences; a rejection receipt does not release reservations or
 authorize ambiguous calls to run again.
 
+Known provider failures with a settled `failed` call and a standard `provider_*`
+error code also pause that invitation for
+`max(60, NOYRA_INTERACTION_COOLDOWN_SECONDS)` seconds. This fixed delay is measured
+from the latest physical call's persisted `completed_at` in UTC. Polling, restart,
+or a UTC day change does not move the deadline. A provider rejection is not a model
+proposal, so this path creates no rejection receipt or subject decision, changes no
+invitation priority, and releases no accounting reservation. It allows another
+eligible invitation to use an independently healthy route while the first waits.
+At the deadline, normal priority, timestamp and ID ordering applies again.
+
+Unknown or executing outcomes and unapproved prepared retries remain fenced by the
+model ledger. Explicit operator reconciliation and closure keep their existing
+semantics; this delay does not reinterpret an operator's resolved failure as a new
+provider rejection. A successful uncommitted response can still recover from its
+original settled call. The scheduler selects at most one eligible invitation per
+tick; it does not keep sending requests until it obtains a valid proposal. Priority
+is not an aging guarantee: a continuous stream of eligible higher-priority messages
+can still precede lower-priority messages under the existing policy.
+
 `NOYRA_INTERACTION_COOLDOWN_SECONDS` spaces decisions across all incoming invitations. The separate
 `NOYRA_MAX_INTERACTION_MODEL_CALLS_PER_DAY` cap is global per subject and UTC day. When it is
 reached, pending invitations remain offered for a later day while the world-cognition cycle continues.

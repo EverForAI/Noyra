@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -81,7 +82,7 @@ class Case:
         return self.now.isoformat(timespec="milliseconds")
 
     def engine(
-        self, responses: list[str | ProviderCallError], *, routed: bool = False
+        self, responses: Sequence[str | ProviderCallError], *, routed: bool = False
     ) -> tuple[InteractionCognition, FakeProvider]:
         provider = FakeProvider(
             [
