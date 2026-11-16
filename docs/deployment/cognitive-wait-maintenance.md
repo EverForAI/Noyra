@@ -62,8 +62,10 @@ python -m noyra.cognitive_wait_maintenance \
   --apply --expect-plan PREVIEW_PLAN_HASH --reason '已核对本批终态等待与备份'
 ```
 
-应用阶段不初始化数据库，严格校验既有 schema；使用 BEGIN IMMEDIATE 串行化写入，
-重新计算同批计划。任何候选状态变化、哈希不符、完整性问题或查询超限都会拒绝并回滚整批。
+应用阶段不初始化数据库；先使用 BEGIN IMMEDIATE 取得写锁，再在同一事务内严格校验既有 schema，
+重新计算同批计划。写锁不可用时按原 200ms 锁等待拒绝，不先执行完整 schema 校验；取得写锁后，
+schema 校验到整批提交之间不允许其他写入改变契约。取得写锁后的 schema 校验和计划处理分别使用原有的
+2 秒阶段预算；锁准入耗时不挤占后续校验阶段。任何候选状态变化、哈希不符、完整性问题或查询超限都会拒绝并回滚整批。
 仅修改已预览的 task_id：同一 purpose 在另一池、另一页的记录不会被顺带修改。
 同事务追加私有 operator 审计事件，记录计划哈希、理由和 task_id。
 
