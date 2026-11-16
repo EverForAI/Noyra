@@ -9,6 +9,7 @@ import pytest
 from pydantic import SecretStr
 
 from noyra.core import Database, IdentityStore
+from noyra.core.at_rest import _windows_harden
 from noyra.core.errors import IntegrityError
 from noyra.core.types import content_hash
 from noyra.model.capabilities import CapabilityProfileStore
@@ -218,6 +219,8 @@ def test_offline_profile_repair_command_records_authorization(
     trusted_file = tmp_path / "trusted.json"
     trusted_file.write_text(json.dumps({"profiles": [profile]}), encoding="utf-8")
     trusted_file.chmod(0o600)
+    if os.name == "nt":
+        _windows_harden(trusted_file, entire_tree=True)
     evidence_root = tmp_path / "evidence"
     evidence_root.mkdir(mode=0o700)
     evidence = (

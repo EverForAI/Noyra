@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
+from noyra.core.at_rest import _windows_harden
 from noyra.service import NoyraService
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +40,8 @@ def test_fresh_preview_has_no_external_economic_or_file_authority(
     if example.get("NOYRA_PROFILE") == "production":
         public_hash_key.write_text("preview-test-key-that-is-at-least-32-bytes", encoding="utf-8")
         public_hash_key.chmod(0o600)
+        if os.name == "nt":
+            _windows_harden(tmp_path, entire_tree=True)
         example["NOYRA_PUBLIC_HASH_KEY_FILE"] = str(public_hash_key)
     for key in (
         "NOYRA_COGNITION_ENABLED",
