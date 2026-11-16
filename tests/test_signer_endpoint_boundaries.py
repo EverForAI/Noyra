@@ -119,20 +119,24 @@ def frontend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Fronte
 
         def do_POST(self) -> None:
             fixture.paths.append(self.path)
+            size = int(self.headers.get("Content-Length", "0"))
+            assert 0 < size <= 16384
+            # Consume the request before closing TLS after an early redirect.
+            # Otherwise unread body bytes can reset the connection on Windows.
+            body = self.rfile.read(size)
+            assert len(body) == size
             if fixture.redirect:
                 self.send_response(302)
                 self.send_header("Location", fixture.origin.url + self.path)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
-            size = int(self.headers.get("Content-Length", "0"))
-            assert 0 < size <= 16384
             connection = http.client.HTTPConnection("127.0.0.1", origin.server_port, timeout=5)
             try:
                 headers = {"Content-Type": "application/json"}
                 if self.headers.get("Authorization"):
                     headers["Authorization"] = str(self.headers["Authorization"])
-                connection.request("POST", self.path, body=self.rfile.read(size), headers=headers)
+                connection.request("POST", self.path, body=body, headers=headers)
                 response = connection.getresponse()
                 body = response.read(65536)
                 self.send_response(response.status)
@@ -259,6 +263,7 @@ def test_redirect_is_not_followed_even_with_a_redirect_enabled_injected_client(
     frontend: Frontend,
 ) -> None:
     frontend.redirect = True
+    statuses: list[int] = []
     with (
         frontend.client() as client,
         HTTPSWalletSigner(
@@ -270,7 +275,11 @@ def test_redirect_is_not_followed_even_with_a_redirect_enabled_injected_client(
         ) as signer,
         pytest.raises(ValueError, match="possession proof invalid"),
     ):
+        client.event_hooks["response"].append(
+            lambda response: statuses.append(response.status_code)
+        )
         signer.prove_migration_identity(proof_context())
+    assert statuses == [302]
     assert frontend.paths == ["/migration-identity"]
     assert frontend.rpc.sent_raw_transactions == []
 
