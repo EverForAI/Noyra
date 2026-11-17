@@ -77,7 +77,16 @@ def test_policy_change_after_prepare_blocks_new_signature_and_preserves_unknown(
 
 
 @pytest.mark.parametrize("when", ["before_headers", "after_body"])
-def test_https_late_worker_cannot_start_payment_after_timeout(tmp_path: Path, when: str) -> None:
+def test_https_late_worker_cannot_start_payment_after_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, when: str
+) -> None:
+    import queue
+    from types import SimpleNamespace
+
+    import noyra.core.http as http
+    import noyra.wallet.dispatch as dispatch
+    import noyra.wallet.execution as execution_module
+
     db, subject, _network, _asset, _source, order = fixture(tmp_path)
     gate = RuntimeAdmissionGate(subject)
     engine = WalletPaymentExecutionEngine(db, MockSigner())
@@ -93,12 +102,26 @@ def test_https_late_worker_cannot_start_payment_after_timeout(tmp_path: Path, wh
     policy_version = engine.economy.get_policy(subject).policy_version
     release = threading.Event()
     done = threading.Event()
+    boundary_reached = threading.Event()
     sends: list[str] = []
+    clock = [0.0]
+
+    class BoundaryQueue(queue.Queue[tuple[bool, Any]]):
+        def get(self, block: bool = True, timeout: float | None = None) -> tuple[bool, Any]:
+            # Keep setup/authorization speed out of the requested interleaving.
+            assert boundary_reached.wait(10), "HTTP worker did not reach the test boundary"
+            clock[0] = 1.0
+            return super().get(block=block, timeout=timeout)
+
+    monkeypatch.setattr(http, "queue", SimpleNamespace(Queue=BoundaryQueue, Empty=queue.Empty))
+    for module in (http, dispatch, execution_module):
+        monkeypatch.setattr(module, "monotonic_time", lambda: clock[0])
 
     def handler(request: httpx.Request) -> httpx.Response:
         try:
             trace = request.extensions["trace"]
             if when == "before_headers":
+                boundary_reached.set()
                 assert release.wait(10)
             trace("http11.send_request_headers.started", {})
             trace("http11.send_request_headers.complete", {})
@@ -106,6 +129,7 @@ def test_https_late_worker_cannot_start_payment_after_timeout(tmp_path: Path, wh
             sends.append("payment")
             trace("http11.send_request_body.complete", {})
             if when == "after_body":
+                boundary_reached.set()
                 assert release.wait(10)
             return httpx.Response(
                 200,
