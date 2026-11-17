@@ -240,7 +240,7 @@ $second=New-NoyraProcessStartInfo $Python $InstallRoot $true
  second_initialization=$second.EnvironmentVariables['NOYRA_MANAGED_INITIALIZE']
  parent_data=$env:NOYRA_DATA_DIR;parent_install=$env:NOYRA_MANAGED_INSTALL_ROOT
  parent_managed=$env:NOYRA_MANAGED_DATA_ROOT;parent_initialization=$env:NOYRA_MANAGED_INITIALIZE
-} | ConvertTo-Json -Depth 6 -Compress
+} | ConvertTo-Json -Depth 6 -Compress -EscapeHandling EscapeNonAscii
 """,
         encoding="utf-8",
     )
