@@ -317,7 +317,20 @@ def test_revoked_export_job_never_becomes_downloadable(tmp_path: Path) -> None:
     manager.start_after_ownership(subject_id)
     try:
         job = manager.create(subject_id, "training")
-        assert staged_ready.wait(5)
+        future = manager.futures[job.job_id]
+        staging_deadline = time.monotonic() + 30
+        while not staged_ready.is_set():
+            if future.done():
+                future.result()
+                finished = manager.get(job.job_id, subject_id=subject_id)
+                pytest.fail(
+                    "training export worker finished before the publication gate: "
+                    f"status={finished.status}, error_code={finished.error_code}"
+                )
+            remaining = staging_deadline - time.monotonic()
+            if remaining <= 0:
+                pytest.fail("training export did not reach the publication gate within 30 seconds")
+            staged_ready.wait(min(0.05, remaining))
         current = TrainingStore(database).policy(subject_id)
         TrainingStore(database).update_policy(
             subject_id,
