@@ -10,6 +10,17 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def child_processes_do_not_inherit_pytest_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Test subprocesses are outside shard coverage; forced exits can leave
+    # partial DBs, and temporary source copies disappear before reporting.
+    for name in tuple(os.environ):
+        if name.startswith("COV_CORE_") or name == "COVERAGE_PROCESS_START":
+            monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def rotation_directory(tmp_path: Path) -> Iterator[Path]:
     uid = getattr(os, "geteuid", None)

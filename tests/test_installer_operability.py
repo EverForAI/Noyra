@@ -139,6 +139,7 @@ verify_service_user_import "$staging/.venv/bin/python"
             text=True,
             timeout=60,
             check=False,
+            env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
         )
         assert result.returncode == 0, result.stderr
         assert stat.S_IMODE((root / "release/.venv/pyvenv.cfg").stat().st_mode) == 0o644
