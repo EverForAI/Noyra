@@ -217,8 +217,9 @@ def _wallet_command(arguments: list[str]) -> None:
 
 
 def _signer_command(arguments: list[str]) -> None:
+    from noyra.core.credentials import read_secret_file
     from noyra.signer_service import CHAIN_ID, HTTPRPC, SignerEngine, SignerHTTPServer, SignerState
-    from noyra.wallet.keystore import load_account, read_password_file
+    from noyra.wallet.keystore import load_account, read_password_credential
 
     parser = argparse.ArgumentParser(prog="python -m noyra signer")
     parser.add_argument("--keystore", type=Path, required=True)
@@ -232,9 +233,10 @@ def _signer_command(arguments: list[str]) -> None:
     options = parser.parse_args(arguments)
     if options.host != "127.0.0.1" or options.chain_id != CHAIN_ID:
         raise SystemExit("signer configuration is invalid")
-    account = load_account(options.keystore, read_password_file(options.wallet_password_credential))
-    token = options.bearer_token_credential.read_text(encoding="utf-8").strip()
-    rpc_url = options.rpc_url_credential.read_text(encoding="utf-8").strip()
+    password = read_password_credential(options.wallet_password_credential)
+    token = read_secret_file(options.bearer_token_credential, label="signer bearer credential")
+    rpc_url = read_secret_file(options.rpc_url_credential, label="signer RPC credential")
+    account = load_account(options.keystore, password)
     state = SignerState.open(options.state)
     engine = SignerEngine(
         account=account,

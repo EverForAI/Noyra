@@ -76,7 +76,12 @@ def test_signed_common_knowledge_is_quarantined_before_subject_acceptance() -> N
             )
         )
         envelope = publisher.export_package(package.package_id)
-        reader.trust_key(publisher.public_key, label="test publisher", actor="operator")
+        reader.trust_key(
+            publisher.public_key,
+            publisher_subject_id=publisher.subject_id,
+            label="test publisher",
+            actor="operator",
+        )
         imported = reader.import_package(envelope)
         assert imported.package_id == package.package_id
         assert reader.usable() == []
@@ -125,7 +130,72 @@ def test_common_knowledge_rejects_private_state_and_tampered_signatures() -> Non
             )
         )
         envelope = publisher.export_package(package.package_id)
-        reader.trust_key(publisher.public_key, label="test publisher", actor="operator")
+        reader.trust_key(
+            publisher.public_key,
+            publisher_subject_id=publisher.subject_id,
+            label="test publisher",
+            actor="operator",
+        )
         envelope["summary"] = "tampered"
         with pytest.raises(IntegrityError):
             reader.import_package(envelope)
+
+
+def test_trusted_key_is_bound_to_the_signed_publisher_subject() -> None:
+    with (
+        tempfile.TemporaryDirectory() as publisher_dir,
+        tempfile.TemporaryDirectory() as reader_dir,
+    ):
+        publisher_kernel, publisher = make_store(Path(publisher_dir), "Noyra-binding-publisher")
+        reader_kernel, reader = make_store(Path(reader_dir), "Noyra-binding-reader")
+        try:
+            package = publisher.publish(
+                CommonKnowledgeProposal(
+                    scope="protocol",
+                    title="Publisher-bound protocol",
+                    summary="The signing key is authorized for one configured publisher.",
+                    payload={
+                        "procedure": ["verify the configured source"],
+                        "compatibility": ["noyra/v1"],
+                        "validation": ["exact subject binding"],
+                        "tags": ["trust"],
+                    },
+                )
+            )
+            envelope = publisher.export_package(package.package_id)
+            reader.trust_key(
+                publisher.public_key,
+                publisher_subject_id=publisher.subject_id,
+                label="bound publisher",
+                actor="operator",
+            )
+            reader.import_package(envelope)
+
+            for claimed_subject in (reader.subject_id, "Noyra-unapproved-publisher"):
+                forged = dict(envelope)
+                body = {key: value for key, value in envelope.items() if key != "signature"}
+                body["package_id"] = package.package_id + "-" + claimed_subject.casefold()
+                body["publisher_subject_id"] = claimed_subject
+                forged.update(body)
+                forged["signature"] = publisher._sign(body)
+                with pytest.raises(PermissionError, match="not trusted"):
+                    reader.import_package(forged)
+                with reader_kernel.database.connection() as connection:
+                    assert (
+                        connection.execute(
+                            "SELECT 1 FROM common_knowledge_packages WHERE package_id=?",
+                            (forged["package_id"],),
+                        ).fetchone()
+                        is None
+                    )
+
+            with pytest.raises(PermissionError, match="cannot trust an external key"):
+                reader.trust_key(
+                    publisher.public_key,
+                    publisher_subject_id=reader.subject_id,
+                    label="self impersonation",
+                    actor="operator",
+                )
+        finally:
+            reader_kernel.close()
+            publisher_kernel.close()

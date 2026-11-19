@@ -30,7 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from noyra.core.database import Database
 from noyra.core.delivery_state import effective_delivery_status
-from noyra.core.errors import IntegrityError, NotFoundError
+from noyra.core.errors import CryptoBackendUnavailableError, IntegrityError, NotFoundError
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.core.xml import parse_untrusted_xml
 
@@ -299,12 +299,18 @@ def _qq_private_key(secret: str) -> Any:
     if not secret:
         raise InboundAuthenticationError("qq app secret is not configured")
     try:
+        from cryptography.exceptions import UnsupportedAlgorithm
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+    except ImportError as error:
+        raise CryptoBackendUnavailableError("inbound crypto backend unavailable") from error
+    try:
         seed_source = secret.encode("utf-8")
         seed = (seed_source * ((32 + len(seed_source) - 1) // len(seed_source)))[:32]
         return Ed25519PrivateKey.from_private_bytes(seed)
-    except (ImportError, ValueError, TypeError) as error:
+    except UnsupportedAlgorithm as error:
+        raise CryptoBackendUnavailableError("inbound crypto backend unavailable") from error
+    except (ValueError, TypeError) as error:
         raise InboundAuthenticationError("qq app secret is invalid") from error
 
 
@@ -330,25 +336,32 @@ def _verify_qq_signature(
         return
     if not signature or not timestamp:
         raise InboundAuthenticationError("qq signature is missing")
+    if len(timestamp) > 32 or not timestamp.isascii():
+        raise InboundAuthenticationError("qq signature timestamp is invalid")
     try:
-        if len(timestamp) > 32 or abs(time.time() - int(timestamp)) > REPLAY_WINDOW_SECONDS:
-            raise InboundAuthenticationError("qq signature is stale")
+        timestamp_value = int(timestamp)
     except ValueError as error:
         raise InboundAuthenticationError("qq signature timestamp is invalid") from error
+    if abs(time.time() - timestamp_value) > REPLAY_WINDOW_SECONDS:
+        raise InboundAuthenticationError("qq signature is stale")
     try:
         signature_bytes = bytes.fromhex(signature)
     except ValueError as error:
         raise InboundAuthenticationError("qq signature is invalid") from error
+    if len(signature_bytes) != 64:
+        raise InboundAuthenticationError("qq signature is invalid")
     try:
-        _qq_private_key(secret).public_key().verify(
-            signature_bytes, timestamp.encode("ascii") + body
-        )
-    except (ImportError, ValueError, TypeError) as error:
-        raise InboundAuthenticationError("qq app secret is invalid") from error
-    except Exception as error:
-        # Ed25519InvalidSignature is intentionally not imported at module
-        # import time; cryptography remains an optional inbound dependency.
+        from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
+
+    except ImportError as error:
+        raise CryptoBackendUnavailableError("inbound crypto backend unavailable") from error
+    key = _qq_private_key(secret)
+    try:
+        key.public_key().verify(signature_bytes, timestamp.encode("ascii") + body)
+    except InvalidSignature as error:
         raise InboundAuthenticationError("qq signature is invalid") from error
+    except UnsupportedAlgorithm as error:
+        raise CryptoBackendUnavailableError("inbound crypto backend unavailable") from error
 
 
 def _common_envelope(
@@ -529,12 +542,16 @@ class FeishuInboundAdapter:
     def _decrypt_payload(encrypted: str, encryption_key: str) -> bytes:
         """Decrypt the official Feishu AES-CBC event wrapper."""
         try:
+            from cryptography.exceptions import UnsupportedAlgorithm
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+        except ImportError as error:
+            raise CryptoBackendUnavailableError("inbound crypto backend unavailable") from error
+        try:
             encrypted_bytes = base64.b64decode(encrypted, validate=True)
             if len(encrypted_bytes) <= 16 or len(encrypted_bytes[16:]) % 16:
                 raise ValueError("feishu ciphertext is invalid")
             key = hashlib.sha256(encryption_key.encode("utf-8")).digest()
-            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
             decryptor = Cipher(
                 # The official Lark SDK prefixes the encrypted payload with
                 # its random 16-byte CBC IV.
@@ -549,7 +566,9 @@ class FeishuInboundAdapter:
             if not plaintext or len(plaintext) > MAX_INBOUND_BODY_BYTES:
                 raise ValueError("feishu plaintext is invalid")
             return plaintext
-        except (ValueError, binascii.Error, ImportError) as error:
+        except UnsupportedAlgorithm as error:
+            raise CryptoBackendUnavailableError("inbound crypto backend unavailable") from error
+        except (ValueError, binascii.Error) as error:
             raise ValueError("feishu encrypted event cannot be decrypted") from error
 
 
@@ -567,23 +586,30 @@ class QQInboundAdapter:
         signing_key: str | None = None,
         account_id: str | None = None,
     ) -> InboundEnvelope | InboundChallenge | InboundIgnored:
+        # QQ's official SDK authenticates the complete callback before
+        # dispatching either a message or an address-validation request.
+        _verify_qq_signature(body, headers, secret, legacy_secret=signing_key)
         payload = _json(body)
         op = payload.get("op")
         data = payload.get("d")
         if op == 13:
-            # QQ's callback-address validation request is intentionally
-            # unsigned.  Possession of AppSecret is proven by the Ed25519
-            # response signature over event_ts + plain_token.
+            # Keep the platform's event_ts + plain_token response format.
             if not isinstance(data, dict):
                 raise ValueError("qq validation payload is invalid")
             plain_token = _text(data.get("plain_token"), "qq plain_token")
             event_ts = _text(data.get("event_ts"), "qq event_ts")
-            signature = _qq_private_key(secret).sign((event_ts + plain_token).encode("utf-8"))
+            try:
+                from cryptography.exceptions import UnsupportedAlgorithm
+
+                signature = _qq_private_key(secret).sign((event_ts + plain_token).encode("utf-8"))
+            except ImportError as error:
+                raise CryptoBackendUnavailableError("inbound crypto backend unavailable") from error
+            except UnsupportedAlgorithm as error:
+                raise CryptoBackendUnavailableError("inbound crypto backend unavailable") from error
             return InboundChallenge(
                 plain_token,
                 {"plain_token": plain_token, "signature": signature.hex()},
             )
-        _verify_qq_signature(body, headers, secret, legacy_secret=signing_key)
         event_type = str(payload.get("t") or "").strip()
         message_types = {
             "C2C_MESSAGE_CREATE",
@@ -713,7 +739,10 @@ class WeChatInboundAdapter:
                 root = self._parse_xml(raw)
                 values = {child.tag: (child.text or "") for child in root}
             else:
-                _verify_wechat_signature(headers, secret)
+                # The plaintext signature covers only token/timestamp/nonce,
+                # so a captured tuple can authenticate a different message ID
+                # and body. Require the official ciphertext-bound envelope.
+                raise InboundAuthenticationError("wechat message callbacks require encrypted XML")
             if values.get("MsgType", "").strip().casefold() != "text":
                 return InboundIgnored("wechat_non_text_event")
             return _common_envelope(
@@ -726,21 +755,7 @@ class WeChatInboundAdapter:
                 content=values.get("Content"),
                 label="",
             )
-        _verify_wechat_signature(headers, secret)
-        payload = _json(body)
-        message_type = str(payload.get("msgtype") or payload.get("type") or "").casefold()
-        if message_type and message_type != "text":
-            return InboundIgnored("wechat_non_text_event")
-        return _common_envelope(
-            channel=self.channel,
-            transport_id=transport_id,
-            event_id=payload.get("msgid") or payload.get("event_id"),
-            account=payload.get("to") or payload.get("account"),
-            sender=payload.get("from") or payload.get("sender"),
-            conversation=payload.get("conversation_id") or payload.get("from"),
-            content=payload.get("content") or payload.get("text"),
-            label=payload.get("nickname"),
-        )
+        raise InboundAuthenticationError("wechat message callbacks require encrypted XML")
 
     @staticmethod
     def _parse_xml(raw: bytes) -> ET.Element:
@@ -781,14 +796,18 @@ class WeChatInboundAdapter:
         expected_account_id: str,
     ) -> bytes:
         try:
+            from cryptography.exceptions import UnsupportedAlgorithm
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+        except ImportError as error:
+            raise CryptoBackendUnavailableError("inbound crypto backend unavailable") from error
+        try:
             key_text = encoding_key.strip()
             key_text += "=" * ((4 - len(key_text) % 4) % 4)
             key = base64.b64decode(key_text, validate=True)
             ciphertext = base64.b64decode(encrypted, validate=True)
             if len(key) != 32 or not ciphertext or len(ciphertext) % 16:
                 raise ValueError("wechat AES payload is invalid")
-            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
             decryptor = Cipher(algorithms.AES(key), modes.CBC(key[:16])).decryptor()
             padded = decryptor.update(ciphertext) + decryptor.finalize()
             padding = padded[-1]
@@ -802,7 +821,9 @@ class WeChatInboundAdapter:
             app_id = plaintext[20 + length :].decode("utf-8")
             if len(message) != length or not app_id:
                 raise ValueError("wechat AES plaintext is invalid")
-        except (ValueError, UnicodeDecodeError, binascii.Error, ImportError) as error:
+        except UnsupportedAlgorithm as error:
+            raise CryptoBackendUnavailableError("inbound crypto backend unavailable") from error
+        except (ValueError, UnicodeDecodeError, binascii.Error) as error:
             raise ValueError("wechat encrypted callback cannot be decrypted") from error
         if not expected_account_id.strip() or not _matches_ascii(
             app_id, expected_account_id.strip()

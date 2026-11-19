@@ -45,6 +45,15 @@ class RotationPreparationUnknownError(RotationJournalError):
         self.request_id = request_id
 
 
+class RotationPendingRecoveryUnknownError(RotationJournalError):
+    """Pending-file recovery may have removed some entries but lacks a sync result."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "pending-file recovery outcome is unknown; inspect the journal before retrying"
+        )
+
+
 class RotationConflictError(RotationJournalError):
     """Existing source, target or evidence does not match the requested operation."""
 

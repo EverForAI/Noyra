@@ -15,6 +15,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 from noyra.core import Database, IdentityStore, TrainingStore
+from noyra.core.at_rest import _windows_harden
 from noyra.core.database import CURRENT_SCHEMA_VERSION
 from noyra.core.errors import IntegrityError
 from noyra.core.types import content_hash
@@ -1637,6 +1638,8 @@ class ProviderTestCase(unittest.IsolatedAsyncioTestCase):
             key_path.write_text("file-model-secret\n", encoding="utf-8")
             if os.name == "posix":
                 key_path.chmod(0o600)
+            elif os.name == "nt":
+                _windows_harden(Path(temporary_directory), entire_tree=True)
             environment = {
                 "NOYRA_MODEL_BASE_URL": "https://models.example/v1",
                 "NOYRA_MODEL_NAME": "file-model",

@@ -1388,7 +1388,7 @@ def _default_checks() -> tuple[IntegrityCheckSpec, ...]:
         ),
         IntegrityCheckSpec("sleep.state", 1, "sleep", _DEEP_PROFILES, _check_sleep),
         IntegrityCheckSpec(
-            "interaction.state", 1, "interaction", _DEEP_PROFILES, _check_interaction
+            "interaction.state", 2, "interaction", _DEEP_PROFILES, _check_interaction
         ),
         IntegrityCheckSpec(
             "interaction.transport", 1, "interaction", _DEEP_PROFILES, _check_transport
@@ -1464,7 +1464,7 @@ def _default_checks() -> tuple[IntegrityCheckSpec, ...]:
             _check_embedding_resources,
         ),
         IntegrityCheckSpec(
-            "knowledge.common", 1, "knowledge", _DEEP_PROFILES, _check_common_knowledge
+            "knowledge.common", 2, "knowledge", _DEEP_PROFILES, _check_common_knowledge
         ),
     )
 
@@ -4311,12 +4311,28 @@ def _check_common_knowledge(context: IntegrityContext) -> Mapping[str, Any]:
         "WHERE p.publisher_subject_id = ? OR i.subject_id = ? ORDER BY p.package_id",
         (context.subject_id, context.subject_id),
     )
-    trusted_rows = context.connection.execute("SELECT * FROM common_knowledge_trusted_keys")
-    trusted_count = 0
-    trusted = {
-        str(row["key_id"]): (str(row["public_key"]), str(row["status"])) for row in trusted_rows
+    trusted_rows = context.connection.execute(
+        "SELECT trusted.key_id, trusted.public_key, trusted.status AS key_status, "
+        "binding.publisher_subject_id, binding.status AS binding_status "
+        "FROM common_knowledge_trusted_keys trusted "
+        "JOIN common_knowledge_trusted_publishers binding "
+        "ON binding.key_id = trusted.key_id WHERE binding.subject_id = ?",
+        (context.subject_id,),
+    )
+    trusted: dict[tuple[str, str], tuple[str, str, str]] = {}
+    for row in trusted_rows:
+        trusted[(str(row["key_id"]), str(row["publisher_subject_id"]))] = (
+            str(row["public_key"]),
+            str(row["key_status"]),
+            str(row["binding_status"]),
+        )
+    trusted_count = len({key_id for key_id, _publisher in trusted})
+    global_trusted_keys = {
+        str(row["key_id"]): (str(row["public_key"]), str(row["status"]))
+        for row in context.connection.execute(
+            "SELECT key_id, public_key, status FROM common_knowledge_trusted_keys"
+        )
     }
-    trusted_count = len(trusted)
     key_directory = context.layout.root / "secrets" / "common-knowledge"
     own_public_key: str | None = None
     own_key_id: str | None = None
@@ -4358,10 +4374,14 @@ def _check_common_knowledge(context: IntegrityContext) -> Mapping[str, Any]:
             if row["key_id"] != own_key_id:
                 raise IntegrityError("common knowledge publisher key id mismatch")
         else:
-            candidate = trusted.get(str(row["key_id"]))
+            candidate = trusted.get((str(row["key_id"]), str(row["publisher_subject_id"])))
             if candidate is None:
-                raise IntegrityError("common knowledge trusted key is missing")
-            public_key = candidate[0]
+                global_key = global_trusted_keys.get(str(row["key_id"]))
+                if global_key is None:
+                    raise IntegrityError("common knowledge trusted key is missing")
+                public_key = global_key[0]
+            else:
+                public_key = candidate[0]
             if content_hash(public_key)[:32] != row["key_id"]:
                 raise IntegrityError("common knowledge trusted key id mismatch")
         body = {
@@ -4390,6 +4410,7 @@ def _check_common_knowledge(context: IntegrityContext) -> Mapping[str, Any]:
         (context.subject_id,),
     )
     verified_imports = 0
+    unbound_accepted_imports = 0
     for row in import_rows:
         if row["provenance_id"] is None:
             if row["status"] == "accepted":
@@ -4420,11 +4441,15 @@ def _check_common_knowledge(context: IntegrityContext) -> Mapping[str, Any]:
         ):
             raise IntegrityError("common knowledge import provenance mismatch")
         if row["status"] == "accepted":
-            trusted_key = trusted.get(str(row["key_id"]))
-            if row["publisher_subject_id"] != context.subject_id and (
-                trusted_key is None or trusted_key[1] != "active"
-            ):
-                raise IntegrityError("accepted common knowledge key is revoked")
+            trusted_key = trusted.get((str(row["key_id"]), str(row["publisher_subject_id"])))
+            if row["publisher_subject_id"] != context.subject_id:
+                if trusted_key is None:
+                    global_key = global_trusted_keys.get(str(row["key_id"]))
+                    if global_key is None or global_key[1] != "active":
+                        raise IntegrityError("accepted common knowledge key is revoked")
+                    unbound_accepted_imports += 1
+                elif trusted_key[1] != "active" or trusted_key[2] != "active":
+                    raise IntegrityError("accepted common knowledge key is revoked")
         verified_imports += 1
     invalid_import = context.connection.execute(
         "SELECT i.import_id FROM common_knowledge_imports i "
@@ -4615,7 +4640,7 @@ def _check_common_knowledge(context: IntegrityContext) -> Mapping[str, Any]:
             or peer["state_hash"] != content_hash(CommonKnowledgeStore._peer_state_values(peer))
         ):
             raise IntegrityError("common knowledge peer state is invalid")
-        trusted_peer_key = trusted.get(str(peer["key_id"]))
+        trusted_peer_key = trusted.get((str(peer["key_id"]), str(peer["publisher_subject_id"])))
         if trusted_peer_key is None or trusted_peer_key[0] != peer_input.public_key:
             raise IntegrityError("common knowledge peer trusted key is missing")
         remote_rows = context.connection.execute(
@@ -4844,6 +4869,7 @@ def _check_common_knowledge(context: IntegrityContext) -> Mapping[str, Any]:
         "verified_signatures": verified,
         "verified_import_provenance": verified_imports,
         "trusted_keys": trusted_count,
+        "unbound_accepted_imports": unbound_accepted_imports,
         "verified_versions": verified_versions,
         "verified_sync_events": verified_sync_events,
         "verified_peers": verified_peers,

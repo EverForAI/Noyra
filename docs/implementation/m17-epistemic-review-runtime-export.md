@@ -62,7 +62,9 @@ images while they exist.
 
 For schema 33, the manifest also identifies ownership graph version 1. The graph explicitly classifies
 98 direct `subject_id` tables and 28 revision/child tables through their declared parent key; common
-knowledge packages and trusted keys use two subject publisher/import predicates. `schema_meta` is reduced
+knowledge packages use publisher/import predicates; trusted keys are exported
+when referenced by a subject package or its explicit publisher binding.
+Publisher bindings are subject-scoped. `schema_meta` is reduced
 to the `schema_version` key, while six rebuildable memory FTS tables are recorded as `skipped`. The
 `table_inventory` reconciles expected and exported rows and records referential gaps. Unknown tables,
 missing graph entries, undeclared parent edges, count mismatches, or cross-subject foreign-key references

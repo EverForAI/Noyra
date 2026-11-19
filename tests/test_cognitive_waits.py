@@ -8,7 +8,9 @@ import sys
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -23,7 +25,8 @@ from noyra.core.cognitive_waits import (
     validate_wait,
     wait_counts,
 )
-from noyra.core.errors import IntegrityError
+from noyra.core.database import CURRENT_SCHEMA_VERSION
+from noyra.core.errors import IntegrityError, SchemaContractError
 from noyra.core.types import content_hash, utc_now
 from noyra.model import (
     BudgetLimits,
@@ -387,13 +390,120 @@ def test_apply_lock_wait_is_bounded(env: Environment) -> None:
     try:
         blocker.execute("BEGIN IMMEDIATE")
         started = time.monotonic()
-        with pytest.raises(sqlite3.OperationalError):
+        with (
+            patch(
+                "noyra.cognitive_wait_maintenance._MaintenanceDatabase."
+                "_validate_schema_contract_connection",
+                side_effect=AssertionError("schema work must not precede lock admission"),
+            ),
+            pytest.raises(sqlite3.OperationalError),
+        ):
             repair_waits(
                 env.path, env.subject, expected_plan=plan["plan_hash"], reason="locked fixture"
             )
         assert time.monotonic() - started < 2
     finally:
         blocker.close()
+
+
+@pytest.mark.parametrize("schema_fraction", [0.75, 1.25])
+def test_repair_gives_schema_validation_its_own_bounded_sql_stage(
+    env: Environment, monkeypatch: pytest.MonkeyPatch, schema_fraction: float
+) -> None:
+    from noyra import cognitive_wait_maintenance as maintenance
+
+    env.legacy_wait()
+    plan = env.preview()
+    clock = [0.0]
+    monkeypatch.setattr(maintenance, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    transaction = maintenance._MaintenanceDatabase.transaction
+    validate = maintenance._MaintenanceDatabase._validate_schema_contract_connection
+
+    @contextmanager
+    def admitted(database: maintenance._MaintenanceDatabase) -> Iterator[sqlite3.Connection]:
+        with transaction(database) as connection:
+            clock[0] += maintenance.SQL_SECONDS / 2
+            yield connection
+
+    def validate_after_admission(
+        database: maintenance._MaintenanceDatabase,
+        connection: sqlite3.Connection,
+        *,
+        strict: bool,
+        persist_marker: bool,
+    ) -> None:
+        assert connection.in_transaction and strict and not persist_marker
+        clock[0] += maintenance.SQL_SECONDS * schema_fraction
+        # Force SQLite's progress callback to observe the controlled clock.
+        connection.execute(
+            "WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL "
+            "SELECT n+1 FROM numbers WHERE n<1000) SELECT sum(n) FROM numbers"
+        ).fetchone()
+        validate(database, connection, strict=strict, persist_marker=persist_marker)
+
+    monkeypatch.setattr(maintenance._MaintenanceDatabase, "transaction", admitted)
+    monkeypatch.setattr(
+        maintenance._MaintenanceDatabase,
+        "_validate_schema_contract_connection",
+        validate_after_admission,
+    )
+    if schema_fraction > 1:
+        before = {
+            table: env.rows(table)
+            for table in ("waiting_cognitive_tasks", "waiting_cognitive_task_revisions", "events")
+        }
+        with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+            repair_waits(
+                env.path, env.subject, expected_plan=plan["plan_hash"], reason="over budget"
+            )
+        assert {table: env.rows(table) for table in before} == before
+    else:
+        repaired = repair_waits(
+            env.path, env.subject, expected_plan=plan["plan_hash"], reason="separate stage budgets"
+        )
+        assert repaired["cancelled"] == 1 and repaired["event_id"]
+    env.check_wait_integrity()
+
+
+@pytest.mark.parametrize("drift", ["trigger", "index", "contract-marker"])
+def test_repair_rechecks_schema_inside_the_write_transaction(
+    env: Environment, monkeypatch: pytest.MonkeyPatch, drift: str
+) -> None:
+    from noyra import cognitive_wait_maintenance as maintenance
+
+    env.legacy_wait()
+    plan = env.preview()
+    before = {
+        table: env.rows(table)
+        for table in ("waiting_cognitive_tasks", "waiting_cognitive_task_revisions", "events")
+    }
+    transaction = maintenance._MaintenanceDatabase.transaction
+
+    @contextmanager
+    def change_before_lock(
+        database: maintenance._MaintenanceDatabase,
+    ) -> Iterator[sqlite3.Connection]:
+        # Another writer can change the schema after facade construction.
+        # Validation must cover the transaction that would actually cancel waits.
+        with env.db.transaction() as connection:
+            if drift == "trigger":
+                connection.execute("DROP TRIGGER prevent_training_record_delete")
+            elif drift == "index":
+                connection.execute("DROP INDEX idx_search_provider_routing_order")
+            else:
+                connection.execute(
+                    "UPDATE schema_meta SET value=? WHERE key='schema_ddl_contract'",
+                    (f"{CURRENT_SCHEMA_VERSION}:" + "0" * 64,),
+                )
+        with transaction(database) as connection:
+            yield connection
+
+    monkeypatch.setattr(maintenance._MaintenanceDatabase, "transaction", change_before_lock)
+    with pytest.raises(SchemaContractError):
+        repair_waits(
+            env.path, env.subject, expected_plan=plan["plan_hash"], reason="schema race fixture"
+        )
+    assert {table: env.rows(table) for table in before} == before
 
 
 def test_cli_defaults_to_preview_and_never_creates_database(

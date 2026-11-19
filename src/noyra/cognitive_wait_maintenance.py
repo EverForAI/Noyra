@@ -226,9 +226,15 @@ def repair_waits(
         raise ValueError("operator_reason_required")
     path = path.resolve(strict=True)
     # No initialization, migration, immutable reads, accounting bypass, or service startup.
-    database = _MaintenanceDatabase(path, initialize=False, strict_schema_contract=True)
+    database = _MaintenanceDatabase(path, initialize=False)
     events = EventStore(database)
     with database.transaction() as connection:
+        # Reject a busy writer before schema work, then validate the exact
+        # transaction being repaired so another writer cannot invalidate it.
+        # Schema validation keeps its own original SQL stage budget.
+        deadline = time.monotonic() + SQL_SECONDS
+        connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        database._validate_schema_contract_connection(connection, strict=True, persist_marker=False)
         connection.execute("PRAGMA busy_timeout=200")
         deadline = time.monotonic() + SQL_SECONDS
         connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)

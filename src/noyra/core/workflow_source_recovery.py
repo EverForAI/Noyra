@@ -12,16 +12,17 @@ from .workflow_bundle import source_identity, validate_source
 
 @dataclass(frozen=True)
 class RecoverySchemaPair:
-    """One directed, explicitly reviewed trigger-only schema transition."""
+    """One directed, explicitly reviewed schema transition."""
 
     source_version: int
     source_ddl: str
     target_version: int
     target_ddl: str
-    structure: str
+    source_structure: str
+    target_structure: str
 
 
-# Exact reviewed trigger-only migration117. No adjacent/transitive inference.
+# Exact reviewed schema transitions only. No adjacent/transitive inference.
 _REVIEWED_SCHEMA_PAIRS: tuple[RecoverySchemaPair, ...] = (
     RecoverySchemaPair(
         116,
@@ -29,6 +30,26 @@ _REVIEWED_SCHEMA_PAIRS: tuple[RecoverySchemaPair, ...] = (
         117,
         "6ddaea3121a169783d2151c7dfb6907ed41ad3c98ed7bb978fc45503b122f41d",
         "2c848bc479a0b2ae97c2ef91d271e01fdf8363110892d7f681412dae64e488d0",
+        "2c848bc479a0b2ae97c2ef91d271e01fdf8363110892d7f681412dae64e488d0",
+    ),
+    RecoverySchemaPair(
+        117,
+        "6ddaea3121a169783d2151c7dfb6907ed41ad3c98ed7bb978fc45503b122f41d",
+        118,
+        "f7c40fc2ed563822434454c0af0a3e44a4d6c40babb1a6b861830af91180716d",
+        "2c848bc479a0b2ae97c2ef91d271e01fdf8363110892d7f681412dae64e488d0",
+        "444938463a1ba013c3e7083fcb8ef55419fee5d17c459528ae6e25de6cab3b26",
+    ),
+    # Existing prepared publications can span both migrations after one
+    # deployment. This exact cumulative bridge is reviewed separately; it is
+    # not inferred from the two adjacent pairs.
+    RecoverySchemaPair(
+        116,
+        "e78f5e9d12d781e71b504dae847c793e680be7788af14d8af5b769f4cd4cd847",
+        118,
+        "f7c40fc2ed563822434454c0af0a3e44a4d6c40babb1a6b861830af91180716d",
+        "2c848bc479a0b2ae97c2ef91d271e01fdf8363110892d7f681412dae64e488d0",
+        "444938463a1ba013c3e7083fcb8ef55419fee5d17c459528ae6e25de6cab3b26",
     ),
 )
 
@@ -60,8 +81,8 @@ def matches_publication_source(
             and pair.target_ddl == actual["schema_ddl_hash"]
             and _SCHEMA_DDL_FINGERPRINTS.get(pair.source_version) == pair.source_ddl
             and _SCHEMA_DDL_FINGERPRINTS.get(pair.target_version) == pair.target_ddl
-            and _SCHEMA_STRUCTURE_FINGERPRINTS.get(pair.source_version) == pair.structure
-            and _SCHEMA_STRUCTURE_FINGERPRINTS.get(pair.target_version) == pair.structure
+            and _SCHEMA_STRUCTURE_FINGERPRINTS.get(pair.source_version) == pair.source_structure
+            and _SCHEMA_STRUCTURE_FINGERPRINTS.get(pair.target_version) == pair.target_structure
         ):
             continue
         # validate_source fixes the exact field set. Event heads may advance

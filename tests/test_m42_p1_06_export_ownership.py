@@ -110,13 +110,27 @@ def test_cancel_before_publication_has_no_domain_success_or_artifact(
     database = _database(tmp_path, subject_id)
     export_root = tmp_path / "exports" / "jobs"
     publication_entered = threading.Event()
-    release_publication = threading.Event()
+    cancel_finished = threading.Event()
+    cancel_result: list[Any] = []
+    cancellers: list[threading.Thread] = []
     original_publication = ExportControl.publication
 
     @contextlib.contextmanager
     def gated_publication(control: ExportControl) -> Iterator[Any]:
         publication_entered.set()
-        assert release_publication.wait(5), "test publication gate was not released"
+
+        def cancel() -> None:
+            try:
+                cancel_result.append(manager.cancel(control.job_id, subject_id))
+            except BaseException as error:  # pragma: no cover - asserted below
+                cancel_result.append(error)
+            finally:
+                cancel_finished.set()
+
+        canceller = threading.Thread(target=cancel, name="p106-before-publication")
+        cancellers.append(canceller)
+        canceller.start()
+        assert cancel_finished.wait(5), "cancellation did not finish before publication"
         with original_publication(control) as connection:
             yield connection
 
@@ -125,11 +139,12 @@ def test_cancel_before_publication_has_no_domain_success_or_artifact(
     manager.start_after_ownership(subject_id)
     try:
         job = manager.create(subject_id, kind)
-        assert publication_entered.wait(10)
-
-        cancelled = manager.cancel(job.job_id, subject_id)
-        assert cancelled.status == "cancelled"
-        release_publication.set()
+        # Full archive preparation has no publication-time budget. Start the
+        # bounded cancellation interleaving only at the real publication hook.
+        manager.executor.shutdown(wait=True)
+        assert publication_entered.is_set()
+        assert len(cancel_result) == 1 and not isinstance(cancel_result[0], BaseException)
+        assert cancel_result[0].status == "cancelled"
         manager.futures[job.job_id].result(timeout=10)
 
         final = manager.get(job.job_id, subject_id=subject_id)
@@ -146,8 +161,10 @@ def test_cancel_before_publication_has_no_domain_success_or_artifact(
         assert success_audits == 0
         assert training_exports == 0
     finally:
-        release_publication.set()
         manager.close()
+        for canceller in cancellers:
+            canceller.join(timeout=5)
+            assert not canceller.is_alive()
 
 
 @pytest.mark.parametrize("kind", ["runtime", "training"])
@@ -160,7 +177,7 @@ def test_publication_wins_and_cancel_after_commit_cannot_revoke_success(
     database = _database(tmp_path, subject_id)
     export_root = tmp_path / "exports" / "jobs"
     publication_entered = threading.Event()
-    release_publication = threading.Event()
+    cancellers: list[threading.Thread] = []
     cancel_started = threading.Event()
     cancel_finished = threading.Event()
     cancel_result: list[BaseException | Any] = []
@@ -170,7 +187,21 @@ def test_publication_wins_and_cancel_after_commit_cannot_revoke_success(
     def gated_publication(control: ExportControl) -> Iterator[Any]:
         with original_publication(control) as connection:
             publication_entered.set()
-            assert release_publication.wait(5), "test publication gate was not released"
+
+            def cancel() -> None:
+                cancel_started.set()
+                try:
+                    cancel_result.append(manager.cancel(control.job_id, subject_id))
+                except BaseException as error:  # pragma: no cover - asserted below
+                    cancel_result.append(error)
+                finally:
+                    cancel_finished.set()
+
+            canceller = threading.Thread(target=cancel, name="p106-canceller")
+            cancellers.append(canceller)
+            canceller.start()
+            assert cancel_started.wait(2)
+            assert not cancel_finished.wait(0.1)
             yield connection
 
     monkeypatch.setattr(ExportControl, "publication", gated_publication)
@@ -178,26 +209,12 @@ def test_publication_wins_and_cancel_after_commit_cannot_revoke_success(
     manager.start_after_ownership(subject_id)
     try:
         job = manager.create(subject_id, kind)
-        assert publication_entered.wait(10)
-
-        def cancel() -> None:
-            cancel_started.set()
-            try:
-                cancel_result.append(manager.cancel(job.job_id, subject_id))
-            except BaseException as error:  # pragma: no cover - asserted below
-                cancel_result.append(error)
-            finally:
-                cancel_finished.set()
-
-        canceller = threading.Thread(target=cancel, name="p106-canceller")
-        canceller.start()
-        assert cancel_started.wait(2)
-        assert not cancel_finished.wait(0.1)
-        release_publication.set()
-
+        # Preparation can outlast a short thread rendezvous under coverage.
+        # The competing canceller starts inside the actual publication lock.
+        manager.executor.shutdown(wait=True)
+        assert publication_entered.is_set()
         manager.futures[job.job_id].result(timeout=15)
         assert cancel_finished.wait(5)
-        canceller.join(timeout=5)
         assert len(cancel_result) == 1
         assert isinstance(cancel_result[0], RuntimeError)
         assert "not cancellable" in str(cancel_result[0])
@@ -213,8 +230,10 @@ def test_publication_wins_and_cancel_after_commit_cannot_revoke_success(
         assert success_audits == 1
         assert training_exports == (1 if kind == "training" else 0)
     finally:
-        release_publication.set()
         manager.close()
+        for canceller in cancellers:
+            canceller.join(timeout=5)
+            assert not canceller.is_alive()
 
 
 @pytest.mark.parametrize("kind", ["runtime", "training"])

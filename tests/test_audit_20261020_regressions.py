@@ -581,13 +581,16 @@ def test_subprocess_timeout_terminates_descendants(
             f"Path({str(completed)!r}).touch() if s.recv(1)==b'G' else None;"
             "s.close()"
         )
+        # Both helpers use only the standard library. Skip site hooks to keep
+        # their readiness handshake reliable within the command timeout on
+        # mounted test environments.
         parent = (
-            "import subprocess,sys,time;subprocess.Popen([sys.executable,'-c',"
+            "import subprocess,sys,time;subprocess.Popen([sys.executable,'-S','-c',"
             + repr(child)
             + "]);time.sleep(30)"
         )
         result = executor.submit(
-            SubprocessRunner().run, [sys.executable, "-c", parent], timeout_seconds=5
+            SubprocessRunner().run, [sys.executable, "-S", "-c", parent], timeout_seconds=5
         )
         connection, _ = listener.accept()
         with connection:

@@ -27,6 +27,7 @@ env:
 
 jobs:
   public-source:
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -51,6 +52,8 @@ jobs:
         run: python scripts/public-file-manifest.py verify-export --revision "${{ github.sha }}" --archive "${{ runner.temp }}/noyra-source.zip"
 
   test:
+    # Include setup and post-test checks; Windows needs more full-suite headroom.
+    timeout-minutes: ${{ matrix.os == 'windows-2022' && 330 || 240 }}
     strategy:
       fail-fast: false
       matrix:
@@ -96,6 +99,7 @@ jobs:
           sudo bash tests/shell/test-migration-components-rollback.sh
           sudo "$(command -v python)" -m pytest \
             tests/test_installer_operability.py \
+            tests/test_installer_release_cleanup.py \
             tests/test_upgrade_storage_boundary.py tests/test_release_scripts.py \
             tests/test_migration_storage_boundary.py tests/test_migration_activation.py -q
           sudo "$(command -v python)" -m pytest \
@@ -114,6 +118,7 @@ jobs:
           path: sbom-*.json
 
   docker:
+    timeout-minutes: 60
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -125,6 +130,7 @@ jobs:
         run: docker build --pull=false --build-arg NOYRA_INSTALL_PROFILE=cloud --tag noyra:cloud-ci .
 
   frontend:
+    timeout-minutes: 20
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -138,6 +144,7 @@ jobs:
       - run: node --test tests/frontend/*.test.cjs
 
   cloud-profile:
+    timeout-minutes: 45
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

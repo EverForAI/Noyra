@@ -77,7 +77,12 @@ def test_package_id_collision_is_rejected_before_second_subject_import_link() ->
             original = publish_protocol(
                 publisher_one, title="Original bounded protocol", compatibility="noyra/v1"
             )
-            reader_one.trust_key(publisher_one.public_key, label="publisher one", actor="operator")
+            reader_one.trust_key(
+                publisher_one.public_key,
+                publisher_subject_id=publisher_one.subject_id,
+                label="publisher one",
+                actor="operator",
+            )
             reader_one.import_package(original)
 
             collision = publish_protocol(
@@ -86,7 +91,12 @@ def test_package_id_collision_is_rejected_before_second_subject_import_link() ->
             collision["package_id"] = original["package_id"]
             collision_body = {field: collision[field] for field in SIGNED_FIELDS}
             collision["signature"] = publisher_two._sign(collision_body)
-            reader_two.trust_key(publisher_two.public_key, label="publisher two", actor="operator")
+            reader_two.trust_key(
+                publisher_two.public_key,
+                publisher_subject_id=publisher_two.subject_id,
+                label="publisher two",
+                actor="operator",
+            )
 
             with pytest.raises(IntegrityError, match="package id collision"):
                 reader_two.import_package(collision)
@@ -120,7 +130,12 @@ def test_import_provenance_binds_exact_envelope_and_is_runtime_exported() -> Non
                 publisher, title="Exact provenance protocol", compatibility="noyra/v1"
             )
             assert set(envelope) == {*SIGNED_FIELDS, "signature"}
-            reader.trust_key(publisher.public_key, label="publisher", actor="operator")
+            reader.trust_key(
+                publisher.public_key,
+                publisher_subject_id=publisher.subject_id,
+                label="publisher",
+                actor="operator",
+            )
             reader.import_package(envelope)
             with reader_kernel.database.connection() as connection:
                 row = connection.execute(
@@ -170,7 +185,12 @@ def test_usable_revalidates_signature_trust_and_compatibility_on_every_read() ->
             envelope = publish_protocol(
                 publisher, title="Read-time validation protocol", compatibility="noyra/v1"
             )
-            reader.trust_key(publisher.public_key, label="publisher", actor="operator")
+            reader.trust_key(
+                publisher.public_key,
+                publisher_subject_id=publisher.subject_id,
+                label="publisher",
+                actor="operator",
+            )
             reader.import_package(envelope)
             reader.accept(envelope["package_id"], reason="bounded and compatible")
             assert len(reader.usable()) == 1
@@ -187,7 +207,12 @@ def test_usable_revalidates_signature_trust_and_compatibility_on_every_read() ->
                     ("2026-08-17T00:00:00+00:00", envelope["key_id"]),
                 )
             assert reader.usable() == []
-            reader.trust_key(publisher.public_key, label="publisher", actor="operator")
+            reader.trust_key(
+                publisher.public_key,
+                publisher_subject_id=publisher.subject_id,
+                label="publisher",
+                actor="operator",
+            )
 
             with reader_kernel.database.transaction() as connection:
                 connection.execute(
@@ -213,7 +238,12 @@ def test_cognition_receives_only_non_private_advisory_context() -> None:
             envelope = publish_protocol(
                 publisher, title="Advisory protocol", compatibility="noyra/v1"
             )
-            reader.trust_key(publisher.public_key, label="publisher", actor="operator")
+            reader.trust_key(
+                publisher.public_key,
+                publisher_subject_id=publisher.subject_id,
+                label="publisher",
+                actor="operator",
+            )
             reader.import_package(envelope)
             reader.accept(envelope["package_id"], reason="safe advisory")
             thought = IntrinsicThought(

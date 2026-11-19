@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 from pydantic import SecretStr
 
+from noyra.core.at_rest import _windows_harden
 from noyra.core.credentials import CredentialError, read_env_secret
 from noyra.core.types import content_hash
 from noyra.model.errors import ConfigurationError
@@ -55,6 +56,8 @@ def test_production_strict_review_loads_proxy_hmac_key_from_private_file(
     key_path.write_text("proxy-signing-key-that-is-at-least-32-bytes", encoding="utf-8")
     if os.name == "posix":
         key_path.chmod(0o600)
+    elif os.name == "nt":
+        _windows_harden(tmp_path, entire_tree=True)
     environment = {
         "NOYRA_PROFILE": "production",
         "NOYRA_DATA_DIR": str(tmp_path / "data"),

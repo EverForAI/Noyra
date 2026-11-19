@@ -24,12 +24,18 @@ def trust_common_knowledge_key(self: RequestHandler, owner: NoyraHTTPServer) -> 
         return
     public_key = payload.get("public_key")
     label = payload.get("label")
-    if not isinstance(public_key, str) or not isinstance(label, str):
+    publisher_subject_id = payload.get("publisher_subject_id")
+    if (
+        not isinstance(public_key, str)
+        or not isinstance(label, str)
+        or not isinstance(publisher_subject_id, str)
+    ):
         self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_trusted_key"})
         return
     try:
         key_id = owner.common_knowledge.trust_key(
             public_key,
+            publisher_subject_id=publisher_subject_id,
             label=label,
             actor=self._actor(),
         )

@@ -2115,7 +2115,7 @@ document.addEventListener("visibilitychange", () => { if (document.hidden) stopR
 
 $("#refresh-project-recovery").addEventListener("click", () => { void loadProjectExecutionRecovery().catch(() => {}); });
 $("#project-recovery-list").addEventListener("click", releaseProjectExecutionReview);
-$("#login-form").addEventListener("submit", login); $("#logout").addEventListener("click", logout); $("#refresh-admin").addEventListener("click", loadAll); $("#check-upgrade-version").addEventListener("click", checkUpgradeVersion); $("#start-upgrade").addEventListener("click", requestUpgradeConfirmation); $("#confirm-upgrade").addEventListener("click", confirmUpgrade); $("#refresh-observability").addEventListener("click", () => { void loadOverview().catch((error) => setStatus("#global-status", errorText(error), true)); }); $("#refresh-provider-health").addEventListener("click", () => { void loadProviderHealth().catch((error) => setStatus("#provider-health-status", errorText(error), true)); }); $("#refresh-retention").addEventListener("click", () => { void loadRetention().catch((error) => setStatus("#retention-status", errorText(error), true)); }); $("#run-retention").addEventListener("click", () => { void runRetention(); }); $("#refresh-mailbox").addEventListener("click", loadMailbox); $("#refresh-models").addEventListener("click", loadModels); $("#refresh-search-providers").addEventListener("click", loadSearchProviders); $("#refresh-capabilities").addEventListener("click", loadCapabilities); $("#refresh-runtime").addEventListener("click", loadRuntime); document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => showSection(button.dataset.section)));
+$("#logout").addEventListener("click", logout); $("#refresh-admin").addEventListener("click", loadAll); $("#check-upgrade-version").addEventListener("click", checkUpgradeVersion); $("#start-upgrade").addEventListener("click", requestUpgradeConfirmation); $("#confirm-upgrade").addEventListener("click", confirmUpgrade); $("#refresh-observability").addEventListener("click", () => { void loadOverview().catch((error) => setStatus("#global-status", errorText(error), true)); }); $("#refresh-provider-health").addEventListener("click", () => { void loadProviderHealth().catch((error) => setStatus("#provider-health-status", errorText(error), true)); }); $("#refresh-retention").addEventListener("click", () => { void loadRetention().catch((error) => setStatus("#retention-status", errorText(error), true)); }); $("#run-retention").addEventListener("click", () => { void runRetention(); }); $("#refresh-mailbox").addEventListener("click", loadMailbox); $("#refresh-models").addEventListener("click", loadModels); $("#refresh-search-providers").addEventListener("click", loadSearchProviders); $("#refresh-capabilities").addEventListener("click", loadCapabilities); $("#refresh-runtime").addEventListener("click", loadRuntime); document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => showSection(button.dataset.section)));
 $("[data-section-panel=overview]").addEventListener("click", (event) => { const button = event.target.closest("[data-setup-go]"); if (button) showSection(button.dataset.setupGo); });
 $("#refresh-wallet-audits").addEventListener("click", () => { void loadWalletAudits().catch(() => {}); });
 $("#refresh-migration").addEventListener("click", () => {
@@ -3149,7 +3149,6 @@ $("#admin-model-form").addEventListener("input", () => { $("#admin-model-form").
 window.addEventListener("beforeunload", (event) => { if (document.querySelector("form[data-dirty]")) { event.preventDefault(); event.returnValue = ""; } });
 addParameterHelp($("#admin-model-form"));
 addParameterHelp($("#retention-settings-form"));
-restoreSession();
 $("#refresh-observability").replaceWith($("#refresh-observability").cloneNode(true));
 $("#refresh-observability").addEventListener("click", () => { void loadUsage(); });
 $("#usage-window").addEventListener("change", () => { void loadUsage(); });
@@ -3630,3 +3629,12 @@ $("#publication-list").addEventListener("click", (event) => {
 publicationFields();
 
 $("#refresh-world-acquisition").addEventListener("click", () => { void loadWorldAcquisition(); });
+
+function startAdminLogin() {
+  const form = $("#login-form");
+  form.addEventListener("submit", login);
+  form.querySelector('button[type="submit"]').disabled = false;
+  $("#login-initialization-status").hidden = true;
+  void restoreSession();
+}
+startAdminLogin();

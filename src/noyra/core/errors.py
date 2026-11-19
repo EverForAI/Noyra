@@ -32,6 +32,10 @@ class SchemaContractError(RuntimeError):
     code = "schema_contract_mismatch"
 
 
+class CryptoBackendUnavailableError(RuntimeError):
+    """A required local cryptographic implementation is missing or unsupported."""
+
+
 class ArchiveKeyUnavailableError(IntegrityError):
     """An encrypted archive cannot be verified because its key is unavailable."""
 

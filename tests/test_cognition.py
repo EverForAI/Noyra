@@ -561,6 +561,11 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
         )
         with self.kernel.database.connection() as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM appraisals").fetchone()[0], 0)
+        self.assertIsNone(await cycle.interaction_cognition.run_due())
+        self.assertEqual(len(provider.requests), 1)
+        self.clock_value = (
+            datetime.fromisoformat(self.clock_value) + timedelta(seconds=60)
+        ).isoformat(timespec="milliseconds")
         self.assertEqual(await cycle.run_once(), "interaction_rejected")
         self.assertEqual(len(provider.requests), 2)
 
@@ -859,9 +864,17 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
                 cycle.goal_governance,
                 "run_due",
                 new=AsyncMock(return_value="goal_governance_committed"),
-            ),
+            ) as run_governance,
         ):
-            self.assertEqual(await cycle.run_once(), "goal_governance_committed")
+            # Fair scheduling may select another lane on the next whole tick.
+            # Verify strategy routing through the same adapter as the cases below.
+            from noyra.core.fair_scheduling import WorkflowOutcome
+
+            goal_result = await cycle._dispatch_workflow("metacognition")
+            assert isinstance(goal_result, WorkflowOutcome)
+            self.assertEqual(goal_result.reason, "goal_governance_committed")
+            self.assertTrue(goal_result.made_progress)
+        run_governance.assert_awaited_once_with()
         with (
             patch.object(
                 cycle.outcome_evaluator,
@@ -901,8 +914,6 @@ class CognitionTestCase(unittest.IsolatedAsyncioTestCase):
         ):
             # Waiting is yielding under fair scheduling; test the strategy adapter
             # directly rather than assuming it monopolizes the next whole tick.
-            from noyra.core.fair_scheduling import WorkflowOutcome
-
             strategy_result = await cycle._dispatch_workflow("metacognition")
             assert isinstance(strategy_result, WorkflowOutcome)
             self.assertEqual(strategy_result.reason, "action_deliberation_waited")

@@ -8,6 +8,7 @@ import pytest
 from pydantic import SecretStr
 
 from noyra.core import Database, IdentityStore
+from noyra.core.at_rest import _windows_harden
 from noyra.core.types import content_hash
 from noyra.model import EmbeddingResourceInput, EmbeddingResourceStore, EmbeddingSettings
 
@@ -19,6 +20,8 @@ def test_embedding_api_key_can_be_loaded_from_a_private_file(
     key_path.write_text("file-embedding-secret\n", encoding="utf-8")
     if os.name == "posix":
         key_path.chmod(0o600)
+    elif os.name == "nt":
+        _windows_harden(tmp_path, entire_tree=True)
     monkeypatch.setenv("NOYRA_EMBEDDING_BASE_URL", "https://embedding.example/v1")
     monkeypatch.setenv("NOYRA_EMBEDDING_MODEL", "embed-v1")
     monkeypatch.setenv("NOYRA_EMBEDDING_API_KEY", "inline-secret-must-not-win")

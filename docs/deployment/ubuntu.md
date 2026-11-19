@@ -312,6 +312,14 @@ remains a compatibility all-access token and should be empty in new deployments.
 `NOYRA_GENESIS_HASH` once and keep a secure record of it. Changing the subject id or genesis hash
 does not migrate an existing identity.
 
+Read the [management role matrix](../security/management-roles.md) before distributing
+credentials. The export token also grants management reads, including private data;
+it is not a third-party link for one file. Operator and export permissions are separate:
+an operator bearer cannot export, and an export bearer cannot change operator settings.
+Break-glass is an offline emergency bearer and cannot create a browser session.
+Operator/admin browser sessions grant read/operator access with CSRF checks for writes;
+export routes still require an export-capable bearer, even after an admin login.
+
 Generate a 32-byte archive key outside SQLite and back it up separately:
 
 ```bash
@@ -346,6 +354,10 @@ with root-only permissions, then set the corresponding `*_CREDENTIAL` variable (
 `NOYRA_MODEL_API_KEY_CREDENTIAL=model-api-key`) and clear its `*_FILE` variable. Noyra reads only
 the credential name from the environment; systemd supplies its contents through
 `CREDENTIALS_DIRECTORY`. File and systemd credential sources cannot both be set for one value.
+
+The separate wallet signer reads its three systemd credentials directly. When replacing an
+older unit that copied credentials into the signer state directory, update the code and unit
+together and follow [the signer credential migration procedure](signer-credentials.md).
 
 Native production hosts use `NOYRA_STORAGE_PROFILE=recovery_capable` by default. This profile
 requires the configured backup root to be usable before the service starts, so runtime readiness
@@ -570,6 +582,12 @@ available for earlier backups. Rotation preserves root-owned service-group
 `0640` permissions and does not require changing the runtime database. See the
 [command and exit-code contract](../development/backup-key-commands.md).
 
+If status reports `pending_count` greater than zero, do not delete journal files
+manually. Record its `pending_fingerprint`, then run `backup-key recover-pending`
+with `--expected-pending-fingerprint` set to that exact value. Re-run status and
+continue with the original request ID and source expectation only after recovery
+reports success.
+
 Restore only while the service is stopped and only to an absent or empty child directory on an
 encrypted volume. Do not use the mount point itself: plaintext staging is created beside the target,
 so the target and its parent must be the same encrypted filesystem. The restore authenticates every
@@ -590,6 +608,10 @@ sudo -u noyra env \
 Review the restored identity on a separate host or swap directories while stopped. Never start two
 processes against the same copied identity. Keep the backup keyring in a separate protected/offline
 backup; it is deliberately excluded from subject backups.
+
+See [restore publication and retry boundaries](../development/backup-restore-publication.md)
+for directory-sync failures, interrupted movement, and retained staging. Keep the
+original encrypted backup until the restored copy has been independently verified.
 
 ## Subject storage and training export
 
@@ -742,6 +764,17 @@ data rollback: database migrations are forward-only, so if the new process has a
 the database, stop the service and restore the pre-update backup to an empty child directory on an
 encrypted volume, then re-point/start the known-good release only after checking identity and
 integrity.
+
+If a failed installation cannot safely remove its newly published, unused code
+release, it leaves Noyra stopped and reports a cleanup failure. The installer
+checks for mounts at or below that release before deletion, including same-device
+bind mounts, and uses `rm --one-file-system` for the deletion itself. An unavailable
+mount listing or a deletion error also blocks automatic restart. Keep release
+directories free of mounts while installation and failure recovery run; this check
+does not serialize concurrent mount changes by an administrator. Review retained
+paths while stopped, preserve the data backup, and resolve the mount or permission
+problem before retrying. A schema-incompatible old release still requires the
+existing data-recovery procedure; cleanup does not override that safeguard.
 
 To select the recorded previous code release after a failed deployment:
 

@@ -17,7 +17,7 @@ from noyra.core.http import (
     PublicDNSHTTPTransport,
     PublicEndpointRejected,
 )
-from noyra.core.types import content_hash
+from noyra.core.types import content_hash, new_id
 from noyra.knowledge import CommonKnowledgePeerInput
 from noyra.knowledge.sync import CommonKnowledgeHTTPClient
 from noyra.model import (
@@ -324,34 +324,60 @@ def test_embedding_preconnect_failure_is_known_unsent(
 
 
 @pytest.mark.parametrize("case", ["dns", "dns_timeout", "private"])
+@pytest.mark.parametrize("due_order", ["bad-first", "good-first", "tied-good-first"])
 def test_common_preconnect_failure_is_recorded_and_does_not_starve_other_peers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     case: str,
+    due_order: str,
 ) -> None:
     pk, publisher = _store(tmp_path, "publisher")
     bk, bad_publisher = _store(tmp_path, "bad-publisher")
     rk, reader = _store(tmp_path, "reader")
-    peers = [
-        reader.register_peer(
-            CommonKnowledgePeerInput(
-                label=label,
-                endpoint=f"https://{label}.example.test",
-                publisher_subject_id=node.subject_id,
-                public_key=node.public_key,
-            ),
-            actor="operator",
+    # Control both scheduling keys so the starvation check covers either peer
+    # running first, including coarse-clock ties resolved by peer ID.
+    now = ["2026-11-14T00:00:00.000+00:00"]
+    reader.clock = lambda: now[0]
+    peer_ids = iter(
+        ["knowledge-peer-b", "knowledge-peer-a"]
+        if due_order == "tied-good-first"
+        else ["knowledge-peer-a", "knowledge-peer-b"]
+    )
+
+    def deterministic_id(prefix: str) -> str:
+        return next(peer_ids) if prefix == "knowledge-peer" else new_id(prefix)
+
+    monkeypatch.setattr("noyra.knowledge.common.new_id", deterministic_id)
+    peers = []
+    for index, (label, node) in enumerate([("bad", bad_publisher), ("good", publisher)]):
+        second = (
+            0
+            if due_order == "tied-good-first"
+            else (1 - index if due_order == "good-first" else index)
         )
-        for label, node in [("bad", bad_publisher), ("good", publisher)]
-    ]
+        now[0] = f"2026-11-14T00:00:0{second}.000+00:00"
+        peers.append(
+            reader.register_peer(
+                CommonKnowledgePeerInput(
+                    label=label,
+                    endpoint=f"https://{label}.example.test",
+                    publisher_subject_id=node.subject_id,
+                    public_key=node.public_key,
+                ),
+                actor="operator",
+            )
+        )
+    now[0] = "2026-11-14T00:00:02.000+00:00"
 
     class Healthy(_PublisherClient):
         def close(self) -> None:
             pass
 
     clients: list[httpx.Client] = []
+    attempted: list[str] = []
 
     def client(endpoint: str, **kwargs: Any) -> Any:
+        attempted.append(endpoint)
         if "bad." in endpoint:
             http = httpx.Client(
                 transport=PublicDNSHTTPTransport(resolver=lambda h, p: resolve(case))
@@ -371,9 +397,15 @@ def test_common_preconnect_failure_is_recorded_and_does_not_starve_other_peers(
         assert reader.peer(peers[0].peer_id).next_sync_at > peers[0].next_sync_at
         with rk.database.connection() as connection:
             outcomes = connection.execute(
-                "SELECT outcome FROM common_knowledge_sync_runs ORDER BY rowid"
+                "SELECT peer_id, outcome FROM common_knowledge_sync_runs ORDER BY rowid"
             ).fetchall()
-        assert [row[0] for row in outcomes] == ["failed", "succeeded"]
+        expected = [(peers[0], "failed"), (peers[1], "succeeded")]
+        if due_order != "bad-first":
+            expected.reverse()
+        assert attempted == [peer.endpoint for peer, _outcome in expected]
+        assert [(row[0], row[1]) for row in outcomes] == [
+            (peer.peer_id, outcome) for peer, outcome in expected
+        ]
     finally:
         for http in clients:
             http.close()

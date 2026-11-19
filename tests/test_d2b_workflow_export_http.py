@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import base64
+from functools import partial
 from typing import Any
 from unittest.mock import patch
 
 from noyra.autonomy.workflow import DurableWorkflowStore
+from noyra.core.workflow_export_control import MAX_SECONDS
 from noyra.core.workflow_export_files import WorkflowArtifactStore
 from noyra.service import NoyraService
 from test_authentication_input_contract import call
@@ -32,6 +34,8 @@ def test_export_http_checks_operator_csrf_pause_and_returns_no_private_artifacts
         reason="PRIVATE_REASON",
     )
     path = "/api/v1/admin/workflow-exports"
+    # These RPCs perform schema validation within the existing server work budget.
+    export_call = partial(call, timeout=MAX_SECONDS + 5.0)
     headers = {"Authorization": "Bearer " + token}
     payload = {
         "workflow_id": "http-workflow",
@@ -54,11 +58,13 @@ def test_export_http_checks_operator_csrf_pause_and_returns_no_private_artifacts
         == 400
     )
     assert (
-        call(instance.http, path, headers=session, payload={**payload, "expected_version": 2})[0]
+        export_call(
+            instance.http, path, headers=session, payload={**payload, "expected_version": 2}
+        )[0]
         == 409
     )
     with patch.object(WorkflowArtifactStore, "flush", return_value=True):
-        status, result, _ = call(instance.http, path, headers=session, payload=payload)
+        status, result, _ = export_call(instance.http, path, headers=session, payload=payload)
     assert status == 200 and result["status"] == "accepted"
     assert result["readback_verified"] and result["source_history_preserved"]
     assert "NEVER_EXPOSE_THIS_STATE" not in str(result) and "PRIVATE_REASON" not in str(result)

@@ -295,7 +295,7 @@ async def test_reader_and_ingestion_detect_paragraph_directive_without_changing_
 
 
 def test_classifier_version_is_advanced_for_new_evidence() -> None:
-    assert INJECTION_CLASSIFIER_VERSION == 5
+    assert INJECTION_CLASSIFIER_VERSION == 6
 
 
 def test_new_classifier_does_not_rewrite_or_replay_seen_legacy_observation(tmp_path: Path) -> None:

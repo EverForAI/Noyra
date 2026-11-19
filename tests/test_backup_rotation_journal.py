@@ -18,6 +18,7 @@ from noyra.core.backup_rotation_records import (
     RotationAcceptance,
     RotationHeader,
     RotationIntent,
+    RotationPendingRecoveryUnknownError,
     RotationPreparationUnknownError,
     sha256,
 )
@@ -548,6 +549,143 @@ def test_known_crash_orphan_is_retained_and_blocks_automatic_preparation(
 
 
 @POSIX
+def test_exact_pending_is_reported_and_requires_explicit_recovery(
+    rotation_directory: Path,
+) -> None:
+    target, source, api = prepared(rotation_directory)
+    pending = directory(target) / (".pending-" + "c" * 32)
+    safe_write(pending, b"uncommitted synthetic bytes")
+
+    state = api.status(request_id=REQ)
+    assert state.state == "prepared_recorded"
+    assert state.pending_count == 1 and state.pending_bytes == len(b"uncommitted synthetic bytes")
+    assert state.pending_fingerprint is not None and len(state.pending_fingerprint) == 64
+    assert pending.exists() and target.read_bytes() == source
+    with pytest.raises(RotationJournalError, match="explicit recovery"):
+        api.prepare(request_id=REQ, expected_generation=1, expected_source_hash=sha256(source))
+
+    recovered = api.recover_pending(expected_fingerprint=state.pending_fingerprint)
+    assert recovered.removed_count == 1
+    assert recovered.removed_bytes == len(b"uncommitted synthetic bytes")
+    assert recovered.durability_confirmed and not pending.exists()
+    assert next(directory(target).glob("*.intent.json")).is_file()
+    assert (
+        api.prepare(
+            request_id=REQ, expected_generation=1, expected_source_hash=sha256(source)
+        ).state
+        == "prepared"
+    )
+    assert target.read_bytes() == source
+
+
+@POSIX
+def test_header_creation_orphan_can_be_inspected_and_recovered(
+    rotation_directory: Path,
+) -> None:
+    target, source, api = setup(rotation_directory)
+    root = directory(target)
+    root.mkdir(mode=0o700)
+    pending = root / (".pending-" + "d" * 32)
+    safe_write(pending, b"")
+
+    state = api.status(request_id=REQ)
+    assert state.state == "pending_recovery_required"
+    assert state.pending_count == 1 and state.pending_bytes == 0
+    assert state.pending_fingerprint is not None
+    api.recover_pending(expected_fingerprint=state.pending_fingerprint)
+    assert not pending.exists() and target.read_bytes() == source
+    recovered_state = api.status(request_id=REQ)
+    assert recovered_state.state == "absent" and recovered_state.pending_count == 0
+    assert (
+        api.prepare(
+            request_id=REQ, expected_generation=1, expected_source_hash=sha256(source)
+        ).state
+        == "prepared"
+    )
+
+
+@POSIX
+def test_pending_link_alias_is_recovered_without_removing_committed_intent(
+    rotation_directory: Path,
+) -> None:
+    target, source, api = prepared(rotation_directory)
+    root = directory(target)
+    intent = next(root.glob("*.intent.json"))
+    pending = root / (".pending-" + "e" * 32)
+    os.link(intent, pending)
+
+    state = api.status(request_id=REQ)
+    assert state.pending_count == 1 and state.pending_fingerprint is not None
+    assert state.state == "prepared_recorded"
+    recovered = api.recover_pending(expected_fingerprint=state.pending_fingerprint)
+    assert recovered.removed_count == 1 and not pending.exists()
+    assert intent.exists() and intent.stat().st_nlink == 1
+    assert api.resume(request_id=REQ).state == "accepted"
+    assert target.read_bytes() != source
+
+
+@POSIX
+def test_stale_pending_fingerprint_cannot_remove_changed_orphan(
+    rotation_directory: Path,
+) -> None:
+    target, _, api = prepared(rotation_directory)
+    pending = directory(target) / (".pending-" + "f" * 32)
+    safe_write(pending, b"first")
+    state = api.status(request_id=REQ)
+    assert state.pending_fingerprint is not None
+    pending.write_bytes(b"changed")
+
+    with pytest.raises(RotationJournalError, match="fingerprint changed"):
+        api.recover_pending(expected_fingerprint=state.pending_fingerprint)
+    assert pending.read_bytes() == b"changed"
+
+
+@POSIX
+def test_pending_recovery_sync_failure_is_unknown_and_can_be_inspected(
+    rotation_directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target, source, api = prepared(rotation_directory)
+    pending = directory(target) / (".pending-" + "8" * 32)
+    safe_write(pending, b"synthetic")
+    state = api.status(request_id=REQ)
+    assert state.pending_fingerprint is not None
+
+    def fail_sync(path: Path) -> None:
+        raise OSError("synthetic directory sync failure")
+
+    monkeypatch.setattr("noyra.core.backup_rotation_storage._fsync_directory", fail_sync)
+    with pytest.raises(RotationPendingRecoveryUnknownError):
+        api.recover_pending(expected_fingerprint=state.pending_fingerprint)
+    assert not pending.exists() and target.read_bytes() == source
+
+    monkeypatch.undo()
+    inspected = api.status(request_id=REQ)
+    assert inspected.state == "prepared_recorded" and inspected.pending_count == 0
+
+
+@POSIX
+@pytest.mark.parametrize("kind", ["permissions", "external-hard-link", "symlink"])
+def test_unsafe_exact_pending_entry_is_not_recoverable(rotation_directory: Path, kind: str) -> None:
+    target, _, api = prepared(rotation_directory)
+    pending = directory(target) / (".pending-" + "9" * 32)
+    if kind == "permissions":
+        safe_write(pending, b"synthetic")
+        pending.chmod(0o644)
+    elif kind == "external-hard-link":
+        outside = rotation_directory / "outside-pending"
+        safe_write(outside, b"synthetic")
+        os.link(outside, pending)
+    else:
+        outside = rotation_directory / "outside-pending"
+        safe_write(outside, b"synthetic")
+        pending.symlink_to(outside)
+
+    with pytest.raises(RotationJournalError):
+        api.status(request_id=REQ)
+    assert pending.exists() or pending.is_symlink()
+
+
+@POSIX
 def test_root_service_group_source_is_unchanged_and_journal_is_owner_only(
     rotation_directory: Path,
 ) -> None:
@@ -744,7 +882,7 @@ def test_temporary_identity_failure_preserves_empty_orphan_and_closes_descriptor
         original_fstat(temporary_fd)
     leftovers = list(directory(target).iterdir())
     assert len(leftovers) == 1 and leftovers[0].read_bytes() == b""
-    with pytest.raises(RotationJournalError, match="incomplete"):
+    with pytest.raises(RotationJournalError, match="explicit recovery"):
         api.prepare(request_id=REQ, expected_generation=1, expected_source_hash=sha256(source))
 
 

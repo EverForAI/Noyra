@@ -78,7 +78,9 @@ The writers and archive verifiers continue to use the original frozen source and
 manifest; the original event-prefix check remains separate and required.
 
 Cross-schema recovery additionally requires a directed, explicitly reviewed pair
-of exact old/new DDL fingerprints and a shared, registered structure fingerprint.
+of exact old/new DDL fingerprints and registered source/target structure fingerprints.
+The original trigger-only transition shares one structure fingerprint; the
+reviewed additive publisher-trust transition pins both measured structures.
 Adjacent version numbers, unchanged tables alone and transitive pair composition
 are insufficient. No operator parameter or environment setting enables a pair.
 New requests keep their normal identity and same-schema parent checks. In
@@ -93,6 +95,13 @@ Recovery tests construct actual116 rows and use the real117 migration, including
 file readback and process restarts. Schema115 and unreviewed future versions gain
 no implicit recovery compatibility; historical accepted archives remain readable.
 Business changes or an unverified actual schema still fail closed.
+
+Schema118 adds publisher-scoped knowledge trust without changing workflow
+history or publication rows. Existing publication retries explicitly accept
+the measured 117-to-118 and cumulative 116-to-118 schema pairs, in addition to
+the original 116-to-117 pair. Each pair pins both source and target DDL and
+structure fingerprints. This does not authorize other transitions, infer
+transitive compatibility, or allow a new request to use older source metadata.
 
 ## Schema117 publication guards and upgrade evidence
 

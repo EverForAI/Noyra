@@ -750,6 +750,25 @@ _OWNERSHIP_GRAPHS[116] = {
 
 # Schema117 changes only guards; the complete subject ownership graph is unchanged.
 _OWNERSHIP_GRAPHS[117] = dict(_OWNERSHIP_GRAPHS[116])
+_OWNERSHIP_GRAPHS[118] = {
+    **_OWNERSHIP_GRAPHS[117],
+    "common_knowledge_trusted_publishers": _subject_rule(),
+    "common_knowledge_trusted_keys": _ExportOwnershipRule(
+        "custom",
+        "key referenced by subject package or explicit publisher binding",
+        predicate=(
+            '(EXISTS (SELECT 1 FROM "common_knowledge_packages" owner_package '
+            'WHERE owner_package."key_id" = {alias}."key_id" AND '
+            '(owner_package."publisher_subject_id" = ? OR EXISTS ('
+            'SELECT 1 FROM "common_knowledge_imports" owner_import '
+            'WHERE owner_import."package_id" = owner_package."package_id" '
+            'AND owner_import."subject_id" = ?))) '
+            'OR EXISTS (SELECT 1 FROM "common_knowledge_trusted_publishers" binding '
+            'WHERE binding."key_id" = {alias}."key_id" AND binding."subject_id" = ?))'
+        ),
+        parameter_count=3,
+    ),
+}
 
 
 @dataclass(frozen=True)

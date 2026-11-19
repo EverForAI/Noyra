@@ -13,11 +13,13 @@
       <p class="eyebrow">NOYRA / PRIVATE CONSOLE</p>
       <h1>管理台</h1>
       <p class="login-copy">登录后管理认知资源、查看私密交流，并检查运行状态。</p>
+      <p class="form-status" id="login-initialization-status" role="status">管理台正在初始化。若长时间没有变化，请检查 JavaScript 是否启用、脚本是否被阻止，然后重新加载页面。</p>
+      <noscript><p class="form-status error">管理台需要启用 JavaScript 才能登录。</p></noscript>
       <form id="login-form">
         <input class="visually-hidden" type="text" name="username" autocomplete="username" value="operator" tabindex="-1" aria-hidden="true">
         <label for="login-token">操作令牌</label>
         <input id="login-token" type="password" autocomplete="current-password" required>
-        <button type="submit">进入管理台</button>
+        <button type="submit" disabled>进入管理台</button>
       </form>
       <p class="form-status" id="login-status" role="status"></p>
       <a class="back-link" href="/">返回公开页面</a>

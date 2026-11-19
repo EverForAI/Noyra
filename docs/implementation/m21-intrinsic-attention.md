@@ -35,6 +35,29 @@ receives bounded private events, memories, beliefs, autonomous goals, relationsh
 self-model context. It can cite only supplied IDs. It cannot call tools, browse, publish, communicate,
 spend funds, alter capabilities or claim an external action occurred.
 
+The context limit measures the final escaped UTF-8 bytes, including JSON syntax and escaped
+control markers. The historical `NOYRA_MAX_THOUGHT_CONTEXT_CHARS` setting name remains available;
+the fixed JSON envelope is additional overhead of fewer than 100 bytes. A context that already
+fits keeps its original representation and prompt.
+
+The worker first checks whether the dictionaries and one event anchor can fit together. If they
+can, it only prunes optional source rows. Otherwise, it projects agenda descriptions and the
+current self-model, reserving a quarter of the budget for agenda metadata and a third for the
+self-model. Only the agenda topic is shortened; agenda/source IDs, attention
+values, status and timestamps remain exact. The self-model keeps its version and bounded prefixes
+of continuity, values, commitments, uncertainties and trait descriptions. Its nested JSON columns
+remain complete JSON arrays, with retained trait provenance IDs and numeric values unchanged.
+Trailing optional entries may be omitted if text shortening alone is insufficient.
+
+Projected dictionaries are marked by `context_projection` with hashes of their full originals.
+The model is told that omitted details remain unknown. These hashes describe truncation and do
+not authorize citations. At least one available event anchor survives list pruning; source-ID
+validation uses exactly the rows still transmitted. If immutable identifiers themselves cannot
+fit, context construction reports an integrity error rather than shortening an identity. The
+durable agenda and self-model stay intact, and context construction does not write to the database.
+Existing budget, cooldown, unknown-call reconciliation and successful-call recovery rules still
+govern provider requests and commits.
+
 A thought may propose one candidate self-origin goal. The local supervisor accepts it only when the
 named motive matches a current affect component with sufficient intensity and the separate daily goal
 limit has not been reached. The goal remains a candidate for normal goal governance; thought does not
@@ -49,6 +72,29 @@ results for one agenda are rejected. After the configured no-change streak, the 
 cooldown and consumes no additional model calls until that cooldown expires. Resolve and abandon are
 terminal. Model calls have their own daily limit and one failed or rejected durable call is not retried
 indefinitely under the same idempotency key.
+
+### Settled evidence and fresh calls
+
+Execution eligibility includes two different operations: settling an existing known outcome,
+and authorizing a fresh provider attempt. A known successful response that has not yet produced
+an episode may be recovered without a new provider request, even when today's call budget is
+exhausted or the minimum episode interval has not elapsed. Recovery may append that one owed
+episode during the interval; it is not permission to dispatch a new call. A known failure can
+similarly receive its one durable round closure without creating an episode or changing paid
+accounting. A successfully recovered response still undergoes current local proposal validation.
+
+Hard agenda cooldown, terminal agenda/parent state and unresolved call fences are checked before
+this recovery allowance. A `prepared` call requires another provider attempt, so it does not use
+the settled-outcome shortcut: daily budget, prior failed-round `retry_after`, minimum interval,
+and existing authorization/context checks continue to apply. A day change or worker restart
+does not release an unknown reservation or reset a durable cooldown.
+
+Committing an episode or a failed-round closure advances the business-round identity atomically.
+Subsequent polls inspect the next round, so the same settled call cannot repeatedly create episodes
+or closures. Tests exercise explicit targets and automatic scheduling across worker restarts,
+including every call state during hard cooldown. Evidence-only ledger fixtures also test recovery
+of a pre-existing success during the interval; those fixtures do not imply that the current
+scheduler would dispatch that call before its interval was due.
 
 Agenda revisions and thought episodes are hashed, append-only histories. Integrity verification binds
 each episode to its agenda and exact model response. The full private ledger is included in developer

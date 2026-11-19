@@ -922,7 +922,33 @@ on_error() {
         echo 'Database may require the new schema; keeping the new release and leaving Noyra stopped. Restore a verified backup before starting incompatible old code.' >&2
       fi
     fi
-    if [[ "$old_data_compatible" == true ]]; then rm -rf -- "$release_root"; fi
+    if [[ "$old_data_compatible" == true ]]; then
+      local release_cleanup_safe=true cleanup_mounts mount_target
+      # A filesystem boundary alone does not protect a same-device bind mount
+      # or a mount covering the deletion operand itself. Refuse both before rm.
+      if ! cleanup_mounts="$(findmnt --list --noheadings --raw --output TARGET)" || \
+        [[ -z "$cleanup_mounts" ]]; then
+        release_cleanup_safe=false
+        echo 'Could not inspect release cleanup mounts; keeping the failed release.' >&2
+      else
+        while IFS= read -r mount_target; do
+          # findmnt --raw escapes whitespace and backslashes as hexadecimal.
+          printf -v mount_target '%b' "$mount_target"
+          if [[ "$mount_target" == "$release_root" || "$mount_target" == "$release_root/"* ]]; then
+            release_cleanup_safe=false
+            echo "Mount at or below failed release; refusing cleanup: $release_root" >&2
+            break
+          fi
+        done <<< "$cleanup_mounts"
+      fi
+      if [[ "$release_cleanup_safe" != true ]] || \
+        ! rm -rf --one-file-system -- "$release_root"; then
+        cleanup_failed=true
+        service_was_stopped=false
+        status=1
+        echo 'Failed release cleanup is incomplete; leaving Noyra stopped. Inspect retained paths before retrying.' >&2
+      fi
+    fi
     if [[ "$legacy_moved" == true ]]; then
       mkdir -p -- "$RELEASES_DIR/$legacy_id"
       mv -- "$RELEASES_DIR/$legacy_id/.venv" "$INSTALL_DIR/.venv" || true

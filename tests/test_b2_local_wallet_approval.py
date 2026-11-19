@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from noyra.core import Database
+from noyra.core.at_rest import _windows_harden
 from noyra.migration.local_wallet_approval import (
     assert_local_wallet_binding,
     authorize_material,
@@ -112,6 +114,8 @@ def test_private_config_cannot_substitute_for_a_source_wallet_approval(tmp_path:
         )
     )
     path.chmod(0o600)
+    if os.name == "nt":
+        _windows_harden(config, entire_tree=True)
     with pytest.raises(ValueError, match="source local wallet approval"):
         MigrationRuntime.binding(
             cast(MigrationRuntime, SimpleNamespace(owner=case.owner)), case.task, case.policy
@@ -249,7 +253,7 @@ def test_material_authorization_is_bound_to_one_artifact_with_retry_identity(
 
 
 def test_key_files_are_not_read_before_source_authority_is_established(tmp_path: Path) -> None:
-    from noyra.migration.wallet_material import source_wallet_files
+    from noyra.migration.wallet_material import source_wallet_material
 
     case = setup_local(tmp_path)
     with (
@@ -258,10 +262,9 @@ def test_key_files_are_not_read_before_source_authority_is_established(tmp_path:
         ),
         pytest.raises(ValueError, match="approval is required"),
     ):
-        source_wallet_files(
+        source_wallet_material(
             case.task,
             {"mode": "local_wallet_transfer", "address": ADDRESS, "approval": {}},
-            tmp_path / "rpc.json",
             database=case.database,
             artifact_id="artifact-one",
             recipient_key_fingerprint="0" * 64,

@@ -18,15 +18,14 @@ def verify_local_wallet(root: Path, address: str) -> None:
         raise ValueError("migration wallet address mismatch")
 
 
-def source_wallet_files(
+def source_wallet_material(
     task: Any,
     binding: Mapping[str, Any],
-    rpc_file: Path,
     *,
     database: Any,
     artifact_id: str,
     recipient_key_fingerprint: str,
-) -> tuple[Path, Path, Path]:
+) -> tuple[Path, Path, bytes]:
     from .local_wallet_approval import authorize_material
 
     # Establish real source authority before reading keystore/password paths.
@@ -59,7 +58,5 @@ def source_wallet_files(
     from noyra.wallet.config import _parse_rpc_urls
 
     rpc_urls = _parse_rpc_urls(os.environ["NOYRA_WALLET_RPC_URLS_JSON"])
-    descriptor = os.open(rpc_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-        json.dump({str(key): value for key, value in rpc_urls.items()}, stream)
-    return keystore, password, rpc_file
+    rpc_material = json.dumps({str(key): value for key, value in rpc_urls.items()}).encode("utf-8")
+    return keystore, password, rpc_material

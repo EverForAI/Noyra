@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import pytest
 
+from noyra.core.at_rest import _windows_harden
 from noyra.wallet.config import configured_wallet_signer_from_env
 
 
@@ -57,6 +58,8 @@ def test_external_signer_bearer_token_can_use_a_private_file(
     token_path.write_text("file-signer-token\n", encoding="utf-8")
     if os.name == "posix":
         token_path.chmod(0o600)
+    elif os.name == "nt":
+        _windows_harden(tmp_path, entire_tree=True)
     monkeypatch.setenv("NOYRA_WALLET_MODE", "external")
     monkeypatch.setenv("NOYRA_WALLET_SIGNER_ENDPOINT", "https://signer.example")
     monkeypatch.setenv("NOYRA_WALLET_SIGNER_ID", "external")

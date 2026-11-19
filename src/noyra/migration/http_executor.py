@@ -21,19 +21,21 @@ import secrets
 import socket
 import sqlite3
 import ssl
+import stat
 import threading
 import time
 from collections.abc import Callable, Mapping
-from contextlib import suppress
+from contextlib import closing, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, BinaryIO, Protocol, cast
 from urllib.parse import urlsplit
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
 
+from noyra.core.at_rest import AtRestError, validate_private_root
 from noyra.core.database import CURRENT_SCHEMA_VERSION, Database
 from noyra.core.deadline import operation_deadline, remaining_seconds
 from noyra.core.http import SyncHTTPTimeoutHook, call_sync_http_with_deadline
@@ -44,10 +46,10 @@ from .activation_contract import (
     validate_activation_receipt,
     validate_activation_request,
 )
-from .bundle import BUNDLE_FORMAT, encrypt_bundle
+from .bundle import BUNDLE_FORMAT, encrypt_bundle_stream
 from .executor import MigrationExecutionError, MigrationExecutionReceipt
 from .manager import MigrationTask
-from .subject_payload import PAYLOAD_FORMAT, create_payload, file_digest
+from .subject_payload import PAYLOAD_FORMAT, file_digest, prepare_payload
 from .trust import (
     RecipientPoPProof,
     create_recipient_pop_challenge,
@@ -71,7 +73,7 @@ class SQLiteArtifactProvider:
 
     def __init__(self, database_path: Path | str, output_root: Path | str):
         self.database_path = Path(database_path).resolve()
-        self.output_root = Path(output_root).resolve()
+        self.output_root = Path(output_root).absolute()
 
     def __call__(self, task: MigrationTask, proof: Mapping[str, object]) -> ArtifactBundle:
         artifact_id = str(proof.get("artifact_id") or f"migration-{task.task_id}")
@@ -106,48 +108,72 @@ class SQLiteArtifactProvider:
                 artifact_id,
                 recipient_key_fingerprint=recipient_fingerprint,
             )
-        self.output_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        destination = self.output_root / f"{artifact_id}.bundle"
+        try:
+            output_root = validate_private_root(
+                self.output_root, create=True, label="migration output"
+            )
+            snapshot_root = validate_private_root(
+                self.database_path.parent / "migration" / "source" / "snapshots",
+                create=True,
+                expected_device=self.database_path.parent.stat().st_dev,
+                label="migration snapshot",
+            )
+        except (OSError, AtRestError) as error:
+            raise MigrationExecutionError("artifact_private_boundary_unavailable") from error
+        destination = output_root / f"{artifact_id}.bundle"
         if destination.exists() and destination.is_symlink():
             raise MigrationExecutionError("artifact_output_invalid")
         if destination.exists():
             raise MigrationExecutionError("artifact_already_exists")
-        raw_snapshot = self.output_root / f".{artifact_id}.sqlite"
-        raw_payload = self.output_root / f".{artifact_id}.tar"
-        wallet_rpc = self.output_root / f".{artifact_id}.rpc.json"
-        if raw_snapshot.exists() or raw_payload.exists():
-            raise MigrationExecutionError("artifact_snapshot_already_exists")
+        raw_snapshot = snapshot_root / f".{artifact_id}.sqlite"
+        # Legacy plaintext material is evidence requiring explicit operator
+        # inspection. Never consume, overwrite or auto-delete a prior result.
+        legacy = [
+            output_root / f".{artifact_id}{suffix}" for suffix in (".sqlite", ".tar", ".rpc.json")
+        ]
+        if any(path.exists() or path.is_symlink() for path in [raw_snapshot, *legacy]):
+            raise MigrationExecutionError("artifact_snapshot_recovery_required")
+        snapshot_identity: tuple[int, int] | None = None
         try:
-            source = sqlite3.connect(self.database_path)
-            target = sqlite3.connect(raw_snapshot)
+            descriptor = os.open(
+                raw_snapshot,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
             try:
-                source.backup(target)
-                target.execute("PRAGMA journal_mode=DELETE")
+                details = os.fstat(descriptor)
+                snapshot_identity = (details.st_dev, details.st_ino)
             finally:
-                target.close()
-                source.close()
-                gc.collect()
-            os.chmod(raw_snapshot, 0o600)
+                os.close(descriptor)
+            with (
+                closing(
+                    sqlite3.connect(self.database_path.as_uri() + "?mode=ro", uri=True)
+                ) as source,
+                closing(sqlite3.connect(raw_snapshot)) as target,
+            ):
+                target.execute("PRAGMA cache_size=-2048")
+                source.backup(target, pages=256)
+                target.execute("PRAGMA journal_mode=DELETE")
+            gc.collect()
             local_wallet = None
             wallet = proof.get("wallet_binding")
             if isinstance(wallet, Mapping) and wallet.get("mode") == "local_wallet_transfer":
-                from .wallet_material import source_wallet_files
+                from .wallet_material import source_wallet_material
 
-                local_wallet = source_wallet_files(
+                local_wallet = source_wallet_material(
                     task,
                     wallet,
-                    wallet_rpc,
                     database=Database(self.database_path, initialize=False),
                     artifact_id=artifact_id,
                     recipient_key_fingerprint=recipient_fingerprint,
                 )
-            inventory = create_payload(
+            payload = prepare_payload(
                 raw_snapshot,
                 self.database_path.parent,
-                raw_payload,
                 task.subject_id,
                 local_wallet=local_wallet,
             )
+            inventory = payload.inventory
             context = {
                 "task_id": task.task_id,
                 "target_id": task.target_id,
@@ -160,22 +186,49 @@ class SQLiteArtifactProvider:
                 "database_sha256": file_digest(raw_snapshot),
                 "inventory_sha256": content_hash(inventory),
             }
-            encrypted = encrypt_bundle(
-                raw_payload,
+
+            def check_wallet_authority() -> None:
+                if isinstance(wallet, Mapping) and wallet.get("mode") == "local_wallet_transfer":
+                    from .local_wallet_approval import authorize_material
+
+                    authorize_material(
+                        Database(self.database_path, initialize=False),
+                        task,
+                        wallet,
+                        artifact_id,
+                        recipient_key_fingerprint=recipient_fingerprint,
+                    )
+
+            def emit(output: BinaryIO) -> None:
+                # Each pass reopens material; recheck revocation, expiry and
+                # recipient binding both before and after that bounded read.
+                check_wallet_authority()
+                payload.write_to(output)
+                check_wallet_authority()
+
+            encrypted = encrypt_bundle_stream(
+                emit,
                 destination,
                 recipient_public_key=recipient_public,
                 context=context,
             )
         except (OSError, ValueError, sqlite3.DatabaseError) as error:
-            raw_snapshot.unlink(missing_ok=True)
             raise MigrationExecutionError("artifact_snapshot_failed") from error
         finally:
-            try:
-                raw_snapshot.unlink(missing_ok=True)
-                raw_payload.unlink(missing_ok=True)
-                wallet_rpc.unlink(missing_ok=True)
-            except OSError as error:
-                raise MigrationExecutionError("artifact_snapshot_cleanup_failed") from error
+            if snapshot_identity is not None:
+                try:
+                    details = raw_snapshot.lstat()
+                    if (
+                        not stat.S_ISREG(details.st_mode)
+                        or details.st_nlink != 1
+                        or (details.st_dev, details.st_ino) != snapshot_identity
+                    ):
+                        raise OSError("migration snapshot identity changed before cleanup")
+                    raw_snapshot.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError as error:
+                    raise MigrationExecutionError("artifact_snapshot_cleanup_failed") from error
         manifest = {
             **encrypted,
             "byte_size": encrypted["ciphertext_size"],

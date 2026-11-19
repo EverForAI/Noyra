@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 import tempfile
 import unittest
 from collections.abc import Mapping
@@ -93,6 +95,12 @@ class ProjectExecutionIntegrityTestCase(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self: Self) -> None:
         self.kernel.close()
+        if os.name == "nt":
+            # Cleanup must enumerate deep generations without changing tested paths.
+            root = str(self.root)
+            if not root.startswith("\\\\?\\"):
+                root = "\\\\?\\UNC\\" + root[2:] if root.startswith("\\\\") else "\\\\?\\" + root
+            shutil.rmtree(root)
         self.temporary.cleanup()
 
     def gateway(self: Self, payloads: list[Mapping[str, object]]) -> ModelGateway:

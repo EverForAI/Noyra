@@ -334,7 +334,7 @@ def test_legacy_upgrade_preserves_exact_rows_and_reopens_without_duplicate_recei
     for _ in range(2):
         current = Database(old.path, strict_schema_contract=True)
         after = snapshot(current)
-        assert after["version"] == "117" and after["ddl"] == _SCHEMA_DDL_FINGERPRINTS[117]
+        assert after["version"] == "118" and after["ddl"] == _SCHEMA_DDL_FINGERPRINTS[118]
         for table, rows in before["rows"].items():
             if table not in {"schema_meta", "persistent_features"}:
                 assert after["rows"][table] == rows, table

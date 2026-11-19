@@ -16,6 +16,7 @@ permissions: {}
 
 jobs:
   verify-and-publish-evidence:
+    timeout-minutes: 30
     environment: external-gates
     runs-on: ubuntu-24.04
     permissions:

@@ -49,8 +49,14 @@ backup/restoration and private-ACL status inspection remain supported. A missing
 Windows durability implementation is never reported as successful rotation.
 
 Open `http://127.0.0.1:8765` for the public site or `/admin` for the creator management surface.
-The management surface accepts the configured operator/admin/break-glass token once and keeps an
-in-memory HttpOnly session until restart or expiry. Windows and Ubuntu use the same identity database, resource pools,
+The management surface accepts the configured operator or legacy admin token and creates an
+HttpOnly read/operator session with expiry and token-rotation validation; writes require CSRF.
+Export routes require an export-capable bearer. Read/export tokens cannot log in, and break-glass
+is bearer-only: a session exchange is rejected and audited. See the
+[management role matrix](../security/management-roles.md) before sharing credentials.
+File-backed credentials must also satisfy the
+[Windows credential ACL boundary](windows-credentials.md); broad inherited file access is rejected.
+Windows and Ubuntu use the same identity database, resource pools,
 training policy, export endpoint, and storage boundaries. Stop the process before copying the
 runtime directory; never run two processes against the same subject identity.
 
@@ -84,6 +90,11 @@ python -m noyra restore-backup `
 
 Missing historical keys, changed ciphertext, permission drift, and partial archives fail closed and
 leave no published restored identity.
+
+See [restore publication and retry boundaries](../development/backup-restore-publication.md)
+for interrupted movement, errors after publication, and Windows persistence limits.
+Keep the original encrypted backup and its historical key generation until the
+restored copy has been independently verified.
 
 ## Managed Windows packages
 

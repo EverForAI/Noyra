@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
+from noyra.core.http import is_public_address
 from noyra.core.types import (
     canonical_json,
     content_hash,
@@ -298,10 +299,12 @@ class CapabilityStore:
             if port not in {None, 443}:
                 return False
             try:
-                address = ipaddress.ip_address(hostname.split("%", 1)[0])
+                address = ipaddress.ip_address(hostname)
             except (TypeError, ValueError):
                 address = None
-            if address is not None and not address.is_global:
+            # Scope authorization stays local; DNS is checked and pinned by the
+            # reader's transport. Literals use that same public-unicast policy.
+            if address is not None and not is_public_address(address):
                 return False
             if scope.get("public_https") is True:
                 return True

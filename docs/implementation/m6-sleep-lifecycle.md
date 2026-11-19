@@ -11,6 +11,38 @@ pressure is deliberately represented separately from emotional frustration. A da
 can therefore force a sleep recommendation even after ordinary fatigue has been restored; the
 budget itself is owned by the model ledger and is not reset by sleep.
 
+### Pool samples and the legacy hard-pressure signal
+
+`resource_pool_pressures` contains per-subject pressure samples, not the model-group configuration
+registry. An empty table for a subject does not itself trigger sleep: new fatigue state starts with
+`resource_pressure = 0` and `fatigue = 0`. The hard-budget rule is evaluated only after the separate
+aggregate `fatigue_states.resource_pressure` reaches `1`.
+
+| Aggregate pressure | Pool samples for this subject | Hard-budget recommendation |
+| --- | --- | --- |
+| Below `1` | Empty, healthy or exhausted samples | None from this rule |
+| `1` | Empty | Retain the legacy single-pool exhaustion signal |
+| `1` | At least one sampled pool below `1` | Continue available work; no global budget sleep |
+| `1` | Every sampled pool at `1` | Recommend budget sleep |
+
+This empty-sample fallback preserves callers using a single model gateway, where an actual ledger
+budget denial reports aggregate pressure without independent pool samples. Treating empty samples
+as healthy would discard that known hard-budget signal. Conversely, empty samples must not be used
+to manufacture an exhaustion assessment during startup. Other fatigue, frustration, conflict and
+staleness rules remain independent of this table.
+
+The service samples routed model pools before a cognition cycle; embedding accounting updates its
+own sample. Configuring a model group alone does not insert a pressure sample. A fresh runtime can
+therefore reach its active sampling hook even with configured but not-yet-sampled groups. Individual
+samples are upserted, and passing an empty update does not clear previously recorded samples.
+
+Budget-triggered autonomous sleep schedules waking at the next UTC budget day. A completed budget
+sleep clears the aggregate hard-pressure signal only after that day actually changes. Sleep and
+wake never erase paid attempts or grant new model capacity: the ledger still determines whether
+work can resume. Existing per-pool samples are not reset by this operation; the next active hook can
+refresh them. Same-day early wake does not reset the daily budget. Normal fatigue restoration and
+the other lifecycle/admission checks still apply.
+
 The deterministic first-version weighting is:
 
 ```text

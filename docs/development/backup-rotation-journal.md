@@ -55,13 +55,24 @@ also rejects them if they are forcibly staged.
 Retained snapshots also retain their keys; future key destruction must account
 for them. This module does not automatically prune records.
 
-The reader accepts at most 63 operations, 128 directory entries, 2 MiB per
-intent, 4 KiB per header/acceptance record and 8 MiB in total. Unknown, nested,
-linked, incomplete, malformed or over-budget entries cause rejection. The one
-reserved acceptance-stage name is bound to the latest intent and must contain
-an exact prefix of its expected receipt. A crash may leave exactly two aliases
-of that receipt inside this private directory; no other hard links qualify.
-Unrecognized private orphans are preserved for inspection rather than deleted.
+The reader accepts at most 63 operations, 128 committed directory entries, 128
+recognized pending entries, 2 MiB per intent or pending file, 4 KiB per
+header/acceptance record and 8 MiB in total. Unknown names, nested, linked,
+malformed or over-budget entries cause rejection. A pending entry is recognized
+only when its name exactly matches `.pending-` followed by 32 lowercase hex
+characters and its file boundary is safe. It is never parsed or adopted as a
+record. Read-only `status` reports its count, byte total and metadata fingerprint;
+`prepare` and `resume` refuse to proceed while one exists.
+
+The explicit `recover-pending` command requires the fingerprint observed from
+status, takes the rotation lock, revalidates the complete set and removes only
+those exact pending names before synchronizing the directory. It does not remove
+unknown names or repair other journal corruption. If a crash occurred between
+create-only linking and temporary-name removal, a pending file may be removed
+only when it is exactly one private hard-link alias to one validated journal
+entry. The one reserved acceptance-stage name is separately bound to the latest
+intent and must contain an exact prefix of its expected receipt. Unrecognized
+private orphans are preserved for inspection rather than deleted.
 
 Writes require the existing stable sibling rotation lock. Journal creation and
 its parent entry are synchronized before preparation completes. Records are

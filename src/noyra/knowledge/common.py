@@ -440,9 +440,22 @@ class CommonKnowledgeStore:
             )
         return self.get(package_id)
 
-    def trust_key(self, public_key: str, *, label: str, actor: str) -> str:
+    def trust_key(
+        self,
+        public_key: str,
+        *,
+        publisher_subject_id: str,
+        label: str,
+        actor: str,
+    ) -> str:
         if not actor.strip() or actor == "subject" or not label.strip():
             raise PermissionError("trusted publisher keys are operator-provided resources")
+        try:
+            publisher_subject_id = validate_subject_id(publisher_subject_id)
+        except (TypeError, ValueError) as error:
+            raise ValueError("trusted publisher subject is invalid") from error
+        if publisher_subject_id == self.subject_id:
+            raise PermissionError("a subject cannot trust an external key as its own publisher")
         self._parse_public_key(public_key)
         key_id = content_hash(public_key)[:32]
         with self.database.transaction() as connection:
@@ -452,6 +465,14 @@ class CommonKnowledgeStore:
                 "public_key = excluded.public_key, label = excluded.label, status = 'active', "
                 "revoked_at = NULL",
                 (key_id, public_key, label.strip(), utc_now()),
+            )
+            connection.execute(
+                "INSERT INTO common_knowledge_trusted_publishers("
+                "subject_id, publisher_subject_id, key_id, status, created_at) "
+                "VALUES (?, ?, ?, 'active', ?) ON CONFLICT(subject_id, key_id, "
+                "publisher_subject_id) DO UPDATE SET status='active', revoked_at=NULL "
+                "WHERE common_knowledge_trusted_publishers.status='revoked'",
+                (self.subject_id, publisher_subject_id, key_id, utc_now()),
             )
         return key_id
 
@@ -485,9 +506,13 @@ class CommonKnowledgeStore:
         signature = str(verified_envelope["signature"])
         now = self.clock()
         key = connection.execute(
-            "SELECT public_key FROM common_knowledge_trusted_keys "
-            "WHERE key_id = ? AND status = 'active'",
-            (body["key_id"],),
+            "SELECT trusted.public_key FROM common_knowledge_trusted_keys trusted "
+            "JOIN common_knowledge_trusted_publishers binding "
+            "ON binding.key_id = trusted.key_id "
+            "WHERE trusted.key_id = ? AND trusted.status = 'active' "
+            "AND binding.status = 'active' "
+            "AND binding.subject_id = ? AND binding.publisher_subject_id = ?",
+            (body["key_id"], self.subject_id, body["publisher_subject_id"]),
         ).fetchone()
         if key is None:
             raise PermissionError("common knowledge publisher key is not trusted")
@@ -746,22 +771,40 @@ class CommonKnowledgeStore:
         """Return imported packages awaiting or undergoing subject review."""
         with self.database.connection() as connection:
             rows = connection.execute(
-                "SELECT p.package_id, i.status AS import_status, i.reason AS import_reason, "
-                "i.imported_at FROM common_knowledge_packages p "
+                "SELECT p.package_id, p.publisher_subject_id, p.key_id, "
+                "i.status AS import_status, i.reason AS import_reason, i.imported_at, "
+                "EXISTS (SELECT 1 FROM common_knowledge_trusted_publishers binding "
+                "WHERE binding.subject_id=i.subject_id AND binding.key_id=p.key_id "
+                "AND binding.publisher_subject_id=p.publisher_subject_id "
+                "AND binding.status='active') AS publisher_bound "
+                "FROM common_knowledge_packages p "
                 "JOIN common_knowledge_imports i ON i.package_id = p.package_id "
                 "WHERE i.subject_id = ? AND i.status != 'revoked' "
                 "ORDER BY i.imported_at DESC LIMIT ?",
                 (self.subject_id, max(1, min(limit, 1_000))),
             ).fetchall()
-        return [
-            {
-                **self.package_metadata(str(row["package_id"])),
-                "import_status": str(row["import_status"]),
-                "import_reason": str(row["import_reason"]),
-                "imported_at": str(row["imported_at"]),
-            }
-            for row in rows
-        ]
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            if row["publisher_subject_id"] != self.subject_id and not row["publisher_bound"]:
+                # Preserve visibility of key-only legacy imports without
+                # presenting unapproved content as a verified advisory.
+                metadata = {
+                    "package_id": str(row["package_id"]),
+                    "publisher_subject_id": str(row["publisher_subject_id"]),
+                    "key_id": str(row["key_id"]),
+                    "publisher_binding_required": True,
+                }
+            else:
+                metadata = self.package_metadata(str(row["package_id"]))
+            result.append(
+                {
+                    **metadata,
+                    "import_status": str(row["import_status"]),
+                    "import_reason": str(row["import_reason"]),
+                    "imported_at": str(row["imported_at"]),
+                }
+            )
+        return result
 
     def revoke(self, package_id: str, *, reason: str, actor: str = "subject") -> None:
         """Revoke a package published by this subject without touching private state."""
@@ -819,6 +862,11 @@ class CommonKnowledgeStore:
             )
             if updated.rowcount != 1:
                 raise ValueError("common knowledge trusted key is not active")
+            connection.execute(
+                "UPDATE common_knowledge_trusted_publishers SET status='revoked', revoked_at=? "
+                "WHERE key_id=? AND status='active'",
+                (now, key_id),
+            )
             connection.execute(
                 "UPDATE common_knowledge_imports SET status = 'revoked', reason = ? "
                 "WHERE subject_id = ? AND status IN ('quarantined', 'accepted') AND package_id IN "
@@ -955,6 +1003,14 @@ class CommonKnowledgeStore:
                 "public_key = excluded.public_key, label = excluded.label, status = 'active', "
                 "revoked_at = NULL",
                 (key_id, proposal.public_key, proposal.label, now),
+            )
+            connection.execute(
+                "INSERT INTO common_knowledge_trusted_publishers("
+                "subject_id, publisher_subject_id, key_id, status, created_at) "
+                "VALUES (?, ?, ?, 'active', ?) ON CONFLICT(subject_id, key_id, "
+                "publisher_subject_id) DO UPDATE SET status='active', revoked_at=NULL "
+                "WHERE common_knowledge_trusted_publishers.status='revoked'",
+                (self.subject_id, proposal.publisher_subject_id, key_id, now),
             )
             connection.execute(
                 "INSERT INTO common_knowledge_peers(peer_id, subject_id, label, endpoint, "
@@ -1429,6 +1485,11 @@ class CommonKnowledgeStore:
         connection: Any,
         package: CommonKnowledgePackage,
     ) -> None:
+        if package.publisher_subject_id != self.subject_id or package.key_id != self.key_id:
+            raise IntegrityError("local common knowledge publisher identity is invalid")
+        if not self.public_key:
+            raise IntegrityError("common knowledge signing key is unavailable")
+        self._verify(self.public_key, self._signed_body(package), package.signature)
         version = connection.execute(
             "SELECT * FROM common_knowledge_versions WHERE subject_id = ? AND package_id = ?",
             (self.subject_id, package.package_id),
@@ -1698,9 +1759,12 @@ class CommonKnowledgeStore:
         ):
             raise PermissionError("common knowledge peer state changed")
         key = connection.execute(
-            "SELECT public_key FROM common_knowledge_trusted_keys "
-            "WHERE key_id=? AND status='active'",
-            (peer["key_id"],),
+            "SELECT trusted.public_key FROM common_knowledge_trusted_keys trusted "
+            "JOIN common_knowledge_trusted_publishers binding "
+            "ON binding.key_id = trusted.key_id "
+            "WHERE trusted.key_id=? AND trusted.status='active' AND binding.status='active' "
+            "AND binding.subject_id=? AND binding.publisher_subject_id=?",
+            (peer["key_id"], self.subject_id, peer["publisher_subject_id"]),
         ).fetchone()
         if key is None or key["public_key"] != peer["public_key"]:
             raise PermissionError("common knowledge publisher key withdrawn")
@@ -2095,10 +2159,18 @@ class CommonKnowledgeStore:
             public_key = self.public_key
             if not public_key:
                 raise IntegrityError("common knowledge signing key is unavailable")
+        elif record.publisher_subject_id == self.subject_id:
+            raise PermissionError("local publisher identity requires the local signing key")
         else:
             key = connection.execute(
-                "SELECT public_key, status FROM common_knowledge_trusted_keys WHERE key_id = ?",
-                (record.key_id,),
+                "SELECT trusted.public_key, trusted.status "
+                "FROM common_knowledge_trusted_keys trusted "
+                "JOIN common_knowledge_trusted_publishers binding "
+                "ON binding.key_id = trusted.key_id "
+                "WHERE trusted.key_id = ? AND trusted.status='active' "
+                "AND binding.status='active' AND binding.subject_id = ? "
+                "AND binding.publisher_subject_id = ?",
+                (record.key_id, self.subject_id, record.publisher_subject_id),
             ).fetchone()
             if key is None or key["status"] != "active":
                 if allow_untrusted:

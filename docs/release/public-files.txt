@@ -222,7 +222,9 @@ docs/deployment/remote-validation.md
 docs/deployment/research-preview.md
 docs/deployment/runtime-observation.md
 docs/deployment/setup-modes.md
+docs/deployment/signer-credentials.md
 docs/deployment/ubuntu.md
+docs/deployment/windows-credentials.md
 docs/deployment/windows-data-root-migration.md
 docs/deployment/workflow-publication-upgrade.md
 docs/development/action-deliberation-recovery.md
@@ -230,21 +232,26 @@ docs/development/architecture-boundaries.md
 docs/development/autonomy-scheduling.md
 docs/development/backup-key-commands.md
 docs/development/backup-keyring-rotation.md
+docs/development/backup-restore-publication.md
 docs/development/backup-rotation-journal.md
 docs/development/backup-rotation-publication.md
 docs/development/checkpoint-clock-and-recovery.md
 docs/development/cognition-result-categories.md
+docs/development/common-knowledge-publisher-trust.md
 docs/development/communication-state.md
 docs/development/email-identity-continuity.md
 docs/development/epistemic-review-recovery.md
 docs/development/help-request-language.md
 docs/development/http-failure-boundary.md
+docs/development/inbound-authentication-retries.md
 docs/development/integrity-evidence.md
 docs/development/integrity-health.md
 docs/development/lifecycle-diagnostics.md
 docs/development/lifecycle-maintenance-protocol.md
 docs/development/memory-literal-search.md
 docs/development/migration-approval-boundaries.md
+docs/development/migration-artifact-staging.md
+docs/development/model-endpoint-policy.md
 docs/development/model-invalidation-boundaries.md
 docs/development/model-pre-send-settlement.md
 docs/development/participant-login-throttling.md
@@ -352,6 +359,7 @@ docs/roadmap/2026-10-26-public-manifest-remediation.md
 docs/roadmap/2026-10-26-service-database-modularization.md
 docs/roadmap/2026-10-27-overnight-health-remediation.md
 docs/security-model.md
+docs/security/management-roles.md
 docs/security/threat-model.md
 docs/state-model.md
 docs/superpowers/plans/2026-09-06-research-preview-release.md
@@ -556,6 +564,7 @@ src/noyra/cognition/social.py
 src/noyra/cognition/social_rounds.py
 src/noyra/cognition/supervisor.py
 src/noyra/cognition/thought.py
+src/noyra/cognition/thought_context.py
 src/noyra/cognition/thought_rounds.py
 src/noyra/cognition/types.py
 src/noyra/cognitive_wait_maintenance.py
@@ -625,6 +634,7 @@ src/noyra/core/runtime_observation.py
 src/noyra/core/scheduling_clock.py
 src/noyra/core/schema/__init__.py
 src/noyra/core/schema/base.py
+src/noyra/core/schema/common_knowledge_trusted_publishers.py
 src/noyra/core/schema/contracts.py
 src/noyra/core/schema/email_identity.py
 src/noyra/core/schema/evidence.py
@@ -655,6 +665,7 @@ src/noyra/core/upgrade.py
 src/noyra/core/usage_projection.py
 src/noyra/core/usage_schema.py
 src/noyra/core/wallet_schema.py
+src/noyra/core/windows_credential_acl.py
 src/noyra/core/workflow_archive_control.py
 src/noyra/core/workflow_bundle.py
 src/noyra/core/workflow_chain_control.py
@@ -738,6 +749,7 @@ src/noyra/interaction/public_cold_reader.py
 src/noyra/interaction/public_contract.py
 src/noyra/interaction/public_display.py
 src/noyra/interaction/public_reading.py
+src/noyra/interaction/rejections.py
 src/noyra/interaction/sitemap_tokens.py
 src/noyra/interaction/smtp_deadline.py
 src/noyra/interaction/store.py
@@ -897,6 +909,7 @@ tests/fixtures/windows-signature-policy-regression.ps1
 tests/fixtures/windows-state-publish-regression.ps1
 tests/fixtures/windows-verification-regression.ps1
 tests/frontend/admin-optimization.test.cjs
+tests/frontend/admin-startup.test.cjs
 tests/frontend/participant.test.cjs
 tests/frontend/public-archive.test.cjs
 tests/frontend/publication-admin.test.cjs
@@ -914,6 +927,7 @@ tests/support/__init__.py
 tests/support/ci_shard.py
 tests/support/faults.py
 tests/support/historical.py
+tests/support/inbound_callbacks.py
 tests/support/relationship_provenance.py
 tests/support/synthetic.py
 tests/support/workflow_recovery_schema.py
@@ -938,6 +952,7 @@ tests/test_architecture_dependencies.py
 tests/test_architecture_properties.py
 tests/test_archive.py
 tests/test_archive_s3.py
+tests/test_at_rest_read_boundaries.py
 tests/test_audit_0dea2dd_contracts.py
 tests/test_audit_0dea2dd_goal_origin.py
 tests/test_audit_0dea2dd_social.py
@@ -970,6 +985,7 @@ tests/test_b3_integrity_evidence.py
 tests/test_b3_integrity_health.py
 tests/test_backup_key_cli.py
 tests/test_backup_keyring_rotation_paths.py
+tests/test_backup_restore_publication.py
 tests/test_backup_rotation_journal.py
 tests/test_backup_rotation_publication.py
 tests/test_backup_rotation_records.py
@@ -990,6 +1006,7 @@ tests/test_c3_help_language.py
 tests/test_c3_result_kinds.py
 tests/test_capability.py
 tests/test_capability_file_races.py
+tests/test_capability_public_address_policy.py
 tests/test_ci_test_runner.py
 tests/test_cloud_ci_contract.py
 tests/test_cloud_dependency_compatibility.py
@@ -998,6 +1015,8 @@ tests/test_cognitive_limit_policy.py
 tests/test_cognitive_waits.py
 tests/test_committed_verification.py
 tests/test_common_knowledge.py
+tests/test_common_knowledge_identity_binding.py
+tests/test_common_knowledge_trust_http.py
 tests/test_common_sync_fencing.py
 tests/test_consciousness_routing.py
 tests/test_credentials.py
@@ -1026,6 +1045,7 @@ tests/test_deployment_maintenance.py
 tests/test_deployment_setup.py
 tests/test_desktop.py
 tests/test_embedding_resources.py
+tests/test_empty_pool_fatigue.py
 tests/test_entities.py
 tests/test_epistemic_recovery.py
 tests/test_epistemic_review.py
@@ -1066,10 +1086,15 @@ tests/test_i3_workflow_chain_http.py
 tests/test_i3_workflow_chain_process.py
 tests/test_identity_challenges.py
 tests/test_inbound.py
+tests/test_inbound_crypto_failures.py
+tests/test_inbound_replay_boundaries.py
 tests/test_independent_audit_profiles.py
 tests/test_installer_operability.py
+tests/test_installer_release_cleanup.py
 tests/test_integrity_hardening.py
 tests/test_interaction.py
+tests/test_interaction_queue_eligibility.py
+tests/test_interaction_rejection_backoff.py
 tests/test_intrinsic_thought.py
 tests/test_intrinsic_thought_recurrence.py
 tests/test_intrinsic_thought_rounds.py
@@ -1114,7 +1139,9 @@ tests/test_m42_p3_07_api_contract.py
 tests/test_m42_p3_08_supply_chain.py
 tests/test_maintenance_route_contract.py
 tests/test_management_integrity_audits.py
+tests/test_management_role_boundaries.py
 tests/test_memory_blocks.py
+tests/test_memory_consolidation_rounds.py
 tests/test_memory_integration.py
 tests/test_memory_lifecycle.py
 tests/test_memory_literal_search.py
@@ -1124,6 +1151,7 @@ tests/test_migration_activation.py
 tests/test_migration_admin_ui.py
 tests/test_migration_agent.py
 tests/test_migration_agent_cli.py
+tests/test_migration_artifact_privacy.py
 tests/test_migration_assessment.py
 tests/test_migration_binding_proofs.py
 tests/test_migration_bundle.py
@@ -1146,6 +1174,7 @@ tests/test_migration_schema.py
 tests/test_migration_service.py
 tests/test_migration_state_machine_hardening.py
 tests/test_migration_storage_boundary.py
+tests/test_migration_streaming.py
 tests/test_migration_subject_payload.py
 tests/test_migration_targets.py
 tests/test_migration_transfer.py
@@ -1153,6 +1182,7 @@ tests/test_migration_trust.py
 tests/test_migration_wallet.py
 tests/test_mind.py
 tests/test_model_authorization.py
+tests/test_model_endpoint_address_policy.py
 tests/test_model_gateway.py
 tests/test_model_invalidation_before_attempt.py
 tests/test_model_pre_send_settlement.py
@@ -1231,7 +1261,10 @@ tests/test_semantic_memory_recovery.py
 tests/test_service.py
 tests/test_service_security_profile.py
 tests/test_service_wallet_modes.py
+tests/test_signer_credentials.py
+tests/test_signer_endpoint_boundaries.py
 tests/test_signer_service.py
+tests/test_signer_systemd_credentials.py
 tests/test_sitemap_tokens.py
 tests/test_sleep.py
 tests/test_smoke.py
@@ -1242,6 +1275,8 @@ tests/test_social_rejection_recovery.py
 tests/test_storage.py
 tests/test_storage_lifecycle.py
 tests/test_storage_mode.py
+tests/test_thought_context_budget.py
+tests/test_thought_recovery_timing.py
 tests/test_transport_dispatch_fencing.py
 tests/test_transports.py
 tests/test_upgrade_deployment.py
@@ -1263,6 +1298,7 @@ tests/test_wallet_keystore.py
 tests/test_wallet_local.py
 tests/test_wallet_observation_breakdown.py
 tests/test_wallet_observation_health.py
+tests/test_wallet_payment_limit_boundaries.py
 tests/test_wallet_reconfirmation.py
 tests/test_wallet_release_gates.py
 tests/test_wallet_reward_workflow.py
@@ -1270,8 +1306,11 @@ tests/test_wallet_rpc.py
 tests/test_wallet_schema60.py
 tests/test_wallet_setup.py
 tests/test_web_contract.py
+tests/test_webhook_request_limits.py
+tests/test_windows_credential_permissions.py
 tests/test_windows_data_root.py
 tests/test_windows_process_identity.py
+tests/test_workflow_guard_migration_boundaries.py
 tests/test_workflow_manifest_contract.py
 tests/test_workflow_publication_capability.py
 tests/test_workflow_source_recovery.py
@@ -1281,6 +1320,7 @@ tests/test_world.py
 tests/test_world_acquisition_diagnostics.py
 tests/test_world_feed_poll.py
 tests/test_world_injection_classification.py
+tests/test_world_instruction_context.py
 tests/test_world_poll_integrity.py
 website/build.mjs
 website/content.mjs

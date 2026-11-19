@@ -10,6 +10,7 @@ import pytest
 from pydantic import SecretStr
 
 from noyra.core import Database, IdentityStore
+from noyra.core.at_rest import _windows_harden
 from noyra.core.types import content_hash
 from noyra.model import (
     CognitiveResourceGroupInput,
@@ -64,6 +65,8 @@ def test_resource_groups_from_env_resolves_api_key_files(
     key_path.write_text("file-group-secret\n", encoding="utf-8")
     if os.name == "posix":
         key_path.chmod(0o600)
+    elif os.name == "nt":
+        _windows_harden(tmp_path, entire_tree=True)
     monkeypatch.setenv(
         "NOYRA_ECONOMY_MODEL_GROUPS_JSON",
         json.dumps(

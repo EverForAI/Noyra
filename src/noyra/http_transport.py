@@ -336,8 +336,14 @@ def handler_type(
                 "/api/admin/lifecycle/reset",
                 "/api/admin/lifecycle/wake",
             }:
+                controls = owner.operator_controls
+                scope = (
+                    owner.admission.lifecycle_control_scope()
+                    if controls is None
+                    else controls.lifecycle_control_scope()
+                )
                 try:
-                    with owner.admission.lifecycle_control_scope():
+                    with scope:
                         if not owner.allow_mutation(self.path):
                             raise OperationInvalidated(
                                 "lifecycle control crossed integrity quarantine"
@@ -928,6 +934,7 @@ def handler_type(
                 return
             length = int(raw_length)
             if length > min(owner.settings.max_request_bytes, 1_048_576):
+                self.close_connection = True
                 self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "too_large"})
                 return
             body = self.rfile.read(length)
@@ -1100,10 +1107,16 @@ def handler_type(
                         "scheduling_priority": accepted.scheduling_priority,
                     },
                 )
-            except Exception:
+            except Exception as error:
                 # Durable ingestion is already complete.  A provider must
                 # receive a success response or it will redeliver forever.
-                LOGGER.exception("inbound acceptance audit failed")
+                log_http_failure(
+                    error,
+                    self._http_request_id,
+                    method=self.command,
+                    target=self.path,
+                    event="inbound_acceptance_audit_failure",
+                )
             self._inbound_ack(
                 channel,
                 {
@@ -1314,6 +1327,13 @@ def handler_type(
             self.wfile.write(body)
 
         def _public_article(self, parsed: Any) -> None:
+            if not self._at_rest_available():
+                self._json(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": "at_rest_boundary_unavailable"},
+                    public_contract=ARCHIVE_CONTRACT,
+                )
+                return
             parts = parsed.path.split("/")
             if len(parts) != 4 or parts[2] not in PUBLIC_VIEWS or not parts[3]:
                 self._text(
@@ -1410,6 +1430,13 @@ def handler_type(
             self._text(HTTPStatus.OK, "text/plain; charset=utf-8", body)
 
         def _sitemap_xml(self, parsed: Any) -> None:
+            if not self._at_rest_available():
+                self._json(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": "at_rest_boundary_unavailable"},
+                    public_contract=ARCHIVE_CONTRACT,
+                )
+                return
             site_url = owner.settings.public_site_url
             if not site_url:
                 self._text(

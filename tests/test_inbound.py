@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Self, cast
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import pytest
@@ -37,6 +38,7 @@ from noyra.interaction.participants import Participant
 from noyra.interaction.types import InteractionKind
 from noyra.model import ModelGateway
 from noyra.service import NoyraService, ServiceSettings
+from support.inbound_callbacks import encrypted_wechat_callback
 
 
 def _setup(tmp_path: Path) -> tuple[SubjectKernel, TransportRecord, InboundStore]:
@@ -711,7 +713,10 @@ def test_qq_official_ed25519_callback_and_validation_handshake() -> None:
     validation_body = json.dumps(validation, separators=(",", ":")).encode()
     challenge = QQInboundAdapter().parse(
         validation_body,
-        {},
+        {
+            "X-Signature-Timestamp": timestamp,
+            "X-Signature-Ed25519": private_key.sign(timestamp.encode() + validation_body).hex(),
+        },
         transport_id="transport-1",
         secret=app_secret,
     )
@@ -719,6 +724,102 @@ def test_qq_official_ed25519_callback_and_validation_handshake() -> None:
     assert challenge.response == {
         "plain_token": "plain-token",
         "signature": private_key.sign((timestamp + "plain-token").encode()).hex(),
+    }
+
+
+@pytest.mark.parametrize(
+    "authentication",
+    [
+        "missing",
+        "timestamp-only",
+        "signature-only",
+        "wrong-key",
+        "changed-body",
+        "stale",
+        "invalid-time",
+        "legacy-without-opt-in",
+    ],
+)
+def test_qq_validation_requires_authenticated_request(authentication: str) -> None:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    secret = "qq-app-secret"
+    private = Ed25519PrivateKey.from_private_bytes((secret.encode() * 4)[:32])
+    timestamp = str(int(time.time()) - (301 if authentication == "stale" else 0))
+    # A validation token can also contain a syntactically valid callback body.
+    # Authentication must succeed before the adapter returns any signed token.
+    callback = json.dumps(
+        {
+            "op": 0,
+            "t": "C2C_MESSAGE_CREATE",
+            "d": {
+                "id": "synthetic-forged-event",
+                "author": {"user_openid": "synthetic-sender"},
+                "content": "synthetic callback",
+            },
+        },
+        separators=(",", ":"),
+    )
+    body = json.dumps(
+        {"op": 13, "d": {"plain_token": callback, "event_ts": timestamp}},
+        separators=(",", ":"),
+    ).encode()
+    headers = {
+        "X-Signature-Timestamp": timestamp,
+        "X-Signature-Ed25519": private.sign(timestamp.encode() + body).hex(),
+    }
+    if authentication == "missing":
+        headers = {}
+    elif authentication == "timestamp-only":
+        del headers["X-Signature-Ed25519"]
+    elif authentication == "signature-only":
+        del headers["X-Signature-Timestamp"]
+    elif authentication == "wrong-key":
+        headers["X-Signature-Ed25519"] = (
+            Ed25519PrivateKey.generate().sign(timestamp.encode() + body).hex()
+        )
+    elif authentication == "changed-body":
+        body += b" "
+    elif authentication == "invalid-time":
+        headers["X-Signature-Timestamp"] = "invalid-time"
+    elif authentication == "legacy-without-opt-in":
+        nonce = "synthetic-nonce"
+        headers = {
+            "X-Noyra-Timestamp": timestamp,
+            "X-Noyra-Nonce": nonce,
+            "X-Noyra-Signature": hmac.new(
+                secret.encode(), f"{timestamp}.{nonce}.".encode() + body, hashlib.sha256
+            ).hexdigest(),
+        }
+    with pytest.raises(InboundAuthenticationError):
+        QQInboundAdapter().parse(body, headers, transport_id="transport-1", secret=secret)
+
+
+def test_qq_validation_accepts_explicit_authenticated_legacy_callback() -> None:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    app_secret = "qq-app-secret"
+    timestamp = str(int(time.time()))
+    nonce = "synthetic-nonce"
+    body = json.dumps(
+        {"op": 13, "d": {"plain_token": "plain-token", "event_ts": timestamp}},
+        separators=(",", ":"),
+    ).encode()
+    signature = hmac.new(
+        b"legacy-secret", f"{timestamp}.{nonce}.".encode() + body, hashlib.sha256
+    ).hexdigest()
+    result = QQInboundAdapter().parse(
+        body,
+        {"X-Noyra-Timestamp": timestamp, "X-Noyra-Nonce": nonce, "X-Noyra-Signature": signature},
+        transport_id="transport-1",
+        secret=app_secret,
+        signing_key="legacy-secret",
+    )
+    assert isinstance(result, InboundChallenge)
+    private = Ed25519PrivateKey.from_private_bytes((app_secret.encode() * 4)[:32])
+    assert result.response == {
+        "plain_token": "plain-token",
+        "signature": private.sign((timestamp + "plain-token").encode()).hex(),
     }
 
 
@@ -802,7 +903,7 @@ def test_wechat_xml_rejects_dtd_and_entity_declarations() -> None:
         )
 
 
-def test_wechat_plaintext_cdata_callback_is_accepted() -> None:
+def test_wechat_plaintext_cdata_callback_is_rejected_without_body_authentication() -> None:
     from noyra.interaction import WeChatInboundAdapter
 
     body = (
@@ -817,20 +918,17 @@ def test_wechat_plaintext_cdata_callback_is_accepted() -> None:
     timestamp = str(int(time.time()))
     nonce = "nonce"
     signature = hashlib.sha1("".join(sorted(("token", timestamp, nonce))).encode()).hexdigest()
-    envelope = WeChatInboundAdapter().parse(
-        body,
-        {
-            "X-Wechat-Signature": signature,
-            "X-Wechat-Timestamp": timestamp,
-            "X-Wechat-Nonce": nonce,
-        },
-        transport_id="transport-1",
-        secret="token",
-    )
-    assert isinstance(envelope, InboundEnvelope)
-    assert envelope.external_account_id == "wx-account"
-    assert envelope.external_sender_id == "user-openid"
-    assert envelope.content == "hello <!DOCTYPE is just text>"
+    with pytest.raises(InboundAuthenticationError, match="encrypted XML"):
+        WeChatInboundAdapter().parse(
+            body,
+            {
+                "X-Wechat-Signature": signature,
+                "X-Wechat-Timestamp": timestamp,
+                "X-Wechat-Nonce": nonce,
+            },
+            transport_id="transport-1",
+            secret="token",
+        )
 
 
 def test_wechat_aes_callback_is_decrypted_and_cdata_is_preserved() -> None:
@@ -846,7 +944,7 @@ def test_wechat_aes_callback_is_decrypted_and_cdata_is_preserved() -> None:
         b"<ToUserName><![CDATA[wx-account]]></ToUserName>"
         b"<FromUserName><![CDATA[user-openid]]></FromUserName>"
         b"<MsgType><![CDATA[text]]></MsgType>"
-        b"<Content><![CDATA[encrypted hello]]></Content>"
+        b"<Content><![CDATA[encrypted hello <!DOCTYPE is only text>]]></Content>"
         b"<MsgId>message-2</MsgId>"
         b"</xml>"
     )
@@ -879,7 +977,7 @@ def test_wechat_aes_callback_is_decrypted_and_cdata_is_preserved() -> None:
     )
     assert isinstance(envelope, InboundEnvelope)
     assert envelope.provider_event_id == "message-2"
-    assert envelope.content == "encrypted hello"
+    assert envelope.content == "encrypted hello <!DOCTYPE is only text>"
 
     stale_timestamp = "1"
     stale_signature = hashlib.sha1(
@@ -1021,6 +1119,7 @@ def test_native_http_callbacks_use_platform_handshakes_and_acknowledgements(
         external_sender_id="qq-user",
         role="participant",
     )
+    wx_key = bytes(range(32))
     wechat = service.http.transports.configure(
         subject_id,
         TransportInput(
@@ -1031,6 +1130,7 @@ def test_native_http_callbacks_use_platform_handshakes_and_acknowledgements(
                 "app_id": SecretStr("wx-app-id"),
                 "app_secret": SecretStr("wx-app-secret"),
                 "webhook_secret": SecretStr("wx-token"),
+                "encoding_aes_key": SecretStr(base64.b64encode(wx_key).decode().rstrip("=")),
             },
         ),
         actor="operator",
@@ -1054,11 +1154,38 @@ def test_native_http_callbacks_use_platform_handshakes_and_acknowledgements(
             },
             separators=(",", ":"),
         ).encode()
+        # Every public alias must reject unauthenticated address validation.
+        for path in ("/api/v1/webhooks/qq/", "/webhooks/qq/"):
+            with pytest.raises(HTTPError) as denied:
+                urlopen(
+                    Request(
+                        f"http://127.0.0.1:{port}{path}{qq.transport_id}",
+                        data=validation_body,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    ),
+                    timeout=5,
+                )
+            with denied.value as response:
+                assert response.code == 401
+                assert json.loads(response.read()) == {"error": "inbound_unauthorized"}
+        with service.kernel.database.connection() as connection:
+            assert (
+                connection.execute("SELECT COUNT(*) FROM interaction_inbound_events").fetchone()[0]
+                == 0
+            )
+        private_key = Ed25519PrivateKey.from_private_bytes((app_secret.encode() * 4)[:32])
         with urlopen(
             Request(
                 qq_url,
                 data=validation_body,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Signature-Timestamp": timestamp,
+                    "X-Signature-Ed25519": private_key.sign(
+                        timestamp.encode() + validation_body
+                    ).hex(),
+                },
                 method="POST",
             ),
             timeout=5,
@@ -1095,20 +1222,26 @@ def test_native_http_callbacks_use_platform_handshakes_and_acknowledgements(
 
         nonce = "wx-nonce"
         wx_timestamp = str(int(time.time()))
-        wx_signature = hashlib.sha1(
-            "".join(sorted(("wx-token", wx_timestamp, nonce))).encode()
-        ).hexdigest()
-        wx_body = (
+        wx_message = (
             b"<xml><ToUserName>wx-account</ToUserName>"
             b"<FromUserName>wx-user</FromUserName>"
             b"<MsgType>text</MsgType><Content>hello from WeChat</Content>"
             b"<MsgId>wx-http-message</MsgId></xml>"
         )
+        wx_body, wx_headers = encrypted_wechat_callback(
+            wx_message,
+            key=wx_key,
+            token="wx-token",
+            account_id="wx-app-id",
+            timestamp=wx_timestamp,
+            nonce=nonce,
+        )
         # Dispatch uses the normalized path, while signature verification must
         # retain the original query-bearing request target.
         wx_url = (
             f"http://127.0.0.1:{port}/api/v1/webhooks/wechat/{wechat.transport_id}"
-            f"?signature={wx_signature}&timestamp={wx_timestamp}&nonce={nonce}"
+            f"?msg_signature={wx_headers['X-Wechat-MsgSignature']}"
+            f"&timestamp={wx_timestamp}&nonce={nonce}&encrypt_type=aes"
         )
         with urlopen(
             Request(
