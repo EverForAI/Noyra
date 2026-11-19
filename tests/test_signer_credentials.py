@@ -57,9 +57,8 @@ def test_signer_rejects_invalid_credentials_before_loading_wallet_or_opening_sta
     which: str,
 ) -> None:
     password = private_file(tmp_path / "password", PASSWORD.encode())
-    token = private_file(tmp_path / "token", TOKEN.encode())
-    rpc = private_file(tmp_path / "rpc", RPC_URL.encode())
-    private_file(token if which == "bearer-token" else rpc, raw)
+    token = private_file(tmp_path / "token", raw if which == "bearer-token" else TOKEN.encode())
+    rpc = private_file(tmp_path / "rpc", raw if which == "rpc-url" else RPC_URL.encode())
     with (
         patch("noyra.wallet.keystore.load_account") as account,
         patch("noyra.signer_service.SignerState.open") as state,
