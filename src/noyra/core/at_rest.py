@@ -1771,7 +1771,8 @@ def _migration_service_paths(data_root: Path, root: Path) -> Iterator[Path]:
                 raise AtRestError("migration control record permissions are invalid")
 
     directory(root, 0, data.st_gid, 0o750)
-    if {path.name for path in root.iterdir()} != {
+    entries = {path.name for path in root.iterdir()}
+    if entries - {"restored"} != {
         "source",
         "fences",
         "requests",
@@ -1779,6 +1780,13 @@ def _migration_service_paths(data_root: Path, root: Path) -> Iterator[Path]:
         "target-activation",
     }:
         raise AtRestError("migration control layout is invalid")
+    if "restored" in entries:
+        # The installed root runner owns the restore workspace. Validate its
+        # boundary without traversing or packaging restored subject data.
+        restored = root / "restored"
+        directory(restored, 0, data.st_gid, 0o750)
+        for child in restored.iterdir():
+            directory(child, 0, 0, 0o700)
     for name in ("fences", "status"):
         root_records(root / name)
     target = root / "target-activation"

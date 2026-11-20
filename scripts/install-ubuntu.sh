@@ -1111,6 +1111,8 @@ install_phase=build_release
 (
   trap - EXIT ERR
   umask 0022
+  # The systemd upgrader protects /root, including pip's default wheel cache.
+  export PIP_NO_CACHE_DIR=1
   python3 -m venv "$staging/.venv"
   "$staging/.venv/bin/python" -m pip install --require-hashes --requirement "$SOURCE_DIR/requirements.lock"
   if [[ "$profile" == cloud ]]; then
@@ -1300,6 +1302,7 @@ noyra_control_layout_snapshot "$DATA_DIR" \
   "$UPGRADE_HANDOFF_LOCK" "$DATA_DIR/upgrade/status.json" \
   "$DATA_DIR/migration" "$DATA_DIR/migration/source" "$DATA_DIR/migration/source/epoch" \
   "$DATA_DIR/migration/fences" "$DATA_DIR/migration/requests" "$DATA_DIR/migration/status" \
+  "$DATA_DIR/migration/restored" \
   "$DATA_DIR/migration/target-activation" "$DATA_DIR/migration/target-activation/requests" \
   "$DATA_DIR/migration/target-activation/status" "$DATA_DIR/migration/target-activation/state" \
   "$DATA_DIR/migration/target-activation/state/rollback" \
