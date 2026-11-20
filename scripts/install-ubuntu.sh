@@ -1184,11 +1184,9 @@ if [[ -n "$old_current" || -n "$legacy_venv" ]]; then
   backup_label="${old_current:-legacy}"
   backup_path="$backup_dir/noyra-${backup_label}-$(date -u +%Y%m%dT%H%M%SZ).noyra-backup"
   staged_backup="$backup_staging/backup.noyra-backup"
-  if [[ -n "$old_current" ]]; then
-    backup_python="$RELEASES_DIR/$old_current/.venv/bin/python"
-  else
-    backup_python="$legacy_venv/bin/python"
-  fi
+  # The staged runtime validates and can read both the existing and its own
+  # control layout, including schema migrations performed during this run.
+  backup_python="$staging/.venv/bin/python"
   [[ -x "$backup_python" ]] || { echo "Current release has no usable Python." >&2; false; }
   [[ "$backup_data_root" = "$DATA_DIR" ]] || {
     echo 'NOYRA_DATA_DIR must remain /var/lib/noyra for the native Ubuntu installer.' >&2

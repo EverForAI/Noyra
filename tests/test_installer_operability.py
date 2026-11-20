@@ -61,6 +61,12 @@ def test_installer_preserves_stop_intent_and_distinguishes_unverified_success() 
     assert "database_recovery_required=true" in SOURCE
 
 
+def test_cold_backup_uses_the_staged_runtime() -> None:
+    assert 'backup_python="$staging/.venv/bin/python"' in SOURCE
+    assert 'backup_python="$RELEASES_DIR/$old_current/.venv/bin/python"' not in SOURCE
+    assert 'backup_python="$legacy_venv/bin/python"' not in SOURCE
+
+
 def test_report_rejects_non_absolute_and_traversal_destinations(tmp_path: Path) -> None:
     helper = _reporter()
     for directory, name in ((Path("relative"), "report"), (tmp_path, "../escape")):
