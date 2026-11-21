@@ -11,6 +11,7 @@ from noyra.core.events import EventStore
 from noyra.core.payload_codec import decompress_text
 from noyra.core.relationship_identity import context_rows
 from noyra.core.types import content_hash, new_id, utc_now
+from noyra.learning.outcomes import has_pending_outcome
 
 from ._integrity import durable_boundary, durable_float, durable_int
 from .attention import attention_batch
@@ -300,24 +301,7 @@ class MetacognitiveControl:
                 "ORDER BY created_at LIMIT 1",
                 (self.subject_id,),
             ).fetchone()
-            pending_outcome = connection.execute(
-                """SELECT 1 FROM (
-                    SELECT d.action_id AS source_id FROM action_deliberation_runs d
-                    LEFT JOIN outcome_evaluations o
-                      ON o.subject_id = d.subject_id AND o.source_type = 'action'
-                     AND o.source_id = d.action_id
-                    WHERE d.subject_id = ? AND d.action_id IS NOT NULL AND o.evaluation_id IS NULL
-                    UNION ALL
-                    SELECT r.research_id FROM research_search_runs r
-                    LEFT JOIN outcome_evaluations o
-                      ON o.subject_id = r.subject_id AND o.source_type = 'research'
-                     AND o.source_id = r.research_id
-                    WHERE r.subject_id = ? AND r.goal_id IS NOT NULL
-                      AND r.status IN ('accepted','no_results','failed')
-                      AND o.evaluation_id IS NULL
-                ) LIMIT 1""",
-                (self.subject_id, self.subject_id),
-            ).fetchone()
+            pending_outcome = has_pending_outcome(connection, self.subject_id)
             authorized_source = connection.execute(
                 """SELECT s.source_id FROM world_sources s
                    JOIN capability_grants g ON g.subject_id = s.subject_id
@@ -547,7 +531,7 @@ class MetacognitiveControl:
                     0.0,
                 )
             )
-        if pending_outcome is not None:
+        if pending_outcome:
             candidates.append(
                 _Candidate(
                     "wait",

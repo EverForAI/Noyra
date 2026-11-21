@@ -10,6 +10,7 @@ from typing import Self
 import httpx
 
 from noyra.capability import CapabilityGrant, CapabilityStore, ToolRunner
+from noyra.cognition import CognitionSettings, MetacognitiveControl
 from noyra.core import ActionLedger, EventStore, SubjectKernel
 from noyra.core.errors import IntegrityError
 from noyra.core.types import content_hash, utc_now
@@ -93,6 +94,16 @@ class OutcomeLearningTestCase(unittest.IsolatedAsyncioTestCase):
             max_progress_delta=progress_delta,
         )
 
+    def scheduler_sees_pending_outcome(self: Self) -> bool:
+        control = MetacognitiveControl(
+            self.kernel.database,
+            self.subject_id,
+            CognitionSettings(),
+            clock=lambda: self.clock_value,
+        )
+        candidates, _ = control._candidates()
+        return any(c.reason_code == "durable_outcome_must_be_evaluated_first" for c in candidates)
+
     async def test_new_observation_advances_goal_and_strategy_confidence(self: Self) -> None:
         CapabilityStore(self.kernel.database).grant(
             self.subject_id,
@@ -145,12 +156,14 @@ class OutcomeLearningTestCase(unittest.IsolatedAsyncioTestCase):
 
         evaluator = self.evaluator()
         self.assertIsNone(evaluator.run_due())
+        self.assertFalse(self.scheduler_sees_pending_outcome())
         ObservationStore(self.kernel.database).mark(
             observation.observation_id,
             "analyzed",
             reason="test cognition accepted the observation",
             subject_id=self.subject_id,
         )
+        self.assertTrue(self.scheduler_sees_pending_outcome())
         self.assertEqual(evaluator.run_due(), "outcome_progress")
         goal = GoalStore(self.kernel.database).get(self.goal.goal_id)
         profile = evaluator.profiles(self.goal.goal_id)[0]
@@ -160,6 +173,8 @@ class OutcomeLearningTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(profile.confidence, 0.5)
         self.assertEqual(profile.last_outcome, "progress")
         self.assertEqual(evaluation.observation_id, observation.observation_id)
+        self.assertEqual(evaluation.source_id, f"adel_{action.action_id}")
+        self.assertFalse(self.scheduler_sees_pending_outcome())
         integrity = evaluator.verify_integrity()
         self.assertEqual(integrity["outcome_evaluations"], 1)
         self.assertEqual(integrity["strategy_profile_revisions"], 1)
@@ -257,7 +272,9 @@ class OutcomeLearningTestCase(unittest.IsolatedAsyncioTestCase):
                 ),
             )
         evaluator = self.evaluator()
+        self.assertTrue(self.scheduler_sees_pending_outcome())
         self.assertEqual(evaluator.run_due(), "outcome_informative")
+        self.assertFalse(self.scheduler_sees_pending_outcome())
         self.assertEqual(GoalStore(self.kernel.database).get(self.goal.goal_id).progress, 0)
         profile = evaluator.profiles(self.goal.goal_id)[0]
         self.assertEqual(profile.last_outcome, "informative")
@@ -302,7 +319,9 @@ class OutcomeLearningTestCase(unittest.IsolatedAsyncioTestCase):
         actions.finish(action.action_id, "succeeded", {"unchanged": True})
         self._insert_deliberation(action.action_id, None, status="unchanged")
         evaluator = self.evaluator()
+        self.assertTrue(self.scheduler_sees_pending_outcome())
         self.assertEqual(evaluator.run_due(), "outcome_no_change")
+        self.assertFalse(self.scheduler_sees_pending_outcome())
         latest = evaluator.latest()
         assert latest is not None
         with (
