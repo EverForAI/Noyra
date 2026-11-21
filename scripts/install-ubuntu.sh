@@ -1111,6 +1111,8 @@ install_phase=build_release
 (
   trap - EXIT ERR
   umask 0022
+  # The systemd upgrader protects /root, including pip's default wheel cache.
+  export PIP_NO_CACHE_DIR=1
   python3 -m venv "$staging/.venv"
   "$staging/.venv/bin/python" -m pip install --require-hashes --requirement "$SOURCE_DIR/requirements.lock"
   if [[ "$profile" == cloud ]]; then
@@ -1182,11 +1184,9 @@ if [[ -n "$old_current" || -n "$legacy_venv" ]]; then
   backup_label="${old_current:-legacy}"
   backup_path="$backup_dir/noyra-${backup_label}-$(date -u +%Y%m%dT%H%M%SZ).noyra-backup"
   staged_backup="$backup_staging/backup.noyra-backup"
-  if [[ -n "$old_current" ]]; then
-    backup_python="$RELEASES_DIR/$old_current/.venv/bin/python"
-  else
-    backup_python="$legacy_venv/bin/python"
-  fi
+  # The staged runtime validates and can read both the existing and its own
+  # control layout, including schema migrations performed during this run.
+  backup_python="$staging/.venv/bin/python"
   [[ -x "$backup_python" ]] || { echo "Current release has no usable Python." >&2; false; }
   [[ "$backup_data_root" = "$DATA_DIR" ]] || {
     echo 'NOYRA_DATA_DIR must remain /var/lib/noyra for the native Ubuntu installer.' >&2
@@ -1300,6 +1300,7 @@ noyra_control_layout_snapshot "$DATA_DIR" \
   "$UPGRADE_HANDOFF_LOCK" "$DATA_DIR/upgrade/status.json" \
   "$DATA_DIR/migration" "$DATA_DIR/migration/source" "$DATA_DIR/migration/source/epoch" \
   "$DATA_DIR/migration/fences" "$DATA_DIR/migration/requests" "$DATA_DIR/migration/status" \
+  "$DATA_DIR/migration/restored" \
   "$DATA_DIR/migration/target-activation" "$DATA_DIR/migration/target-activation/requests" \
   "$DATA_DIR/migration/target-activation/status" "$DATA_DIR/migration/target-activation/state" \
   "$DATA_DIR/migration/target-activation/state/rollback" \

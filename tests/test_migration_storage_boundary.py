@@ -31,6 +31,8 @@ def _installed_layout(root: Path) -> Path:
         "migration/requests": (service_uid, service_gid, 0o700),
         "migration/fences": (0, service_gid, 0o750),
         "migration/status": (0, service_gid, 0o750),
+        "migration/restored": (0, service_gid, 0o750),
+        "migration/restored/target-fixture": (0, 0, 0o700),
         "migration/target-activation": (0, service_gid, 0o750),
         "migration/target-activation/requests": (0, service_gid, 0o730),
         "migration/target-activation/status": (0, service_gid, 0o750),
@@ -119,6 +121,7 @@ assert (restored/'migration/fences/active.json').read_text() == (
     '{"subject_id":"Noyra-other","task_id":"migration-task","status":"active"}'
 )
 assert not (restored/'migration/target-activation').exists()
+assert not (restored/'migration/restored').exists()
 assert (root/'data/migration/target-activation/state').stat().st_uid == 0
 print('boot_and_backup_ok')
 """
@@ -136,7 +139,9 @@ print('boot_and_backup_ok')
         assert (data / "migration").stat().st_mode & 0o777 == 0o750
 
 
-@pytest.mark.parametrize("tamper", ["owner", "writable", "state", "extra", "symlink"])
+@pytest.mark.parametrize(
+    "tamper", ["owner", "writable", "state", "extra", "symlink", "restored_target"]
+)
 def test_migration_control_exception_rejects_untrusted_layout(tamper: str) -> None:
     with tempfile.TemporaryDirectory(prefix="noyra-control-reject-", dir="/var/tmp") as temp:
         root = Path(temp)
@@ -151,6 +156,8 @@ def test_migration_control_exception_rejects_untrusted_layout(tamper: str) -> No
             (control / "target-activation/state").chmod(0o750)
         elif tamper == "extra":
             (control / "unexpected").mkdir()
+        elif tamper == "restored_target":
+            (control / "restored/target-fixture").chmod(0o755)
         else:
             (control / "fences/link").symlink_to(root)
         with pytest.raises(AtRestError, match="migration"):

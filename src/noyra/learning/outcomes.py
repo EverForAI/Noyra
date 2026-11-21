@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from sqlite3 import Connection
 from typing import Any
 
 from noyra.core.database import Database
@@ -20,6 +21,39 @@ from noyra.mind import GoalRecord, GoalStore
 
 from ._integrity import durable_boundary
 from .types import OutcomeEvaluationRecord, StrategyProfileRecord
+
+_PENDING_ACTION = """
+    FROM action_deliberation_runs d
+    JOIN actions a ON a.action_id = d.action_id
+    LEFT JOIN observations o ON o.observation_id = d.observation_id
+    LEFT JOIN outcome_evaluations e
+      ON e.subject_id = d.subject_id AND e.source_type = 'action'
+     AND e.source_id = d.deliberation_id
+    WHERE d.subject_id = ? AND e.evaluation_id IS NULL
+      AND (
+          d.status IN ('unchanged', 'failed', 'outcome_unavailable')
+          OR (d.status = 'succeeded' AND o.status IN ('analyzed', 'rejected'))
+      )
+"""
+_PENDING_RESEARCH = """
+    FROM research_search_runs r
+    LEFT JOIN outcome_evaluations e
+      ON e.subject_id = r.subject_id AND e.source_type = 'research'
+     AND e.source_id = r.research_id
+    WHERE r.subject_id = ? AND e.evaluation_id IS NULL
+      AND r.goal_id IS NOT NULL AND r.status IN ('accepted', 'no_results', 'failed')
+"""
+
+
+def has_pending_outcome(connection: Connection, subject_id: str) -> bool:
+    """Check the evaluator's candidate set without consuming it or applying its interval."""
+    return (
+        connection.execute(
+            "SELECT 1 " + _PENDING_ACTION + " UNION ALL SELECT 1 " + _PENDING_RESEARCH + " LIMIT 1",
+            (subject_id, subject_id),
+        ).fetchone()
+        is not None
+    )
 
 
 @dataclass(frozen=True)
@@ -176,19 +210,9 @@ class OutcomeEvaluator:
             row = connection.execute(
                 """SELECT d.deliberation_id, d.goal_id, d.action_id, d.observation_id,
                           d.status AS source_status, d.strategy_title, d.completed_at,
-                          a.strategy_id, a.tool, o.status AS observation_status
-                   FROM action_deliberation_runs d
-                   JOIN actions a ON a.action_id = d.action_id
-                   LEFT JOIN observations o ON o.observation_id = d.observation_id
-                   LEFT JOIN outcome_evaluations e
-                     ON e.subject_id = d.subject_id AND e.source_type = 'action'
-                    AND e.source_id = d.deliberation_id
-                   WHERE d.subject_id = ? AND e.evaluation_id IS NULL
-                     AND (
-                         d.status IN ('unchanged', 'failed', 'outcome_unavailable')
-                         OR (d.status = 'succeeded' AND o.status IN ('analyzed', 'rejected'))
-                     )
-                   ORDER BY d.completed_at, d.deliberation_id LIMIT 1""",
+                          a.strategy_id, a.tool, o.status AS observation_status """
+                + _PENDING_ACTION
+                + " ORDER BY d.completed_at, d.deliberation_id LIMIT 1",
                 (self.subject_id,),
             ).fetchone()
         if row is None:
@@ -217,13 +241,9 @@ class OutcomeEvaluator:
     def _pending_research(self) -> PendingOutcome | None:
         with self.database.connection() as connection:
             row = connection.execute(
-                """SELECT r.* FROM research_search_runs r
-                   LEFT JOIN outcome_evaluations e
-                     ON e.subject_id = r.subject_id AND e.source_type = 'research'
-                    AND e.source_id = r.research_id
-                   WHERE r.subject_id = ? AND e.evaluation_id IS NULL
-                     AND r.goal_id IS NOT NULL AND r.status IN ('accepted', 'no_results', 'failed')
-                   ORDER BY r.completed_at, r.research_id LIMIT 1""",
+                "SELECT r.* "
+                + _PENDING_RESEARCH
+                + " ORDER BY r.completed_at, r.research_id LIMIT 1",
                 (self.subject_id,),
             ).fetchone()
         if row is None:
