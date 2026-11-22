@@ -343,7 +343,7 @@ def test_expired_capability_requires_each_effort_to_be_retested(
     )
     assert initial is not None
 
-    clock.value += timedelta(days=31)
+    clock.value += timedelta(days=61)
     stale = store.get(subject_id, "openai_compatible", "https://models.example/v1", "gpt-5-mini")
     assert stale is not None and stale.status == "stale"
     refreshed = store.record_probe_success(
@@ -362,17 +362,26 @@ def test_expired_capability_requires_each_effort_to_be_retested(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("initial_period", [30, 60])
 async def test_live_call_refreshes_only_selected_effort_and_cache_does_not_refresh(
-    tmp_path: Path, clock: type[_Clock]
+    tmp_path: Path, clock: type[_Clock], monkeypatch: pytest.MonkeyPatch, initial_period: int
 ) -> None:
     success = ProviderResponse('{"ok":true}', ModelUsage(3, 3))
-    provider = FakeProvider([success, success])
+    provider = FakeProvider([success, success, success])
     router, store, _ = _router(tmp_path, provider)
-    medium = store.record_probe_success(*_IDENTITY, "medium")
-    initial = store.record_probe_success(*_IDENTITY, "high")
+    with monkeypatch.context() as prior_release:
+        if initial_period == 30:
+            prior_release.setattr("noyra.model.capabilities.CAPABILITY_PROBE_TTL_DAYS", 30)
+        medium = store.record_probe_success(*_IDENTITY, "medium")
+        initial = store.record_probe_success(*_IDENTITY, "high")
     assert medium and initial
+    initial_deadline = clock.value + timedelta(days=initial_period)
+    assert initial.effort_expiry("high") == initial_deadline.isoformat()
+    clock.value += timedelta(days=initial_period - 8)
     assert await _complete(router, "first") is False
-    clock.value += timedelta(days=23)
+    assert store.get(*_IDENTITY) == initial
+
+    clock.value += timedelta(days=1)
     due = store.get(*_IDENTITY)
     assert due and due.effort_status("high") == "refresh_due"
     assert await _complete(router, "first") is True
@@ -381,8 +390,18 @@ async def test_live_call_refreshes_only_selected_effort_and_cache_does_not_refre
     refreshed = store.get(*_IDENTITY)
     assert refreshed and refreshed.revision == due.revision + 1
     assert refreshed.effort_status("high") == "ready"
+    assert refreshed.effort_expiry("high") == (clock.value + timedelta(days=60)).isoformat()
     assert refreshed.effort_expiry("medium") == medium.effort_expiry("medium")
-    assert [req.reasoning_effort for req in provider.requests] == ["high", "high"]
+
+    clock.value += timedelta(days=66)
+    grace = store.get(*_IDENTITY)
+    assert grace and grace.effort_status("high") == "grace"
+    assert await _complete(router, "third") is False
+    renewed = store.get(*_IDENTITY)
+    assert renewed and renewed.revision == refreshed.revision + 1
+    assert renewed.effort_expiry("high") == (clock.value + timedelta(days=60)).isoformat()
+    assert renewed.effort_expiry("medium") == medium.effort_expiry("medium")
+    assert [req.reasoning_effort for req in provider.requests] == ["high", "high", "high"]
 
 
 @pytest.mark.asyncio
@@ -392,7 +411,7 @@ async def test_observation_write_failure_does_not_change_settled_call(
     provider = FakeProvider([ProviderResponse('{"ok":true}', ModelUsage(3, 3))])
     router, store, _ = _router(tmp_path, provider)
     assert store.record_probe_success(*_IDENTITY, "high") is not None
-    clock.value += timedelta(days=23)
+    clock.value += timedelta(days=53)
     before = store.get(*_IDENTITY)
 
     def unavailable(*args: Any, **kwargs: Any) -> None:
@@ -414,7 +433,7 @@ async def test_timeout_does_not_extend_grace_and_saved_probe_recovers_after_grac
     router, store, group_id = _router(tmp_path, provider)
     initial = store.record_probe_success(*_IDENTITY, "high")
     assert initial
-    clock.value += timedelta(days=31)
+    clock.value += timedelta(days=61)
     with pytest.raises(ProviderCallError, match="provider_timeout"):
         await _complete(router, "timeout")
     stale = store.get(*_IDENTITY)
@@ -521,7 +540,7 @@ def test_environment_restart_keeps_existing_group_but_not_new_stale_configuratio
         ),
     )
     NoyraService._sync_cognitive_resources(owner, (proposal,))
-    clock.value += timedelta(days=38)
+    clock.value += timedelta(days=68)
     NoyraService._sync_cognitive_resources(owner, (proposal,))
     with pytest.raises(RuntimeError, match="environment_model_capability_profile_required"):
         NoyraService._sync_cognitive_resources(

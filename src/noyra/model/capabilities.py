@@ -16,7 +16,7 @@ from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from .reasoning import REASONING_EFFORTS, ReasoningEffort, reasoning_profile
 
 CAPABILITY_PROFILE_VERSION = 1
-CAPABILITY_PROBE_TTL_DAYS = 30
+CAPABILITY_PROBE_TTL_DAYS = 60
 CAPABILITY_REFRESH_LEAD = timedelta(days=7)
 CAPABILITY_REFRESH_GRACE = timedelta(days=7)
 CAPABILITY_READY_STATES = frozenset({"ready", "refresh_due"})

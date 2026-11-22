@@ -350,12 +350,16 @@ keys are written by the authenticated API directly into private files beneath
 
 The reasoning capability review date is not an API key expiration date. Each
 verified effort is tracked separately for the same subject, provider endpoint,
-and model. In the seven days before its 30-day review date, a new successful
+and model. In the seven days before its 60-day review date, a new successful
 model call using that exact effort refreshes the evidence under the normal
 call budget. There are no scheduled extra provider requests. An existing
 resource can continue for another seven days if the date passes without a
 successful revalidation. Cached results and provider failures do not extend
 the window, and new configurations still require fresh evidence.
+
+Upgrading does not rewrite existing review dates. A previously recorded
+30-day observation rolls over to the 60-day cycle on its next successful
+revalidation. Idle resources do not renew on their own.
 
 The management page shows when revalidation is due, in grace, or blocked.
 After the grace period, or if the provider explicitly rejects the reasoning
