@@ -64,6 +64,7 @@ from noyra.core.types import (
 )
 
 from .capabilities import (
+    CAPABILITY_EXPIRED_STATE,
     CAPABILITY_REVALIDATION_STATES,
     CAPABILITY_RUNTIME_STATES,
     CapabilityProfileStore,
@@ -3072,6 +3073,7 @@ class RoutedModelGateway(ModelGateway):
             groups = self._weighted_group_order(groups)
         terminal_error: Exception | None = None
         route_in_progress = False
+        expired_revalidation_attempted = False
         attempts = 0
         for group in groups:
             if attempts >= self.max_group_failovers:
@@ -3113,6 +3115,12 @@ class RoutedModelGateway(ModelGateway):
                 )
                 try:
                     gateway, capability = self._gateway_with_capability(group, key)
+                    expired_revalidation_attempted = bool(
+                        group.reasoning_effort is not None
+                        and capability is not None
+                        and capability.effort_status(group.reasoning_effort)
+                        == CAPABILITY_EXPIRED_STATE
+                    )
                 except Exception as error:
                     latency = int((time.monotonic() - started) * 1000)
                     self._record_attempt(
@@ -3247,6 +3255,9 @@ class RoutedModelGateway(ModelGateway):
                         latency,
                     )
                     terminal_error = error
+                    if expired_revalidation_attempted:
+                        # One real attempt per expired route; do not rotate its keys.
+                        break
                     if forced_state is None and not self.provider_health.route_eligible(
                         self.subject_id, "model", group.group_id
                     ):
@@ -3363,6 +3374,8 @@ class RoutedModelGateway(ModelGateway):
                 finally:
                     settlement.close()
                     await self._close_gateway(gateway)
+            if expired_revalidation_attempted:
+                break
             if isinstance(terminal_error, ProviderCallError) and terminal_error.outcome_unknown:
                 break
             if forced_state is not None:
@@ -3867,8 +3880,6 @@ class RoutedModelGateway(ModelGateway):
         max_attempts: int | None = None,
         operator_probe: bool = False,
     ) -> tuple[ModelGateway, StoredCapability | None]:
-        reasoning_verified = False
-        capability = None
         effort = group.reasoning_effort
         capabilities = CapabilityProfileStore(self.database)
 
@@ -3881,9 +3892,15 @@ class RoutedModelGateway(ModelGateway):
             if effort is None:
                 return
             if profile is None:
-                allowed = reasoning_profile(group.model, group.provider_type).supported
+                allowed = (
+                    capability is None
+                    and reasoning_profile(group.model, group.provider_type).supported
+                )
             else:
-                allowed = profile.effort_status(effort) in CAPABILITY_RUNTIME_STATES
+                state = profile.effort_status(effort)
+                allowed = state in CAPABILITY_RUNTIME_STATES and (
+                    state != CAPABILITY_EXPIRED_STATE or expired_revalidation
+                )
             if not allowed:
                 raise ProviderCallError(
                     "model_capability_probe_required", retryable=False, outcome_unknown=False
@@ -3892,13 +3909,14 @@ class RoutedModelGateway(ModelGateway):
         def check_before_send() -> None:
             require_reasoning_capability(current_capability())
 
-        if effort is not None:
-            capability = current_capability()
-            if operator_probe:
-                reasoning_verified = True
-            else:
-                require_reasoning_capability(capability)
-                reasoning_verified = True
+        capability = current_capability() if effort is not None else None
+        expired_revalidation = (
+            effort is not None
+            and capability is not None
+            and capability.effort_status(effort) == CAPABILITY_EXPIRED_STATE
+        )
+        if effort is not None and not operator_probe:
+            require_reasoning_capability(capability)
         settings = OpenAICompatibleSettings(
             base_url=group.base_url,
             model=group.model,
@@ -3915,7 +3933,9 @@ class RoutedModelGateway(ModelGateway):
                 group.output_microusd_per_million,
             ),
             retry_policy=RetryPolicy(
-                max_attempts=1 if operator_probe else max_attempts or group.max_attempts
+                max_attempts=1
+                if operator_probe or expired_revalidation
+                else max_attempts or group.max_attempts
             ),
             resource_pool=group.pool,
             resource_group_id=group.group_id,
@@ -3924,7 +3944,7 @@ class RoutedModelGateway(ModelGateway):
             resource_key_id=key.key_id,
             resource_key_fingerprint=key.key_fingerprint,
             reasoning_effort=group.reasoning_effort,
-            reasoning_capability_verified=reasoning_verified,
+            reasoning_capability_verified=effort is not None,
             request_capability_check=check_before_send
             if effort is not None and not operator_probe
             else None,

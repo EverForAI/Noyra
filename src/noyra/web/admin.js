@@ -1878,6 +1878,7 @@ async function loadModels() {
     const notice = {
       refresh_due: "思考强度待复验",
       grace: "思考强度待复验（宽限期）",
+      expired: "能力记录已过期；首次正常调用将自动复验",
       probe_required: "思考强度未验证，调用已阻断",
       rejected: "供应商拒绝了此思考强度，调用已阻断",
     }[reasoning?.effective_status];

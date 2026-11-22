@@ -61,7 +61,12 @@ class _Output(BaseModel):
 
 
 def _router(
-    tmp_path: Path, provider: FakeProvider, *, budget: int = 50
+    tmp_path: Path,
+    provider: FakeProvider,
+    *,
+    budget: int = 50,
+    max_attempts: int = 1,
+    key_count: int = 1,
 ) -> tuple[RoutedModelGateway, CapabilityProfileStore, str]:
     database = Database(tmp_path / "revalidation.sqlite3")
     IdentityStore(database).ensure(_SUBJECT, content_hash(_SUBJECT))
@@ -74,9 +79,9 @@ def _router(
             base_url=_URL,
             model=_MODEL,
             reasoning_effort="high",
-            api_keys=(SecretStr("fixture-key"),),
+            api_keys=tuple(SecretStr(f"fixture-key-{index}") for index in range(key_count)),
             daily_attempts=budget,
-            max_attempts=1,
+            max_attempts=max_attempts,
         ),
         actor="operator",
     )
@@ -405,6 +410,106 @@ async def test_live_call_refreshes_only_selected_effort_and_cache_does_not_refre
 
 
 @pytest.mark.asyncio
+async def test_expired_effort_revalidates_on_the_first_successful_normal_call(
+    tmp_path: Path, clock: type[_Clock]
+) -> None:
+    provider = FakeProvider([ProviderResponse('{"ok":true}', ModelUsage(3, 3))])
+    router, store, _ = _router(tmp_path, provider, budget=1)
+    initial = store.record_probe_success(*_IDENTITY, "high")
+    assert initial is not None
+    clock.value += timedelta(days=68)
+    expired = store.get(*_IDENTITY)
+    assert expired and expired.effort_status("high") == "expired"
+    assert expired.public(selected="high")["effective_status"] == "probe_required"
+    assert expired.public(selected="high", existing_resource=True)["effective_status"] == "expired"
+
+    assert await _complete(router, "needed-after-expiry") is False
+    renewed = store.get(*_IDENTITY)
+    assert renewed and renewed.revision == initial.revision + 1
+    assert renewed.effort_expiry("high") == (clock.value + timedelta(days=60)).isoformat()
+    assert len(provider.requests) == 1
+    assert provider.requests[0].reasoning_effort == "high"
+    assert (
+        router.ledger.budget_status(
+            _SUBJECT, router.limits_for_pool("economy"), resource_pool="economy"
+        ).attempts
+        == 1
+    )
+
+    assert await _complete(router, "needed-after-expiry") is True
+    assert store.get(*_IDENTITY) == renewed
+    assert len(provider.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_revision"),
+    [
+        (
+            ProviderCallError("provider_http_500", retryable=True, outcome_unknown=False),
+            "expired",
+            1,
+        ),
+        (
+            ProviderCallError(
+                "provider_reasoning_effort_rejected",
+                retryable=False,
+                outcome_unknown=False,
+                status_code=400,
+            ),
+            "rejected",
+            2,
+        ),
+    ],
+)
+async def test_expired_effort_failure_never_renews_or_overrides_provider_rejection(
+    tmp_path: Path,
+    clock: type[_Clock],
+    error: ProviderCallError,
+    expected_status: str,
+    expected_revision: int,
+) -> None:
+    provider = FakeProvider([error])
+    router, store, _ = _router(tmp_path, provider, max_attempts=3, key_count=2)
+    initial = store.record_probe_success(*_IDENTITY, "high")
+    assert initial is not None
+    clock.value += timedelta(days=68)
+
+    key = f"failed-expired-{expected_status}"
+    with pytest.raises(ProviderCallError, match=error.code):
+        await _complete(router, key)
+    current = store.get(*_IDENTITY)
+    assert current and current.revision == expected_revision
+    assert current.effort_status("high") == expected_status
+    if expected_status == "expired":
+        assert current.effort_expiry("high") == initial.effort_expiry("high")
+        with pytest.raises(ProviderCallError, match="economy_pool_waiting"):
+            await _complete(router, key)
+    else:
+        assert "high" not in current.tested_efforts
+        with pytest.raises(ProviderCallError, match="model_capability_probe_required"):
+            await _complete(router, key)
+    assert len(provider.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_effort_revalidation_respects_budget(
+    tmp_path: Path, clock: type[_Clock]
+) -> None:
+    provider = FakeProvider([])
+    router, store, _ = _router(tmp_path, provider, budget=0)
+    assert store.record_probe_success(*_IDENTITY, "high") is not None
+    clock.value += timedelta(days=68)
+    before = store.get(*_IDENTITY)
+
+    with pytest.raises(BudgetExhaustedError):
+        await _complete(router, "expired-without-budget")
+
+    assert store.get(*_IDENTITY) == before
+    assert not provider.requests
+
+
+@pytest.mark.asyncio
 async def test_observation_write_failure_does_not_change_settled_call(
     tmp_path: Path, clock: type[_Clock], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -425,7 +530,7 @@ async def test_observation_write_failure_does_not_change_settled_call(
 
 
 @pytest.mark.asyncio
-async def test_timeout_does_not_extend_grace_and_saved_probe_recovers_after_grace(
+async def test_unknown_outcome_does_not_renew_or_replay_expired_effort(
     tmp_path: Path, clock: type[_Clock]
 ) -> None:
     timeout = ProviderCallError("provider_timeout", retryable=False, outcome_unknown=True)
@@ -440,8 +545,10 @@ async def test_timeout_does_not_extend_grace_and_saved_probe_recovers_after_grac
     assert stale and stale.effort_status("high") == "grace"
     assert stale.revision == initial.revision
     clock.value += timedelta(days=6)
-    with pytest.raises(ProviderCallError, match="model_capability_probe_required"):
-        await _complete(router, "past-grace")
+    expired = store.get(*_IDENTITY)
+    assert expired and expired.effort_status("high") == "expired"
+    with pytest.raises(ProviderCallError, match="routed_model_call_quarantined"):
+        await _complete(router, "timeout")
     assert len(provider.requests) == 1
     result = await router.test_resource(group_id, subject_id=_SUBJECT)
     assert result["ok"] and len(provider.requests) == 2

@@ -20,8 +20,9 @@ CAPABILITY_PROBE_TTL_DAYS = 60
 CAPABILITY_REFRESH_LEAD = timedelta(days=7)
 CAPABILITY_REFRESH_GRACE = timedelta(days=7)
 CAPABILITY_READY_STATES = frozenset({"ready", "refresh_due"})
-CAPABILITY_RUNTIME_STATES = CAPABILITY_READY_STATES | {"grace"}
-CAPABILITY_REVALIDATION_STATES = frozenset({"refresh_due", "grace"})
+CAPABILITY_EXPIRED_STATE = "expired"
+CAPABILITY_RUNTIME_STATES = CAPABILITY_READY_STATES | {"grace", CAPABILITY_EXPIRED_STATE}
+CAPABILITY_REVALIDATION_STATES = frozenset({"refresh_due", "grace", CAPABILITY_EXPIRED_STATE})
 
 
 @dataclass(frozen=True)
@@ -59,7 +60,7 @@ class StoredCapability:
             return "ready"
         remaining = deadline - (now or datetime.now(UTC))
         if remaining <= -CAPABILITY_REFRESH_GRACE:
-            return "probe_required"
+            return CAPABILITY_EXPIRED_STATE
         if remaining <= timedelta(0):
             return "grace"
         if remaining <= CAPABILITY_REFRESH_LEAD:
@@ -99,7 +100,7 @@ class StoredCapability:
         self, *, selected: ReasoningEffort | None = None, existing_resource: bool = False
     ) -> dict[str, Any]:
         effective_status = self.effort_status(selected) if selected is not None else self.status
-        if not existing_resource and effective_status == "grace":
+        if not existing_resource and effective_status in {"grace", CAPABILITY_EXPIRED_STATE}:
             effective_status = "probe_required"
         effective_selected = selected if effective_status in CAPABILITY_RUNTIME_STATES else None
         return {

@@ -354,17 +354,23 @@ and model. In the seven days before its 60-day review date, a new successful
 model call using that exact effort refreshes the evidence under the normal
 call budget. There are no scheduled extra provider requests. An existing
 resource can continue for another seven days if the date passes without a
-successful revalidation. Cached results and provider failures do not extend
-the window, and new configurations still require fresh evidence.
+successful revalidation. After that grace period, an existing resource whose
+last evidence only expired by time may revalidate on its next real, normally
+budgeted call. An expired resource group gets one attempt per task, without
+rotating its keys. This is not an extra probe. Only a successful response refreshes
+the evidence; failed and cached calls do not. A provider rejection remains
+blocked, and an unknown outcome stays quarantined under its original request
+identity. New configurations still require fresh evidence.
 
 Upgrading does not rewrite existing review dates. A previously recorded
 30-day observation rolls over to the 60-day cycle on its next successful
 revalidation. Idle resources do not renew on their own.
 
-The management page shows when revalidation is due, in grace, or blocked.
-After the grace period, or if the provider explicitly rejects the reasoning
-parameter, use **Test connection** on the saved resource. This uses the existing
-key for a single budgeted request and does not lower the effort automatically.
+The management page shows when revalidation is due, in grace, or expired.
+When no real task is available to trigger revalidation, or after the provider
+explicitly rejects the reasoning parameter, **Test connection** on the saved
+resource remains the explicit recovery path. It uses the existing key for a
+single budgeted request and never lowers the effort automatically.
 
 Systemd credentials can provide the same values from a private per-service credential directory.
 Copy `deploy/systemd/noyra-credentials.conf.example` to a systemd drop-in, install each source file
