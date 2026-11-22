@@ -298,11 +298,12 @@ class SubjectKernel:
         self._sync_migration_source_epoch(state.version)
         return state
 
-    def activate(self) -> RuntimeState:
+    def activate(self, *, open_admission: bool = True) -> RuntimeState:
         self._require_ownership()
         state = self.lifecycle.transition("active", "runtime ready", actor="supervisor")
         self._sync_migration_source_epoch(state.version)
-        self.admission.open(epoch=state.version)
+        if open_admission:
+            self.admission.open(epoch=state.version)
         return state
 
     def pause(self, reason: str = "operator pause", *, actor: str = "operator") -> RuntimeState:

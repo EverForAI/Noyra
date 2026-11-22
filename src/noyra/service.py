@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import hashlib
 import hmac
 import ipaddress
@@ -12,6 +13,7 @@ import os
 import re
 import secrets
 import signal
+import sqlite3
 import sys
 import threading
 import time
@@ -694,6 +696,7 @@ class NoyraHTTPServer:
         self.thread: threading.Thread | None = None
         self._closed = False
         self.defer_export_ownership = False
+        self.boot_recovery_review_required = False
 
     @property
     def address(self) -> tuple[str, int]:
@@ -1075,7 +1078,7 @@ class NoyraHTTPServer:
         )
 
     def allow_mutation(self, path: str) -> bool:
-        if self._closed or self.admission.closed:
+        if self._closed or self.admission.closed or self.boot_recovery_review_required:
             return False
         if self._quarantined():
             return self._is_recovery_mutation(path)
@@ -1823,6 +1826,24 @@ def _cloud_archive_subject_state_available(database: Database, subject_id: str) 
     return row is not None
 
 
+class BootRecoveryRestartRequired(RuntimeError):
+    """A transient startup recovery failure requires a fresh process."""
+
+
+def _restartable_boot_recovery_error(error: Exception) -> bool:
+    if isinstance(error, sqlite3.OperationalError):
+        code = getattr(error, "sqlite_errorcode", None)
+        return isinstance(code, int) and (code & 0xFF) in {
+            sqlite3.SQLITE_BUSY,
+            sqlite3.SQLITE_LOCKED,
+        }
+    return isinstance(error, OSError) and error.errno in {
+        errno.EAGAIN,
+        errno.EBUSY,
+        errno.ETIMEDOUT,
+    }
+
+
 class NoyraService:
     @_release_startup_lock_on_failure
     def __init__(
@@ -2003,6 +2024,7 @@ class NoyraService:
         self._integrity_worker: asyncio.Task[Any] | None = None
         self._thread_workers: set[asyncio.Task[Any]] = set()
         self._boot_recovery_pending = False
+        self._boot_recovery_restart_required = False
         self._last_retention_run_at: datetime | None = None
         self._construction_complete = True
 
@@ -2450,10 +2472,9 @@ class NoyraService:
             self._sync_cognitive_resources(self._pending_cognitive_resource_proposals)
             self._pending_cognitive_resource_proposals = ()
         self.http._start_export_ownership()
-        self.http.defer_export_ownership = False
         if state.state == "booting":
             self.kernel.orient()
-            self.kernel.activate()
+            self.kernel.activate(open_admission=False)
         try:
             self.kernel.snapshot_store.latest(self.kernel.subject_id)
         except NotFoundError:
@@ -2467,7 +2488,9 @@ class NoyraService:
                 },
                 reason="establish restart continuity checkpoint",
             )
-        self._boot_recovery_pending = False
+        self._sync_training_policy()
+        if self.cognition is not None:
+            self.cognition.bootstrap()
         current = self.kernel.lifecycle.current()
         # A restart can legitimately land in a sleep/paused lifecycle.  The
         # startup integrity policy decides whether cognition initialization is
@@ -2479,9 +2502,8 @@ class NoyraService:
             self.kernel.admission.open(epoch=current.version)
         else:
             self.kernel.admission.clear_quarantine()
-        self._sync_training_policy()
-        if self.cognition is not None:
-            self.cognition.bootstrap()
+        self.http.defer_export_ownership = False
+        self._boot_recovery_pending = False
 
     def _sync_training_policy(self) -> None:
         policy = self.http.training.policy(self.kernel.subject_id)
@@ -2529,6 +2551,8 @@ class NoyraService:
                 with suppress(NotImplementedError, RuntimeError):
                     loop.add_signal_handler(signum, self.request_shutdown)
             await self.loop.run_forever(stop_event)
+            if self._boot_recovery_restart_required:
+                raise BootRecoveryRestartRequired("integrity_boot_recovery_restart_required")
         finally:
             self.kernel.admission.begin_drain()
             self.http.server.stop_accepting()
@@ -2588,6 +2612,13 @@ class NoyraService:
                 None,
                 self.settings.sleep_interval_seconds,
             )
+        if self.http.boot_recovery_review_required:
+            return TickResult(
+                self.kernel.lifecycle.current().state,
+                "integrity_boot_recovery_review_required",
+                None,
+                self.settings.sleep_interval_seconds,
+            )
         summary = self.integrity.summary()
         if self.integrity.policy_mode == "pause" and summary.get("evidence", {}).get(
             "recheck_pending"
@@ -2611,11 +2642,22 @@ class NoyraService:
                 )
             try:
                 self._complete_boot_after_integrity()
-            except Exception:
-                self.request_shutdown()
+            except Exception as error:
+                self.kernel.admission.quarantine()
+                if _restartable_boot_recovery_error(error):
+                    self._boot_recovery_restart_required = True
+                    LOGGER.warning("startup recovery interrupted by transient storage contention")
+                    self.request_shutdown()
+                    recovery_action = "integrity_boot_recovery_restart_required"
+                else:
+                    self.http.boot_recovery_review_required = True
+                    LOGGER.error(
+                        "startup recovery requires operator review (%s)", type(error).__name__
+                    )
+                    recovery_action = "integrity_boot_recovery_review_required"
                 return TickResult(
                     self.kernel.lifecycle.current().state,
-                    "integrity_boot_recovery_failed",
+                    recovery_action,
                     None,
                     self.settings.error_backoff_seconds,
                 )
@@ -3030,7 +3072,10 @@ def main() -> None:
         # retaining a clear journal error for operators.
         LOGGER.error("service configuration failed: %s", error)
         raise SystemExit(EX_CONFIG) from error
-    asyncio.run(service.run())
+    try:
+        asyncio.run(service.run())
+    except BootRecoveryRestartRequired:
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

@@ -37,6 +37,18 @@ def dispatch(self: RequestHandler, owner: NoyraHTTPServer) -> None:
     ):
         self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "rate_limited"})
         return
+    if owner.boot_recovery_review_required:
+        parsed = urlsplit(self.path)
+        if parsed.path == "/health/live":
+            health.health_live(self, owner)
+        elif parsed.path in {"/health/ready", "/api/admin/readiness", "/api/v1/admin/readiness"}:
+            health.health_ready_admin_readiness(self, owner, parsed)
+        else:
+            self._json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {"error": "integrity_boot_recovery_review_required"},
+            )
+        return
     if self.path.startswith("/api/v1/"):
         normalized_path = self.path.replace("/api/v1/", "/api/", 1)
         if normalized_path.startswith("/api/webhooks/"):

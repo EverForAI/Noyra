@@ -45,6 +45,7 @@ from noyra.model import (
 )
 from noyra.research import SearchProviderInput, SearchProviderStore
 from noyra.service import NoyraService, ServiceSettings
+from noyra.service import main as service_main
 from noyra.world import SourceRegistry
 from support.faults import (
     blocking_integrity_process_worker,
@@ -4297,6 +4298,156 @@ def test_pause_pending_quarantines_all_sleep_progression(tmp_path: Path, sleep_s
     finally:
         service.http.close()
         service.kernel.close()
+
+
+@pytest.fixture
+def delayed_boot_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> NoyraService:
+    settings = ServiceSettings(
+        data_dir=tmp_path,
+        subject_id="Noyra-delayed-boot-test",
+        genesis_hash=content_hash("delayed-boot-test"),
+        host="127.0.0.1",
+        port=0,
+        admin_token=SecretStr("fixture-operator-token-for-delayed-boot"),
+        integrity_mode="pause",
+    )
+    service = NoyraService(settings)
+    first_check = True
+
+    def check(_context: Any) -> IntegrityCheckOutcome:
+        nonlocal first_check
+        if first_check:
+            first_check = False
+            return IntegrityCheckOutcome("incomplete", "p1", "fixture_deferred_startup")
+        return IntegrityCheckOutcome()
+
+    registry = IntegrityRegistry(
+        (
+            IntegrityCheckSpec(
+                "test.delayed_boot",
+                1,
+                "test",
+                frozenset({"startup_light", "periodic_deep"}),
+                check,
+                "light",
+            ),
+        )
+    )
+    integrity = IntegrityRuntimeController(
+        service.kernel, tmp_path, policy_mode="pause", registry=registry
+    )
+    periodic = integrity.run_periodic_if_due
+    monkeypatch.setattr(integrity, "run_periodic_if_due", lambda: periodic(force=True))
+    service.integrity = service.http.integrity = integrity
+    service.loop.next_wakeup_hook = integrity.seconds_until_due
+    return service
+
+
+def test_delayed_boot_storage_contention_exits_nonzero_after_releasing_ownership(
+    delayed_boot_service: NoyraService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = delayed_boot_service
+    attempts = 0
+
+    def busy() -> None:
+        nonlocal attempts
+        attempts += 1
+        assert service._boot_recovery_pending
+        assert service.kernel.process_lock.held and not service.kernel.admission.accepting
+        error = sqlite3.OperationalError("fixture contention")
+        error.sqlite_errorcode = sqlite3.SQLITE_BUSY_SNAPSHOT
+        raise error
+
+    monkeypatch.setattr(service, "_sync_training_policy", busy)
+    monkeypatch.setattr(NoyraService, "from_env", lambda: service)
+    monkeypatch.setattr("sys.argv", ["noyra-service"])
+    run = service.run
+
+    async def run_with_test_deadline() -> None:
+        await asyncio.wait_for(run(), timeout=45)
+
+    monkeypatch.setattr(service, "run", run_with_test_deadline)
+    with pytest.raises(SystemExit) as failed:
+        service_main()
+    assert failed.value.code == 1
+    assert attempts == 1
+    assert not service.kernel.process_lock.held
+    assert service.http.thread is None
+
+    # A fresh start uses the normal recovery path against the same data.
+    fresh = NoyraService(service.settings)
+    try:
+        fresh.integrity = fresh.http.integrity = IntegrityRuntimeController(
+            fresh.kernel,
+            fresh.settings.data_dir,
+            policy_mode="pause",
+            registry=service.integrity.registry,
+        )
+        fresh.boot()
+        assert not fresh._boot_recovery_pending
+        assert fresh.kernel.lifecycle.current().state == "active"
+        assert fresh.kernel.admission.accepting
+    finally:
+        fresh.close()
+
+
+@pytest.mark.asyncio
+async def test_delayed_boot_review_retains_health_endpoints_and_keeps_admission_closed(
+    delayed_boot_service: NoyraService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = delayed_boot_service
+    failed = asyncio.Event()
+    attempts = 0
+
+    def review() -> None:
+        nonlocal attempts
+        attempts += 1
+        assert service._boot_recovery_pending
+        assert service.kernel.admission.quarantined and not service.kernel.admission.accepting
+        failed.set()
+        raise IntegrityError("fixture recovery data requires review")
+
+    monkeypatch.setattr(service, "_sync_training_policy", review)
+    task = asyncio.create_task(service.run())
+
+    def read(path: str, *, authenticated: bool = False) -> tuple[int, dict[str, Any]]:
+        host, port = service.http.address
+        req = Request(f"http://{host}:{port}{path}")
+        if authenticated:
+            assert service.settings.admin_token is not None
+            req.add_header(
+                "Authorization", "Bearer " + service.settings.admin_token.get_secret_value()
+            )
+        try:
+            with urlopen(req, timeout=5) as response:
+                return response.status, json.load(response)
+        except HTTPError as error:
+            with error:
+                return error.code, json.load(error)
+
+    try:
+        await asyncio.wait_for(failed.wait(), timeout=30)
+        assert not task.done() and service.kernel.process_lock.held
+        assert (await service.loop.tick()).action == "integrity_boot_recovery_review_required"
+        assert attempts == 1
+        assert not service.http.allow_mutation("/api/admin/actions/test/reconcile")
+        assert (await asyncio.to_thread(read, "/health/live"))[0] == 200
+        assert (await asyncio.to_thread(read, "/api/admin/readiness"))[0] == 401
+        status, readiness = await asyncio.to_thread(
+            read, "/api/admin/readiness", authenticated=True
+        )
+        assert status == 503
+        assert readiness["reason_code"] == "integrity_boot_recovery_review_required"
+        assert readiness["execution_admission"]["runtime_gate_accepting"] is False
+        status, private = await asyncio.to_thread(
+            read, "/api/admin/conversations", authenticated=True
+        )
+        assert status == 503
+        assert private == {"error": "integrity_boot_recovery_review_required"}
+    finally:
+        service.request_shutdown()
+        await asyncio.wait_for(task, timeout=15)
+    assert not service.kernel.process_lock.held
 
 
 def _blocked_service_fixture(
