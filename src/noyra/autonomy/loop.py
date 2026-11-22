@@ -5,13 +5,13 @@ import math
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
-from noyra.core.admission import OperationInvalidated, bind_lease
+from noyra.core.admission import OperationInvalidated, assert_current_lease, bind_lease
 from noyra.core.errors import IntegrityError, RuntimeOwnershipError
 from noyra.core.events import EventStore
 from noyra.core.integrity_watchdog import IntegrityWatchdog
 from noyra.core.runtime import SubjectKernel
 from noyra.sleep import FatigueTracker, SleepEngine, SleepReflectionPlan, SleepRunRecord
-from noyra.sleep.errors import SleepStateConflictError
+from noyra.sleep.errors import SleepReflectionDeferred, SleepStateConflictError
 
 from .sleep_recovery import failures, record_failure
 from .types import LoopConfig, TickResult
@@ -466,7 +466,13 @@ class AutonomyLoop:
         elif run.status == "reflective_sleep" and run.reflection_event_id is None:
             if self.reflection_hook is None:
                 raise SleepStateConflictError("reflection hook is unavailable")
-            plan = await self.reflection_hook(run)
+            try:
+                plan = await self.reflection_hook(run)
+            except SleepReflectionDeferred:
+                assert_current_lease()
+                return TickResult(
+                    lifecycle, "reflection_model_wait", None, self.config.sleep_interval_seconds
+                )
             self.sleep.commit_reflection(run.sleep_id, plan)
             action = "reflection_committed"
         elif run.status == "reflective_sleep":

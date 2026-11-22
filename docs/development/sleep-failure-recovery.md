@@ -50,7 +50,21 @@ reflection, deep sleep or waking. A run that actually needs a missing callback
 reports `sleep_state_wait` and records bounded failure evidence; persistent
 absence reaches `sleep_failed_paused`, without inventing a plan. The existing
 model-call cap, validated successful-response recovery and no-change local
-fallbacks remain unchanged.
+fallbacks still apply.
+
+A deep pool that has no eligible route, is waiting for its normal retry time,
+or requires a capability probe can defer reflection without recording a sleep
+stage failure. The loop reconsiders it on its normal sleep ticks, respecting
+the router's retry time and the model budget. On the first such deferral at or
+after ten minutes in reflective sleep (or the planned wake time, if earlier),
+it commits only the existing local no-change plan: available context counts and
+the reason remote reflection was skipped. No extra probe, alternate model,
+public diary entry, or cognitive revision is created by this fallback. Normal
+sleep and waking still use their existing transitions and admission checks.
+The deadline is anchored to the persisted phase timestamp across restarts and
+uses elapsed monotonic time once observed in-process. Ambiguous provider
+outcomes and integrity errors do not qualify for this deferral; model accounting
+and unknown-request replay fences are unchanged.
 
 The loop, sleep engine, fatigue tracker, scheduled wake calculation and error
 cooldown use the injected timezone-aware clock. Wake deadlines and budget sleep

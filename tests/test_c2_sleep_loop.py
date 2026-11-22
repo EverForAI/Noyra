@@ -1,16 +1,28 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import SecretStr
 
 from noyra.autonomy import AutonomyLoop, LoopConfig
+from noyra.cognition import CognitionSettings, SleepReflectionCognition
 from noyra.core import SubjectKernel
 from noyra.core.admission import OperationInvalidated
 from noyra.core.errors import IntegrityError, RuntimeOwnershipError
+from noyra.core.scheduling_clock import CooldownClock
 from noyra.core.types import content_hash
+from noyra.model import (
+    CognitiveResourceGroupInput,
+    CognitiveResourceStore,
+    FakeProvider,
+    ModelMessage,
+    ModelUsage,
+    ProviderResponse,
+    RoutedModelGateway,
+)
 from noyra.sleep import SleepIntegrity, SleepReflectionPlan, SleepRunRecord
 from test_c2_sleep_recovery import at_phase
 from test_c2_sleep_recovery import kernel as kernel
@@ -96,6 +108,140 @@ async def test_sleep_advances_after_restart_with_ordinary_admission_closed(
         assert reopened.admission.accepting
         lease = reopened.admission.begin("ordinary-work")
         reopened.admission.finish(lease)
+        SleepIntegrity(reopened.database).verify(subject)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovers_before_deadline", [False, True])
+async def test_deep_pool_outage_does_not_pause_sleep_after_restart(
+    kernel: SubjectKernel, monkeypatch: pytest.MonkeyPatch, recovers_before_deadline: bool
+) -> None:
+    now = datetime.now(UTC)
+    started = now
+    provider = FakeProvider(
+        [ProviderResponse('{"summary":"Model reflection"}', ModelUsage(10, 10))]
+    )
+    monkeypatch.setattr("noyra.model.resources.utc_now", lambda: now.isoformat())
+
+    # The router schedules the initial wait from its own datetime clock.
+    class ModelClock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> ModelClock:
+            return cls.fromtimestamp(now.timestamp(), tz)
+
+    monkeypatch.setattr("noyra.model.resources.datetime", ModelClock)
+
+    def make_loop(owner: SubjectKernel) -> tuple[AutonomyLoop, RoutedModelGateway]:
+        database, subject = owner.database, owner.subject_id
+        resources = CognitiveResourceStore(database, database.path.parent / "model-secrets")
+        gateway = RoutedModelGateway(
+            database, subject, resources, provider_factory=lambda _: provider
+        )
+        cognition = SleepReflectionCognition(
+            database,
+            subject,
+            gateway,
+            CognitionSettings(enabled=False),
+            clock=lambda: now.isoformat(),
+        )
+        monkeypatch.setattr(
+            cognition,
+            "_model_wait_clock",
+            CooldownClock(lambda: (now - started).total_seconds(), capacity=1),
+        )
+        return AutonomyLoop(
+            owner,
+            reflection_hook=cognition.propose,
+            clock=lambda: now,
+            config=LoopConfig(max_consecutive_failures=1),
+        ), gateway
+
+    def configure_deep_pool(gateway: RoutedModelGateway) -> None:
+        gateway.resources.configure(
+            gateway.subject_id,
+            CognitiveResourceGroupInput(
+                pool="deep",
+                label="fixture",
+                base_url="https://models.example/v1",
+                model="fixture-model",
+                api_keys=(SecretStr("fixture-key"),),
+                max_attempts=1,
+            ),
+            actor="operator",
+        )
+
+    loop, _ = make_loop(kernel)
+    wake_at = started + timedelta(minutes=11)
+    run = loop.sleep.start("subject_choice", "Fixture", wake_after=wake_at.isoformat())
+    assert (await loop.tick()).action == "reflection_started"
+    assert (await loop.tick()).action == "reflection_model_wait"
+    assert len(provider.requests) == 0
+    path, subject = kernel.database.path, kernel.subject_id
+    kernel.close()
+
+    now = started + timedelta(minutes=6)
+    with SubjectKernel(path, subject, content_hash("c2")) as reopened:
+        assert reopened.boot().state == "reflective_sleep"
+        loop, gateway = make_loop(reopened)
+        if recovers_before_deadline:
+            configure_deep_pool(gateway)
+        else:
+            assert (await loop.tick()).action == "reflection_model_wait"
+            now = started + timedelta(minutes=10)
+
+        assert (await loop.tick()).action == "reflection_committed"
+        assert len(provider.requests) == int(recovers_before_deadline)
+        with reopened.database.read_transaction() as connection:
+            plan = SleepReflectionPlan.model_validate_json(
+                connection.execute(
+                    "SELECT plan_json FROM sleep_reflections WHERE sleep_id=?", (run.sleep_id,)
+                ).fetchone()[0]
+            )
+            assert (
+                connection.execute(
+                    "SELECT count(*) FROM events WHERE event_type='sleep_stage_failed'"
+                ).fetchone()[0]
+                == 0
+            )
+            assert (
+                connection.execute(
+                    "SELECT count(*) FROM waiting_cognitive_tasks WHERE status='waiting'"
+                ).fetchone()[0]
+                == 0
+            )
+        if recovers_before_deadline:
+            assert plan.summary == "Model reflection"
+        else:
+            assert "deep model pool unavailable after waiting" in plan.summary
+            assert not any(
+                (
+                    plan.memories,
+                    plan.belief_revisions,
+                    plan.goal_revisions,
+                    plan.retry_blocks,
+                    plan.personality_candidates,
+                    plan.public_diary_candidate,
+                )
+            )
+
+        assert (await loop.tick()).action == "deep_sleep_entered"
+        assert (await loop.tick()).action == "deep_sleep_wait"
+        now = wake_at
+        assert (await loop.tick()).action == "wake_started"
+        assert (await loop.tick()).action == "wake_completed"
+        assert reopened.admission.accepting
+        assert loop.sleep.get(run.sleep_id).status == "complete"
+        if not recovers_before_deadline:
+            configure_deep_pool(gateway)
+            result = await gateway.complete_structured(
+                subject,
+                "fixture:post-wake",
+                (ModelMessage(role="user", content="Fixture"),),
+                SleepReflectionPlan,
+                idempotency_key="fixture-post-wake",
+            )
+            assert result.output.summary == "Model reflection"
+            assert len(provider.requests) == 1
         SleepIntegrity(reopened.database).verify(subject)
 
 
