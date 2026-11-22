@@ -223,7 +223,7 @@ from noyra.model import (
     RoutedModelGateway,
     resource_groups_from_env,
 )
-from noyra.model.capabilities import CapabilityProfileStore
+from noyra.model.capabilities import CAPABILITY_READY_STATES, CapabilityProfileStore
 from noyra.model.errors import (
     EmbeddingShutdownIncompleteError,
 )
@@ -2245,8 +2245,11 @@ class NoyraService:
                 )
                 if (
                     capability is None
-                    or capability.status != "known"
-                    or proposal.reasoning_effort not in capability.tested_efforts
+                    or (
+                        current is None
+                        and capability.effort_status(proposal.reasoning_effort)
+                        not in CAPABILITY_READY_STATES
+                    )
                     or proposal.capability_revision is None
                     or capability.revision < proposal.capability_revision
                     or (

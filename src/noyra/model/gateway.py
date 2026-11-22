@@ -63,6 +63,7 @@ class ModelGateway:
         resource_key_fingerprint: str | None = None,
         reasoning_effort: str | None = None,
         reasoning_capability_verified: bool = False,
+        request_capability_check: Callable[[], None] | None = None,
     ):
         if not model.strip():
             raise ValueError("model name is required")
@@ -87,6 +88,7 @@ class ModelGateway:
         self.resource_key_fingerprint = resource_key_fingerprint
         self.reasoning_effort = reasoning_effort
         self.reasoning_capability_verified = reasoning_capability_verified
+        self.request_capability_check = request_capability_check
 
     async def complete_structured(
         self,
@@ -246,6 +248,8 @@ class ModelGateway:
                         resource_key_fingerprint=self.resource_key_fingerprint,
                         expected_resource_revision=self.resource_revision,
                     )
+                    if self.request_capability_check is not None:
+                        self.request_capability_check()
                     assert_current_lease()
                 except (Exception, asyncio.CancelledError) as error:
                     # Keep evidence of a failed final guard separately from a
@@ -468,6 +472,8 @@ class ModelGateway:
             return "model_lifecycle_blocked"
         if isinstance(error, (InvitationWithdrawnError, ModelAuthorizationError)):
             return "model_authorization_denied"
+        if isinstance(error, ProviderCallError) and error.code == "model_capability_probe_required":
+            return error.code
         if isinstance(error, asyncio.CancelledError):
             return "model_call_cancelled_before_send"
         return "model_pre_send_failure"

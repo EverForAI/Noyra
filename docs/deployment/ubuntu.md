@@ -348,6 +348,20 @@ should not be used in production configuration. The search-provider and dashboar
 keys are written by the authenticated API directly into private files beneath
 `/var/lib/noyra/secrets/`, not into SQLite.
 
+The reasoning capability review date is not an API key expiration date. Each
+verified effort is tracked separately for the same subject, provider endpoint,
+and model. In the seven days before its 30-day review date, a new successful
+model call using that exact effort refreshes the evidence under the normal
+call budget. There are no scheduled extra provider requests. An existing
+resource can continue for another seven days if the date passes without a
+successful revalidation. Cached results and provider failures do not extend
+the window, and new configurations still require fresh evidence.
+
+The management page shows when revalidation is due, in grace, or blocked.
+After the grace period, or if the provider explicitly rejects the reasoning
+parameter, use **Test connection** on the saved resource. This uses the existing
+key for a single budgeted request and does not lower the effort automatically.
+
 Systemd credentials can provide the same values from a private per-service credential directory.
 Copy `deploy/systemd/noyra-credentials.conf.example` to a systemd drop-in, install each source file
 with root-only permissions, then set the corresponding `*_CREDENTIAL` variable (for example,

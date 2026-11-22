@@ -1874,6 +1874,19 @@ async function loadModels() {
   for (const item of rows) {
     const exactBudget = item.exact_budget || item;
     const card = Array.from($("#model-list").children).find((node) => node.dataset.resourceId === item.group_id);
+    const reasoning = item.reasoning_profile;
+    const notice = {
+      refresh_due: "思考强度待复验",
+      grace: "思考强度待复验（宽限期）",
+      probe_required: "思考强度未验证，调用已阻断",
+      rejected: "供应商拒绝了此思考强度，调用已阻断",
+    }[reasoning?.effective_status];
+    if (notice && item.status === "active") {
+      const hint = document.createElement("p");
+      hint.className = "field-hint";
+      hint.textContent = notice;
+      card?.querySelector(".model-resource-identity")?.after(hint);
+    }
     const form = card?.querySelector("[data-model-budget-form]");
     if (form) {
     for (const [dimension, field] of Object.entries(limitFields)) {
@@ -2742,7 +2755,7 @@ $("#model-list").addEventListener("click", async (event) => {
   const currentAction = beginAdminAction();
   const button = event.target.closest("[data-model-action]"); if (!button) return;
   const action = button.dataset.modelAction;
-  if (action === "test" && !window.confirm("这是已保存资源的正式测试：受休眠、授权和预算限制，最多向该资源发送一次请求，输出上限为 64 Token，可能产生费用；与保存前的草稿探测不同。继续吗？")) return;
+  if (action === "test" && !window.confirm("测试使用已保存的密钥和配置，受授权与预算限制，最多发送一次请求，可能产生费用。成功后会更新所选思考强度的验证记录。继续吗？")) return;
   if (action === "revoke") {
     const item = renderedModels.get(button.dataset.id);
     if (!item || !window.confirm(modelDeletionMessage(item))) return;
@@ -3092,7 +3105,9 @@ const applyReasoningProfile = (profile) => {
   else delete reasoningField.dataset.profileRevision;
   if (profile?.profile_digest) reasoningField.dataset.profileDigest = String(profile.profile_digest);
   else delete reasoningField.dataset.profileDigest;
-  const tested = Array.isArray(profile?.tested_efforts) ? profile.tested_efforts : [];
+  const tested = Array.isArray(profile?.fresh_efforts)
+    ? profile.fresh_efforts
+    : Array.isArray(profile?.tested_efforts) ? profile.tested_efforts : [];
   const selectionVerified = observed && (!select.value || tested.includes(select.value));
   reasoningField.dataset.capabilityObserved = observed ? "true" : "false";
   reasoningField.dataset.testedEfforts = JSON.stringify(tested);
