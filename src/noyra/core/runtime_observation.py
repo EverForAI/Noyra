@@ -266,6 +266,10 @@ def autonomy_progress_observation(
             "blocks_cognition": capacity_blocks_cognition if capacity_available else None,
             "blocks_embedding": capacity.get("blocks_embedding") if capacity_available else None,
             "blocking_tables": capacity.get("blocking_tables", []),
+            "core_warning_threshold_percent": (
+                capacity.get("core_warning_threshold_percent") if capacity_available else None
+            ),
+            "core_near_limit": capacity.get("core_near_limit") if capacity_available else None,
         },
         "storage": {
             "free_bytes": free_bytes if type(free_bytes) is int else None,
@@ -397,6 +401,8 @@ class RuntimeObserver:
                     "blocks_cognition": capacity["blocks_cognition"],
                     "blocks_embedding": capacity["blocks_embedding"],
                     "limit_per_table": capacity["limit_per_table"],
+                    "core_warning_threshold_percent": capacity["core_warning_threshold_percent"],
+                    "core_near_limit": capacity["core_near_limit"],
                 }
             except (sqlite3.Error, IntegrityError, ValueError):
                 # Unknown counters are not interpreted as free capacity.

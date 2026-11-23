@@ -808,6 +808,18 @@ function renderRuntimeObservation(observation,state) {
   ]);
 }
 
+function handleOverviewNavigation(event) {
+  const button = event.target.closest("[data-setup-go]");
+  if (!button) return;
+  if (button.dataset.setupGo === "retention") {
+    const details = $("#overview-retention");
+    details.open = true;
+    details.querySelector("summary").focus();
+    return;
+  }
+  showSection(button.dataset.setupGo);
+}
+
 function renderOverviewAttention(data, failures=[]) {
   const rows=failures.map(row=>({priority:"risk",title:`${row.label}读取失败`,detail:errorText(row.error),section:"overview"}));
   if(data){
@@ -816,8 +828,14 @@ function renderOverviewAttention(data, failures=[]) {
     const autonomy=data.autonomy;
     const autonomyBlockers=new Set(autonomy?.blockers || []);
     if(autonomyBlockers.has("storage_pressure"))add("blocker","存储压力阻止自主认知","核对磁盘可用空间与存储配额","runtime");
-    if(autonomyBlockers.has("evidence_capacity"))add("blocker","必要证据容量已达上限","完成备份后扩容或调整上限；不要删除必要历史","runtime");
+    if(autonomyBlockers.has("evidence_capacity"))add("blocker","必要证据容量已达上限","完成备份后扩容或调整上限；不要删除必要历史","retention");
     else if(autonomy?.evidence_capacity?.blocks_embedding===true)add("risk","向量证据容量已达上限","新向量请求暂停，记忆检索使用本地兜底；此项不阻断自主认知循环。","runtime");
+    const capacity=autonomy?.evidence_capacity;
+    if(capacity?.available===true && Array.isArray(capacity.core_near_limit) && capacity.core_near_limit.length){
+      const warnings=capacity.core_near_limit;
+      const preview=warnings.slice(0,2).map(row=>`${row.table} 剩余 ${formatInteger(row.remaining)} 行`).join("；");
+      add("risk","核心证据容量接近上限",`${warnings.length} 张表达到 ${capacity.core_warning_threshold_percent}% 预警线：${preview}${warnings.length>2 ? "；另有其他表" : ""}。`,"retention");
+    }
     if(autonomyBlockers.has("safety_quarantine"))add("blocker","完整性安全隔离生效","核对完整性证据后再执行受控恢复","runtime");
     if(autonomyBlockers.has("migration_fenced"))add("blocker","运行时处于迁移隔离","按迁移流程完成切换或回滚","migration");
     if(!autonomy && data.storage?.cognition_allowed===false)add("blocker","认知写入已暂停","检查磁盘或证据容量","runtime");
@@ -1422,6 +1440,7 @@ function renderRetention(payload) {
   const backupPlan = plan.backup || {};
   const backupSummary = backupPlan.backup_summary || {};
   const capacity = payload?.evidence_capacity;
+  const nearLimit = Array.isArray(capacity?.core_near_limit) ? capacity.core_near_limit : null;
   const lifecycle = payload?.lifecycle_diagnostics;
   const coverage = lifecycle?.policy_coverage;
   const drift = lifecycle?.structural_drift;
@@ -1452,6 +1471,8 @@ function renderRetention(payload) {
         : "必要证据已达上限，暂停新增认知工作"
       : capacity?.blocked === false ? "未达上限" : "未读取"],
     ["触顶证据表", capacity?.blocking_tables?.length ? capacity.blocking_tables.join("、") : capacity?.blocked === false ? "无" : "未读取"],
+    ["核心证据容量预警", nearLimit === null ? "未读取" : `${capacity.core_warning_threshold_percent}% 预警线 · ${nearLimit.length ? `${nearLimit.length} 张表接近上限` : "无临近上限的表；已触顶见上项"}`],
+    ...(nearLimit || []).map(row => [`临近上限：${row.table}`, `${formatInteger(row.count)} / ${formatInteger(row.limit)} 行 · 剩余 ${formatInteger(row.remaining)} 行`]),
     ["生命周期策略盘点", coverage ? `现有清理规则 ${formatInteger(coverage.implemented_retention_objects)} 项 / 领域协议 ${formatInteger(coverage.documented_domain_objects)} 项 / 保留基线 ${formatInteger(coverage.preservation_only_objects)} 项 / 待审 ${formatInteger(coverage.unreviewed_objects)} 项` : "暂未取得，不按零项处理"],
     ["策略覆盖说明", "盘点仅供维护参考；未审对象保持保留，不新增删除权限，也不阻断正常认知"],
     ["结构清单比对", ({matches_baseline:"与表清单基线一致；不代表完整结构检查或全部保留策略已审核",mismatch:"发现新增或缺失对象，请查看完整性记录",baseline_unavailable:"结构基线暂不可验证"}[drift?.status] || "暂未取得")],
@@ -2178,7 +2199,7 @@ document.addEventListener("visibilitychange", () => { if (document.hidden) stopR
 $("#refresh-project-recovery").addEventListener("click", () => { void loadProjectExecutionRecovery().catch(() => {}); });
 $("#project-recovery-list").addEventListener("click", releaseProjectExecutionReview);
 $("#logout").addEventListener("click", logout); $("#refresh-admin").addEventListener("click", loadAll); $("#check-upgrade-version").addEventListener("click", checkUpgradeVersion); $("#start-upgrade").addEventListener("click", requestUpgradeConfirmation); $("#confirm-upgrade").addEventListener("click", confirmUpgrade); $("#refresh-observability").addEventListener("click", () => { void loadOverview().catch((error) => setStatus("#global-status", errorText(error), true)); }); $("#refresh-provider-health").addEventListener("click", () => { void loadProviderHealth().catch((error) => setStatus("#provider-health-status", errorText(error), true)); }); $("#refresh-retention").addEventListener("click", () => { void loadRetention().catch((error) => setStatus("#retention-status", errorText(error), true)); }); $("#run-retention").addEventListener("click", () => { void runRetention(); }); $("#refresh-mailbox").addEventListener("click", loadMailbox); $("#refresh-models").addEventListener("click", loadModels); $("#refresh-search-providers").addEventListener("click", loadSearchProviders); $("#refresh-capabilities").addEventListener("click", loadCapabilities); $("#refresh-runtime").addEventListener("click", loadRuntime); document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => showSection(button.dataset.section)));
-$("[data-section-panel=overview]").addEventListener("click", (event) => { const button = event.target.closest("[data-setup-go]"); if (button) showSection(button.dataset.setupGo); });
+$("[data-section-panel=overview]").addEventListener("click", handleOverviewNavigation);
 $("#refresh-wallet-audits").addEventListener("click", () => { void loadWalletAudits().catch(() => {}); });
 $("#refresh-migration").addEventListener("click", () => {
   const form = $("#migration-policy-form");

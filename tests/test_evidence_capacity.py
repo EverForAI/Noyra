@@ -53,6 +53,41 @@ def test_evidence_limit_preserves_idempotency_and_accounting(
     assert ledger.get_call(call.call_id).status == "failed"
 
 
+def test_core_capacity_warning_uses_effective_per_table_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NOYRA_EVIDENCE_MAX_ROWS_PER_TABLE", "5")
+    subject = "Noyra-capacity-warning"
+    database = Database(tmp_path / "noyra.sqlite3")
+    IdentityStore(database).ensure(subject, content_hash(subject))
+    # Exercise reporting on synthetic counters without manufacturing ledger history.
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE route_evidence_row_counts SET row_count=8 "
+            "WHERE subject_id=? AND table_name='waiting_cognitive_task_revisions'",
+            (subject,),
+        )
+        connection.execute(
+            "UPDATE evidence_row_counts SET row_count=4 "
+            "WHERE subject_id=? AND table_name='embedding_usage_entries'",
+            (subject,),
+        )
+    retention = RetentionManager(database)
+    status = retention.evidence_capacity(subject)
+    assert status["blocked"] is False
+    assert status["core_warning_threshold_percent"] == 80
+    assert status["core_near_limit"] == [
+        {"table": "waiting_cognitive_task_revisions", "count": 8, "limit": 10, "remaining": 2}
+    ]
+
+    # A lowered cap must move the table to the blocker view, not show negative headroom.
+    monkeypatch.setenv("NOYRA_EVIDENCE_MAX_ROWS_PER_TABLE", "3")
+    status = retention.evidence_capacity(subject)
+    assert status["blocks_cognition"] is True
+    assert "waiting_cognitive_task_revisions" in status["blocking_tables"]
+    assert status["core_near_limit"] == []
+
+
 def test_action_limit_still_allows_completion_and_duplicate_lookup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

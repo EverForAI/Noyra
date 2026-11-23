@@ -835,6 +835,40 @@ test("embedding-only exhaustion shows a risk, not a cognition blocker", () => {
   assert.doesNotMatch(html, /data-priority="blocker"/);
 });
 
+test("core capacity warnings show headroom without reporting a blocker", () => {
+  const { sandbox, nodes } = observationContext();
+  const capacity = {
+    available: true, core_warning_threshold_percent: 80,
+    core_near_limit: [{table:"model_calls", count:80, limit:100, remaining:20}],
+  };
+  const data = {
+    format: "noyra-runtime-observation/v1", database_observation: "ok",
+    cognition: {enabled:true}, attention: {},
+    autonomy: {status:"running", reason_code:"running", blockers:[], evidence_capacity:capacity},
+  };
+  sandbox.renderOverviewAttention(data);
+  const html = nodes.get("#overview-attention").innerHTML;
+  assert.match(html, /data-priority="risk"/);
+  assert.match(html, /80% 预警线：model_calls 剩余 20 行/);
+  assert.match(html, /data-setup-go="retention"/);
+  assert.doesNotMatch(html, /data-priority="blocker"/);
+
+  const details = sandbox.$("#overview-retention");
+  let focused = false;
+  details.open = false;
+  details.querySelector = (selector) => {
+    assert.equal(selector, "summary");
+    return {focus: () => { focused = true; }};
+  };
+  sandbox.handleOverviewNavigation({target:{closest:()=>({dataset:{setupGo:"retention"}})}});
+  assert.equal(details.open, true);
+  assert.equal(focused, true);
+
+  capacity.available = false;
+  sandbox.renderOverviewAttention(data);
+  assert.doesNotMatch(nodes.get("#overview-attention").innerHTML, /容量接近上限/);
+});
+
 test("runtime overview unavailable is not zero cost, current health or a reason to reset data", () => {
   const { sandbox, nodes } = observationContext();
   sandbox.renderRuntimeObservation({database_observation:"unavailable",resources:{},cognition:{}},null);
@@ -1173,6 +1207,22 @@ test("retention distinguishes structural baseline from advisory preservation cov
   html=nodes.get("#retention-summary").innerHTML;
   assert.match(html,/暂未取得，不按零项处理/);
   assert.doesNotMatch(html,/待审 0 项/);
+});
+
+test("retention displays actual per-table limits and distinguishes missing capacity", () => {
+  const { sandbox, nodes } = context();
+  sandbox.$("#retention-settings-form").querySelectorAll=()=>[];
+  vm.runInContext(functionsBetween("function renderRetention(", "async function loadRetention("),sandbox);
+  sandbox.renderRetention({settings:{revision:0},evidence_capacity:{
+    blocked:false, core_warning_threshold_percent:80,
+    core_near_limit:[{table:"waiting_cognitive_task_revisions", count:8, limit:10, remaining:2}],
+  }});
+  assert.match(nodes.get("#retention-summary").innerHTML,/临近上限：waiting_cognitive_task_revisions/);
+  assert.match(nodes.get("#retention-summary").innerHTML,/8 \/ 10 行 · 剩余 2 行/);
+  sandbox.renderRetention({settings:{revision:0},evidence_capacity:{blocked:false}});
+  assert.deepEqual(JSON.parse(nodes.get("#retention-summary").innerHTML)
+    .find(([label])=>label==="核心证据容量预警"), ["核心证据容量预警", "未读取"]);
+  assert.doesNotMatch(nodes.get("#retention-summary").innerHTML,/剩余 2 行/);
 });
 
 

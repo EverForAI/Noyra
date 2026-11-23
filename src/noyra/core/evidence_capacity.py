@@ -12,6 +12,7 @@ from .evidence_schema import MAX_ROUTE_FAILOVERS, TABLES_V80, TABLES_V92
 
 EVIDENCE_TABLES = TABLES_V92
 DEFAULT_EVIDENCE_ROWS = 250_000
+_CORE_WARNING_PERCENT = 80
 _EMBEDDING_EVIDENCE_TABLES = {"embedding_usage_entries", "embedding_circuit_transitions"}
 
 # Persistent idempotency and causal evidence is deliberately retained. The
@@ -60,8 +61,7 @@ def evidence_row_limit(environ: Mapping[str, str] | None = None) -> int:
     return limit
 
 
-def _limits() -> dict[str, int]:
-    limit = evidence_row_limit()
+def _limits(limit: int) -> dict[str, int]:
     # Initial circuit + probe + terminal/recovery transitions are reserved by
     # usage admission. Completion must never be blocked at the capacity limit.
     multipliers = {
@@ -122,7 +122,7 @@ def require_evidence_capacity(connection: Any, subject_id: str, table: str) -> N
     """Call inside the writer transaction, after any idempotent replay lookup."""
     if table not in EVIDENCE_TABLES:
         raise ValueError("unknown evidence table")
-    counts, limits = evidence_counts(connection, subject_id), _limits()
+    counts, limits = evidence_counts(connection, subject_id), _limits(evidence_row_limit())
     protected = {table} | {
         name for name, (source, _) in EVIDENCE_LIFECYCLE.items() if source == table
     }
@@ -131,12 +131,21 @@ def require_evidence_capacity(connection: Any, subject_id: str, table: str) -> N
 
 
 def evidence_capacity_status(connection: sqlite3.Connection, subject_id: str) -> dict[str, Any]:
-    counts, limits = evidence_counts(connection, subject_id), _limits()
+    limit_per_table = evidence_row_limit()
+    counts, limits = evidence_counts(connection, subject_id), _limits(limit_per_table)
     blocking_tables = {table for table, count in counts.items() if count >= limits[table]}
+    core_near_limit = [
+        {"table": table, "count": count, "limit": limits[table], "remaining": limits[table] - count}
+        for table, count in sorted(counts.items())
+        if table not in _EMBEDDING_EVIDENCE_TABLES
+        and _CORE_WARNING_PERCENT * limits[table] <= 100 * count < 100 * limits[table]
+    ]
     return {
-        "limit_per_table": evidence_row_limit(),
+        "limit_per_table": limit_per_table,
         "limits": limits,
         "counts": counts,
+        "core_warning_threshold_percent": _CORE_WARNING_PERCENT,
+        "core_near_limit": core_near_limit,
         "blocked": bool(blocking_tables),
         "blocking_tables": sorted(blocking_tables),
         # Only this pair has a separate writer and an existing non-vector fallback.

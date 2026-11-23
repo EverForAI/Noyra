@@ -818,14 +818,36 @@ def test_admin_runtime_summary_reports_capacity_and_storage_blockers_read_only(
 
     try:
         server.start()
-        monkeypatch.setenv("NOYRA_EVIDENCE_MAX_ROWS_PER_TABLE", "1")
-        ModelLedger(kernel.database).prepare_call(
-            subject, "provider", "model", "fixture", content_hash("request"), "one"
-        )
+        monkeypatch.setenv("NOYRA_EVIDENCE_MAX_ROWS_PER_TABLE", "5")
+        ledger = ModelLedger(kernel.database)
+
+        def admit_call(number: int) -> None:
+            ledger.prepare_call(
+                subject, "provider", "model", "fixture", content_hash("request"), str(number)
+            )
+
+        for number in range(3):
+            admit_call(number)
+        assert observe()["autonomy"]["evidence_capacity"]["core_near_limit"] == []
+
+        admit_call(3)
+        before = persisted_state()
+        warning = observe()
+        assert warning["autonomy"]["evidence_capacity"]["core_warning_threshold_percent"] == 80
+        assert warning["autonomy"]["evidence_capacity"]["core_near_limit"] == [
+            {"table": "model_calls", "count": 4, "limit": 5, "remaining": 1}
+        ]
+        assert warning["autonomy"]["evidence_capacity"]["blocks_cognition"] is False
+        assert "evidence_capacity" not in warning["autonomy"]["blockers"]
+        assert persisted_state() == before
+
+        # The warning did not change admission. The next row can reach the limit.
+        admit_call(4)
         before = persisted_state()
         capacity = observe()
         assert capacity["autonomy"]["reason_code"] == "evidence_capacity"
         assert "evidence_capacity" in capacity["autonomy"]["blockers"]
+        assert capacity["autonomy"]["evidence_capacity"]["core_near_limit"] == []
         assert persisted_state() == before
 
         with patch(
@@ -836,6 +858,15 @@ def test_admin_runtime_summary_reports_capacity_and_storage_blockers_read_only(
         assert storage["autonomy"]["reason_code"] == "storage_pressure"
         assert "storage_pressure" in storage["autonomy"]["blockers"]
         assert "evidence_capacity" in storage["autonomy"]["blockers"]
+        assert persisted_state() == before
+
+        with patch(
+            "noyra.core.runtime_observation.evidence_capacity_status",
+            side_effect=sqlite3.OperationalError("counter read failed"),
+        ):
+            missing_capacity = observe()["autonomy"]
+        assert missing_capacity["reason_code"] == "evidence_capacity_unavailable"
+        assert missing_capacity["evidence_capacity"]["core_near_limit"] is None
         assert persisted_state() == before
     finally:
         server.close()
