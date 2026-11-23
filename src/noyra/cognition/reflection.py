@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 from noyra.core.database import Database
@@ -10,6 +11,7 @@ from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.events import EventStore
 from noyra.core.payload_codec import decompress_text
 from noyra.core.private_sources import private_input_scope
+from noyra.core.scheduling_clock import CooldownClock, aware_time
 from noyra.core.types import canonical_json, content_hash, utc_now
 from noyra.mind.goal import ALLOWED_GOAL_TRANSITIONS
 from noyra.model import ModelGateway, ModelMessage
@@ -21,8 +23,14 @@ from noyra.model.errors import (
 )
 from noyra.model.request_identity import business_request_key
 from noyra.sleep import SleepReflectionPlan, SleepRunRecord
+from noyra.sleep.errors import SleepReflectionDeferred
 
 from .settings import CognitionSettings
+
+_MODEL_WAIT_LIMIT = timedelta(minutes=10)
+_MODEL_UNAVAILABLE_CODES = frozenset(
+    {"deep_pool_unavailable", "deep_pool_waiting", "model_capability_probe_required"}
+)
 
 
 class ReflectionCognitionPending(RuntimeError):
@@ -64,6 +72,7 @@ class SleepReflectionCognition:
         self.settings = settings
         self.clock = clock
         self.events = EventStore(database)
+        self._model_wait_clock = CooldownClock(capacity=1)
 
     async def propose(self, run: SleepRunRecord) -> SleepReflectionPlan:
         if run.subject_id != self.subject_id or run.status != "reflective_sleep":
@@ -92,6 +101,16 @@ class SleepReflectionCognition:
         except (ProviderCallError, StructuredOutputError, ModelCallStateError) as error:
             if self._call_count(purpose) >= self.settings.max_sleep_model_calls_per_run:
                 return self._fallback(context, "remote reflection model unavailable")
+            if (
+                isinstance(error, ProviderCallError)
+                and not error.outcome_unknown
+                and error.code in _MODEL_UNAVAILABLE_CODES
+            ):
+                if self._model_wait_elapsed(run):
+                    return self._fallback(context, "deep model pool unavailable after waiting")
+                raise SleepReflectionDeferred(
+                    "deep model pool is not ready for reflection"
+                ) from error
             raise ReflectionCognitionPending(
                 "remote reflection model has no usable proposal"
             ) from error
@@ -107,6 +126,17 @@ class SleepReflectionCognition:
                 "reflection proposal did not satisfy local constraints"
             ) from error
         return result.output
+
+    def _model_wait_elapsed(self, run: SleepRunRecord) -> bool:
+        now = aware_time(self.clock())
+        # The phase's persisted start bounds the wait across ordinary restarts.
+        elapsed = max(timedelta(0), now - aware_time(run.updated_at))
+        remaining = _MODEL_WAIT_LIMIT - elapsed
+        if run.wake_after is not None:
+            remaining = min(remaining, aware_time(run.wake_after) - now)
+        return self._model_wait_clock.ready(
+            run.sleep_id, str(run.version), remaining.total_seconds()
+        )
 
     def _context(self, run: SleepRunRecord) -> ReflectionContext:
         lower_bound = self._window_start(run)
@@ -605,8 +635,8 @@ class SleepReflectionCognition:
         return SleepReflectionPlan(
             summary=(
                 "Bounded fallback reflection: "
-                f"reviewed {context.event_count} events and "
-                f"{context.interaction_count} interactions; "
+                f"{context.event_count} events and {context.interaction_count} interactions "
+                "were available; "
                 f"{reason}. No memory, belief, goal, retry, or personality revision was committed."
             ),
             facts=(

@@ -734,10 +734,75 @@ for (const [reason, text] of [
   });
 }
 
+test("autonomy progress explanation keeps planned sleep distinct from blockers", () => {
+  const { sandbox } = observationContext();
+  for (const [reason, text] of [
+    ["planned_sleep", "正常生命周期"],
+    ["budget_wait", "预算耗尽后的计划休息"],
+    ["storage_pressure", "存储压力阻止"],
+    ["evidence_capacity", "必要证据容量"],
+    ["safety_quarantine", "完整性安全隔离"],
+    ["manual_pause", "人工暂停"],
+    ["tick_stalled", "没有确认的循环进展"],
+    ["sleep_evidence_unavailable", "缺少匹配的休眠记录"],
+  ]) {
+    const explanation = sandbox.runtimeExplanation({
+      database_observation: "ok",
+      autonomy: { reason_code: reason },
+      loop: { reason_code: "recent_success" },
+    });
+    assert.ok(explanation.join(" ").includes(text), reason);
+  }
+});
+
+test("planned sleep stays informational while concrete autonomy blockers alert", () => {
+  const { sandbox, nodes } = observationContext();
+  sandbox.renderOverviewAttention({
+    format: "noyra-runtime-observation/v1",
+    database_observation: "ok",
+    cognition: { enabled: true },
+    loop: { reason_code: "resting" },
+    autonomy: { status: "planned_sleep", reason_code: "planned_sleep", blockers: [] },
+    attention: {},
+  });
+  assert.doesNotMatch(nodes.get("#overview-attention").innerHTML, /data-priority="blocker"|data-priority="risk"/);
+
+  sandbox.renderOverviewAttention({
+    format: "noyra-runtime-observation/v1",
+    database_observation: "ok",
+    cognition: { enabled: true },
+    loop: { reason_code: "resting" },
+    autonomy: {
+      status: "planned_sleep",
+      reason_code: "planned_sleep",
+      blockers: ["evidence_capacity"],
+    },
+    attention: {},
+  });
+  assert.match(nodes.get("#overview-attention").innerHTML, /必要证据容量已达上限/);
+  assert.match(nodes.get("#overview-attention").innerHTML, /data-priority="blocker"/);
+});
+
+test("missing sleep evidence is surfaced as uncertain autonomy progress", () => {
+  const { sandbox, nodes } = observationContext();
+  sandbox.renderOverviewAttention({
+    format: "noyra-runtime-observation/v1",
+    database_observation: "ok",
+    cognition: { enabled: true },
+    autonomy: {
+      status: "unknown",
+      reason_code: "sleep_evidence_unavailable",
+      blockers: [],
+    },
+    attention: {},
+  });
+  assert.match(nodes.get("#overview-attention").innerHTML, /缺少匹配的休眠记录/);
+  assert.match(nodes.get("#overview-attention").innerHTML, /data-priority="risk"/);
+});
 test("runtime overview uses bounded sample money exactly and explains missing evidence", () => {
   const { sandbox, nodes } = observationContext();
   sandbox.renderRuntimeObservation({format:"noyra-runtime-observation/v1",database_observation:"ok",
-    cognition:{enabled:true},lifecycle:"active",loop:{reason_code:"recent_success",consecutive_failures:0},
+    cognition:{enabled:true},lifecycle:"active",autonomy:{status:"running",reason_code:"running",blockers:[]},loop:{reason_code:"recent_success",consecutive_failures:0},
     resources:{rss_bytes:1048576,data_free_bytes:null,database_bytes:4096,wal_bytes:0},
     model_sample:{call_limit:100,calls:100,attempts:500,calls_truncated:true,attempts_truncated:true,
       succeeded_calls:98,failed_calls:1,unknown_calls:1,known_cost_microusd:"9007199254740993",
@@ -748,7 +813,60 @@ test("runtime overview uses bounded sample money exactly and explains missing ev
   assert.ok(summary.includes("不是今日总量") && summary.includes("非供应商账单"));
   assert.ok(summary.includes("截断") && summary.includes("含排队与重试"));
   assert.ok(nodes.get("#storage-summary").innerHTML.includes("未读取"));
+  assert.ok(nodes.get("#overview-metrics").innerHTML.includes("自主运行"));
   assert.ok(nodes.get("#cognition-state").textContent.includes("连通性未由摘要验证"));
+});
+
+test("embedding-only exhaustion shows a risk, not a cognition blocker", () => {
+  const { sandbox, nodes } = observationContext();
+  sandbox.renderOverviewAttention({
+    format: "noyra-runtime-observation/v1",
+    database_observation: "ok",
+    cognition: { enabled: true },
+    autonomy: {
+      status: "running", reason_code: "running", blockers: [],
+      evidence_capacity: { blocks_embedding: true, blocks_cognition: false },
+    },
+    attention: {},
+  });
+  const html = nodes.get("#overview-attention").innerHTML;
+  assert.match(html, /向量证据容量已达上限/);
+  assert.match(html, /data-priority="risk"/);
+  assert.doesNotMatch(html, /data-priority="blocker"/);
+});
+
+test("core capacity warnings show headroom without reporting a blocker", () => {
+  const { sandbox, nodes } = observationContext();
+  const capacity = {
+    available: true, core_warning_threshold_percent: 80,
+    core_near_limit: [{table:"model_calls", count:80, limit:100, remaining:20}],
+  };
+  const data = {
+    format: "noyra-runtime-observation/v1", database_observation: "ok",
+    cognition: {enabled:true}, attention: {},
+    autonomy: {status:"running", reason_code:"running", blockers:[], evidence_capacity:capacity},
+  };
+  sandbox.renderOverviewAttention(data);
+  const html = nodes.get("#overview-attention").innerHTML;
+  assert.match(html, /data-priority="risk"/);
+  assert.match(html, /80% 预警线：model_calls 剩余 20 行/);
+  assert.match(html, /data-setup-go="retention"/);
+  assert.doesNotMatch(html, /data-priority="blocker"/);
+
+  const details = sandbox.$("#overview-retention");
+  let focused = false;
+  details.open = false;
+  details.querySelector = (selector) => {
+    assert.equal(selector, "summary");
+    return {focus: () => { focused = true; }};
+  };
+  sandbox.handleOverviewNavigation({target:{closest:()=>({dataset:{setupGo:"retention"}})}});
+  assert.equal(details.open, true);
+  assert.equal(focused, true);
+
+  capacity.available = false;
+  sandbox.renderOverviewAttention(data);
+  assert.doesNotMatch(nodes.get("#overview-attention").innerHTML, /容量接近上限/);
 });
 
 test("runtime overview unavailable is not zero cost, current health or a reason to reset data", () => {
@@ -819,8 +937,7 @@ test("saved model test errors separate lifecycle, authorization, inactive resour
     assert.ok(text.includes(word),code);
     assert.ok(!text.includes("信息不完整"),code);
   }
-  assert.ok(source.includes("输出上限为 64 Token"));
-  assert.ok(source.includes("最多向该资源发送一次请求"));
+  assert.ok(source.includes("受授权与预算限制，最多发送一次请求"));
 });
 
 test("runtime samples explain resource groups, terminal waits and unknown billing evidence", () => {
@@ -1090,6 +1207,22 @@ test("retention distinguishes structural baseline from advisory preservation cov
   html=nodes.get("#retention-summary").innerHTML;
   assert.match(html,/暂未取得，不按零项处理/);
   assert.doesNotMatch(html,/待审 0 项/);
+});
+
+test("retention displays actual per-table limits and distinguishes missing capacity", () => {
+  const { sandbox, nodes } = context();
+  sandbox.$("#retention-settings-form").querySelectorAll=()=>[];
+  vm.runInContext(functionsBetween("function renderRetention(", "async function loadRetention("),sandbox);
+  sandbox.renderRetention({settings:{revision:0},evidence_capacity:{
+    blocked:false, core_warning_threshold_percent:80,
+    core_near_limit:[{table:"waiting_cognitive_task_revisions", count:8, limit:10, remaining:2}],
+  }});
+  assert.match(nodes.get("#retention-summary").innerHTML,/临近上限：waiting_cognitive_task_revisions/);
+  assert.match(nodes.get("#retention-summary").innerHTML,/8 \/ 10 行 · 剩余 2 行/);
+  sandbox.renderRetention({settings:{revision:0},evidence_capacity:{blocked:false}});
+  assert.deepEqual(JSON.parse(nodes.get("#retention-summary").innerHTML)
+    .find(([label])=>label==="核心证据容量预警"), ["核心证据容量预警", "未读取"]);
+  assert.doesNotMatch(nodes.get("#retention-summary").innerHTML,/剩余 2 行/);
 });
 
 

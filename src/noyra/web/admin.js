@@ -716,6 +716,35 @@ function observationBytes(value) {
 }
 
 function runtimeExplanation(observation) {
+  const autonomyReasons={
+    running:["自主循环近期有完成记录","这表示循环最近完成过一次，不证明每个模型、消息或外部任务都成功。","logs"],
+    planned_sleep:["主体处于计划休息阶段","这是正常生命周期，不代表服务故障。查看休息原因及唤醒安排。","logs"],
+    budget_wait:["主体正在等待预算唤醒","预算耗尽后的计划休息仍在进行；不会因 HTTP 在线就提前发送模型请求。","logs"],
+    waking:["主体正在执行唤醒阶段","等待唤醒状态完成后再评估自主循环。","logs"],
+    storage_pressure:["存储压力阻止新增认知","维护已按存储安全边界暂停新认知；核对可用空间和存储配额。","runtime"],
+    evidence_capacity:["必要证据容量已达上限","为保留账本和幂等证据，新增认知已停止；完成备份后扩容或调整上限，不要删除历史。","runtime"],
+    safety_quarantine:["完整性安全隔离生效","自主运行已被隔离；先核对完整性结果，不要尝试自动恢复或清除证据。","runtime"],
+    manual_pause:["主体处于人工暂停状态","暂停不会因服务重启或健康检查而自动解除。","runtime"],
+    migration_fenced:["运行时处于迁移隔离","迁移隔离生效期间自主工作不会继续；按迁移流程完成切换或回滚。","migration"],
+    runtime_draining:["服务正在关闭","运行锁和旧请求仍按排空流程处理。","runtime"],
+    admission_closed:["运行准入已关闭","新自主工作不会开始；核对运行防护状态。","runtime"],
+    loop_cooldown:["自主循环正在错误冷却期","循环将在退避时间后重试；查看失败诊断，不要重置冷却证据。","logs"],
+    loop_recovering:["自主循环正在进行恢复检查","恢复结果尚未确认。","logs"],
+    tick_unconfirmed:["循环工作尚未确认完成","可能有长任务或未结算工作；结合运行记录判断，不要按成功处理。","logs"],
+    tick_stalled:["近期没有确认的循环进展","核对运行日志、工作线程和任务状态；不自动重放结果未知的操作。","logs"],
+    cognition_disabled:["自主认知未启用","HTTP 服务可用，但当前配置未启用自主认知。","models"],
+    starting:["自主循环正在等待首次观测","启动后的第一次循环尚未完成。","logs"],
+    stopped:["主体生命周期已停止","HTTP 可访问不代表主体正在运行；核对生命周期与运行防护。","runtime"],
+    evidence_capacity_unavailable:["无法读取必要证据容量状态","不把未读取解释为容量充足；请核对数据库和容量计数。","runtime"],
+    sleep_evidence_unavailable:["休眠状态缺少匹配的休眠记录","生命周期显示正在休眠或唤醒，但当前数据库快照中没有匹配证据；暂不能确认这是计划等待。","logs"],
+    observation_unavailable:["运行观测暂不可用","查询失败不等于零用量或正常运行；保留数据并重试读取。","runtime"],
+    unknown:["自主循环状态未知","当前证据不足以判断是否正在推进。","logs"],
+  };
+  if (observation?.autonomy) {
+    const explanation=autonomyReasons[observation.autonomy.reason_code] || autonomyReasons.unknown;
+    const wake=observation.autonomy.next_action_at ? ` 计划下次动作：${formatTimestamp(observation.autonomy.next_action_at)}。` : "";
+    return [explanation[0], explanation[1] + wake, explanation[2]];
+  }
   const reasons={
     recent_success:["近期循环成功","这证明最近一次循环完成，不保证外部模型、付款或每条消息已经处理。","logs"],
     paused:["主体已暂停","暂停不是服务崩溃。请先在运行防护中核对暂停原因，不要反复重启。","runtime"],
@@ -734,7 +763,9 @@ function renderRuntimeObservation(observation,state) {
   const resources=observation.resources || {}, sample=observation.model_sample;
   const explanation=runtimeExplanation(observation);
   $("#overview-observation").innerHTML=`<strong>${esc(explanation[0])}</strong><p>${esc(explanation[1])}</p><p class="muted">下次重试：${esc(observation.loop?.next_retry_at ? formatTimestamp(observation.loop.next_retry_at) : "未安排或无记录")} · 观测于 ${esc(formatTimestamp(observation.observed_at))}</p><button type="button" data-setup-go="${esc(explanation[2])}">查看判断依据</button>`;
-  $("#overview-metrics").innerHTML=[["当前阶段",lifecycleLabels[observation.lifecycle || state?.lifecycle?.state] || "未读取"],["最近循环成功",formatTimestamp(observation.loop?.last_successful_tick_at)],["连续循环失败",observation.loop?.consecutive_failures ?? "未读取"],["模型样本中的未知调用",sample?.unknown_calls ?? "未读取"]].map(([label,value])=>`<div class="metric"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join("");
+  const autonomyLabels={running:"近期完成",planned_sleep:"计划休息",waiting:"计划等待",waking:"正在唤醒",blocked:"运行受阻",paused:"人工暂停",stopped:"已停止",disabled:"未启用",unconfirmed:"等待确认",stalled:"无近期进展",starting:"启动中",stopping:"正在关闭",unknown:"未知"};
+  const autonomy=observation.autonomy;
+  $("#overview-metrics").innerHTML=[["当前阶段",lifecycleLabels[observation.lifecycle || state?.lifecycle?.state] || "未读取"],["自主运行",autonomyLabels[autonomy?.status] || "未读取"],["最近循环成功",formatTimestamp(observation.loop?.last_successful_tick_at)],["连续循环失败",observation.loop?.consecutive_failures ?? "未读取"],["模型样本中的未知调用",sample?.unknown_calls ?? "未读取"]].map(([label,value])=>`<div class="metric"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join("");
   $("#cognition-state").textContent=observation.cognition?.enabled===true ? "模块已启用，连通性未由摘要验证" : observation.cognition?.enabled===false ? "认知未启用" : "状态未提供";
   const latency=value=>value==null ? "无有效记录" : `${formatInteger(value)} ms`;
   const projectWaitLabels = { review_due: "待复核", review_committed: "复核已提交", subject_wait: "自主选择等待", waiting_daily_quota: "等待复核日额度", waiting_budget: "等待资源额度", review_backoff: "复核退避", review_retry_limit: "复核恢复次数已达上限", awaiting_reconciliation: "等待结果对账", waiting_dependencies: "等待关联证据", help_public_summary_requires_review: "求助摘要未通过公开安全检查，未投递", help_pending_route: "求助已记录，尚无投递通道", help_delivery_pending: "求助待投递或投递失败，尚未确认送达", help_delivery_unknown: "求助投递结果未知，等待对账", help_waiting_reply: "求助已确认送达，等待回复" };
@@ -777,12 +808,42 @@ function renderRuntimeObservation(observation,state) {
   ]);
 }
 
+function handleOverviewNavigation(event) {
+  const button = event.target.closest("[data-setup-go]");
+  if (!button) return;
+  if (button.dataset.setupGo === "retention") {
+    const details = $("#overview-retention");
+    details.open = true;
+    details.querySelector("summary").focus();
+    return;
+  }
+  showSection(button.dataset.setupGo);
+}
+
 function renderOverviewAttention(data, failures=[]) {
   const rows=failures.map(row=>({priority:"risk",title:`${row.label}读取失败`,detail:errorText(row.error),section:"overview"}));
   if(data){
     const health=data.operator_health || {};const cognition=data.cognition || {};
     const add=(priority,title,detail,section)=>rows.push({priority,title,detail,section});
-    if(data.storage?.cognition_allowed===false)add("blocker","认知写入已暂停","检查磁盘或证据容量","runtime");
+    const autonomy=data.autonomy;
+    const autonomyBlockers=new Set(autonomy?.blockers || []);
+    if(autonomyBlockers.has("storage_pressure"))add("blocker","存储压力阻止自主认知","核对磁盘可用空间与存储配额","runtime");
+    if(autonomyBlockers.has("evidence_capacity"))add("blocker","必要证据容量已达上限","完成备份后扩容或调整上限；不要删除必要历史","retention");
+    else if(autonomy?.evidence_capacity?.blocks_embedding===true)add("risk","向量证据容量已达上限","新向量请求暂停，记忆检索使用本地兜底；此项不阻断自主认知循环。","runtime");
+    const capacity=autonomy?.evidence_capacity;
+    if(capacity?.available===true && Array.isArray(capacity.core_near_limit) && capacity.core_near_limit.length){
+      const warnings=capacity.core_near_limit;
+      const preview=warnings.slice(0,2).map(row=>`${row.table} 剩余 ${formatInteger(row.remaining)} 行`).join("；");
+      add("risk","核心证据容量接近上限",`${warnings.length} 张表达到 ${capacity.core_warning_threshold_percent}% 预警线：${preview}${warnings.length>2 ? "；另有其他表" : ""}。`,"retention");
+    }
+    if(autonomyBlockers.has("safety_quarantine"))add("blocker","完整性安全隔离生效","核对完整性证据后再执行受控恢复","runtime");
+    if(autonomyBlockers.has("migration_fenced"))add("blocker","运行时处于迁移隔离","按迁移流程完成切换或回滚","migration");
+    if(!autonomy && data.storage?.cognition_allowed===false)add("blocker","认知写入已暂停","检查磁盘或证据容量","runtime");
+    if(["tick_stalled","tick_unconfirmed","evidence_capacity_unavailable","sleep_evidence_unavailable","observation_unavailable","migration_fenced","admission_closed"].includes(autonomy?.reason_code)){
+      const why=runtimeExplanation(data);add("risk",why[0],why[1],why[2]);
+    }
+    if(autonomy?.reason_code==="budget_wait")add("reminder","主体正在等待预算唤醒",autonomy.next_action_at ? `计划下次动作：${formatTimestamp(autonomy.next_action_at)}` : "预算恢复由计划唤醒流程重新评估","logs");
+    if(autonomy?.reason_code==="manual_pause")add("reminder","主体处于人工暂停状态","只在确认暂停原因和授权后恢复","runtime");
     if(data.integrity?.pause_pending || (data.integrity?.p0 || 0)>0)add("blocker","完整性保护要求处理","查看检查结果后再恢复相关工作","runtime");
     else if(data.integrity && data.integrity.status!=="ok")add("risk","完整性检查未通过或未完成",`P0 ${data.integrity.p0 ?? "未知"} · P1 ${data.integrity.p1 ?? "未知"}`,"runtime");
     if(health.at_rest && health.at_rest.ready===false)add(health.at_rest.enforced===false ? "risk":"blocker","加密存储未就绪","检查数据卷与访问权限","runtime");
@@ -791,7 +852,7 @@ function renderOverviewAttention(data, failures=[]) {
     else for(const pool of ["economy","deep"]){const info=cognition.model_pools?.[pool];if(info?.available_key_count===0)add("risk",`${modelPoolLabels[pool]}暂无可选密钥`,"配置存在不代表供应商请求已成功","models");}
     if(data.format==="noyra-runtime-observation/v1"){
       const why=runtimeExplanation(data);
-      if(data.database_observation!=="ok" || ["tick_not_recent","insufficient_evidence"].includes(data.loop?.reason_code))add("risk",why[0],why[1],why[2]);
+      if(!autonomy && (data.database_observation!=="ok" || ["tick_not_recent","insufficient_evidence"].includes(data.loop?.reason_code)))add("risk",why[0],why[1],why[2]);
       for(const [key,title,section] of [["unknown_actions","有外部行动结果未知","logs"],["unknown_model_calls","有模型调用结果未知","logs"],["unknown_payments","有付款结果未知","wallet"],["unresolved_deliveries","有外部投递需要核对","channels"]]){
         const item=data.attention?.[key];
         if(item?.count)add("risk",title,`${item.count}${item.more ? "+":""} 项；保留结果与费用证据，先核对，不要盲目重试。`,section);
@@ -1379,6 +1440,7 @@ function renderRetention(payload) {
   const backupPlan = plan.backup || {};
   const backupSummary = backupPlan.backup_summary || {};
   const capacity = payload?.evidence_capacity;
+  const nearLimit = Array.isArray(capacity?.core_near_limit) ? capacity.core_near_limit : null;
   const lifecycle = payload?.lifecycle_diagnostics;
   const coverage = lifecycle?.policy_coverage;
   const drift = lifecycle?.structural_drift;
@@ -1403,7 +1465,14 @@ function renderRetention(payload) {
     ["已验证恢复点", `${formatInteger(backupSummary.verified_recovery_points_after_plan)} 个 · ${backupSummary.recovery_points_status || "未知"}`],
     ["备份占用 / 水位", `${formatInteger(backupSummary.total_bytes_after_plan)} 字节 · ${backupSummary.space_status || "未知"}`],
     ["未验证备份关注", formatInteger((backupPlan.backup_attention || []).length)],
-    ["证据容量", capacity?.blocked ? "已达上限，暂停新增认知工作" : "可用"],
+    ["证据容量", capacity?.blocked === true
+      ? capacity.blocks_cognition === false && capacity.blocks_embedding === true
+        ? "向量证据已达上限，暂停新向量请求；不因此暂停认知循环"
+        : "必要证据已达上限，暂停新增认知工作"
+      : capacity?.blocked === false ? "未达上限" : "未读取"],
+    ["触顶证据表", capacity?.blocking_tables?.length ? capacity.blocking_tables.join("、") : capacity?.blocked === false ? "无" : "未读取"],
+    ["核心证据容量预警", nearLimit === null ? "未读取" : `${capacity.core_warning_threshold_percent}% 预警线 · ${nearLimit.length ? `${nearLimit.length} 张表接近上限` : "无临近上限的表；已触顶见上项"}`],
+    ...(nearLimit || []).map(row => [`临近上限：${row.table}`, `${formatInteger(row.count)} / ${formatInteger(row.limit)} 行 · 剩余 ${formatInteger(row.remaining)} 行`]),
     ["生命周期策略盘点", coverage ? `现有清理规则 ${formatInteger(coverage.implemented_retention_objects)} 项 / 领域协议 ${formatInteger(coverage.documented_domain_objects)} 项 / 保留基线 ${formatInteger(coverage.preservation_only_objects)} 项 / 待审 ${formatInteger(coverage.unreviewed_objects)} 项` : "暂未取得，不按零项处理"],
     ["策略覆盖说明", "盘点仅供维护参考；未审对象保持保留，不新增删除权限，也不阻断正常认知"],
     ["结构清单比对", ({matches_baseline:"与表清单基线一致；不代表完整结构检查或全部保留策略已审核",mismatch:"发现新增或缺失对象，请查看完整性记录",baseline_unavailable:"结构基线暂不可验证"}[drift?.status] || "暂未取得")],
@@ -1874,6 +1943,20 @@ async function loadModels() {
   for (const item of rows) {
     const exactBudget = item.exact_budget || item;
     const card = Array.from($("#model-list").children).find((node) => node.dataset.resourceId === item.group_id);
+    const reasoning = item.reasoning_profile;
+    const notice = {
+      refresh_due: "思考强度待复验",
+      grace: "思考强度待复验（宽限期）",
+      expired: "能力记录已过期；首次正常调用将自动复验",
+      probe_required: "思考强度未验证，调用已阻断",
+      rejected: "供应商拒绝了此思考强度，调用已阻断",
+    }[reasoning?.effective_status];
+    if (notice && item.status === "active") {
+      const hint = document.createElement("p");
+      hint.className = "field-hint";
+      hint.textContent = notice;
+      card?.querySelector(".model-resource-identity")?.after(hint);
+    }
     const form = card?.querySelector("[data-model-budget-form]");
     if (form) {
     for (const [dimension, field] of Object.entries(limitFields)) {
@@ -2116,7 +2199,7 @@ document.addEventListener("visibilitychange", () => { if (document.hidden) stopR
 $("#refresh-project-recovery").addEventListener("click", () => { void loadProjectExecutionRecovery().catch(() => {}); });
 $("#project-recovery-list").addEventListener("click", releaseProjectExecutionReview);
 $("#logout").addEventListener("click", logout); $("#refresh-admin").addEventListener("click", loadAll); $("#check-upgrade-version").addEventListener("click", checkUpgradeVersion); $("#start-upgrade").addEventListener("click", requestUpgradeConfirmation); $("#confirm-upgrade").addEventListener("click", confirmUpgrade); $("#refresh-observability").addEventListener("click", () => { void loadOverview().catch((error) => setStatus("#global-status", errorText(error), true)); }); $("#refresh-provider-health").addEventListener("click", () => { void loadProviderHealth().catch((error) => setStatus("#provider-health-status", errorText(error), true)); }); $("#refresh-retention").addEventListener("click", () => { void loadRetention().catch((error) => setStatus("#retention-status", errorText(error), true)); }); $("#run-retention").addEventListener("click", () => { void runRetention(); }); $("#refresh-mailbox").addEventListener("click", loadMailbox); $("#refresh-models").addEventListener("click", loadModels); $("#refresh-search-providers").addEventListener("click", loadSearchProviders); $("#refresh-capabilities").addEventListener("click", loadCapabilities); $("#refresh-runtime").addEventListener("click", loadRuntime); document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => showSection(button.dataset.section)));
-$("[data-section-panel=overview]").addEventListener("click", (event) => { const button = event.target.closest("[data-setup-go]"); if (button) showSection(button.dataset.setupGo); });
+$("[data-section-panel=overview]").addEventListener("click", handleOverviewNavigation);
 $("#refresh-wallet-audits").addEventListener("click", () => { void loadWalletAudits().catch(() => {}); });
 $("#refresh-migration").addEventListener("click", () => {
   const form = $("#migration-policy-form");
@@ -2742,7 +2825,7 @@ $("#model-list").addEventListener("click", async (event) => {
   const currentAction = beginAdminAction();
   const button = event.target.closest("[data-model-action]"); if (!button) return;
   const action = button.dataset.modelAction;
-  if (action === "test" && !window.confirm("这是已保存资源的正式测试：受休眠、授权和预算限制，最多向该资源发送一次请求，输出上限为 64 Token，可能产生费用；与保存前的草稿探测不同。继续吗？")) return;
+  if (action === "test" && !window.confirm("测试使用已保存的密钥和配置，受授权与预算限制，最多发送一次请求，可能产生费用。成功后会更新所选思考强度的验证记录。继续吗？")) return;
   if (action === "revoke") {
     const item = renderedModels.get(button.dataset.id);
     if (!item || !window.confirm(modelDeletionMessage(item))) return;
@@ -3092,7 +3175,9 @@ const applyReasoningProfile = (profile) => {
   else delete reasoningField.dataset.profileRevision;
   if (profile?.profile_digest) reasoningField.dataset.profileDigest = String(profile.profile_digest);
   else delete reasoningField.dataset.profileDigest;
-  const tested = Array.isArray(profile?.tested_efforts) ? profile.tested_efforts : [];
+  const tested = Array.isArray(profile?.fresh_efforts)
+    ? profile.fresh_efforts
+    : Array.isArray(profile?.tested_efforts) ? profile.tested_efforts : [];
   const selectionVerified = observed && (!select.value || tested.includes(select.value));
   reasoningField.dataset.capabilityObserved = observed ? "true" : "false";
   reasoningField.dataset.testedEfforts = JSON.stringify(tested);

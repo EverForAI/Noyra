@@ -478,8 +478,11 @@ def test_hard_deadline_returns_without_waiting_for_stalled_provider(
         gateway.close()
 
 
-def test_recall_falls_back_locally_and_failure_is_counted_as_fatigue(
+@pytest.mark.parametrize("capacity_full", [False, True])
+def test_recall_falls_back_locally_when_embedding_is_unavailable(
     embedding_database: tuple[Database, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capacity_full: bool,
 ) -> None:
     database, subject_id = embedding_database
     events = EventStore(database)
@@ -500,7 +503,9 @@ def test_recall_falls_back_locally_and_failure_is_counted_as_fatigue(
     cycle.subject_id = subject_id
     cycle.fatigue = tracker
     provider = ScriptedEmbeddingProvider(
-        (EmbeddingProviderError("provider_unavailable", usage_unknown=True),)
+        (1,)
+        if capacity_full
+        else (EmbeddingProviderError("provider_unavailable", usage_unknown=True),)
     )
     gateway = gateway_for(
         database,
@@ -525,6 +530,9 @@ def test_recall_falls_back_locally_and_failure_is_counted_as_fatigue(
         )
     store = MemoryStore(database, embedding_index=MemoryEmbeddingIndex(database, gateway))
     try:
+        if capacity_full:
+            monkeypatch.setenv("NOYRA_EVIDENCE_MAX_ROWS_PER_TABLE", "1")
+            gateway.embed(("seed the capacity limit",))
         recalls = store.recall(
             subject_id,
             "local fallback relevant memory",
@@ -533,14 +541,17 @@ def test_recall_falls_back_locally_and_failure_is_counted_as_fatigue(
         )
         assert recalls[0].memory.memory_id == memory.memory_id
         assert recalls[0].lexical_score > 0
-        assert tracker.pool_pressures(subject_id)["embedding"] == 1.0
+        # In the capacity case the only paid-attempt opportunity was the fixture seed.
+        assert provider.calls == 1
+        assert tracker.pool_pressures(subject_id)["embedding"] == (0.0 if capacity_full else 1.0)
         with database.connection() as connection:
             transition = connection.execute(
                 "SELECT reason FROM fatigue_transitions WHERE subject_id = ? "
                 "ORDER BY rowid DESC LIMIT 1",
                 (subject_id,),
             ).fetchone()
-        assert transition["reason"] == "embedding resource outcome: provider_unavailable"
+        expected = "succeeded" if capacity_full else "provider_unavailable"
+        assert transition["reason"] == f"embedding resource outcome: {expected}"
     finally:
         gateway.close()
 

@@ -141,7 +141,9 @@ class OpenAICompatibleProvider:
                     follow_redirects=False,
                     extensions={"trace": trace},
                 ) as response:
-                    return await self._parse_response(response, deadline=deadline)
+                    return await self._parse_response(
+                        response, deadline=deadline, reasoning_effort=request.reasoning_effort
+                    )
         except ProviderCallError as error:
             if error.latency_ms is None:
                 error.latency_ms = max(0, min(int((loop.time() - started) * 1000), 86_400_000))
@@ -234,7 +236,9 @@ class OpenAICompatibleProvider:
                     ),
                     follow_redirects=False,
                 ) as response:
-                    parsed = await provider._parse_response(response, deadline=deadline)
+                    parsed = await provider._parse_response(
+                        response, deadline=deadline, reasoning_effort=reasoning_effort
+                    )
             if not parsed.content.strip():
                 raise ProviderCallError(
                     "provider_response_empty", retryable=False, outcome_unknown=True
@@ -393,6 +397,7 @@ class OpenAICompatibleProvider:
         response: httpx.Response,
         *,
         deadline: float | None = None,
+        reasoning_effort: str | None = None,
     ) -> ProviderResponse:
         validate_response_headers(response, max_header_bytes=DEFAULT_MAX_HEADER_BYTES)
         if response.status_code == 429:
@@ -429,8 +434,15 @@ class OpenAICompatibleProvider:
                 status_code=response.status_code,
             )
         if response.status_code < 200 or response.status_code >= 300:
+            rejected_effort = (
+                reasoning_effort is not None
+                and response.status_code in {400, 422}
+                and await self._reasoning_parameter_rejected(response, deadline)
+            )
             raise ProviderCallError(
-                f"provider_http_{response.status_code}",
+                "provider_reasoning_effort_rejected"
+                if rejected_effort
+                else f"provider_http_{response.status_code}",
                 retryable=False,
                 outcome_unknown=False,
                 status_code=response.status_code,
@@ -485,6 +497,35 @@ class OpenAICompatibleProvider:
             usage=usage,
             finish_reason=choice.finish_reason,
             provider_request_id=request_id,
+        )
+
+    @staticmethod
+    async def _reasoning_parameter_rejected(
+        response: httpx.Response, deadline: float | None
+    ) -> bool:
+        # Only a bounded, structured, parameter-specific refusal invalidates evidence.
+        # Do not echo error bodies, which can contain provider or request details.
+        loop = asyncio.get_running_loop()
+        end = loop.time() + 0.25
+        if deadline is not None:
+            end = min(end, deadline - 0.01)
+        try:
+            body = await read_bounded_response(response, max_body_bytes=8192, deadline=end)
+            payload = json.loads(body)
+        except (ValueError, RecursionError, httpx.HTTPError):
+            return False
+        error = payload.get("error") if isinstance(payload, dict) else None
+        return (
+            isinstance(error, dict)
+            and error.get("param") == "reasoning_effort"
+            and error.get("code")
+            in (
+                "unsupported_parameter",
+                "unsupported_value",
+                "unknown_parameter",
+                "invalid_parameter",
+                "invalid_value",
+            )
         )
 
     async def aclose(self) -> None:

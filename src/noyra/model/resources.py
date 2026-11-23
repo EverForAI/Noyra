@@ -4,8 +4,10 @@ import base64
 import builtins
 import ipaddress
 import json
+import logging
 import os
 import re
+import sqlite3
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -19,7 +21,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
-from noyra.core.admission import accounting_scope
+from noyra.core.admission import OperationInvalidated, accounting_scope
 from noyra.core.at_rest import validate_private_file, validate_private_root
 from noyra.core.cognitive_waits import (
     cancel_terminal_waits,
@@ -61,7 +63,13 @@ from noyra.core.types import (
     utc_now,
 )
 
-from .capabilities import CapabilityProfileStore
+from .capabilities import (
+    CAPABILITY_EXPIRED_STATE,
+    CAPABILITY_REVALIDATION_STATES,
+    CAPABILITY_RUNTIME_STATES,
+    CapabilityProfileStore,
+    StoredCapability,
+)
 from .config import OpenAICompatibleSettings
 from .errors import (
     BudgetExhaustedError,
@@ -90,6 +98,7 @@ from .types import (
 )
 
 CognitivePool = Literal["economy", "deep"]
+_logger = logging.getLogger(__name__)
 
 # SQLite INTEGER values are signed 64-bit integers.  Python's unbounded
 # integers must be bounded before they reach either pydantic's public API or
@@ -3064,6 +3073,7 @@ class RoutedModelGateway(ModelGateway):
             groups = self._weighted_group_order(groups)
         terminal_error: Exception | None = None
         route_in_progress = False
+        expired_revalidation_attempted = False
         attempts = 0
         for group in groups:
             if attempts >= self.max_group_failovers:
@@ -3104,7 +3114,13 @@ class RoutedModelGateway(ModelGateway):
                     0,
                 )
                 try:
-                    gateway = self._gateway(group, key)
+                    gateway, capability = self._gateway_with_capability(group, key)
+                    expired_revalidation_attempted = bool(
+                        group.reasoning_effort is not None
+                        and capability is not None
+                        and capability.effort_status(group.reasoning_effort)
+                        == CAPABILITY_EXPIRED_STATE
+                    )
                 except Exception as error:
                     latency = int((time.monotonic() - started) * 1000)
                     self._record_attempt(
@@ -3113,11 +3129,16 @@ class RoutedModelGateway(ModelGateway):
                         key.key_id,
                         attempt_number,
                         "failed",
-                        type(error).__name__,
+                        error.code
+                        if isinstance(error, ProviderCallError)
+                        else type(error).__name__,
                         latency,
                     )
                     terminal_error = error
-                    if forced_state is not None:
+                    if forced_state is not None or (
+                        isinstance(error, ProviderCallError)
+                        and error.code == "model_capability_probe_required"
+                    ):
                         break
                     continue
                 settlement = ExitStack()
@@ -3177,6 +3198,24 @@ class RoutedModelGateway(ModelGateway):
                             "participant invitation has been withdrawn"
                         ) from error
                     latency = int((time.monotonic() - started) * 1000)
+                    if isinstance(error, ProviderCallError) and (
+                        error.code
+                        in {"provider_reasoning_effort_rejected", "model_capability_probe_required"}
+                    ):
+                        self._record_attempt(
+                            decision.decision_id,
+                            group.group_id,
+                            key.key_id,
+                            attempt_number,
+                            "failed",
+                            error.code,
+                            latency,
+                        )
+                        self._finish_decision(decision.decision_id, "failed", error.code)
+                        settlement.close()
+                        if error.code == "provider_reasoning_effort_rejected":
+                            self._observe_reasoning(group, capability, rejected=True)
+                        raise
                     with suppress(Exception):
                         self.provider_health.record_attempt(
                             self.subject_id,
@@ -3216,6 +3255,9 @@ class RoutedModelGateway(ModelGateway):
                         latency,
                     )
                     terminal_error = error
+                    if expired_revalidation_attempted:
+                        # One real attempt per expired route; do not rotate its keys.
+                        break
                     if forced_state is None and not self.provider_health.route_eligible(
                         self.subject_id, "model", group.group_id
                     ):
@@ -3325,10 +3367,15 @@ class RoutedModelGateway(ModelGateway):
                         result=result,
                         latency_ms=latency,
                     )
+                    settlement.close()
+                    if not result.cached:
+                        self._observe_reasoning(group, capability)
                     return result
                 finally:
                     settlement.close()
                     await self._close_gateway(gateway)
+            if expired_revalidation_attempted:
+                break
             if isinstance(terminal_error, ProviderCallError) and terminal_error.outcome_unknown:
                 break
             if forced_state is not None:
@@ -3667,7 +3714,7 @@ class RoutedModelGateway(ModelGateway):
         # A probe is one deliberate billable attempt. It must not inherit a
         # resource's normal cognition retry policy and quietly spend several
         # attempts from a single operator click.
-        gateway = self._gateway(group, key, max_attempts=1)
+        gateway, capability = self._gateway_with_capability(group, key, operator_probe=True)
         started = time.monotonic()
         purpose = f"operator_model_test:{group.group_id}"
         idempotency_key = f"{purpose}:{new_id('probe')}"
@@ -3693,7 +3740,12 @@ class RoutedModelGateway(ModelGateway):
                 ),
                 temperature=0,
             )
+            if not result.output.ok:
+                raise StructuredOutputError("model_test_output_invalid")
         except ProviderCallError as error:
+            if error.code == "provider_reasoning_effort_rejected":
+                self._observe_reasoning(group, capability, rejected=True)
+                raise
             self.resources.record_failure(
                 key.key_id,
                 getattr(error, "category", getattr(error, "code", type(error).__name__)),
@@ -3710,6 +3762,14 @@ class RoutedModelGateway(ModelGateway):
         except (BudgetExhaustedError, ModelCallStateError):
             raise
         else:
+            if not result.cached and group.reasoning_effort is not None:
+                CapabilityProfileStore(self.database).record_probe_success(
+                    subject_id,
+                    group.provider_type,
+                    group.base_url,
+                    group.model,
+                    group.reasoning_effort,
+                )
             self.resources.record_success(key.key_id, subject_id=subject_id)
             return {
                 "group_id": group.group_id,
@@ -3776,26 +3836,87 @@ class RoutedModelGateway(ModelGateway):
         *,
         max_attempts: int | None = None,
     ) -> ModelGateway:
-        reasoning_verified = False
-        if group.reasoning_effort is not None:
-            capability = CapabilityProfileStore(self.database).get(
+        return self._gateway_with_capability(group, key, max_attempts=max_attempts)[0]
+
+    def _observe_reasoning(
+        self,
+        group: CognitiveResourceGroupRecord,
+        capability: StoredCapability | None,
+        *,
+        rejected: bool = False,
+    ) -> None:
+        effort = group.reasoning_effort
+        if effort is None or (
+            not rejected
+            and (
+                capability is None
+                or capability.effort_status(effort) not in CAPABILITY_REVALIDATION_STATES
+            )
+        ):
+            return
+        # A paused or drained runtime may still settle the provider ledger, but
+        # may not publish new capability evidence from a stale operation.
+        try:
+            CapabilityProfileStore(self.database).record_runtime_observation(
+                self.subject_id,
+                group.provider_type,
+                group.base_url,
+                group.model,
+                effort,
+                rejected=rejected,
+                expected=capability,
+            )
+        except (OperationInvalidated, PermissionError):
+            return
+        except (sqlite3.Error, IntegrityError, OSError):
+            # Observation failure must not change an already-settled call.
+            _logger.warning("Could not store model reasoning capability observation")
+
+    def _gateway_with_capability(
+        self,
+        group: CognitiveResourceGroupRecord,
+        key: CognitiveResourceKeyRecord,
+        *,
+        max_attempts: int | None = None,
+        operator_probe: bool = False,
+    ) -> tuple[ModelGateway, StoredCapability | None]:
+        effort = group.reasoning_effort
+        capabilities = CapabilityProfileStore(self.database)
+
+        def current_capability() -> StoredCapability | None:
+            return capabilities.get(
                 self.subject_id, group.provider_type, group.base_url, group.model
             )
-            if capability is None:
-                if not reasoning_profile(group.model, group.provider_type).supported:
-                    raise ProviderCallError(
-                        "model_capability_probe_required", retryable=False, outcome_unknown=False
-                    )
-            elif (
-                capability.status != "known"
-                or capability.parameter != "reasoning_effort"
-                or group.reasoning_effort not in capability.tested_efforts
-            ):
+
+        def require_reasoning_capability(profile: StoredCapability | None) -> None:
+            if effort is None:
+                return
+            if profile is None:
+                allowed = (
+                    capability is None
+                    and reasoning_profile(group.model, group.provider_type).supported
+                )
+            else:
+                state = profile.effort_status(effort)
+                allowed = state in CAPABILITY_RUNTIME_STATES and (
+                    state != CAPABILITY_EXPIRED_STATE or expired_revalidation
+                )
+            if not allowed:
                 raise ProviderCallError(
                     "model_capability_probe_required", retryable=False, outcome_unknown=False
                 )
-            else:
-                reasoning_verified = True
+
+        def check_before_send() -> None:
+            require_reasoning_capability(current_capability())
+
+        capability = current_capability() if effort is not None else None
+        expired_revalidation = (
+            effort is not None
+            and capability is not None
+            and capability.effort_status(effort) == CAPABILITY_EXPIRED_STATE
+        )
+        if effort is not None and not operator_probe:
+            require_reasoning_capability(capability)
         settings = OpenAICompatibleSettings(
             base_url=group.base_url,
             model=group.model,
@@ -3811,7 +3932,11 @@ class RoutedModelGateway(ModelGateway):
                 group.input_microusd_per_million,
                 group.output_microusd_per_million,
             ),
-            retry_policy=RetryPolicy(max_attempts=max_attempts or group.max_attempts),
+            retry_policy=RetryPolicy(
+                max_attempts=1
+                if operator_probe or expired_revalidation
+                else max_attempts or group.max_attempts
+            ),
             resource_pool=group.pool,
             resource_group_id=group.group_id,
             pool_limits=self._aggregate_limits(group.pool),
@@ -3819,11 +3944,14 @@ class RoutedModelGateway(ModelGateway):
             resource_key_id=key.key_id,
             resource_key_fingerprint=key.key_fingerprint,
             reasoning_effort=group.reasoning_effort,
-            reasoning_capability_verified=reasoning_verified,
+            reasoning_capability_verified=effort is not None,
+            request_capability_check=check_before_send
+            if effort is not None and not operator_probe
+            else None,
             capture_model_io=self.capture_model_io,
             capture_model_io_getter=self.capture_model_io_getter,
             enforce_training_policy=self.enforce_training_policy,
-        )
+        ), capability
 
     def _weighted_group_order(
         self, groups: Sequence[CognitiveResourceGroupRecord]

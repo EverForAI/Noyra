@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any, cast
 from urllib.parse import urlsplit
 
@@ -349,7 +350,7 @@ class CognitionCycle:
         )
         self._bootstrapped = True
 
-    async def run_once(self) -> str:
+    async def run_once(self, *, embedding_capacity_blocked: bool = False) -> str:
         try:
             lease = self.kernel.admission.begin("cognition")
         except OperationInvalidated:
@@ -357,7 +358,9 @@ class CognitionCycle:
         try:
             with bind_lease(lease):
                 try:
-                    result = await self._run_once_impl()
+                    result = await self._run_once_impl(
+                        embedding_capacity_blocked=embedding_capacity_blocked
+                    )
                     lease.assert_current()
                 except OperationInvalidated:
                     return "cognition_interrupted"
@@ -378,7 +381,7 @@ class CognitionCycle:
         finally:
             self.kernel.admission.finish(lease)
 
-    async def _run_once_impl(self) -> str:
+    async def _run_once_impl(self, *, embedding_capacity_blocked: bool = False) -> str:
         self.bootstrap()
         if self.kernel.lifecycle.current().state != "active":
             return "cognition_inactive"
@@ -387,7 +390,11 @@ class CognitionCycle:
             self.subject_id,
             minimum_cycles=self.settings.minimum_genesis_cycles,
         )
-        if self.embedding_index is not None and genesis.status != "complete":
+        if (
+            self.embedding_index is not None
+            and not embedding_capacity_blocked
+            and genesis.status != "complete"
+        ):
             with suppress(Exception):
                 await asyncio.to_thread(
                     self.embedding_index.rebuild_missing,
@@ -405,7 +412,9 @@ class CognitionCycle:
             # reaching the metacognitive slot after all project work finishes.
             self.intrinsic_thought.discover_agenda()
             return await self.scheduler.run(
-                self._dispatch_workflow,
+                partial(
+                    self._dispatch_workflow, embedding_capacity_blocked=embedding_capacity_blocked
+                ),
                 active=lambda: self.kernel.lifecycle.current().state == "active",
             )
         if genesis.status == "created":
@@ -594,10 +603,14 @@ class CognitionCycle:
             return self._finalize_genesis_cycle(current)
         return "cognition_committed"
 
-    async def _dispatch_workflow(self, name: str) -> str | WorkflowOutcome | None:
+    async def _dispatch_workflow(
+        self, name: str, *, embedding_capacity_blocked: bool = False
+    ) -> str | WorkflowOutcome | None:
         if name == "embedding_maintenance":
             if self.embedding_index is None:
                 return None
+            if embedding_capacity_blocked:
+                return WorkflowOutcome("embedding_evidence_capacity_wait")
             try:
                 rebuilt = await asyncio.to_thread(
                     self.embedding_index.rebuild_missing,

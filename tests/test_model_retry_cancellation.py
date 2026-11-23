@@ -27,6 +27,7 @@ from noyra.model import (
     RetryPolicy,
     RoutedModelGateway,
 )
+from noyra.model.capabilities import StoredCapability
 from noyra.model.errors import ModelCallStateError, ProviderCallError
 
 
@@ -505,14 +506,16 @@ def _router(
     router = RoutedModelGateway(
         model.database, model.subject, store, provider_factory=provider_factory
     )
-    build_gateway = router._gateway
+    build_gateway = router._gateway_with_capability
 
-    def gateway_with_controlled_delay(*args: Any, **kwargs: Any) -> ModelGateway:
-        gateway = build_gateway(*args, **kwargs)
+    def gateway_with_controlled_delay(
+        *args: Any, **kwargs: Any
+    ) -> tuple[ModelGateway, StoredCapability | None]:
+        gateway, capability = build_gateway(*args, **kwargs)
         gateway._sleep = backoff
-        return gateway
+        return gateway, capability
 
-    monkeypatch.setattr(router, "_gateway", gateway_with_controlled_delay)
+    monkeypatch.setattr(router, "_gateway_with_capability", gateway_with_controlled_delay)
     return router, store, constructed
 
 

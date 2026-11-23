@@ -74,6 +74,7 @@ def health_ready_admin_readiness(
             and integrity_ready
             and checker_healthy
             and cloud_ready
+            and not owner.boot_recovery_review_required
         )
         checked_at = utc_now()
         components = {
@@ -165,6 +166,10 @@ def health_ready_admin_readiness(
             (
                 value
                 for blocked, value in (
+                    (
+                        owner.boot_recovery_review_required,
+                        "integrity_boot_recovery_review_required",
+                    ),
                     (not storage_runtime_ready, storage.reason_code or "storage_unavailable"),
                     (
                         owner.settings.storage_profile == "recovery_capable"
@@ -191,7 +196,15 @@ def health_ready_admin_readiness(
     except Exception:
         self._json(
             HTTPStatus.SERVICE_UNAVAILABLE,
-            {"status": "degraded", "service": "noyra", "reason_code": "readiness_check_failed"},
+            {
+                "status": "degraded",
+                "service": "noyra",
+                "reason_code": (
+                    "integrity_boot_recovery_review_required"
+                    if owner.boot_recovery_review_required
+                    else "readiness_check_failed"
+                ),
+            },
         )
     return True
 

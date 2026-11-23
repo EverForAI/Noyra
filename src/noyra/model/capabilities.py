@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from noyra.core.database import Database
@@ -16,7 +16,13 @@ from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from .reasoning import REASONING_EFFORTS, ReasoningEffort, reasoning_profile
 
 CAPABILITY_PROFILE_VERSION = 1
-CAPABILITY_PROBE_TTL_DAYS = 30
+CAPABILITY_PROBE_TTL_DAYS = 60
+CAPABILITY_REFRESH_LEAD = timedelta(days=7)
+CAPABILITY_REFRESH_GRACE = timedelta(days=7)
+CAPABILITY_READY_STATES = frozenset({"ready", "refresh_due"})
+CAPABILITY_EXPIRED_STATE = "expired"
+CAPABILITY_RUNTIME_STATES = CAPABILITY_READY_STATES | {"grace", CAPABILITY_EXPIRED_STATE}
+CAPABILITY_REVALIDATION_STATES = frozenset({"refresh_due", "grace", CAPABILITY_EXPIRED_STATE})
 
 
 @dataclass(frozen=True)
@@ -34,6 +40,40 @@ class StoredCapability:
     status: str
     observed_at: str
     expires_at: str | None
+    effort_expiries: tuple[tuple[ReasoningEffort, str | None], ...] = ()
+    rejected_efforts: tuple[ReasoningEffort, ...] = ()
+
+    def effort_expiry(self, effort: ReasoningEffort) -> str | None:
+        return dict(self.effort_expiries).get(effort, self.expires_at)
+
+    def effort_status(self, effort: ReasoningEffort, *, now: datetime | None = None) -> str:
+        if effort in self.rejected_efforts:
+            return "rejected"
+        if (
+            self.status not in {"known", "stale"}
+            or self.parameter != "reasoning_effort"
+            or effort not in self.tested_efforts
+        ):
+            return "probe_required"
+        deadline = _parse_expiry(self.effort_expiry(effort))
+        if deadline is None:
+            return "ready"
+        remaining = deadline - (now or datetime.now(UTC))
+        if remaining <= -CAPABILITY_REFRESH_GRACE:
+            return CAPABILITY_EXPIRED_STATE
+        if remaining <= timedelta(0):
+            return "grace"
+        if remaining <= CAPABILITY_REFRESH_LEAD:
+            return "refresh_due"
+        return "ready"
+
+    def _effort_metadata(self) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        if self.effort_expiries:
+            result["effort_expiries"] = dict(self.effort_expiries)
+        if self.rejected_efforts:
+            result["rejected_efforts"] = list(self.rejected_efforts)
+        return result
 
     @property
     def profile_digest(self) -> str:
@@ -52,23 +92,17 @@ class StoredCapability:
                 "revision": self.revision,
                 "observed_at": self.observed_at,
                 "expires_at": self.expires_at,
+                **self._effort_metadata(),
             }
         )
 
-    def public(self, *, selected: ReasoningEffort | None = None) -> dict[str, Any]:
-        configured_selected = selected if selected in self.efforts else None
-        effective_selected = (
-            configured_selected
-            if self.status == "known" and configured_selected in self.tested_efforts
-            else None
-        )
-        effective_status = (
-            "ready"
-            if effective_selected is not None
-            else "probe_required"
-            if configured_selected is not None
-            else self.status
-        )
+    def public(
+        self, *, selected: ReasoningEffort | None = None, existing_resource: bool = False
+    ) -> dict[str, Any]:
+        effective_status = self.effort_status(selected) if selected is not None else self.status
+        if not existing_resource and effective_status in {"grace", CAPABILITY_EXPIRED_STATE}:
+            effective_status = "probe_required"
+        effective_selected = selected if effective_status in CAPABILITY_RUNTIME_STATES else None
         return {
             "supported": self.supported,
             "efforts": list(self.efforts),
@@ -81,12 +115,14 @@ class StoredCapability:
             "observed_at": self.observed_at,
             "expires_at": self.expires_at,
             "profile_digest": self.profile_digest,
-            # ``selected`` is the effective runtime value.  A stale or
-            # partially-tested profile must never look active in a public
-            # management payload; operators still need the configured value
-            # to understand why a call is blocked.
+            "fresh_efforts": [
+                effort
+                for effort in self.tested_efforts
+                if self.effort_status(effort) in CAPABILITY_READY_STATES
+            ],
+            "revalidate_at": self.effort_expiry(selected) if selected is not None else None,
             "selected": effective_selected,
-            "configured_selected": configured_selected,
+            "configured_selected": selected,
             "effective_status": effective_status,
         }
 
@@ -115,6 +151,7 @@ class StoredCapability:
             "observed_at": self.observed_at,
             "expires_at": self.expires_at,
             "profile_digest": self.profile_digest,
+            **self._effort_metadata(),
         }
 
 
@@ -128,17 +165,36 @@ def _parse_efforts(value: Any) -> tuple[ReasoningEffort, ...]:
     return tuple(item for item in REASONING_EFFORTS if item in value)
 
 
-def _is_expired(expires_at: str | None, *, now: datetime | None = None) -> bool:
-    if not expires_at:
-        return False
+def _parse_expiry(expires_at: object) -> datetime | None:
+    if expires_at is None:
+        return None
+    if not isinstance(expires_at, str):
+        raise IntegrityError("model capability expiry is invalid")
     try:
         expires = datetime.fromisoformat(expires_at)
     except ValueError as error:
         raise IntegrityError("model capability expiry is invalid") from error
-    if expires.tzinfo is None:
+    if expires.utcoffset() is None:
         raise IntegrityError("model capability expiry is invalid")
-    current = now or datetime.now(UTC)
-    return expires <= current
+    return expires
+
+
+def _effort_metadata(
+    payload: dict[str, Any],
+    efforts: tuple[ReasoningEffort, ...],
+    tested: tuple[ReasoningEffort, ...],
+) -> tuple[tuple[tuple[ReasoningEffort, str | None], ...], tuple[ReasoningEffort, ...]]:
+    expiries = payload.get("effort_expiries", {})
+    rejected = _parse_efforts(payload.get("rejected_efforts", []))
+    if (
+        not isinstance(expiries, dict)
+        or (expiries and set(expiries) != set(tested))
+        or any(effort in tested or effort not in efforts for effort in rejected)
+    ):
+        raise IntegrityError("model capability effort metadata is invalid")
+    for expiry in expiries.values():
+        _parse_expiry(expiry)
+    return tuple((effort, expiries[effort]) for effort in tested if effort in expiries), rejected
 
 
 class CapabilityProfileStore:
@@ -184,6 +240,8 @@ class CapabilityProfileStore:
             raise IntegrityError("model capability tested efforts exceed the profile")
         if supported != bool(efforts) or (supported and parameter != "reasoning_effort"):
             raise IntegrityError("model capability profile is inconsistent")
+        deadlines, rejected = _effort_metadata(payload, efforts, tested_efforts)
+        _parse_expiry(row["expires_at"])
         return StoredCapability(
             str(row["provider_type"]),
             str(row["endpoint_hash"]),
@@ -198,6 +256,8 @@ class CapabilityProfileStore:
             str(row["status"]),
             str(row["observed_at"]),
             row["expires_at"],
+            deadlines,
+            rejected,
         )
 
     def get(
@@ -218,22 +278,15 @@ class CapabilityProfileStore:
         if row is None:
             return None
         capability = self._from_row(row)
-        if _is_expired(capability.expires_at) and capability.status == "known":
-            return StoredCapability(
-                capability.provider_type,
-                capability.endpoint_hash,
-                capability.model,
-                capability.supported,
-                capability.efforts,
-                capability.tested_efforts,
-                capability.parameter,
-                capability.version,
-                capability.revision,
-                capability.source,
-                "stale",
-                capability.observed_at,
-                capability.expires_at,
+        if (
+            capability.status == "known"
+            and capability.tested_efforts
+            and not any(
+                capability.effort_status(effort) in CAPABILITY_READY_STATES
+                for effort in capability.tested_efforts
             )
+        ):
+            return replace(capability, status="stale")
         return capability
 
     def record_probe_success(
@@ -244,13 +297,45 @@ class CapabilityProfileStore:
         model: str,
         effort: ReasoningEffort,
     ) -> StoredCapability | None:
+        return self._record_observation(subject_id, provider_type, base_url, model, effort, "probe")
+
+    def record_runtime_observation(
+        self,
+        subject_id: str,
+        provider_type: str,
+        base_url: str,
+        model: str,
+        effort: ReasoningEffort,
+        *,
+        rejected: bool = False,
+        expected: StoredCapability | None = None,
+    ) -> StoredCapability | None:
+        return self._record_observation(
+            subject_id,
+            provider_type,
+            base_url,
+            model,
+            effort,
+            "rejected" if rejected else "refresh",
+            expected=expected,
+        )
+
+    def _record_observation(
+        self,
+        subject_id: str,
+        provider_type: str,
+        base_url: str,
+        model: str,
+        effort: ReasoningEffort,
+        observation: Literal["probe", "refresh", "rejected"],
+        *,
+        expected: StoredCapability | None = None,
+    ) -> StoredCapability | None:
         if effort not in REASONING_EFFORTS:
             raise ValueError("invalid reasoning capability effort")
         candidate_profile = reasoning_profile(model, provider_type)
         if effort not in candidate_profile.candidate_efforts:
             raise ValueError("reasoning effort is not a candidate for this model")
-        now = utc_now()
-        expires = (datetime.now(UTC) + timedelta(days=CAPABILITY_PROBE_TTL_DAYS)).isoformat()
         endpoint_hash = _endpoint_hash(base_url)
         with self.database.transaction() as connection:
             if not self._table_exists(connection):
@@ -260,46 +345,71 @@ class CapabilityProfileStore:
                 "WHERE subject_id=? AND provider_type=? AND endpoint_hash=? AND model=?",
                 (subject_id, provider_type, endpoint_hash, model.strip()),
             ).fetchone()
-            if row is None:
-                efforts: tuple[ReasoningEffort, ...] = candidate_profile.efforts or (effort,)
-                tested_efforts: tuple[ReasoningEffort, ...] = (effort,)
-                revision = 1
-                profile_id = new_id("mcap")
-            else:
-                current = self._from_row(row)
-                efforts = tuple(
-                    item for item in REASONING_EFFORTS if item in (*current.efforts, effort)
-                )
-                if effort not in candidate_profile.candidate_efforts:
-                    raise ValueError("reasoning effort is not a candidate for this model")
-                if current.status == "known" and not _is_expired(current.expires_at):
-                    tested_efforts = tuple(
-                        item
-                        for item in REASONING_EFFORTS
-                        if item in (*current.tested_efforts, effort)
+            current = self._from_row(row) if row is not None else None
+            now = datetime.now(UTC)
+            # An in-flight result must not overwrite a newer probe of this effort.
+            if observation == "rejected" and (
+                (current is None) != (expected is None)
+                or (
+                    current is not None
+                    and expected is not None
+                    and (
+                        current.effort_expiry(effort) != expected.effort_expiry(effort)
+                        or (effort in current.tested_efforts) != (effort in expected.tested_efforts)
                     )
-                else:
-                    tested_efforts = (effort,)
-                revision = current.revision + 1
-                profile_id = str(row["profile_id"])
+                )
+            ):
+                return current
+            if observation == "refresh" and (
+                current is None
+                or current.effort_status(effort, now=now) not in CAPABILITY_REVALIDATION_STATES
+            ):
+                return current
+            if (
+                observation == "rejected"
+                and current is not None
+                and effort in current.rejected_efforts
+            ):
+                return current
+            previous_tested = (
+                current.tested_efforts if current and current.status in {"known", "stale"} else ()
+            )
+            deadlines = (
+                {item: current.effort_expiry(item) for item in previous_tested} if current else {}
+            )
+            rejected = set(current.rejected_efforts if current else ())
+            if observation == "rejected":
+                deadlines.pop(effort, None)
+                rejected.add(effort)
+            else:
+                deadlines[effort] = (now + timedelta(days=CAPABILITY_PROBE_TTL_DAYS)).isoformat()
+                rejected.discard(effort)
+            available = set(current.efforts if current else candidate_profile.efforts) | {effort}
+            efforts = tuple(item for item in REASONING_EFFORTS if item in available)
+            tested = tuple(item for item in REASONING_EFFORTS if item in deadlines)
+            # The legacy deadline remains conservative for readers without per-effort metadata.
+            finite = [value for value in deadlines.values() if value is not None]
+            expires = min(finite, key=datetime.fromisoformat) if finite else None
             payload = {
                 "supported": True,
                 "efforts": list(efforts),
-                "tested_efforts": list(tested_efforts),
+                "tested_efforts": list(tested),
                 "parameter": "reasoning_effort",
                 "version": CAPABILITY_PROFILE_VERSION,
+                "effort_expiries": deadlines,
+                "rejected_efforts": [item for item in REASONING_EFFORTS if item in rejected],
             }
             state = {
-                "profile_id": profile_id,
+                "profile_id": row["profile_id"] if row is not None else new_id("mcap"),
                 "subject_id": subject_id,
                 "provider_type": provider_type,
                 "endpoint_hash": endpoint_hash,
                 "model": model.strip(),
                 "capabilities_json": canonical_json(payload),
-                "revision": revision,
+                "revision": current.revision + 1 if current else 1,
                 "source": "probe",
-                "status": "known",
-                "observed_at": now,
+                "status": "known" if tested else "failed",
+                "observed_at": now.isoformat(timespec="milliseconds"),
                 "expires_at": expires,
             }
             connection.execute(
@@ -310,21 +420,7 @@ class CapabilityProfileStore:
                 "expires_at=excluded.expires_at, state_hash=excluded.state_hash",
                 (*state.values(), content_hash(state)),
             )
-        return StoredCapability(
-            provider_type,
-            endpoint_hash,
-            model.strip(),
-            True,
-            efforts,
-            tested_efforts,
-            "reasoning_effort",
-            CAPABILITY_PROFILE_VERSION,
-            revision,
-            "probe",
-            "known",
-            now,
-            expires,
-        )
+        return self._from_row({**state, "state_hash": content_hash(state)})
 
     @staticmethod
     def _import_candidate(item: object) -> StoredCapability:
@@ -369,16 +465,21 @@ class CapabilityProfileStore:
             or revision < 1
             or any(value not in efforts for value in tested_efforts)
             or not isinstance(observed_at, str)
-            or not isinstance(expires_at, str)
+            or (expires_at is not None and not isinstance(expires_at, str))
         ):
             raise ValueError("model capability profile is invalid")
         try:
             observed_time = datetime.fromisoformat(observed_at)
-            expires_time = datetime.fromisoformat(expires_at)
-        except ValueError as error:
+            expires_time = _parse_expiry(expires_at)
+            deadlines, rejected = _effort_metadata(item, efforts, tested_efforts)
+        except (ValueError, IntegrityError) as error:
             raise ValueError("model capability profile timestamps are invalid") from error
-        if observed_time.tzinfo is None or expires_time.tzinfo is None:
+        if observed_time.utcoffset() is None or (
+            expires_time is None and (tested_efforts or not rejected)
+        ):
             raise ValueError("model capability profile timestamps must include a timezone")
+        if any(deadline is None for _, deadline in deadlines):
+            raise ValueError("model capability tested efforts require finite expiry dates")
         endpoint_hash = _endpoint_hash(base_url)
         candidate = StoredCapability(
             provider_type,
@@ -391,9 +492,11 @@ class CapabilityProfileStore:
             version,
             revision,
             "operator",
-            "known",
+            "failed" if rejected and not tested_efforts else "known",
             observed_at,
             expires_at,
+            deadlines,
+            rejected,
         )
         if item.get("profile_digest") != candidate.profile_digest:
             raise ValueError("model capability profile digest mismatch")
@@ -416,11 +519,12 @@ class CapabilityProfileStore:
                     "tested_efforts": list(candidate.tested_efforts),
                     "parameter": candidate.parameter,
                     "version": candidate.version,
+                    **candidate._effort_metadata(),
                 }
             ),
             "revision": candidate.revision,
             "source": "operator",
-            "status": "known",
+            "status": candidate.status,
             "observed_at": candidate.observed_at,
             "expires_at": candidate.expires_at,
         }

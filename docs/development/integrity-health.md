@@ -91,3 +91,18 @@ This recovery does not clear a migration fence, reopen a draining runtime, bypas
 ownership, or treat an unavailable/incomplete/corrupt result as clean. It retains
 the existing `off`, `alert` and `pause` policy meanings. Known findings and the
 report's actual registered coverage remain visible.
+
+## Delayed startup recovery failures
+
+When startup waits for integrity evidence, runtime admission remains closed
+through the final recovery, including policy synchronization and cognition
+bootstrap. Confirmed transient SQLite contention or temporary OS resource
+errors drain the runtime and return a nonzero exit after releasing ownership.
+The existing service restart delay and start limit govern a fresh process's
+recovery attempt.
+
+Other recovery failures keep the process in quarantine for operator review.
+The liveness and readiness endpoints remain available, including authenticated
+readiness. Readiness reports `integrity_boot_recovery_review_required`. The
+service journal records the exception type. Resolve the underlying cause before
+restarting the service to run startup recovery again.

@@ -160,7 +160,7 @@ def _cognitive_resource_payload(
         else None
     )
     payload["reasoning_profile"] = (
-        capability.public(selected=record.reasoning_effort)
+        capability.public(selected=record.reasoning_effort, existing_resource=True)
         if capability is not None
         else reasoning_profile_payload(
             record.model, record.provider_type, selected=record.reasoning_effort

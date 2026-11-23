@@ -16,7 +16,7 @@ from noyra.model import (
     EmbeddingResourceInput,
     OpenAICompatibleProvider,
 )
-from noyra.model.capabilities import CapabilityProfileStore
+from noyra.model.capabilities import CAPABILITY_READY_STATES, CapabilityProfileStore
 from noyra.model.errors import (
     BudgetExhaustedError,
     ModelAuthorizationError,
@@ -67,9 +67,8 @@ def configure_model_resource(self: RequestHandler, owner: NoyraHTTPServer) -> No
             )
             if (
                 capability is None
-                or capability.status != "known"
-                or capability.parameter != "reasoning_effort"
-                or proposal.reasoning_effort not in capability.tested_efforts
+                or capability.effort_status(proposal.reasoning_effort)
+                not in CAPABILITY_READY_STATES
             ):
                 self._json(
                     HTTPStatus.CONFLICT,

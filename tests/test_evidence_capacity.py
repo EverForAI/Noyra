@@ -4,6 +4,7 @@ import json
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -14,6 +15,7 @@ from noyra.core.errors import InvalidTransitionError
 from noyra.core.retention import RetentionManager
 from noyra.core.runtime_export import RuntimeLogExporter
 from noyra.core.types import content_hash
+from noyra.model import EmbeddingBudgetLimits, EmbeddingCircuitPolicy, EmbeddingLedger
 from noyra.model.ledger import ModelLedger
 from noyra.model.types import BudgetLimits, ModelUsage
 from noyra.service import NoyraService, ServiceSettings
@@ -49,6 +51,41 @@ def test_evidence_limit_preserves_idempotency_and_accounting(
     assert status["counts"]["model_calls"] == 1
     assert status["counts"]["model_attempts"] == 1
     assert ledger.get_call(call.call_id).status == "failed"
+
+
+def test_core_capacity_warning_uses_effective_per_table_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NOYRA_EVIDENCE_MAX_ROWS_PER_TABLE", "5")
+    subject = "Noyra-capacity-warning"
+    database = Database(tmp_path / "noyra.sqlite3")
+    IdentityStore(database).ensure(subject, content_hash(subject))
+    # Exercise reporting on synthetic counters without manufacturing ledger history.
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE route_evidence_row_counts SET row_count=8 "
+            "WHERE subject_id=? AND table_name='waiting_cognitive_task_revisions'",
+            (subject,),
+        )
+        connection.execute(
+            "UPDATE evidence_row_counts SET row_count=4 "
+            "WHERE subject_id=? AND table_name='embedding_usage_entries'",
+            (subject,),
+        )
+    retention = RetentionManager(database)
+    status = retention.evidence_capacity(subject)
+    assert status["blocked"] is False
+    assert status["core_warning_threshold_percent"] == 80
+    assert status["core_near_limit"] == [
+        {"table": "waiting_cognitive_task_revisions", "count": 8, "limit": 10, "remaining": 2}
+    ]
+
+    # A lowered cap must move the table to the blocker view, not show negative headroom.
+    monkeypatch.setenv("NOYRA_EVIDENCE_MAX_ROWS_PER_TABLE", "3")
+    status = retention.evidence_capacity(subject)
+    assert status["blocks_cognition"] is True
+    assert "waiting_cognitive_task_revisions" in status["blocking_tables"]
+    assert status["core_near_limit"] == []
 
 
 def test_action_limit_still_allows_completion_and_duplicate_lookup(
@@ -171,6 +208,68 @@ def test_capacity_exhaustion_preserves_wallet_maintenance(
 
 
 @pytest.mark.asyncio
+async def test_embedding_capacity_does_not_block_cognition_but_core_capacity_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NOYRA_EVIDENCE_MAX_ROWS_PER_TABLE", "1")
+    service = NoyraService(
+        ServiceSettings(
+            data_dir=tmp_path,
+            subject_id="Noyra-cap-embedding-only",
+            genesis_hash="a" * 64,
+            port=0,
+            integrity_mode="off",
+        )
+    )
+    service.boot()
+    database, subject = service.kernel.database, service.kernel.subject_id
+    try:
+        ledger = EmbeddingLedger(database)
+        usage, _ = ledger.authorize(
+            subject,
+            "fixture",
+            "provider",
+            "model",
+            "memory_embedding",
+            "a" * 64,
+            "once",
+            EmbeddingBudgetLimits(10, 10, 10),
+            EmbeddingCircuitPolicy(1, 1),
+            text_count=1,
+            reserved_tokens=1,
+            reserved_cost_microusd=1,
+        )
+        ledger.start(usage.usage_id)
+        ledger.succeed(
+            usage.usage_id,
+            input_tokens=1,
+            cost_microusd=1,
+            usage_estimated=False,
+            provider_request_id=None,
+        )
+        cognition = AsyncMock(return_value="cognition_committed")
+        monkeypatch.setattr(service, "cognition", Mock(run_once=cognition))
+        assert await service._active_tick() == "cognition_committed"
+        cognition.assert_awaited_once_with(embedding_capacity_blocked=True)
+        assert service.http.autonomy_block_state is None
+        observation = service.http.runtime_observer.snapshot(
+            cognition_enabled=True, interval_seconds=30
+        )
+        assert observation["evidence_capacity"]["blocking_tables"] == ["embedding_usage_entries"]
+        assert observation["evidence_capacity"]["blocks_embedding"] is True
+        assert observation["evidence_capacity"]["blocks_cognition"] is False
+
+        ModelLedger(database).prepare_call(subject, "p", "m", "test", "a" * 64, "full")
+        assert await service._active_tick() == "evidence_capacity_reached"
+        cognition.assert_awaited_once()
+        assert service.http.autonomy_block_state is not None
+        assert service.http.autonomy_block_state["reason_code"] == "evidence_capacity"
+    finally:
+        service.http.close()
+        service.kernel.close()
+
+
+@pytest.mark.asyncio
 async def test_capacity_allows_real_queued_delivery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -237,7 +336,6 @@ def test_embedding_cap_preserves_replay_recovery_and_circuit_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from noyra.model import EmbeddingBudgetLimits, EmbeddingCircuitPolicy, EmbeddingLedger
     from noyra.model.embedding_ledger import EmbeddingUsageRecord
 
     monkeypatch.setenv("NOYRA_EVIDENCE_MAX_ROWS_PER_TABLE", "2")

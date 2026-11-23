@@ -57,7 +57,7 @@ textarea { min-height: 112px; resize: vertical; }
 .hero-strip { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 24px 26px; border: 1px solid #cbded1; border-radius: 12px; background: #dfeee4; }
 .hero-strip h2 { margin: 4px 0 3px; font-size: 24px; }
 .health-mark { display: grid; place-items: center; width: 58px; height: 58px; border-radius: 50%; background: #c4e3ce; color: #198254; font-size: 24px; }
-.metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 15px 0; }
+.metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 12px; margin: 15px 0; }
 .metric { padding: 17px; border: 1px solid #d4dfd8; border-radius: 9px; background: #fff; }
 .metric span { display: block; color: #738078; font-size: 12px; }.metric strong { display: block; margin-top: 8px; font-size: 21px; overflow-wrap: anywhere; }
 .two-column, .conversation-layout, .resource-columns, .wallet-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px; }
