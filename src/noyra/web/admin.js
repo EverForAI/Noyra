@@ -817,6 +817,7 @@ function renderOverviewAttention(data, failures=[]) {
     const autonomyBlockers=new Set(autonomy?.blockers || []);
     if(autonomyBlockers.has("storage_pressure"))add("blocker","存储压力阻止自主认知","核对磁盘可用空间与存储配额","runtime");
     if(autonomyBlockers.has("evidence_capacity"))add("blocker","必要证据容量已达上限","完成备份后扩容或调整上限；不要删除必要历史","runtime");
+    else if(autonomy?.evidence_capacity?.blocks_embedding===true)add("risk","向量证据容量已达上限","新向量请求暂停，记忆检索使用本地兜底；此项不阻断自主认知循环。","runtime");
     if(autonomyBlockers.has("safety_quarantine"))add("blocker","完整性安全隔离生效","核对完整性证据后再执行受控恢复","runtime");
     if(autonomyBlockers.has("migration_fenced"))add("blocker","运行时处于迁移隔离","按迁移流程完成切换或回滚","migration");
     if(!autonomy && data.storage?.cognition_allowed===false)add("blocker","认知写入已暂停","检查磁盘或证据容量","runtime");
@@ -1445,7 +1446,12 @@ function renderRetention(payload) {
     ["已验证恢复点", `${formatInteger(backupSummary.verified_recovery_points_after_plan)} 个 · ${backupSummary.recovery_points_status || "未知"}`],
     ["备份占用 / 水位", `${formatInteger(backupSummary.total_bytes_after_plan)} 字节 · ${backupSummary.space_status || "未知"}`],
     ["未验证备份关注", formatInteger((backupPlan.backup_attention || []).length)],
-    ["证据容量", capacity?.blocked ? "已达上限，暂停新增认知工作" : "可用"],
+    ["证据容量", capacity?.blocked === true
+      ? capacity.blocks_cognition === false && capacity.blocks_embedding === true
+        ? "向量证据已达上限，暂停新向量请求；不因此暂停认知循环"
+        : "必要证据已达上限，暂停新增认知工作"
+      : capacity?.blocked === false ? "未达上限" : "未读取"],
+    ["触顶证据表", capacity?.blocking_tables?.length ? capacity.blocking_tables.join("、") : capacity?.blocked === false ? "无" : "未读取"],
     ["生命周期策略盘点", coverage ? `现有清理规则 ${formatInteger(coverage.implemented_retention_objects)} 项 / 领域协议 ${formatInteger(coverage.documented_domain_objects)} 项 / 保留基线 ${formatInteger(coverage.preservation_only_objects)} 项 / 待审 ${formatInteger(coverage.unreviewed_objects)} 项` : "暂未取得，不按零项处理"],
     ["策略覆盖说明", "盘点仅供维护参考；未审对象保持保留，不新增删除权限，也不阻断正常认知"],
     ["结构清单比对", ({matches_baseline:"与表清单基线一致；不代表完整结构检查或全部保留策略已审核",mismatch:"发现新增或缺失对象，请查看完整性记录",baseline_unavailable:"结构基线暂不可验证"}[drift?.status] || "暂未取得")],

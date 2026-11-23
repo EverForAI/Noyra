@@ -817,6 +817,24 @@ test("runtime overview uses bounded sample money exactly and explains missing ev
   assert.ok(nodes.get("#cognition-state").textContent.includes("连通性未由摘要验证"));
 });
 
+test("embedding-only exhaustion shows a risk, not a cognition blocker", () => {
+  const { sandbox, nodes } = observationContext();
+  sandbox.renderOverviewAttention({
+    format: "noyra-runtime-observation/v1",
+    database_observation: "ok",
+    cognition: { enabled: true },
+    autonomy: {
+      status: "running", reason_code: "running", blockers: [],
+      evidence_capacity: { blocks_embedding: true, blocks_cognition: false },
+    },
+    attention: {},
+  });
+  const html = nodes.get("#overview-attention").innerHTML;
+  assert.match(html, /向量证据容量已达上限/);
+  assert.match(html, /data-priority="risk"/);
+  assert.doesNotMatch(html, /data-priority="blocker"/);
+});
+
 test("runtime overview unavailable is not zero cost, current health or a reason to reset data", () => {
   const { sandbox, nodes } = observationContext();
   sandbox.renderRuntimeObservation({database_observation:"unavailable",resources:{},cognition:{}},null);

@@ -12,6 +12,7 @@ from .evidence_schema import MAX_ROUTE_FAILOVERS, TABLES_V80, TABLES_V92
 
 EVIDENCE_TABLES = TABLES_V92
 DEFAULT_EVIDENCE_ROWS = 250_000
+_EMBEDDING_EVIDENCE_TABLES = {"embedding_usage_entries", "embedding_circuit_transitions"}
 
 # Persistent idempotency and causal evidence is deliberately retained. The
 # admission boundary, not age-based deletion, bounds these tables.
@@ -131,11 +132,16 @@ def require_evidence_capacity(connection: Any, subject_id: str, table: str) -> N
 
 def evidence_capacity_status(connection: sqlite3.Connection, subject_id: str) -> dict[str, Any]:
     counts, limits = evidence_counts(connection, subject_id), _limits()
+    blocking_tables = {table for table, count in counts.items() if count >= limits[table]}
     return {
         "limit_per_table": evidence_row_limit(),
         "limits": limits,
         "counts": counts,
-        "blocked": any(value >= limits[table] for table, value in counts.items()),
+        "blocked": bool(blocking_tables),
+        "blocking_tables": sorted(blocking_tables),
+        # Only this pair has a separate writer and an existing non-vector fallback.
+        "blocks_cognition": bool(blocking_tables - _EMBEDDING_EVIDENCE_TABLES),
+        "blocks_embedding": bool(blocking_tables & _EMBEDDING_EVIDENCE_TABLES),
         "policy": "preserve_required_evidence_stop_new_work",
         "lifecycle": {
             table: {

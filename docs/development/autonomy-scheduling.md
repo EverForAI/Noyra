@@ -67,6 +67,14 @@ unknown instead of treating it as zero or healthy. It is an operational signal,
 not an admission decision, provider probe or proof that an individual task
 succeeded.
 
+If only embedding usage or its circuit evidence is full, the scheduler defers
+embedding refresh while allowing the cognition cycle to continue under its
+normal checks. Semantic recall already falls back to local retrieval when a
+new embedding cannot be obtained. The embedding writer still rejects new
+reservations transactionally and permits settlement of existing ones. Other
+full evidence tables still block new cognition, and any full table continues
+to gate the creation of new autonomous reward workflows.
+
 After genesis completes, independent serial service slots cover local maintenance,
 project execution and review, interaction handling, metacognitive selection, world
 acquisition, world interpretation and optional embedding maintenance. Embedding refresh

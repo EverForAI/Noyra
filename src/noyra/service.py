@@ -2882,7 +2882,8 @@ class NoyraService:
                 )
             lease.assert_current()
             evidence_exhausted = evidence_status["blocked"]
-            if evidence_exhausted:
+            cognition_capacity_blocked = evidence_status["blocks_cognition"]
+            if cognition_capacity_blocked:
                 self.http.autonomy_block_state = {
                     "reason_code": "evidence_capacity",
                     "observed_at": utc_now(),
@@ -2925,7 +2926,7 @@ class NoyraService:
             with bind_lease(lease):
                 await self.http.deliveries.deliver_pending(self.kernel.subject_id)
             lease.assert_current()
-            if evidence_exhausted:
+            if cognition_capacity_blocked:
                 return "evidence_capacity_reached"
             if self.cognition is None:
                 return None
@@ -2940,7 +2941,9 @@ class NoyraService:
                         },
                     )
             with bind_lease(lease):
-                result = await self.cognition.run_once()
+                result = await self.cognition.run_once(
+                    embedding_capacity_blocked=evidence_status["blocks_embedding"]
+                )
             lease.assert_current()
             return result
         except OperationInvalidated:

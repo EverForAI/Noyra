@@ -126,6 +126,21 @@ def test_loop_explanations_never_infer_failure_from_sleep_or_absent_evidence(
             "active",
             "recent_success",
             {"available": False},
+            {
+                "available": True,
+                "blocked": True,
+                "blocks_embedding": True,
+                "blocks_cognition": False,
+                "blocking_tables": ["embedding_usage_entries"],
+            },
+            False,
+            None,
+            "running",
+        ),
+        (
+            "active",
+            "recent_success",
+            {"available": False},
             {"available": True, "blocked": True, "blocking_tables": ["model_calls"]},
             False,
             None,
@@ -214,6 +229,9 @@ def test_autonomy_progress_distinguishes_planned_waits_from_blockers(
     )
     assert result["reason_code"] == expected
     assert result["observed_at"] == NOW.isoformat()
+    if capacity.get("blocks_embedding"):
+        assert result["evidence_capacity"]["blocks_embedding"] is True
+        assert "evidence_capacity" not in result["blockers"]
     if expected in {"planned_sleep", "budget_wait"}:
         assert result["status"] in {"planned_sleep", "waiting"}
         assert "tick_stalled" not in result["blockers"]

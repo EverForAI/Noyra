@@ -268,9 +268,15 @@ async def test_embedding_maintenance_has_its_own_bounded_service_opportunity(
     index = Mock()
     index.rebuild_missing.return_value = 2
     cycle.embedding_index = index
+    deferred = await cycle._dispatch_workflow(
+        "embedding_maintenance", embedding_capacity_blocked=True
+    )
     outcome = await cycle._dispatch_workflow("embedding_maintenance")
     from noyra.core.fair_scheduling import WorkflowOutcome
 
+    assert isinstance(deferred, WorkflowOutcome)
+    assert deferred.reason == "embedding_evidence_capacity_wait"
+    assert not deferred.did_execute and not deferred.made_progress
     assert isinstance(outcome, WorkflowOutcome) and outcome.did_execute and outcome.made_progress
     index.rebuild_missing.assert_called_once()
     assert index.rebuild_missing.call_args.kwargs["limit"] == 32

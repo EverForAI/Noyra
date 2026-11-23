@@ -126,8 +126,10 @@ def autonomy_progress_observation(
         and not migration_fenced
     ):
         blockers.append("admission_closed")
-    if capacity.get("available") is True and capacity.get("blocked") is True:
-        blockers.append("evidence_capacity")
+    capacity_available = capacity.get("available") is True
+    capacity_blocks_cognition = (
+        capacity_available and capacity.get("blocks_cognition", capacity.get("blocked")) is True
+    )
 
     free_bytes = resources.get("data_free_bytes")
     disk_pressure = type(free_bytes) is int and free_bytes < minimum_free_bytes
@@ -140,6 +142,8 @@ def autonomy_progress_observation(
             observed_block = block_state.get("reason_code")
     if disk_pressure or observed_block == "storage_pressure":
         blockers.append("storage_pressure")
+    if capacity_blocks_cognition or observed_block == "evidence_capacity":
+        blockers.append("evidence_capacity")
 
     reason = "unknown"
     next_action_at: str | None = None
@@ -180,7 +184,7 @@ def autonomy_progress_observation(
         reason = "evidence_capacity"
     elif observed_block == "storage_pressure" or disk_pressure:
         reason = "storage_pressure"
-    elif capacity.get("available") is True and capacity.get("blocked") is True:
+    elif capacity_blocks_cognition:
         reason = "evidence_capacity"
     elif capacity.get("available") is not True:
         reason = "evidence_capacity_unavailable"
@@ -257,8 +261,10 @@ def autonomy_progress_observation(
         "next_action_at": next_action_at,
         "blockers": list(dict.fromkeys(blockers)),
         "evidence_capacity": {
-            "available": capacity.get("available") is True,
-            "blocked": capacity.get("blocked") if capacity.get("available") is True else None,
+            "available": capacity_available,
+            "blocked": capacity.get("blocked") if capacity_available else None,
+            "blocks_cognition": capacity_blocks_cognition if capacity_available else None,
+            "blocks_embedding": capacity.get("blocks_embedding") if capacity_available else None,
             "blocking_tables": capacity.get("blocking_tables", []),
         },
         "storage": {
@@ -384,15 +390,12 @@ class RuntimeObserver:
                 pass
             try:
                 capacity = evidence_capacity_status(connection, self.subject_id)
-                blocking_tables = sorted(
-                    table
-                    for table, count in capacity["counts"].items()
-                    if count >= capacity["limits"][table]
-                )
                 result["evidence_capacity"] = {
                     "available": True,
-                    "blocked": bool(blocking_tables),
-                    "blocking_tables": blocking_tables,
+                    "blocked": capacity["blocked"],
+                    "blocking_tables": capacity["blocking_tables"],
+                    "blocks_cognition": capacity["blocks_cognition"],
+                    "blocks_embedding": capacity["blocks_embedding"],
                     "limit_per_table": capacity["limit_per_table"],
                 }
             except (sqlite3.Error, IntegrityError, ValueError):
