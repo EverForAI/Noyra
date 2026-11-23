@@ -5,6 +5,7 @@ import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -26,6 +27,7 @@ from noyra.core.runtime_observation import (
 from noyra.core.types import content_hash
 from noyra.model.ledger import ModelLedger
 from noyra.service import NoyraHTTPServer, ServiceSettings
+from noyra.sleep import FatigueInputs, FatigueTracker, SleepEngine, SleepReflectionPlan
 
 NOW = datetime(2026, 10, 22, tzinfo=UTC)
 
@@ -215,6 +217,45 @@ def test_autonomy_progress_distinguishes_planned_waits_from_blockers(
     if expected in {"planned_sleep", "budget_wait"}:
         assert result["status"] in {"planned_sleep", "waiting"}
         assert "tick_stalled" not in result["blockers"]
+
+
+@pytest.mark.parametrize(
+    "observed_at",
+    [
+        NOW - timedelta(seconds=181),
+        NOW + timedelta(seconds=1),
+    ],
+)
+def test_expired_or_future_storage_block_signal_is_not_carried_forward(
+    observed_at: datetime,
+) -> None:
+    observation = {
+        "database_observation": "ok",
+        "lifecycle": "active",
+        "cognition": {"enabled": True},
+        "loop": {
+            "reason_code": "recent_success",
+            "last_successful_tick_at": NOW.isoformat(),
+            "last_success_age_seconds": 5,
+        },
+        "sleep": {"available": False},
+        "evidence_capacity": {"available": True, "blocked": False},
+        "resources": {"data_free_bytes": 10_000_000_000},
+    }
+
+    result = autonomy_progress_observation(
+        observation,
+        now=NOW,
+        minimum_free_bytes=500_000_000,
+        block_state={
+            "reason_code": "storage_pressure",
+            "observed_at": observed_at.isoformat(),
+        },
+        stale_after=180,
+    )
+
+    assert result["reason_code"] == "running"
+    assert "storage_pressure" not in result["blockers"]
 
 
 def test_autonomy_progress_keeps_sleep_admission_closed_and_reports_migration_fence() -> None:
@@ -566,6 +607,218 @@ def test_summary_authentication_and_no_expensive_or_external_probes(tmp_path: Pa
             busy.value.close()
         finally:
             server.runtime_observer._lock.release()
+    finally:
+        server.close()
+        kernel.close()
+
+
+def test_admin_runtime_summary_matches_isolated_persisted_lifecycle_read_only(
+    tmp_path: Path,
+) -> None:
+    subject = "observation-lifecycle-http"
+    genesis = content_hash(subject)
+    kernel = SubjectKernel(tmp_path / "lifecycle.sqlite3", subject, genesis)
+    settings = ServiceSettings(
+        data_dir=tmp_path,
+        subject_id=subject,
+        genesis_hash=genesis,
+        host="127.0.0.1",
+        port=0,
+        operator_token=SecretStr("lifecycle-observation-operator-token-long-enough"),
+    )
+    kernel.boot()
+    kernel.orient()
+    kernel.activate()
+    server = NoyraHTTPServer(kernel, settings)
+    url = f"http://127.0.0.1:{server.address[1]}/api/v1/admin/runtime-summary"
+    headers = {"Authorization": "Bearer lifecycle-observation-operator-token-long-enough"}
+
+    def persisted_state() -> dict[str, list[dict[str, Any]]]:
+        with kernel.database.read_transaction() as connection:
+            return {
+                table: [
+                    dict(row) for row in connection.execute(f"SELECT * FROM {table} ORDER BY rowid")
+                ]
+                for table in (
+                    "runtime_state",
+                    "autonomy_loop_state",
+                    "sleep_runs",
+                    "sleep_transitions",
+                    "events",
+                    "model_calls",
+                    "model_attempts",
+                    "audit_records",
+                )
+            }
+
+    def observe() -> dict[str, Any]:
+        with (
+            patch.object(server, "cognition_is_enabled", return_value=True),
+            patch("noyra.core.runtime_observation.CACHE_SECONDS", 0),
+            urlopen(Request(url, headers=headers), timeout=5) as response,
+        ):
+            assert response.status == 200
+            return json.load(response)
+
+    try:
+        server.start()
+        now = datetime.now(UTC)
+        with kernel.database.transaction() as connection:
+            connection.execute(
+                "INSERT INTO autonomy_loop_state(subject_id,circuit_status,consecutive_failures,"
+                "last_tick_started_at,last_successful_tick_at,updated_at) "
+                "VALUES (?, 'closed', 0, ?, ?, ?)",
+                (subject, now.isoformat(), now.isoformat(), now.isoformat()),
+            )
+        before = persisted_state()
+        running = observe()
+        assert running["lifecycle"] == "active"
+        assert running["autonomy"]["reason_code"] == "running"
+        assert persisted_state() == before
+
+        sleep = SleepEngine(kernel.database, subject)
+        run = sleep.start("subject_choice", "Synthetic observer validation")
+        sleep.begin_reflection(run.sleep_id)
+        sleep.commit_reflection(run.sleep_id, SleepReflectionPlan(summary="Synthetic reflection"))
+        sleep.enter_deep_sleep(run.sleep_id)
+        before = persisted_state()
+        planned = observe()
+        assert planned["lifecycle"] == "deep_sleep"
+        assert planned["sleep"]["available"] is True
+        assert planned["sleep"]["status"] == planned["lifecycle"]
+        assert planned["autonomy"]["reason_code"] == "planned_sleep"
+        assert planned["autonomy"]["blockers"] == []
+        assert persisted_state() == before
+
+        base = server.runtime_observer.snapshot(cognition_enabled=True, interval_seconds=30)
+        before = persisted_state()
+        with patch.object(
+            server.runtime_observer,
+            "snapshot",
+            return_value={**base, "sleep": {"available": False}},
+        ):
+            missing_evidence = observe()
+        assert missing_evidence["autonomy"]["reason_code"] == "sleep_evidence_unavailable"
+        assert missing_evidence["autonomy"]["status"] == "unknown"
+        assert persisted_state() == before
+
+        sleep.wake(run.sleep_id, "Synthetic observer wake", force=True)
+        before = persisted_state()
+        waking = observe()
+        assert waking["lifecycle"] == "waking"
+        assert waking["sleep"]["status"] == "waking"
+        assert waking["autonomy"]["reason_code"] == "waking"
+        assert persisted_state() == before
+        sleep.complete_wake(run.sleep_id)
+        assert kernel.lifecycle.current().state == "active"
+
+        fatigue = FatigueTracker(kernel.database)
+        fatigue.assess(
+            subject,
+            FatigueInputs(
+                resource_pressure=1.0,
+                cognitive_load=0.0,
+                frustration=0.0,
+                goal_conflict=0.0,
+                staleness=0.0,
+            ),
+            reason="Synthetic exhausted-budget validation",
+        )
+        planned_wake = (datetime.now(UTC) + timedelta(hours=2)).isoformat()
+        budget_run = sleep.start("budget", "Synthetic budget wait", wake_after=planned_wake)
+        sleep.begin_reflection(budget_run.sleep_id)
+        sleep.commit_reflection(
+            budget_run.sleep_id, SleepReflectionPlan(summary="Synthetic budget reflection")
+        )
+        sleep.enter_deep_sleep(budget_run.sleep_id)
+        before = persisted_state()
+        budget_wait = observe()
+        assert budget_wait["lifecycle"] == "deep_sleep"
+        assert budget_wait["sleep"]["trigger_type"] == "budget"
+        assert budget_wait["autonomy"]["reason_code"] == "budget_wait"
+        assert budget_wait["autonomy"]["status"] == "waiting"
+        recorded_wake = sleep.get(budget_run.sleep_id).wake_after
+        assert recorded_wake is not None
+        assert datetime.fromisoformat(
+            budget_wait["autonomy"]["next_action_at"]
+        ) == datetime.fromisoformat(recorded_wake)
+        assert persisted_state() == before
+        sleep.wake(budget_run.sleep_id, "Synthetic budget wake", force=True)
+        sleep.complete_wake(budget_run.sleep_id)
+    finally:
+        server.close()
+        kernel.close()
+
+
+def test_admin_runtime_summary_reports_capacity_and_storage_blockers_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subject = "observation-resource-http"
+    genesis = content_hash(subject)
+    kernel = SubjectKernel(tmp_path / "resources.sqlite3", subject, genesis)
+    settings = ServiceSettings(
+        data_dir=tmp_path,
+        subject_id=subject,
+        genesis_hash=genesis,
+        host="127.0.0.1",
+        port=0,
+        operator_token=SecretStr("resource-observation-operator-token-long-enough"),
+    )
+    kernel.boot()
+    kernel.orient()
+    kernel.activate()
+    server = NoyraHTTPServer(kernel, settings)
+    url = f"http://127.0.0.1:{server.address[1]}/api/v1/admin/runtime-summary"
+    headers = {"Authorization": "Bearer resource-observation-operator-token-long-enough"}
+
+    def persisted_state() -> dict[str, list[dict[str, Any]]]:
+        with kernel.database.read_transaction() as connection:
+            return {
+                table: [
+                    dict(row) for row in connection.execute(f"SELECT * FROM {table} ORDER BY rowid")
+                ]
+                for table in (
+                    "runtime_state",
+                    "autonomy_loop_state",
+                    "sleep_runs",
+                    "sleep_transitions",
+                    "events",
+                    "model_calls",
+                    "model_attempts",
+                    "audit_records",
+                )
+            }
+
+    def observe() -> dict[str, Any]:
+        with (
+            patch.object(server, "cognition_is_enabled", return_value=True),
+            patch("noyra.core.runtime_observation.CACHE_SECONDS", 0),
+            urlopen(Request(url, headers=headers), timeout=5) as response,
+        ):
+            assert response.status == 200
+            return json.load(response)
+
+    try:
+        server.start()
+        monkeypatch.setenv("NOYRA_EVIDENCE_MAX_ROWS_PER_TABLE", "1")
+        ModelLedger(kernel.database).prepare_call(
+            subject, "provider", "model", "fixture", content_hash("request"), "one"
+        )
+        before = persisted_state()
+        capacity = observe()
+        assert capacity["autonomy"]["reason_code"] == "evidence_capacity"
+        assert "evidence_capacity" in capacity["autonomy"]["blockers"]
+        assert persisted_state() == before
+
+        with patch(
+            "noyra.core.runtime_observation.shutil.disk_usage",
+            return_value=SimpleNamespace(total=1_000_000_000, used=999_000_000, free=1_000_000),
+        ):
+            storage = observe()
+        assert storage["autonomy"]["reason_code"] == "storage_pressure"
+        assert "storage_pressure" in storage["autonomy"]["blockers"]
+        assert "evidence_capacity" in storage["autonomy"]["blockers"]
+        assert persisted_state() == before
     finally:
         server.close()
         kernel.close()
