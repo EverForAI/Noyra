@@ -6,14 +6,14 @@ import hmac
 import ipaddress
 import json
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 from urllib.parse import SplitResult, parse_qs
 
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.lifecycle_diagnostics import LifecycleCatalogUnavailable
-from noyra.core.runtime_observation import ObservationBusy
+from noyra.core.runtime_observation import ObservationBusy, autonomy_progress_observation
 from noyra.core.upgrade import UpgradeError
 from noyra.interaction.conversations import ConversationConflict
 
@@ -151,6 +151,21 @@ def admin_runtime_summary(self: RequestHandler, owner: NoyraHTTPServer) -> bool:
             {"error": "runtime_observation_busy"},
         )
         return True
+    observation = {
+        **observation,
+        "autonomy": autonomy_progress_observation(
+            observation,
+            now=datetime.now(UTC),
+            minimum_free_bytes=owner.settings.minimum_free_storage_bytes,
+            process_started_at=owner.runtime_observer.process_started_at,
+            safety_quarantined=(owner.admission.quarantined or owner.boot_recovery_review_required),
+            admission_accepting=owner.admission.accepting,
+            runtime_closed=owner.admission.closed,
+            migration_fenced=owner.admission.migration_fenced,
+            block_state=owner.autonomy_block_state,
+            stale_after=max(180.0, owner.settings.active_interval_seconds * 3),
+        ),
+    }
     if owner.integrity_watchdog_health is not None:
         try:
             watchdog = owner.integrity_watchdog_health()

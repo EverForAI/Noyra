@@ -13,16 +13,18 @@ from urllib.request import Request, urlopen
 import pytest
 from pydantic import SecretStr
 
-from noyra.core import SubjectKernel
+from noyra.core import Database, IdentityStore, SubjectKernel
 from noyra.core.runtime_observation import (
     ATTEMPT_LIMIT,
     CALL_LIMIT,
     ObservationBusy,
     RuntimeObserver,
+    autonomy_progress_observation,
     loop_observation,
     resource_observation,
 )
 from noyra.core.types import content_hash
+from noyra.model.ledger import ModelLedger
 from noyra.service import NoyraHTTPServer, ServiceSettings
 
 NOW = datetime(2026, 10, 22, tzinfo=UTC)
@@ -63,6 +65,252 @@ def test_loop_explanations_never_infer_failure_from_sleep_or_absent_evidence(
         if age is None or age < 0
         else result["last_success_age_seconds"] == age
     )
+
+
+@pytest.mark.parametrize(
+    ("lifecycle", "loop_reason", "sleep", "capacity", "quarantined", "block", "expected"),
+    [
+        (
+            "active",
+            "recent_success",
+            {"available": False},
+            {"available": True, "blocked": False},
+            False,
+            None,
+            "running",
+        ),
+        (
+            "deep_sleep",
+            "resting",
+            {"available": True, "status": "deep_sleep", "trigger_type": "fatigue"},
+            {"available": True, "blocked": False},
+            False,
+            None,
+            "planned_sleep",
+        ),
+        (
+            "deep_sleep",
+            "resting",
+            {
+                "available": True,
+                "status": "deep_sleep",
+                "trigger_type": "budget",
+                "wake_after": "2026-10-22T01:00:00+00:00",
+            },
+            {"available": True, "blocked": False},
+            False,
+            None,
+            "budget_wait",
+        ),
+        (
+            "paused",
+            "paused",
+            {"available": False},
+            {"available": True, "blocked": False},
+            False,
+            None,
+            "manual_pause",
+        ),
+        (
+            "paused",
+            "paused",
+            {"available": False},
+            {"available": True, "blocked": False},
+            True,
+            None,
+            "safety_quarantine",
+        ),
+        (
+            "active",
+            "recent_success",
+            {"available": False},
+            {"available": True, "blocked": True, "blocking_tables": ["model_calls"]},
+            False,
+            None,
+            "evidence_capacity",
+        ),
+        (
+            "active",
+            "recent_success",
+            {"available": False},
+            {"available": True, "blocked": False},
+            False,
+            {"reason_code": "storage_pressure", "observed_at": NOW.isoformat()},
+            "storage_pressure",
+        ),
+        (
+            "active",
+            "cooling_down",
+            {"available": False},
+            {"available": True, "blocked": False},
+            False,
+            None,
+            "loop_cooldown",
+        ),
+        (
+            "active",
+            "tick_not_recent",
+            {"available": False},
+            {"available": True, "blocked": False},
+            False,
+            None,
+            "tick_stalled",
+        ),
+        (
+            "active",
+            "recent_success",
+            {"available": False},
+            {"available": True, "blocked": False},
+            False,
+            None,
+            "cognition_disabled",
+        ),
+        (
+            "active",
+            "recent_success",
+            {"available": False},
+            {"available": False},
+            False,
+            None,
+            "evidence_capacity_unavailable",
+        ),
+    ],
+)
+def test_autonomy_progress_distinguishes_planned_waits_from_blockers(
+    lifecycle: str,
+    loop_reason: str,
+    sleep: dict[str, Any],
+    capacity: dict[str, Any],
+    quarantined: bool,
+    block: dict[str, Any] | None,
+    expected: str,
+) -> None:
+    observation = {
+        "database_observation": "ok",
+        "lifecycle": lifecycle,
+        "cognition": {
+            "enabled": loop_reason != "recent_success" or expected != "cognition_disabled"
+        },
+        "loop": {
+            "reason_code": loop_reason,
+            "last_successful_tick_at": NOW.isoformat(),
+            "last_success_age_seconds": 5,
+            "last_tick_started_age_seconds": 500,
+            "consecutive_failures": 0,
+            "next_retry_at": (NOW + timedelta(minutes=2)).isoformat(),
+        },
+        "sleep": sleep,
+        "evidence_capacity": capacity,
+        "resources": {"data_free_bytes": 10_000_000_000},
+    }
+    result = autonomy_progress_observation(
+        observation,
+        now=NOW,
+        minimum_free_bytes=500_000_000,
+        safety_quarantined=quarantined,
+        block_state=block,
+    )
+    assert result["reason_code"] == expected
+    assert result["observed_at"] == NOW.isoformat()
+    if expected in {"planned_sleep", "budget_wait"}:
+        assert result["status"] in {"planned_sleep", "waiting"}
+        assert "tick_stalled" not in result["blockers"]
+
+
+def test_autonomy_progress_keeps_sleep_admission_closed_and_reports_migration_fence() -> None:
+    observation = {
+        "database_observation": "ok",
+        "lifecycle": "deep_sleep",
+        "cognition": {"enabled": True},
+        "loop": {"reason_code": "resting"},
+        "sleep": {"available": True, "status": "deep_sleep", "trigger_type": "fatigue"},
+        "evidence_capacity": {"available": True, "blocked": False},
+        "resources": {"data_free_bytes": 10_000_000_000},
+    }
+    sleeping = autonomy_progress_observation(
+        observation,
+        now=NOW,
+        minimum_free_bytes=500_000_000,
+        admission_accepting=False,
+    )
+    assert sleeping["reason_code"] == "planned_sleep"
+    assert sleeping["blockers"] == []
+
+    migrating = autonomy_progress_observation(
+        {**observation, "lifecycle": "active"},
+        now=NOW,
+        minimum_free_bytes=500_000_000,
+        migration_fenced=True,
+        admission_accepting=False,
+    )
+    assert migrating["reason_code"] == "migration_fenced"
+    assert migrating["blockers"] == ["migration_fenced"]
+
+
+@pytest.mark.parametrize(
+    "sleep",
+    [
+        {"available": False},
+        {"available": True, "status": "waking", "trigger_type": "budget"},
+    ],
+)
+def test_sleep_without_matching_evidence_is_not_reported_as_planned(
+    sleep: dict[str, Any],
+) -> None:
+    observation = {
+        "database_observation": "ok",
+        "lifecycle": "deep_sleep",
+        "cognition": {"enabled": True},
+        "loop": {"reason_code": "resting"},
+        "sleep": sleep,
+        "evidence_capacity": {"available": True, "blocked": False},
+        "resources": {"data_free_bytes": 10_000_000_000},
+    }
+
+    result = autonomy_progress_observation(
+        observation,
+        now=NOW,
+        minimum_free_bytes=500_000_000,
+    )
+
+    assert result["reason_code"] == "sleep_evidence_unavailable"
+    assert result["status"] == "unknown"
+    assert result["next_action_at"] is None
+
+
+def test_recent_success_from_a_previous_process_is_not_current_process_progress() -> None:
+    observation = {
+        "database_observation": "ok",
+        "lifecycle": "active",
+        "cognition": {"enabled": True},
+        "loop": {
+            "reason_code": "recent_success",
+            "last_successful_tick_at": (NOW - timedelta(seconds=10)).isoformat(),
+            "last_tick_started_at": (NOW - timedelta(seconds=11)).isoformat(),
+            "last_tick_started_age_seconds": 11,
+        },
+        "sleep": {"available": False},
+        "evidence_capacity": {"available": True, "blocked": False},
+        "resources": {"data_free_bytes": 10_000_000_000},
+    }
+    process_start = NOW - timedelta(seconds=5)
+    result = autonomy_progress_observation(
+        observation,
+        now=NOW,
+        minimum_free_bytes=500_000_000,
+        process_started_at=process_start,
+    )
+    assert result["reason_code"] == "starting"
+
+    observation["loop"]["last_tick_started_at"] = (NOW - timedelta(seconds=2)).isoformat()
+    observation["loop"]["last_tick_started_age_seconds"] = 2
+    in_progress = autonomy_progress_observation(
+        observation,
+        now=NOW,
+        minimum_free_bytes=500_000_000,
+        process_started_at=process_start,
+    )
+    assert in_progress["reason_code"] == "tick_unconfirmed"
 
 
 def _database(path: Path, *, calls: int = 1, attempts: int = 1) -> None:
@@ -153,6 +401,34 @@ def test_samples_are_exact_subject_scoped_and_never_include_payloads(tmp_path: P
         assert private not in serialized
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM model_calls").fetchone()[0] == 3
+
+
+def test_runtime_observation_reads_evidence_capacity_without_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NOYRA_EVIDENCE_MAX_ROWS_PER_TABLE", "1")
+    subject = "runtime-observation-capacity"
+    database = Database(tmp_path / "capacity.sqlite3")
+    IdentityStore(database).ensure(subject, content_hash(subject))
+    ModelLedger(database).prepare_call(
+        subject, "provider", "model", "fixture", content_hash("request"), "one"
+    )
+    observation = RuntimeObserver(database.path, tmp_path, subject).snapshot(
+        cognition_enabled=True, interval_seconds=30
+    )
+
+    capacity = observation["evidence_capacity"]
+    assert observation["database_observation"] == "ok"
+    assert capacity["available"] is True
+    assert capacity["blocked"] is True
+    assert "model_calls" in capacity["blocking_tables"]
+    with database.connection() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM model_calls WHERE subject_id=?", (subject,)
+            ).fetchone()[0]
+            == 1
+        )
 
 
 def test_row_caps_and_truncation_are_explicit(tmp_path: Path) -> None:
@@ -251,6 +527,12 @@ def test_summary_authentication_and_no_expensive_or_external_probes(tmp_path: Pa
         assert read_denied.value.code == 401
         read_denied.value.close()
         headers = {"Authorization": "Bearer observation-operator-token-long-enough"}
+        server.autonomy_block_state = {
+            "reason_code": "storage_pressure",
+            "observed_at": datetime.now(UTC).isoformat(),
+            "free_bytes": 1,
+            "over_quota": [],
+        }
         with (
             patch.object(server, "diagnostics", side_effect=AssertionError("heavy diagnostics")),
             patch.object(server, "_current_storage", side_effect=AssertionError("storage scan")),
@@ -260,6 +542,9 @@ def test_summary_authentication_and_no_expensive_or_external_probes(tmp_path: Pa
         assert body["format"] == "noyra-runtime-observation/v1"
         assert body["database_observation"] == "ok"
         assert body["cognition"]["enabled"] is False
+        assert body["autonomy"]["status"] == "blocked"
+        assert body["autonomy"]["reason_code"] == "storage_pressure"
+        assert body["autonomy"]["blockers"] == ["storage_pressure"]
         assert "observation-operator-token-long-enough" not in json.dumps(body)
         with (
             patch.object(server, "cognition_is_enabled", return_value=True),

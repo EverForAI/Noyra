@@ -684,7 +684,10 @@ class NoyraHTTPServer:
         self._storage_observation: tuple[StorageContract, str] | None = None
         self.integrity_watchdog_health: Callable[[], dict[str, Any]] | None = None
         self.runtime_observer = RuntimeObserver(
-            self.kernel.database.path, self.settings.data_dir, self.kernel.subject_id
+            self.kernel.database.path,
+            self.settings.data_dir,
+            self.kernel.subject_id,
+            minimum_free_bytes=self.settings.minimum_free_storage_bytes,
         )
         self._health_cache_lock = threading.Lock()
         self._health_cache_at = 0.0
@@ -697,6 +700,7 @@ class NoyraHTTPServer:
         self._closed = False
         self.defer_export_ownership = False
         self.boot_recovery_review_required = False
+        self.autonomy_block_state: dict[str, Any] | None = None
 
     @property
     def address(self) -> tuple[str, int]:
@@ -2865,6 +2869,12 @@ class NoyraService:
                     await self._tracked_to_thread(self._run_retention_if_due)
             lease.assert_current()
             if not storage.cognition_allowed:
+                self.http.autonomy_block_state = {
+                    "reason_code": "storage_pressure",
+                    "observed_at": utc_now(),
+                    "free_bytes": storage.usage.free_bytes,
+                    "over_quota": list(storage.over_quota),
+                }
                 return "storage_pressure"
             with bind_lease(lease):
                 evidence_status = await self._tracked_to_thread(
@@ -2872,6 +2882,13 @@ class NoyraService:
                 )
             lease.assert_current()
             evidence_exhausted = evidence_status["blocked"]
+            if evidence_exhausted:
+                self.http.autonomy_block_state = {
+                    "reason_code": "evidence_capacity",
+                    "observed_at": utc_now(),
+                }
+            else:
+                self.http.autonomy_block_state = None
             try:
                 with bind_lease(lease):
                     await self._tracked_to_thread(

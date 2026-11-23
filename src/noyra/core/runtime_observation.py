@@ -15,6 +15,7 @@ from typing import Any
 from .cognitive_waits import terminal_wait_reason
 from .delivery_state import delivery_attention_sample
 from .errors import IntegrityError
+from .evidence_capacity import evidence_capacity_status
 from .fair_scheduling import ScheduleState
 from .recovery_budget import (
     RECOVERY_DAILY_ATTEMPTS,
@@ -51,6 +52,7 @@ def loop_observation(
 ) -> dict[str, Any]:
     last = _timestamp(None if row is None else row.get("last_successful_tick_at"))
     retry = _timestamp(None if row is None else row.get("next_retry_at"))
+    started = _timestamp(None if row is None else row.get("last_tick_started_at"))
     age = None if last is None else (now - last).total_seconds()
     circuit = None if row is None else row.get("circuit_status")
     if lifecycle == "paused":
@@ -72,9 +74,198 @@ def loop_observation(
         "circuit_status": circuit if circuit in {"closed", "open", "half_open"} else None,
         "last_successful_tick_at": None if last is None else last.isoformat(),
         "last_success_age_seconds": None if age is None or age < 0 else round(age, 3),
+        "last_tick_started_at": None if started is None else started.isoformat(),
+        "last_tick_started_age_seconds": (
+            None
+            if started is None or (now - started).total_seconds() < 0
+            else round((now - started).total_seconds(), 3)
+        ),
         "next_retry_at": None if retry is None else retry.isoformat(),
         "consecutive_failures": None if row is None else int(row["consecutive_failures"]),
         "observation_threshold_seconds": stale_after,
+    }
+
+
+def autonomy_progress_observation(
+    observation: dict[str, Any],
+    *,
+    now: datetime,
+    minimum_free_bytes: int,
+    process_started_at: datetime | None = None,
+    safety_quarantined: bool = False,
+    admission_accepting: bool = True,
+    runtime_closed: bool = False,
+    migration_fenced: bool = False,
+    block_state: dict[str, Any] | None = None,
+    stale_after: float = 180.0,
+) -> dict[str, Any]:
+    """Classify autonomous progress without turning planned sleep into failure."""
+    lifecycle = observation.get("lifecycle")
+    loop = observation.get("loop")
+    loop = loop if isinstance(loop, dict) else {}
+    sleep = observation.get("sleep")
+    sleep = sleep if isinstance(sleep, dict) else {}
+    capacity = observation.get("evidence_capacity")
+    capacity = capacity if isinstance(capacity, dict) else {}
+    resources = observation.get("resources")
+    resources = resources if isinstance(resources, dict) else {}
+    cognition = observation.get("cognition")
+    cognition = cognition if isinstance(cognition, dict) else {}
+
+    blockers: list[str] = []
+    if safety_quarantined:
+        blockers.append("safety_quarantine")
+    if migration_fenced:
+        blockers.append("migration_fenced")
+    if runtime_closed:
+        blockers.append("runtime_draining")
+    if (
+        lifecycle == "active"
+        and not admission_accepting
+        and not runtime_closed
+        and not migration_fenced
+    ):
+        blockers.append("admission_closed")
+    if capacity.get("available") is True and capacity.get("blocked") is True:
+        blockers.append("evidence_capacity")
+
+    free_bytes = resources.get("data_free_bytes")
+    disk_pressure = type(free_bytes) is int and free_bytes < minimum_free_bytes
+    observed_block = None
+    if isinstance(block_state, dict):
+        blocked_at = _timestamp(block_state.get("observed_at"))
+        if blocked_at is not None and timedelta(0) <= now - blocked_at <= timedelta(
+            seconds=max(stale_after, 180.0)
+        ):
+            observed_block = block_state.get("reason_code")
+    if disk_pressure or observed_block == "storage_pressure":
+        blockers.append("storage_pressure")
+
+    reason = "unknown"
+    next_action_at: str | None = None
+    sleep_status = sleep.get("status")
+    sleep_trigger = sleep.get("trigger_type")
+    if observation.get("database_observation") != "ok":
+        reason = "observation_unavailable"
+    elif safety_quarantined:
+        reason = "safety_quarantine"
+    elif migration_fenced:
+        reason = "migration_fenced"
+    elif runtime_closed:
+        reason = "runtime_draining"
+    elif lifecycle == "paused":
+        reason = "manual_pause"
+    elif lifecycle in {"winding_down", "reflective_sleep", "deep_sleep", "waking"}:
+        # Lifecycle and sleep-run rows are read from the same SQLite snapshot.
+        # Do not call a sleep planned when that supporting record is missing or
+        # disagrees with the lifecycle state; surface the gap as unknown instead.
+        if sleep.get("available") is not True or sleep_status != lifecycle:
+            reason = "sleep_evidence_unavailable"
+        else:
+            wake_at = _timestamp(sleep.get("wake_after"))
+            next_action_at = None if wake_at is None else wake_at.isoformat()
+            if lifecycle == "waking":
+                reason = "waking"
+            elif sleep_trigger == "budget":
+                reason = "budget_wait"
+            else:
+                reason = "planned_sleep"
+    elif lifecycle == "stopped":
+        reason = "stopped"
+    elif lifecycle != "active":
+        reason = "starting"
+    elif not admission_accepting:
+        reason = "admission_closed"
+    elif observed_block == "evidence_capacity":
+        reason = "evidence_capacity"
+    elif observed_block == "storage_pressure" or disk_pressure:
+        reason = "storage_pressure"
+    elif capacity.get("available") is True and capacity.get("blocked") is True:
+        reason = "evidence_capacity"
+    elif capacity.get("available") is not True:
+        reason = "evidence_capacity_unavailable"
+    elif loop.get("reason_code") == "cooling_down":
+        reason = "loop_cooldown"
+        next_action_at = loop.get("next_retry_at")
+    elif loop.get("reason_code") == "recovering":
+        reason = "loop_recovering"
+    elif cognition.get("enabled") is False:
+        reason = "cognition_disabled"
+    elif loop.get("reason_code") == "recent_success":
+        last_success = _timestamp(loop.get("last_successful_tick_at"))
+        last_started = _timestamp(loop.get("last_tick_started_at"))
+        if process_started_at is not None and (
+            last_success is None or last_success < process_started_at
+        ):
+            reason = (
+                "tick_unconfirmed"
+                if last_started is not None
+                and last_started >= process_started_at
+                and loop.get("last_tick_started_age_seconds") is not None
+                and loop["last_tick_started_age_seconds"] <= stale_after
+                else "starting"
+            )
+        else:
+            reason = "running"
+    elif loop.get("reason_code") == "tick_not_recent":
+        reason = (
+            "tick_unconfirmed"
+            if loop.get("pending_calls", 0)
+            or (
+                loop.get("last_tick_started_age_seconds") is not None
+                and loop["last_tick_started_age_seconds"] <= stale_after
+            )
+            else "tick_stalled"
+        )
+    elif loop.get("reason_code") == "paused":
+        reason = "manual_pause"
+    elif loop.get("reason_code") == "stopped":
+        reason = "stopped"
+    elif loop.get("reason_code") == "insufficient_evidence":
+        reason = "starting" if loop.get("last_successful_tick_at") is None else "unknown"
+
+    return {
+        "status": {
+            "running": "running",
+            "planned_sleep": "planned_sleep",
+            "budget_wait": "waiting",
+            "waking": "waking",
+            "loop_cooldown": "waiting",
+            "loop_recovering": "recovering",
+            "storage_pressure": "blocked",
+            "evidence_capacity": "blocked",
+            "safety_quarantine": "blocked",
+            "migration_fenced": "blocked",
+            "runtime_draining": "stopping",
+            "admission_closed": "blocked",
+            "manual_pause": "paused",
+            "stopped": "stopped",
+            "cognition_disabled": "disabled",
+            "tick_unconfirmed": "unconfirmed",
+            "tick_stalled": "stalled",
+            "evidence_capacity_unavailable": "unknown",
+            "sleep_evidence_unavailable": "unknown",
+            "observation_unavailable": "unknown",
+            "starting": "starting",
+            "unknown": "unknown",
+        }[reason],
+        "reason_code": reason,
+        "lifecycle": lifecycle if isinstance(lifecycle, str) else None,
+        "observed_at": now.isoformat(),
+        "last_successful_tick_at": loop.get("last_successful_tick_at"),
+        "last_success_age_seconds": loop.get("last_success_age_seconds"),
+        "next_action_at": next_action_at,
+        "blockers": list(dict.fromkeys(blockers)),
+        "evidence_capacity": {
+            "available": capacity.get("available") is True,
+            "blocked": capacity.get("blocked") if capacity.get("available") is True else None,
+            "blocking_tables": capacity.get("blocking_tables", []),
+        },
+        "storage": {
+            "free_bytes": free_bytes if type(free_bytes) is int else None,
+            "minimum_free_bytes": minimum_free_bytes,
+        },
+        "scope": "bounded_local_observation_not_admission_or_provider_probe",
     }
 
 
@@ -118,10 +309,19 @@ def resource_observation(data: Path, database: Path) -> dict[str, Any]:
 class RuntimeObserver:
     """Coalesce display samples, with bounded lock wait, rows, SQL work and TTL."""
 
-    def __init__(self, database: Path, data: Path, subject_id: str) -> None:
+    def __init__(
+        self,
+        database: Path,
+        data: Path,
+        subject_id: str,
+        *,
+        minimum_free_bytes: int = 500_000_000,
+    ) -> None:
         self.database = database
         self.data = data
         self.subject_id = subject_id
+        self.minimum_free_bytes = max(1, minimum_free_bytes)
+        self.process_started_at = datetime.now(UTC)
         self._lock = threading.Lock()
         self._cached: dict[str, Any] | None = None
         self._cached_at = 0.0
@@ -153,6 +353,8 @@ class RuntimeObserver:
             "model_sample": None,
             "waiting_sample": None,
             "attention": None,
+            "sleep": {"available": False},
+            "evidence_capacity": {"available": False, "blocked": None, "blocking_tables": []},
             "resources": resource_observation(self.data, self.database),
         }
         connection = None
@@ -167,10 +369,35 @@ class RuntimeObserver:
                 "SELECT state FROM runtime_state WHERE subject_id=?", (self.subject_id,)
             ).fetchone()
             row = connection.execute(
-                "SELECT circuit_status,consecutive_failures,last_successful_tick_at,next_retry_at "
-                "FROM autonomy_loop_state WHERE subject_id=?",
-                (self.subject_id,),
+                "SELECT * FROM autonomy_loop_state WHERE subject_id=?", (self.subject_id,)
             ).fetchone()
+            try:
+                sleep_row = connection.execute(
+                    "SELECT status,trigger_type,wake_after,started_at FROM sleep_runs "
+                    "WHERE subject_id=? AND status NOT IN ('complete','failed') "
+                    "ORDER BY rowid DESC LIMIT 1",
+                    (self.subject_id,),
+                ).fetchone()
+                if sleep_row is not None:
+                    result["sleep"] = {"available": True, **dict(sleep_row)}
+            except sqlite3.Error:
+                pass
+            try:
+                capacity = evidence_capacity_status(connection, self.subject_id)
+                blocking_tables = sorted(
+                    table
+                    for table, count in capacity["counts"].items()
+                    if count >= capacity["limits"][table]
+                )
+                result["evidence_capacity"] = {
+                    "available": True,
+                    "blocked": bool(blocking_tables),
+                    "blocking_tables": blocking_tables,
+                    "limit_per_table": capacity["limit_per_table"],
+                }
+            except (sqlite3.Error, IntegrityError, ValueError):
+                # Unknown counters are not interpreted as free capacity.
+                pass
             recovery = None
             schedule: dict[str, Any] | None = None
             project_rows: list[Any] = []
@@ -476,6 +703,10 @@ class RuntimeObserver:
                     },
                 }
             )
+            loop = result.get("loop")
+            model_sample = result.get("model_sample")
+            if isinstance(loop, dict) and isinstance(model_sample, dict):
+                loop["pending_calls"] = model_sample["pending_calls"]
         except (OSError, sqlite3.Error, IntegrityError):
             # Incomplete queries never masquerade as zero usage or healthy state.
             pass

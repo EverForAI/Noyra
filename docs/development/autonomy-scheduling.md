@@ -49,6 +49,24 @@ subject's existing attempt history. This is not a budget reset or rewritten time
 
 ## Runtime integration and recovery
 
+### Operator autonomy progress signal
+
+The authenticated runtime summary reports a bounded, read-only `autonomy`
+classification separately from HTTP and readiness. It distinguishes a recent
+completed loop, planned sleep, budget wait, wake, cooldown, storage pressure,
+evidence-capacity exhaustion, manual pause, integrity quarantine, migration
+fence, startup and unconfirmed progress. A planned sleep is informational; it
+does not degrade service readiness or trigger a wake. A manual pause or safety
+fence is reported but never cleared by observation.
+
+Evidence capacity is read from the existing indexed row counters in the same
+short-lived read-only observation. Storage pressure uses the current free-space
+sample and the runtime's last bounded maintenance admission result. The status
+includes its observation time and categorizes missing/incomplete evidence as
+unknown instead of treating it as zero or healthy. It is an operational signal,
+not an admission decision, provider probe or proof that an individual task
+succeeded.
+
 After genesis completes, independent serial service slots cover local maintenance,
 project execution and review, interaction handling, metacognitive selection, world
 acquisition, world interpretation and optional embedding maintenance. Embedding refresh
