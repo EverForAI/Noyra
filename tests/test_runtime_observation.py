@@ -338,16 +338,17 @@ def test_sleep_without_matching_evidence_is_not_reported_as_planned(
 
 
 def test_recent_success_from_a_previous_process_is_not_current_process_progress() -> None:
+    loop = {
+        "reason_code": "recent_success",
+        "last_successful_tick_at": (NOW - timedelta(seconds=10)).isoformat(),
+        "last_tick_started_at": (NOW - timedelta(seconds=11)).isoformat(),
+        "last_tick_started_age_seconds": 11,
+    }
     observation = {
         "database_observation": "ok",
         "lifecycle": "active",
         "cognition": {"enabled": True},
-        "loop": {
-            "reason_code": "recent_success",
-            "last_successful_tick_at": (NOW - timedelta(seconds=10)).isoformat(),
-            "last_tick_started_at": (NOW - timedelta(seconds=11)).isoformat(),
-            "last_tick_started_age_seconds": 11,
-        },
+        "loop": loop,
         "sleep": {"available": False},
         "evidence_capacity": {"available": True, "blocked": False},
         "resources": {"data_free_bytes": 10_000_000_000},
@@ -361,8 +362,8 @@ def test_recent_success_from_a_previous_process_is_not_current_process_progress(
     )
     assert result["reason_code"] == "starting"
 
-    observation["loop"]["last_tick_started_at"] = (NOW - timedelta(seconds=2)).isoformat()
-    observation["loop"]["last_tick_started_age_seconds"] = 2
+    loop["last_tick_started_at"] = (NOW - timedelta(seconds=2)).isoformat()
+    loop["last_tick_started_age_seconds"] = 2
     in_progress = autonomy_progress_observation(
         observation,
         now=NOW,
@@ -676,7 +677,9 @@ def test_admin_runtime_summary_matches_isolated_persisted_lifecycle_read_only(
             urlopen(Request(url, headers=headers), timeout=5) as response,
         ):
             assert response.status == 200
-            return json.load(response)
+            body = json.load(response)
+            assert isinstance(body, dict)
+            return body
 
     try:
         server.start()
@@ -814,7 +817,9 @@ def test_admin_runtime_summary_reports_capacity_and_storage_blockers_read_only(
             urlopen(Request(url, headers=headers), timeout=5) as response,
         ):
             assert response.status == 200
-            return json.load(response)
+            body = json.load(response)
+            assert isinstance(body, dict)
+            return body
 
     try:
         server.start()
