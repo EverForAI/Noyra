@@ -143,6 +143,18 @@ class UpgradeManagerTestCase(unittest.TestCase):
             )
         self.assertEqual(error.exception.code, "upgrade_target_invalid")
 
+    def test_target_sha_must_match_the_compact_metadata_check(self: Self) -> None:
+        self.manager.check_version()
+        self.latest_sha = "b" * 40
+        with self.assertRaises(UpgradeError) as error:
+            self.manager.start(
+                target_sha="b" * 40,
+                reason="routine",
+                idempotency_key="request-1",
+            )
+        self.assertEqual(error.exception.code, "upgrade_target_invalid")
+        self.assertFalse(self.request.exists())
+
     def test_status_and_request_redact_secrets_and_bound_free_text(self: Self) -> None:
         self.manager.github_fetcher = lambda: {
             "sha": self.latest_sha,
