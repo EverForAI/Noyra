@@ -131,14 +131,15 @@ def test_public_schema_has_fixed_reviewed_fingerprints(
     archive: tuple[PublicArchive, SubjectKernel],
 ) -> None:
     _, kernel = archive
-    # Reviewed whole-database schema 118, not only archive tables. Versions
+    # Reviewed whole-database schema 119, not only archive tables. Versions
     # 108-112 add acquisition state, its immutable-cache guard, an agenda
     # revision index, append-only thought-round closures and bounded scheduling state.
     # v113 adds explicit email identity versions and per-event mailbox evidence.
     # v114 adds bounded lookup indexes; v115-v116 add immutable workflow
     # export acceptance and increment-parent metadata. v117 replaces workflow
-    # publication guards; v118 adds publisher-scoped knowledge trust. Public
-    # archive tables retain their contract. Keep independent literal values,
+    # publication guards; v118 adds publisher-scoped knowledge trust and v119
+    # adds a bounded runtime-observation index. Public archive tables retain
+    # their contract. Keep independent literal values,
     # never derive the expectation from the implementation's fingerprint registry.
     with kernel.database.connection() as connection:
         assert (
@@ -146,15 +147,15 @@ def test_public_schema_has_fixed_reviewed_fingerprints(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()[0]
             == str(CURRENT_SCHEMA_VERSION)
-            == "118"
+            == "119"
         )
         assert (
             kernel.database.schema_ddl_fingerprint(connection)
-            == "f7c40fc2ed563822434454c0af0a3e44a4d6c40babb1a6b861830af91180716d"
+            == "10e3d5548e307f67f6b5c8222637dac5a951e54b4481073094eb220bda22a041"
         )
         assert (
             kernel.database.schema_structure_fingerprint(connection)
-            == "444938463a1ba013c3e7083fcb8ef55419fee5d17c459528ae6e25de6cab3b26"
+            == "c2dad7eaea77a67246b7185cf8b07fee74a39607e5a0cac3924a86a72b48b4ef"
         )
 
 

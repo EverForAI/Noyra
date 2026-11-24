@@ -15,6 +15,7 @@ import pytest
 from pydantic import SecretStr
 
 from noyra.core import Database, IdentityStore, SubjectKernel
+from noyra.core.database import _SCHEMA_DDL_FINGERPRINTS
 from noyra.core.runtime_observation import (
     ATTEMPT_LIMIT,
     CALL_LIMIT,
@@ -24,6 +25,7 @@ from noyra.core.runtime_observation import (
     loop_observation,
     resource_observation,
 )
+from noyra.core.schema.migrations import MIGRATIONS
 from noyra.core.types import content_hash
 from noyra.model.ledger import ModelLedger
 from noyra.service import NoyraHTTPServer, ServiceSettings
@@ -393,7 +395,8 @@ def _database(path: Path, *, calls: int = 1, attempts: int = 1) -> None:
               resource_group_id TEXT,resource_pool TEXT DEFAULT 'economy',
               model TEXT DEFAULT 'fixture-model',purpose TEXT DEFAULT 'fixture',error_code TEXT);
             CREATE TABLE waiting_cognitive_tasks(
-              task_id TEXT PRIMARY KEY,subject_id TEXT,purpose TEXT,status TEXT);
+              task_id TEXT PRIMARY KEY,subject_id TEXT,purpose TEXT,status TEXT,
+              first_waited_at TEXT NOT NULL DEFAULT '2026-10-22T00:00:00+00:00');
             CREATE TABLE sleep_runs(
               sleep_id TEXT PRIMARY KEY,subject_id TEXT,status TEXT,reflection_event_id TEXT);
             CREATE TABLE observations(
@@ -403,6 +406,7 @@ def _database(path: Path, *, calls: int = 1, attempts: int = 1) -> None:
               status TEXT,input_tokens INTEGER,output_tokens INTEGER,cost_microusd INTEGER,
               private_payload TEXT, UNIQUE(call_id,attempt_number));
         """)
+        connection.executescript(MIGRATIONS[119])
         connection.execute("INSERT INTO runtime_state VALUES ('subject','active')")
         connection.execute(
             "INSERT INTO autonomy_loop_state VALUES ('subject','closed',0,?,NULL)",
@@ -965,7 +969,8 @@ def test_wait_sample_separates_terminal_history_and_keeps_missing_parents_visibl
         )
         connection.execute("INSERT INTO sleep_runs VALUES ('done','subject','complete',NULL)")
         connection.executemany(
-            "INSERT INTO waiting_cognitive_tasks VALUES (?,?,?,?)",
+            "INSERT INTO waiting_cognitive_tasks(task_id,subject_id,purpose,status) "
+            "VALUES (?,?,?,?)",
             [
                 ("live", "subject", "world_cognition:new", "waiting"),
                 ("terminal", "subject", "world_cognition:rejected", "waiting"),
@@ -988,3 +993,147 @@ def test_wait_sample_separates_terminal_history_and_keeps_missing_parents_visibl
         "cancelled": 1,
         "missing_parent": 2,
     }
+
+
+def test_wait_sample_uses_versioned_index_for_large_history_and_remains_bounded(
+    tmp_path: Path,
+) -> None:
+    subject = "runtime-observation-large-waits"
+    database = Database(tmp_path / "large-waits.sqlite3")
+    IdentityStore(database).ensure(subject, content_hash(subject))
+    base = datetime(2026, 11, 1, tzinfo=UTC)
+    wait_count = 150_000
+    with database.transaction() as connection:
+        connection.executemany(
+            "INSERT INTO waiting_cognitive_tasks("
+            "task_id,subject_id,pool,purpose,status,reason_code,retry_count,next_retry_at,"
+            "first_waited_at,updated_at,state_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                (
+                    f"wait-{index:06d}",
+                    subject,
+                    "deep",
+                    f"fixture:{index}",
+                    "waiting",
+                    "fixture",
+                    1,
+                    (base + timedelta(days=30)).isoformat(),
+                    (base + timedelta(seconds=index)).isoformat(),
+                    (base + timedelta(seconds=index)).isoformat(),
+                    "0" * 64,
+                )
+                for index in range(wait_count)
+            ),
+        )
+        plan = connection.execute(
+            "EXPLAIN QUERY PLAN SELECT task_id,purpose,status,first_waited_at "
+            "FROM waiting_cognitive_tasks WHERE subject_id=? AND status=? "
+            "ORDER BY first_waited_at DESC,task_id DESC LIMIT ?",
+            (subject, "waiting", CALL_LIMIT + 1),
+        ).fetchall()
+    details = [str(row[3]) for row in plan]
+    assert any("idx_waiting_cognitive_subject_status_first_waited" in detail for detail in details)
+    assert not any("TEMP B-TREE" in detail.upper() for detail in details)
+
+    sampled_purposes: list[str] = []
+
+    def record_purpose(_connection: Any, _subject: str, purpose: str) -> None:
+        sampled_purposes.append(purpose)
+        return None
+
+    observer = RuntimeObserver(database.path, tmp_path, subject)
+    with patch("noyra.core.runtime_observation.terminal_wait_reason", record_purpose):
+        result = observer.snapshot(cognition_enabled=True, interval_seconds=30)
+    assert result["database_observation"] == "ok"
+    assert result["waiting_sample"]["records"] == CALL_LIMIT
+    assert result["waiting_sample"]["truncated"] is True
+    assert len(sampled_purposes) == CALL_LIMIT
+    assert sampled_purposes[0] == f"fixture:{wait_count - 1}"
+    assert sampled_purposes[-1] == f"fixture:{wait_count - CALL_LIMIT}"
+
+
+def test_missing_optional_autonomy_evidence_is_partial_not_healthy_or_total_failure(
+    tmp_path: Path,
+) -> None:
+    subject = "runtime-observation-partial"
+    with SubjectKernel(
+        tmp_path / "partial-observation.sqlite3", subject, content_hash(subject)
+    ) as kernel:
+        kernel.boot()
+        kernel.orient()
+        kernel.activate()
+        ModelLedger(kernel.database).prepare_call(
+            subject, "provider", "model", "fixture", content_hash("request"), "one"
+        )
+        # Fail only the optional autonomy-control segment. Other fields remain
+        # available, but the absent autonomy evidence must not become healthy.
+        with patch(
+            "noyra.core.integrity_watchdog.read_watchdog",
+            side_effect=sqlite3.OperationalError("optional control snapshot unavailable"),
+        ):
+            result = RuntimeObserver(kernel.database.path, tmp_path, subject).snapshot(
+                cognition_enabled=True, interval_seconds=30
+            )
+        assert result["database_observation"] == "ok"
+        assert result["autonomy_observation"] == "unavailable"
+        assert result["integrity_watchdog"]["status"] == "unavailable"
+        assert result["model_sample"]["calls"] == 1
+
+
+def test_schema_119_adds_wait_sample_index_without_rewriting_wait_evidence(
+    tmp_path: Path,
+) -> None:
+    subject = "runtime-observation-migration"
+    path = tmp_path / "migration.sqlite3"
+    database = Database(path)
+    IdentityStore(database).ensure(subject, content_hash(subject))
+    wait = (
+        "legacy-wait",
+        subject,
+        "deep",
+        "fixture:legacy",
+        "waiting",
+        "fixture",
+        1,
+        "2026-11-30T00:00:00+00:00",
+        "2026-11-20T00:00:00+00:00",
+        "2026-11-20T00:00:00+00:00",
+        "0" * 64,
+    )
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO waiting_cognitive_tasks("
+            "task_id,subject_id,pool,purpose,status,reason_code,retry_count,next_retry_at,"
+            "first_waited_at,updated_at,state_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            wait,
+        )
+        connection.execute("DROP INDEX idx_waiting_cognitive_subject_status_first_waited")
+        connection.execute("UPDATE schema_meta SET value='118' WHERE key='schema_version'")
+        connection.execute(
+            "UPDATE schema_meta SET value=? WHERE key='schema_ddl_contract'",
+            (f"118:{_SCHEMA_DDL_FINGERPRINTS[118]}",),
+        )
+
+    upgraded = Database(path)
+    with upgraded.read_transaction() as connection:
+        assert (
+            connection.execute(
+                "SELECT task_id,subject_id,pool,purpose,status,reason_code,retry_count,"
+                "next_retry_at,"
+                "first_waited_at,updated_at,state_hash FROM waiting_cognitive_tasks"
+            ).fetchone()[:]
+            == wait
+        )
+        assert (
+            connection.execute(
+                "SELECT value FROM schema_meta WHERE key='schema_version'"
+            ).fetchone()[0]
+            == "119"
+        )
+        assert (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' "
+                "AND name='idx_waiting_cognitive_subject_status_first_waited'"
+            ).fetchone()
+            is not None
+        )

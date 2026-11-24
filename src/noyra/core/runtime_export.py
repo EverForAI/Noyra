@@ -769,6 +769,7 @@ _OWNERSHIP_GRAPHS[118] = {
         parameter_count=3,
     ),
 }
+_OWNERSHIP_GRAPHS[119] = _OWNERSHIP_GRAPHS[118]
 
 
 @dataclass(frozen=True)

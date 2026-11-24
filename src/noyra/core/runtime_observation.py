@@ -517,12 +517,24 @@ class RuntimeObserver:
             attention["unresolved_deliveries"] = delivery_attention_sample(
                 connection, self.subject_id
             )
-            waits = connection.execute(
-                "SELECT task_id,purpose,status FROM waiting_cognitive_tasks "
-                "WHERE subject_id=? AND status IN ('waiting','cancelled') "
-                "ORDER BY rowid DESC LIMIT ?",
-                (self.subject_id, CALL_LIMIT + 1),
-            ).fetchall()
+            # Resolve each status through the versioned subject/status/time index.
+            # Sorting the full wait history by rowid forced a temporary B-tree
+            # even though this is only a latest-record display sample.
+            waits_by_status = []
+            for wait_status in ("waiting", "cancelled"):
+                waits_by_status.extend(
+                    connection.execute(
+                        "SELECT task_id,purpose,status,first_waited_at "
+                        "FROM waiting_cognitive_tasks WHERE subject_id=? AND status=? "
+                        "ORDER BY first_waited_at DESC,task_id DESC LIMIT ?",
+                        (self.subject_id, wait_status, CALL_LIMIT + 1),
+                    ).fetchall()
+                )
+            waits = sorted(
+                waits_by_status,
+                key=lambda item: (str(item["first_waited_at"]), str(item["task_id"])),
+                reverse=True,
+            )[: CALL_LIMIT + 1]
             waiting_sample: dict[str, Any] = {
                 "scope": "latest_wait_records_not_total",
                 "record_limit": CALL_LIMIT,

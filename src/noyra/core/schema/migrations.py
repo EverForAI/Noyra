@@ -92,4 +92,9 @@ CREATE INDEX IF NOT EXISTS idx_workflow_checkpoints_subject_history
     116: WORKFLOW_INCREMENT_SCHEMA,
     117: WORKFLOW_PUBLICATION_GUARDS_SCHEMA,
     118: COMMON_KNOWLEDGE_TRUSTED_PUBLISHERS_SCHEMA,
+    # Keep the local runtime-observation wait sample on an ordered bounded path.
+    119: """
+CREATE INDEX IF NOT EXISTS idx_waiting_cognitive_subject_status_first_waited
+    ON waiting_cognitive_tasks(subject_id,status,first_waited_at DESC,task_id DESC);
+""",
 }
