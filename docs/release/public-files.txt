@@ -314,6 +314,7 @@ docs/release/2026-10-10-dispatch-remediation-external-acceptance.md
 docs/release/2026-10-10-post-audit-external-acceptance.md
 docs/release/2026-10-11-third-round-external-acceptance.md
 docs/release/README.md
+docs/release/current-source-status.md
 docs/release/external-gates.md
 docs/release/public-files-excluded.txt
 docs/release/public-files.sha256

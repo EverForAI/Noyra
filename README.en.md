@@ -11,7 +11,8 @@
 Author and public attribution: **Jaxon Grey**<br>
 GitHub: [EverForAI](https://github.com/EverForAI)<br>
 License: [Apache-2.0](LICENSE)<br>
-Current release: experimental research preview `preview-2026.09.07-r1`
+Python package version: `0.1.0`; latest preview tag recorded in this repository: `preview-2026.09.09-r2`.
+The checked-out source is a later development snapshot, not a new release or a statement about any deployed instance.
 
 The project's **world-first claim concerns the combination** of endogenous goals, non-command
 interaction, and the subject's capacity to organize paid human labor. Goals form and change through
@@ -83,7 +84,10 @@ and the [prior-art record](docs/research/2026-09-06-ncas-prior-art.md).
 ## Current Capabilities and Preview Limits
 
 This is an **experimental research preview**, not a production release or a certification of years of
-unattended operation.
+unattended operation. The source migration target is schema `119` (defined in
+`src/noyra/core/schema/base.py`); this does not mean any deployed database has been migrated to it.
+See the [current source status and evidence index](docs/release/current-source-status.md) for version identifiers
+and the scope of the public verification records.
 
 | Domain | Implemented foundation | Current evidence boundary | Not established by this preview |
 | --- | --- | --- | --- |
@@ -102,9 +106,9 @@ Run the preview with a new isolated data directory and loopback binding only. Do
 a real signer, enable automatic payments or publishing, connect real funds, grant file capabilities, or
 reuse a development directory containing private subject state, credentials, logs, or databases.
 
-The `preview-2026.09.07-r1` revision includes reviewed repairs for the file-tool and fee-admission issues
-described in [the revision notes](docs/release/2026-09-07-preview-r1.md). The preview restrictions remain
-in force after those repairs. Known deployment limits and security reporting are documented in
+The historical `preview-2026.09.07-r1` revision includes reviewed repairs for the file-tool and fee-admission issues
+described in [the revision notes](docs/release/2026-09-07-preview-r1.md). Those notes apply to r1 only, not to r2
+or the current development checkout. The preview restrictions remain in force. Known deployment limits and security reporting are documented in
 [research preview deployment](docs/deployment/research-preview.md) and [SECURITY.md](SECURITY.md).
 
 The project still plans supervised bounties, human assistance, payments, tips, independent signing, and
@@ -114,7 +118,9 @@ feature in the preview does not certify the implementation for real funds or una
 ## Historical Verification Notes
 
 Historical audit records retain their original scope and result; they are not a new certification of
-the current commit. The latest release and audit documents are authoritative for current boundaries.
+the current commit. The [current source status and evidence index](docs/release/current-source-status.md)
+identifies version metadata and the exact limits of the public records; dated release and audit notes remain
+scoped to the revisions and checks they name.
 
 - P1-02 established versioned integrity registration, watchdog quarantine, safe pause, bounded read-only
   audit, and large-event integrity checks.
