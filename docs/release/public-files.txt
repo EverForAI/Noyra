@@ -263,6 +263,7 @@ docs/development/self-modification-expiry.md
 docs/development/semantic-memory-recovery.md
 docs/development/sleep-failure-recovery.md
 docs/development/social-proposal-recovery.md
+docs/development/source-provenance-contract.md
 docs/development/workflow-export-format.md
 docs/development/workflow-export-publications.md
 docs/development/workflow-increment-metadata.md
@@ -656,6 +657,7 @@ src/noyra/core/schema/world_poll.py
 src/noyra/core/secret_cleanup.py
 src/noyra/core/sleep_recovery.py
 src/noyra/core/snapshots.py
+src/noyra/core/source_provenance.py
 src/noyra/core/storage.py
 src/noyra/core/storage_lifecycle.py
 src/noyra/core/storage_mode.py
@@ -1275,6 +1277,7 @@ tests/test_smtp_deadline_fencing.py
 tests/test_snapshot_compaction.py
 tests/test_soak_collector.py
 tests/test_social_rejection_recovery.py
+tests/test_source_provenance.py
 tests/test_storage.py
 tests/test_storage_lifecycle.py
 tests/test_storage_mode.py
