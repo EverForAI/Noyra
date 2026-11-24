@@ -15,14 +15,17 @@ from noyra.core.errors import IntegrityError, RuntimeOwnershipError
 from noyra.core.scheduling_clock import CooldownClock
 from noyra.core.types import content_hash
 from noyra.model import (
+    BudgetLimits,
     CognitiveResourceGroupInput,
     CognitiveResourceStore,
     FakeProvider,
+    ModelLedger,
     ModelMessage,
     ModelUsage,
     ProviderResponse,
     RoutedModelGateway,
 )
+from noyra.model.request_identity import business_request_key
 from noyra.sleep import SleepIntegrity, SleepReflectionPlan, SleepRunRecord
 from test_c2_sleep_recovery import at_phase
 from test_c2_sleep_recovery import kernel as kernel
@@ -109,6 +112,65 @@ async def test_sleep_advances_after_restart_with_ordinary_admission_closed(
         lease = reopened.admission.begin("ordinary-work")
         reopened.admission.finish(lease)
         SleepIntegrity(reopened.database).verify(subject)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["prepared", "executing", "unknown"])
+async def test_fenced_legacy_reflection_call_allows_sleep_to_finish(
+    kernel: SubjectKernel,
+    status: str,
+) -> None:
+    _, sleep_id = at_phase(kernel, "reflective_sleep")
+    database, subject = kernel.database, kernel.subject_id
+    purpose = f"sleep_reflection:{sleep_id}"
+    provider = FakeProvider([])
+    ledger = ModelLedger(database)
+    call, _ = ledger.prepare_call(
+        subject,
+        provider.name,
+        "legacy-model",
+        purpose,
+        content_hash("legacy context"),
+        business_request_key(database, subject, purpose),
+    )
+    if status != "prepared":
+        attempt = ledger.authorize_attempt(
+            call.call_id,
+            BudgetLimits(10, 1_000, 1_000, 1_000),
+            reserved_input_tokens=1,
+            reserved_output_tokens=1,
+            reserved_cost_microusd=1,
+        )
+        ledger.start_attempt(attempt.attempt_id)
+        if status == "unknown":
+            ledger.finish_attempt(attempt.attempt_id, "unknown", usage=None, cost_microusd=None)
+            ledger.finish_call(call.call_id, "unknown")
+    call = ledger.get_call(call.call_id)
+    assert call.status == status
+    attempts = ledger.attempts(call.call_id)
+    resources = CognitiveResourceStore(database, database.path.parent / "model-secrets")
+    gateway = RoutedModelGateway(database, subject, resources, provider_factory=lambda _: provider)
+    cognition = SleepReflectionCognition(
+        database,
+        subject,
+        gateway,
+        CognitionSettings(enabled=False),
+    )
+    loop = AutonomyLoop(kernel, reflection_hook=cognition.propose)
+    for action in ("reflection_committed", "deep_sleep_entered", "wake_started", "wake_completed"):
+        assert (await loop.tick()).action == action
+    assert loop.sleep.get(sleep_id).status == "complete"
+    assert not provider.requests
+    assert ledger.get_call(call.call_id) == call
+    assert ledger.attempts(call.call_id) == attempts
+    with database.read_transaction() as connection:
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM model_calls WHERE purpose=?", (purpose,)
+            ).fetchone()[0]
+            == 1
+        )
+    SleepIntegrity(database).verify(subject)
 
 
 @pytest.mark.asyncio

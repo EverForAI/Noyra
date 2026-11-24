@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from noyra.core import Database, EventStore, IdentityStore, SubjectKernel
 from noyra.core.database import CURRENT_SCHEMA_VERSION
-from noyra.core.errors import IntegrityError, InvalidTransitionError, NotFoundError
+from noyra.core.errors import IntegrityError, InvalidTransitionError
 from noyra.core.types import canonical_json, content_hash
 from noyra.mind import BeliefStore, GoalCandidate, GoalStore, MemoryStore
 from noyra.model import (
@@ -561,18 +561,43 @@ class SleepTestCase(unittest.TestCase):
         self.assertEqual(reopened_identity.genesis_hash, original_identity.genesis_hash)
         self.assertEqual(reopened_identity.last_checkpoint, original_identity.last_checkpoint)
 
-    def test_invalid_reflection_rolls_back_atomically(self: Self) -> None:
+    def test_goal_revision_is_rejected_before_any_integration(self: Self) -> None:
+        goals = GoalStore(self.database)
+        event = EventStore(self.database).append(self.subject_id, "experience", "test", {})
+        goal = goals.create_candidate(
+            self.subject_id,
+            GoalCandidate(
+                title="Continue the inquiry",
+                description="Use verified outcomes to track progress.",
+                origin="self",
+                priority=0.6,
+                commitment=0.5,
+                motive_emotion="curiosity",
+            ),
+            causal_source_ids=(event.event_id,),
+            reason="test goal",
+        )
+        history = goals.revisions(goal.goal_id)
         run = self.sleep.start("subject_choice", "test atomic integration")
         self.sleep.begin_reflection(run.sleep_id)
-        with self.assertRaises(NotFoundError):
+        with self.assertRaisesRegex(SleepStateConflictError, "cannot revise goals"):
             self.sleep.commit_reflection(
                 run.sleep_id,
                 SleepReflectionPlan(
-                    summary="This plan contains a nonexistent goal.",
+                    summary="A reflection with otherwise allowed memory integration.",
+                    memories=(
+                        SleepMemory(
+                            content="I observed a pattern.",
+                            memory_type="reflection",
+                            salience=0.5,
+                            confidence=0.5,
+                            source_event_ids=(event.event_id,),
+                        ),
+                    ),
                     goal_revisions=(
                         SleepGoalRevision(
-                            goal_id="goal_missing",
-                            status="paused",
+                            goal_id=goal.goal_id,
+                            status="active",
                             priority=0.5,
                             commitment=0.5,
                             progress=0.1,
@@ -589,9 +614,85 @@ class SleepTestCase(unittest.TestCase):
             event_count = connection.execute(
                 "SELECT COUNT(*) FROM events WHERE event_type = 'sleep_reflection'"
             ).fetchone()[0]
+        self.assertEqual(MemoryStore(self.database).search(self.subject_id), [])
+        self.assertEqual(goals.get(goal.goal_id), goal)
+        self.assertEqual(goals.revisions(goal.goal_id), history)
         self.assertEqual(reflection_count, 0)
         self.assertEqual(event_count, 0)
         self.assertIsNone(self.sleep.get(run.sleep_id).reflection_event_id)
+
+    def test_committed_legacy_plan_replays_without_reapplying_goal_revision(self: Self) -> None:
+        goals = GoalStore(self.database)
+        event = EventStore(self.database).append(self.subject_id, "experience", "test", {})
+        goal = goals.create_candidate(
+            self.subject_id,
+            GoalCandidate(
+                title="Follow the finding",
+                description="Continue the bounded inquiry.",
+                origin="self",
+                priority=0.6,
+                commitment=0.5,
+                motive_emotion="curiosity",
+            ),
+            causal_source_ids=(event.event_id,),
+            reason="test goal",
+        )
+        run = self.sleep.start("subject_choice", "replay historical reflection")
+        self.sleep.begin_reflection(run.sleep_id)
+        plain = SleepReflectionPlan(summary="A legacy reflection was recorded.")
+        committed = self.sleep.commit_reflection(run.sleep_id, plain)
+        assert committed.reflection_event_id is not None
+        revision = SleepGoalRevision(
+            goal_id=goal.goal_id,
+            status="active",
+            priority=0.6,
+            commitment=0.5,
+            progress=0.3,
+            emotional_pressure=0.0,
+            reason="historical reflection",
+        )
+        legacy = plain.model_copy(update={"goal_revisions": (revision,)})
+        payload = legacy.model_dump(mode="json")
+        revised = goals.revise(
+            **revision.model_dump(),
+            causal_source_ids=(committed.reflection_event_id,),
+            expected_revision=goal.current_revision,
+        )
+        # Recreate the pre-boundary durable state in the isolated fixture.
+        with self.database.transaction() as connection:
+            trigger = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'prevent_sleep_reflection_update'"
+            ).fetchone()[0]
+            connection.execute("DROP TRIGGER prevent_sleep_reflection_update")
+            connection.execute(
+                "UPDATE sleep_reflections SET plan_json=?, plan_hash=? WHERE sleep_id=?",
+                (canonical_json(payload), content_hash(payload), run.sleep_id),
+            )
+            connection.execute(trigger)
+            self.sleep._integration(
+                connection,
+                run.sleep_id,
+                "goal",
+                goal.goal_id,
+                "revised",
+                (committed.reflection_event_id,),
+                content_hash(revised.__dict__),
+                self.clock_value,
+            )
+        before = goals.revisions(goal.goal_id)
+        reopened = SleepEngine(self.database, self.subject_id)
+        self.assertEqual(
+            SleepIntegrity(self.database).verify(self.subject_id)["sleep_integrations"], 1
+        )
+        replayed = SleepReflectionPlan.model_validate_json(canonical_json(payload))
+        self.assertEqual(reopened.commit_reflection(run.sleep_id, replayed), committed)
+        with self.assertRaisesRegex(SleepStateConflictError, "different reflection"):
+            reopened.commit_reflection(run.sleep_id, plain)
+        self.assertEqual(goals.get(goal.goal_id), revised)
+        self.assertEqual(goals.revisions(goal.goal_id), before)
+        self.assertEqual(
+            SleepIntegrity(self.database).verify(self.subject_id)["sleep_integrations"], 1
+        )
 
     def test_retry_block_requires_new_evidence_before_same_strategy(self: Self) -> None:
         setup_evidence = EventStore(self.database).append(
@@ -689,7 +790,7 @@ class SleepTestCase(unittest.TestCase):
         self.assertEqual(prepared.status, "prepared")
         SleepIntegrity(self.database).verify(self.subject_id)
 
-    def test_reflection_integrates_memory_goal_belief_and_personality_candidate(self: Self) -> None:
+    def test_reflection_integrates_memory_belief_and_personality_candidate(self: Self) -> None:
         events = EventStore(self.database)
         evidence = tuple(
             events.append(
@@ -736,17 +837,6 @@ class SleepTestCase(unittest.TestCase):
                         source_event_ids=(evidence[0], evidence[1]),
                     ),
                 ),
-                goal_revisions=(
-                    SleepGoalRevision(
-                        goal_id=goal.goal_id,
-                        status="active",
-                        priority=0.8,
-                        commitment=0.6,
-                        progress=0.1,
-                        emotional_pressure=0.0,
-                        reason="sleep review found the question worth pursuing",
-                    ),
-                ),
                 belief_revisions=(
                     SleepBeliefRevision(
                         belief_id=belief.belief_id,
@@ -767,7 +857,7 @@ class SleepTestCase(unittest.TestCase):
                 ),
             ),
         )
-        self.assertEqual(GoalStore(self.database).get(goal.goal_id).status, "active")
+        self.assertEqual(GoalStore(self.database).get(goal.goal_id), goal)
         self.assertEqual(BeliefStore(self.database).get(belief.belief_id).status, "qualified")
         self.assertEqual(len(MemoryStore(self.database).search(self.subject_id)), 1)
         with self.database.connection() as connection:

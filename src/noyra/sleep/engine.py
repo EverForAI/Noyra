@@ -13,7 +13,6 @@ from noyra.core.lifecycle import LifecycleManager
 from noyra.core.snapshots import SnapshotStore
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.mind.belief import BeliefStore
-from noyra.mind.goal import GoalStore
 from noyra.mind.memory import MemoryStore
 from noyra.mind.validation import validate_causal_source_ids, validate_event_ids
 
@@ -64,7 +63,6 @@ class SleepEngine:
         self.fatigue = FatigueTracker(database, clock=self.clock)
         self.memories = MemoryStore(database)
         self.beliefs = BeliefStore(database)
-        self.goals = GoalStore(database)
         self.snapshots = SnapshotStore(database)
         self.identities = IdentityStore(database)
 
@@ -199,6 +197,10 @@ class SleepEngine:
                     raise SleepStateConflictError("sleep already has a different reflection")
                 return self._from_row(row)
 
+            # The legacy shape is retained for historical replay only.
+            if plan.goal_revisions:
+                raise SleepStateConflictError("sleep reflection cannot revise goals")
+
             event = self.events._append_connection(
                 connection,
                 self.subject_id,
@@ -241,9 +243,6 @@ class SleepEngine:
                 ),
             )
             self._apply_memories(connection, sleep_id, event.event_id, plan, now)
-            # Project managers may add richer sleep assessments; this local
-            # snapshot is only a fallback and never calls a model.
-            self._apply_goals(connection, sleep_id, event.event_id, plan, now)
             self._apply_beliefs(connection, sleep_id, event.event_id, plan, now)
             self._apply_retry_blocks(connection, sleep_id, plan, now)
             self._apply_personality_candidates(connection, sleep_id, plan, now)
@@ -515,45 +514,6 @@ class SleepEngine:
                 "created",
                 sources,
                 content_hash(record.__dict__),
-                now,
-            )
-
-    def _apply_goals(
-        self,
-        connection: Any,
-        sleep_id: str,
-        reflection_event_id: str,
-        plan: SleepReflectionPlan,
-        now: str,
-    ) -> None:
-        seen: set[str] = set()
-        for item in plan.goal_revisions:
-            if item.goal_id in seen:
-                raise SleepStateConflictError("a sleep plan cannot revise one goal twice")
-            seen.add(item.goal_id)
-            current = self.goals._load_connection(connection, item.goal_id)
-            if current.subject_id != self.subject_id:
-                raise SleepStateConflictError("sleep goal belongs to another subject")
-            revised = self.goals._revise_connection(
-                connection,
-                item.goal_id,
-                status=item.status,
-                priority=item.priority,
-                commitment=item.commitment,
-                progress=item.progress,
-                emotional_pressure=item.emotional_pressure,
-                reason=item.reason,
-                causal_source_ids=(reflection_event_id,),
-                expected_revision=current.current_revision,
-            )
-            self._integration(
-                connection,
-                sleep_id,
-                "goal",
-                revised.goal_id,
-                "revised",
-                (reflection_event_id,),
-                content_hash(revised.__dict__),
                 now,
             )
 

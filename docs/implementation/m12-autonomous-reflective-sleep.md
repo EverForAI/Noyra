@@ -2,8 +2,9 @@
 
 M12 replaces the service's count-only sleep summary with bounded remote-model reflection over a
 durable experience window. The existing `SleepEngine` remains the only component allowed to commit
-reflection effects. The model proposes a `SleepReflectionPlan`; it never writes memories, goals,
-beliefs, retry barriers, personality candidates, diary entries, or lifecycle state directly.
+reflection effects. The model returns a `SleepReflectionProposal`. Goal records are read-only
+context for this stage. Goal governance handles goal decisions, and outcome evaluation applies
+progress supported by action evidence.
 
 ## Frozen reflection window
 
@@ -37,23 +38,28 @@ terms are acceptable for this exposure.
 Before `SleepEngine` sees a proposal, the reflection supervisor verifies:
 
 - every new memory cites only an event present in the frozen window;
-- each goal or belief appears once and was present in the supplied context;
-- every goal transition follows the deterministic goal state machine;
+- goal revisions are excluded from the model output contract;
+- each belief appears once and was present in the supplied context;
 - a belief revision supplies at least one in-window supporting or counter event;
 - retry barriers cite distinct, supplied failed actions whose tool, target, goal, and strategy match;
 - personality candidates cite at least three distinct in-window events.
 
-`SleepEngine.commit_reflection` then revalidates ownership and causal references and applies all
-effects in one SQLite transaction. Any failure rolls back the reflection event and every integration.
+`SleepEngine.commit_reflection` checks the goal boundary again before writing a new reflection.
+It revalidates ownership and causal references and applies the allowed effects in one SQLite
+transaction. Any failure rolls back the reflection event and every integration.
 Personality output remains a candidate, not an editable or immediately adopted persona. Public diary
 text remains a private candidate until a separate subject-owned publication action exists.
 
 ## Recovery and bounded failure
 
 The model call purpose and idempotency key are tied to the sleep ID. A crash after a successful call
-reuses the stored structured response. Invalid successful responses are skipped and privately
-audited. Provider, schema, or local-validation failures can consume at most
-`NOYRA_MAX_SLEEP_MODEL_CALLS_PER_RUN` calls.
+reuses the stored structured response after integrity and policy validation. A cached proposal
+with goal revisions is rejected and privately audited. Another proposal may be requested within
+the existing call limit, or sleep uses its local fallback. Previously committed plans retain their
+original payloads and can replay idempotently. A pending call fenced by the gateway or bound to a
+conflicting request context leads to local fallback. The original call retains its ledger state
+and any outstanding reservation. Provider, schema, or local-validation failures can consume at
+most `NOYRA_MAX_SLEEP_MODEL_CALLS_PER_RUN` calls.
 
 When that limit is reached, or the hard remote-model budget denies the call, M12 returns a
 deterministic no-change reflection containing only counts. This deliberately prefers losing one
