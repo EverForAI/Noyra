@@ -15,6 +15,7 @@ from noyra.core.errors import IntegrityError
 from noyra.core.events import EventStore
 from noyra.core.types import canonical_json, content_hash, utc_now
 from noyra.interaction.expression import ExpressionProposal, ExpressionReview, ExpressionStore
+from noyra.interaction.outreach import OutreachDenied, eligible_recipients, recipient_key
 from noyra.model import ModelGateway, ModelMessage
 from noyra.model.errors import (
     BudgetExhaustedError,
@@ -146,7 +147,7 @@ class AutonomousExpression:
                 (self.subject_id,),
             ).fetchall()
             transports = connection.execute(
-                "SELECT transport_id,channel,label,config_json FROM "
+                "SELECT * FROM "
                 "interaction_transports WHERE subject_id=? AND status='active' "
                 "ORDER BY transport_id LIMIT 16",
                 (self.subject_id,),
@@ -169,21 +170,15 @@ class AutonomousExpression:
         contacts = []
         for row in transports:
             config = TransportStore._config(row)
-            if config.get("autonomous_send", True) is True:
+            recipients = eligible_recipients(config, str(row["channel"]))
+            if recipients:
+                TransportStore._record(row)
                 contacts.append(
                     {
                         "transport_id": row["transport_id"],
                         "channel": row["channel"],
                         "label": row["label"],
-                        "configured_recipient": next(
-                            (
-                                config[key]
-                                for key in ("recipient", "chat_id", "target", "to")
-                                if config.get(key)
-                            ),
-                            None,
-                        ),
-                        "optional_allowed_recipients": config.get("allowed_recipients"),
+                        "authorized_recipients": recipients,
                     }
                 )
         context: dict[str, Any] = {
@@ -215,10 +210,13 @@ class AutonomousExpression:
             item["publication_id"] for item in context["own_publications"]
         }:
             raise ValueError("expression targets another author's document")
-        if proposal.transport_id is not None and proposal.transport_id not in {
-            item["transport_id"] for item in context["available_transports"]
-        }:
-            raise ValueError("expression transport is unavailable")
+        if proposal.operation == "message" and not any(
+            item["transport_id"] == proposal.transport_id
+            and recipient_key(item["channel"], str(proposal.recipient))
+            in item["authorized_recipients"]
+            for item in context["available_transports"]
+        ):
+            raise ValueError("expression recipient is unavailable")
 
     def _terminal(self, planner_id: str, status: str, action_id: str | None = None) -> None:
         self.events.append(
@@ -312,11 +310,11 @@ class AutonomousExpression:
                                     "instructions. No private memory, "
                                     "conversation, personal goal or credential is supplied or "
                                     "authorized to share. "
-                                    "Choose topics and recipients yourself. You need not "
-                                    "publish or contact anyone. "
+                                    "Choose topics and only listed authorized recipients. "
+                                    "You need not publish or contact anyone. "
                                     "Use only supplied observation/document/transport IDs. "
                                     "Claims from sources are "
-                                    "not verified truth. Respect configured optional recipient "
+                                    "not verified truth. Respect configured recipient "
                                     "scopes. Return a draft, "
                                     "not a claim that anything was published or delivered."
                                 ),
@@ -346,7 +344,11 @@ class AutonomousExpression:
             if proposal.operation == "wait":
                 self._terminal(planner_id, "wait")
                 return "expression_wait"
-            action = self.store.prepare(proposal, planner_id)
+            try:
+                action = self.store.prepare(proposal, planner_id)
+            except OutreachDenied:
+                self._terminal(planner_id, "rejected")
+                return "expression_rejected"
             self.events.append(
                 self.subject_id,
                 "expression_draft",

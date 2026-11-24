@@ -40,6 +40,7 @@ from noyra.core.delivery_state import (
     verified_reconciliations,
 )
 from noyra.core.errors import IntegrityError, InvalidTransitionError, NotFoundError
+from noyra.core.events import EventStore
 from noyra.core.http import (
     DEFAULT_MAX_HEADER_BYTES,
     DEFAULT_MAX_RESPONSE_BYTES,
@@ -60,6 +61,17 @@ from noyra.core.types import (
 )
 
 from .outbound import OUTBOUND_ADAPTERS
+from .outreach import (
+    MAX_RECIPIENTS,
+    POLICY_KEY,
+    OutreachAuthorization,
+    OutreachChange,
+    OutreachDenied,
+    eligible_recipients,
+    recipient_key,
+    recipient_policy,
+    route_allows,
+)
 from .smtp_deadline import SMTPOperation
 
 TransportChannel = Literal["telegram", "wechat", "qq", "feishu", "email", "webhook"]
@@ -161,6 +173,8 @@ class TransportInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_channel_endpoint(self) -> TransportInput:
+        if POLICY_KEY in self.settings:
+            raise ValueError("recipient policy must be managed through the outreach operation")
         for key in ("autonomous_send", "require_known_senders"):
             if key in self.settings and type(self.settings[key]) is not bool:
                 raise ValueError(key + " must be boolean")
@@ -381,7 +395,117 @@ class TransportStore:
             ).fetchone()
         if row is None:
             raise NotFoundError(f"transport not found: {transport_id}")
-        return self._config(row)
+        settings = self._config(row)
+        settings.pop(POLICY_KEY, None)
+        return settings
+
+    def outreach_inventory(self, subject_id: str) -> builtins.list[dict[str, Any]]:
+        with self.database.read_transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM interaction_transports WHERE subject_id=? ORDER BY channel,label",
+                (subject_id,),
+            ).fetchall()
+            result = []
+            for row in rows:
+                record = self._record(row)
+                config = self._config(row)
+                policy = recipient_policy(config, record.channel)
+                result.append(
+                    {
+                        "transport_id": record.transport_id,
+                        "label": record.label,
+                        "channel": record.channel,
+                        "status": record.status,
+                        "eligible_recipients": len(eligible_recipients(config, record.channel))
+                        if record.status == "active"
+                        else 0,
+                        "revoked_recipients": sum(not entry.active for entry in policy.values()),
+                    }
+                )
+            return result
+
+    def change_outreach(
+        self, transport_id: str, change: OutreachChange, *, actor: str, subject_id: str
+    ) -> dict[str, Any]:
+        if not actor.strip() or actor == "subject":
+            raise PermissionError("only an operator can change recipient authorization")
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM interaction_transports WHERE transport_id=? AND subject_id=?",
+                (transport_id, subject_id),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError("transport not found")
+            record = self._record(row)
+            if row["endpoint_contract"] != "digest_v1":
+                raise IntegrityError("transport endpoint upgrade is required")
+            config = self._config(row)
+            recipient = recipient_key(record.channel, change.recipient)
+            policy = recipient_policy(config, record.channel)
+            previous = policy.get(recipient)
+            active = change.operation == "authorize"
+            if active and (
+                record.status != "active"
+                or not route_allows(config, record.channel, recipient)
+                or change.expected_authorization_id
+                != (previous.authorization_id if previous else None)
+            ):
+                raise OutreachDenied("route is disabled, restricted, or authorization changed")
+            if not active and previous is not None and not previous.active:
+                return {"authorization_id": previous.authorization_id, "active": False}
+            if previous is None and len(policy) >= MAX_RECIPIENTS:
+                raise ValueError("this transport reached its recipient policy limit")
+            entry = OutreachAuthorization(
+                authorization_id=new_id("outreach"),
+                active=active,
+                operator_name=change.operator_name,
+                opt_out_email=change.opt_out_email,
+            )
+            policy[recipient] = entry
+            config[POLICY_KEY] = {key: value.model_dump() for key, value in policy.items()}
+            state = {
+                key: row[key]
+                for key in (
+                    "transport_id",
+                    "subject_id",
+                    "channel",
+                    "label",
+                    "endpoint",
+                    "endpoint_contract",
+                    "endpoint_digest",
+                    "secret_reference",
+                    "status",
+                )
+            }
+            # Do not change the route timestamp: only the recipient policy changed.
+            connection.execute(
+                "UPDATE interaction_transports SET config_json=?,state_hash=? "
+                "WHERE transport_id=? AND subject_id=?",
+                (
+                    canonical_json(config),
+                    content_hash({**state, "config": config}),
+                    transport_id,
+                    subject_id,
+                ),
+            )
+            EventStore(self.database)._append_connection(
+                connection,
+                subject_id,
+                "outreach_authorization_changed",
+                actor,
+                {
+                    "transport_id": transport_id,
+                    "recipient_hash": content_hash(recipient),
+                    "authorization_id": entry.authorization_id,
+                    "active": active,
+                    "reason_hash": content_hash(change.reason),
+                },
+                privacy_level="private",
+                causal_parent_ids=(),
+                occurred_at=None,
+                event_id=None,
+            )
+            return {"authorization_id": entry.authorization_id, "active": active}
 
     def disable(
         self, transport_id: str, *, reason: str, actor: str, subject_id: str
@@ -1386,8 +1510,6 @@ class DeliveryDispatcher:
     def _expression_route(
         self, connection: Any, subject: str, interaction_id: str
     ) -> dict[str, Any] | None:
-        from noyra.core.events import EventStore
-
         row = connection.execute(
             "SELECT * FROM events WHERE subject_id=? AND event_id=?",
             (subject, "evt_outbox_" + content_hash(interaction_id)),
@@ -1395,11 +1517,12 @@ class DeliveryDispatcher:
         if row is None:
             return None
         payload = EventStore(self.database).payload_from_row(row, connection=connection)
+        required = {"interaction_id", "transport_id", "recipient", "grant_id", "action_id"}
         if (
-            content_hash(payload) != row["payload_hash"]
+            row["event_type"] != "expression_outbox"
+            or content_hash(payload) != row["payload_hash"]
             or payload.get("interaction_id") != interaction_id
-            or set(payload)
-            != {"interaction_id", "transport_id", "recipient", "grant_id", "action_id"}
+            or set(payload) not in (required, required | {"authorization_id"})
         ):
             raise IntegrityError("expression outbox route is invalid")
         action = connection.execute(
@@ -1764,6 +1887,8 @@ class DeliveryDispatcher:
             )
             assert_current_lease()
             return completed
+        except OutreachDenied:
+            return self._fail_closed_delivery(delivery, "outreach_authorization_unavailable")
         except PermissionError:
             return self._fail_closed_delivery(delivery, "PermissionError")
         except Exception as error:
@@ -1799,31 +1924,39 @@ class DeliveryDispatcher:
             expression = self._expression_route(
                 connection, transport.subject_id, str(current["interaction_id"])
             )
+            if expression is None and str(current["idempotency_key"]).startswith(
+                "expression-message:"
+            ):
+                raise OutreachDenied("expression outbox authorization evidence is missing")
             if expression is not None:
                 from noyra.capability import CapabilityStore
-                from noyra.interaction.expression import ExpressionProposal, ExpressionStore
+                from noyra.capability.errors import CapabilityDeniedError
+                from noyra.interaction.expression import ExpressionStore
 
                 if expression["transport_id"] != transport.transport_id or expression[
                     "recipient"
                 ] != interaction.get("counterparty"):
                     raise PermissionError("expression recipient or transport changed")
-                CapabilityStore(self.database).revalidate_use(
-                    expression["grant_id"],
-                    transport.subject_id,
-                    "message",
-                    "transport:" + transport.transport_id,
-                    side_effect=True,
-                )
-                ExpressionStore(self.database, transport.subject_id)._transport(
-                    connection,
-                    ExpressionProposal(
-                        operation="message",
-                        body=str(current["content"]),
-                        transport_id=transport.transport_id,
-                        recipient=str(expression["recipient"]),
-                        reason="dispatch revalidation",
-                    ),
-                )
+                channel, authorization = ExpressionStore(
+                    self.database, transport.subject_id
+                ).require_outreach(connection, transport.transport_id, str(expression["recipient"]))
+                if (
+                    expression.get("authorization_id") != authorization.authorization_id
+                    or channel != current["channel"]
+                    or current["counterparty"] != expression["recipient"]
+                    or not str(current["content"]).startswith(authorization.notice())
+                ):
+                    raise OutreachDenied("outreach authorization or disclosure changed")
+                try:
+                    CapabilityStore(self.database).revalidate_use(
+                        expression["grant_id"],
+                        transport.subject_id,
+                        "message",
+                        "transport:" + transport.transport_id,
+                        side_effect=True,
+                    )
+                except CapabilityDeniedError:
+                    raise OutreachDenied("expression transport capability withdrawn") from None
             withdrawn = connection.execute(
                 "SELECT 1 FROM private_conversation_messages m JOIN private_conversations c "
                 "ON c.conversation_id=m.conversation_id WHERE m.interaction_id IN (?,?) "
@@ -1934,7 +2067,7 @@ class DeliveryDispatcher:
         frozen_settings = content_hash(settings)
 
         def before_send() -> None:
-            self._assert_message_send_allowed(transport, interaction, idempotency_key)
+            assert_current_lease()
             if self.transports is not None:
                 current = self.transports.get(
                     transport.transport_id, subject_id=transport.subject_id
@@ -1951,7 +2084,7 @@ class DeliveryDispatcher:
                     or content_hash(current_settings) != frozen_settings
                 ):
                     raise PermissionError("transport configuration changed before dispatch")
-            assert_current_lease()
+            self._assert_message_send_allowed(transport, interaction, idempotency_key)
 
         async def trace(event: str, info: dict[str, Any]) -> None:
             if event.endswith("send_request_headers.started"):
