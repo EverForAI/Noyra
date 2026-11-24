@@ -2,18 +2,20 @@
 
 Noyra's local deterministic tests prove the payment state machine, but they do
 not prove signer isolation, real-chain receipts, backup recovery, or a long
-running production process. Production automatic payment therefore remains
-disabled until the external release evidence is independently reviewed.
+running production process. Automatic payment through a protected signer remains disabled until
+the external release evidence is independently reviewed, regardless of deployment profile.
+The in-process signer is limited to an explicitly opted-in development/test Sepolia flow and is
+never available in production; protected external signers still require signed release evidence.
 
-The production profile requires this explicit opt-in before the service will
-load autonomous wallet automation:
+Protected-signing automatic payments require this explicit opt-in before the service will
+load autonomous wallet automation, including in development:
 
 ```text
 NOYRA_WALLET_AUTOMATION_RELEASE_GATE=external_verified
 ```
 
-That setting remains an operator opt-in. Production policy activation and each
-new automatic payment authorization also verify a root-controlled Ed25519 key
+That setting remains an operator opt-in, not evidence. Policy activation and each
+new payment authorization through a protected signer verify a root-controlled Ed25519 key
 at `/etc/noyra/release-evidence-public-key` and the current release's
 `.noyra-external-gates.json`, bound to its `.noyra-source-sha`. An environment
 assertion alone cannot enable production automation. Disabling and emergency

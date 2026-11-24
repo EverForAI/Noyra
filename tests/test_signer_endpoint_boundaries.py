@@ -327,12 +327,10 @@ def test_production_transport_still_rejects_a_hostname_resolving_to_loopback(
     connect.assert_not_called()
 
 
-@pytest.mark.parametrize("mode", [None, "external"])
 def test_external_environment_rejects_local_origin_without_disclosing_input(
-    monkeypatch: pytest.MonkeyPatch, mode: str | None
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    if mode is not None:
-        monkeypatch.setenv("NOYRA_WALLET_MODE", mode)
+    monkeypatch.setenv("NOYRA_WALLET_MODE", "external")
     endpoint = "http://127.0.0.1:8780/private-synthetic-value"
     monkeypatch.setenv("NOYRA_WALLET_SIGNER_ENDPOINT", endpoint)
     monkeypatch.setenv("NOYRA_WALLET_SIGNER_ID", "staging-signer-01")
@@ -344,16 +342,13 @@ def test_external_environment_rejects_local_origin_without_disclosing_input(
     assert endpoint not in str(error.value) and "synthetic-env-token" not in str(error.value)
 
 
-@pytest.mark.parametrize("mode", [None, "external"])
 def test_environment_selects_https_frontend_and_never_uses_the_origin_url(
     frontend: Frontend,
     monkeypatch: pytest.MonkeyPatch,
-    mode: str | None,
 ) -> None:
     import noyra.wallet.config as config
 
-    if mode is not None:
-        monkeypatch.setenv("NOYRA_WALLET_MODE", mode)
+    monkeypatch.setenv("NOYRA_WALLET_MODE", "external")
     monkeypatch.setenv("NOYRA_WALLET_SIGNER_ENDPOINT", frontend.url)
     monkeypatch.setenv("NOYRA_WALLET_SIGNER_ID", "staging-signer-01")
     monkeypatch.setenv("NOYRA_WALLET_SIGNER_ADDRESS", ADDRESS)

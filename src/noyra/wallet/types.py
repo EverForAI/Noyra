@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 SQLITE_INT64_MAX = 9_223_372_036_854_775_807
+LOCAL_SIGNING_CHAIN_ID = 11_155_111
 _EVM_ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}\Z")
 _SYMBOL = re.compile(r"[A-Z0-9._-]{1,32}\Z")
 _BALANCE = re.compile(r"(?:0|[1-9][0-9]{0,255})\Z")

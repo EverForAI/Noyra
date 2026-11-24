@@ -14,7 +14,10 @@ from noyra.core.database import (
 from noyra.core.errors import IntegrityError, InvalidTransitionError, NotFoundError
 from noyra.core.identity import validate_subject_id
 from noyra.core.redaction import redact_secret_text
-from noyra.core.release_assurance import require_activation_evidence
+from noyra.core.release_assurance import (
+    require_activation_evidence,
+    require_wallet_activation_evidence,
+)
 from noyra.core.types import (
     canonical_json,
     content_hash,
@@ -115,12 +118,34 @@ class WalletEconomyStore:
     """Pre-signer bounty, policy, payment-order and append-only ledger domain."""
 
     def __init__(
-        self, database: Database, *, clock: Callable[[], str] = _now, production: bool | None = None
+        self,
+        database: Database,
+        *,
+        clock: Callable[[], str] = _now,
+        production: bool | None = None,
+        protected_signing: bool = False,
+        testnet_signing: bool = False,
     ):
         self.database = database
         self.production = production
+        self.protected_signing = protected_signing
+        self.testnet_signing = testnet_signing
         self.clock = clock
         self.wallets = WalletStore(database)
+
+    def require_automatic_activation(self, chain_id: int | None = None) -> None:
+        if self.protected_signing:
+            from .types import LOCAL_SIGNING_CHAIN_ID
+
+            require_wallet_activation_evidence(
+                automatic=True,
+                testnet=(
+                    self.testnet_signing
+                    and (chain_id is None or chain_id == LOCAL_SIGNING_CHAIN_ID)
+                ),
+            )
+        else:
+            require_activation_evidence(production=self.production)
 
     @staticmethod
     def _operator(actor: object) -> str:
@@ -654,7 +679,7 @@ class WalletEconomyStore:
                 and proposal.automation_enabled is not False
                 and not proposal.emergency_paused
             ):
-                require_activation_evidence(production=self.production)
+                self.require_automatic_activation()
             # Preserve the pre-switch API contract for callers that only set
             # mode=automatic. New management clients send an explicit bool.
             if proposal.automation_enabled is None:
@@ -1194,7 +1219,7 @@ class WalletEconomyStore:
             return False
         if row["payment_mode"] == "automatic":
             try:
-                require_activation_evidence(production=self.production)
+                self.require_automatic_activation()
             except ValueError:
                 return False
         # Network and asset allowlists are retained as durable policy metadata
@@ -1202,7 +1227,7 @@ class WalletEconomyStore:
         # active registered network/asset pair; only the recipient itself is
         # intentionally free of an address allowlist.
         registered = c.execute(
-            "SELECT n.status AS network_status, a.status AS asset_status, a.network_id "
+            "SELECT n.status AS network_status, n.chain_id, a.status AS asset_status, a.network_id "
             "FROM wallet_networks AS n "
             "JOIN wallet_assets AS a ON a.subject_id=n.subject_id AND a.network_id=n.network_id "
             "WHERE n.subject_id=? AND n.network_id=? AND a.asset_id=?",
@@ -1215,6 +1240,11 @@ class WalletEconomyStore:
             or registered["network_id"] != row["network_id"]
         ):
             return False
+        if row["payment_mode"] == "automatic":
+            try:
+                self.require_automatic_activation(int(registered["chain_id"]))
+            except ValueError:
+                return False
         amount = int(row["amount"])
         single_limit = int(policy["per_order_limit"])
         daily_limit = int(policy["daily_limit"])

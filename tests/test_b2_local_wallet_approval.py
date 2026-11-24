@@ -292,9 +292,13 @@ def test_real_synthetic_keystore_is_exported_only_in_recipient_encrypted_payload
     account = load_account(keystore, "synthetic-password")
     grant = grant_local_wallet(case.database, case.task, account.address, actor="operator")
     monkeypatch.setenv("NOYRA_WALLET_MODE", "local")
+    monkeypatch.setenv("NOYRA_PROFILE", "test")
+    monkeypatch.setenv("NOYRA_WALLET_TESTNET_ENABLED", "true")
     monkeypatch.setenv("NOYRA_WALLET_KEYSTORE_PATH", str(keystore))
     monkeypatch.setenv("NOYRA_WALLET_PASSWORD_FILE", str(password))
-    monkeypatch.setenv("NOYRA_WALLET_RPC_URLS_JSON", json.dumps({"1": "https://rpc.example.com"}))
+    monkeypatch.setenv(
+        "NOYRA_WALLET_RPC_URLS_JSON", json.dumps({"11155111": "https://rpc.example.com"})
+    )
     recipient_bytes = case.recipient.public_key().public_bytes_raw()
     proof = {
         "artifact_id": "synthetic-local-wallet",

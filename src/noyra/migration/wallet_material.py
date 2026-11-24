@@ -9,10 +9,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from noyra.wallet.config import local_testnet_rpc_urls, require_wallet_testnet_opt_in
 from noyra.wallet.keystore import load_account, read_password_file
 
 
 def verify_local_wallet(root: Path, address: str) -> None:
+    local_testnet_rpc_urls((root / "rpc.json").read_text(encoding="utf-8"))
     account = load_account(root / "wallet.json", read_password_file(root / "password"))
     if account.address.casefold() != address.casefold():
         raise ValueError("migration wallet address mismatch")
@@ -48,6 +50,8 @@ def source_wallet_material(
         raise ValueError("local wallet task approval expired")
     if os.environ.get("NOYRA_WALLET_MODE") != "local":
         raise ValueError("local wallet migration requires configured local signer")
+    require_wallet_testnet_opt_in()
+    rpc_urls = local_testnet_rpc_urls(os.environ["NOYRA_WALLET_RPC_URLS_JSON"])
     keystore = Path(os.environ["NOYRA_WALLET_KEYSTORE_PATH"])
     password = Path(os.environ["NOYRA_WALLET_PASSWORD_FILE"])
     if not keystore.is_absolute() or not password.is_absolute():
@@ -55,8 +59,5 @@ def source_wallet_material(
     account = load_account(keystore, read_password_file(password))
     if account.address.casefold() != address.casefold():
         raise ValueError("local wallet source identity mismatch")
-    from noyra.wallet.config import _parse_rpc_urls
-
-    rpc_urls = _parse_rpc_urls(os.environ["NOYRA_WALLET_RPC_URLS_JSON"])
     rpc_material = json.dumps({str(key): value for key, value in rpc_urls.items()}).encode("utf-8")
     return keystore, password, rpc_material

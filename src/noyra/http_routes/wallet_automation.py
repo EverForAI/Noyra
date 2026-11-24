@@ -6,7 +6,7 @@ import time
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
-from noyra.core.release_assurance import activation_status
+from noyra.core.release_assurance import activation_status, wallet_automation_opted_in
 from noyra.core.types import content_hash
 from noyra.wallet import PaymentPolicyInput
 
@@ -69,8 +69,16 @@ def wallet_automation_projection(self: RequestHandler, owner: NoyraHTTPServer) -
         # The three measures share a snapshot. A failed/partial read is unknown,
         # never an empty result or proof that there is no unsettled payment.
         pending, latest_failure, active = None, None, None
-    evidence = activation_status()
-    evidence_blocked = owner.settings.profile == "production" and evidence["status"] != "verified"
+    protected = owner.wallet_economy.protected_signing
+    testnet_exception = (
+        owner.wallet_economy.testnet_signing and owner.settings.profile != "production"
+    )
+    evidence = activation_status(bind_running_build=protected and not testnet_exception)
+    evidence_blocked = (
+        (protected or owner.settings.profile == "production")
+        and not testnet_exception
+        and evidence["status"] != "verified"
+    ) or (protected and not testnet_exception and not wallet_automation_opted_in())
     return {
         "automation_enabled": bool(policy.automation_enabled),
         "mode": policy.mode,
@@ -174,8 +182,13 @@ def update_wallet_automation(
         self._json(
             HTTPStatus.CONFLICT if "conflict" in str(error) else HTTPStatus.BAD_REQUEST,
             {
-                "error": "production_release_evidence_required"
-                if str(error) == "production_release_evidence_required"
+                "error": str(error)
+                if str(error)
+                in {
+                    "production_release_evidence_required",
+                    "wallet_release_evidence_required",
+                    "wallet_automation_external_gate_opt_in_required",
+                }
                 else "invalid_wallet_automation"
             },
         )

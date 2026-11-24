@@ -155,7 +155,9 @@ def test_current_release_evidence_is_sha_bound_and_pointer_controlled(
 ) -> None:
     record, key = signed_evidence()
     release = tmp_path / "releases" / "release"
-    release.mkdir(parents=True)
+    running_python = release / ".venv" / "bin" / "python"
+    running_python.parent.mkdir(parents=True)
+    running_python.touch()
     (release / ".noyra-source-sha").write_text("a" * 40)
     (release / assurance.EVIDENCE_NAME).write_text(json.dumps(record))
     public_key = tmp_path / "public-key"
@@ -167,6 +169,18 @@ def test_current_release_evidence_is_sha_bound_and_pointer_controlled(
         pytest.skip("directory symlink permission unavailable")
     monkeypatch.setattr(assurance, "CURRENT_PATH", pointer)
     monkeypatch.setattr(assurance, "PUBLIC_KEY_PATH", public_key)
+    monkeypatch.setattr("sys.executable", str(running_python))
+    monkeypatch.setattr(
+        assurance,
+        "_RUNNING_MODULE",
+        running_python.parent
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "noyra"
+        / "core"
+        / "release_assurance.py",
+    )
     monkeypatch.setattr(assurance, "controlled_text", lambda path, **_: path.read_text())
     actual = pointer.lstat()
     root_pointer = os.stat_result(
@@ -190,9 +204,14 @@ def test_current_release_evidence_is_sha_bound_and_pointer_controlled(
 
     with patch.object(Path, "lstat", metadata):
         assert assurance.current_evidence()["commit_sha"] == "a" * 40
+        assert assurance.current_evidence(bind_running_build=True)["commit_sha"] == "a" * 40
         (release / ".noyra-source-sha").write_text("b" * 40)
         with pytest.raises(ValueError, match="commit_sha"):
             assurance.current_evidence()
+        (release / ".noyra-source-sha").write_text("a" * 40)
+        monkeypatch.setattr("sys.executable", str(tmp_path / "unbound" / "python"))
+        with pytest.raises(ValueError, match="running_build_does_not_match_current_release"):
+            assurance.current_evidence(bind_running_build=True)
 
 
 def test_production_payment_gate_allows_pause_and_disable_without_evidence(tmp_path: Path) -> None:
@@ -225,6 +244,49 @@ def test_production_payment_gate_allows_pause_and_disable_without_evidence(tmp_p
         {"payment_mode": "automatic"},
         {"mode": "automatic", "automation_enabled": True, "emergency_paused": False},
     )
+
+
+def test_protected_wallet_gate_uses_running_build_and_explicit_testnet_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[bool] = []
+
+    def verified(*, bind_running_build: bool = False) -> dict[str, Any]:
+        calls.append(bind_running_build)
+        return {"status": "verified"}
+
+    monkeypatch.setattr(assurance, "current_evidence", verified)
+    monkeypatch.setenv("NOYRA_PROFILE", "development")
+    monkeypatch.setenv("NOYRA_WALLET_TESTNET_ENABLED", "true")
+    assurance.require_wallet_activation_evidence(automatic=False, testnet=True)
+    assert calls == []
+
+    assurance.require_wallet_activation_evidence(automatic=False, testnet=False)
+    assert calls == [True]
+    monkeypatch.setenv("NOYRA_PROFILE", "production")
+    assurance.require_wallet_activation_evidence(automatic=False, testnet=True)
+    assert calls == [True, True]
+
+    monkeypatch.delenv("NOYRA_WALLET_AUTOMATION_RELEASE_GATE", raising=False)
+    with pytest.raises(ValueError, match="wallet_automation_external_gate_opt_in_required"):
+        assurance.require_wallet_activation_evidence(automatic=True, testnet=False)
+    monkeypatch.setenv("NOYRA_WALLET_AUTOMATION_RELEASE_GATE", "external_verified")
+    assurance.require_wallet_activation_evidence(automatic=True, testnet=False)
+    assert calls[-1] is True
+
+
+def test_wallet_production_evidence_rejects_stale_running_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NOYRA_PROFILE", "production")
+    monkeypatch.setenv("NOYRA_WALLET_AUTOMATION_RELEASE_GATE", "external_verified")
+
+    def stale(**_: Any) -> dict[str, Any]:
+        raise ValueError("running_build_does_not_match_current_release")
+
+    monkeypatch.setattr(assurance, "current_evidence", stale)
+    with pytest.raises(ValueError, match="wallet_release_evidence_required"):
+        assurance.require_wallet_activation_evidence(automatic=True)
 
 
 def test_container_acceptance_binds_signed_evidence_to_image_source(

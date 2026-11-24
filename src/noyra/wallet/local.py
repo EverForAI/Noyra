@@ -30,7 +30,7 @@ from .execution import (
     WalletUnsignedTransfer,
 )
 from .local_rpc import LocalWalletRPC
-from .types import SQLITE_INT64_MAX, canonical_evm_address
+from .types import LOCAL_SIGNING_CHAIN_ID, SQLITE_INT64_MAX, canonical_evm_address
 
 _QUANTITY = re.compile(r"0x(?:0|[1-9a-f][0-9a-f]{0,63})\Z")
 _HASH = re.compile(r"0x[0-9a-fA-F]{64}\Z")
@@ -68,6 +68,8 @@ class LocalWalletSigner:
     ) -> None:
         if not isinstance(account, LocalAccount):
             raise ValueError("local wallet account is invalid")
+        if set(rpc_urls) != {LOCAL_SIGNING_CHAIN_ID}:
+            raise ValueError("local wallet only supports the isolated development testnet")
         self._account: LocalAccount | None = account
         self.address = canonical_evm_address(account.address)
         self.signer_id = f"local:{self.address}"
@@ -90,7 +92,11 @@ class LocalWalletSigner:
         try:
             # Pydantic's model_copy/model_construct can bypass validation.
             checked = WalletUnsignedTransfer.model_validate(transfer.model_dump())
-            if checked.source_address != self.address or int(checked.max_fee_per_gas) <= 0:
+            if (
+                checked.chain_id != LOCAL_SIGNING_CHAIN_ID
+                or checked.source_address != self.address
+                or int(checked.max_fee_per_gas) <= 0
+            ):
                 raise ValueError("invalid source or fee")
             recipient, _ = self._effect(checked)
             if recipient == self.address or recipient == "0x" + "0" * 40:

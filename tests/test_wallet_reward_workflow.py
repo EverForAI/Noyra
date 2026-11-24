@@ -30,6 +30,18 @@ from noyra.wallet import (
     WalletSignerError,
     WalletStore,
 )
+from noyra.wallet import execution as wallet_execution
+
+
+@pytest.fixture(autouse=True)
+def custom_mock_signers_are_simulation_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    classify = wallet_execution.wallet_signer_requires_evidence
+
+    def explicit_simulation(signer: Any) -> bool:
+        return False if isinstance(signer, MockSigner) else classify(signer)
+
+    monkeypatch.setattr(wallet_execution, "wallet_signer_requires_evidence", explicit_simulation)
+
 
 SOURCE_ADDRESS = "0xA111111111111111111111111111111111111111"
 RECIPIENT_ADDRESS = "0xB111111111111111111111111111111111111111"

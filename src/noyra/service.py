@@ -66,7 +66,7 @@ from noyra.core.operator_controls import (
 from noyra.core.private_sources import WITHDRAWN_PARTICIPANT_INVITATION
 from noyra.core.provider_health import ProviderHealthStore
 from noyra.core.redaction import redact_secrets
-from noyra.core.release_assurance import upgrade_channel
+from noyra.core.release_assurance import upgrade_channel, wallet_automation_opted_in
 from noyra.core.retention import RetentionManager, RetentionSettings
 from noyra.core.runtime import SubjectKernel
 from noyra.core.runtime_export import RuntimeLogExporter
@@ -244,9 +244,11 @@ from noyra.wallet import (
     WalletRewardWorkflow,
     WalletSigner,
     WalletStore,
+    wallet_signer_is_testnet,
+    wallet_signer_requires_evidence,
 )
 from noyra.wallet.config import configured_wallet_signer_from_env
-from noyra.wallet.types import canonical_timestamp
+from noyra.wallet.types import LOCAL_SIGNING_CHAIN_ID, canonical_timestamp
 from noyra.world import SafeWebReader
 
 LOGGER = logging.getLogger("noyra.service")
@@ -267,16 +269,19 @@ class _WalletAutomationConfig:
     auto_publish: bool
 
 
-def _wallet_automation_from_env() -> _WalletAutomationConfig | None:
+def _wallet_automation_from_env(
+    *, protected_signing: bool = False, testnet_signing: bool = False
+) -> _WalletAutomationConfig | None:
     raw_enabled = os.getenv("NOYRA_WALLET_AUTOMATION_ENABLED")
     if raw_enabled is None or raw_enabled.strip().lower() in {"", "0", "false", "no", "off"}:
         return None
     if raw_enabled.strip().lower() not in {"1", "true", "yes", "on"}:
         raise ValueError("NOYRA_WALLET_AUTOMATION_ENABLED must be true or false")
-    if os.getenv("NOYRA_PROFILE", "development").strip().lower() == "production":
-        release_gate = os.getenv("NOYRA_WALLET_AUTOMATION_RELEASE_GATE", "").strip().lower()
-        if release_gate != "external_verified":
-            raise ValueError("production wallet automation requires an external gate approval")
+    production = os.getenv("NOYRA_PROFILE", "development").strip().lower() == "production"
+    if (
+        production or (protected_signing and not testnet_signing)
+    ) and not wallet_automation_opted_in():
+        raise ValueError("wallet automation requires an external gate approval")
 
     network_id = os.getenv("NOYRA_WALLET_AUTOMATION_NETWORK_ID", "").strip()
     asset_id = os.getenv("NOYRA_WALLET_AUTOMATION_ASSET_ID", "").strip()
@@ -565,7 +570,10 @@ class NoyraHTTPServer:
         )
         self.wallets = WalletStore(kernel.database)
         self.wallet_economy = WalletEconomyStore(
-            kernel.database, production=settings.profile == "production"
+            kernel.database,
+            production=settings.profile == "production",
+            protected_signing=wallet_signer_requires_evidence(wallet_signer),
+            testnet_signing=wallet_signer_is_testnet(wallet_signer),
         )
         self.wallet_acquisitions = WalletBalanceAcquisitionLedger(kernel.database)
         self.wallet_acquisition_runner = WalletBalanceAcquisitionRunner(self.wallet_acquisitions)
@@ -2080,7 +2088,10 @@ class NoyraService:
                     close()
             return service
         try:
-            service._wallet_automation_config = _wallet_automation_from_env()
+            service._wallet_automation_config = _wallet_automation_from_env(
+                protected_signing=service.http.wallet_economy.protected_signing,
+                testnet_signing=service.http.wallet_economy.testnet_signing,
+            )
             if (
                 service._wallet_automation_config is not None
                 and service.http.wallet_execution is None
@@ -2989,6 +3000,24 @@ class NoyraService:
         config = self._wallet_automation_config
         if config is None:
             return 0
+        try:
+            self.http.wallet_economy.require_automatic_activation()
+        except ValueError:
+            # Do not solicit work with a promised payment while the gate is closed.
+            return 0
+        if self.http.wallet_economy.testnet_signing:
+            try:
+                network = self.http.wallets.get_network(config.network_id, subject_id=subject_id)
+                asset = self.http.wallets.get_asset(config.asset_id, subject_id=subject_id)
+            except NotFoundError:
+                return 0
+            if (
+                network.chain_id != LOCAL_SIGNING_CHAIN_ID
+                or network.status != "active"
+                or asset.network_id != network.network_id
+                or asset.status != "active"
+            ):
+                return 0
         if type(limit) is not int or not 1 <= limit <= 16:
             raise ValueError("invalid autonomous wallet workflow limit")
         with self.kernel.database.read_transaction() as connection:

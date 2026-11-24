@@ -37,6 +37,10 @@ from noyra.core.http import (
     validate_response_headers,
 )
 from noyra.core.identity import validate_subject_id
+from noyra.core.release_assurance import (
+    require_wallet_activation_evidence,
+    wallet_testnet_opted_in,
+)
 from noyra.core.types import canonical_json, content_hash, new_id, strict_json_loads, utc_now
 
 from .dispatch import (
@@ -892,6 +896,20 @@ class WalletExecutionAttemptRecord:
     completed_at: str | None
 
 
+def wallet_signer_requires_evidence(signer: WalletSigner | None) -> bool:
+    from .local import LocalWalletSigner
+
+    # Only the built-in simulation and the chain-fenced local signer are exempt.
+    # No caller-supplied name, flag, chain label or deployment profile is authority.
+    return signer is not None and type(signer) not in {MockSigner, LocalWalletSigner}
+
+
+def wallet_signer_is_testnet(signer: WalletSigner | None) -> bool:
+    from .local import LocalWalletSigner
+
+    return type(signer) is LocalWalletSigner and wallet_testnet_opted_in()
+
+
 class WalletPaymentExecutionEngine:
     """Crash-safe orchestrator for reserved payment orders."""
 
@@ -935,9 +953,18 @@ class WalletPaymentExecutionEngine:
         confirmation_timeout_seconds: int = 900,
     ):
         self.database = database
-        self.economy = economy or WalletEconomyStore(database)
+        protected_signing = wallet_signer_requires_evidence(signer)
+        self.economy = economy or WalletEconomyStore(
+            database,
+            protected_signing=protected_signing,
+            testnet_signing=wallet_signer_is_testnet(signer),
+        )
+        if economy is not None:
+            self.economy.protected_signing = protected_signing
+            self.economy.testnet_signing = wallet_signer_is_testnet(signer)
         self.wallets = self.economy.wallets
         self.signer = signer
+        self._protected_signing = protected_signing
         signer_id = getattr(signer, "signer_id", None)
         if not isinstance(signer_id, str) or not 1 <= len(signer_id.strip()) <= 256:
             raise ValueError("wallet signer identity is invalid")
@@ -1673,6 +1700,7 @@ class WalletPaymentExecutionEngine:
                 if execution_row is None:
                     raise IntegrityError("unknown order execution is missing")
                 execution = self._execution_from_row(execution_row)
+                self._require_signer_evidence(order, execution.chain_id)
                 if execution.signer_id != self.signer_id:
                     raise ValueError("unknown execution signer identity changed")
                 attempt_number = execution.attempt_count + 1
@@ -1807,6 +1835,7 @@ class WalletPaymentExecutionEngine:
                 or asset["network_id"] != network["network_id"]
             ):
                 raise ValueError("wallet execution references are not active")
+            self._require_signer_evidence(order, int(network["chain_id"]))
             source = c.execute(
                 "SELECT * FROM wallet_addresses WHERE subject_id=? AND network_id=? "
                 "AND status='active' AND purpose='spending' "
@@ -2183,6 +2212,15 @@ class WalletPaymentExecutionEngine:
                 ).fetchone()
             )
 
+    def _require_signer_evidence(self, order: Mapping[str, Any], chain_id: int) -> None:
+        if self._protected_signing:
+            from .types import LOCAL_SIGNING_CHAIN_ID
+
+            require_wallet_activation_evidence(
+                automatic=order["payment_mode"] == "automatic",
+                testnet=(chain_id == LOCAL_SIGNING_CHAIN_ID and self.economy.testnet_signing),
+            )
+
     def _sign_and_broadcast(
         self,
         transfer: WalletUnsignedTransfer,
@@ -2214,6 +2252,10 @@ class WalletPaymentExecutionEngine:
                         )
                     ):
                         raise WalletDispatchDenied("wallet dispatch authorization changed")
+                    try:
+                        self._require_signer_evidence(order, int(current.chain_id))
+                    except ValueError:
+                        raise WalletDispatchDenied("wallet release authorization changed") from None
                 assert_current_lease()
                 yield
 

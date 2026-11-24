@@ -258,14 +258,39 @@ def test_external_gate_workflow_is_separate_protected_and_sha_bound() -> None:
     assert "EXTERNAL_GATES_RUN_ID" not in release_workflow
 
 
-def test_production_wallet_automation_requires_explicit_external_gate(
+@pytest.mark.parametrize(
+    "profile,protected,testnet",
+    [("production", False, False), ("development", True, False)],
+)
+def test_wallet_automation_requires_explicit_external_gate(
     monkeypatch: pytest.MonkeyPatch,
+    profile: str,
+    protected: bool,
+    testnet: bool,
 ) -> None:
-    monkeypatch.setenv("NOYRA_PROFILE", "production")
+    monkeypatch.setenv("NOYRA_PROFILE", profile)
+    monkeypatch.delenv("NOYRA_WALLET_AUTOMATION_RELEASE_GATE", raising=False)
     monkeypatch.setenv("NOYRA_WALLET_AUTOMATION_ENABLED", "true")
     monkeypatch.setenv("NOYRA_WALLET_AUTOMATION_NETWORK_ID", "network")
     monkeypatch.setenv("NOYRA_WALLET_AUTOMATION_ASSET_ID", "asset")
     monkeypatch.setenv("NOYRA_WALLET_AUTOMATION_REWARD_AMOUNT", "1")
     monkeypatch.setenv("NOYRA_WALLET_AUTOMATION_ACCEPTANCE_CRITERIA", '["done"]')
     with pytest.raises(ValueError, match="external gate"):
-        _wallet_automation_from_env()
+        _wallet_automation_from_env(protected_signing=protected, testnet_signing=testnet)
+
+
+def test_explicit_development_testnet_can_run_bounded_test_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NOYRA_PROFILE", "development")
+    monkeypatch.delenv("NOYRA_WALLET_AUTOMATION_RELEASE_GATE", raising=False)
+    for key, value in {
+        "NOYRA_WALLET_AUTOMATION_ENABLED": "true",
+        "NOYRA_WALLET_AUTOMATION_NETWORK_ID": "testnet",
+        "NOYRA_WALLET_AUTOMATION_ASSET_ID": "synthetic-asset",
+        "NOYRA_WALLET_AUTOMATION_REWARD_AMOUNT": "1",
+        "NOYRA_WALLET_AUTOMATION_ACCEPTANCE_CRITERIA": '["done"]',
+    }.items():
+        monkeypatch.setenv(key, value)
+    config = _wallet_automation_from_env(protected_signing=True, testnet_signing=True)
+    assert config is not None and config.network_id == "testnet"

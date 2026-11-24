@@ -1,10 +1,9 @@
 # 本地钱包运行指南
 
-Noyra 的钱包模式由 `NOYRA_WALLET_MODE` 选择：`disabled`（默认）、
-`local`（进程内加载加密 Ethereum V3 keystore）或 `external`（现有的
-HTTPS signer）。旧部署若只设置 `NOYRA_WALLET_SIGNER_ENDPOINT` 和
-`NOYRA_WALLET_SIGNER_ID`，仍按 external 兼容处理；显式 `disabled` 会覆盖
-遗留变量。
+Noyra 的钱包模式必须由 `NOYRA_WALLET_MODE` 显式选择：`disabled`（模板默认）、
+`local` 或 `external`。未设置模式时，旧 signer 字段只产生脱敏迁移警告，不读取
+凭据，也不会装载 signer；将旧部署迁移为 `NOYRA_WALLET_MODE=external` 并完整复核
+凭据后才会恢复签名。`disabled` 始终覆盖旧 signer 字段。
 
 ## External signer 的入口和本机监听
 
@@ -55,9 +54,16 @@ python -m noyra wallet-setup --path C:\noyra\secrets\wallet.json
 
 将密码文件放在只有服务账户可读的目录，并通过 systemd credentials、容器 secret
 或等价的受保护挂载提供。`NOYRA_WALLET_PASSWORD_FILE` 只填写文件路径；不要
-把密码写入 `.env`。`NOYRA_WALLET_RPC_URLS_JSON` 是链 ID 到 HTTPS origin 的
-JSON 映射，例如 `{"1":"https://rpc.example"}`。不接受明文 HTTP、URL 中的
+把密码写入 `.env`。进程内 `local` 签名仅用于显式启用的 development/test
+Sepolia 测试环境，必须同时设置 `NOYRA_WALLET_TESTNET_ENABLED=true`，且 RPC 映射
+只能包含 Sepolia chain ID `11155111`；测试网模式不能用于 production。真实资产
+应使用符合独立验收要求的 `external` signer。RPC URL 仍须为 HTTPS origin，不接受明文 HTTP、URL 中的
 凭据、查询参数或重复链键。
+
+本地迁移会在源端取得、目标 migration-agent 解封和 root activation 各阶段分别
+检查显式测试网授权。仅用于隔离测试迁移时，源服务、migration-agent 和目标服务
+均需显式设置 `NOYRA_PROFILE=development`（或 `test`）及测试网开关；production
+目标不会激活进程内签名器。普通部署保持模板中的关闭值。
 
 本地模式把私钥解密到 Noyra 进程内存。进程被攻破时，攻击者可能取得密钥；
 external 模式把密钥留在隔离 signer 服务，适合更高隔离要求。请保存加密
