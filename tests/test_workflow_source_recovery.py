@@ -56,7 +56,14 @@ def enable(monkeypatch: pytest.MonkeyPatch, pair: recovery.RecoverySchemaPair) -
 
 
 def test_only_actual_reviewed_publication_migration_enables_cross_schema_recovery() -> None:
-    assert len(recovery._REVIEWED_SCHEMA_PAIRS) == 3
+    assert {
+        (pair.source_version, pair.target_version) for pair in recovery._REVIEWED_SCHEMA_PAIRS
+    } == {
+        (116, 117),
+        (116, 118),
+        (117, 118),
+        (119, 120),
+    }
     pair = next(item for item in recovery._REVIEWED_SCHEMA_PAIRS if item.source_version == 116)
     assert (pair.source_version, pair.target_version) == (116, 117)
     assert pair.source_ddl == _SCHEMA_DDL_FINGERPRINTS[116]
@@ -217,11 +224,14 @@ def test_schema115_does_not_inherit_approval_for_the116_pair(
     assert not recovery.matches_publication_source(actual, legacy, existing_request=True)
 
 
-def test_exact_additive_trust_migration_preserves_pending_workflow_source() -> None:
+@pytest.mark.parametrize("source_version,target_version", [(117, 118), (119, 120)])
+def test_exact_guard_or_trust_migration_preserves_pending_workflow_source(
+    source_version: int, target_version: int
+) -> None:
     pair = next(
         item
         for item in recovery._REVIEWED_SCHEMA_PAIRS
-        if item.source_version == 117 and item.target_version == 118
+        if item.source_version == source_version and item.target_version == target_version
     )
     frozen = {
         "format": FORMAT,
@@ -229,7 +239,7 @@ def test_exact_additive_trust_migration_preserves_pending_workflow_source() -> N
         "subject_id": "migration-subject",
         "workflow_id": "migration-workflow",
         "genesis_hash": "1" * 64,
-        "schema_version": 117,
+        "schema_version": source_version,
         "schema_ddl_hash": pair.source_ddl,
         "records": 4,
         "state_bytes": 8,
@@ -242,7 +252,7 @@ def test_exact_additive_trust_migration_preserves_pending_workflow_source() -> N
     }
     actual = {
         **frozen,
-        "schema_version": 118,
+        "schema_version": target_version,
         "schema_ddl_hash": pair.target_ddl,
         "event_head": {"sequence": 1, "root_hash": "5" * 64},
     }

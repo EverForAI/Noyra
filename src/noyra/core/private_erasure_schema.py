@@ -1,5 +1,47 @@
 """Explicit privacy operations, separate from routine retention."""
 
+from .types import content_hash
+
+ERASED_REFLECTION_PLAN = '{"privacy_erased":true}'
+ERASED_REFLECTION_HASH = content_hash({"privacy_erased": True})
+
+MIGRATION_V120 = f"""
+DROP TRIGGER IF EXISTS prevent_sleep_reflection_update;
+CREATE TRIGGER prevent_sleep_reflection_update BEFORE UPDATE ON sleep_reflections
+WHEN NOT (
+ OLD.plan_json!='{ERASED_REFLECTION_PLAN}'
+ AND NEW.plan_json='{ERASED_REFLECTION_PLAN}' AND NEW.plan_hash='{ERASED_REFLECTION_HASH}'
+ AND NEW.summary='[erased]' AND NEW.facts_json='[]' AND NEW.contradictions_json='[]'
+ AND NEW.prediction_errors_json='[]' AND NEW.unresolved_questions_json='[]'
+ AND NEW.public_diary_candidate IS NULL
+ AND NEW.reflection_id=OLD.reflection_id AND NEW.sleep_id=OLD.sleep_id
+ AND NEW.event_id=OLD.event_id AND NEW.created_at=OLD.created_at
+ AND EXISTS(SELECT 1 FROM private_erasure_receipts receipt
+ JOIN private_erasure_jobs job ON job.job_id=receipt.job_id
+ JOIN private_conversations window ON window.subject_id=job.subject_id
+  AND window.conversation_id=job.conversation_id AND window.status='deleting'
+ JOIN sleep_runs run ON run.sleep_id=OLD.sleep_id AND run.subject_id=job.subject_id
+  AND run.status='complete' AND run.reflection_event_id=OLD.event_id
+ JOIN events event ON event.event_id=OLD.event_id AND event.subject_id=job.subject_id
+  AND event.event_type='sleep_reflection' AND event.payload_archive_key IS NULL
+ JOIN model_calls call ON call.call_id=json_extract(event.payload_json,'$.model_call_id')
+  AND call.subject_id=job.subject_id AND call.purpose='sleep_reflection:'||run.sleep_id
+  AND call.status='succeeded'
+ WHERE receipt.record_table='sleep_reflections' AND receipt.record_id=OLD.reflection_id
+ AND receipt.original_hash=OLD.plan_hash AND receipt.erased_hash=NEW.plan_hash
+ AND job.status='running'
+ AND EXISTS(SELECT 1 FROM private_model_sources source WHERE source.call_id=call.call_id
+  AND source.subject_id=job.subject_id AND source.conversation_id=job.conversation_id)
+ AND NOT EXISTS(SELECT 1 FROM private_model_sources source WHERE source.call_id=call.call_id
+  AND (source.subject_id!=job.subject_id OR source.conversation_id!=job.conversation_id)))
+)
+BEGIN SELECT RAISE(ABORT,'sleep reflections require explicit content erasure'); END;
+CREATE TRIGGER IF NOT EXISTS prevent_erased_sleep_reflection_insert
+BEFORE INSERT ON sleep_reflections WHEN NEW.plan_json='{ERASED_REFLECTION_PLAN}'
+ OR NEW.plan_hash='{ERASED_REFLECTION_HASH}'
+BEGIN SELECT RAISE(ABORT,'sleep reflection erasure requires an existing reflection'); END;
+"""
+
 MIGRATION_V87 = """
 CREATE TABLE IF NOT EXISTS private_erasure_jobs (
  job_id TEXT PRIMARY KEY,

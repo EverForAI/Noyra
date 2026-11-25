@@ -100,7 +100,7 @@ def _validate_parent(connection: sqlite3.Connection, subject_id: str, purpose: s
             ).fetchone()
             if reflection is None or reflection["event_id"] != row["reflection_event_id"]:
                 raise IntegrityError("sleep reflection parent mismatch")
-            SleepIntegrity._verify_reflection(reflection)
+            SleepIntegrity._verify_reflection(connection, reflection, subject_id)
             event = connection.execute(
                 "SELECT subject_id,event_type FROM events WHERE event_id=?",
                 (row["reflection_event_id"],),

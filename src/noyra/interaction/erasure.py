@@ -13,8 +13,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from noyra.core.errors import IntegrityError, NotFoundError
-from noyra.core.types import canonical_json, content_hash, new_id, utc_now
+from noyra.core.errors import IntegrityError, NotFoundError, PayloadLimitError
+from noyra.core.payload_codec import decompress_text
+from noyra.core.private_erasure_schema import ERASED_REFLECTION_HASH, ERASED_REFLECTION_PLAN
+from noyra.core.types import canonical_json, content_hash, new_id, strict_json_loads, utc_now
 
 from .conversations import ConversationConflict, _row
 from .reflection_erasure_scope import sleep_reflection_scope
@@ -27,6 +29,7 @@ ERASED = "[erased]"
 ERASED_MODEL = {"privacy_erased": True}
 MAX_ERASURE_ROWS = 20_000
 MAX_REVIEW_SECONDS = 5
+MAX_REFLECTION_BYTES = 8_000_000
 _REVIEW_CODES = frozenset(
     {
         "private_erasure_scope_exceeds_limit",
@@ -96,6 +99,7 @@ class _ErasureScope:
     calls: list[sqlite3.Row]
     events: set[str]
     memory_ids: set[str]
+    reflection_hashes: dict[str, str]
 
 
 class ConversationErasure:
@@ -280,6 +284,9 @@ class ConversationErasure:
                     "model_copies": len(scope.calls),
                     "retired_exports": retired_exports,
                 }
+                if scope.reflection_hashes:
+                    connection.execute("PRAGMA secure_delete=ON")
+                    counts["sleep_reflections"] = len(scope.reflection_hashes)
                 for row in scope.messages:
                     digest = InteractionStore._state_hash_values(
                         ERASED,
@@ -340,6 +347,22 @@ class ConversationErasure:
                         "UPDATE model_calls SET request_json=NULL,response_json=?,response_hash=? "
                         "WHERE call_id=?",
                         (canonical_json(ERASED_MODEL), content_hash(ERASED_MODEL), row["call_id"]),
+                    )
+                for reflection_id, original_hash in scope.reflection_hashes.items():
+                    self._receipt(
+                        connection,
+                        result["job_id"],
+                        "sleep_reflections",
+                        reflection_id,
+                        original_hash,
+                        ERASED_REFLECTION_HASH,
+                    )
+                    connection.execute(
+                        "UPDATE sleep_reflections SET summary=?,facts_json='[]',"
+                        "contradictions_json='[]',prediction_errors_json='[]',"
+                        "unresolved_questions_json='[]',public_diary_candidate=NULL,"
+                        "plan_json=?,plan_hash=? WHERE reflection_id=?",
+                        (ERASED, ERASED_REFLECTION_PLAN, ERASED_REFLECTION_HASH, reflection_id),
                     )
                 counts.update(
                     self._erase_affected_memories(connection, result["job_id"], subject_id, scope)
@@ -424,6 +447,56 @@ class ConversationErasure:
             ):
                 raise IntegrityError("private erasure model residual")
         ConversationErasure._verify_erased_memories(connection, subject, job_id, scope.memory_ids)
+        ConversationErasure._verify_reflection_receipts(
+            connection, subject, window, job_id, len(scope.reflection_hashes)
+        )
+
+    @staticmethod
+    def _verify_reflection_receipts(
+        connection: sqlite3.Connection, subject: str, window: str, job_id: str, expected: int
+    ) -> None:
+        from noyra.sleep.integrity import SleepIntegrity
+
+        # Purpose identifies the expected runs even if structural events were archived later.
+        # Admission also requires an exact selected-call link for each affected run.
+        calls = connection.execute(
+            "SELECT DISTINCT c.call_id,c.purpose,"
+            "(c.request_json IS NULL AND c.response_json IS ? AND c.response_hash IS ?) AS erased "
+            "FROM private_model_sources s JOIN model_calls c ON c.call_id=s.call_id "
+            "AND c.subject_id=s.subject_id WHERE s.subject_id=? AND s.conversation_id=? "
+            "AND c.purpose GLOB 'sleep_reflection:*' LIMIT ?",
+            (
+                canonical_json(ERASED_MODEL),
+                content_hash(ERASED_MODEL),
+                subject,
+                window,
+                MAX_ERASURE_ROWS + 1,
+            ),
+        ).fetchall()
+        receipts = {
+            row[0]
+            for row in connection.execute(
+                "SELECT record_id FROM private_erasure_receipts WHERE job_id=? "
+                "AND record_table='sleep_reflections' LIMIT ?",
+                (job_id, MAX_ERASURE_ROWS + 1),
+            )
+        }
+        if max(len(calls), len(receipts)) > MAX_ERASURE_ROWS:
+            raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
+        if len(receipts) != expected:
+            raise IntegrityError("private erasure sleep reflection receipt counts do not match")
+        if any(not call["erased"] for call in calls):
+            raise IntegrityError("private erasure sleep model residual")
+        sleep_ids = {row["purpose"].removeprefix("sleep_reflection:") for row in calls}
+        rows = connection.execute(
+            "SELECT r.* FROM json_each(?) ids JOIN sleep_runs s ON s.sleep_id=ids.value "
+            "AND s.subject_id=? JOIN sleep_reflections r ON r.sleep_id=s.sleep_id",
+            (canonical_json(sorted(sleep_ids)), subject),
+        ).fetchall()
+        if len(rows) != len(sleep_ids) or {row["reflection_id"] for row in rows} != receipts:
+            raise IntegrityError("private erasure sleep reflection scope does not match receipts")
+        for row in rows:
+            SleepIntegrity._verify_erased_reflection(connection, row, subject, job_id)
 
     @staticmethod
     def _verify_erased_memories(
@@ -488,7 +561,7 @@ class ConversationErasure:
         ).fetchone():
             raise IntegrityError("private erasure index residual")
 
-    def _verify_completed_memory_receipts(self, subject: str, job: dict[str, Any]) -> None:
+    def _verify_completed_receipts(self, subject: str, window: str, job: dict[str, Any]) -> int:
         counts = job["counts"]
         if not isinstance(counts, dict):
             raise IntegrityError("private erasure memory receipt counts are invalid")
@@ -496,8 +569,12 @@ class ConversationErasure:
         expected = (counts.get("exclusive_memories"), counts.get("reconstructed_memories", 0))
         if any(type(count) is not int or count < 0 for count in expected):
             raise IntegrityError("private erasure memory receipt counts are invalid")
+        reflections = counts.get("sleep_reflections", 0)
+        if type(reflections) is not int or reflections < 0:
+            raise IntegrityError("private erasure sleep reflection counts are invalid")
         job_id = job["job_id"]
         with self.database.read_transaction() as connection:
+            self._verify_reflection_receipts(connection, subject, window, job_id, reflections)
             memory_ids = {
                 row[0]
                 for row in connection.execute(
@@ -511,6 +588,7 @@ class ConversationErasure:
             if len(memory_ids) != sum(expected):
                 raise IntegrityError("private erasure memory receipt counts do not match")
             self._verify_erased_memories(connection, subject, job_id, memory_ids)
+        return reflections
 
     @staticmethod
     def _receipt(connection: Any, job: str, table: str, key: str, old: str, new: str) -> None:
@@ -562,15 +640,20 @@ class ConversationErasure:
                 (subject, window, window),
             ).fetchone():
                 raise ErasureReviewRequired("cross_window_derivative_review_required")
-            for event in events:
+            reflection_hashes, reflection_events = self._review_reflections(
+                connection, subject, window, calls, deadline
+            )
+            for event in events | reflection_events:
                 if connection.execute(
                     "SELECT 1 FROM events e,json_each(e.causal_parent_ids_json) parent "
                     "WHERE e.subject_id=? AND parent.value=? LIMIT 1",
                     (subject, event),
                 ).fetchone():
                     raise ErasureReviewRequired("private_event_derivative_review_required")
-            memory_ids = self._check_derivatives(connection, subject, events, calls)
-            return _ErasureScope(messages, calls, events, memory_ids)
+            memory_ids = self._check_derivatives(
+                connection, subject, events, reflection_events, bool(reflection_hashes)
+            )
+            return _ErasureScope(messages, calls, events, memory_ids, reflection_hashes)
         except sqlite3.OperationalError as error:
             if time.monotonic() > deadline:
                 raise ErasureReviewRequired("private_erasure_review_deadline") from error
@@ -580,7 +663,11 @@ class ConversationErasure:
 
     @staticmethod
     def _check_derivatives(
-        connection: Any, subject: str, events: set[str], calls: list[Any]
+        connection: Any,
+        subject: str,
+        events: set[str],
+        reflection_events: set[str],
+        reviewed_sleep_checkpoints: bool,
     ) -> set[str]:
         # Historical model calls did not record exact private input lineage. Require
         # review instead of guessing that an opaque reflection has no private text.
@@ -591,9 +678,9 @@ class ConversationErasure:
             (subject,),
         ).fetchone():
             raise ErasureReviewRequired("legacy_private_provenance_review_required")
-        if any(row["purpose"].startswith("sleep_reflection:") for row in calls):
-            raise ErasureReviewRequired("reflection_derivative_review_required")
         for table in _UNREVIEWED_DOMAINS:
+            if table == "state_snapshots" and reviewed_sleep_checkpoints:
+                continue
             if (
                 table == "relationship_identity_bindings"
                 and not connection.execute(
@@ -616,12 +703,6 @@ class ConversationErasure:
                 f'SELECT 1 FROM "{table}" WHERE subject_id=? LIMIT 1', (subject,)
             ).fetchone():
                 raise ErasureReviewRequired("private_memory_derivative_review_required")
-        if connection.execute(
-            "SELECT 1 FROM sleep_reflections r JOIN sleep_runs s ON s.sleep_id=r.sleep_id "
-            "WHERE s.subject_id=? LIMIT 1",
-            (subject,),
-        ).fetchone():
-            raise ErasureReviewRequired("reflection_derivative_review_required")
         ConversationErasure._review_exports(connection, subject)
 
         revisions = connection.execute(
@@ -633,9 +714,10 @@ class ConversationErasure:
             raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
         sources_by_memory: dict[str, set[str]] = {}
         for revision in revisions:
-            sources_by_memory.setdefault(revision["memory_id"], set()).update(
-                _memory_sources(revision["source_event_ids_json"])
-            )
+            sources = _memory_sources(revision["source_event_ids_json"])
+            if reflection_events.intersection(sources):
+                raise ErasureReviewRequired("reflection_derivative_review_required")
+            sources_by_memory.setdefault(revision["memory_id"], set()).update(sources)
         affected = {
             memory_id for memory_id, sources in sources_by_memory.items() if sources & events
         }
@@ -643,6 +725,208 @@ class ConversationErasure:
             if not sources_by_memory[memory_id] <= events:
                 ConversationErasure._independent_memory_revision(connection, memory_id, events)
         return affected
+
+    @staticmethod
+    def _review_reflections(
+        connection: sqlite3.Connection,
+        subject: str,
+        window: str,
+        calls: list[sqlite3.Row],
+        deadline: float,
+    ) -> tuple[dict[str, str], set[str]]:
+        from noyra.sleep.integrity import SleepIntegrity
+        from noyra.sleep.types import SleepReflectionPlan
+
+        review_required = "reflection_derivative_review_required"
+        target_purposes = {
+            row["purpose"] for row in calls if row["purpose"].startswith("sleep_reflection:")
+        }
+        affected: dict[str, str] = {}
+        affected_events: set[str] = set()
+        reviewed_purposes: set[str] = set()
+        remaining_bytes = MAX_REFLECTION_BYTES
+        for index, ref in enumerate(
+            connection.execute(
+                "SELECT r.reflection_id,r.sleep_id,r.event_id,r.plan_hash,"
+                "s.status,s.reflection_event_id,p.snapshot_id,e.payload_hash,"
+                "CASE WHEN e.payload_archive_key IS NULL AND e.event_type='sleep_reflection' "
+                "AND e.privacy_level='private' AND e.source='subject' "
+                "AND e.causal_parent_ids_json='[]' AND length(CAST(e.payload_json AS BLOB))<=1024 "
+                "THEN e.payload_json END AS event_payload,"
+                "length(CAST(r.plan_json AS BLOB))+length(CAST(r.summary AS BLOB))+"
+                "length(CAST(r.facts_json AS BLOB))+length(CAST(r.contradictions_json AS BLOB))+"
+                "length(CAST(r.prediction_errors_json AS BLOB))+"
+                "length(CAST(r.unresolved_questions_json AS BLOB))+"
+                "coalesce(length(CAST(r.public_diary_candidate AS BLOB)),0) AS content_bytes "
+                "FROM sleep_reflections r JOIN sleep_runs s ON s.sleep_id=r.sleep_id "
+                "LEFT JOIN events e ON e.event_id=r.event_id AND e.subject_id=s.subject_id "
+                "LEFT JOIN state_snapshots p ON p.snapshot_id=s.checkpoint_id "
+                "AND p.subject_id=s.subject_id WHERE s.subject_id=? LIMIT ?",
+                (subject, MAX_ERASURE_ROWS + 1),
+            ),
+            start=1,
+        ):
+            remaining_bytes -= ref["content_bytes"]
+            if index > MAX_ERASURE_ROWS or remaining_bytes < 0:
+                raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
+            if time.monotonic() > deadline:
+                raise ErasureReviewRequired("private_erasure_review_deadline")
+            if (
+                ref["status"] != "complete"
+                or ref["event_id"] != ref["reflection_event_id"]
+                or ref["snapshot_id"] is None
+                or ref["event_payload"] is None
+            ):
+                raise ErasureReviewRequired(review_required)
+            payload = SleepIntegrity._json_value(
+                ref["event_payload"], "sleep reflection event invalid"
+            )
+            if (
+                not isinstance(payload, dict)
+                or content_hash(payload) != ref["payload_hash"]
+                or payload.get("sleep_id") != ref["sleep_id"]
+                or not isinstance(payload.get("model_call_id"), str)
+            ):
+                raise ErasureReviewRequired(review_required)
+            purpose = f"sleep_reflection:{ref['sleep_id']}"
+            call = connection.execute(
+                "SELECT c.call_id,min(s.conversation_id) AS first_window,"
+                "max(s.conversation_id) AS last_window FROM model_calls c "
+                "JOIN private_model_sources s ON s.call_id=c.call_id WHERE c.call_id=? "
+                "AND c.subject_id=? AND c.purpose=? AND c.status='succeeded' "
+                "GROUP BY c.call_id HAVING min(s.subject_id)=? AND max(s.subject_id)=?",
+                (payload["model_call_id"], subject, purpose, subject, subject),
+            ).fetchone()
+            if call is None or call["first_window"] != call["last_window"]:
+                raise ErasureReviewRequired(review_required)
+            row = connection.execute(
+                "SELECT * FROM sleep_reflections WHERE reflection_id=?", (ref["reflection_id"],)
+            ).fetchone()
+            SleepIntegrity._verify_reflection(connection, row, subject)
+            is_target = call["first_window"] == window
+            if row["plan_hash"] == ERASED_REFLECTION_HASH:
+                if is_target:
+                    raise ErasureReviewRequired(review_required)
+                continue
+            selected_call = connection.execute(
+                "SELECT response_json,response_hash FROM model_calls WHERE call_id=? "
+                "AND length(CAST(response_json AS BLOB))<=?",
+                (call["call_id"], remaining_bytes),
+            ).fetchone()
+            if selected_call is None:
+                raise ErasureReviewRequired(review_required)
+            try:
+                plan = SleepReflectionPlan.model_validate_json(row["plan_json"])
+                raw_response = decompress_text(
+                    selected_call["response_json"], max_bytes=remaining_bytes
+                )
+                if raw_response is None:
+                    raise ErasureReviewRequired(review_required)
+                remaining_bytes -= len(raw_response.encode("utf-8"))
+                response = strict_json_loads(raw_response)
+                if (
+                    not isinstance(response, dict)
+                    or content_hash(response) != selected_call["response_hash"]
+                    or not isinstance(response.get("content"), str)
+                ):
+                    raise ErasureReviewRequired(review_required)
+                selected_plan = SleepReflectionPlan.model_validate_json(response["content"])
+            except PayloadLimitError as error:
+                raise ErasureReviewRequired("private_erasure_scope_exceeds_limit") from error
+            except (TypeError, ValueError) as error:
+                raise ErasureReviewRequired(review_required) from error
+            if (
+                plan != selected_plan
+                or canonical_json(plan.model_dump(mode="json")) != row["plan_json"]
+                or payload
+                != {
+                    "sleep_id": row["sleep_id"],
+                    "model_call_id": call["call_id"],
+                    "summary_hash": content_hash(plan.summary),
+                    "facts": len(plan.facts),
+                    "contradictions": len(plan.contradictions),
+                    "prediction_errors": len(plan.prediction_errors),
+                    "unresolved_questions": len(plan.unresolved_questions),
+                }
+            ):
+                raise ErasureReviewRequired(review_required)
+            if not is_target:
+                continue
+            if (
+                plan.memories
+                or plan.belief_revisions
+                or plan.goal_revisions
+                or plan.retry_blocks
+                or plan.personality_candidates
+                or connection.execute(
+                    "SELECT 1 FROM sleep_integrations WHERE sleep_id=? "
+                    "UNION ALL SELECT 1 FROM retry_blocks WHERE source_sleep_id=? "
+                    "UNION ALL SELECT 1 FROM public_diary_entries WHERE source_sleep_id=? "
+                    "UNION ALL SELECT 1 FROM autonomous_project_sleep_reflections WHERE sleep_id=? "
+                    "LIMIT 1",
+                    (row["sleep_id"],) * 4,
+                ).fetchone()
+            ):
+                raise ErasureReviewRequired(review_required)
+            affected[row["reflection_id"]] = row["plan_hash"]
+            affected_events.add(row["event_id"])
+            reviewed_purposes.add(purpose)
+
+        if reviewed_purposes != target_purposes:
+            raise ErasureReviewRequired(review_required)
+        if affected:
+            version = connection.execute(
+                "SELECT value FROM schema_meta WHERE key='schema_version'"
+            ).fetchone()
+            if version is None or int(version[0]) < 120:
+                raise ErasureReviewRequired(review_required)
+            ConversationErasure._review_sleep_checkpoints(connection, subject, deadline)
+            if connection.execute(
+                "SELECT 1 FROM audit_records a WHERE a.subject_id=? "
+                "AND a.action='runtime_exported' AND NOT EXISTS(SELECT 1 FROM export_jobs j "
+                "WHERE j.subject_id=a.subject_id AND j.export_kind='runtime' "
+                "AND j.sha256=json_extract(a.payload_json,'$.archive_sha256')) LIMIT 1",
+                (subject,),
+            ).fetchone():
+                raise ErasureReviewRequired("private_legacy_export_review_required")
+        return affected, affected_events
+
+    @staticmethod
+    def _review_sleep_checkpoints(
+        connection: sqlite3.Connection, subject: str, deadline: float
+    ) -> None:
+        # SleepEngine writes an identifier-only checkpoint on entering deep sleep.
+        # Any other snapshot shape still needs the broader derivative review.
+        for index, snap in enumerate(
+            connection.execute(
+                "SELECT p.snapshot_id,p.reason,p.state_hash,s.sleep_id,s.reflection_event_id,"
+                "CASE WHEN length(CAST(p.state_json AS BLOB))<=1024 THEN p.state_json END "
+                "AS state_json "
+                "FROM state_snapshots p LEFT JOIN sleep_runs s ON s.checkpoint_id=p.snapshot_id "
+                "AND s.subject_id=p.subject_id AND s.status='complete' "
+                "WHERE p.subject_id=? LIMIT ?",
+                (subject, MAX_ERASURE_ROWS + 1),
+            ),
+            start=1,
+        ):
+            if index > MAX_ERASURE_ROWS:
+                raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
+            if time.monotonic() > deadline:
+                raise ErasureReviewRequired("private_erasure_review_deadline")
+            expected = {
+                "kind": "sleep_checkpoint",
+                "sleep_id": snap["sleep_id"],
+                "reflection_event_id": snap["reflection_event_id"],
+                "lifecycle": "deep_sleep",
+            }
+            if (
+                snap["sleep_id"] is None
+                or snap["reflection_event_id"] is None
+                or snap["reason"] != "sleep integration checkpoint"
+                or snap["state_json"] != canonical_json(expected)
+                or snap["state_hash"] != content_hash(expected)
+            ):
+                raise ErasureReviewRequired("private_memory_derivative_review_required")
 
     @staticmethod
     def _review_exports(connection: Any, subject: str) -> None:
@@ -1008,6 +1292,7 @@ def replay_privacy_deletions(current_root: Path, restored_root: Path) -> None:
         return
     database = Database(restored_root / "noyra.sqlite3")
     erasure = ConversationErasure(database)
+    erased_reflections = False
     for (subject, window), marker in markers.items():
         erasure._write_marker(subject, window, marker["job_id"])
         with database.connection() as connection:
@@ -1019,11 +1304,22 @@ def replay_privacy_deletions(current_root: Path, restored_root: Path) -> None:
         if row is None:
             continue
         job = erasure._resume_recorded_intent(subject, window, expected_revision=row[0])
-        if job["status"] == "completed":
-            # Older backups can carry a completion flag from a weaker verifier.
-            erasure._verify_completed_memory_receipts(subject, job)
-        elif erasure.run(subject, window)["status"] != "completed":
+        if job["status"] != "completed":
+            job = erasure.run(subject, window)
+        if job["status"] != "completed":
             raise ErasureReviewRequired("backup_private_deletion_replay_requires_review")
+        # Older backups can carry a completion flag from a weaker verifier.
+        erased_reflections |= bool(erasure._verify_completed_receipts(subject, window, job))
+    if erased_reflections:
+        database.assert_schema_contract()
+        if any(restored_root.glob("noyra.sqlite3.pre-migration-v*.bak")):
+            raise IntegrityError("private erasure restore contains a pre-migration copy")
+        # The staging tree is private and has no live readers. Rebuild it before
+        # publication so free pages do not retain a previous reflection or call.
+        with database.connection() as connection:
+            connection.execute("VACUUM")
+            if connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] != 0:
+                raise IntegrityError("private erasure restore WAL could not be cleared")
 
 
 def _journal_markers(root: Path) -> dict[tuple[str, str], dict[str, str]]:

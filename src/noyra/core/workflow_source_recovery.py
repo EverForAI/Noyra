@@ -51,6 +51,16 @@ _REVIEWED_SCHEMA_PAIRS: tuple[RecoverySchemaPair, ...] = (
         "2c848bc479a0b2ae97c2ef91d271e01fdf8363110892d7f681412dae64e488d0",
         "444938463a1ba013c3e7083fcb8ef55419fee5d17c459528ae6e25de6cab3b26",
     ),
+    # v120 only changes reflection guards. Existing publications still require
+    # the same checkpoint history, receipts and verified event-chain anchor.
+    RecoverySchemaPair(
+        119,
+        "10e3d5548e307f67f6b5c8222637dac5a951e54b4481073094eb220bda22a041",
+        120,
+        "de0a5b8461949e2c5ea7426ee03a9e31e9cd0b8d19f07e6b6a143d2728f45bac",
+        "c2dad7eaea77a67246b7185cf8b07fee74a39607e5a0cac3924a86a72b48b4ef",
+        "c2dad7eaea77a67246b7185cf8b07fee74a39607e5a0cac3924a86a72b48b4ef",
+    ),
 )
 
 

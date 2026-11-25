@@ -4,6 +4,7 @@ from typing import Any
 
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError
+from noyra.core.private_erasure_schema import ERASED_REFLECTION_HASH, ERASED_REFLECTION_PLAN
 from noyra.core.types import (
     content_hash,
     strict_bool,
@@ -127,7 +128,7 @@ class SleepIntegrity:
                 else:
                     if reflection is None or reflection["event_id"] != row["reflection_event_id"]:
                         raise IntegrityError(f"sleep reflection mismatch: {row['sleep_id']}")
-                    self._verify_reflection(reflection)
+                    self._verify_reflection(connection, reflection, subject_id)
                     event = connection.execute(
                         "SELECT subject_id, event_type FROM events WHERE event_id = ?",
                         (reflection["event_id"],),
@@ -378,7 +379,63 @@ class SleepIntegrity:
             raise IntegrityError(f"{context} is invalid") from error
 
     @staticmethod
-    def _verify_reflection(row: Any) -> None:
+    def _verify_erased_reflection(
+        connection: Any, row: Any, subject: str, job_id: str | None = None
+    ) -> None:
+        receipt = connection.execute(
+            "SELECT j.job_id,j.status,c.status AS window_status,s.status AS run_status "
+            "FROM private_erasure_receipts r JOIN private_erasure_jobs j ON j.job_id=r.job_id "
+            "JOIN private_conversations c ON c.conversation_id=j.conversation_id "
+            "AND c.subject_id=j.subject_id "
+            "JOIN sleep_runs s ON s.sleep_id=? AND s.subject_id=j.subject_id "
+            "AND s.reflection_event_id=? "
+            "JOIN events e ON e.event_id=s.reflection_event_id AND e.subject_id=s.subject_id "
+            "AND e.event_type='sleep_reflection' AND e.privacy_level='private' "
+            "WHERE r.record_table='sleep_reflections' AND r.record_id=? AND j.subject_id=? "
+            "AND r.erased_hash=? AND r.original_hash!=r.erased_hash "
+            "AND length(r.original_hash)=64 AND r.original_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND ((j.status='running' AND j.stage='content') "
+            "OR (j.status='completed' AND j.stage='verified'))",
+            (
+                row["sleep_id"],
+                row["event_id"],
+                row["reflection_id"],
+                subject,
+                ERASED_REFLECTION_HASH,
+            ),
+        ).fetchone()
+        if (
+            receipt is None
+            or receipt["run_status"] != "complete"
+            or receipt["window_status"] != "deleted"
+            or (job_id is None and receipt["status"] != "completed")
+            or (
+                job_id is not None
+                and (
+                    receipt["job_id"] != job_id or receipt["status"] not in {"running", "completed"}
+                )
+            )
+            or row["plan_json"] != ERASED_REFLECTION_PLAN
+            or row["plan_hash"] != ERASED_REFLECTION_HASH
+            or row["summary"] != "[erased]"
+            or row["public_diary_candidate"] is not None
+            or any(
+                row[name] != "[]"
+                for name in (
+                    "facts_json",
+                    "contradictions_json",
+                    "prediction_errors_json",
+                    "unresolved_questions_json",
+                )
+            )
+        ):
+            raise IntegrityError("private erasure sleep reflection residual or invalid receipt")
+
+    @staticmethod
+    def _verify_reflection(connection: Any, row: Any, subject: str) -> None:
+        if row["plan_hash"] == ERASED_REFLECTION_HASH or row["plan_json"] == ERASED_REFLECTION_PLAN:
+            SleepIntegrity._verify_erased_reflection(connection, row, subject)
+            return
         raw_plan = row["plan_json"]
         plan = SleepIntegrity._json_value(
             raw_plan, f"sleep reflection plan invalid: {row['reflection_id']}"

@@ -11,10 +11,14 @@ from noyra.core import Database, EventStore, IdentityStore
 from noyra.core import database as database_module
 from noyra.core.at_rest import BackupKeyring, EncryptedBackupManager
 from noyra.core.errors import IntegrityError, NotFoundError
+from noyra.core.export_jobs import ExportCancelledError
+from noyra.core.private_erasure_schema import ERASED_REFLECTION_HASH, ERASED_REFLECTION_PLAN
 from noyra.core.private_sources import private_input_scope
+from noyra.core.runtime_export import RuntimeLogExporter
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 from noyra.interaction import InteractionStore
 from noyra.interaction.conversations import ConversationConflict, ConversationStore, _row
+from noyra.interaction.diary import PublicDiaryStore
 from noyra.interaction.erasure import (
     ERASED,
     ERASED_MODEL,
@@ -25,6 +29,7 @@ from noyra.interaction.erasure import (
 from noyra.interaction.erasure import (
     ConversationErasure as RecoveryErasure,
 )
+from noyra.interaction.errors import InteractionStateConflictError
 from noyra.interaction.integrity import InteractionIntegrity
 from noyra.interaction.types import InteractionDecision
 from noyra.mind import MemoryStore, MindEngine
@@ -32,6 +37,7 @@ from noyra.mind.errors import CausalValidationError
 from noyra.model.errors import ModelCallStateError
 from noyra.model.ledger import ModelLedger
 from noyra.model.types import BudgetLimits, ModelUsage
+from noyra.sleep import SleepEngine, SleepIntegrity, SleepReflectionPlan
 
 
 class ConversationErasure(RecoveryErasure):
@@ -156,6 +162,321 @@ def _private_message(db: Database) -> tuple[dict[str, Any], str, str]:
             (message.interaction_id,),
         ).fetchone()[0]
     return window, message.interaction_id, event
+
+
+def _sleep_reflection(
+    db: Database,
+    inputs: tuple[str, ...],
+    text: str,
+    *,
+    bound: bool = True,
+    complete: bool = True,
+    match_response: bool = True,
+) -> tuple[str, str]:
+    engine = SleepEngine(db, "owner")
+    engine.lifecycle.ensure_initial("active")
+    sleep_id = engine.start("subject_choice", "fixture sleep").sleep_id
+    engine.begin_reflection(sleep_id)
+    plan = SleepReflectionPlan(
+        summary=f"{text} summary",
+        facts=(f"{text} fact",),
+        contradictions=(f"{text} contradiction",),
+        prediction_errors=(f"{text} prediction error",),
+        unresolved_questions=(f"{text} question",),
+        public_diary_candidate=f"{text} diary candidate",
+    )
+    ledger = ModelLedger(db)
+    with private_input_scope(inputs):
+        call, _ = ledger.prepare_call(
+            "owner",
+            "mock",
+            "mock",
+            f"sleep_reflection:{sleep_id}",
+            content_hash(text),
+            sleep_id,
+            request={"content": text},
+        )
+    attempt = ledger.authorize_attempt(
+        call.call_id,
+        BudgetLimits(100, 1000, 1000, 1000),
+        reserved_input_tokens=10,
+        reserved_output_tokens=10,
+        reserved_cost_microusd=10,
+    )
+    ledger.start_attempt(attempt.attempt_id)
+    ledger.finish_attempt(attempt.attempt_id, "succeeded", usage=ModelUsage(5, 5), cost_microusd=5)
+    response_plan = plan if match_response else SleepReflectionPlan(summary="another response")
+    ledger.finish_call(
+        call.call_id, "succeeded", response={"content": response_plan.model_dump_json()}
+    )
+    if bound:
+        plan._model_call_id = call.call_id
+    engine.commit_reflection(sleep_id, plan)
+    if complete:
+        engine.enter_deep_sleep(sleep_id)
+        engine.wake(sleep_id, "fixture wake", force=True)
+        engine.complete_wake(sleep_id)
+    return sleep_id, call.call_id
+
+
+def _reflection_row(db: Database, sleep_id: str) -> dict[str, Any]:
+    with db.read_transaction() as connection:
+        return dict(
+            connection.execute(
+                "SELECT * FROM sleep_reflections WHERE sleep_id=?", (sleep_id,)
+            ).fetchone()
+        )
+
+
+def test_sleep_reflection_erasure_replays_encrypted_backups_across_schema120(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "current"
+    secret = "fixture-reflection-cleartext-487230"
+    with monkeypatch.context() as historical:
+        historical.setattr(database_module, "CURRENT_SCHEMA_VERSION", 119)
+        db = Database(root / "noyra.sqlite3")
+        window, message, _ = _private_message(db)
+        other_window = ConversationStore(db).create("owner", "independent window")
+        other_message = InteractionStore(db).receive(
+            "owner",
+            "web",
+            "other-web-user",
+            "independent message",
+            conversation_id=other_window["conversation_id"],
+        )
+        sleep_id, call_id = _sleep_reflection(db, (message,), secret)
+        other_sleep, other_call = _sleep_reflection(
+            db, (other_message.interaction_id,), "independent reflection"
+        )
+    original = _reflection_row(db, sleep_id)
+    independent = _reflection_row(db, other_sleep)
+    original_other_call = ModelLedger(db).get_call(other_call)
+    run = SleepEngine(db, "owner").get(sleep_id)
+    chain = EventStore(db).verify_chain("owner")
+    integrity = SleepIntegrity(db).verify("owner")
+    keyring = tmp_path / "keyring.json"
+    BackupKeyring.initialize(keyring)
+    manager = EncryptedBackupManager(root, keyring)
+    before = tmp_path / "before-erasure.noyra-backup"
+    manager.create(before)
+    assert secret.encode() in db.path.read_bytes()
+
+    db = Database(db.path, strict_schema_contract=True)
+    assert _reflection_row(db, sleep_id) == original
+    assert not list(root.glob("noyra.sqlite3.pre-migration-v*.bak"))
+    erasure = ConversationErasure(db)
+    with pytest.raises(ErasureReviewRequired, match="private_deletion_disabled"):
+        RecoveryErasure(db).request(
+            "owner", window["conversation_id"], expected_revision=1, confirmed=True
+        )
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    result = erasure.run("owner", window["conversation_id"])
+    assert result["status"] == "completed", result
+    assert result["counts"]["sleep_reflections"] == 1
+    assert erasure.run("owner", window["conversation_id"]) == result
+    after = tmp_path / "after-erasure.noyra-backup"
+    manager.create(after)
+
+    restored = []
+    for index, backup in enumerate((before, after)):
+        destination = tmp_path / f"restored-{index}"
+        manager.restore(backup, destination)
+        copy = Database(
+            destination / "noyra.sqlite3", initialize=False, strict_schema_contract=True
+        )
+        restored.append(copy)
+        assert secret.encode() not in copy.path.read_bytes()
+        assert not any(
+            secret.encode() in path.read_bytes() for path in destination.glob("*.sqlite3-*")
+        )
+    for copy in [db, *restored]:
+        assert _reflection_row(copy, sleep_id) == {
+            **original,
+            "summary": ERASED,
+            "facts_json": "[]",
+            "contradictions_json": "[]",
+            "prediction_errors_json": "[]",
+            "unresolved_questions_json": "[]",
+            "public_diary_candidate": None,
+            "plan_json": ERASED_REFLECTION_PLAN,
+            "plan_hash": ERASED_REFLECTION_HASH,
+        }
+        assert _reflection_row(copy, other_sleep) == independent
+        assert ModelLedger(copy).get_call(other_call) == original_other_call
+        assert InteractionStore(copy).get(other_message.interaction_id) == other_message
+        assert InteractionStore(copy).get(message).content == ERASED
+        assert ModelLedger(copy).get_call(call_id).response == ERASED_MODEL
+        assert ModelLedger(copy).attempts(call_id)[0].cost_microusd == 5
+        assert SleepEngine(copy, "owner").get(sleep_id) == run
+        assert SleepEngine(copy, "owner").lifecycle.current().state == "active"
+        assert SleepIntegrity(copy).verify("owner") == integrity
+        assert EventStore(copy).verify_chain("owner") == chain
+        with pytest.raises(InteractionStateConflictError, match="reflection was erased"):
+            PublicDiaryStore(copy).publish("owner", sleep_id, "revived", "old diary body")
+        with copy.transaction() as connection, pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE sleep_reflections SET summary='revived' WHERE sleep_id=?", (sleep_id,)
+            )
+        with copy.read_transaction() as connection:
+            assert connection.execute(
+                "SELECT job_id,original_hash,erased_hash FROM private_erasure_receipts "
+                "WHERE record_table='sleep_reflections' AND record_id=?",
+                (original["reflection_id"],),
+            ).fetchone()[:] == (result["job_id"], original["plan_hash"], ERASED_REFLECTION_HASH)
+    assert RuntimeLogExporter(restored[-1]).export("owner", actor="fixture").row_count > 0
+
+
+def test_sleep_reflection_erasure_is_atomic_on_verification_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, _ = _private_message(db)
+    sleep_id, call_id = _sleep_reflection(db, (message,), "rollback fixture")
+    original = _reflection_row(db, sleep_id)
+    call = ModelLedger(db).get_call(call_id)
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+
+    def fail_verification(connection: sqlite3.Connection, *_: Any) -> None:
+        assert (
+            connection.execute(
+                "SELECT plan_hash FROM sleep_reflections WHERE sleep_id=?", (sleep_id,)
+            ).fetchone()[0]
+            == ERASED_REFLECTION_HASH
+        )
+        raise IntegrityError("fixture post-write verification failure")
+
+    with monkeypatch.context() as failure:
+        failure.setattr(
+            RecoveryErasure, "_verify_reflection_receipts", staticmethod(fail_verification)
+        )
+        result = erasure.run("owner", window["conversation_id"])
+    assert result["status"] == "failed" and result["error_code"] == "erasure_storage_error"
+    assert _reflection_row(db, sleep_id) == original
+    assert ModelLedger(db).get_call(call_id) == call
+    assert InteractionStore(db).get(message).content == "private original"
+    with db.read_transaction() as connection:
+        assert not connection.execute("SELECT 1 FROM private_erasure_receipts").fetchone()
+        assert _row(connection, "owner", window["conversation_id"])["status"] == "deleting"
+    assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing_binding",
+        "other_window",
+        "open_run",
+        "invalid_plan",
+        "independent_mismatch",
+        "diary",
+        "runtime_export",
+    ],
+)
+def test_sleep_reflection_erasure_rejects_unreviewed_scope(tmp_path: Path, case: str) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, _ = _private_message(db)
+    inputs: tuple[str, ...] = (message,)
+    if case in {"other_window", "independent_mismatch"}:
+        second = ConversationStore(db).create("owner", "second window")
+        other = InteractionStore(db).receive(
+            "owner",
+            "web",
+            "web-user",
+            "independent input",
+            conversation_id=second["conversation_id"],
+        )
+        if case == "other_window":
+            inputs += (other.interaction_id,)
+        else:
+            _sleep_reflection(db, (other.interaction_id,), "other plan", match_response=False)
+    sleep_id, call_id = _sleep_reflection(
+        db,
+        inputs,
+        "review fixture",
+        bound=case != "missing_binding",
+        complete=case != "open_run",
+        match_response=case != "invalid_plan",
+    )
+    if case == "diary":
+        PublicDiaryStore(db).publish("owner", sleep_id, "fixture", "review fixture diary candidate")
+    if case == "runtime_export":
+        RuntimeLogExporter(db).export_to_path(
+            "owner", actor="fixture", target=tmp_path / "runtime.zip"
+        )
+    before = _reflection_row(db, sleep_id)
+    call = ModelLedger(db).get_call(call_id)
+    reason = {
+        "other_window": "cross_window_derivative_review_required",
+        "runtime_export": "private_legacy_export_review_required",
+    }.get(case, "reflection_derivative_review_required")
+    erasure = ConversationErasure(db)
+    assert erasure.assess("owner", window["conversation_id"])["reason_code"] == reason
+    with pytest.raises(ErasureReviewRequired, match=reason):
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert not erasure.root.exists()
+    assert _reflection_row(db, sleep_id) == before
+    assert ModelLedger(db).get_call(call_id) == call
+    assert InteractionStore(db).get(message).content == "private original"
+
+
+def test_sleep_reflection_erasure_fences_unmanaged_runtime_export(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, _ = _private_message(db)
+    _sleep_reflection(db, (message,), "reflection included in stale export")
+    erasure = ConversationErasure(db)
+    file_hash = RuntimeLogExporter._file_hash
+
+    def finish_erasure(path: Path, **kwargs: Any) -> str:
+        digest = file_hash(path, **kwargs)
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+        result = erasure.run("owner", window["conversation_id"])
+        assert result["status"] == "completed", result
+        return digest
+
+    monkeypatch.setattr(RuntimeLogExporter, "_file_hash", staticmethod(finish_erasure))
+    destination = tmp_path / "runtime.zip"
+    with pytest.raises(ExportCancelledError, match="private content changed"):
+        RuntimeLogExporter(db).export_to_path("owner", actor="fixture", target=destination)
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".runtime.zip.*"))
+
+
+def test_completed_sleep_reflection_restore_rejects_retained_projection(tmp_path: Path) -> None:
+    root = tmp_path / "current"
+    db = Database(root / "noyra.sqlite3")
+    window, message, _ = _private_message(db)
+    sleep_id, _ = _sleep_reflection(db, (message,), "residual fixture")
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+    # Model historical corruption in the fixture, retaining the reviewed schema.
+    with db.transaction() as connection:
+        trigger = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name='prevent_sleep_reflection_update'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER prevent_sleep_reflection_update")
+        connection.execute(
+            "UPDATE sleep_reflections SET unresolved_questions_json=? WHERE sleep_id=?",
+            (canonical_json(["old private question"]), sleep_id),
+        )
+        connection.execute(trigger)
+    db.assert_schema_contract()
+    with pytest.raises(IntegrityError, match="sleep reflection residual"):
+        SleepIntegrity(db).verify("owner")
+    keyring = tmp_path / "keyring.json"
+    BackupKeyring.initialize(keyring)
+    manager = EncryptedBackupManager(root, keyring)
+    backup = tmp_path / "damaged-backup.noyra-backup"
+    manager.create(backup)
+    destination = tmp_path / "restored"
+    with pytest.raises(IntegrityError, match="sleep reflection residual"):
+        manager.restore(backup, destination)
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".noyra-restore-*"))
 
 
 @pytest.mark.parametrize("archived", [False, True])

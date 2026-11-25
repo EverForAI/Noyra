@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ..private_erasure_schema import MIGRATION_V120
 from .common_knowledge_trusted_publishers import COMMON_KNOWLEDGE_TRUSTED_PUBLISHERS_SCHEMA
 from .email_identity import EMAIL_IDENTITY_SCHEMA
 from .migrations_v002_v005 import MIGRATIONS_V002_V005
@@ -97,4 +98,5 @@ CREATE INDEX IF NOT EXISTS idx_workflow_checkpoints_subject_history
 CREATE INDEX IF NOT EXISTS idx_waiting_cognitive_subject_status_first_waited
     ON waiting_cognitive_tasks(subject_id,status,first_waited_at DESC,task_id DESC);
 """,
+    120: MIGRATION_V120,
 }

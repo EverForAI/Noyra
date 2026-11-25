@@ -15,7 +15,7 @@ import pytest
 from pydantic import SecretStr
 
 from noyra.core import Database, IdentityStore, SubjectKernel
-from noyra.core.database import _SCHEMA_DDL_FINGERPRINTS
+from noyra.core.database import CURRENT_SCHEMA_VERSION
 from noyra.core.runtime_observation import (
     ATTEMPT_LIMIT,
     CALL_LIMIT,
@@ -1082,10 +1082,13 @@ def test_missing_optional_autonomy_evidence_is_partial_not_healthy_or_total_fail
 
 def test_schema_119_adds_wait_sample_index_without_rewriting_wait_evidence(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     subject = "runtime-observation-migration"
     path = tmp_path / "migration.sqlite3"
-    database = Database(path)
+    with monkeypatch.context() as historical:
+        historical.setattr("noyra.core.database.CURRENT_SCHEMA_VERSION", 118)
+        database = Database(path)
     IdentityStore(database).ensure(subject, content_hash(subject))
     wait = (
         "legacy-wait",
@@ -1107,12 +1110,6 @@ def test_schema_119_adds_wait_sample_index_without_rewriting_wait_evidence(
             "first_waited_at,updated_at,state_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             wait,
         )
-        connection.execute("DROP INDEX idx_waiting_cognitive_subject_status_first_waited")
-        connection.execute("UPDATE schema_meta SET value='118' WHERE key='schema_version'")
-        connection.execute(
-            "UPDATE schema_meta SET value=? WHERE key='schema_ddl_contract'",
-            (f"118:{_SCHEMA_DDL_FINGERPRINTS[118]}",),
-        )
 
     upgraded = Database(path)
     with upgraded.read_transaction() as connection:
@@ -1124,12 +1121,9 @@ def test_schema_119_adds_wait_sample_index_without_rewriting_wait_evidence(
             ).fetchone()[:]
             == wait
         )
-        assert (
-            connection.execute(
-                "SELECT value FROM schema_meta WHERE key='schema_version'"
-            ).fetchone()[0]
-            == "119"
-        )
+        assert connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == str(CURRENT_SCHEMA_VERSION)
         assert (
             connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='index' "
