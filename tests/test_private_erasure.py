@@ -34,6 +34,8 @@ from noyra.interaction.errors import InteractionStateConflictError
 from noyra.interaction.integrity import InteractionIntegrity
 from noyra.interaction.types import InteractionDecision
 from noyra.mind import (
+    EntityStore,
+    MemoryBlockStore,
     MemoryConsolidator,
     MemoryIntegrationSupervisor,
     MemoryStore,
@@ -168,6 +170,66 @@ def _private_message(db: Database) -> tuple[dict[str, Any], str, str]:
             (message.interaction_id,),
         ).fetchone()[0]
     return window, message.interaction_id, event
+
+
+@pytest.mark.parametrize("derivative", ["memory_block", "entity_graph"])
+def test_unlineaged_memory_derivatives_keep_historical_erasure_fail_closed(
+    tmp_path: Path, derivative: str
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message_id, event_id = _private_message(db)
+
+    if derivative == "memory_block":
+        blocks = MemoryBlockStore(db)
+        block = blocks.create(
+            "owner",
+            "working_context",
+            "private conversation context",
+            "A summary that may contain conversation-derived details.",
+            reason="captured context",
+        )
+    else:
+        entities = EntityStore(db)
+        entity = entities.upsert(
+            "owner", "person", "private-person", "Private conversation person"
+        )
+        link = entities.link_evidence(
+            "owner",
+            entity.entity_id,
+            "event",
+            event_id,
+            role="mentioned in private conversation",
+            confidence=0.9,
+        )
+
+    erasure = ConversationErasure(db)
+    assessment = erasure.assess("owner", window["conversation_id"])
+    assert assessment["status"] == "review_required"
+    assert assessment["reason_code"] == "private_memory_derivative_review_required"
+    assert assessment["deletion_available"] is False
+    assert assessment["counts"] is None
+
+    # These historical records do not carry enough source/revision lineage to
+    # erase selectively. Refusal must leave both the intent marker and source
+    # conversation untouched until a complete provenance contract exists.
+    with pytest.raises(
+        ErasureReviewRequired, match="private_memory_derivative_review_required"
+    ):
+        erasure.request(
+            "owner", window["conversation_id"], expected_revision=1, confirmed=True
+        )
+
+    assert not erasure.root.exists()
+    assert InteractionStore(db).get(message_id).content == "private original"
+    assert ConversationStore(db).list("owner")["items"][0]["status"] == "active"
+    if derivative == "memory_block":
+        assert blocks.get(block.block_id).content == (
+            "A summary that may contain conversation-derived details."
+        )
+        assert blocks.verify_integrity("owner")["memory_block_revisions"] == 1
+    else:
+        assert entities.evidence_links("owner", entity.entity_id) == [link]
+        assert entities.verify_integrity("owner")["links"] == 1
 
 
 def _sleep_reflection(
