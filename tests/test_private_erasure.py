@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from noyra.core import Database, IdentityStore
+from noyra.core import Database, EventStore, IdentityStore
 from noyra.core import database as database_module
 from noyra.core.at_rest import BackupKeyring, EncryptedBackupManager
 from noyra.core.errors import IntegrityError, NotFoundError
@@ -761,14 +761,17 @@ def test_restore_rejects_unsupported_replay_without_publishing(tmp_path: Path) -
 def test_restore_reconstructs_independent_memory_and_erases_mixed_revisions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from noyra.core.events import EventStore
-
     current = tmp_path / "current"
     db = Database(current / "noyra.sqlite3")
     IdentityStore(db).ensure("owner", content_hash("owner"))
     with monkeypatch.context() as prior:
         prior.setattr("noyra.core.events.utc_now", lambda: "1999-01-01T00:00:00.000+00:00")
-        independent = EventStore(db).append("owner", "independent", "test", {"fact": "safe"})
+        event_store = EventStore(db)
+        independent = event_store.append("owner", "independent", "test", {"fact": "safe"})
+        additional = tuple(
+            event_store.append("owner", "independent", "test", {"sequence": index}).event_id
+            for index in range(63)
+        )
     memory = MemoryStore(db, clock=lambda: "2000-01-01T00:00:00.000+00:00").create(
         "owner",
         "episodic",
@@ -778,6 +781,8 @@ def test_restore_reconstructs_independent_memory_and_erases_mixed_revisions(
         source_event_ids=(independent.event_id,),
     )
     window, message, event = _private_message(db)
+    # Both revisions fit the limit, but their combined sources exceed it.
+    later_sources = (*additional, event)
     MemoryStore(db).revise(
         memory.memory_id,
         content="private mixed fact",
@@ -785,7 +790,30 @@ def test_restore_reconstructs_independent_memory_and_erases_mixed_revisions(
         confidence=0.9,
         status="active",
         reason="private reason",
-        source_event_ids=(independent.event_id, event),
+        source_event_ids=later_sources,
+    )
+    other = ConversationStore(db).create("owner", "independent window")
+    independent_message = InteractionStore(db).receive(
+        "owner",
+        "web",
+        "web-user",
+        "another window's text",
+        conversation_id=other["conversation_id"],
+    )
+    with db.connection() as connection:
+        independent_event = connection.execute(
+            "SELECT event_id FROM events WHERE subject_id='owner' "
+            "AND event_type='interaction_received' "
+            "AND json_extract(payload_json,'$.interaction_id')=?",
+            (independent_message.interaction_id,),
+        ).fetchone()[0]
+    other_memory = MemoryStore(db).create(
+        "owner",
+        "semantic",
+        "unrelated window fact",
+        salience=0.5,
+        confidence=0.7,
+        source_event_ids=(independent_event,),
     )
     keyring = tmp_path / "keyring.json"
     BackupKeyring.initialize(keyring)
@@ -801,13 +829,140 @@ def test_restore_reconstructs_independent_memory_and_erases_mixed_revisions(
 
     restored = Database(target / "noyra.sqlite3")
     assert InteractionStore(restored).get(message).content == ERASED
-    assert MemoryStore(restored).get(memory.memory_id).content == ERASED
-    assert all(
-        row["content"] == ERASED for row in MemoryStore(restored).revisions(memory.memory_id)
+    store = MemoryStore(restored)
+    assert store.get(memory.memory_id).content == ERASED
+    revisions = store.revisions(memory.memory_id)
+    assert len(revisions) == 3
+    assert all(row["content"] == ERASED for row in revisions)
+    assert revisions[0]["source_event_ids_json"] == canonical_json([independent.event_id])
+    assert revisions[1]["source_event_ids_json"] == canonical_json(later_sources)
+    assert revisions[2]["source_event_ids_json"] == canonical_json(later_sources)
+    assert store.get(other_memory.memory_id) == other_memory
+    assert InteractionStore(restored).get(independent_message.interaction_id) == independent_message
+    remaining = store.search("owner")
+    assert {item.content for item in remaining} == {"independent fact", "unrelated window fact"}
+    with restored.connection() as connection:
+        assert not connection.execute(
+            "SELECT 1 FROM memory_fts WHERE memory_id=?", (memory.memory_id,)
+        ).fetchone()
+    assert MindEngine(restored).verify_integrity("owner")["memories"] == 3
+
+
+@pytest.mark.parametrize("case", ["legacy", "stale_index", "receipt_count_mismatch"])
+def test_restore_rechecks_completed_memory_erasure_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    current = tmp_path / "current"
+    db = Database(current / "noyra.sqlite3")
+    window, _, event = _private_message(db)
+    memory = MemoryStore(db).create(
+        "owner",
+        "semantic",
+        "private text",
+        salience=0.5,
+        confidence=0.7,
+        source_event_ids=(event,),
     )
-    remaining = MemoryStore(restored).search("owner", query="independent")
-    assert len(remaining) == 1 and remaining[0].content == "independent fact"
-    assert MindEngine(restored).verify_integrity("owner")["memories"] == 2
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    erase_memories = RecoveryErasure._erase_affected_memories
+
+    def erase_with_older_counts(self: RecoveryErasure, *args: Any) -> dict[str, int]:
+        counts = erase_memories(self, *args)
+        if case == "legacy":
+            del counts["reconstructed_memories"]
+        elif case == "receipt_count_mismatch":
+            counts["exclusive_memories"] += 1
+        return counts
+
+    with monkeypatch.context() as legacy:
+        legacy.setattr(RecoveryErasure, "_erase_affected_memories", erase_with_older_counts)
+        assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+    if case == "stale_index":
+        with db.transaction() as connection:
+            connection.execute(
+                "INSERT INTO memory_fts(memory_id,subject_id,content) VALUES(?,?,?)",
+                (memory.memory_id, "owner", "stale completed-job text"),
+            )
+    keyring = tmp_path / "keyring.json"
+    BackupKeyring.initialize(keyring)
+    manager = EncryptedBackupManager(current, keyring)
+    backup = tmp_path / "after-erasure.noyra-backup"
+    manager.create(backup)
+    target = tmp_path / "restored"
+    if case != "legacy":
+        reason = "private erasure index residual" if case == "stale_index" else "receipt counts"
+        with pytest.raises(IntegrityError, match=reason):
+            manager.restore(backup, target)
+        assert not target.exists()
+        assert not list(tmp_path.glob(".noyra-restore-*"))
+    else:
+        assert manager.restore(backup, target) == target
+        copy = Database(target / "noyra.sqlite3")
+        assert MemoryStore(copy).get(memory.memory_id).content == ERASED
+        assert MemoryStore(copy).search("owner") == []
+
+
+@pytest.mark.parametrize("residual", ["prior_revision", "search_index"])
+def test_erasure_rolls_back_if_any_memory_copy_remains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, residual: str
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    IdentityStore(db).ensure("owner", content_hash("owner"))
+    with monkeypatch.context() as prior:
+        prior.setattr("noyra.core.events.utc_now", lambda: "1999-01-01T00:00:00.000+00:00")
+        evidence = EventStore(db).append("owner", "independent", "test", {})
+    memory = MemoryStore(db, clock=lambda: "2000-01-01T00:00:00.000+00:00").create(
+        "owner",
+        "semantic",
+        "independent original",
+        salience=0.5,
+        confidence=0.7,
+        source_event_ids=(evidence.event_id,),
+    )
+    window, message_id, private_event = _private_message(db)
+    store = MemoryStore(db)
+    store.revise(
+        memory.memory_id,
+        content="mixed private history",
+        salience=0.4,
+        confidence=0.6,
+        status="active",
+        reason="fixture revision",
+        source_event_ids=(private_event,),
+    )
+    if residual == "prior_revision":
+        # Simulate an update that reports no exception but misses a revision
+        # that has no direct target event in its source list.
+        with db.transaction() as connection:
+            connection.execute(
+                "CREATE TRIGGER test_skip_memory_redaction BEFORE UPDATE ON memory_revisions "
+                "WHEN OLD.revision_number=1 BEGIN SELECT RAISE(IGNORE); END"
+            )
+    else:
+        verify = RecoveryErasure._verify
+
+        def verify_with_stale_index(connection: sqlite3.Connection, *args: Any) -> None:
+            connection.execute(
+                "INSERT INTO memory_fts(memory_id,subject_id,content) VALUES(?,?,?)",
+                (memory.memory_id, "owner", "stale index text"),
+            )
+            verify(connection, *args)
+
+        monkeypatch.setattr(RecoveryErasure, "_verify", staticmethod(verify_with_stale_index))
+
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    current = store.get(memory.memory_id)
+    history = store.revisions(memory.memory_id)
+    result = erasure.run("owner", window["conversation_id"])
+    assert result["status"] == "failed" and result["error_code"] == "erasure_storage_error"
+    assert store.get(memory.memory_id) == current
+    assert store.revisions(memory.memory_id) == history
+    assert InteractionStore(db).get(message_id).content == "private original"
+    with db.connection() as connection:
+        assert not connection.execute("SELECT 1 FROM private_erasure_receipts").fetchone()
+        assert connection.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
 
 
 @pytest.mark.parametrize("invalid", ["empty", "malformed", "wrong_filename", "large", "hardlink"])

@@ -8,6 +8,7 @@ import re
 import sqlite3
 import stat
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -89,6 +90,14 @@ class ErasureReviewRequired(RuntimeError):
     """An opaque historical derivative cannot safely be treated as cleared."""
 
 
+@dataclass(frozen=True, slots=True)
+class _ErasureScope:
+    messages: list[sqlite3.Row]
+    calls: list[sqlite3.Row]
+    events: set[str]
+    memory_ids: set[str]
+
+
 class ConversationErasure:
     def __init__(self, database: Database):
         self.database = database
@@ -102,9 +111,7 @@ class ConversationErasure:
             connection.execute("PRAGMA query_only=ON")
             state = _row(connection, subject_id, conversation_id)
             try:
-                messages, calls, events = self._review(
-                    connection, subject_id, conversation_id, deadline=deadline
-                )
+                scope = self._review(connection, subject_id, conversation_id, deadline=deadline)
             except ErasureReviewRequired as error:
                 reason = str(error)
                 if reason not in _REVIEW_CODES:
@@ -114,9 +121,9 @@ class ConversationErasure:
                 reason = "private_erasure_full_contract_pending"
                 status = "full_contract_pending"
                 counts = {
-                    "messages": len(messages),
-                    "model_copies": len(calls),
-                    "events": len(events),
+                    "messages": len(scope.messages),
+                    "model_copies": len(scope.calls),
+                    "events": len(scope.events),
                 }
             reflection_scope = sleep_reflection_scope(
                 connection,
@@ -262,18 +269,18 @@ class ConversationErasure:
         try:
             retired_exports = self._retire_exports(subject_id)
             with self.database.transaction() as connection:
-                messages, calls, events = self._review(connection, subject_id, conversation_id)
+                scope = self._review(connection, subject_id, conversation_id)
                 connection.execute(
                     "UPDATE private_erasure_jobs SET status='running',stage='content',"
                     "error_code=NULL,updated_at=? WHERE job_id=?",
                     (utc_now(), result["job_id"]),
                 )
                 counts = {
-                    "messages": len(messages),
-                    "model_copies": len(calls),
+                    "messages": len(scope.messages),
+                    "model_copies": len(scope.calls),
                     "retired_exports": retired_exports,
                 }
-                for row in messages:
+                for row in scope.messages:
                     digest = InteractionStore._state_hash_values(
                         ERASED,
                         row["direction"],
@@ -320,7 +327,7 @@ class ConversationErasure:
                             "WHERE decision_id=?",
                             (ERASED, digest, decision["decision_id"]),
                         )
-                for row in calls:
+                for row in scope.calls:
                     self._receipt(
                         connection,
                         result["job_id"],
@@ -335,7 +342,7 @@ class ConversationErasure:
                         (canonical_json(ERASED_MODEL), content_hash(ERASED_MODEL), row["call_id"]),
                     )
                 counts.update(
-                    self._erase_affected_memories(connection, result["job_id"], subject_id, events)
+                    self._erase_affected_memories(connection, result["job_id"], subject_id, scope)
                 )
                 state = _row(connection, subject_id, conversation_id)
                 state.update(
@@ -359,7 +366,7 @@ class ConversationErasure:
                         subject_id,
                     ),
                 )
-                self._verify(connection, subject_id, conversation_id, messages, calls, events)
+                self._verify(connection, subject_id, conversation_id, result["job_id"], scope)
                 connection.execute(
                     "UPDATE private_erasure_jobs SET status='completed',stage='verified',"
                     "counts_json=?,updated_at=? WHERE job_id=?",
@@ -384,14 +391,13 @@ class ConversationErasure:
         connection: Any,
         subject: str,
         window: str,
-        messages: list[Any],
-        calls: list[Any],
-        events: set[str],
+        job_id: str,
+        scope: _ErasureScope,
     ) -> None:
         state = _row(connection, subject, window)
         if state["title"] != ERASED or state["status"] != "deleted" or state["pinned"]:
             raise IntegrityError("private erasure window residual")
-        for original in messages:
+        for original in scope.messages:
             message = connection.execute(
                 "SELECT * FROM interactions WHERE interaction_id=? AND subject_id=?",
                 (original["interaction_id"], subject),
@@ -404,7 +410,7 @@ class ConversationErasure:
                 (original["interaction_id"], ERASED),
             ).fetchone():
                 raise IntegrityError("private erasure decision residual")
-        for original in calls:
+        for original in scope.calls:
             call = connection.execute(
                 "SELECT request_json,response_json,response_hash FROM model_calls "
                 "WHERE call_id=? AND subject_id=?",
@@ -417,25 +423,94 @@ class ConversationErasure:
                 or call["response_hash"] != content_hash(ERASED_MODEL)
             ):
                 raise IntegrityError("private erasure model residual")
-        for revision in connection.execute(
-            "SELECT r.memory_id,r.content,r.reason,r.source_event_ids_json,m.content AS current,"
-            "m.status FROM memory_revisions r JOIN memories m ON m.memory_id=r.memory_id "
-            "WHERE m.subject_id=? LIMIT ?",
-            (subject, MAX_ERASURE_ROWS + 1),
-        ).fetchall():
-            if not set(_memory_sources(revision["source_event_ids_json"])) & events:
-                continue
-            if (
-                revision["content"] != ERASED
-                or revision["reason"] != "privacy erasure"
-                or revision["current"] != ERASED
-                or revision["status"] != "archived"
-            ):
+        ConversationErasure._verify_erased_memories(connection, subject, job_id, scope.memory_ids)
+
+    @staticmethod
+    def _verify_erased_memories(
+        connection: sqlite3.Connection, subject: str, job_id: str, memory_ids: set[str]
+    ) -> None:
+        from noyra.mind.memory import MemoryStore
+
+        if not memory_ids:
+            return
+        targets = canonical_json(sorted(memory_ids))
+        digest = content_hash(ERASED)
+        verified = 0
+        historical_revisions = 0
+        for memory in connection.execute(
+            "SELECT m.* FROM json_each(?) ids "
+            "JOIN memories m ON m.memory_id=ids.value AND m.subject_id=? "
+            "JOIN private_erasure_receipts receipt ON receipt.job_id=? "
+            "AND receipt.record_table='memories' AND receipt.record_id=m.memory_id "
+            "AND receipt.erased_hash=m.state_hash",
+            (targets, subject, job_id),
+        ):
+            current = MemoryStore._from_row(memory)
+            if current.content != ERASED or current.status != "archived":
                 raise IntegrityError("private erasure memory residual")
-            if connection.execute(
-                "SELECT 1 FROM memory_embeddings WHERE memory_id=?", (revision["memory_id"],)
-            ).fetchone():
-                raise IntegrityError("private erasure index residual")
+            revisions = 0
+            for revision in connection.execute(
+                "SELECT r.*,receipt.erased_hash FROM memory_revisions r "
+                "LEFT JOIN private_erasure_receipts receipt ON receipt.job_id=? "
+                "AND receipt.record_table='memory_revisions' AND receipt.record_id=r.revision_id "
+                "WHERE r.memory_id=? ORDER BY r.revision_number",
+                (job_id, current.memory_id),
+            ):
+                revisions += 1
+                _memory_sources(revision["source_event_ids_json"])
+                expected_state = MemoryStore._state_hash(
+                    ERASED, revision["salience"], revision["confidence"], revision["status"]
+                )
+                is_current = revisions == current.current_revision
+                historical_revisions += not is_current
+                if historical_revisions > MAX_ERASURE_ROWS:
+                    raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
+                if (
+                    revision["revision_number"] != revisions
+                    or revision["content"] != ERASED
+                    or revision["reason"] != "privacy erasure"
+                    or revision["content_hash"] != digest
+                    or revision["state_hash"] != expected_state
+                    or revision["erased_hash"] != (None if is_current else expected_state)
+                    or (is_current and expected_state != memory["state_hash"])
+                ):
+                    raise IntegrityError("private erasure memory revision residual")
+            if revisions != current.current_revision:
+                raise IntegrityError("private erasure memory history mismatch")
+            verified += 1
+        if verified != len(memory_ids):
+            raise IntegrityError("private erasure memory scope mismatch")
+        if connection.execute(
+            "SELECT 1 FROM memory_embeddings e JOIN json_each(?) ids ON ids.value=e.memory_id "
+            "UNION ALL SELECT 1 FROM memory_fts f JOIN json_each(?) ids ON ids.value=f.memory_id "
+            "LIMIT 1",
+            (targets, targets),
+        ).fetchone():
+            raise IntegrityError("private erasure index residual")
+
+    def _verify_completed_memory_receipts(self, subject: str, job: dict[str, Any]) -> None:
+        counts = job["counts"]
+        if not isinstance(counts, dict):
+            raise IntegrityError("private erasure memory receipt counts are invalid")
+        # Jobs predating memory reconstruction recorded only exclusive memories.
+        expected = (counts.get("exclusive_memories"), counts.get("reconstructed_memories", 0))
+        if any(type(count) is not int or count < 0 for count in expected):
+            raise IntegrityError("private erasure memory receipt counts are invalid")
+        job_id = job["job_id"]
+        with self.database.read_transaction() as connection:
+            memory_ids = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT record_id FROM private_erasure_receipts "
+                    "WHERE job_id=? AND record_table='memories' LIMIT ?",
+                    (job_id, MAX_ERASURE_ROWS + 1),
+                )
+            }
+            if len(memory_ids) > MAX_ERASURE_ROWS:
+                raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
+            if len(memory_ids) != sum(expected):
+                raise IntegrityError("private erasure memory receipt counts do not match")
+            self._verify_erased_memories(connection, subject, job_id, memory_ids)
 
     @staticmethod
     def _receipt(connection: Any, job: str, table: str, key: str, old: str, new: str) -> None:
@@ -446,7 +521,7 @@ class ConversationErasure:
 
     def _review(
         self, connection: Any, subject: str, window: str, *, deadline: float | None = None
-    ) -> tuple[list[Any], list[Any], set[str]]:
+    ) -> _ErasureScope:
         if deadline is None:
             deadline = time.monotonic() + MAX_REVIEW_SECONDS
         connection.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
@@ -494,8 +569,8 @@ class ConversationErasure:
                     (subject, event),
                 ).fetchone():
                     raise ErasureReviewRequired("private_event_derivative_review_required")
-            self._check_derivatives(connection, subject, events, calls)
-            return messages, calls, events
+            memory_ids = self._check_derivatives(connection, subject, events, calls)
+            return _ErasureScope(messages, calls, events, memory_ids)
         except sqlite3.OperationalError as error:
             if time.monotonic() > deadline:
                 raise ErasureReviewRequired("private_erasure_review_deadline") from error
@@ -506,7 +581,7 @@ class ConversationErasure:
     @staticmethod
     def _check_derivatives(
         connection: Any, subject: str, events: set[str], calls: list[Any]
-    ) -> None:
+    ) -> set[str]:
         # Historical model calls did not record exact private input lineage. Require
         # review instead of guessing that an opaque reflection has no private text.
         if connection.execute(
@@ -561,9 +636,13 @@ class ConversationErasure:
             sources_by_memory.setdefault(revision["memory_id"], set()).update(
                 _memory_sources(revision["source_event_ids_json"])
             )
-        for memory_id, sources in sources_by_memory.items():
-            if sources & events and not sources <= events:
+        affected = {
+            memory_id for memory_id, sources in sources_by_memory.items() if sources & events
+        }
+        for memory_id in sorted(affected):
+            if not sources_by_memory[memory_id] <= events:
                 ConversationErasure._independent_memory_revision(connection, memory_id, events)
+        return affected
 
     @staticmethod
     def _review_exports(connection: Any, subject: str) -> None:
@@ -703,33 +782,39 @@ class ConversationErasure:
         raise ErasureReviewRequired("multi_source_memory_review_required")
 
     def _erase_affected_memories(
-        self, connection: Any, job_id: str, subject: str, events: set[str]
+        self, connection: sqlite3.Connection, job_id: str, subject: str, scope: _ErasureScope
     ) -> dict[str, int]:
+        from noyra.mind.memory import MemoryStore
+
+        events = scope.events
         erased = rebuilt = 0
         for memory in connection.execute(
-            "SELECT memory_id,current_revision,content_hash,salience,confidence,"
-            "memory_type,privacy_level,status "
-            "FROM memories WHERE subject_id=? LIMIT ?",
-            (subject, MAX_ERASURE_ROWS + 1),
+            "SELECT m.* FROM json_each(?) ids "
+            "JOIN memories m ON m.memory_id=ids.value AND m.subject_id=? ORDER BY m.memory_id",
+            (canonical_json(sorted(scope.memory_ids)), subject),
         ).fetchall():
+            memory_id = memory["memory_id"]
             revisions = connection.execute(
                 "SELECT revision_id,source_event_ids_json,content_hash,salience,confidence,status "
-                "FROM memory_revisions WHERE memory_id=?",
-                (memory["memory_id"],),
+                "FROM memory_revisions WHERE memory_id=? ORDER BY revision_number DESC",
+                (memory_id,),
             ).fetchall()
-            sources = {
-                source
-                for revision in revisions
-                for source in _memory_sources(revision["source_event_ids_json"])
-            }
-            if not sources & events:
-                continue
+            source_lists = [
+                _memory_sources(revision["source_event_ids_json"]) for revision in revisions
+            ]
+            sources = {source for items in source_lists for source in items}
+            # Prior revisions retain their original references. The tombstone
+            # uses one known affected revision's bounded list, even if the
+            # union across history exceeds the per-revision limit.
+            tombstone_sources = next(
+                (items for items in source_lists if events.intersection(items)), None
+            )
+            if tombstone_sources is None:
+                raise IntegrityError("private erasure memory source is missing")
             if not sources <= events:
                 independent = ConversationErasure._independent_memory_revision(
                     connection, memory["memory_id"], events
                 )
-                from noyra.mind.memory import MemoryStore
-
                 rebuilder = MemoryStore(self.database)
                 replacement = rebuilder._create_connection(
                     connection,
@@ -755,15 +840,10 @@ class ConversationErasure:
                         source_event_ids=_memory_sources(independent["source_event_ids_json"]),
                     )
                 rebuilt += 1
+            digest = content_hash(ERASED)
             for revision in revisions:
-                digest = content_hash(ERASED)
-                state_hash = content_hash(
-                    {
-                        "content": ERASED,
-                        "salience": float(revision["salience"]),
-                        "confidence": float(revision["confidence"]),
-                        "status": revision["status"],
-                    }
+                state_hash = MemoryStore._state_hash(
+                    ERASED, revision["salience"], revision["confidence"], revision["status"]
                 )
                 ConversationErasure._receipt(
                     connection,
@@ -778,29 +858,21 @@ class ConversationErasure:
                     "WHERE revision_id=?",
                     (ERASED, digest, state_hash, "privacy erasure", revision["revision_id"]),
                 )
-            current_hash = content_hash(ERASED)
-            from noyra.mind.memory import MemoryStore
-
             MemoryStore._insert_revision(
                 connection,
                 memory["memory_id"],
                 int(memory["current_revision"]) + 1,
                 ERASED,
-                current_hash,
+                digest,
                 float(memory["salience"]),
                 float(memory["confidence"]),
                 "archived",
                 "privacy erasure",
-                tuple(sorted(sources)),
+                tombstone_sources,
                 utc_now(),
             )
-            current_state = content_hash(
-                {
-                    "content": ERASED,
-                    "salience": float(memory["salience"]),
-                    "confidence": float(memory["confidence"]),
-                    "status": "archived",
-                }
+            current_state = MemoryStore._state_hash(
+                ERASED, memory["salience"], memory["confidence"], "archived"
             )
             ConversationErasure._receipt(
                 connection,
@@ -814,7 +886,7 @@ class ConversationErasure:
                 "UPDATE memories SET content=?,content_hash=?,state_hash=?,updated_at=?,"
                 "status='archived',current_revision=current_revision+1 "
                 "WHERE memory_id=?",
-                (ERASED, current_hash, current_state, utc_now(), memory["memory_id"]),
+                (ERASED, digest, current_state, utc_now(), memory["memory_id"]),
             )
             if connection.execute(
                 "SELECT 1 FROM memory_embeddings WHERE memory_id=?", (memory["memory_id"],)
@@ -946,8 +1018,11 @@ def replay_privacy_deletions(current_root: Path, restored_root: Path) -> None:
             ).fetchone()
         if row is None:
             continue
-        erasure._resume_recorded_intent(subject, window, expected_revision=row[0])
-        if erasure.run(subject, window)["status"] != "completed":
+        job = erasure._resume_recorded_intent(subject, window, expected_revision=row[0])
+        if job["status"] == "completed":
+            # Older backups can carry a completion flag from a weaker verifier.
+            erasure._verify_completed_memory_receipts(subject, job)
+        elif erasure.run(subject, window)["status"] != "completed":
             raise ErasureReviewRequired("backup_private_deletion_replay_requires_review")
 
 
