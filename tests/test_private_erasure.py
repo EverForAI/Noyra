@@ -173,7 +173,7 @@ def _private_message(db: Database) -> tuple[dict[str, Any], str, str]:
 
 
 @pytest.mark.parametrize("derivative", ["memory_block", "entity_graph"])
-def test_unlineaged_memory_derivatives_keep_historical_erasure_fail_closed(
+def test_memory_derivative_domains_stay_guarded_until_erasure_integration(
     tmp_path: Path, derivative: str
 ) -> None:
     db = Database(tmp_path / "noyra.sqlite3")
@@ -187,6 +187,7 @@ def test_unlineaged_memory_derivatives_keep_historical_erasure_fail_closed(
             "private conversation context",
             "A summary that may contain conversation-derived details.",
             reason="captured context",
+            source_memory_ids=(),
         )
     else:
         entities = EntityStore(db)
@@ -209,9 +210,10 @@ def test_unlineaged_memory_derivatives_keep_historical_erasure_fail_closed(
     assert assessment["deletion_available"] is False
     assert assessment["counts"] is None
 
-    # These historical records do not carry enough source/revision lineage to
-    # erase selectively. Refusal must leave both the intent marker and source
-    # conversation untouched until a complete provenance contract exists.
+    # The block now records revision-level lineage, but neither block redaction
+    # nor complete entity-graph reconstruction has an erasure receipt contract.
+    # Refusal must keep source content and the intent marker untouched until that
+    # downstream recovery path is implemented and verified.
     with pytest.raises(
         ErasureReviewRequired, match="private_memory_derivative_review_required"
     ):
@@ -1111,7 +1113,7 @@ def test_unverified_contradiction_integration_requires_review_without_marker(
     assert InteractionStore(db).get(message).content == "private original"
 
 
-def test_schema121_migration_preserves_integrations_and_allows_audited_revert(
+def test_schema120_upgrade_preserves_integrations_and_allows_audited_revert(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "integration-v120.sqlite3"
@@ -1155,7 +1157,7 @@ def test_schema121_migration_preserves_integrations_and_allows_audited_revert(
             connection.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()[0]
-            == "121"
+            == str(database_module.CURRENT_SCHEMA_VERSION)
         )
         assert (
             connection.execute(

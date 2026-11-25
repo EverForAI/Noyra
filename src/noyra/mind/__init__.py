@@ -8,7 +8,12 @@ from .benchmarks import (
     MemoryBenchmarkScore,
     PinnedMemoryBenchmark,
 )
-from .blocks import MemoryBlockRecord, MemoryBlockStore
+from .blocks import (
+    MemoryBlockRecord,
+    MemoryBlockRevisionLineage,
+    MemoryBlockSourceReference,
+    MemoryBlockStore,
+)
 from .causal import CausalStore
 from .consolidation import MemoryConsolidator
 from .engine import MindEngine
@@ -60,6 +65,8 @@ __all__ = [
     "MemoryBenchmarkCurvePoint",
     "MemoryBenchmarkScore",
     "MemoryBlockRecord",
+    "MemoryBlockRevisionLineage",
+    "MemoryBlockSourceReference",
     "MemoryBlockStore",
     "MemoryConsolidationRecord",
     "MemoryConsolidator",

@@ -640,6 +640,7 @@ src/noyra/core/schema/common_knowledge_trusted_publishers.py
 src/noyra/core/schema/contracts.py
 src/noyra/core/schema/email_identity.py
 src/noyra/core/schema/evidence.py
+src/noyra/core/schema/memory_block_lineage.py
 src/noyra/core/schema/migrations.py
 src/noyra/core/schema/migrations_v002_v005.py
 src/noyra/core/schema/migrations_v006_v017.py

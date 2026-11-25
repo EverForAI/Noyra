@@ -10,14 +10,16 @@ from typing import Any
 
 import pytest
 
-from noyra.core import Database, IdentityStore
+from noyra.core import Database, EventStore, IdentityStore
 from noyra.core.database import CURRENT_SCHEMA_VERSION
 from noyra.core.runtime_export import (
+    _OWNERSHIP_GRAPHS,
     _PARENT_TABLES_V33,
     RuntimeExportArtifact,
     RuntimeLogExporter,
 )
 from noyra.core.types import content_hash, utc_now
+from noyra.mind import MemoryBlockStore, MemoryStore
 from support.historical import (
     HistoricalFixture,
     load_historical_fixtures,
@@ -760,6 +762,67 @@ def test_cross_subject_parent_reference_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="foreign references leave"):
         RuntimeLogExporter(database).export(subject_a, actor="test")
+
+
+def test_memory_block_revision_sources_export_only_with_their_subject(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "memory-block-lineage-export.sqlite3")
+    subject_a = "Noyra-block-lineage-export-a"
+    subject_b = "Noyra-block-lineage-export-b"
+    IdentityStore(database).ensure(subject_a, content_hash({"subject": subject_a}))
+    IdentityStore(database).ensure(subject_b, content_hash({"subject": subject_b}))
+    blocks = MemoryBlockStore(database)
+    memories = MemoryStore(database)
+    event_a = EventStore(database).append(subject_a, "experience", "fixture", {"source": "a"})
+    event_b = EventStore(database).append(subject_b, "experience", "fixture", {"source": "b"})
+    source_a = memories.create(
+        subject_a,
+        "semantic",
+        "source a",
+        salience=0.5,
+        confidence=0.7,
+        source_event_ids=(event_a.event_id,),
+    )
+    source_b = memories.create(
+        subject_b,
+        "semantic",
+        "source b",
+        salience=0.5,
+        confidence=0.7,
+        source_event_ids=(event_b.event_id,),
+    )
+    block_a = blocks.create(
+        subject_a,
+        "working_context",
+        "context a",
+        "derived from source a",
+        reason="fixture",
+        source_memory_ids=(source_a.memory_id,),
+    )
+    blocks.create(
+        subject_b,
+        "working_context",
+        "context b",
+        "derived from source b",
+        reason="fixture",
+        source_memory_ids=(source_b.memory_id,),
+    )
+
+    rule = _OWNERSHIP_GRAPHS[CURRENT_SCHEMA_VERSION]["memory_block_revision_sources"]
+    assert (rule.mode, rule.parent_table, rule.parent_key, rule.child_key) == (
+        "parent",
+        "memory_blocks",
+        "block_id",
+        "block_id",
+    )
+    _manifest, rows = _read_artifact(RuntimeLogExporter(database).export(subject_a, actor="test"))
+    exported_sources = rows["memory_block_revision_sources"]
+    assert len(exported_sources) == 1
+    assert exported_sources[0]["source_memory_id"] == source_a.memory_id
+    revision_id = blocks.lineage_history(block_a.block_id)[0].revision_id
+    assert exported_sources[0]["revision_id"] == revision_id
+    assert all(row["source_memory_id"] != source_b.memory_id for row in exported_sources)
 
 
 def test_large_parent_history_exports_without_variable_sized_id_lists(tmp_path: Path) -> None:

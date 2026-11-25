@@ -775,6 +775,12 @@ _OWNERSHIP_GRAPHS[119] = _OWNERSHIP_GRAPHS[118]
 _OWNERSHIP_GRAPHS[120] = _OWNERSHIP_GRAPHS[119]
 # Schema 121 adds only guarded redaction triggers; subject ownership is unchanged.
 _OWNERSHIP_GRAPHS[121] = _OWNERSHIP_GRAPHS[120]
+# Schema 122 adds revision source evidence owned by its memory-block revision.
+_OWNERSHIP_GRAPHS[122] = {
+    **_OWNERSHIP_GRAPHS[121],
+    "memory_block_revision_lineage": _parent_rule("memory_blocks", "block_id", "block_id"),
+    "memory_block_revision_sources": _parent_rule("memory_blocks", "block_id", "block_id"),
+}
 
 
 @dataclass(frozen=True)
