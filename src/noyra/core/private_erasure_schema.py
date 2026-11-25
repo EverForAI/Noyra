@@ -4,6 +4,7 @@ from .types import content_hash
 
 ERASED_REFLECTION_PLAN = '{"privacy_erased":true}'
 ERASED_REFLECTION_HASH = content_hash({"privacy_erased": True})
+ERASED_CONTENT_HASH = content_hash("[erased]")
 
 MIGRATION_V120 = f"""
 DROP TRIGGER IF EXISTS prevent_sleep_reflection_update;
@@ -367,4 +368,65 @@ WHEN NOT (
  )
 )
 BEGIN SELECT RAISE(ABORT,'memory integration revision erasure requires explicit receipt'); END;
+"""
+
+
+MIGRATION_V124 = f"""
+DROP TRIGGER IF EXISTS prevent_memory_block_revision_update;
+CREATE TRIGGER prevent_memory_block_revision_update
+BEFORE UPDATE ON memory_block_revisions
+WHEN NOT (
+ NEW.revision_id IS OLD.revision_id
+ AND NEW.block_id IS OLD.block_id
+ AND NEW.version IS OLD.version
+ AND NEW.status IS OLD.status
+ AND NEW.actor IS OLD.actor
+ AND NEW.created_at IS OLD.created_at
+ AND NEW.content='[erased]'
+ AND NEW.content_hash='{ERASED_CONTENT_HASH}'
+ AND NEW.reason='privacy erasure'
+ AND EXISTS(
+  SELECT 1 FROM memory_blocks b
+  JOIN private_erasure_receipts r ON r.record_table='memory_block_revisions'
+   AND r.record_id=OLD.revision_id
+  JOIN private_erasure_jobs j ON j.job_id=r.job_id
+  WHERE b.block_id=OLD.block_id
+   AND b.subject_id=j.subject_id
+   AND r.original_hash=OLD.content_hash
+   AND r.erased_hash=NEW.content_hash
+   AND j.status='running'
+   AND j.stage='content'
+ )
+)
+BEGIN SELECT RAISE(ABORT,'memory block revisions require explicit content erasure'); END;
+
+CREATE TRIGGER IF NOT EXISTS prevent_erased_memory_block_update
+BEFORE UPDATE ON memory_blocks
+WHEN EXISTS(SELECT 1 FROM private_erasure_receipts r
+ WHERE r.record_table='memory_blocks' AND r.record_id=OLD.block_id)
+ AND NOT (
+  NEW.block_id IS OLD.block_id
+  AND NEW.subject_id IS OLD.subject_id
+  AND NEW.block_type IS OLD.block_type
+  AND NEW.label IS OLD.label
+  AND NEW.privacy_level IS OLD.privacy_level
+  AND NEW.version IS OLD.version
+  AND NEW.created_at IS OLD.created_at
+  AND NEW.content='[erased]'
+  AND NEW.content_hash='{ERASED_CONTENT_HASH}'
+  AND NEW.status='archived'
+ )
+BEGIN SELECT RAISE(ABORT,'erased memory block content cannot be restored'); END;
+
+CREATE TRIGGER IF NOT EXISTS prevent_erased_memory_block_revision_insert
+BEFORE INSERT ON memory_block_revisions
+WHEN EXISTS(SELECT 1 FROM private_erasure_receipts r
+ WHERE r.record_table='memory_blocks' AND r.record_id=NEW.block_id)
+ AND NOT (
+  NEW.content='[erased]'
+  AND NEW.content_hash='{ERASED_CONTENT_HASH}'
+  AND NEW.status='archived'
+  AND NEW.reason='privacy erasure'
+ )
+BEGIN SELECT RAISE(ABORT,'erased memory block cannot receive new content'); END;
 """

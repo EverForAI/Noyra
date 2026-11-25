@@ -91,6 +91,15 @@ _REVIEWED_SCHEMA_PAIRS: tuple[RecoverySchemaPair, ...] = (
         "1dd125ddb0efb42d5a060c816f96f6f166fdc2f1a9e684003bceae1d1e51aca8",
         "831e5e2019db93adbd8f48f3d21c0c0d4fed98d185a2158c478f0020f89eca5e",
     ),
+    # v124 adds receipt-bound redaction guards for direct-event memory blocks.
+    RecoverySchemaPair(
+        123,
+        "0d983fd848829847093e4ae8f37316b33187692c911a4dcd957dd58d0d78f076",
+        124,
+        "15236fa91cdb81a32b47c3ac83396ca27c241ad1af97f4738da4eda5f9f512ae",
+        "831e5e2019db93adbd8f48f3d21c0c0d4fed98d185a2158c478f0020f89eca5e",
+        "831e5e2019db93adbd8f48f3d21c0c0d4fed98d185a2158c478f0020f89eca5e",
+    ),
 )
 
 

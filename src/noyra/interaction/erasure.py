@@ -62,7 +62,6 @@ _UNREVIEWED_DOMAINS = (
     "thought_episodes",
     "relationship_social_runs",
     "psychological_snapshots",
-    "memory_blocks",
     "entities",
     "entity_relations",
     "entity_evidence_links",
@@ -107,6 +106,8 @@ class _ErasureScope:
     memory_integration_rows: dict[str, sqlite3.Row]
     memory_integration_revision_rows: dict[str, sqlite3.Row]
     discard_only_memory_ids: set[str]
+    memory_block_revisions: dict[str, sqlite3.Row]
+    memory_block_current_rows: dict[str, sqlite3.Row]
 
 
 class ConversationErasure:
@@ -296,6 +297,8 @@ class ConversationErasure:
                     or scope.memory_ids
                     or scope.memory_integration_rows
                     or scope.memory_integration_revision_rows
+                    or scope.memory_block_revisions
+                    or scope.memory_block_current_rows
                 ):
                     connection.execute("PRAGMA secure_delete=ON")
                 if scope.reflection_hashes:
@@ -397,6 +400,7 @@ class ConversationErasure:
                         scope.memory_integration_revision_rows
                     )
                     self._erase_memory_integrations(connection, result["job_id"], scope)
+                counts.update(self._erase_memory_blocks(connection, result["job_id"], scope))
                 counts.update(
                     self._erase_affected_memories(connection, result["job_id"], subject_id, scope)
                 )
@@ -480,6 +484,13 @@ class ConversationErasure:
             ):
                 raise IntegrityError("private erasure model residual")
         ConversationErasure._verify_erased_memories(connection, subject, job_id, scope.memory_ids)
+        ConversationErasure._verify_erased_memory_blocks(
+            connection,
+            subject,
+            job_id,
+            set(scope.memory_block_revisions),
+            set(scope.memory_block_current_rows),
+        )
         sleep_ids = ConversationErasure._verify_reflection_receipts(
             connection, subject, window, job_id, len(scope.reflection_hashes)
         )
@@ -649,6 +660,92 @@ class ConversationErasure:
             raise IntegrityError("private erasure index residual")
 
     @staticmethod
+    def _verify_erased_memory_blocks(
+        connection: sqlite3.Connection,
+        subject: str,
+        job_id: str,
+        revision_ids: set[str],
+        current_block_ids: set[str],
+    ) -> None:
+        from noyra.mind.blocks import MemoryBlockStore
+        from noyra.mind.memory import MemoryStore
+
+        revision_receipts = {
+            row["record_id"]: row
+            for row in connection.execute(
+                "SELECT record_id,original_hash,erased_hash FROM private_erasure_receipts "
+                "WHERE job_id=? AND record_table='memory_block_revisions' LIMIT ?",
+                (job_id, MAX_ERASURE_ROWS + 1),
+            )
+        }
+        block_receipts = {
+            row["record_id"]: row
+            for row in connection.execute(
+                "SELECT record_id,original_hash,erased_hash FROM private_erasure_receipts "
+                "WHERE job_id=? AND record_table='memory_blocks' LIMIT ?",
+                (job_id, MAX_ERASURE_ROWS + 1),
+            )
+        }
+        if (
+            set(revision_receipts) != revision_ids
+            or set(block_receipts) != current_block_ids
+            or len(revision_ids) > MAX_ERASURE_ROWS
+            or len(current_block_ids) > MAX_ERASURE_ROWS
+        ):
+            raise IntegrityError("private erasure memory block receipt scope mismatch")
+        digest = content_hash(ERASED)
+        for revision_id in sorted(revision_ids):
+            receipt = revision_receipts[revision_id]
+            row = connection.execute(
+                "SELECT r.*,b.subject_id,b.version AS block_version "
+                "FROM memory_block_revisions r JOIN memory_blocks b ON b.block_id=r.block_id "
+                "WHERE r.revision_id=? AND b.subject_id=?",
+                (revision_id, subject),
+            ).fetchone()
+            if row is None or row["content"] != ERASED:
+                raise IntegrityError("private erasure memory block revision residual")
+            if (
+                row["content_hash"] != digest
+                or row["reason"] != "privacy erasure"
+                or receipt["erased_hash"] != digest
+                or receipt["original_hash"] == digest
+                or not MemoryStore._valid_hash(receipt["original_hash"])
+                or content_hash(row["content"]) != row["content_hash"]
+            ):
+                raise IntegrityError("private erasure memory block revision evidence mismatch")
+            lineage_status, sources, event_sources, complete = (
+                MemoryBlockStore._verified_revision_lineage(connection, row)
+            )
+            if (
+                lineage_status != "declared_no_memory_sources"
+                or sources
+                or not complete
+                or not event_sources
+            ):
+                raise IntegrityError("private erasure memory block lineage residual")
+            if (
+                int(row["version"]) == int(row["block_version"])
+                and row["block_id"] not in current_block_ids
+            ):
+                raise IntegrityError("private erasure current memory block receipt missing")
+        for block_id in sorted(current_block_ids):
+            receipt = block_receipts[block_id]
+            row = connection.execute(
+                "SELECT * FROM memory_blocks WHERE block_id=? AND subject_id=?",
+                (block_id, subject),
+            ).fetchone()
+            if row is None or row["content"] != ERASED or row["status"] != "archived":
+                raise IntegrityError("private erasure memory block residual")
+            if (
+                row["content_hash"] != digest
+                or receipt["erased_hash"] != digest
+                or receipt["original_hash"] == digest
+                or not MemoryStore._valid_hash(receipt["original_hash"])
+                or content_hash(row["content"]) != row["content_hash"]
+            ):
+                raise IntegrityError("private erasure memory block evidence mismatch")
+
+    @staticmethod
     def _verify_memory_integration_receipts(
         connection: sqlite3.Connection,
         subject: str,
@@ -762,9 +859,17 @@ class ConversationErasure:
         discarded = counts.get("discarded_mixed_memories", 0)
         integration_records = counts.get("memory_integration_records", 0)
         integration_revisions = counts.get("memory_integration_revisions", 0)
+        memory_block_revisions = counts.get("memory_block_revisions", 0)
+        memory_blocks = counts.get("memory_blocks", 0)
         if any(
             type(value) is not int or value < 0
-            for value in (discarded, integration_records, integration_revisions)
+            for value in (
+                discarded,
+                integration_records,
+                integration_revisions,
+                memory_block_revisions,
+                memory_blocks,
+            )
         ):
             raise IntegrityError("private erasure downstream receipt counts are invalid")
         reflections = counts.get("sleep_reflections", 0)
@@ -796,6 +901,30 @@ class ConversationErasure:
             )
             self._verify_memory_integration_receipts(
                 connection, subject, job_id, memory_ids, integration_records, integration_revisions
+            )
+            block_revision_ids = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT record_id FROM private_erasure_receipts "
+                    "WHERE job_id=? AND record_table='memory_block_revisions' LIMIT ?",
+                    (job_id, MAX_ERASURE_ROWS + 1),
+                )
+            }
+            current_block_ids = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT record_id FROM private_erasure_receipts "
+                    "WHERE job_id=? AND record_table='memory_blocks' LIMIT ?",
+                    (job_id, MAX_ERASURE_ROWS + 1),
+                )
+            }
+            if (
+                len(block_revision_ids) != memory_block_revisions
+                or len(current_block_ids) != memory_blocks
+            ):
+                raise IntegrityError("private erasure memory block receipt counts do not match")
+            self._verify_erased_memory_blocks(
+                connection, subject, job_id, block_revision_ids, current_block_ids
             )
         return (
             reflections,
@@ -930,6 +1059,12 @@ class ConversationErasure:
                 sleep_memory_links,
                 deadline,
             )
+            memory_block_revisions, memory_block_current_rows = self._review_memory_blocks(
+                connection,
+                subject,
+                events | reflection_events,
+                memory_ids,
+            )
             return _ErasureScope(
                 messages,
                 calls,
@@ -941,6 +1076,8 @@ class ConversationErasure:
                 memory_integration_rows,
                 memory_integration_revision_rows,
                 discard_only_memory_ids,
+                memory_block_revisions,
+                memory_block_current_rows,
             )
         except sqlite3.OperationalError as error:
             if time.monotonic() > deadline:
@@ -948,6 +1085,51 @@ class ConversationErasure:
             raise
         finally:
             connection.set_progress_handler(None, 0)
+
+    @staticmethod
+    def _review_memory_blocks(
+        connection: sqlite3.Connection,
+        subject: str,
+        tainted_events: set[str],
+        affected_memory_ids: set[str],
+    ) -> tuple[dict[str, sqlite3.Row], dict[str, sqlite3.Row]]:
+        from noyra.mind.blocks import MemoryBlockStore
+
+        revisions = connection.execute(
+            "SELECT r.*,b.subject_id,b.version AS block_version "
+            "FROM memory_block_revisions r JOIN memory_blocks b ON b.block_id=r.block_id "
+            "WHERE b.subject_id=? ORDER BY r.block_id,r.version LIMIT ?",
+            (subject, MAX_ERASURE_ROWS + 1),
+        ).fetchall()
+        if len(revisions) > MAX_ERASURE_ROWS:
+            raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
+        candidates: dict[str, sqlite3.Row] = {}
+        current_rows: dict[str, sqlite3.Row] = {}
+        for revision in revisions:
+            lineage_status, sources, event_sources, complete = (
+                MemoryBlockStore._verified_revision_lineage(connection, revision)
+            )
+            source_memory_ids = {source.memory_id for source in sources}
+            source_event_ids = {event.event_id for event in event_sources}
+            if lineage_status == "unknown" or not complete:
+                raise ErasureReviewRequired("private_memory_derivative_review_required")
+            if source_memory_ids & affected_memory_ids:
+                raise ErasureReviewRequired("private_memory_derivative_review_required")
+            if not source_event_ids & tainted_events:
+                continue
+            if (
+                lineage_status != "declared_no_memory_sources"
+                or sources
+                or not source_event_ids
+                or not source_event_ids <= tainted_events
+            ):
+                raise ErasureReviewRequired("private_memory_derivative_review_required")
+            candidates[str(revision["revision_id"])] = revision
+            if int(revision["version"]) == int(revision["block_version"]):
+                current_rows[str(revision["block_id"])] = revision
+        if len(candidates) > MAX_ERASURE_ROWS:
+            raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
+        return candidates, current_rows
 
     @staticmethod
     def _check_derivatives(
@@ -1436,6 +1618,44 @@ class ConversationErasure:
                     raise IntegrityError("independent memory revision content mismatch")
                 return revision
         raise ErasureReviewRequired("multi_source_memory_review_required")
+
+    @staticmethod
+    def _erase_memory_blocks(
+        connection: sqlite3.Connection, job_id: str, scope: _ErasureScope
+    ) -> dict[str, int]:
+        digest = content_hash(ERASED)
+        for revision in scope.memory_block_revisions.values():
+            ConversationErasure._receipt(
+                connection,
+                job_id,
+                "memory_block_revisions",
+                revision["revision_id"],
+                revision["content_hash"],
+                digest,
+            )
+            connection.execute(
+                "UPDATE memory_block_revisions SET content=?,content_hash=?,reason=? "
+                "WHERE revision_id=?",
+                (ERASED, digest, "privacy erasure", revision["revision_id"]),
+            )
+        for block_id, _revision in scope.memory_block_current_rows.items():
+            block = connection.execute(
+                "SELECT * FROM memory_blocks WHERE block_id=?", (block_id,)
+            ).fetchone()
+            if block is None:
+                raise IntegrityError("private erasure memory block disappeared")
+            ConversationErasure._receipt(
+                connection, job_id, "memory_blocks", block_id, block["content_hash"], digest
+            )
+            connection.execute(
+                "UPDATE memory_blocks SET content=?,content_hash=?,status='archived',updated_at=? "
+                "WHERE block_id=?",
+                (ERASED, digest, utc_now(), block_id),
+            )
+        return {
+            "memory_block_revisions": len(scope.memory_block_revisions),
+            "memory_blocks": len(scope.memory_block_current_rows),
+        }
 
     def _erase_affected_memories(
         self, connection: sqlite3.Connection, job_id: str, subject: str, scope: _ErasureScope

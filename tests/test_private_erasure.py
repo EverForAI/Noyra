@@ -173,7 +173,7 @@ def _private_message(db: Database) -> tuple[dict[str, Any], str, str]:
 
 
 @pytest.mark.parametrize("derivative", ["memory_block", "entity_graph"])
-def test_memory_derivative_domains_stay_guarded_until_erasure_integration(
+def test_memory_derivative_domains_use_verified_erasure_boundaries(
     tmp_path: Path, derivative: str
 ) -> None:
     db = Database(tmp_path / "noyra.sqlite3")
@@ -188,25 +188,47 @@ def test_memory_derivative_domains_stay_guarded_until_erasure_integration(
             "A summary that may contain conversation-derived details.",
             reason="captured context",
             source_memory_ids=(),
-            source_event_ids=(event_id,) if derivative == "memory_block" else (),
+            source_event_ids=(event_id,),
         )
-        if derivative == "memory_block":
-            block_lineage = blocks.lineage_history(block.block_id)[0]
-            assert block_lineage.event_lineage_complete is True
-            assert tuple(event.event_id for event in block_lineage.event_sources) == (event_id,)
-    else:
-        entities = EntityStore(db)
-        entity = entities.upsert(
-            "owner", "person", "private-person", "Private conversation person"
-        )
-        link = entities.link_evidence(
-            "owner",
-            entity.entity_id,
-            "event",
-            event_id,
-            role="mentioned in private conversation",
-            confidence=0.9,
-        )
+        block_lineage = blocks.lineage_history(block.block_id)[0]
+        assert block_lineage.event_lineage_complete is True
+        assert tuple(event.event_id for event in block_lineage.event_sources) == (event_id,)
+
+        erasure = ConversationErasure(db)
+        assessment = erasure.assess("owner", window["conversation_id"])
+        assert assessment["status"] == "full_contract_pending"
+        assert assessment["deletion_available"] is False
+
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+        result = erasure.run("owner", window["conversation_id"])
+        assert result["status"] == "completed"
+        assert result["counts"]["memory_block_revisions"] == 1
+        assert result["counts"]["memory_blocks"] == 1
+        assert blocks.get(block.block_id).content == ERASED
+        assert blocks.get(block.block_id).status == "archived"
+        assert blocks.verify_integrity("owner")["memory_block_revisions"] == 1
+        with db.connection() as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM private_erasure_receipts "
+                "WHERE record_table='memory_block_revisions'"
+            ).fetchone()[0] == 1
+            assert connection.execute(
+                "SELECT COUNT(*) FROM private_erasure_receipts "
+                "WHERE record_table='memory_blocks'"
+            ).fetchone()[0] == 1
+        assert InteractionStore(db).get(message_id).content == ERASED
+        return
+
+    entities = EntityStore(db)
+    entity = entities.upsert("owner", "person", "private-person", "Private conversation person")
+    link = entities.link_evidence(
+        "owner",
+        entity.entity_id,
+        "event",
+        event_id,
+        role="mentioned in private conversation",
+        confidence=0.9,
+    )
 
     erasure = ConversationErasure(db)
     assessment = erasure.assess("owner", window["conversation_id"])
@@ -215,28 +237,247 @@ def test_memory_derivative_domains_stay_guarded_until_erasure_integration(
     assert assessment["deletion_available"] is False
     assert assessment["counts"] is None
 
-    # The block now records revision-level lineage, but neither block redaction
-    # nor complete entity-graph reconstruction has an erasure receipt contract.
-    # Refusal must keep source content and the intent marker untouched until that
-    # downstream recovery path is implemented and verified.
     with pytest.raises(
         ErasureReviewRequired, match="private_memory_derivative_review_required"
     ):
-        erasure.request(
-            "owner", window["conversation_id"], expected_revision=1, confirmed=True
-        )
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
 
     assert not erasure.root.exists()
     assert InteractionStore(db).get(message_id).content == "private original"
     assert ConversationStore(db).list("owner")["items"][0]["status"] == "active"
-    if derivative == "memory_block":
-        assert blocks.get(block.block_id).content == (
-            "A summary that may contain conversation-derived details."
+    assert entities.evidence_links("owner", entity.entity_id) == [link]
+    assert entities.verify_integrity("owner")["links"] == 1
+
+
+def test_memory_block_with_mixed_event_sources_remains_fail_closed(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    independent_event_id = EventStore(db).append("owner", "experience", "test", {}).event_id
+    MemoryBlockStore(db).create(
+        "owner",
+        "working_context",
+        "mixed context",
+        "Mixed private and independent evidence.",
+        reason="mixed capture",
+        source_memory_ids=(),
+        source_event_ids=(private_event_id, independent_event_id),
+    )
+
+    erasure = ConversationErasure(db)
+    with pytest.raises(
+        ErasureReviewRequired, match="private_memory_derivative_review_required"
+    ):
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+
+
+def test_memory_block_with_affected_memory_source_remains_fail_closed(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    memory = MemoryStore(db).create(
+        "owner",
+        "semantic",
+        "Private memory source.",
+        salience=0.8,
+        confidence=0.9,
+        source_event_ids=(private_event_id,),
+    )
+    MemoryBlockStore(db).create(
+        "owner",
+        "working_context",
+        "memory-derived context",
+        "Derived from a private memory.",
+        reason="derived capture",
+        source_memory_ids=(memory.memory_id,),
+        source_event_ids=(),
+    )
+
+    erasure = ConversationErasure(db)
+    with pytest.raises(
+        ErasureReviewRequired, match="private_memory_derivative_review_required"
+    ):
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+
+
+def test_legacy_memory_block_without_event_coverage_remains_fail_closed(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    blocks = MemoryBlockStore(db)
+    block = blocks.create(
+        "owner",
+        "working_context",
+        "legacy context",
+        "Legacy context without direct event coverage.",
+        reason="legacy capture",
+        source_memory_ids=(),
+        source_event_ids=(private_event_id,),
+    )
+    with db.transaction() as connection:
+        connection.execute("DROP TRIGGER prevent_memory_block_revision_event_source_delete")
+        connection.execute("DROP TRIGGER prevent_memory_block_revision_event_coverage_delete")
+        connection.execute("DROP TRIGGER prevent_memory_block_revision_lineage_update")
+        connection.execute(
+            "DELETE FROM memory_block_revision_event_sources WHERE revision_id IN "
+            "(SELECT revision_id FROM memory_block_revisions WHERE block_id=?)",
+            (block.block_id,),
         )
-        assert blocks.verify_integrity("owner")["memory_block_revisions"] == 1
-    else:
-        assert entities.evidence_links("owner", entity.entity_id) == [link]
-        assert entities.verify_integrity("owner")["links"] == 1
+        connection.execute(
+            "DELETE FROM memory_block_revision_event_coverage WHERE revision_id IN "
+            "(SELECT revision_id FROM memory_block_revisions WHERE block_id=?)",
+            (block.block_id,),
+        )
+        connection.execute(
+            "UPDATE memory_block_revision_lineage SET lineage_hash=? WHERE revision_id IN "
+            "(SELECT revision_id FROM memory_block_revisions WHERE block_id=?)",
+            (MemoryBlockStore._lineage_hash("declared_no_memory_sources", ()), block.block_id),
+        )
+
+    erasure = ConversationErasure(db)
+    with pytest.raises(
+        ErasureReviewRequired, match="private_memory_derivative_review_required"
+    ):
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+
+
+
+def test_unrelated_memory_block_survives_private_event_erasure(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    independent_event_id = EventStore(db).append("owner", "experience", "test", {}).event_id
+    blocks = MemoryBlockStore(db)
+    block = blocks.create(
+        "owner",
+        "working_context",
+        "independent context",
+        "Independent context remains readable.",
+        reason="independent capture",
+        source_memory_ids=(),
+        source_event_ids=(independent_event_id,),
+    )
+
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+    assert blocks.get(block.block_id).content == "Independent context remains readable."
+    with db.connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM private_erasure_receipts "
+            "WHERE record_table IN ('memory_blocks','memory_block_revisions')"
+        ).fetchone()[0] == 0
+    assert private_event_id
+
+
+def test_historical_memory_block_revision_is_redacted_without_erasing_current_revision(
+    tmp_path: Path,
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    independent_event_id = EventStore(db).append("owner", "experience", "test", {}).event_id
+    blocks = MemoryBlockStore(db)
+    block = blocks.create(
+        "owner",
+        "working_context",
+        "versioned context",
+        "Private historical context.",
+        reason="private capture",
+        source_memory_ids=(),
+        source_event_ids=(private_event_id,),
+    )
+    blocks.revise(
+        block.block_id,
+        "Independent current context.",
+        reason="independent refresh",
+        expected_version=1,
+        source_memory_ids=(),
+        source_event_ids=(independent_event_id,),
+    )
+
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    result = erasure.run("owner", window["conversation_id"])
+    assert result["status"] == "completed"
+    assert result["counts"]["memory_block_revisions"] == 1
+    assert result["counts"]["memory_blocks"] == 0
+    assert blocks.get(block.block_id).content == "Independent current context."
+    with db.connection() as connection:
+        rows = connection.execute(
+            "SELECT version,content,reason FROM memory_block_revisions "
+            "WHERE block_id=? ORDER BY version",
+            (block.block_id,),
+        ).fetchall()
+    assert [(row["version"], row["content"], row["reason"]) for row in rows] == [
+        (1, ERASED, "privacy erasure"),
+        (2, "Independent current context.", "independent refresh"),
+    ]
+
+
+def test_backup_restore_replays_direct_event_memory_block_erasure(tmp_path: Path) -> None:
+    current = tmp_path / "current"
+    db = Database(current / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    block = MemoryBlockStore(db).create(
+        "owner",
+        "working_context",
+        "backup context",
+        "Backup must not restore erased block content.",
+        reason="private capture",
+        source_memory_ids=(),
+        source_event_ids=(private_event_id,),
+    )
+    keyring = tmp_path / "keyring.json"
+    BackupKeyring.initialize(keyring)
+    manager = EncryptedBackupManager(current, keyring)
+    backup = tmp_path / "before-erasure.noyra-backup"
+    manager.create(backup)
+
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+
+    target = tmp_path / "restored"
+    manager.restore(backup, target)
+    restored = Database(target / "noyra.sqlite3")
+    assert MemoryBlockStore(restored).get(block.block_id).content == ERASED
+    assert MemoryBlockStore(restored).get(block.block_id).status == "archived"
+
+
+
+def test_erased_memory_block_cannot_be_restored_by_direct_sql(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, _, private_event_id = _private_message(db)
+    blocks = MemoryBlockStore(db)
+    block = blocks.create(
+        "owner",
+        "working_context",
+        "restoration guard",
+        "Private block content.",
+        reason="private capture",
+        source_memory_ids=(),
+        source_event_ids=(private_event_id,),
+    )
+    erasure = ConversationErasure(db)
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert erasure.run("owner", window["conversation_id"])["status"] == "completed"
+    with db.connection() as connection:
+        revision_id = connection.execute(
+            "SELECT revision_id FROM memory_block_revisions WHERE block_id=?",
+            (block.block_id,),
+        ).fetchone()[0]
+        with pytest.raises(
+            sqlite3.IntegrityError, match="memory block revisions require explicit content erasure"
+        ):
+            connection.execute(
+                "UPDATE memory_block_revisions SET content=?,content_hash=? WHERE revision_id=?",
+                ("restored", content_hash("restored"), revision_id),
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError, match="erased memory block content cannot be restored"
+        ):
+            connection.execute(
+                "UPDATE memory_blocks SET content=?,content_hash=?,status='active' "
+                "WHERE block_id=?",
+                ("restored", content_hash("restored"), block.block_id),
+            )
+
 
 
 def _sleep_reflection(
