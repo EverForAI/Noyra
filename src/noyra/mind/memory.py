@@ -887,6 +887,9 @@ class MemoryStore:
             )
             if state_hash != expected_state:
                 raise IntegrityError(f"{context} state hash mismatch")
+            cls._verify_erasure_reason_receipt(
+                connection, "memory_integrations", integration_id, state_hash, reason, context
+            )
 
             cls._verify_owned_ids(
                 connection,
@@ -919,6 +922,10 @@ class MemoryStore:
                 (integration_id,),
             ).fetchall()
             expected_actions = ("commit",) if status == "active" else ("commit", "revert")
+            if reason == "[erased]" and any(
+                revision["reason"] != "[erased]" for revision in revisions
+            ):
+                raise IntegrityError(f"{context} redaction revision set is incomplete")
             if len(revisions) != len(expected_actions):
                 raise IntegrityError(f"{context} revision history is invalid")
             for index, (revision, expected_action) in enumerate(
@@ -952,12 +959,64 @@ class MemoryStore:
                     }
                 ):
                     raise IntegrityError(f"{revision_context} hash mismatch")
+                cls._verify_erasure_reason_receipt(
+                    connection,
+                    "memory_integration_revisions",
+                    revision_id,
+                    revision_hash,
+                    revision_reason,
+                    revision_context,
+                )
                 if index == 0 and (revision_reason != reason or revision_created_at != created_at):
                     raise IntegrityError(f"{context} commit revision is invalid")
                 if action == "revert" and revision_created_at != reverted_at:
                     raise IntegrityError(f"{context} revert revision is invalid")
             revision_count += len(revisions)
         return len(rows), revision_count
+
+    @staticmethod
+    def _verify_erasure_reason_receipt(
+        connection: Any,
+        record_table: str,
+        record_id: str,
+        state_hash: str,
+        reason: str,
+        context: str,
+    ) -> None:
+        if record_table == "memory_integrations":
+            owner_join = (
+                "JOIN memory_integrations i ON i.integration_id=r.record_id "
+                "AND i.subject_id=j.subject_id "
+            )
+        elif record_table == "memory_integration_revisions":
+            owner_join = (
+                "JOIN memory_integration_revisions v ON v.revision_id=r.record_id "
+                "JOIN memory_integrations i ON i.integration_id=v.integration_id "
+                "AND i.subject_id=j.subject_id "
+            )
+        else:
+            raise IntegrityError("memory integration erasure receipt table is invalid")
+        receipt = connection.execute(
+            "SELECT r.original_hash,r.erased_hash,j.status,j.stage "
+            "FROM private_erasure_receipts r JOIN private_erasure_jobs j ON j.job_id=r.job_id "
+            + owner_join
+            + "WHERE r.record_table=? AND r.record_id=?",
+            (record_table, record_id),
+        ).fetchone()
+        if receipt is None:
+            if reason == "[erased]":
+                raise IntegrityError(f"{context} redacted reason has no erasure receipt")
+            return
+        if (
+            reason != "[erased]"
+            or receipt["erased_hash"] != state_hash
+            or receipt["original_hash"] == state_hash
+            or not MemoryStore._valid_hash(receipt["original_hash"])
+            or receipt["status"] not in {"running", "completed"}
+            or (receipt["status"] == "running" and receipt["stage"] != "content")
+            or (receipt["status"] == "completed" and receipt["stage"] != "verified")
+        ):
+            raise IntegrityError(f"{context} redaction receipt mismatch")
 
     @staticmethod
     def _persisted_float(

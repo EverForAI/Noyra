@@ -205,12 +205,15 @@ class MemoryIntegrationSupervisor:
                 record.confidence,
                 "reverted",
             )
+            # Append the immutable revert evidence before the constrained
+            # lifecycle transition so the storage guard can require both in
+            # this same transaction.
+            self._revision(connection, integration_id, "revert", reason.strip(), now)
             connection.execute(
                 "UPDATE memory_integrations SET status = 'reverted', state_hash = ?, "
                 "reverted_at = ? WHERE integration_id = ?",
                 (state_hash, now, integration_id),
             )
-            self._revision(connection, integration_id, "revert", reason.strip(), now)
         return self.get(integration_id)
 
     def get(self, integration_id: str) -> MemoryIntegrationRecord:

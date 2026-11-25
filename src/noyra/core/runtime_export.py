@@ -773,6 +773,8 @@ _OWNERSHIP_GRAPHS[118] = {
 _OWNERSHIP_GRAPHS[119] = _OWNERSHIP_GRAPHS[118]
 # Schema 120 changes reflection guards without changing table ownership.
 _OWNERSHIP_GRAPHS[120] = _OWNERSHIP_GRAPHS[119]
+# Schema 121 adds only guarded redaction triggers; subject ownership is unchanged.
+_OWNERSHIP_GRAPHS[121] = _OWNERSHIP_GRAPHS[120]
 
 
 @dataclass(frozen=True)

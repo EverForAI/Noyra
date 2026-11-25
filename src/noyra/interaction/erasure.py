@@ -42,6 +42,7 @@ _REVIEW_CODES = frozenset(
         "legacy_private_provenance_review_required",
         "reflection_derivative_review_required",
         "memory_consolidation_review_required",
+        "memory_integration_review_required",
         "private_memory_derivative_review_required",
         "private_exports_in_flight",
         "private_legacy_export_review_required",
@@ -61,7 +62,6 @@ _UNREVIEWED_DOMAINS = (
     "thought_episodes",
     "relationship_social_runs",
     "psychological_snapshots",
-    "memory_integrations",
     "memory_blocks",
     "entities",
     "entity_relations",
@@ -104,6 +104,9 @@ class _ErasureScope:
     reflection_hashes: dict[str, str]
     sleep_memory_links: dict[str, sqlite3.Row]
     memory_taint_events: dict[str, set[str]]
+    memory_integration_rows: dict[str, sqlite3.Row]
+    memory_integration_revision_rows: dict[str, sqlite3.Row]
+    discard_only_memory_ids: set[str]
 
 
 class ConversationErasure:
@@ -288,8 +291,14 @@ class ConversationErasure:
                     "model_copies": len(scope.calls),
                     "retired_exports": retired_exports,
                 }
-                if scope.reflection_hashes:
+                if (
+                    scope.reflection_hashes
+                    or scope.memory_ids
+                    or scope.memory_integration_rows
+                    or scope.memory_integration_revision_rows
+                ):
                     connection.execute("PRAGMA secure_delete=ON")
+                if scope.reflection_hashes:
                     counts["sleep_reflections"] = len(scope.reflection_hashes)
                 for row in scope.messages:
                     digest = InteractionStore._state_hash_values(
@@ -381,6 +390,13 @@ class ConversationErasure:
                             link["result_hash"],
                             content_hash(dict(link)),
                         )
+                if scope.memory_integration_rows or scope.memory_integration_revision_rows:
+                    connection.execute("PRAGMA secure_delete=ON")
+                    counts["memory_integration_records"] = len(scope.memory_integration_rows)
+                    counts["memory_integration_revisions"] = len(
+                        scope.memory_integration_revision_rows
+                    )
+                    self._erase_memory_integrations(connection, result["job_id"], scope)
                 counts.update(
                     self._erase_affected_memories(connection, result["job_id"], subject_id, scope)
                 )
@@ -469,6 +485,14 @@ class ConversationErasure:
         )
         ConversationErasure._verify_sleep_memory_receipts(
             connection, subject, job_id, sleep_ids, scope.memory_ids, len(scope.sleep_memory_links)
+        )
+        ConversationErasure._verify_memory_integration_receipts(
+            connection,
+            subject,
+            job_id,
+            scope.memory_ids,
+            len(scope.memory_integration_rows),
+            len(scope.memory_integration_revision_rows),
         )
 
     @staticmethod
@@ -624,9 +648,104 @@ class ConversationErasure:
         ).fetchone():
             raise IntegrityError("private erasure index residual")
 
+    @staticmethod
+    def _verify_memory_integration_receipts(
+        connection: sqlite3.Connection,
+        subject: str,
+        job_id: str,
+        memory_ids: set[str],
+        expected_integrations: int,
+        expected_revisions: int,
+    ) -> None:
+        from noyra.mind.integration import MemoryIntegrationSupervisor
+        from noyra.mind.memory import MemoryStore
+
+        integration_receipts = {
+            row["record_id"]: row
+            for row in connection.execute(
+                "SELECT record_id,original_hash,erased_hash FROM private_erasure_receipts "
+                "WHERE job_id=? AND record_table='memory_integrations' LIMIT ?",
+                (job_id, MAX_ERASURE_ROWS + 1),
+            )
+        }
+        revision_receipts = {
+            row["record_id"]: row
+            for row in connection.execute(
+                "SELECT record_id,original_hash,erased_hash FROM private_erasure_receipts "
+                "WHERE job_id=? AND record_table='memory_integration_revisions' LIMIT ?",
+                (job_id, MAX_ERASURE_ROWS + 1),
+            )
+        }
+        if (
+            len(integration_receipts) != expected_integrations
+            or len(revision_receipts) != expected_revisions
+            or max(len(integration_receipts), len(revision_receipts)) > MAX_ERASURE_ROWS
+        ):
+            raise IntegrityError("private erasure memory integration receipt counts do not match")
+        for integration_id, receipt in integration_receipts.items():
+            row = connection.execute(
+                "SELECT * FROM memory_integrations WHERE integration_id=? AND subject_id=?",
+                (integration_id, subject),
+            ).fetchone()
+            if row is None or row["reason"] != ERASED:
+                raise IntegrityError("private erasure memory integration residual")
+            expected_hash = MemoryIntegrationSupervisor._hash(
+                row["operation"],
+                tuple(_memory_sources(row["source_memory_ids_json"])),
+                row["output_memory_id"],
+                tuple(_memory_sources(row["evidence_event_ids_json"])),
+                ERASED,
+                float(row["confidence"]),
+                row["status"],
+            )
+            if (
+                row["state_hash"] != expected_hash
+                or receipt["erased_hash"] != expected_hash
+                or receipt["original_hash"] == expected_hash
+                or not MemoryStore._valid_hash(receipt["original_hash"])
+                or not (
+                    {row["output_memory_id"], *strict_json_loads(row["source_memory_ids_json"])}
+                    & memory_ids
+                )
+            ):
+                raise IntegrityError("private erasure memory integration evidence mismatch")
+        for revision_id, receipt in revision_receipts.items():
+            row = connection.execute(
+                "SELECT r.*,i.subject_id FROM memory_integration_revisions r "
+                "JOIN memory_integrations i ON i.integration_id=r.integration_id "
+                "WHERE r.revision_id=? AND i.subject_id=?",
+                (revision_id, subject),
+            ).fetchone()
+            if row is None or row["reason"] != ERASED:
+                raise IntegrityError("private erasure memory integration revision residual")
+            integration = connection.execute(
+                "SELECT reason FROM memory_integrations WHERE integration_id=?",
+                (row["integration_id"],),
+            ).fetchone()
+            if integration is None or integration["reason"] != ERASED:
+                raise IntegrityError("private erasure integration revision lacks redacted parent")
+            expected_hash = content_hash(
+                {
+                    "integration_id": row["integration_id"],
+                    "action": row["action"],
+                    "reason": ERASED,
+                    "created_at": row["created_at"],
+                }
+            )
+            if (
+                row["state_hash"] != expected_hash
+                or receipt["erased_hash"] != expected_hash
+                or receipt["original_hash"] == expected_hash
+                or not MemoryStore._valid_hash(receipt["original_hash"])
+            ):
+                raise IntegrityError(
+                    "private erasure memory integration revision evidence mismatch"
+                )
+        MemoryStore._verify_memory_integrations(connection, subject)
+
     def _verify_completed_receipts(
         self, subject: str, window: str, job: dict[str, Any]
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, int, int, int]:
         counts = job["counts"]
         if not isinstance(counts, dict):
             raise IntegrityError("private erasure memory receipt counts are invalid")
@@ -640,6 +759,14 @@ class ConversationErasure:
             or reconstructed < 0
         ):
             raise IntegrityError("private erasure memory receipt counts are invalid")
+        discarded = counts.get("discarded_mixed_memories", 0)
+        integration_records = counts.get("memory_integration_records", 0)
+        integration_revisions = counts.get("memory_integration_revisions", 0)
+        if any(
+            type(value) is not int or value < 0
+            for value in (discarded, integration_records, integration_revisions)
+        ):
+            raise IntegrityError("private erasure downstream receipt counts are invalid")
         reflections = counts.get("sleep_reflections", 0)
         sleep_memories = counts.get("sleep_memories", 0)
         if type(reflections) is not int or reflections < 0:
@@ -661,13 +788,22 @@ class ConversationErasure:
             }
             if len(memory_ids) > MAX_ERASURE_ROWS:
                 raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
-            if len(memory_ids) != exclusive + reconstructed:
+            if len(memory_ids) != exclusive + reconstructed + discarded:
                 raise IntegrityError("private erasure memory receipt counts do not match")
             self._verify_erased_memories(connection, subject, job_id, memory_ids)
             self._verify_sleep_memory_receipts(
                 connection, subject, job_id, sleep_ids, memory_ids, sleep_memories
             )
-        return reflections, sleep_memories
+            self._verify_memory_integration_receipts(
+                connection, subject, job_id, memory_ids, integration_records, integration_revisions
+            )
+        return (
+            reflections,
+            sleep_memories,
+            integration_records,
+            integration_revisions,
+            len(memory_ids),
+        )
 
     @staticmethod
     def _receipt(connection: Any, job: str, table: str, key: str, old: str, new: str) -> None:
@@ -675,6 +811,56 @@ class ConversationErasure:
             "INSERT OR IGNORE INTO private_erasure_receipts VALUES(?,?,?,?,?)",
             (job, table, key, old, new),
         )
+
+    @staticmethod
+    def _erase_memory_integrations(
+        connection: sqlite3.Connection, job_id: str, scope: _ErasureScope
+    ) -> None:
+        from noyra.mind.integration import MemoryIntegrationSupervisor
+
+        for integration_id, row in scope.memory_integration_rows.items():
+            state_hash = MemoryIntegrationSupervisor._hash(
+                row["operation"],
+                tuple(_memory_sources(row["source_memory_ids_json"])),
+                row["output_memory_id"],
+                tuple(_memory_sources(row["evidence_event_ids_json"])),
+                ERASED,
+                float(row["confidence"]),
+                row["status"],
+            )
+            ConversationErasure._receipt(
+                connection,
+                job_id,
+                "memory_integrations",
+                integration_id,
+                row["state_hash"],
+                state_hash,
+            )
+            connection.execute(
+                "UPDATE memory_integrations SET reason=?,state_hash=? WHERE integration_id=?",
+                (ERASED, state_hash, integration_id),
+            )
+        for revision_id, row in scope.memory_integration_revision_rows.items():
+            state_hash = content_hash(
+                {
+                    "integration_id": row["integration_id"],
+                    "action": row["action"],
+                    "reason": ERASED,
+                    "created_at": row["created_at"],
+                }
+            )
+            ConversationErasure._receipt(
+                connection,
+                job_id,
+                "memory_integration_revisions",
+                revision_id,
+                row["state_hash"],
+                state_hash,
+            )
+            connection.execute(
+                "UPDATE memory_integration_revisions SET reason=?,state_hash=? WHERE revision_id=?",
+                (ERASED, state_hash, revision_id),
+            )
 
     def _review(
         self, connection: Any, subject: str, window: str, *, deadline: float | None = None
@@ -729,7 +915,13 @@ class ConversationErasure:
                     (subject, event),
                 ).fetchone():
                     raise ErasureReviewRequired("private_event_derivative_review_required")
-            memory_ids, memory_taint_events = self._check_derivatives(
+            (
+                memory_ids,
+                memory_taint_events,
+                memory_integration_rows,
+                memory_integration_revision_rows,
+                discard_only_memory_ids,
+            ) = self._check_derivatives(
                 connection,
                 subject,
                 events,
@@ -746,6 +938,9 @@ class ConversationErasure:
                 reflection_hashes,
                 sleep_memory_links,
                 memory_taint_events,
+                memory_integration_rows,
+                memory_integration_revision_rows,
+                discard_only_memory_ids,
             )
         except sqlite3.OperationalError as error:
             if time.monotonic() > deadline:
@@ -763,7 +958,13 @@ class ConversationErasure:
         reviewed_sleep_checkpoints: bool,
         sleep_memory_links: dict[str, sqlite3.Row],
         deadline: float,
-    ) -> tuple[set[str], dict[str, set[str]]]:
+    ) -> tuple[
+        set[str],
+        dict[str, set[str]],
+        dict[str, sqlite3.Row],
+        dict[str, sqlite3.Row],
+        set[str],
+    ]:
         # Historical model calls did not record exact private input lineage. Require
         # review instead of guessing that an opaque reflection has no private text.
         if connection.execute(
@@ -820,20 +1021,48 @@ class ConversationErasure:
             for memory_id, sources in sources_by_memory.items()
             if sources & tainted_events
         }
-        consolidation_memories, consolidation_taint_events = _review_memory_consolidation_lineage(
-            connection, subject, affected, deadline
-        )
-        affected.update(consolidation_memories)
         memory_taint_events = {memory_id: set(tainted_events) for memory_id in affected}
-        for memory_id, markers in consolidation_taint_events.items():
-            memory_taint_events.setdefault(memory_id, set(tainted_events)).update(markers)
+        integration_rows: dict[str, sqlite3.Row] = {}
+        integration_revision_rows: dict[str, sqlite3.Row] = {}
+        discard_only_memory_ids: set[str] = set()
+        # Integration and consolidation can alternate. Follow the immutable
+        # provenance graph to a bounded fixed point, rejecting overlong chains.
+        for _ in range(16):
+            prior_count = len(affected)
+            consolidation_memories, consolidation_taint_events = (
+                _review_memory_consolidation_lineage(connection, subject, affected, deadline)
+            )
+            affected.update(consolidation_memories)
+            for memory_id, markers in consolidation_taint_events.items():
+                memory_taint_events.setdefault(memory_id, set(tainted_events)).update(markers)
+            (
+                integration_memories,
+                integration_taint_events,
+                reviewed_integrations,
+                reviewed_revisions,
+                discard_only,
+            ) = _review_memory_integration_lineage(connection, subject, affected, deadline)
+            affected.update(integration_memories)
+            for memory_id, markers in integration_taint_events.items():
+                memory_taint_events.setdefault(memory_id, set(tainted_events)).update(markers)
+            integration_rows.update(reviewed_integrations)
+            integration_revision_rows.update(reviewed_revisions)
+            discard_only_memory_ids.update(discard_only)
+            if len(affected) == prior_count:
+                break
+        else:
+            raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
         if not sleep_memory_links.keys() <= affected:
             raise IntegrityError("sleep memory source history does not match the erasure window")
         for memory_id in sorted(affected):
             if not sources_by_memory.get(memory_id, set()) <= memory_taint_events[memory_id]:
                 if memory_id in sleep_memory_links:
                     raise ErasureReviewRequired("reflection_derivative_review_required")
-                ConversationErasure._independent_memory_revision(connection, memory_id, events)
+                try:
+                    ConversationErasure._independent_memory_revision(connection, memory_id, events)
+                except ErasureReviewRequired:
+                    if memory_id not in discard_only_memory_ids:
+                        raise
         if (
             affected
             and connection.execute(
@@ -849,7 +1078,13 @@ class ConversationErasure:
             ).fetchone()
         ):
             raise ErasureReviewRequired("reflection_derivative_review_required")
-        return affected, memory_taint_events
+        return (
+            affected,
+            memory_taint_events,
+            integration_rows,
+            integration_revision_rows,
+            discard_only_memory_ids,
+        )
 
     @staticmethod
     def _review_reflections(
@@ -1207,9 +1442,7 @@ class ConversationErasure:
     ) -> dict[str, int]:
         from noyra.mind.memory import MemoryStore
 
-        # A selected sleep-reflection event is a causal marker for the exact
-        # model response bound to this private window, not an independent source.
-        erased = rebuilt = 0
+        erased = rebuilt = discarded = 0
         for memory in connection.execute(
             "SELECT m.* FROM json_each(?) ids "
             "JOIN memories m ON m.memory_id=ids.value AND m.subject_id=? ORDER BY m.memory_id",
@@ -1226,45 +1459,50 @@ class ConversationErasure:
                 _memory_sources(revision["source_event_ids_json"]) for revision in revisions
             ]
             sources = {source for items in source_lists for source in items}
-            # Prior revisions retain their original references. The tombstone
-            # uses one known affected revision's bounded list, even if the
-            # union across history exceeds the per-revision limit.
             tombstone_sources = next(
                 (items for items in source_lists if events.intersection(items)), None
             )
             if tombstone_sources is None:
-                if memory_id not in scope.memory_ids or not source_lists:
+                if not source_lists:
                     raise IntegrityError("private erasure memory source is missing")
                 tombstone_sources = source_lists[0]
+
             if not sources <= events:
-                independent = ConversationErasure._independent_memory_revision(
-                    connection, memory["memory_id"], events
-                )
-                rebuilder = MemoryStore(self.database)
-                replacement = rebuilder._create_connection(
-                    connection,
-                    subject,
-                    memory["memory_type"],
-                    independent["content"],
-                    salience=float(independent["salience"]),
-                    confidence=float(independent["confidence"]),
-                    source_event_ids=_memory_sources(independent["source_event_ids_json"]),
-                    privacy_level=memory["privacy_level"],
-                    reason="independent memory reconstruction after privacy erasure",
-                )
-                if independent["status"] == "archived" or memory["status"] == "archived":
-                    # Reconstructed archived facts must not become active knowledge.
-                    rebuilder._revise_connection(
+                try:
+                    independent = ConversationErasure._independent_memory_revision(
+                        connection, memory_id, events
+                    )
+                except ErasureReviewRequired:
+                    if memory_id not in scope.discard_only_memory_ids:
+                        raise
+                    independent = None
+                    discarded += 1
+                if independent is not None:
+                    rebuilder = MemoryStore(self.database)
+                    replacement = rebuilder._create_connection(
                         connection,
-                        replacement.memory_id,
-                        content=independent["content"],
+                        subject,
+                        memory["memory_type"],
+                        independent["content"],
                         salience=float(independent["salience"]),
                         confidence=float(independent["confidence"]),
-                        status="archived",
-                        reason="preserve independent archived state",
                         source_event_ids=_memory_sources(independent["source_event_ids_json"]),
+                        privacy_level=memory["privacy_level"],
+                        reason="independent memory reconstruction after privacy erasure",
                     )
-                rebuilt += 1
+                    if independent["status"] == "archived" or memory["status"] == "archived":
+                        rebuilder._revise_connection(
+                            connection,
+                            replacement.memory_id,
+                            content=independent["content"],
+                            salience=float(independent["salience"]),
+                            confidence=float(independent["confidence"]),
+                            status="archived",
+                            reason="preserve independent archived state",
+                            source_event_ids=_memory_sources(independent["source_event_ids_json"]),
+                        )
+                    rebuilt += 1
+
             digest = content_hash(ERASED)
             for revision in revisions:
                 state_hash = MemoryStore._state_hash(
@@ -1285,7 +1523,7 @@ class ConversationErasure:
                 )
             MemoryStore._insert_revision(
                 connection,
-                memory["memory_id"],
+                memory_id,
                 int(memory["current_revision"]) + 1,
                 ERASED,
                 digest,
@@ -1300,35 +1538,25 @@ class ConversationErasure:
                 ERASED, memory["salience"], memory["confidence"], "archived"
             )
             ConversationErasure._receipt(
-                connection,
-                job_id,
-                "memories",
-                memory["memory_id"],
-                memory["content_hash"],
-                current_state,
+                connection, job_id, "memories", memory_id, memory["content_hash"], current_state
             )
             connection.execute(
-                "UPDATE memories SET content=?,content_hash=?,state_hash=?,updated_at=?,"
-                "status='archived',current_revision=current_revision+1 "
-                "WHERE memory_id=?",
-                (ERASED, digest, current_state, utc_now(), memory["memory_id"]),
+                "UPDATE memories SET content=?,content_hash=?,state_hash=?,updated_at=?, "
+                "status='archived',current_revision=current_revision+1 WHERE memory_id=?",
+                (ERASED, digest, current_state, utc_now(), memory_id),
             )
             if connection.execute(
-                "SELECT 1 FROM memory_embeddings WHERE memory_id=?", (memory["memory_id"],)
+                "SELECT 1 FROM memory_embeddings WHERE memory_id=?", (memory_id,)
             ).fetchone():
                 ConversationErasure._receipt(
-                    connection,
-                    job_id,
-                    "memory_embeddings",
-                    memory["memory_id"],
-                    memory["memory_id"],
-                    "deleted",
+                    connection, job_id, "memory_embeddings", memory_id, memory_id, "deleted"
                 )
-                connection.execute(
-                    "DELETE FROM memory_embeddings WHERE memory_id=?", (memory["memory_id"],)
-                )
+                connection.execute("DELETE FROM memory_embeddings WHERE memory_id=?", (memory_id,))
             erased += int(sources <= events)
-        return {"exclusive_memories": erased, "reconstructed_memories": rebuilt}
+        counts = {"exclusive_memories": erased, "reconstructed_memories": rebuilt}
+        if discarded:
+            counts["discarded_mixed_memories"] = discarded
+        return counts
 
     def _write_marker(self, subject: str, window: str, job: str) -> str:
         from noyra.core.at_rest import _contains_reparse_component, _fsync_directory
@@ -1360,6 +1588,219 @@ class ConversationErasure:
         _fsync_directory(self.root)
         _fsync_directory(self.root.parent)
         return job
+
+
+def _review_memory_integration_lineage(
+    connection: sqlite3.Connection,
+    subject: str,
+    seeds: set[str],
+    deadline: float,
+) -> tuple[
+    set[str],
+    dict[str, set[str]],
+    dict[str, sqlite3.Row],
+    dict[str, sqlite3.Row],
+    set[str],
+]:
+    """Redact verified contradiction outputs while preserving independent inputs."""
+    if not seeds:
+        return set(), {}, {}, {}, set()
+    from noyra.mind.memory import MemoryStore
+
+    review_required = "memory_integration_review_required"
+    bounds = connection.execute(
+        "SELECT COUNT(*),COALESCE(SUM(length(CAST(source_memory_ids_json AS BLOB))+"
+        "length(CAST(evidence_event_ids_json AS BLOB))+length(CAST(reason AS BLOB))),0) "
+        "FROM memory_integrations WHERE subject_id=?",
+        (subject,),
+    ).fetchone()
+    revision_bounds = connection.execute(
+        "SELECT COUNT(*),COALESCE(SUM(length(CAST(r.reason AS BLOB))),0) "
+        "FROM memory_integration_revisions r JOIN memory_integrations i "
+        "ON i.integration_id=r.integration_id WHERE i.subject_id=?",
+        (subject,),
+    ).fetchone()
+    if (
+        bounds[0] > MAX_ERASURE_ROWS
+        or revision_bounds[0] > MAX_ERASURE_ROWS
+        or bounds[1] + revision_bounds[1] > MAX_REFLECTION_BYTES
+    ):
+        raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
+    MemoryStore._verify_memory_integrations(connection, subject)
+    integrations = connection.execute(
+        "SELECT * FROM memory_integrations WHERE subject_id=? ORDER BY created_at,integration_id",
+        (subject,),
+    ).fetchall()
+    by_source: dict[str, list[sqlite3.Row]] = {}
+    by_output: dict[str, list[sqlite3.Row]] = {}
+    sources_by_id: dict[str, tuple[str, ...]] = {}
+    for row in integrations:
+        if time.monotonic() >= deadline:
+            raise ErasureReviewRequired("private_erasure_review_deadline")
+        source_json = row["source_memory_ids_json"]
+        evidence_json = row["evidence_event_ids_json"]
+        if (
+            not isinstance(source_json, str)
+            or len(source_json.encode("utf-8")) > MAX_REFLECTION_BYTES
+            or not isinstance(evidence_json, str)
+            or len(evidence_json.encode("utf-8")) > MAX_REFLECTION_BYTES
+        ):
+            raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
+        sources = MemoryStore._persisted_json_strings(
+            source_json, f"memory integration {row['integration_id']} sources"
+        )
+        evidence = MemoryStore._persisted_json_strings(
+            evidence_json, f"memory integration {row['integration_id']} evidence"
+        )
+        if (
+            len(sources) < 2
+            or len(sources) > 64
+            or not evidence
+            or len(evidence) > 64
+            or canonical_json(list(sources)) != source_json
+            or canonical_json(list(evidence)) != evidence_json
+        ):
+            raise IntegrityError("memory integration provenance is not canonical")
+        sources_by_id[str(row["integration_id"])] = sources
+        for source in sources:
+            by_source.setdefault(source, []).append(row)
+        output = row["output_memory_id"]
+        if not isinstance(output, str) or not output:
+            raise IntegrityError("memory integration output is missing")
+        by_output.setdefault(output, []).append(row)
+
+    verified_integrations: set[str] = set()
+
+    def verify_output_provenance(row: sqlite3.Row) -> None:
+        integration_id = str(row["integration_id"])
+        output_id = str(row["output_memory_id"])
+        if integration_id in verified_integrations:
+            return
+        if row["reason"] == ERASED:
+            # The prior immutable receipt and memory integration validator attest
+            # that this output was already cleared by an earlier privacy job.
+            operation_receipt = connection.execute(
+                "SELECT 1 FROM private_erasure_receipts r JOIN private_erasure_jobs j "
+                "ON j.job_id=r.job_id WHERE r.record_table='memory_integrations' "
+                "AND r.record_id=? AND r.erased_hash=? AND j.subject_id=? "
+                "AND j.status='completed' AND j.stage='verified' LIMIT 1",
+                (integration_id, row["state_hash"], subject),
+            ).fetchone()
+            receipt = connection.execute(
+                "SELECT 1 FROM private_erasure_receipts r JOIN private_erasure_jobs j "
+                "ON j.job_id=r.job_id WHERE r.record_table='memories' AND r.record_id=? "
+                "AND j.subject_id=? AND j.status='completed' AND j.stage='verified' LIMIT 1",
+                (output_id, subject),
+            ).fetchone()
+            output_memory = connection.execute(
+                "SELECT content FROM memories WHERE memory_id=? AND subject_id=?",
+                (output_id, subject),
+            ).fetchone()
+            if (
+                operation_receipt is None
+                or receipt is None
+                or output_memory is None
+                or output_memory["content"] != ERASED
+            ):
+                raise IntegrityError("redacted integration output has no erased memory receipt")
+            verified_integrations.add(integration_id)
+            return
+        output = connection.execute(
+            "SELECT r.rowid AS revision_rowid,r.created_at,r.reason,r.content,r.content_hash,"
+            "r.state_hash,r.salience,r.confidence,r.status,r.source_event_ids_json "
+            "FROM memory_revisions r WHERE r.memory_id=? AND r.revision_number=1",
+            (output_id,),
+        ).fetchone()
+        if output is None:
+            raise ErasureReviewRequired(review_required)
+        from noyra.mind.memory import MemoryStore
+
+        if (
+            output["reason"] != f"memory integration: {row['reason']}"
+            or _timestamp(output["created_at"]) > _timestamp(row["created_at"])
+            or output["content_hash"] != content_hash(output["content"])
+            or output["state_hash"]
+            != MemoryStore._state_hash(
+                output["content"],
+                float(output["salience"]),
+                float(output["confidence"]),
+                output["status"],
+            )
+        ):
+            raise IntegrityError("memory integration output revision does not match its receipt")
+        try:
+            output_sources = _memory_sources(output["source_event_ids_json"])
+        except IntegrityError as error:
+            raise ErasureReviewRequired(review_required) from error
+        expected = dict.fromkeys(
+            MemoryStore._persisted_json_strings(
+                row["evidence_event_ids_json"], "memory integration evidence"
+            )
+        )
+        for memory_id in sources_by_id[integration_id]:
+            revision = connection.execute(
+                "SELECT rowid,source_event_ids_json,content_hash,state_hash,content,salience,"
+                "confidence,status FROM memory_revisions WHERE memory_id=? AND rowid<? "
+                "ORDER BY revision_number DESC LIMIT 1",
+                (memory_id, output["revision_rowid"]),
+            ).fetchone()
+            if revision is None:
+                raise ErasureReviewRequired(review_required)
+            events = _memory_sources(revision["source_event_ids_json"])
+            if revision["content_hash"] != content_hash(revision["content"]) or revision[
+                "state_hash"
+            ] != MemoryStore._state_hash(
+                revision["content"],
+                revision["salience"],
+                revision["confidence"],
+                revision["status"],
+            ):
+                raise IntegrityError("memory integration parent revision is invalid")
+            expected.update(dict.fromkeys(events))
+        if tuple(expected) != output_sources:
+            raise ErasureReviewRequired(review_required)
+        verified_integrations.add(integration_id)
+
+    affected = set(seeds)
+    additional: set[str] = set()
+    discard_only: set[str] = set()
+    selected: dict[str, sqlite3.Row] = {}
+    revision_rows: dict[str, sqlite3.Row] = {}
+    pending = list(sorted(seeds))
+    checked: set[str] = set()
+    while pending:
+        if time.monotonic() >= deadline:
+            raise ErasureReviewRequired("private_erasure_review_deadline")
+        memory_id = pending.pop()
+        for row in [*by_source.get(memory_id, ()), *by_output.get(memory_id, ())]:
+            integration_id = str(row["integration_id"])
+            if integration_id in checked:
+                continue
+            checked.add(integration_id)
+            if row["operation"] != "contradict":
+                # Merge/supersede mutates source-memory lifecycle and needs a
+                # separate audited restoration contract. Do not partially erase.
+                raise ErasureReviewRequired(review_required)
+            verify_output_provenance(row)
+            if row["reason"] == ERASED:
+                continue
+            selected[integration_id] = row
+            output_id = str(row["output_memory_id"])
+            discard_only.add(output_id)
+            if memory_id in sources_by_id[integration_id] and output_id not in affected:
+                affected.add(output_id)
+                additional.add(output_id)
+                pending.append(output_id)
+            for revision in connection.execute(
+                "SELECT * FROM memory_integration_revisions WHERE integration_id=? "
+                "ORDER BY created_at,rowid",
+                (integration_id,),
+            ):
+                if revision["reason"] != ERASED:
+                    revision_rows[str(revision["revision_id"])] = revision
+            if len(affected) > MAX_ERASURE_ROWS:
+                raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
+    return additional, {}, selected, revision_rows, discard_only & affected
 
 
 def _review_memory_consolidation_lineage(
@@ -1780,6 +2221,8 @@ def replay_privacy_deletions(current_root: Path, restored_root: Path) -> None:
     erasure = ConversationErasure(database)
     erased_reflections = False
     erased_sleep_memories = False
+    erased_memory_integrations = False
+    erased_memories = False
     for (subject, window), marker in markers.items():
         erasure._write_marker(subject, window, marker["job_id"])
         with database.connection() as connection:
@@ -1796,14 +2239,22 @@ def replay_privacy_deletions(current_root: Path, restored_root: Path) -> None:
         if job["status"] != "completed":
             raise ErasureReviewRequired("backup_private_deletion_replay_requires_review")
         # Older backups can carry a completion flag from a weaker verifier.
-        reflections, sleep_memories = erasure._verify_completed_receipts(subject, window, job)
+        (
+            reflections,
+            sleep_memories,
+            integration_records,
+            integration_revisions,
+            memory_records,
+        ) = erasure._verify_completed_receipts(subject, window, job)
         erased_reflections |= bool(reflections)
         erased_sleep_memories |= bool(sleep_memories)
-    if erased_reflections:
+        erased_memory_integrations |= bool(integration_records or integration_revisions)
+        erased_memories |= bool(memory_records)
+    if erased_reflections or erased_memory_integrations or erased_memories:
         database.assert_schema_contract()
         if any(restored_root.glob("noyra.sqlite3.pre-migration-v*.bak")):
             raise IntegrityError("private erasure restore contains a pre-migration copy")
-        if erased_sleep_memories:
+        if erased_sleep_memories or erased_memories:
             # An FTS deletion can leave old posting lists in index segments.
             # Rebuild from the surviving FTS rows in the isolated restore tree.
             with database.transaction() as connection:

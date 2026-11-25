@@ -297,3 +297,74 @@ CREATE TRIGGER IF NOT EXISTS prevent_private_web_delivery_delete
  BEFORE DELETE ON private_web_deliveries
  BEGIN SELECT RAISE(ABORT,'private push consent is audit evidence'); END;
 """
+
+
+MIGRATION_V121 = """
+CREATE TRIGGER IF NOT EXISTS prevent_memory_integration_update
+BEFORE UPDATE ON memory_integrations
+WHEN NOT (
+ (
+  NEW.integration_id IS OLD.integration_id
+  AND NEW.subject_id IS OLD.subject_id
+  AND NEW.operation IS OLD.operation
+  AND NEW.source_memory_ids_json IS OLD.source_memory_ids_json
+  AND NEW.output_memory_id IS OLD.output_memory_id
+  AND NEW.evidence_event_ids_json IS OLD.evidence_event_ids_json
+  AND NEW.reason='[erased]'
+  AND NEW.confidence IS OLD.confidence
+  AND NEW.status IS OLD.status
+  AND NEW.created_at IS OLD.created_at
+  AND NEW.reverted_at IS OLD.reverted_at
+  AND EXISTS(
+   SELECT 1 FROM private_erasure_receipts r JOIN private_erasure_jobs j ON j.job_id=r.job_id
+   WHERE r.record_table='memory_integrations' AND r.record_id=OLD.integration_id
+   AND r.original_hash=OLD.state_hash AND r.erased_hash=NEW.state_hash
+   AND j.subject_id=OLD.subject_id AND j.status='running' AND j.stage='content'
+  )
+ ) OR (
+  OLD.status='active' AND NEW.status='reverted' AND OLD.reverted_at IS NULL
+  AND NEW.reverted_at IS NOT NULL
+  AND NEW.integration_id IS OLD.integration_id
+  AND NEW.subject_id IS OLD.subject_id
+  AND NEW.operation IS OLD.operation
+  AND NEW.source_memory_ids_json IS OLD.source_memory_ids_json
+  AND NEW.output_memory_id IS OLD.output_memory_id
+  AND NEW.evidence_event_ids_json IS OLD.evidence_event_ids_json
+  AND NEW.reason IS OLD.reason
+  AND NEW.confidence IS OLD.confidence
+  AND NEW.created_at IS OLD.created_at
+  AND NEW.state_hash IS NOT OLD.state_hash
+  AND length(NEW.state_hash)=64 AND NEW.state_hash NOT GLOB '*[^0-9a-f]*'
+  AND (SELECT count(*) FROM memory_integration_revisions v
+       WHERE v.integration_id=OLD.integration_id)=2
+  AND EXISTS(SELECT 1 FROM memory_integration_revisions v
+       WHERE v.integration_id=OLD.integration_id AND v.action='revert'
+       AND v.created_at=NEW.reverted_at AND length(v.state_hash)=64
+       AND v.state_hash NOT GLOB '*[^0-9a-f]*')
+ )
+)
+BEGIN SELECT RAISE(ABORT,'memory integration reason erasure requires explicit receipt'); END;
+DROP TRIGGER IF EXISTS prevent_memory_integration_revision_update;
+CREATE TRIGGER prevent_memory_integration_revision_update
+BEFORE UPDATE ON memory_integration_revisions
+WHEN NOT (
+ NEW.revision_id IS OLD.revision_id
+ AND NEW.integration_id IS OLD.integration_id
+ AND NEW.action IS OLD.action
+ AND NEW.reason='[erased]'
+ AND NEW.created_at IS OLD.created_at
+ AND EXISTS(
+  SELECT 1 FROM memory_integrations i JOIN private_erasure_receipts r
+   ON r.record_table='memory_integration_revisions' AND r.record_id=OLD.revision_id
+  JOIN private_erasure_jobs j ON j.job_id=r.job_id
+  WHERE i.integration_id=OLD.integration_id AND i.subject_id=j.subject_id
+  AND i.reason='[erased]' AND EXISTS(
+   SELECT 1 FROM private_erasure_receipts ir WHERE ir.job_id=j.job_id
+    AND ir.record_table='memory_integrations' AND ir.record_id=i.integration_id
+    AND ir.erased_hash=i.state_hash)
+  AND r.original_hash=OLD.state_hash AND r.erased_hash=NEW.state_hash
+  AND j.status='running' AND j.stage='content'
+ )
+)
+BEGIN SELECT RAISE(ABORT,'memory integration revision erasure requires explicit receipt'); END;
+"""

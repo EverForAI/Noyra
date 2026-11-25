@@ -61,6 +61,15 @@ _REVIEWED_SCHEMA_PAIRS: tuple[RecoverySchemaPair, ...] = (
         "c2dad7eaea77a67246b7185cf8b07fee74a39607e5a0cac3924a86a72b48b4ef",
         "c2dad7eaea77a67246b7185cf8b07fee74a39607e5a0cac3924a86a72b48b4ef",
     ),
+    # v121 adds narrow privacy-reason redaction guards without changing records.
+    RecoverySchemaPair(
+        120,
+        "de0a5b8461949e2c5ea7426ee03a9e31e9cd0b8d19f07e6b6a143d2728f45bac",
+        121,
+        "703815ad73522f8ade927b45bfd7fe6cc3655fd4597afc5caa439aed7862cbd2",
+        "c2dad7eaea77a67246b7185cf8b07fee74a39607e5a0cac3924a86a72b48b4ef",
+        "c2dad7eaea77a67246b7185cf8b07fee74a39607e5a0cac3924a86a72b48b4ef",
+    ),
 )
 
 

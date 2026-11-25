@@ -266,6 +266,10 @@ class MemoryIntegrationTestCase(unittest.TestCase):
                 )
 
             with kernel.database.transaction() as connection:
+                trigger = connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE name='prevent_memory_integration_update'"
+                ).fetchone()[0]
+                connection.execute("DROP TRIGGER prevent_memory_integration_update")
                 connection.execute(
                     "UPDATE memory_integrations SET source_memory_ids_json = ? "
                     "WHERE integration_id = ?",
@@ -274,6 +278,7 @@ class MemoryIntegrationTestCase(unittest.TestCase):
                         integration.integration_id,
                     ),
                 )
+                connection.execute(trigger)
             with self.assertRaises(IntegrityError):
                 memories.verify_lifecycle_integrity(kernel.subject_id)
 
@@ -288,6 +293,10 @@ class MemoryIntegrationTestCase(unittest.TestCase):
                 integration.status,
             )
             with kernel.database.transaction() as connection:
+                trigger = connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE name='prevent_memory_integration_update'"
+                ).fetchone()[0]
+                connection.execute("DROP TRIGGER prevent_memory_integration_update")
                 connection.execute(
                     "UPDATE memory_integrations SET source_memory_ids_json = ?, "
                     "evidence_event_ids_json = ?, state_hash = ? WHERE integration_id = ?",
@@ -298,6 +307,7 @@ class MemoryIntegrationTestCase(unittest.TestCase):
                         integration.integration_id,
                     ),
                 )
+                connection.execute(trigger)
             with self.assertRaises(IntegrityError):
                 memories.verify_lifecycle_integrity(kernel.subject_id)
 
