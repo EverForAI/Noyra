@@ -11,8 +11,14 @@ from pydantic import ValidationError
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.events import EventStore
-from noyra.core.private_sources import private_input_scope
+from noyra.core.private_sources import (
+    MAX_PRIVATE_INPUTS,
+    private_call_withdrawn,
+    private_event_inputs,
+    private_input_scope,
+)
 from noyra.core.scheduling_clock import CooldownClock, aware_time
+from noyra.core.source_provenance import parse_source_event_ids
 from noyra.core.types import canonical_json, content_hash, utc_now
 from noyra.model import ModelGateway, ModelLedger, ModelMessage
 from noyra.model.errors import (
@@ -83,6 +89,8 @@ class SleepReflectionCognition:
         recovered = self._successful_plan(purpose, context)
         if recovered is not None:
             return recovered
+        if len(context.interaction_ids) > MAX_PRIVATE_INPUTS:
+            return self._fallback(context, "reflection private input limit reached")
         calls = self._call_count(purpose)
         if calls >= self.settings.max_sleep_model_calls_per_run:
             return self._fallback(context, "reflection model call limit reached")
@@ -97,6 +105,10 @@ class SleepReflectionCognition:
                     max_output_tokens=min(4_000, self.settings.max_output_tokens),
                     temperature=self.settings.temperature,
                 )
+        except PermissionError:
+            if self._context_inputs_withdrawn(context):
+                return SleepReflectionPlan.after_source_withdrawal()
+            raise
         except BudgetExhaustedError:
             return self._fallback(context, "remote model budget unavailable during reflection")
         except ModelCallConflictError:
@@ -104,6 +116,8 @@ class SleepReflectionCognition:
             # Reusing its identity with changed content cannot authorize a send.
             return self._fallback(context, "pending reflection request context changed")
         except (ProviderCallError, StructuredOutputError, ModelCallStateError) as error:
+            if self._context_inputs_withdrawn(context):
+                return SleepReflectionPlan.after_source_withdrawal()
             if (
                 isinstance(error, ProviderCallError)
                 and error.outcome_unknown
@@ -137,7 +151,23 @@ class SleepReflectionCognition:
             raise ReflectionCognitionPending(
                 "reflection proposal did not satisfy local constraints"
             ) from error
+        plan._model_call_id = result.call_id
         return plan
+
+    def _context_inputs_withdrawn(self, context: ReflectionContext) -> bool:
+        if not context.interaction_ids:
+            return False
+        with self.database.connection() as connection:
+            return (
+                connection.execute(
+                    "SELECT 1 FROM json_each(?) ids JOIN private_conversation_messages m "
+                    "ON m.interaction_id=ids.value JOIN private_conversations c "
+                    "ON c.conversation_id=m.conversation_id AND c.subject_id=m.subject_id "
+                    "WHERE m.subject_id=? AND c.status IN ('deleting','deleted') LIMIT 1",
+                    (canonical_json(context.interaction_ids), self.subject_id),
+                ).fetchone()
+                is not None
+            )
 
     def _model_wait_elapsed(self, run: SleepRunRecord) -> bool:
         now = aware_time(self.clock())
@@ -152,7 +182,7 @@ class SleepReflectionCognition:
 
     def _context(self, run: SleepRunRecord) -> ReflectionContext:
         lower_bound = self._window_start(run)
-        with self.database.connection() as connection:
+        with self.database.read_transaction() as connection:
             current = self._boundary(connection, run.sleep_id)
             previous = self._previous_run(connection, run)
             prior = None if previous is None else self._boundary(connection, previous["sleep_id"])
@@ -181,8 +211,6 @@ class SleepReflectionCognition:
                 + " AND event_type != 'sleep_reflection_boundary' ORDER BY rowid DESC LIMIT 64",
                 (self.subject_id, *event_args),
             ).fetchall()
-            event_ids = tuple(str(row["event_id"]) for row in event_rows)
-            appraisal_rows = self._appraisal_rows(connection, event_ids)
             goal_rows = connection.execute(
                 "SELECT goal_id, title, description, origin, status, priority, commitment, "
                 "progress, emotional_pressure, current_revision FROM goals WHERE subject_id = ? "
@@ -191,17 +219,55 @@ class SleepReflectionCognition:
                 (self.subject_id,),
             ).fetchall()
             belief_rows = connection.execute(
-                "SELECT belief_id, proposition, confidence, scope, status, current_revision "
-                "FROM beliefs WHERE subject_id = ? AND status != 'retracted' "
-                "ORDER BY reviewed_at DESC, belief_id DESC LIMIT 12",
+                "SELECT b.belief_id,b.proposition,b.confidence,b.scope,b.status,"
+                "b.current_revision,r.supporting_event_ids_json,r.counter_event_ids_json "
+                "FROM beliefs b JOIN belief_revisions r ON r.belief_id=b.belief_id "
+                "AND r.revision_number=b.current_revision WHERE b.subject_id=? "
+                "AND b.status!='retracted' ORDER BY b.reviewed_at DESC,b.belief_id DESC LIMIT 12",
                 (self.subject_id,),
             ).fetchall()
             memory_rows = connection.execute(
-                "SELECT memory_id, memory_type, content, salience, confidence, updated_at "
-                "FROM memories WHERE subject_id = ? AND status = 'active' "
-                "ORDER BY salience DESC, confidence DESC, updated_at DESC LIMIT 8",
+                "SELECT m.memory_id,m.memory_type,m.content,m.salience,m.confidence,m.updated_at,"
+                "r.source_event_ids_json FROM memories m JOIN memory_revisions r "
+                "ON r.memory_id=m.memory_id AND r.revision_number=m.current_revision "
+                "WHERE m.subject_id=? AND m.status='active' "
+                "ORDER BY m.salience DESC,m.confidence DESC,m.updated_at DESC LIMIT 8",
                 (self.subject_id,),
             ).fetchall()
+            direct_refs = {
+                "memories": {
+                    row["memory_id"]: parse_source_event_ids(row["source_event_ids_json"]) or ()
+                    for row in memory_rows
+                },
+                "beliefs": {
+                    row["belief_id"]: (
+                        *(parse_source_event_ids(row["supporting_event_ids_json"]) or ()),
+                        *(parse_source_event_ids(row["counter_event_ids_json"]) or ()),
+                    )
+                    for row in belief_rows
+                },
+            }
+            event_ids = tuple(str(row["event_id"]) for row in event_rows)
+            input_refs = set(event_ids)
+            for records in direct_refs.values():
+                for ids in records.values():
+                    input_refs.update(ids)
+            event_inputs = private_event_inputs(connection, self.subject_id, tuple(input_refs))
+            withdrawn_events = {eid for eid, (_, withdrawn) in event_inputs.items() if withdrawn}
+            event_rows = [row for row in event_rows if row["event_id"] not in withdrawn_events]
+            memory_rows = [
+                row
+                for row in memory_rows
+                if not withdrawn_events.intersection(direct_refs["memories"][row["memory_id"]])
+            ]
+            belief_rows = [
+                row
+                for row in belief_rows
+                if not withdrawn_events.intersection(direct_refs["beliefs"][row["belief_id"]])
+            ]
+            appraisal_rows = self._appraisal_rows(
+                connection, tuple(eid for eid in event_ids if eid not in withdrawn_events)
+            )
             affect_rows = connection.execute(
                 "SELECT emotion_type, target_type, target_id, intensity, valence, arousal, "
                 "dominance "
@@ -389,6 +455,14 @@ class SleepReflectionCognition:
             ],
         }
         self._trim_context(context)
+        retained_refs = {
+            item["event_id"] for key in ("events", "appraisals") for item in context[key]
+        }
+        for key, id_key in (("memories", "memory_id"), ("beliefs", "belief_id")):
+            for item in context[key]:
+                retained_refs.update(direct_refs[key][item[id_key]])
+        retained_inputs = {str(item["interaction_id"]) for item in context["interactions"]}
+        retained_inputs.update(event_inputs[eid][0] for eid in retained_refs if eid in event_inputs)
         return ReflectionContext(
             serialized=canonical_json(context),
             event_ids=frozenset(str(item["event_id"]) for item in context["events"]),
@@ -405,7 +479,7 @@ class SleepReflectionCognition:
             },
             event_count=len(context["events"]),
             interaction_count=len(context["interactions"]),
-            interaction_ids=tuple(str(item["interaction_id"]) for item in context["interactions"]),
+            interaction_ids=tuple(sorted(retained_inputs)),
         )
 
     def _previous_run(self, connection: Any, run: SleepRunRecord) -> Any:
@@ -535,14 +609,24 @@ class SleepReflectionCognition:
         purpose: str,
         context: ReflectionContext,
     ) -> SleepReflectionPlan | None:
-        with self.database.connection() as connection:
+        with self.database.read_transaction() as connection:
             rows = connection.execute(
                 "SELECT * FROM model_calls "
                 "WHERE subject_id = ? AND purpose = ? "
                 "AND status = 'succeeded' ORDER BY created_at DESC",
                 (self.subject_id, purpose),
             ).fetchall()
-        for row in rows:
+            checked_rows = [
+                (
+                    row,
+                    row["error_code"] == "private_content_erased"
+                    or private_call_withdrawn(connection, self.subject_id, row["call_id"]),
+                )
+                for row in rows
+            ]
+        for row, withdrawn in checked_rows:
+            if withdrawn:
+                return SleepReflectionPlan.after_source_withdrawal()
             call = ModelLedger._call_from_row(row)
             content = (call.response or {}).get("content")
             if not isinstance(content, str):
@@ -559,6 +643,7 @@ class SleepReflectionCognition:
                     purpose.rsplit(":", 1)[1], call.call_id, type(error).__name__
                 )
                 continue
+            plan._model_call_id = call.call_id
             return plan
         return None
 

@@ -7,7 +7,9 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
-from .types import content_hash
+from .types import canonical_json, content_hash
+
+MAX_PRIVATE_INPUTS = 100
 
 _SOURCES: ContextVar[tuple[str, ...]] = ContextVar("noyra_private_interaction_sources", default=())
 
@@ -73,6 +75,41 @@ def assert_event_sources_available(connection: Any, subject_id: str, event_id: s
         raise PermissionError("private event source has been withdrawn")
 
 
+def private_event_inputs(
+    connection: Any, subject_id: str, event_ids: tuple[str, ...]
+) -> dict[str, tuple[str, bool]]:
+    """Resolve direct, available payload links without inferring archived ancestry."""
+    if not event_ids:
+        return {}
+    rows = connection.execute(
+        "SELECT e.event_id,m.interaction_id,c.status FROM json_each(?) ids "
+        "JOIN events e ON e.event_id=ids.value "
+        "JOIN private_conversation_messages m ON m.subject_id=e.subject_id "
+        "AND m.interaction_id=CASE WHEN json_valid(e.payload_json) "
+        "THEN json_extract(e.payload_json,'$.interaction_id') END "
+        "JOIN private_conversations c ON c.conversation_id=m.conversation_id "
+        "AND c.subject_id=e.subject_id "
+        "WHERE e.subject_id=? AND e.payload_archive_key IS NULL",
+        (canonical_json(event_ids), subject_id),
+    ).fetchall()
+    return {
+        row["event_id"]: (row["interaction_id"], row["status"] in {"deleting", "deleted"})
+        for row in rows
+    }
+
+
+def private_call_withdrawn(connection: Any, subject_id: str, call_id: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM private_model_sources s JOIN private_conversations c "
+            "ON c.conversation_id=s.conversation_id AND c.subject_id=s.subject_id "
+            "WHERE s.subject_id=? AND s.call_id=? AND c.status IN ('deleting','deleted') LIMIT 1",
+            (subject_id, call_id),
+        ).fetchone()
+        is not None
+    )
+
+
 def assert_private_inputs_available(connection: Any) -> None:
     active = _INVITATION.get()
     if active is not None and participant_invitation_withdrawn(connection, *active):
@@ -109,7 +146,9 @@ CREATE TRIGGER IF NOT EXISTS prevent_private_model_source_delete
 
 @contextmanager
 def private_input_scope(interaction_ids: tuple[str, ...]) -> Iterator[None]:
-    if len(interaction_ids) > 100 or len(set(interaction_ids)) != len(interaction_ids):
+    if len(interaction_ids) > MAX_PRIVATE_INPUTS or len(set(interaction_ids)) != len(
+        interaction_ids
+    ):
         raise ValueError("private sources must be distinct and bounded")
     token = _SOURCES.set(interaction_ids)
     try:

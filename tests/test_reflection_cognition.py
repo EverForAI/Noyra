@@ -426,7 +426,7 @@ class ReflectionCognitionTestCase(unittest.IsolatedAsyncioTestCase):
         await self.seed_successful_legacy_call(legacy)
         provider = FakeProvider([])
         plan = await self.cognition(provider, max_calls=1).propose(self.sleep_run)
-        self.assertEqual(plan, legacy)
+        self.assertEqual(plan.model_dump(), legacy.model_dump())
         self.assertFalse(provider.requests)
 
     async def test_cache_integrity_damage_is_not_a_policy_rejection(self: Self) -> None:

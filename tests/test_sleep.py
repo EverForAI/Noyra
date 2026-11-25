@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -799,7 +800,7 @@ class SleepTestCase(unittest.TestCase):
                 "test",
                 {"index": index},
             ).event_id
-            for index in range(3)
+            for index in range(64)
         )
         goal = GoalStore(self.database).create_candidate(
             self.subject_id,
@@ -823,18 +824,18 @@ class SleepTestCase(unittest.TestCase):
         )
         run = self.sleep.start("subject_choice", "integrate structured reflection")
         self.sleep.begin_reflection(run.sleep_id)
-        self.sleep.commit_reflection(
+        committed = self.sleep.commit_reflection(
             run.sleep_id,
             SleepReflectionPlan(
                 summary="The observations were consistent enough to refine my state.",
-                facts=("Three experiences were recorded.",),
+                facts=("The reflection reviewed 64 experiences.",),
                 memories=(
                     SleepMemory(
                         content="I encountered the same pattern across three observations.",
                         memory_type="reflection",
                         salience=0.8,
                         confidence=0.7,
-                        source_event_ids=(evidence[0], evidence[1]),
+                        source_event_ids=evidence,
                     ),
                 ),
                 belief_revisions=(
@@ -843,7 +844,7 @@ class SleepTestCase(unittest.TestCase):
                         proposition="The pattern may recur across independent observations.",
                         confidence=0.65,
                         status="qualified",
-                        counter_event_ids=(evidence[2],),
+                        counter_event_ids=evidence,
                         reason="sleep review narrowed the belief's scope",
                     ),
                 ),
@@ -852,7 +853,7 @@ class SleepTestCase(unittest.TestCase):
                         trait="careful curiosity",
                         direction=0.7,
                         confidence=0.4,
-                        evidence_ids=evidence,
+                        evidence_ids=evidence[:3],
                     ),
                 ),
             ),
@@ -861,6 +862,24 @@ class SleepTestCase(unittest.TestCase):
         self.assertEqual(BeliefStore(self.database).get(belief.belief_id).status, "qualified")
         self.assertEqual(len(MemoryStore(self.database).search(self.subject_id)), 1)
         with self.database.connection() as connection:
+            memory_revision = connection.execute(
+                "SELECT source_event_ids_json FROM memory_revisions"
+            ).fetchone()
+            self.assertEqual(json.loads(memory_revision[0]), list(evidence))
+            belief_revision = connection.execute(
+                "SELECT supporting_event_ids_json,counter_event_ids_json "
+                "FROM belief_revisions WHERE revision_number=2"
+            ).fetchone()
+            self.assertEqual(json.loads(belief_revision[0]), [])
+            self.assertEqual(json.loads(belief_revision[1]), list(evidence))
+            receipts = connection.execute(
+                "SELECT source_ids_json FROM sleep_integrations "
+                "WHERE sleep_id=? AND integration_type IN ('memory','belief')",
+                (run.sleep_id,),
+            ).fetchall()
+            self.assertEqual(len(receipts), 2)
+            for receipt in receipts:
+                self.assertEqual(json.loads(receipt[0]), [*evidence, committed.reflection_event_id])
             self.assertEqual(
                 connection.execute(
                     "SELECT COUNT(*) FROM personality_candidates WHERE subject_id = ?",

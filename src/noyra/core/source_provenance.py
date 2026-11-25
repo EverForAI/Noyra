@@ -53,7 +53,7 @@ def classify_source_event_ids_json(
     This function intentionally does not inspect event payloads or follow causal parents.
     An exact event category is descriptive only and never grants instruction authority.
     """
-    event_ids = _parse_event_ids(source_event_ids_json)
+    event_ids = parse_source_event_ids(source_event_ids_json)
     if event_ids is None:
         return _unknown_provenance(input_valid=False)
     if not isinstance(subject_id, str) or not subject_id or not subject_id.isascii():
@@ -138,7 +138,8 @@ def classify_source_event_ids_json(
     )
 
 
-def _parse_event_ids(value: object) -> tuple[str, ...] | None:
+def parse_source_event_ids(value: object) -> tuple[str, ...] | None:
+    """Parse bounded direct references; invalid historical data has unknown lineage."""
     if not isinstance(value, str) or len(value) > MAX_SOURCE_EVENT_IDS_JSON_CHARS:
         return None
     try:

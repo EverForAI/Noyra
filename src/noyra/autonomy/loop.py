@@ -11,7 +11,11 @@ from noyra.core.events import EventStore
 from noyra.core.integrity_watchdog import IntegrityWatchdog
 from noyra.core.runtime import SubjectKernel
 from noyra.sleep import FatigueTracker, SleepEngine, SleepReflectionPlan, SleepRunRecord
-from noyra.sleep.errors import SleepReflectionDeferred, SleepStateConflictError
+from noyra.sleep.errors import (
+    SleepReflectionDeferred,
+    SleepReflectionSourceWithdrawn,
+    SleepStateConflictError,
+)
 
 from .sleep_recovery import failures, record_failure
 from .types import LoopConfig, TickResult
@@ -473,7 +477,12 @@ class AutonomyLoop:
                 return TickResult(
                     lifecycle, "reflection_model_wait", None, self.config.sleep_interval_seconds
                 )
-            self.sleep.commit_reflection(run.sleep_id, plan)
+            try:
+                self.sleep.commit_reflection(run.sleep_id, plan)
+            except SleepReflectionSourceWithdrawn:
+                self.sleep.commit_reflection(
+                    run.sleep_id, SleepReflectionPlan.after_source_withdrawal()
+                )
             action = "reflection_committed"
         elif run.status == "reflective_sleep":
             self.sleep.enter_deep_sleep(run.sleep_id)
