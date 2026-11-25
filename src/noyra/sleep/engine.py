@@ -203,6 +203,11 @@ class SleepEngine:
                 raise SleepStateConflictError("sleep reflection cannot revise goals")
 
             self._check_reflection_sources(connection, sleep_id, plan)
+            # Preserve the selected call, not every call sharing the run's purpose.
+            # Keep this outside the persisted plan/hash and the event's causal edges.
+            model_link = (
+                {} if plan._model_call_id is None else {"model_call_id": plan._model_call_id}
+            )
             event = self.events._append_connection(
                 connection,
                 self.subject_id,
@@ -215,6 +220,7 @@ class SleepEngine:
                     "contradictions": len(plan.contradictions),
                     "prediction_errors": len(plan.prediction_errors),
                     "unresolved_questions": len(plan.unresolved_questions),
+                    **model_link,
                 },
                 privacy_level="private",
                 causal_parent_ids=(),

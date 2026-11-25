@@ -16,6 +16,7 @@ from noyra.core.errors import IntegrityError, NotFoundError
 from noyra.core.types import canonical_json, content_hash, new_id, utc_now
 
 from .conversations import ConversationConflict, _row
+from .reflection_erasure_scope import sleep_reflection_scope
 from .store import InteractionStore
 
 if TYPE_CHECKING:
@@ -96,11 +97,14 @@ class ConversationErasure:
     def assess(self, subject_id: str, conversation_id: str) -> dict[str, Any]:
         """Explain the first prototype blocker without accepting a deletion intent."""
         counts = None
+        deadline = time.monotonic() + MAX_REVIEW_SECONDS
         with self.database.read_transaction() as connection:
             connection.execute("PRAGMA query_only=ON")
             state = _row(connection, subject_id, conversation_id)
             try:
-                messages, calls, events = self._review(connection, subject_id, conversation_id)
+                messages, calls, events = self._review(
+                    connection, subject_id, conversation_id, deadline=deadline
+                )
             except ErasureReviewRequired as error:
                 reason = str(error)
                 if reason not in _REVIEW_CODES:
@@ -114,12 +118,16 @@ class ConversationErasure:
                     "model_copies": len(calls),
                     "events": len(events),
                 }
+            reflection_scope = sleep_reflection_scope(
+                connection, subject_id, conversation_id, deadline, row_limit=MAX_ERASURE_ROWS
+            )
         return {
             "status": status,
             "deletion_available": False,
             "reason_code": reason,
             "conversation_revision": state["revision"],
             "counts": counts,
+            "sleep_reflection_scope": reflection_scope,
             "checked_at": utc_now(),
             "coverage": "first_prototype_blocker",
         }
@@ -432,9 +440,10 @@ class ConversationErasure:
         )
 
     def _review(
-        self, connection: Any, subject: str, window: str
+        self, connection: Any, subject: str, window: str, *, deadline: float | None = None
     ) -> tuple[list[Any], list[Any], set[str]]:
-        deadline = time.monotonic() + MAX_REVIEW_SECONDS
+        if deadline is None:
+            deadline = time.monotonic() + MAX_REVIEW_SECONDS
         connection.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
         try:
             messages = connection.execute(

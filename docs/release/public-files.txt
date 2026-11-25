@@ -753,6 +753,7 @@ src/noyra/interaction/public_cold_reader.py
 src/noyra/interaction/public_contract.py
 src/noyra/interaction/public_display.py
 src/noyra/interaction/public_reading.py
+src/noyra/interaction/reflection_erasure_scope.py
 src/noyra/interaction/rejections.py
 src/noyra/interaction/sitemap_tokens.py
 src/noyra/interaction/smtp_deadline.py
