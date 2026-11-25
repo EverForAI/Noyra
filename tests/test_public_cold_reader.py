@@ -11,12 +11,21 @@ from typing import Any
 import pytest
 
 from noyra.core import SubjectKernel
+from noyra.core.archive import ArchiveKeyring
 from noyra.core.deadline import monotonic_time
+from noyra.core.errors import ArchiveKeyUnavailableError
 from noyra.core.event_archive import EventPayloadArchive
 from noyra.core.events import EventStore
 from noyra.core.types import content_hash
+from noyra.interaction import InteractionStore
+from noyra.interaction.conversations import ConversationStore
 from noyra.interaction.public_archive import PublicArchive
-from noyra.interaction.public_cold_reader import PublicColdReader, _memory_limit
+from noyra.interaction.public_cold_reader import (
+    PrivateArchiveReviewReader,
+    PublicColdReader,
+    _memory_limit,
+    archive_keyring_revision,
+)
 
 
 def _blocked_worker(channel: Any, *args: Any) -> None:
@@ -133,5 +142,127 @@ def test_large_private_cold_payload_returns_only_approved_states_and_no_writes(
             for p in (tmp_path / "subject").rglob("*")
         }
         assert after == before
+    finally:
+        kernel.close()
+
+
+def test_private_cold_reader_returns_only_allowlisted_references_without_key_ipc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NOYRA_ARCHIVE_ENCRYPTION_KEY", base64.urlsafe_b64encode(b"P" * 32).decode())
+    monkeypatch.setenv("NOYRA_ARCHIVE_ENCRYPTION_KEY_ID", "private-review-isolation")
+    kernel = SubjectKernel(
+        tmp_path / "private.sqlite3", "private-cold-review", content_hash("cold")
+    )
+    try:
+        kernel.boot()
+        kernel.orient()
+        kernel.activate()
+        window = ConversationStore(kernel.database).create(kernel.subject_id, "PRIVATE-TITLE")
+        message = InteractionStore(kernel.database).receive(
+            kernel.subject_id,
+            "web",
+            "web-user",
+            "ARCHIVED-PRIVATE-BODY-MUST-NOT-LEAVE-WORKER",
+            conversation_id=window["conversation_id"],
+        )
+        event = EventStore(kernel.database).append(
+            kernel.subject_id,
+            "interaction_received",
+            "human",
+            {"interaction_id": message.interaction_id, "private": "ARCHIVED-PRIVATE-BODY"},
+            occurred_at="2020-01-01T00:00:00.000+00:00",
+        )
+        archive = EventPayloadArchive(
+            kernel.database, tmp_path / "subject" / "cold", subject_id=kernel.subject_id
+        )
+        assert archive.archive_cold(kernel.subject_id, older_than_days=30) >= 1
+        with kernel.database.read_transaction() as connection:
+            row = connection.execute(
+                "SELECT e.payload_archive_key,e.payload_hash,e.event_type,s.* "
+                "FROM events e JOIN event_payload_segments s "
+                "ON s.subject_id=e.subject_id AND s.object_key=e.payload_archive_key "
+                "WHERE e.event_id=?",
+                (event.event_id,),
+            ).fetchone()
+            assert row is not None
+            metadata = {
+                name: row[name]
+                for name in (
+                    "event_count",
+                    "compressed_hash",
+                    "archive_format",
+                    "encryption_key_id",
+                    "encryption_key_fingerprint",
+                )
+            }
+            before = list(connection.iterdump())
+            identities = [
+                item[0] for item in connection.execute("SELECT subject_id FROM subject_identity")
+            ]
+            keys = [
+                tuple(item)
+                for item in connection.execute(
+                    "SELECT subject_id,storage_key FROM subject_storage_keys"
+                )
+            ]
+        subject_directory = archive.root.parent
+        before_files = {
+            str(path.relative_to(tmp_path)): (path.stat().st_size, path.stat().st_mtime_ns)
+            for path in subject_directory.rglob("*")
+            if path.is_file()
+        }
+        deadline = monotonic_time() + 30
+        keyring = ArchiveKeyring.from_env()
+        keyring.validate_revision(kernel.database, kernel.subject_id)
+        revision = archive_keyring_revision(keyring)
+        reader = PrivateArchiveReviewReader(
+            kernel.database.path,
+            kernel.subject_id,
+            identities,
+            keys,
+            deadline,
+            expected_keyring_revision=revision,
+        )
+        try:
+            reader.prepare()
+            references, size = reader.load_references(
+                row["payload_archive_key"],
+                metadata,
+                16_000_000,
+                {event.event_id: (event.payload_hash, "interaction_received")},
+            )
+            assert references == {event.event_id: {"interaction_id": message.interaction_id}}
+            assert 0 < size <= 16_000_000
+            assert not hasattr(reader, "load")
+            assert not hasattr(PublicColdReader, "load_references")
+        finally:
+            reader.close(lambda: None)
+
+        # A keyring change before process startup cannot pass the parent's pin.
+        monkeypatch.setenv(
+            "NOYRA_ARCHIVE_ENCRYPTION_KEY", base64.urlsafe_b64encode(b"Q" * 32).decode()
+        )
+        key_reader = PrivateArchiveReviewReader(
+            kernel.database.path,
+            kernel.subject_id,
+            identities,
+            keys,
+            monotonic_time() + 30,
+            expected_keyring_revision=revision,
+        )
+        try:
+            with pytest.raises(ArchiveKeyUnavailableError):
+                key_reader.prepare()
+        finally:
+            key_reader.close(lambda: None)
+        with kernel.database.read_transaction() as connection:
+            assert list(connection.iterdump()) == before
+        after_files = {
+            str(path.relative_to(tmp_path)): (path.stat().st_size, path.stat().st_mtime_ns)
+            for path in subject_directory.rglob("*")
+            if path.is_file()
+        }
+        assert after_files == before_files
     finally:
         kernel.close()

@@ -16,7 +16,7 @@ from noyra.core import Database, EventStore, IdentityStore, SubjectKernel
 from noyra.core.errors import NotFoundError
 from noyra.core.event_archive import EventPayloadArchive
 from noyra.core.types import content_hash
-from noyra.interaction import InteractionStore
+from noyra.interaction import InteractionStore, PublicDiaryStore
 from noyra.interaction import erasure as erasure_module
 from noyra.interaction.conversations import ConversationStore
 from noyra.interaction.erasure import ConversationErasure, ErasureReviewRequired
@@ -26,6 +26,7 @@ from noyra.model.ledger import ModelLedger
 from noyra.model.types import ProviderResponse
 from noyra.service import NoyraHTTPServer, ServiceSettings
 from noyra.sleep import (
+    PersonalityCandidateInput,
     SleepBeliefRevision,
     SleepEngine,
     SleepIntegrity,
@@ -120,7 +121,9 @@ async def test_assessment_distinguishes_exact_reflection_input_from_cited_events
                 "AND json_extract(payload_json,'$.interaction_id')=?",
                 (subject, message.interaction_id),
             ).fetchone()[0]
-        additional_event = EventStore(db).append(subject, "experience", "test", {}).event_id
+        events = EventStore(db)
+        additional_event = events.append(subject, "experience", "test", {}).event_id
+        third_event = events.append(subject, "experience", "test", {"third": True}).event_id
         belief = BeliefStore(db).create(
             subject,
             "example proposition",
@@ -133,6 +136,15 @@ async def test_assessment_distinguishes_exact_reflection_input_from_cited_events
         run = engine.begin_reflection(run.sleep_id)
         output = SleepReflectionPlan(
             summary="derived model summary",
+            public_diary_candidate="Synthetic diary candidate",
+            personality_candidates=(
+                PersonalityCandidateInput(
+                    trait="cautious curiosity",
+                    direction=0.3,
+                    confidence=0.4,
+                    evidence_ids=(target_event, additional_event, third_event),
+                ),
+            ),
             memories=(
                 SleepMemory(
                     content="derived memory content",
@@ -189,6 +201,13 @@ async def test_assessment_distinguishes_exact_reflection_input_from_cited_events
         assert event.privacy_level == "private" and not event.causal_parent_ids
         assert event.payload.get("model_call_id") == selected._model_call_id
         assert "model_call_id" not in selected.model_dump()
+        engine.enter_deep_sleep(run.sleep_id)
+        engine.wake(run.sleep_id, "fixture", force=True)
+        engine.complete_wake(run.sleep_id)
+        if selected.public_diary_candidate is not None:
+            PublicDiaryStore(db).publish(
+                subject, run.sleep_id, "Synthetic title", selected.public_diary_candidate
+            )
         SleepIntegrity(db).verify(subject)
         erasure = ConversationErasure(db)
         with db.read_transaction() as connection:
@@ -204,10 +223,18 @@ async def test_assessment_distinguishes_exact_reflection_input_from_cited_events
         scope = result["sleep_reflection_scope"]
         assert scope == {
             "status": "observed",
-            "coverage": "known_direct_links_only",
+            "coverage": "known_direct_links_and_reviewed_sleep_derivatives",
+            "archive": {
+                "status": "not_present",
+                "segments": 0,
+                "events": 0,
+                "target_events": 0,
+                "read_mode": "local_only_no_restore",
+            },
             "counts": {
                 "committed_reflections": 1,
                 "reflections_without_recorded_model_inputs": int(mode == "unbound"),
+                "reflections_with_unbound_model_calls": int(mode == "unbound"),
                 "reflections_with_target_model_input": int(mode != "unbound"),
                 "reflections_with_multiple_window_inputs": int(mode == "mixed_windows"),
                 "memory_belief_receipts_with_target_model_input": 0 if mode == "unbound" else 3,
@@ -215,8 +242,24 @@ async def test_assessment_distinguishes_exact_reflection_input_from_cited_events
                     3 if mode == "mixed_windows" else 0
                 ),
                 "memory_belief_receipts_with_target_event": 0 if mode == "unbound" else 2,
+                "personality_candidate_receipts_with_target_model_input": int(mode != "unbound"),
+                "personality_candidate_receipts_with_multiple_window_inputs": int(
+                    mode == "mixed_windows"
+                ),
+                "personality_candidate_receipts_with_target_event": int(mode != "unbound"),
                 "target_receipts_with_unmatched_event_references": int(mode != "unbound"),
                 "opaque_memory_belief_receipts": 0,
+                "opaque_derivative_receipts": 0,
+                "sleep_integration_receipts": 0 if mode == "unbound" else 4,
+                "sleep_integration_receipts_with_target_model_input": (
+                    0 if mode == "unbound" else 4
+                ),
+                "sleep_integration_receipts_with_multiple_window_inputs": (
+                    4 if mode == "mixed_windows" else 0
+                ),
+                "retry_blocks_linked_to_target_model_input": 0,
+                "public_diary_entries_linked_to_target_model_input": int(mode != "unbound"),
+                "project_sleep_reviews_on_target_model_run": 0,
             },
         }
         assert erasure.assess(subject, other["conversation_id"])["sleep_reflection_scope"][
@@ -258,21 +301,38 @@ async def test_assessment_distinguishes_exact_reflection_input_from_cited_events
             monkeypatch.setenv(
                 "NOYRA_ARCHIVE_ENCRYPTION_KEY", base64.urlsafe_b64encode(bytes(range(32))).decode()
             )
-            archive = EventPayloadArchive(db, tmp_path / "cold", subject_id=subject)
+            archive = EventPayloadArchive(
+                db, db.path.parent / "subject" / "cold", subject_id=subject
+            )
             with monkeypatch.context() as archive_time:
                 archive_time.setattr("noyra.core.event_archive.datetime", Future)
                 assert archive.archive_cold(subject) > 0
-            archived = erasure.assess(subject, target["conversation_id"])
+            with monkeypatch.context() as archive_review:
+                archive_review.setattr(erasure_module, "MAX_REVIEW_SECONDS", 30)
+                archived = erasure.assess(subject, target["conversation_id"])
             assert archived["reason_code"] == "reflection_derivative_review_required"
             assert archived["deletion_available"] is False
-            assert archived["sleep_reflection_scope"]["counts"] == {
-                **scope["counts"],
-                "reflections_without_recorded_model_inputs": 1,
-                "reflections_with_target_model_input": 0,
-                "memory_belief_receipts_with_target_model_input": 0,
-                "memory_belief_receipts_with_target_event": 0,
-                "target_receipts_with_unmatched_event_references": 0,
-            }
+            assert archived["sleep_reflection_scope"]["archive"]["status"] == "verified_local"
+            assert archived["sleep_reflection_scope"]["archive"]["target_events"] == 1
+            assert archived["sleep_reflection_scope"]["counts"] == scope["counts"]
+            with db.read_transaction() as connection:
+                object_key = connection.execute(
+                    "SELECT payload_archive_key FROM events WHERE event_id=?", (target_event,)
+                ).fetchone()[0]
+            object_path = archive.provider._path(object_key)
+            unavailable_path = object_path.with_name(object_path.name + ".test-held")
+            object_path.replace(unavailable_path)
+            try:
+                with monkeypatch.context() as unavailable_review:
+                    unavailable_review.setattr(erasure_module, "MAX_REVIEW_SECONDS", 30)
+                    unavailable = erasure.assess(subject, target["conversation_id"])
+                assert unavailable["deletion_available"] is False
+                assert unavailable["sleep_reflection_scope"]["status"] == "incomplete"
+                assert unavailable["sleep_reflection_scope"]["archive"]["status"] == "unavailable"
+                assert not object_path.exists()
+            finally:
+                unavailable_path.replace(object_path)
+            assert target in ConversationStore(db).list(subject)["items"]
             SleepIntegrity(db).verify(subject)
 
 
@@ -287,8 +347,9 @@ def test_sleep_scope_fails_closed_on_the_shared_review_deadline(
     assert result["deletion_available"] is False
     assert result["sleep_reflection_scope"] == {
         "status": "bounded_out",
-        "coverage": "known_direct_links_only",
+        "coverage": "known_direct_links_and_reviewed_sleep_derivatives",
         "counts": None,
+        "archive": {"status": "not_checked", "segments": 0, "events": 0},
     }
 
 

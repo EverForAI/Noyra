@@ -119,7 +119,12 @@ class ConversationErasure:
                     "events": len(events),
                 }
             reflection_scope = sleep_reflection_scope(
-                connection, subject_id, conversation_id, deadline, row_limit=MAX_ERASURE_ROWS
+                connection,
+                subject_id,
+                conversation_id,
+                deadline,
+                row_limit=MAX_ERASURE_ROWS,
+                database=self.database,
             )
         return {
             "status": status,

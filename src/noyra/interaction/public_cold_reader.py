@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import re
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator
@@ -28,6 +29,19 @@ from noyra.core.types import canonical_json, content_hash
 
 MAX_COLD_PROCESS_MEMORY = 512 * 1024 * 1024
 MAX_COLD_REPLY_BYTES = 2_000_000
+COLD_READ_SLOTS = threading.BoundedSemaphore(2)
+_PRIVATE_REFERENCE_FIELDS = {
+    "interaction_received": ("interaction_id",),
+    "interaction_sent": ("interaction_id",),
+    "interaction_decision": ("interaction_id",),
+    "sleep_reflection": ("sleep_id", "model_call_id"),
+    "other": (),
+}
+_PRIVATE_REFERENCE_IDS = {
+    "interaction_id": re.compile(r"int_[0-9a-f]{32}"),
+    "sleep_id": re.compile(r"sleep_[0-9a-f]{32}"),
+    "model_call_id": re.compile(r"mcall_[0-9a-f]{32}"),
+}
 
 
 def _memory_limit(maximum: int) -> Any:
@@ -216,23 +230,13 @@ def _worker(
         _ = locals().get("memory_guard")
 
 
-class PublicColdReader:
+class _ColdReader:
     def __init__(
-        self,
-        path: Path,
-        subject: str,
-        identities: list[str],
-        keys: list[tuple[str, str]],
-        deadline: float,
+        self, worker: Callable[..., None], args: tuple[object, ...], name: str, deadline: float
     ):
         context = multiprocessing.get_context("spawn")
         self.channel, child = context.Pipe()
-        self.process = context.Process(
-            target=_worker,
-            args=(child, str(path), subject, identities, keys),
-            name="noyra-public-cold-reader",
-            daemon=True,
-        )
+        self.process = context.Process(target=worker, args=(child, *args), name=name, daemon=True)
         self.deadline = deadline
         self.closed = False
         self.ready = False
@@ -240,7 +244,7 @@ class PublicColdReader:
             self.process.start()
         except (OSError, RuntimeError) as error:
             self.close(lambda: None)
-            raise ArchiveUnavailableError("public cold reader cannot start") from error
+            raise ArchiveUnavailableError("cold reader cannot start") from error
         finally:
             child.close()
 
@@ -287,6 +291,49 @@ class PublicColdReader:
         threading.Thread(target=exchange, name="noyra-public-cold-ipc", daemon=True).start()
         return future.result(timeout=remaining)
 
+    def close(self, release: Callable[[], None]) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        self.channel.close()
+        if self.process.pid is None:
+            self.process.close()
+            release()
+            return
+        if self.process.is_alive():
+            self.process.terminate()
+        self.process.join(timeout=0.1)
+        if self.process.is_alive():
+            self.process.kill()
+            self.process.join(timeout=0.1)
+        if not self.process.is_alive():
+            self.process.close()
+            release()
+            return
+
+        def reap() -> None:
+            # Kernel-uninterruptible I/O may delay reaping. Keep admission held
+            # until that work is actually gone, rather than overbooking memory.
+            self.process.join()
+            self.process.close()
+            release()
+
+        threading.Thread(target=reap, name="noyra-public-cold-reaper", daemon=True).start()
+
+
+class PublicColdReader(_ColdReader):
+    def __init__(
+        self,
+        path: Path,
+        subject: str,
+        identities: list[str],
+        keys: list[tuple[str, str]],
+        deadline: float,
+    ):
+        super().__init__(
+            _worker, (str(path), subject, identities, keys), "noyra-public-cold-reader", deadline
+        )
+
     def prepare(self) -> ArchiveKeyring:
         result = self._exchange()
         if result["kind"] != "ready":
@@ -318,31 +365,161 @@ class PublicColdReader:
             raise ArchiveUnavailableError("public cold reader response invalid")
         return result["states"], result["bytes"]
 
-    def close(self, release: Callable[[], None]) -> None:
-        if self.closed:
-            return
-        self.closed = True
-        self.channel.close()
-        if self.process.pid is None:
-            self.process.close()
-            release()
-            return
-        if self.process.is_alive():
-            self.process.terminate()
-        self.process.join(timeout=0.1)
-        if self.process.is_alive():
-            self.process.kill()
-            self.process.join(timeout=0.1)
-        if not self.process.is_alive():
-            self.process.close()
-            release()
-            return
 
-        def reap() -> None:
-            # Kernel-uninterruptible I/O may delay reaping. Keep admission held
-            # until that work is actually gone, rather than overbooking memory.
-            self.process.join()
-            self.process.close()
-            release()
+def _private_review_worker(
+    channel: Connection,
+    path: str,
+    subject: str,
+    identities: list[str],
+    keys: list[tuple[str, str]],
+    expected_keyring_revision: tuple[int, str, str | None, str],
+) -> None:
+    try:
+        memory_guard = _memory_limit(MAX_COLD_PROCESS_MEMORY)
+        database = _DirectorySnapshot(path, identities, keys)
+        archive = EventPayloadArchive(
+            database,
+            database.path.parent / "subject" / "cold",
+            subject_id=subject,
+            create_root=False,
+            read_only_root=True,
+            cache_cloud_restores=False,
+        )
+        if archive_keyring_revision(archive.keyring) != expected_keyring_revision:
+            raise ArchiveKeyUnavailableError("private archive key revision changed")
+        channel.send_bytes(b'{"kind":"private_ready"}')
+        while True:
+            key, metadata, maximum, events = channel.recv()
+            if (
+                not 1 <= maximum <= 64_000_000
+                or not 1 <= len(events) <= 5_000
+                or any(
+                    event_type not in _PRIVATE_REFERENCE_FIELDS for _, event_type in events.values()
+                )
+            ):
+                raise PayloadLimitError("private archive request exceeds the review bound")
+            loaded = archive._load_segment(
+                subject,
+                key,
+                connection=None,
+                metadata=metadata,
+                max_decompressed_bytes=maximum,
+                max_events=5_000,
+                local_only=True,
+            )
+            if loaded.payloads.keys() != events.keys():
+                raise IntegrityError("private archive segment membership is inconsistent")
+            references: dict[str, dict[str, str]] = {}
+            for identifier, (expected_hash, event_type) in events.items():
+                payload = loaded.payloads[identifier]
+                if content_hash(payload) != expected_hash:
+                    raise IntegrityError("private archive event hash is inconsistent")
+                fields = _PRIVATE_REFERENCE_FIELDS[event_type]
+                if not fields:
+                    continue
+                selected: dict[str, str] = {}
+                for field in fields:
+                    value = payload.get(field)
+                    if field == "model_call_id" and value is None:
+                        continue
+                    if not isinstance(value, str) or not _PRIVATE_REFERENCE_IDS[field].fullmatch(
+                        value
+                    ):
+                        raise IntegrityError("private archive reference is invalid")
+                    selected[field] = value
+                references[identifier] = selected
+            raw = canonical_json(
+                {
+                    "kind": "private_result",
+                    "bytes": loaded.decompressed_bytes,
+                    "references": references,
+                }
+            ).encode()
+            if len(raw) > MAX_COLD_REPLY_BYTES:
+                raise PayloadLimitError("private archive reference reply exceeds bound")
+            channel.send_bytes(raw)
+            del raw, references, loaded, payload
+    except (EOFError, BrokenPipeError):
+        return
+    except Exception as error:
+        with suppress(OSError):
+            channel.send_bytes(
+                canonical_json({"kind": "error", "type": type(error).__name__}).encode()
+            )
+    finally:
+        channel.close()
+        _ = locals().get("memory_guard")
 
-        threading.Thread(target=reap, name="noyra-public-cold-reaper", daemon=True).start()
+
+def archive_keyring_revision(keyring: ArchiveKeyring) -> tuple[int, str, str | None, str]:
+    return (
+        keyring.generation,
+        keyring.active_key_id,
+        keyring.legacy_key_id,
+        content_hash(list(keyring.metadata())),
+    )
+
+
+class PrivateArchiveReviewReader(_ColdReader):
+    """Return only validated archive references to the internal erasure review."""
+
+    def __init__(
+        self,
+        path: Path,
+        subject: str,
+        identities: list[str],
+        keys: list[tuple[str, str]],
+        deadline: float,
+        *,
+        expected_keyring_revision: tuple[int, str, str | None, str],
+    ):
+        super().__init__(
+            _private_review_worker,
+            (str(path), subject, identities, keys, expected_keyring_revision),
+            "noyra-private-cold-review",
+            deadline,
+        )
+
+    def prepare(self) -> None:
+        if self._exchange() != {"kind": "private_ready"}:
+            raise ArchiveUnavailableError("private cold reader initialization failed")
+        self.ready = True
+
+    def load_references(
+        self,
+        key: str,
+        metadata: dict[str, Any],
+        maximum: int,
+        events: dict[str, tuple[str, str]],
+    ) -> tuple[dict[str, dict[str, str]], int]:
+        if not self.ready:
+            raise RuntimeError("private cold reader key revision not validated")
+        result = self._exchange((key, metadata, maximum, events))
+        references = result.get("references")
+        size = result.get("bytes")
+        expected_ids = {
+            identifier
+            for identifier, (_, kind) in events.items()
+            if _PRIVATE_REFERENCE_FIELDS[kind]
+        }
+        if (
+            set(result) != {"kind", "references", "bytes"}
+            or result["kind"] != "private_result"
+            or type(size) is not int
+            or not 0 < size <= maximum
+            or not isinstance(references, dict)
+            or references.keys() != expected_ids
+        ):
+            raise IntegrityError("private archive reference response is invalid")
+        for identifier, fields in references.items():
+            allowed = set(_PRIVATE_REFERENCE_FIELDS[events[identifier][1]])
+            if (
+                not isinstance(fields, dict)
+                or not allowed - {"model_call_id"} <= fields.keys() <= allowed
+                or any(
+                    not isinstance(value, str) or not _PRIVATE_REFERENCE_IDS[field].fullmatch(value)
+                    for field, value in fields.items()
+                )
+            ):
+                raise IntegrityError("private archive reference response is invalid")
+        return references, size
