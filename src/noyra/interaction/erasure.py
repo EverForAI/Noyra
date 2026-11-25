@@ -41,6 +41,7 @@ _REVIEW_CODES = frozenset(
         "private_erasure_review_deadline",
         "legacy_private_provenance_review_required",
         "reflection_derivative_review_required",
+        "memory_consolidation_review_required",
         "private_memory_derivative_review_required",
         "private_exports_in_flight",
         "private_legacy_export_review_required",
@@ -61,7 +62,6 @@ _UNREVIEWED_DOMAINS = (
     "relationship_social_runs",
     "psychological_snapshots",
     "memory_integrations",
-    "memory_consolidation_runs",
     "memory_blocks",
     "entities",
     "entity_relations",
@@ -103,7 +103,7 @@ class _ErasureScope:
     memory_ids: set[str]
     reflection_hashes: dict[str, str]
     sleep_memory_links: dict[str, sqlite3.Row]
-    memory_source_events: set[str]
+    memory_taint_events: dict[str, set[str]]
 
 
 class ConversationErasure:
@@ -729,14 +729,14 @@ class ConversationErasure:
                     (subject, event),
                 ).fetchone():
                     raise ErasureReviewRequired("private_event_derivative_review_required")
-            memory_source_events = events | reflection_events
-            memory_ids = self._check_derivatives(
+            memory_ids, memory_taint_events = self._check_derivatives(
                 connection,
                 subject,
                 events,
                 reflection_events,
                 bool(reflection_hashes),
                 sleep_memory_links,
+                deadline,
             )
             return _ErasureScope(
                 messages,
@@ -745,7 +745,7 @@ class ConversationErasure:
                 memory_ids,
                 reflection_hashes,
                 sleep_memory_links,
-                memory_source_events,
+                memory_taint_events,
             )
         except sqlite3.OperationalError as error:
             if time.monotonic() > deadline:
@@ -762,7 +762,8 @@ class ConversationErasure:
         reflection_events: set[str],
         reviewed_sleep_checkpoints: bool,
         sleep_memory_links: dict[str, sqlite3.Row],
-    ) -> set[str]:
+        deadline: float,
+    ) -> tuple[set[str], dict[str, set[str]]]:
         # Historical model calls did not record exact private input lineage. Require
         # review instead of guessing that an opaque reflection has no private text.
         if connection.execute(
@@ -819,10 +820,17 @@ class ConversationErasure:
             for memory_id, sources in sources_by_memory.items()
             if sources & tainted_events
         }
+        consolidation_memories, consolidation_taint_events = _review_memory_consolidation_lineage(
+            connection, subject, affected, deadline
+        )
+        affected.update(consolidation_memories)
+        memory_taint_events = {memory_id: set(tainted_events) for memory_id in affected}
+        for memory_id, markers in consolidation_taint_events.items():
+            memory_taint_events.setdefault(memory_id, set(tainted_events)).update(markers)
         if not sleep_memory_links.keys() <= affected:
             raise IntegrityError("sleep memory source history does not match the erasure window")
         for memory_id in sorted(affected):
-            if not sources_by_memory[memory_id] <= tainted_events:
+            if not sources_by_memory.get(memory_id, set()) <= memory_taint_events[memory_id]:
                 if memory_id in sleep_memory_links:
                     raise ErasureReviewRequired("reflection_derivative_review_required")
                 ConversationErasure._independent_memory_revision(connection, memory_id, events)
@@ -841,7 +849,7 @@ class ConversationErasure:
             ).fetchone()
         ):
             raise ErasureReviewRequired("reflection_derivative_review_required")
-        return affected
+        return affected, memory_taint_events
 
     @staticmethod
     def _review_reflections(
@@ -1201,7 +1209,6 @@ class ConversationErasure:
 
         # A selected sleep-reflection event is a causal marker for the exact
         # model response bound to this private window, not an independent source.
-        events = scope.memory_source_events
         erased = rebuilt = 0
         for memory in connection.execute(
             "SELECT m.* FROM json_each(?) ids "
@@ -1209,6 +1216,7 @@ class ConversationErasure:
             (canonical_json(sorted(scope.memory_ids)), subject),
         ).fetchall():
             memory_id = memory["memory_id"]
+            events = scope.memory_taint_events.get(memory_id, scope.events)
             revisions = connection.execute(
                 "SELECT revision_id,source_event_ids_json,content_hash,salience,confidence,status "
                 "FROM memory_revisions WHERE memory_id=? ORDER BY revision_number DESC",
@@ -1225,7 +1233,9 @@ class ConversationErasure:
                 (items for items in source_lists if events.intersection(items)), None
             )
             if tombstone_sources is None:
-                raise IntegrityError("private erasure memory source is missing")
+                if memory_id not in scope.memory_ids or not source_lists:
+                    raise IntegrityError("private erasure memory source is missing")
+                tombstone_sources = source_lists[0]
             if not sources <= events:
                 independent = ConversationErasure._independent_memory_revision(
                     connection, memory["memory_id"], events
@@ -1350,6 +1360,255 @@ class ConversationErasure:
         _fsync_directory(self.root)
         _fsync_directory(self.root.parent)
         return job
+
+
+def _review_memory_consolidation_lineage(
+    connection: sqlite3.Connection,
+    subject: str,
+    seeds: set[str],
+    deadline: float,
+) -> tuple[set[str], dict[str, set[str]]]:
+    """Follow deterministic consolidation links; never infer from memory text."""
+    if not seeds:
+        return set(), {}
+    from noyra.mind.consolidation import MemoryConsolidator
+    from noyra.mind.memory import MemoryStore
+
+    review_required = "memory_consolidation_review_required"
+    rows = connection.execute(
+        "SELECT m.consolidation_id,m.member_id,m.source_memory_id,m.result_memory_id,"
+        "m.disposition,m.reason,m.state_hash AS member_hash,m.created_at AS member_created_at "
+        "FROM memory_consolidation_members m JOIN memory_consolidation_runs r "
+        "ON r.consolidation_id=m.consolidation_id WHERE r.subject_id=? "
+        "ORDER BY r.rowid,m.rowid LIMIT ?",
+        (subject, MAX_ERASURE_ROWS + 1),
+    ).fetchall()
+    if len(rows) > MAX_ERASURE_ROWS:
+        raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
+    runs: dict[str, list[sqlite3.Row]] = {}
+    by_source: dict[str, set[str]] = {}
+    by_result: dict[str, set[str]] = {}
+    reference_bytes = 0
+    for row in rows:
+        if time.monotonic() >= deadline:
+            raise ErasureReviewRequired("private_erasure_review_deadline")
+        for name in ("consolidation_id", "member_id", "source_memory_id", "disposition", "reason"):
+            value = row[name]
+            if not isinstance(value, str) or not value or len(value) > 256:
+                raise IntegrityError("memory consolidation lineage identifier is invalid")
+            reference_bytes += len(value.encode("utf-8"))
+        if reference_bytes > MAX_REFLECTION_BYTES:
+            raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
+        consolidation_id = str(row["consolidation_id"])
+        source_id = str(row["source_memory_id"])
+        runs.setdefault(consolidation_id, []).append(row)
+        by_source.setdefault(source_id, set()).add(consolidation_id)
+        if row["result_memory_id"] is not None:
+            if not isinstance(row["result_memory_id"], str) or not row["result_memory_id"]:
+                raise IntegrityError("memory consolidation result reference is invalid")
+            by_result.setdefault(str(row["result_memory_id"]), set()).add(consolidation_id)
+
+    def validate_run(
+        consolidation_id: str,
+    ) -> tuple[sqlite3.Row, list[sqlite3.Row], str, set[str]]:
+        if time.monotonic() >= deadline:
+            raise ErasureReviewRequired("private_erasure_review_deadline")
+        run = connection.execute(
+            "SELECT rowid AS consolidation_order,* FROM memory_consolidation_runs "
+            "WHERE consolidation_id=? AND subject_id=?",
+            (consolidation_id, subject),
+        ).fetchone()
+        members = runs[consolidation_id]
+        if run is None:
+            raise IntegrityError("memory consolidation run is missing")
+        reviewed = run["reviewed_count"]
+        if type(reviewed) is not int or reviewed != len(members) or reviewed > MAX_ERASURE_ROWS:
+            raise IntegrityError("memory consolidation member count is invalid")
+        if any(row["member_created_at"] != run["created_at"] for row in members):
+            raise IntegrityError("memory consolidation member timestamp mismatch")
+        archived: list[str] = []
+        strengthened: list[str] = []
+        summary_outputs: dict[str, set[str]] = {}
+        allowed_reasons = {
+            "archived_duplicate": "exact duplicate",
+            "strengthened": "repeated recall",
+            "summarized": "archived without deleting history",
+            "retained": "retained",
+        }
+        for member in members:
+            disposition = member["disposition"]
+            source_id = str(member["source_memory_id"])
+            result_id = member["result_memory_id"]
+            if (
+                disposition not in allowed_reasons
+                or member["reason"] != allowed_reasons[disposition]
+            ):
+                raise ErasureReviewRequired(review_required)
+            if disposition in {"retained", "strengthened"} and result_id != source_id:
+                raise IntegrityError("memory consolidation identity result is invalid")
+            if disposition == "archived_duplicate" and (
+                not isinstance(result_id, str) or not result_id or result_id == source_id
+            ):
+                raise IntegrityError("memory duplicate result is invalid")
+            if disposition == "summarized" and result_id is not None:
+                if not isinstance(result_id, str) or not result_id:
+                    raise IntegrityError("memory summary result is invalid")
+                summary_outputs.setdefault(result_id, set()).add(source_id)
+            expected_member_hash = content_hash(
+                {
+                    "source_memory_id": source_id,
+                    "result_memory_id": result_id,
+                    "disposition": disposition,
+                    "reason": member["reason"],
+                    "created_at": member["member_created_at"],
+                }
+            )
+            if member["member_hash"] != expected_member_hash:
+                raise IntegrityError("memory consolidation member state hash mismatch")
+            if disposition in {"archived_duplicate", "summarized"}:
+                archived.append(source_id)
+            elif disposition == "strengthened":
+                strengthened.append(source_id)
+
+        archived_ids = _consolidation_memory_ids(run["archived_memory_ids_json"])
+        strengthened_ids = _consolidation_memory_ids(run["strengthened_memory_ids_json"])
+        summary_ids = _consolidation_memory_ids(run["summary_memory_ids_json"])
+        if archived_ids != archived or strengthened_ids != strengthened:
+            raise IntegrityError("memory consolidation run disposition lists mismatch")
+        if not set(summary_ids) <= set(summary_outputs):
+            raise IntegrityError("memory consolidation summary list mismatch")
+        expected_summary = (
+            f"Reviewed {reviewed} memories; archived {len(archived)}, "
+            f"strengthened {len(strengthened)}, created {len(summary_ids)} summaries."
+        )
+        status = "committed" if archived or strengthened or summary_ids else "no_change"
+        if run["status"] != status or run["summary"] != expected_summary:
+            raise IntegrityError("memory consolidation run state is invalid")
+        if run["state_hash"] != MemoryConsolidator._state_hash(
+            status,
+            reviewed,
+            tuple(archived),
+            tuple(strengthened),
+            tuple(summary_ids),
+            expected_summary,
+            str(run["created_at"]),
+        ):
+            raise IntegrityError("memory consolidation run hash mismatch")
+        previous = connection.execute(
+            "SELECT consolidation_id FROM memory_consolidation_runs WHERE subject_id=? "
+            "AND rowid<? ORDER BY rowid DESC LIMIT 1",
+            (subject, run["consolidation_order"]),
+        ).fetchone()
+        predecessor = "initial" if previous is None else previous["consolidation_id"]
+        if run["idempotency_key"] != f"memory-consolidation:v2:after:{predecessor}":
+            raise ErasureReviewRequired(review_required)
+        event_rows = connection.execute(
+            "SELECT event_id,payload_json,payload_hash,source,privacy_level,payload_archive_key,"
+            "causal_parent_ids_json,occurred_at "
+            "FROM events WHERE subject_id=? AND event_type='memory_consolidation' "
+            "AND json_valid(payload_json) "
+            "AND json_extract(payload_json,'$.idempotency_key')=? LIMIT 2",
+            (subject, run["idempotency_key"]),
+        ).fetchall()
+        expected_payload = {
+            "idempotency_key": run["idempotency_key"],
+            "reviewed_count": reviewed,
+        }
+        if len(event_rows) != 1:
+            raise ErasureReviewRequired(review_required)
+        event = event_rows[0]
+        if (
+            event["payload_archive_key"] is not None
+            or event["source"] != "memory_supervisor"
+            or event["privacy_level"] != "private"
+            or event["causal_parent_ids_json"] != "[]"
+            or event["occurred_at"] != run["created_at"]
+            or event["payload_json"] != canonical_json(expected_payload)
+            or event["payload_hash"] != content_hash(expected_payload)
+        ):
+            raise ErasureReviewRequired(review_required)
+        all_memory_ids = {str(member["source_memory_id"]) for member in members} | {
+            str(member["result_memory_id"])
+            for member in members
+            if member["result_memory_id"] is not None
+        }
+        for memory_id in all_memory_ids:
+            owner = connection.execute(
+                "SELECT subject_id FROM memories WHERE memory_id=?", (memory_id,)
+            ).fetchone()
+            if owner is None or owner["subject_id"] != subject:
+                raise IntegrityError("memory consolidation target ownership mismatch")
+        for result_id, parents in summary_outputs.items():
+            record = MemoryStore._load_connection(connection, result_id)
+            prefix = "Consolidated memory cluster: "
+            if not record.content.startswith(prefix):
+                raise ErasureReviewRequired(review_required)
+            cluster = tuple(record.content.removeprefix(prefix).split(", "))
+            if (
+                not 2 <= len(cluster) <= 8
+                or len(set(cluster)) != len(cluster)
+                or tuple(sorted(cluster)) != cluster
+                or not set(cluster) <= {str(member["source_memory_id"]) for member in members}
+                or not parents <= set(cluster)
+            ):
+                raise ErasureReviewRequired(review_required)
+        return run, members, str(event["event_id"]), set(summary_ids)
+
+    affected = set(seeds)
+    additional: set[str] = set()
+    taint_events_by_memory: dict[str, set[str]] = {}
+    validated: dict[str, tuple[sqlite3.Row, list[sqlite3.Row], str, set[str]]] = {}
+    pending = list(sorted(seeds))
+    while pending:
+        if time.monotonic() >= deadline:
+            raise ErasureReviewRequired("private_erasure_review_deadline")
+        memory_id = pending.pop()
+        relevant_runs = by_source.get(memory_id, set()) | by_result.get(memory_id, set())
+        for consolidation_id in sorted(relevant_runs):
+            if consolidation_id not in validated:
+                validated[consolidation_id] = validate_run(consolidation_id)
+            _run, members, event_id, created_summaries = validated[consolidation_id]
+            for member in members:
+                if str(member["source_memory_id"]) != memory_id:
+                    continue
+                result = member["result_memory_id"]
+                disposition = member["disposition"]
+                if disposition in {"archived_duplicate", "strengthened", "summarized"}:
+                    taint_events_by_memory.setdefault(memory_id, set()).add(event_id)
+                if result is not None and disposition in {"archived_duplicate", "summarized"}:
+                    target = str(result)
+                    if disposition == "summarized" and target not in _consolidation_memory_ids(
+                        _run["summary_memory_ids_json"]
+                    ):
+                        # A reused summary may predate the private input and have
+                        # no version that can safely remove just this memory ID.
+                        raise ErasureReviewRequired(review_required)
+                    if target not in affected:
+                        affected.add(target)
+                        additional.add(target)
+                        pending.append(target)
+                    if disposition == "summarized" and target in created_summaries:
+                        taint_events_by_memory.setdefault(target, set()).add(event_id)
+                    if len(affected) > MAX_ERASURE_ROWS:
+                        raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
+    return additional, taint_events_by_memory
+
+
+def _consolidation_memory_ids(value: object) -> list[str]:
+    if not isinstance(value, str) or len(value.encode("utf-8")) > 128 * 1024:
+        raise ErasureReviewRequired("private_erasure_scope_exceeds_limit")
+    try:
+        decoded = strict_json_loads(value)
+    except (TypeError, ValueError, UnicodeError) as error:
+        raise IntegrityError("memory consolidation id list is invalid") from error
+    if (
+        not isinstance(decoded, list)
+        or len(decoded) > MAX_ERASURE_ROWS
+        or any(not isinstance(item, str) or not item or len(item) > 256 for item in decoded)
+        or len(decoded) != len(set(decoded))
+    ):
+        raise IntegrityError("memory consolidation id list is invalid")
+    return decoded
 
 
 def _sleep_memory_links(

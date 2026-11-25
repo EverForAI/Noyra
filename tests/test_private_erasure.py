@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -32,7 +33,7 @@ from noyra.interaction.erasure import (
 from noyra.interaction.errors import InteractionStateConflictError
 from noyra.interaction.integrity import InteractionIntegrity
 from noyra.interaction.types import InteractionDecision
-from noyra.mind import MemoryStore, MindEngine
+from noyra.mind import MemoryConsolidator, MemoryStore, MindEngine
 from noyra.mind.errors import CausalValidationError
 from noyra.model.errors import ModelCallStateError
 from noyra.model.ledger import ModelLedger
@@ -787,6 +788,304 @@ def test_sleep_reflection_mixed_memory_rebuilds_only_pre_window_revision(
         assert ModelLedger(copy).get_call(call_id).response == ERASED_MODEL
         assert MindEngine(copy).verify_integrity("owner")["memories"] == 2
         assert SleepIntegrity(copy).verify("owner")["sleep_runs"] == 1
+
+
+@pytest.mark.parametrize("duplicate_keeper", [False, True])
+def test_sleep_memory_consolidation_descendants_are_erased_and_backups_replay(
+    tmp_path: Path, duplicate_keeper: bool
+) -> None:
+    root = tmp_path / "current"
+    db = Database(root / "noyra.sqlite3")
+    IdentityStore(db).ensure("owner", content_hash("owner"))
+    independent_event = EventStore(db).append(
+        "owner", "independent_experience", "fixture", {"fact": "older independent fact"}
+    )
+    memory_text = (
+        "independent duplicate payload" if duplicate_keeper else "independent cluster fact"
+    )
+    independent = MemoryStore(db).create(
+        "owner",
+        "reflection",
+        memory_text,
+        salience=0.2 if duplicate_keeper else 0.25,
+        confidence=0.5,
+        source_event_ids=(independent_event.event_id,),
+    )
+    window, message, private_event = _private_message(db)
+    sleep_memory_text = memory_text if duplicate_keeper else "private sleep-derived cluster member"
+    sleep_id, call_id = _sleep_reflection(
+        db,
+        (message,),
+        "consolidation lineage",
+        memories=(
+            SleepMemory(
+                content=sleep_memory_text,
+                memory_type="reflection",
+                salience=0.15,
+                confidence=0.4,
+                source_event_ids=(private_event,),
+            ),
+        ),
+    )
+    with db.read_transaction() as connection:
+        private_memory_id = connection.execute(
+            "SELECT target_id FROM sleep_integrations WHERE sleep_id=? "
+            "AND integration_type='memory'",
+            (sleep_id,),
+        ).fetchone()[0]
+    private_memory = MemoryStore(db).get(private_memory_id)
+    if duplicate_keeper:
+        assert private_memory.memory_type == independent.memory_type
+        assert private_memory.content == independent.content
+    consolidator = MemoryConsolidator(
+        db,
+        "owner",
+        interval_seconds=0,
+        stale_after_days=0,
+        archive_after_days=0,
+        minimum_active_memories=0,
+    )
+    assert consolidator.run_due() == "memory_consolidation_committed"
+    with db.read_transaction() as connection:
+        run = dict(
+            connection.execute(
+                "SELECT * FROM memory_consolidation_runs ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+        )
+        members = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM memory_consolidation_members "
+                "WHERE consolidation_id=? ORDER BY rowid",
+                (run["consolidation_id"],),
+            )
+        ]
+        summary_ids = json.loads(run["summary_memory_ids_json"])
+        summaries = [
+            dict(
+                connection.execute(
+                    "SELECT * FROM memories WHERE memory_id=?", (memory_id,)
+                ).fetchone()
+            )
+            for memory_id in summary_ids
+        ]
+    assert any(row["source_memory_id"] == private_memory_id for row in members)
+    if duplicate_keeper:
+        assert (
+            next(row for row in members if row["source_memory_id"] == private_memory_id)[
+                "disposition"
+            ]
+            == "archived_duplicate"
+        )
+    else:
+        assert summaries and all(
+            row["content"].startswith("Consolidated memory cluster: ") for row in summaries
+        )
+    keys = tmp_path / "keyring.json"
+    BackupKeyring.initialize(keys)
+    manager = EncryptedBackupManager(root, keys)
+    before = tmp_path / "before-consolidation-erasure.noyra-backup"
+    manager.create(before)
+
+    erasure = ConversationErasure(db)
+    assessment = erasure.assess("owner", window["conversation_id"])
+    assert assessment["status"] == "full_contract_pending"
+    assert assessment["deletion_available"] is False
+    erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    result = erasure.run("owner", window["conversation_id"])
+    assert result["status"] == "completed", result
+    after = tmp_path / "after-consolidation-erasure.noyra-backup"
+    manager.create(after)
+
+    for index, backup in enumerate((before, after)):
+        destination = manager.restore(backup, tmp_path / f"restored-consolidation-{index}")
+        copy = Database(
+            destination / "noyra.sqlite3", initialize=False, strict_schema_contract=True
+        )
+        assert b"private sleep-derived cluster member" not in copy.path.read_bytes()
+        assert SleepIntegrity(copy).verify("owner")["sleep_runs"] == 1
+        assert MindEngine(copy).verify_integrity("owner")["memories"] >= 2
+        assert MemoryStore(copy).get(private_memory_id).content == ERASED
+        assert all(
+            revision["content"] == ERASED
+            for revision in MemoryStore(copy).revisions(private_memory_id)
+        )
+        assert ModelLedger(copy).get_call(call_id).response == ERASED_MODEL
+        if duplicate_keeper:
+            assert MemoryStore(copy).get(independent.memory_id).content == ERASED
+            with copy.read_transaction() as connection:
+                retained = connection.execute(
+                    "SELECT memory_id,status FROM memories WHERE subject_id=? AND content=? "
+                    "AND memory_id NOT IN (?,?)",
+                    ("owner", memory_text, private_memory_id, independent.memory_id),
+                ).fetchall()
+            assert len(retained) == 1
+            assert retained[0]["status"] == "archived"
+            assert MemoryStore(copy).source_event_ids(retained[0]["memory_id"]) == (
+                independent_event.event_id,
+            )
+        else:
+            assert MemoryStore(copy).get(independent.memory_id).status == "archived"
+            assert MemoryStore(copy).get(independent.memory_id).content == memory_text
+        with copy.read_transaction() as connection:
+            assert (
+                dict(
+                    connection.execute(
+                        "SELECT * FROM memory_consolidation_runs WHERE consolidation_id=?",
+                        (run["consolidation_id"],),
+                    ).fetchone()
+                )
+                == run
+            )
+            restored_members = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM memory_consolidation_members "
+                    "WHERE consolidation_id=? ORDER BY rowid",
+                    (run["consolidation_id"],),
+                )
+            ]
+            assert restored_members == members
+            for summary in summaries:
+                assert (
+                    connection.execute(
+                        "SELECT content FROM memories WHERE memory_id=?", (summary["memory_id"],)
+                    ).fetchone()[0]
+                    == ERASED
+                )
+
+
+def test_reused_consolidation_summary_without_new_safe_revision_requires_review(
+    tmp_path: Path,
+) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, private_event = _private_message(db)
+    independent_event = EventStore(db).append(
+        "owner", "independent_experience", "fixture", {"fact": "unrelated old evidence"}
+    )
+    sleep_id, _ = _sleep_reflection(
+        db,
+        (message,),
+        "legacy summary reuse",
+        memories=(
+            SleepMemory(
+                content="private member in reused summary",
+                memory_type="reflection",
+                salience=0.15,
+                confidence=0.4,
+                source_event_ids=(private_event,),
+            ),
+        ),
+    )
+    with db.read_transaction() as connection:
+        private_memory_id = connection.execute(
+            "SELECT target_id FROM sleep_integrations WHERE sleep_id=?", (sleep_id,)
+        ).fetchone()[0]
+    independent = MemoryStore(db).create(
+        "owner",
+        "reflection",
+        "unrelated old consolidation member",
+        salience=0.2,
+        confidence=0.4,
+        source_event_ids=(independent_event.event_id,),
+    )
+    cluster = tuple(sorted((private_memory_id, independent.memory_id)))
+    reused_summary = MemoryStore(db).create(
+        "owner",
+        "reflection",
+        "Consolidated memory cluster: " + ", ".join(cluster),
+        salience=0.45,
+        confidence=0.45,
+        source_event_ids=(independent_event.event_id,),
+        reason="fixture legacy summary",
+    )
+    assert (
+        MemoryConsolidator(
+            db,
+            "owner",
+            interval_seconds=0,
+            stale_after_days=0,
+            archive_after_days=0,
+            minimum_active_memories=0,
+        ).run_due()
+        == "memory_consolidation_committed"
+    )
+    with db.read_transaction() as connection:
+        run = connection.execute(
+            "SELECT summary_memory_ids_json FROM memory_consolidation_runs "
+            "ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        assert json.loads(run[0]) == []
+        assert connection.execute(
+            "SELECT 1 FROM memory_consolidation_members WHERE source_memory_id=? "
+            "AND result_memory_id=?",
+            (private_memory_id, reused_summary.memory_id),
+        ).fetchone()
+    before = MemoryStore(db).get(reused_summary.memory_id)
+    erasure = ConversationErasure(db)
+    assert erasure.assess("owner", window["conversation_id"])["reason_code"] == (
+        "memory_consolidation_review_required"
+    )
+    with pytest.raises(ErasureReviewRequired, match="memory_consolidation_review_required"):
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert not erasure.root.exists()
+    assert MemoryStore(db).get(reused_summary.memory_id) == before
+    assert InteractionStore(db).get(message).content == "private original"
+
+
+def test_sleep_consolidation_tampered_membership_requires_review(tmp_path: Path) -> None:
+    db = Database(tmp_path / "noyra.sqlite3")
+    window, message, private_event = _private_message(db)
+    sleep_id, _ = _sleep_reflection(
+        db,
+        (message,),
+        "tampered consolidation",
+        memories=(
+            SleepMemory(
+                content="sleep memory for consolidation",
+                memory_type="reflection",
+                salience=0.2,
+                confidence=0.4,
+                source_event_ids=(private_event,),
+            ),
+        ),
+    )
+    with db.read_transaction() as connection:
+        memory_id = connection.execute(
+            "SELECT target_id FROM sleep_integrations WHERE sleep_id=?", (sleep_id,)
+        ).fetchone()[0]
+    assert (
+        MemoryConsolidator(
+            db,
+            "owner",
+            interval_seconds=0,
+            stale_after_days=0,
+            archive_after_days=0,
+            minimum_active_memories=0,
+        ).run_due()
+        == "memory_consolidation_committed"
+    )
+    with db.transaction() as connection:
+        trigger = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name='prevent_memory_consolidation_member_update'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER prevent_memory_consolidation_member_update")
+        connection.execute(
+            "UPDATE memory_consolidation_members SET reason='tampered free text' "
+            "WHERE source_memory_id=?",
+            (memory_id,),
+        )
+        connection.execute(trigger)
+    before = MemoryStore(db).get(memory_id)
+    erasure = ConversationErasure(db)
+    assert erasure.assess("owner", window["conversation_id"])["reason_code"] == (
+        "memory_consolidation_review_required"
+    )
+    with pytest.raises(ErasureReviewRequired, match="memory_consolidation_review_required"):
+        erasure.request("owner", window["conversation_id"], expected_revision=1, confirmed=True)
+    assert not erasure.root.exists()
+    assert MemoryStore(db).get(memory_id) == before
+    assert InteractionStore(db).get(message).content == "private original"
 
 
 def test_sleep_reflection_mixed_memory_without_pre_window_revision_requires_review(
