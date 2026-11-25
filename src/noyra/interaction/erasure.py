@@ -103,6 +103,7 @@ class _ErasureScope:
     memory_ids: set[str]
     reflection_hashes: dict[str, str]
     sleep_memory_links: dict[str, sqlite3.Row]
+    memory_source_events: set[str]
 
 
 class ConversationErasure:
@@ -728,6 +729,7 @@ class ConversationErasure:
                     (subject, event),
                 ).fetchone():
                     raise ErasureReviewRequired("private_event_derivative_review_required")
+            memory_source_events = events | reflection_events
             memory_ids = self._check_derivatives(
                 connection,
                 subject,
@@ -737,7 +739,13 @@ class ConversationErasure:
                 sleep_memory_links,
             )
             return _ErasureScope(
-                messages, calls, events, memory_ids, reflection_hashes, sleep_memory_links
+                messages,
+                calls,
+                events,
+                memory_ids,
+                reflection_hashes,
+                sleep_memory_links,
+                memory_source_events,
             )
         except sqlite3.OperationalError as error:
             if time.monotonic() > deadline:
@@ -801,16 +809,20 @@ class ConversationErasure:
         sources_by_memory: dict[str, set[str]] = {}
         for revision in revisions:
             sources = _memory_sources(revision["source_event_ids_json"])
-            if reflection_events.intersection(sources):
-                raise ErasureReviewRequired("reflection_derivative_review_required")
             sources_by_memory.setdefault(revision["memory_id"], set()).update(sources)
+        # The bound reflection event is the durable source marker for its
+        # selected model response. Taint downstream memory history by that
+        # marker; the independent-revision gate may retain only pre-input state.
+        tainted_events = events | reflection_events
         affected = {
-            memory_id for memory_id, sources in sources_by_memory.items() if sources & events
+            memory_id
+            for memory_id, sources in sources_by_memory.items()
+            if sources & tainted_events
         }
         if not sleep_memory_links.keys() <= affected:
             raise IntegrityError("sleep memory source history does not match the erasure window")
         for memory_id in sorted(affected):
-            if not sources_by_memory[memory_id] <= events:
+            if not sources_by_memory[memory_id] <= tainted_events:
                 if memory_id in sleep_memory_links:
                     raise ErasureReviewRequired("reflection_derivative_review_required")
                 ConversationErasure._independent_memory_revision(connection, memory_id, events)
@@ -1187,7 +1199,9 @@ class ConversationErasure:
     ) -> dict[str, int]:
         from noyra.mind.memory import MemoryStore
 
-        events = scope.events
+        # A selected sleep-reflection event is a causal marker for the exact
+        # model response bound to this private window, not an independent source.
+        events = scope.memory_source_events
         erased = rebuilt = 0
         for memory in connection.execute(
             "SELECT m.* FROM json_each(?) ids "
