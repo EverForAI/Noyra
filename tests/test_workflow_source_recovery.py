@@ -64,6 +64,8 @@ def test_only_actual_reviewed_publication_migration_enables_cross_schema_recover
         (117, 118),
         (119, 120),
         (120, 121),
+        (121, 122),
+        (122, 123),
     }
     pair = next(item for item in recovery._REVIEWED_SCHEMA_PAIRS if item.source_version == 116)
     assert (pair.source_version, pair.target_version) == (116, 117)
@@ -225,7 +227,10 @@ def test_schema115_does_not_inherit_approval_for_the116_pair(
     assert not recovery.matches_publication_source(actual, legacy, existing_request=True)
 
 
-@pytest.mark.parametrize("source_version,target_version", [(117, 118), (119, 120), (120, 121)])
+@pytest.mark.parametrize(
+    "source_version,target_version",
+    [(117, 118), (119, 120), (120, 121), (121, 122), (122, 123)],
+)
 def test_exact_guard_or_trust_migration_preserves_pending_workflow_source(
     source_version: int, target_version: int
 ) -> None:

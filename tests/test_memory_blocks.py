@@ -41,6 +41,7 @@ def test_memory_blocks_preserve_revisions_and_optimistic_concurrency() -> None:
             "Compare two evidence sources.",
             reason="a bounded context became relevant",
             source_memory_ids=(),
+            source_event_ids=(),
         )
         revised = blocks.revise(
             block.block_id,
@@ -48,6 +49,7 @@ def test_memory_blocks_preserve_revisions_and_optimistic_concurrency() -> None:
             reason="new evidence broadened the inquiry",
             expected_version=1,
             source_memory_ids=(),
+            source_event_ids=(),
         )
         assert revised.version == 2
         with pytest.raises(ValueError):
@@ -57,6 +59,7 @@ def test_memory_blocks_preserve_revisions_and_optimistic_concurrency() -> None:
                 reason="stale writer",
                 expected_version=1,
                 source_memory_ids=(),
+                source_event_ids=(),
             )
         assert blocks.verify_integrity(subject_id) == {
             "memory_blocks": 1,
@@ -83,6 +86,7 @@ def test_memory_block_sources_capture_exact_immutable_memory_revision() -> None:
             "A context derived from the source memory.",
             reason="memory-derived context",
             source_memory_ids=(source.memory_id,),
+            source_event_ids=(),
         )
 
         first = blocks.lineage_history(block.block_id)[0]
@@ -115,6 +119,7 @@ def test_memory_block_sources_capture_exact_immutable_memory_revision() -> None:
             reason="new source revision became relevant",
             expected_version=1,
             source_memory_ids=(source.memory_id,),
+            source_event_ids=(),
         )
         history = blocks.lineage_history(block.block_id)
         assert history[1].sources[0].revision_number == 2
@@ -138,8 +143,30 @@ def test_memory_block_lineage_requires_explicit_same_subject_sources() -> None:
                 "content",
                 reason="test",
             )
+        with pytest.raises(ValueError, match="event lineage must be explicitly declared"):
+            blocks.create(
+                subject_id,
+                "working_context",
+                "implicit event lineage",
+                "content",
+                reason="test",
+                source_memory_ids=(),
+            )
 
         foreign = _source_memory(database, other_subject, "foreign source")
+        foreign_event = EventStore(database).append(
+            other_subject, "experience", "fixture", {"detail": "foreign"}
+        )
+        with pytest.raises(ValueError, match="source event is unavailable"):
+            blocks.create(
+                subject_id,
+                "working_context",
+                "foreign event lineage",
+                "content",
+                reason="test",
+                source_memory_ids=(),
+                source_event_ids=(foreign_event.event_id,),
+            )
         with pytest.raises(ValueError, match="source memory is unavailable"):
             blocks.create(
                 subject_id,
@@ -148,6 +175,7 @@ def test_memory_block_lineage_requires_explicit_same_subject_sources() -> None:
                 "content",
                 reason="test",
                 source_memory_ids=(foreign.memory_id,),
+                source_event_ids=(),
             )
         with database.connection() as connection:
             assert connection.execute("SELECT COUNT(*) FROM memory_blocks").fetchone()[0] == 0
@@ -155,6 +183,46 @@ def test_memory_block_lineage_requires_explicit_same_subject_sources() -> None:
                 connection.execute("SELECT COUNT(*) FROM memory_block_revisions").fetchone()[0]
                 == 0
             )
+
+
+def test_memory_block_direct_event_sources_are_chain_bound_and_complete(tmp_path: Path) -> None:
+    database = Database(tmp_path / "noyra.sqlite3")
+    subject_id = "Noyra-memory-block-event-lineage"
+    IdentityStore(database).ensure(subject_id, content_hash({"seed": subject_id}))
+    event = EventStore(database).append(
+        subject_id, "experience", "fixture", {"detail": "private-derived source"}
+    )
+    block = MemoryBlockStore(database).create(
+        subject_id,
+        "working_context",
+        "event-linked",
+        "derived directly from an event",
+        reason="test",
+        source_memory_ids=(),
+        source_event_ids=(event.event_id,),
+    )
+
+    lineage = MemoryBlockStore(database).lineage_history(block.block_id)[0]
+    assert lineage.lineage_status == "declared_no_memory_sources"
+    assert lineage.event_lineage_complete is True
+    assert len(lineage.event_sources) == 1
+    assert lineage.event_sources[0].event_id == event.event_id
+    assert lineage.event_sources[0].sequence_number > 0
+    assert len(lineage.event_sources[0].root_hash) == 64
+    assert MemoryBlockStore(database).verify_integrity(subject_id)[
+        "memory_block_revisions"
+    ] == 1
+
+    with (
+        pytest.raises(sqlite3.IntegrityError, match="append-only"),
+        database.transaction() as connection,
+    ):
+        connection.execute(
+            "DELETE FROM memory_block_revision_event_sources "
+            "WHERE revision_id=(SELECT revision_id FROM memory_block_revisions "
+            "WHERE block_id=?)",
+            (block.block_id,),
+        )
 
 
 def test_memory_block_source_rows_are_append_only(tmp_path: Path) -> None:
@@ -169,6 +237,7 @@ def test_memory_block_source_rows_are_append_only(tmp_path: Path) -> None:
         "linked content",
         reason="test",
         source_memory_ids=(source.memory_id,),
+        source_event_ids=(),
     )
     with database.connection() as connection:
         source_row = connection.execute(
@@ -203,8 +272,15 @@ def test_memory_block_source_rows_are_append_only(tmp_path: Path) -> None:
         "content",
         reason="test",
         source_memory_ids=(),
+        source_event_ids=(),
     )
     with database.transaction() as connection:
+        connection.execute("DROP TRIGGER prevent_memory_block_revision_event_coverage_delete")
+        connection.execute(
+            "DELETE FROM memory_block_revision_event_coverage WHERE revision_id=("
+            "SELECT revision_id FROM memory_block_revisions WHERE block_id=? AND version=1)",
+            (independent.block_id,),
+        )
         connection.execute("DROP TRIGGER prevent_memory_block_revision_lineage_delete")
         connection.execute(
             "DELETE FROM memory_block_revision_lineage WHERE revision_id=("
@@ -228,6 +304,7 @@ def test_memory_block_source_lineage_survives_encrypted_backup_restore(tmp_path:
         "backup context",
         reason="backup fixture",
         source_memory_ids=(source.memory_id,),
+        source_event_ids=(),
     )
     expected = MemoryBlockStore(database).lineage_history(block.block_id)
     keyring = tmp_path / "keyring.json"
@@ -244,6 +321,82 @@ def test_memory_block_source_lineage_survives_encrypted_backup_restore(tmp_path:
     restored_blocks = MemoryBlockStore(restored)
     assert restored_blocks.lineage_history(block.block_id) == expected
     assert restored_blocks.verify_integrity(subject_id)["memory_block_revisions"] == 1
+
+
+def test_schema_122_memory_lineage_remains_direct_event_incomplete_after_upgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "schema-122.sqlite3"
+    subject_id = "Noyra-memory-block-v122-lineage"
+    with monkeypatch.context() as historical:
+        historical.setattr(database_module, "CURRENT_SCHEMA_VERSION", 122)
+        database = Database(path)
+        IdentityStore(database).ensure(subject_id, content_hash({"seed": subject_id}))
+        source = _source_memory(database, subject_id, "v122 memory source")
+        block_id = new_id("mblock")
+        revision_id = new_id("mblockrev")
+        content = "v122 memory-derived block"
+        now = utc_now()
+        with database.transaction() as connection:
+            connection.execute(
+                "INSERT INTO memory_blocks(block_id,subject_id,block_type,label,content,"
+                "content_hash,privacy_level,status,version,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,'active',1,?,?)",
+                (
+                    block_id,
+                    subject_id,
+                    "working_context",
+                    "v122",
+                    content,
+                    content_hash(content),
+                    "private",
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO memory_block_revisions(revision_id,block_id,version,content,"
+                "content_hash,status,reason,actor,created_at) VALUES(?,?,1,?,?,'active',?,?,?)",
+                (
+                    revision_id,
+                    block_id,
+                    content,
+                    content_hash(content),
+                    "v122 fixture",
+                    "subject",
+                    now,
+                ),
+            )
+            sources = MemoryBlockStore._capture_sources(
+                connection, subject_id, (source.memory_id,)
+            )
+            lineage_hash = MemoryBlockStore._lineage_hash("memory", sources)
+            connection.execute(
+                "INSERT INTO memory_block_revision_lineage(revision_id,block_id,lineage_status,"
+                "lineage_hash) VALUES(?,?,'memory',?)",
+                (revision_id, block_id, lineage_hash),
+            )
+            for item in sources:
+                connection.execute(
+                    "INSERT INTO memory_block_revision_sources(revision_id,block_id,"
+                    "source_memory_id,source_revision_number,source_revision_hash) "
+                    "VALUES(?,?,?,?,?)",
+                    (
+                        revision_id,
+                        block_id,
+                        item.memory_id,
+                        item.revision_number,
+                        item.revision_hash,
+                    ),
+                )
+
+    upgraded = Database(path, strict_schema_contract=True)
+    lineage = MemoryBlockStore(upgraded).lineage_history(block_id)[0]
+    assert lineage.lineage_status == "memory"
+    assert lineage.sources[0].memory_id == source.memory_id
+    # v122 recorded memory parents but had no explicit direct-event coverage.
+    assert lineage.event_lineage_complete is False
+    assert lineage.event_sources == ()
 
 
 def test_schema_121_memory_block_revisions_migrate_as_unknown(

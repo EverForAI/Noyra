@@ -781,6 +781,16 @@ _OWNERSHIP_GRAPHS[122] = {
     "memory_block_revision_lineage": _parent_rule("memory_blocks", "block_id", "block_id"),
     "memory_block_revision_sources": _parent_rule("memory_blocks", "block_id", "block_id"),
 }
+# Schema 123 adds revision-level event source coverage and references.
+_OWNERSHIP_GRAPHS[123] = {
+    **_OWNERSHIP_GRAPHS[122],
+    "memory_block_revision_event_coverage": _parent_rule(
+        "memory_blocks", "block_id", "block_id"
+    ),
+    "memory_block_revision_event_sources": _parent_rule(
+        "memory_blocks", "block_id", "block_id"
+    ),
+}
 
 
 @dataclass(frozen=True)

@@ -6,6 +6,8 @@ from typing import Any, ClassVar
 
 from noyra.core.database import Database
 from noyra.core.errors import IntegrityError, NotFoundError
+from noyra.core.events import EventStore
+from noyra.core.private_sources import assert_event_sources_available
 from noyra.core.types import content_hash, new_id, utc_now
 
 from .memory import MemoryStore
@@ -33,12 +35,21 @@ class MemoryBlockSourceReference:
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryBlockEventReference:
+    event_id: str
+    sequence_number: int
+    root_hash: str
+
+
+@dataclass(frozen=True, slots=True)
 class MemoryBlockRevisionLineage:
     revision_id: str
     block_id: str
     version: int
     lineage_status: str
     sources: tuple[MemoryBlockSourceReference, ...]
+    event_sources: tuple[MemoryBlockEventReference, ...]
+    event_lineage_complete: bool
 
 
 class MemoryBlockStore:
@@ -63,9 +74,12 @@ class MemoryBlockStore:
         reason: str,
         actor: str = "subject",
         source_memory_ids: tuple[str, ...] | None = None,
+        source_event_ids: tuple[str, ...] | None = None,
     ) -> MemoryBlockRecord:
         self._validate(block_type, label, content, reason, actor)
-        sources = self._validate_source_ids(source_memory_ids)
+        sources = self._validate_source_ids(source_memory_ids, "memory")
+        event_ids = self._validate_source_ids(source_event_ids, "event")
+        self._validate_combined_source_limit(sources, event_ids)
         block_id = new_id("mblock")
         now = utc_now()
         with self.database.transaction() as connection:
@@ -95,6 +109,7 @@ class MemoryBlockStore:
                 actor,
                 now,
                 sources,
+                event_ids,
             )
         return self.get(block_id)
 
@@ -108,12 +123,15 @@ class MemoryBlockStore:
         expected_version: int | None = None,
         status: str = "active",
         source_memory_ids: tuple[str, ...] | None = None,
+        source_event_ids: tuple[str, ...] | None = None,
     ) -> MemoryBlockRecord:
         if status not in {"active", "archived"}:
             raise ValueError("memory block status is invalid")
         if not content.strip() or len(content) > 100_000 or not reason.strip() or not actor.strip():
             raise ValueError("memory block revision is invalid")
-        sources = self._validate_source_ids(source_memory_ids)
+        sources = self._validate_source_ids(source_memory_ids, "memory")
+        event_ids = self._validate_source_ids(source_event_ids, "event")
+        self._validate_combined_source_limit(sources, event_ids)
         now = utc_now()
         with self.database.transaction() as connection:
             row = connection.execute(
@@ -142,6 +160,7 @@ class MemoryBlockStore:
                 actor,
                 now,
                 sources,
+                event_ids,
             )
         return self.get(block_id)
 
@@ -180,7 +199,9 @@ class MemoryBlockStore:
                 version = self._persisted_version(
                     revision["version"], f"memory block {block_id} revision version"
                 )
-                lineage_status, sources = self._verified_revision_lineage(connection, revision)
+                lineage_status, sources, events, event_lineage_complete = (
+                    self._verified_revision_lineage(connection, revision)
+                )
                 result.append(
                     MemoryBlockRevisionLineage(
                         str(revision["revision_id"]),
@@ -188,6 +209,8 @@ class MemoryBlockStore:
                         version,
                         lineage_status,
                         sources,
+                        events,
+                        event_lineage_complete,
                     )
                 )
             return result
@@ -233,22 +256,31 @@ class MemoryBlockStore:
             raise ValueError("memory block content is invalid")
 
     @classmethod
-    def _validate_source_ids(cls, source_memory_ids: tuple[str, ...] | None) -> tuple[str, ...]:
-        """Require an explicit parent list; empty means declared no memory parents only."""
-        if source_memory_ids is None:
-            raise ValueError("memory block lineage must be explicitly declared")
-        if not isinstance(source_memory_ids, tuple) or len(source_memory_ids) > cls._MAX_SOURCES:
-            raise ValueError("memory block source list is invalid")
+    def _validate_source_ids(
+        cls, source_ids: tuple[str, ...] | None, source_kind: str
+    ) -> tuple[str, ...]:
+        """Require an explicit parent list; empty means no direct parents of this kind."""
+        if source_ids is None:
+            raise ValueError(f"memory block {source_kind} lineage must be explicitly declared")
+        if not isinstance(source_ids, tuple) or len(source_ids) > cls._MAX_SOURCES:
+            raise ValueError(f"memory block {source_kind} source list is invalid")
         if any(
-            not isinstance(memory_id, str)
-            or not memory_id
-            or memory_id != memory_id.strip()
-            for memory_id in source_memory_ids
+            not isinstance(source_id, str)
+            or not source_id
+            or source_id != source_id.strip()
+            for source_id in source_ids
         ):
-            raise ValueError("memory block source list is invalid")
-        if len(set(source_memory_ids)) != len(source_memory_ids):
-            raise ValueError("memory block source list contains duplicates")
-        return tuple(sorted(source_memory_ids))
+            raise ValueError(f"memory block {source_kind} source list is invalid")
+        if len(set(source_ids)) != len(source_ids):
+            raise ValueError(f"memory block {source_kind} source list contains duplicates")
+        return tuple(sorted(source_ids))
+
+    @classmethod
+    def _validate_combined_source_limit(
+        cls, source_memory_ids: tuple[str, ...], source_event_ids: tuple[str, ...]
+    ) -> None:
+        if len(source_memory_ids) + len(source_event_ids) > cls._MAX_SOURCES:
+            raise ValueError("memory block combined source list exceeds the review limit")
 
     @staticmethod
     def _revision(
@@ -261,17 +293,22 @@ class MemoryBlockStore:
         actor: str,
         now: str,
         source_memory_ids: tuple[str, ...],
+        source_event_ids: tuple[str, ...],
     ) -> None:
         block = connection.execute(
             "SELECT subject_id FROM memory_blocks WHERE block_id = ?", (block_id,)
         ).fetchone()
         if block is None:
             raise IntegrityError("memory block disappeared during revision")
-        source_refs = MemoryBlockStore._capture_sources(
-            connection, str(block["subject_id"]), source_memory_ids
+        subject_id = str(block["subject_id"])
+        source_refs = MemoryBlockStore._capture_sources(connection, subject_id, source_memory_ids)
+        event_refs = MemoryBlockStore._capture_event_sources(
+            connection, subject_id, source_event_ids
         )
         lineage_status = "memory" if source_refs else "declared_no_memory_sources"
-        lineage_hash = MemoryBlockStore._lineage_hash(lineage_status, source_refs)
+        lineage_hash = MemoryBlockStore._complete_lineage_hash(
+            lineage_status, source_refs, event_refs
+        )
         revision_id = new_id("mblockrev")
         connection.execute(
             "INSERT INTO memory_block_revisions(revision_id, block_id, version, content, "
@@ -306,6 +343,18 @@ class MemoryBlockStore:
                     source.revision_number,
                     source.revision_hash,
                 ),
+            )
+        connection.execute(
+            "INSERT INTO memory_block_revision_event_coverage(revision_id, block_id, source_hash) "
+            "VALUES (?, ?, ?)",
+            (revision_id, block_id, MemoryBlockStore._event_coverage_hash(event_refs)),
+        )
+        for event in event_refs:
+            connection.execute(
+                "INSERT INTO memory_block_revision_event_sources(revision_id, block_id, "
+                "source_event_id, source_sequence_number, source_root_hash) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (revision_id, block_id, event.event_id, event.sequence_number, event.root_hash),
             )
 
     @classmethod
@@ -347,9 +396,41 @@ class MemoryBlockStore:
         return tuple(refs)
 
     @classmethod
+    def _capture_event_sources(
+        cls, connection: Any, subject_id: str, source_event_ids: tuple[str, ...]
+    ) -> tuple[MemoryBlockEventReference, ...]:
+        refs: list[MemoryBlockEventReference] = []
+        for event_id in source_event_ids:
+            assert_event_sources_available(connection, subject_id, event_id)
+            row = connection.execute(
+                "SELECT e.*,r.sequence_number AS chain_sequence_number,"
+                "r.previous_root_hash AS chain_previous_root_hash,r.root_hash AS chain_root_hash "
+                "FROM events e JOIN event_chain_roots r ON r.event_id=e.event_id "
+                "AND r.subject_id=e.subject_id WHERE e.event_id=? AND e.subject_id=?",
+                (event_id, subject_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("memory block source event is unavailable")
+            sequence_number = MemoryStore._persisted_integer(
+                row["chain_sequence_number"], "memory block source event sequence", minimum=1
+            )
+            expected_root = EventStore._chain_hash(
+                row, sequence_number, row["chain_previous_root_hash"]
+            )
+            if expected_root != row["chain_root_hash"]:
+                raise IntegrityError("memory block source event chain hash mismatch")
+            refs.append(MemoryBlockEventReference(event_id, sequence_number, expected_root))
+        return tuple(refs)
+
+    @classmethod
     def _verified_revision_lineage(
         cls, connection: Any, revision: Any
-    ) -> tuple[str, tuple[MemoryBlockSourceReference, ...]]:
+    ) -> tuple[
+        str,
+        tuple[MemoryBlockSourceReference, ...],
+        tuple[MemoryBlockEventReference, ...],
+        bool,
+    ]:
         revision_id = str(revision["revision_id"])
         lineage = connection.execute(
             "SELECT * FROM memory_block_revision_lineage WHERE revision_id=?",
@@ -362,13 +443,7 @@ class MemoryBlockStore:
         lineage_status = lineage["lineage_status"]
         if lineage_status not in {"unknown", "declared_no_memory_sources", "memory"}:
             raise IntegrityError("memory block lineage status is invalid")
-        if lineage_status == "unknown":
-            if lineage["lineage_hash"] != "" or connection.execute(
-                "SELECT 1 FROM memory_block_revision_sources WHERE revision_id=? LIMIT 1",
-                (revision_id,),
-            ).fetchone():
-                raise IntegrityError("unknown memory block lineage has source evidence")
-            return "unknown", ()
+
         source_rows = connection.execute(
             "SELECT s.revision_id,s.block_id,s.source_memory_id,s.source_revision_number,"
             "s.source_revision_hash,mr.memory_id,mr.revision_number,mr.content,"
@@ -383,16 +458,40 @@ class MemoryBlockStore:
             "WHERE s.revision_id=? ORDER BY s.source_memory_id",
             (revision_id,),
         ).fetchall()
+
+        coverage = connection.execute(
+            "SELECT * FROM memory_block_revision_event_coverage WHERE revision_id=?",
+            (revision_id,),
+        ).fetchone()
+        if coverage is not None and coverage["block_id"] != revision["block_id"]:
+            raise IntegrityError("memory block event coverage identity mismatch")
+        event_rows = connection.execute(
+            "SELECT s.revision_id,s.block_id,s.source_event_id,s.source_sequence_number,"
+            "s.source_root_hash,e.event_id,e.subject_id,e.subject_id AS event_subject,"
+            "e.event_type,e.source,"
+            "e.occurred_at,e.observed_at,e.payload_hash,e.privacy_level,"
+            "e.causal_parent_ids_json,r.subject_id AS chain_subject,"
+            "r.sequence_number AS chain_sequence_number,"
+            "r.previous_root_hash AS chain_previous_root_hash,r.root_hash AS chain_root_hash,"
+            "b.subject_id AS block_subject "
+            "FROM memory_block_revision_event_sources s "
+            "JOIN events e ON e.event_id=s.source_event_id "
+            "JOIN event_chain_roots r ON r.event_id=e.event_id AND r.subject_id=e.subject_id "
+            "JOIN memory_blocks b ON b.block_id=s.block_id "
+            "WHERE s.revision_id=? ORDER BY s.source_event_id",
+            (revision_id,),
+        ).fetchall()
+        if coverage is None and event_rows:
+            raise IntegrityError("memory block event sources have no coverage record")
+
+        if lineage_status == "unknown":
+            if source_rows or coverage is not None:
+                raise IntegrityError("unknown memory block lineage has source evidence")
+            return "unknown", (), (), False
         if lineage_status == "declared_no_memory_sources" and source_rows:
             raise IntegrityError("declared-no-memory-sources block revision has memory sources")
         if lineage_status == "memory" and not source_rows:
             raise IntegrityError("memory-derived block revision has no source memories")
-        expected_lineage_hash = cls._lineage_hash(lineage_status, ())
-        if (
-            lineage_status == "declared_no_memory_sources"
-            and lineage["lineage_hash"] != expected_lineage_hash
-        ):
-            raise IntegrityError("memory block declared-no-memory-sources lineage hash mismatch")
 
         sources: list[MemoryBlockSourceReference] = []
         for row in source_rows:
@@ -410,11 +509,48 @@ class MemoryBlockStore:
                     str(row["source_memory_id"]), source_revision_number, source_hash
                 )
             )
-        if lineage_status == "memory" and lineage["lineage_hash"] != cls._lineage_hash(
-            lineage_status, tuple(sources)
-        ):
+
+        event_sources: list[MemoryBlockEventReference] = []
+        for row in event_rows:
+            if (
+                row["event_subject"] != row["block_subject"]
+                or row["chain_subject"] != row["block_subject"]
+                or row["block_id"] != revision["block_id"]
+            ):
+                raise IntegrityError("memory block event source subject or identity mismatch")
+            sequence_number = MemoryStore._persisted_integer(
+                row["source_sequence_number"], "memory block source event sequence", minimum=1
+            )
+            chain_sequence = MemoryStore._persisted_integer(
+                row["chain_sequence_number"], "memory block source event chain sequence", minimum=1
+            )
+            if sequence_number != chain_sequence:
+                raise IntegrityError("memory block event source sequence mismatch")
+            expected_root = EventStore._chain_hash(
+                row, sequence_number, row["chain_previous_root_hash"]
+            )
+            if expected_root != row["chain_root_hash"] or expected_root != row["source_root_hash"]:
+                raise IntegrityError("memory block source event chain hash mismatch")
+            event_sources.append(
+                MemoryBlockEventReference(
+                    str(row["source_event_id"]), sequence_number, expected_root
+                )
+            )
+
+        event_complete = coverage is not None
+        if event_complete:
+            expected_coverage_hash = cls._event_coverage_hash(tuple(event_sources))
+            if coverage["source_hash"] != expected_coverage_hash:
+                raise IntegrityError("memory block event coverage hash mismatch")
+            expected_lineage_hash = cls._complete_lineage_hash(
+                lineage_status, tuple(sources), tuple(event_sources)
+            )
+        else:
+            # Schema v122 lineage hashes did not include direct event parents.
+            expected_lineage_hash = cls._lineage_hash(lineage_status, tuple(sources))
+        if lineage["lineage_hash"] != expected_lineage_hash:
             raise IntegrityError("memory block lineage hash mismatch")
-        return str(lineage_status), tuple(sources)
+        return str(lineage_status), tuple(sources), tuple(event_sources), event_complete
 
     @classmethod
     def _source_revision_number(cls, revision: Any) -> int:
@@ -476,6 +612,48 @@ class MemoryBlockStore:
                         "revision_hash": source.revision_hash,
                     }
                     for source in sources
+                ],
+            }
+        )
+
+    @staticmethod
+    def _event_coverage_hash(events: tuple[MemoryBlockEventReference, ...]) -> str:
+        return content_hash(
+            [
+                {
+                    "event_id": event.event_id,
+                    "sequence_number": event.sequence_number,
+                    "root_hash": event.root_hash,
+                }
+                for event in events
+            ]
+        )
+
+    @staticmethod
+    def _complete_lineage_hash(
+        lineage_status: str,
+        sources: tuple[MemoryBlockSourceReference, ...],
+        events: tuple[MemoryBlockEventReference, ...],
+    ) -> str:
+        return content_hash(
+            {
+                "lineage_format": 2,
+                "lineage_status": lineage_status,
+                "memory_sources": [
+                    {
+                        "memory_id": source.memory_id,
+                        "revision_number": source.revision_number,
+                        "revision_hash": source.revision_hash,
+                    }
+                    for source in sources
+                ],
+                "event_sources": [
+                    {
+                        "event_id": event.event_id,
+                        "sequence_number": event.sequence_number,
+                        "root_hash": event.root_hash,
+                    }
+                    for event in events
                 ],
             }
         )

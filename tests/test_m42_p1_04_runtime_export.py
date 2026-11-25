@@ -799,6 +799,7 @@ def test_memory_block_revision_sources_export_only_with_their_subject(
         "derived from source a",
         reason="fixture",
         source_memory_ids=(source_a.memory_id,),
+        source_event_ids=(),
     )
     blocks.create(
         subject_b,
@@ -807,15 +808,18 @@ def test_memory_block_revision_sources_export_only_with_their_subject(
         "derived from source b",
         reason="fixture",
         source_memory_ids=(source_b.memory_id,),
+        source_event_ids=(),
     )
 
-    rule = _OWNERSHIP_GRAPHS[CURRENT_SCHEMA_VERSION]["memory_block_revision_sources"]
-    assert (rule.mode, rule.parent_table, rule.parent_key, rule.child_key) == (
-        "parent",
-        "memory_blocks",
-        "block_id",
-        "block_id",
-    )
+    expected_parent = ("parent", "memory_blocks", "block_id", "block_id")
+    for table in (
+        "memory_block_revision_lineage",
+        "memory_block_revision_sources",
+        "memory_block_revision_event_coverage",
+        "memory_block_revision_event_sources",
+    ):
+        rule = _OWNERSHIP_GRAPHS[CURRENT_SCHEMA_VERSION][table]
+        assert (rule.mode, rule.parent_table, rule.parent_key, rule.child_key) == expected_parent
     _manifest, rows = _read_artifact(RuntimeLogExporter(database).export(subject_a, actor="test"))
     exported_sources = rows["memory_block_revision_sources"]
     assert len(exported_sources) == 1
@@ -823,6 +827,10 @@ def test_memory_block_revision_sources_export_only_with_their_subject(
     revision_id = blocks.lineage_history(block_a.block_id)[0].revision_id
     assert exported_sources[0]["revision_id"] == revision_id
     assert all(row["source_memory_id"] != source_b.memory_id for row in exported_sources)
+    coverage = rows["memory_block_revision_event_coverage"]
+    assert len(coverage) == 1
+    assert coverage[0]["block_id"] == block_a.block_id
+    assert rows["memory_block_revision_event_sources"] == []
 
 
 def test_large_parent_history_exports_without_variable_sized_id_lists(tmp_path: Path) -> None:

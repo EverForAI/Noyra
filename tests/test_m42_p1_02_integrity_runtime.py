@@ -3537,6 +3537,8 @@ def test_malformed_memory_block_version_is_p0(tmp_path: Path) -> None:
         "Integrity fixture",
         "A bounded memory block.",
         reason="P1-02 classification fixture",
+        source_memory_ids=(),
+        source_event_ids=(),
     )
     with kernel.database.transaction() as connection:
         connection.execute("PRAGMA ignore_check_constraints = ON")

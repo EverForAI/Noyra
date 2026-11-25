@@ -9,6 +9,7 @@ from .benchmarks import (
     PinnedMemoryBenchmark,
 )
 from .blocks import (
+    MemoryBlockEventReference,
     MemoryBlockRecord,
     MemoryBlockRevisionLineage,
     MemoryBlockSourceReference,
@@ -64,6 +65,7 @@ __all__ = [
     "MemoryBenchmarkCase",
     "MemoryBenchmarkCurvePoint",
     "MemoryBenchmarkScore",
+    "MemoryBlockEventReference",
     "MemoryBlockRecord",
     "MemoryBlockRevisionLineage",
     "MemoryBlockSourceReference",

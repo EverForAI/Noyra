@@ -5,6 +5,7 @@ from __future__ import annotations
 from ..private_erasure_schema import MIGRATION_V120, MIGRATION_V121
 from .common_knowledge_trusted_publishers import COMMON_KNOWLEDGE_TRUSTED_PUBLISHERS_SCHEMA
 from .email_identity import EMAIL_IDENTITY_SCHEMA
+from .memory_block_event_lineage import MEMORY_BLOCK_EVENT_LINEAGE_SCHEMA
 from .memory_block_lineage import MEMORY_BLOCK_LINEAGE_SCHEMA
 from .migrations_v002_v005 import MIGRATIONS_V002_V005
 from .migrations_v006_v017 import MIGRATIONS_V006_V017
@@ -102,4 +103,5 @@ CREATE INDEX IF NOT EXISTS idx_waiting_cognitive_subject_status_first_waited
     120: MIGRATION_V120,
     121: MIGRATION_V121,
     122: MEMORY_BLOCK_LINEAGE_SCHEMA,
+    123: MEMORY_BLOCK_EVENT_LINEAGE_SCHEMA,
 }

@@ -188,7 +188,12 @@ def test_memory_derivative_domains_stay_guarded_until_erasure_integration(
             "A summary that may contain conversation-derived details.",
             reason="captured context",
             source_memory_ids=(),
+            source_event_ids=(event_id,) if derivative == "memory_block" else (),
         )
+        if derivative == "memory_block":
+            block_lineage = blocks.lineage_history(block.block_id)[0]
+            assert block_lineage.event_lineage_complete is True
+            assert tuple(event.event_id for event in block_lineage.event_sources) == (event_id,)
     else:
         entities = EntityStore(db)
         entity = entities.upsert(
